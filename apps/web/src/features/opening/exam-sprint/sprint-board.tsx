@@ -2,7 +2,7 @@
 
 import type { CourseGoal, PlanDraft, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi, type TodayPlanRead } from "../client/api";
 import { useConversationObjectHref } from "../assistant/conversation-object-context";

@@ -10,7 +10,7 @@ import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMe
 import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
 import { formatTurnError, pageForSubmit } from "./turn-errors";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
 import { LoadingRows, secondaryButtonClass } from "../design/ui";
 import { ResponsiveInspector } from "../design/inspector";
@@ -80,6 +80,10 @@ export type AssistantViewProps = {
   /** Explicit selected content appends to this session's draft; it never sends or changes its binding. */
   promptRequest?: { id: string; text: string };
   embedded?: boolean;
+  /** Agent 全页：待确认的产出与记忆放在右侧栏，而不是折叠在对话下方 */
+  agent?: boolean;
+  /** 当前对话变化（新建或恢复）时通知外层，用于 Agent 页同步会话列表与地址 */
+  onConversationChange?: (id: string | null) => void;
   studyContext?: StudyConversationContext;
   studyContextError?: string;
 };
@@ -292,7 +296,7 @@ export function AssistantView(props: Props) {
     onNew={() => setSession(value => ({ identity, count: assistantSessionIndex(value, identity) + 1 }))} />;
 }
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
-  startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false,
+  startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false, agent = false, onConversationChange,
   start, onConversationReady, companion = false, objectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -310,9 +314,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     learningAttempt ? null : initialConversationId,
   );
   const conversationIdRef = useRef(conversationId);
+  const conversationChange = useRef(onConversationChange);
+  conversationChange.current = onConversationChange;
   const setConversationId = useCallback((id: string | null) => {
+    const changed = conversationIdRef.current !== id;
     conversationIdRef.current = id;
     setConversationIdState(id);
+    if (changed) conversationChange.current?.(id);
   }, []);
   const conversationReader = useMemo(() => createConversationReader(api), [api]);
   const [resume, setResume] = useState<ConversationResume | null>(null);
@@ -1043,7 +1051,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       ) : null}
 
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
-      {privacy === "saved" && !loading && !embedded && !startScreen ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
+      {privacy === "saved" && !loading && !embedded && !startScreen ? <details className={`mx-5 mb-2 text-xs text-text-2 ${agent ? "xl:hidden" : ""}`}><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题会保留在当前页面；浏览器暂时无法保存，刷新或关闭前请先复制。</p> : null}
       <Composer questionMode={ordinaryQuestion} startMode={startScreen} sendDisabled={uploadPending}
@@ -1054,6 +1062,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
       {startScreen && start ? <StartSuggestions {...start} objectHref={objectHref} onExample={setPrompt} /> : null}
     </div>
+    {agent ? <section aria-label="产出与待确认" className="hidden w-(--layout-companion) shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg/60 px-4 py-3 xl:flex">
+      <section aria-labelledby="agent-proposals-heading" className="space-y-2">
+        <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">待你确认</h2>
+        {privacy === "saved" && !loading ? <ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
+      </section>
+      <section aria-labelledby="agent-memory-heading" className="space-y-2 border-t border-line pt-3">
+        <h2 id="agent-memory-heading" className="text-meta font-medium text-text-2">AI 记忆</h2>
+        <MemoryPanel api={api} />
+      </section>
+    </section> : null}
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
     <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">

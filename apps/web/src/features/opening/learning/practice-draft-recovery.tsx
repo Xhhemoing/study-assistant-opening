@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useRef, useState } from "react";
 
 /** Keep the raw answer accessible even when the old material can no longer be resumed. */

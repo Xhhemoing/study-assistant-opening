@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeft, Save } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { PageHeader, ContentGrid, ContentBlock, LoadError, ui } from "../opening/design/ui";

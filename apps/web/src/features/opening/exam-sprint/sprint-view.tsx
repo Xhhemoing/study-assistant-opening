@@ -1,7 +1,7 @@
 "use client";
 
 import type { ExamMode, ExamSprintOverview } from "@aistudy/contracts";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { Download, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { EmptyState, LoadingRows, LoadError, PageHeader, ui } from "../design/ui";

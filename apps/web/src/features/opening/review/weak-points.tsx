@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, ui } from "../design/ui";
 import { errorCauses, practiceHref, retestQueueHref, readCauses, writeCauses, weakPointStateLabels, type ErrorCause, type WeakPoint } from "./weak-points-model";

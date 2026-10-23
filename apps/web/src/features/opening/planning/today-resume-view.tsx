@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { buttonClass, EmptyState, secondaryButtonClass, ui } from "../design/ui";
 import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import type { TeachingActivity } from "@aistudy/contracts";

@@ -2,7 +2,7 @@
 
 import { PageHeading, ui } from "../opening/design/ui";
 import { ArrowLeft, CheckCircle2, CircleHelp, TriangleAlert } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import type { InterventionSummary, PracticeResultData } from "./result-summary-model";
 import { getAttemptEvidenceLabel, statusWordLabel } from "./result-summary-model";
 

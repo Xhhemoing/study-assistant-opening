@@ -2,7 +2,7 @@
 
 import { ui } from "../opening/design/ui";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useStudyProvider } from "../../lib/data/react";

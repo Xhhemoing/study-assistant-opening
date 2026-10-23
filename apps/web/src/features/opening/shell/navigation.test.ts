@@ -6,7 +6,7 @@ describe("workspace navigation", () => {
   it("uses four shared destinations and keeps secondary tools out of primary navigation", () => {
     expect(openingNavigation().filter(item => item.group === "core").map(item => [item.href, item.label])).toEqual([
       ["/opening/today", "开始"], ["/opening/courses", "课程"],
-      ["/opening/review", "复习"], ["/opening/library", "资料"],
+      ["/opening/agent", "助理"], ["/opening/library", "资料"],
     ]);
   });
   it("highlights only the matching primary or tool entry", () => {

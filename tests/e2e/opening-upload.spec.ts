@@ -44,7 +44,7 @@ test.describe("opening upload", () => {
       await sourceOpener.click({ timeout: 15_000 });
       const reader = page.getByRole("dialog", { name, exact: true });
       await reader.locator("summary").filter({ hasText: "原件与处理信息" }).click();
-      const originalLink = reader.getByRole("link", { name: "打开原件", exact: true });
+      const originalLink = reader.locator('a[download]').filter({ hasText: "打开原件" });
       await expect(originalLink).toBeVisible();
       await expect(originalLink).toHaveAttribute("href", /^\/api\/opening\/sources\/[0-9a-f-]{36}\/download\?version=0$/);
       const download = await context.request.get((await originalLink.getAttribute("href"))!);

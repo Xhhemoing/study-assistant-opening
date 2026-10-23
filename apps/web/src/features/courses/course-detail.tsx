@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeft, BookOpen } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from "../opening/design/ui";

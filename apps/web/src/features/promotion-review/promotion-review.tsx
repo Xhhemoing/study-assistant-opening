@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeft, Check, FileText, Plus, X } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { PromotionCandidateKind, PromotionRecord } from "@aistudy/contracts";
 import { EmptyState, LoadError, LoadingRows, PageHeading, textareaClass, ui } from "../opening/design/ui";

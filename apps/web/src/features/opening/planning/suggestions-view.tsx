@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useMemo } from "react";
 import { MemoryPanel } from "../assistant/memory-panel";
 import { createOpeningApi } from "../client/api";

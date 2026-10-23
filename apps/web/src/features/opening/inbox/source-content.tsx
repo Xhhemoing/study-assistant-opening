@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw, Sparkles } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { z } from "zod";

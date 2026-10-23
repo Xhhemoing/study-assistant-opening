@@ -1,7 +1,7 @@
 "use client";
 
 import { LogOut, Minimize2, RotateCcw, Sparkles } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { CommandPalette } from "../../search/command-palette";

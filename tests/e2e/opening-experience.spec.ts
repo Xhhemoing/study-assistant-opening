@@ -11,7 +11,7 @@ test("compact mobile navigation and settings retain every destination and predic
   await page.goto("/opening/today");
   const navigation = page.getByRole("navigation", { name: "学习工作台导航（移动端）", exact: true });
   await expect(navigation.getByRole("link")).toHaveCount(4);
-  for (const [label, href] of [["开始", "/opening/today"], ["课程", "/opening/courses"], ["复习", "/opening/review"], ["资料", "/opening/library"]] as const) {
+  for (const [label, href] of [["开始", "/opening/today"], ["课程", "/opening/courses"], ["助理", "/opening/agent"], ["资料", "/opening/library"]] as const) {
     await expect(navigation.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
   }
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);

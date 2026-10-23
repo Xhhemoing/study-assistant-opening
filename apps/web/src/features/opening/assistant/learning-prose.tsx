@@ -1,7 +1,7 @@
 "use client";
 
 import "katex/dist/katex.min.css";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { Element, ElementContent, Root, RootContent } from "hast";
 import type { Parent as MdastParent, Root as MdastRoot, Text as MdastText } from "mdast";
 import { Component, memo, useContext, useMemo, type ReactNode } from "react";

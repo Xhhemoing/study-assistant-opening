@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useMemo } from "react";
 import { useCourseBundle } from "./course-detail";
 import { StudyNotePanel } from "../opening/teaching/study-context-tools";

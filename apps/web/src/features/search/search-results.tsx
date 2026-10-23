@@ -1,5 +1,5 @@
 import { ArrowUpRight } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import type { SearchHit } from "@aistudy/domain";
 import { EmptyState } from "../opening/design/ui";
 import { groupSearchHits, searchHitHref } from "./search-results-model";

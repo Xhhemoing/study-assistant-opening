@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import type { LearningAttempt, SourceRecord } from "@aistudy/contracts";

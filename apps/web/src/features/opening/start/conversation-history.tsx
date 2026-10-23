@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useState } from "react";
 import type { ConversationSummary } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../client/api";

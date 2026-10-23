@@ -26,7 +26,7 @@ test.describe("opening shell", () => {
         ).toBeVisible();
         await expect(nav.getByRole("link", { name: "开始" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "课程" })).toBeVisible();
-        await expect(nav.getByRole("link", { name: "复习" })).toBeVisible();
+        await expect(nav.getByRole("link", { name: "助理" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "资料" })).toBeVisible();
         await expect(nav.getByRole("link", { name: "开始" })).toHaveAttribute(
           "aria-current",

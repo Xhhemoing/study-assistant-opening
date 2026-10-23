@@ -1,7 +1,7 @@
 "use client";
 
 import type { ExamIntegrationOverview, ExamSourceItem, ExamWorkReview } from "@aistudy/contracts";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { textareaClass, ui } from "../design/ui";
 import type { ExamIntegrationIntent } from "./client";
 import type { ExamResources } from "./use-exam-resources";

@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useState } from "react";
 import { Check, ArrowRight } from "lucide-react";
 import { ReviewFields } from "./review-fields";

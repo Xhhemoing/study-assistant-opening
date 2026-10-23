@@ -1,7 +1,7 @@
 "use client";
 
 import type { ExamIntegrationOverview, ExamSprintOverview } from "@aistudy/contracts";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useState } from "react";
 import { ui } from "../design/ui";
 import type { ExamIntegrationIntent } from "./client";

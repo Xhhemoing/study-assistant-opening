@@ -1,7 +1,7 @@
 "use client";
 
 import type { ComponentProps } from "react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 
 type ShellNavLinkProps = ComponentProps<typeof Link>;
 

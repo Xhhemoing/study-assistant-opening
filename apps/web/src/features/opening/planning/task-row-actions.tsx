@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext } from "react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import type { StudyTask } from "./study-task";
 import { isRetestOriginTask } from "./task-status-control";

@@ -1,7 +1,7 @@
 "use client";
 
 import { CalendarDays, Plus, RefreshCw, Target } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useState } from "react";
 import type { StudyGoal } from "@aistudy/contracts";
 import { EmptyState, PageHeading, ui } from "../opening/design/ui";

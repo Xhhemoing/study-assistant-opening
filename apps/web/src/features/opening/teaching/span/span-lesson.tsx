@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import { Focus, Maximize2 } from "lucide-react";
 import { useWorkspaceLayout } from "../../shell/workspace-layout-context";
 import { conversationObjectHref } from "../../assistant/conversation-links";

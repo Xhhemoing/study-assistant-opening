@@ -9,6 +9,7 @@ import type { ConversationSummary } from "@aistudy/contracts";
 const listConversations = vi.hoisted(() => vi.fn());
 vi.mock("../client/api", () => ({ createOpeningApi: () => ({ listConversations }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: { children: ReactNode }) => createElement("a", props, children) }));
+vi.mock("next/navigation", () => ({ usePathname: () => "/opening/today", useRouter: () => null }));
 import { RecentConversations, useRecentConversations } from "./recent-conversations";
 
 const rows: ConversationSummary[] = Array.from({ length: 10 }, (_, index) => ({

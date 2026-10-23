@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { BookOpen } from "lucide-react";
 import type { ReactNode } from "react";
 import type { LearningResume } from "@aistudy/contracts";

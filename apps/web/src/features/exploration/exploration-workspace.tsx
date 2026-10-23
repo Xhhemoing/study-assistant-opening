@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeft, ArrowUpRight, GitBranch, Plus, RefreshCw, Save, XCircle } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ExplorationBlockKind, PersistedExploration } from "@aistudy/contracts";
 import { EmptyState, LoadError, LoadingRows, PageHeading, textareaClass, ui } from "../opening/design/ui";

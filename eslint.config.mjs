@@ -89,6 +89,16 @@ export default tseslint.config(
     },
   },
   {
+    // UI v5：站内链接统一走带页面过渡的 TransitionLink（壳层外/测试中自动退回普通跳转）。
+    files: ["apps/web/src/features/**/*.{ts,tsx}"],
+    ignores: ["**/*.test.{ts,tsx}", "apps/web/src/features/auth/**", "apps/web/src/features/opening/v3/motion/view-transition.tsx"],
+    rules: {
+      "@typescript-eslint/no-restricted-imports": ["error", {
+        paths: [{ name: "next/link", message: "用 features/opening/v3/motion/view-transition 的 TransitionLink，跳转才有页面过渡。", allowTypeImports: true }],
+      }],
+    },
+  },
+  {
     // One model gateway: providers are built only from configured routes, so every
     // model call is selectable in settings and recorded in the budget ledger.
     files: ["apps/**/*.{ts,tsx}", "packages/**/*.{ts,tsx}"],

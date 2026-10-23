@@ -29,6 +29,7 @@ export type Feature = {
 export const FEATURES: Feature[] = [
   { id: "today", route: "/opening/today", label: "开始", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/planning/today-dashboard" },
   { id: "suggestions", route: "/opening/suggestions", label: "建议", icon: "start", placement: "none", depth: 0, layout: "redirect", parent: "today", source: "app/(opening)/opening/suggestions → /opening/today" },
+  { id: "agent", route: "/opening/agent", label: "助理", icon: "assistant", placement: "none", depth: 0, layout: "workspace", source: "features/opening/assistant/agent-workspace" },
   { id: "assistant", route: "/opening/assistant", label: "对话", icon: "assistant", placement: "none", depth: 1, layout: "thread", parent: "today", source: "features/opening/assistant/assistant-entry" },
   { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/courses/page" },
   { id: "course-new", route: "/opening/courses/new", label: "新建课程", icon: "add", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/courses/course-create" },
