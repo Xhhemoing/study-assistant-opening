@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { materialQuestionDisputed } from "./opening-material-questions";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { aiEvaluationSchema, serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
@@ -96,6 +97,10 @@ export async function readOpeningLearningEvidenceContexts(
   const problemIds = [...new Set(records.flatMap(row => row.problemId ? [row.problemId] : []))];
   const rootIds = [...new Set(records.map(row => row.rootObservationId ?? row.id))];
   const itemIds = [...new Set(records.flatMap(row => row.itemVersionId ? [row.itemVersionId] : []))];
+  const disputedItems = itemIds.length ? await db`SELECT v.id FROM opening_learning_item_versions v
+    WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+      AND ${materialQuestionDisputed(db,"v")}` : [];
+  const disputes = new Set(disputedItems.map(row=>String(row.id)));
   const answerConditions = attemptIds.length ? await db`SELECT attempt_id,
       bool_or(COALESCE(payload->'signals' ? 'copied_answer',FALSE)) AS copied_answer,
       bool_or(COALESCE(payload->'signals' ? 'guessed',FALSE)) AS reported_guess
@@ -375,6 +380,7 @@ export async function readOpeningLearningEvidenceContexts(
     };
     const declaredConditions = answerConditions.find(row => row.attempt_id === record.attemptId);
     const context: EvidenceEligibilityContext = {
+      materialAnswerDisputed: Boolean(record.itemVersionId && disputes.has(record.itemVersionId)),
       selfReportedAnswerConditions: { copiedAnswer: declaredConditions?.copied_answer === true, reportedGuess: declaredConditions?.reported_guess === true },
       serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
       aiEvaluation: aiEvaluationSchema.safeParse(record.aiEvaluation).data ?? null,
@@ -475,7 +481,7 @@ export async function readOpeningLearningEvidenceContexts(
     });
     // For paper registrations without an item, this existing cache dependency also
     // records their explicit skill identity. Historical item matching stays unchanged.
-    const itemMatches = Boolean(record.itemVersionId ? matchingItems.has(record.itemVersionId) : examIdentity) && identityCurrent;
+    const itemMatches = Boolean(record.itemVersionId ? matchingItems.has(record.itemVersionId) : examIdentity) && identityCurrent && !context.materialAnswerDisputed;
     if (privacySourceIds.some(id => excluded.has(id))) context.version = { applicability: "privacy_excluded" };
     else if (ids.length) {
       if (sourceStates.some(source => !source.uploaded)) context.version = { applicability: "unavailable" };

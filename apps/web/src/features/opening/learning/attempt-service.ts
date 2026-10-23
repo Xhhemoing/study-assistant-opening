@@ -103,10 +103,10 @@ export function createOpeningAttemptService(sql: Sql) {
       // separate from help delivered later so an exact retry remains a replay.
       const spanLesson = attempt.spanExercise && attempt.contextAnchor?.activityId
         ? await createOpeningSpanSessionRepository(sql).get(scope, attempt.contextAnchor.activityId) : null;
-      if (spanLesson?.sessionId === attempt.sessionId) return learning.insertObservation(scope, base, { submittedAssistance: input.assistance });
+      if (spanLesson?.sessionId === attempt.sessionId) return learning.insertObservation(scope, base, { submittedAssistance: input.assistance, workSource: input.workSource });
       // K02 L02 close: resolve nodeId for independent retest so Data links SkillEvidence in the same tx.
       if (!input.retestId) {
-        return learning.insertObservation(scope, base);
+        return learning.insertObservation(scope, base, { workSource: input.workSource });
       }
       // DL11: server re-checks earliest-allowed before inserting observation (UI disable is not a guarantee).
       const earliestTimes = await loadRetestSubmitEarliestTimes(sql, scope, input.retestId);
@@ -124,6 +124,7 @@ export function createOpeningAttemptService(sql: Sql) {
       return learning.insertObservation(
         scope,
         skillLink ? { ...base, nodeId: skillLink.nodeId, dimension: skillLink.dimension } : base,
+        { workSource: input.workSource },
       );
     },
   };

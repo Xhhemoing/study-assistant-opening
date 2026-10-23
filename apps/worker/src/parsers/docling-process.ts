@@ -27,10 +27,15 @@ export function decodeParserOutput(text: string): ParsedPage[] {
 
 export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: number }): { parseDocument: ParseDocument } {
   return { async parseDocument(input, signal) {
-    // CPU-only docling runs minutes per deck; a short wall-clock cap turns
-    // legitimate large conversions into exit-4 failures (observed: three
-    // concurrent 50–72-page math slides all timed out together).
-    const result = await deps.run(["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(input.timeoutSeconds ?? 900)], signal);
+    const timeoutSeconds = input.timeoutSeconds ?? 900;
+    const argv = ["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(timeoutSeconds)];
+    if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
+    // The outer deadline includes imports/model initialization, which the
+    // Python conversion thread timeout cannot cover.
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutSeconds * 1000)]);
+    deadline.throwIfAborted();
+    const result = await deps.run(argv, deadline);
+    deadline.throwIfAborted();
     if (result.exitCode === 0) return decodeParserOutput(result.stdout);
     if (result.exitCode === 3) throw new UnsupportedMimeError("unsupported source MIME");
     if (result.exitCode === 5) throw new BoundsExceededError("parser bounds exceeded");
@@ -42,17 +47,42 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
 
 export function createNodeRunner({ pythonExecutable, cwd }: ParserConfig = loadParserConfig()): ParserRunner {
   return (argv, signal) => new Promise((resolve, reject) => {
-    const child = spawn(pythonExecutable, argv, { cwd, signal, windowsHide: true, env: createParserSubprocessEnv("python") });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => { if (Buffer.byteLength(stdout) < 2 * 1024 * 1024) stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { if (Buffer.byteLength(stderr) < 64 * 1024) stderr += chunk.toString(); });
-    child.on("error", reject);
+    if (signal.aborted) { reject(signal.reason); return; }
+    // Own a process group so cancellation also kills subprocess descendants.
+    // Do not settle until close: callers may then safely remove the input file.
+    const child = spawn(pythonExecutable, argv, { cwd, detached: process.platform !== "win32", windowsHide: true, env: createParserSubprocessEnv("python") });
+    const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    let stdoutBytes = 0, stderrBytes = 0;
+    let failure: unknown;
+    const killTree = () => {
+      if (!child.pid) return;
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore", env: createParserSubprocessEnv("media") });
+        killer.on("error", () => child.kill("SIGKILL"));
+      } else {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL"); }
+      }
+    };
+    const abort = () => { failure = signal.reason; killTree(); };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > 8 * 1024 * 1024) { failure = new BoundsExceededError("parser stdout exceeds capture bound"); killTree(); }
+      else stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const kept = chunk.subarray(0, Math.max(0, 64 * 1024 - stderrBytes));
+      if (kept.length) stderr.push(kept);
+      stderrBytes += kept.length;
+    });
+    child.on("error", error => { failure = error; });
     child.on("close", (exitCode) => {
-      // Non-zero conversions carry the CLI's reason on stderr; surfacing the
-      // tail turns opaque "conversion failed" jobs into diagnosable ones.
-      const detail = exitCode ? stderr.slice(-400).replace(/\s+$/, "") : "";
-      resolve({ exitCode: exitCode ?? 4, stdout, stderr: detail });
+      signal.removeEventListener("abort", abort);
+      if (failure) { reject(failure); return; }
+      const detail = exitCode ? Buffer.concat(stderr).toString("utf8").slice(-400).trimEnd() : "";
+      resolve({ exitCode: exitCode ?? 4, stdout: Buffer.concat(stdout).toString("utf8"), stderr: detail });
     });
   });
 }

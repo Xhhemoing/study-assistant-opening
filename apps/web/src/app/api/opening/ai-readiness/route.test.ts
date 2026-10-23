@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   listModels: vi.fn(),
   getPlanning: vi.fn(),
+  readParserHealth: vi.fn(),
 }));
 
 vi.mock("../../../../features/opening/runtime", () => ({
@@ -23,6 +24,7 @@ vi.mock("@aistudy/database", async importOriginal => ({
   createOpeningAiSettingsRepository: () => ({ get: mocks.getSettings }),
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.listModels }),
   createOpeningPlanningSettingsRepository: () => ({ get: mocks.getPlanning }),
+  createOpeningParserHealthRepository: () => ({ read: mocks.readParserHealth }),
 }));
 
 import { ApiError } from "../../../../features/auth/service";
@@ -67,6 +69,7 @@ beforeEach(() => {
     invalidStoredSettings: false,
   });
   mocks.listModels.mockResolvedValue([]);
+  mocks.readParserHealth.mockResolvedValue(null);
   mocks.getPlanning.mockResolvedValue({
     settings: { timeZone: "Asia/Shanghai" },
     saved: true,
@@ -76,11 +79,31 @@ beforeEach(() => {
 });
 
 describe("AI readiness HTTP boundary", () => {
+  it("reads Worker measurements even without Web OCR config and never trusts Web config alone", async () => {
+    mocks.readParserHealth.mockResolvedValue({ status: "ready", checkedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), missingFiles: [] });
+    let body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.find((item: { key: string }) => item.key === "parser_ocr")).toMatchObject({ ok: true, status: "ready", severity: "soft" });
+    process.env.PARSER_OCR_MODEL_DIR = "/web-only/not-evidence";
+    try {
+      mocks.readParserHealth.mockResolvedValue(null);
+      body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+      expect(body.items.find((item: { key: string }) => item.key === "parser_ocr")).toMatchObject({ ok: false, status: "unknown" });
+      expect(JSON.stringify(body)).not.toContain("/web-only");
+    } finally { delete process.env.PARSER_OCR_MODEL_DIR; }
+  });
+
+  it("reports unknown rather than ready when Worker health storage cannot be read", async () => {
+    mocks.readParserHealth.mockRejectedValue(new Error("DB unavailable"));
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.find((item: { key: string }) => item.key === "parser_ocr")).toMatchObject({ ok: false, status: "unknown", severity: "soft" });
+  });
+
   it("requires authentication before reading readiness", async () => {
     mocks.scope.mockRejectedValue(new ApiError("UNAUTHENTICATED", "Authentication required", 401));
     const response = await GET(new Request("http://localhost/api/opening/ai-readiness"));
     expect(response.status).toBe(401);
     expect(mocks.getSettings).not.toHaveBeenCalled();
+    expect(mocks.readParserHealth).not.toHaveBeenCalled();
   });
 
   it("returns 200 items shape with Cache-Control no-store and no secrets", async () => {

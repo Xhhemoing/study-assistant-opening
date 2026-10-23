@@ -1,5 +1,6 @@
 import type { Sql } from "postgres";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
+import { assertMaterialPageReadable } from "./opening-material-manifest";
 
 /** Owner-only, version-pinned plain text; object keys and rendered HTML never leave this reader. */
 export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id: string, input: { version?: number; page?: number }) {
@@ -20,6 +21,7 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
     const pages = stats.map(row => row.page == null ? null : Number(row.page));
     const page = input.page ?? pages[0]!;
     if (!pages.includes(page)) throw new OpeningSourceError("NOT_FOUND", "该页没有解析记录");
+    await assertMaterialPageReadable(tx,scope,id,version,page);
     // Limit each database value before sending; a physical page may contain multiple chunks.
     const bodies = await tx`SELECT left(text,20001) AS text FROM opening_source_chunks
       WHERE source_id=${id} AND source_version=${version} AND page IS NOT DISTINCT FROM ${page} ORDER BY created_at,id`;

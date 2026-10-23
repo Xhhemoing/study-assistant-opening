@@ -1,4 +1,6 @@
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
+import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
+import { readMaterialManifest } from "./opening-material-manifest";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 /**
@@ -141,6 +143,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_source_versions: [
     "source_id", "workspace_id", "version", "bytes", "sha256", "availability",
+    "material_manifest", "material_manifest_revision", "material_reviewed_by", "material_reviewed_at",
   ],
   opening_source_chunks: [
     "id", "source_id", "source_version", "page", "slide_label", "start_ms", "end_ms", "text", "created_at",
@@ -214,6 +217,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "source_versions", "reference_check", "submitted_intent", "history_revision", "workspace_history_revision",
     "root_observation_id", "revises_observation_id", "revision_kind", "revision_reason", "actor_id",
     "effective_head_id", "server_evaluation", "ai_evaluation",
+    "answer_revision", "grading_work_source", "grading_operation_id",
   ],
   opening_skill_evidence: [
     "id", "workspace_id", "owner_user_id", "course_id", "node_id", "observation_id", "dimension", "created_at",
@@ -268,6 +272,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "opening_source_versions.material_manifest",
   "opening_retest_activities.learning_protocol",
   "learning_events.payload",
   "workspace_preferences.ai_settings",
@@ -294,6 +299,7 @@ const JSONB_COLUMNS = new Set([
   "opening_learning_observations.reference_check",
   "opening_learning_observations.server_evaluation",
   "opening_learning_observations.ai_evaluation",
+  "opening_learning_observations.grading_work_source",
   "opening_learning_item_versions.evaluation_spec",
   "opening_suggestion_feedback.intent",
   "opening_plan_acceptances.before_blocks",
@@ -444,6 +450,17 @@ export async function executeOpeningRestoreApply(
         throw err;
       }
 
+      for (const version of (backup.tables.opening_source_versions ?? []) as Record<string,unknown>[]) {
+        if (version.material_manifest != null) readMaterialManifest(version.material_manifest);
+      }
+      const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
+      let restoredObservations = observations;
+      if (observations.length) {
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+        if (!workspace) throw new Error("restore workspace owner is missing");
+        restoredObservations = restoreOpeningGradingMetadata(observations, workspaceId, String(workspace.owner_user_id));
+      }
+
       const cancelled = await tx`
         UPDATE opening_jobs
         SET state = 'cancelled', updated_at = now()
@@ -460,10 +477,15 @@ export async function executeOpeningRestoreApply(
         const rows = (backup.tables[table] as Record<string, unknown>[] | undefined) ?? [];
         const orderedRows = table === "opening_learning_decisions"
           ? [...rows].sort((a, b) => ["plan", "session", "activity"].indexOf(String(a.layer)) - ["plan", "session", "activity"].indexOf(String(b.layer)))
-          : rows;
+          : table === "opening_learning_observations" ? restoredObservations : rows;
         for (const row of orderedRows) {
           if (!row || typeof row !== "object") continue;
-          const payload = filterPayload(tx as unknown as Sql, table, row, workspaceId);
+          // Observation root/head references are cyclic and immediate FKs.
+          // Export order is by UUID, not predecessor; reconnect only after every
+          // validated observation exists, in this same restore transaction.
+          const insertRow = table === "opening_learning_observations"
+            ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null } : row;
+          const payload = filterPayload(tx as unknown as Sql, table, insertRow, workspaceId);
           if (!payload) continue;
           if (table === "cards") {
             const [admitted] = await tx`SELECT ${cardSourcesIncluded(tx, workspaceId, tx`${row.source_ids as string[]}::uuid[]`)} AS included`;
@@ -471,6 +493,15 @@ export async function executeOpeningRestoreApply(
           }
           await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
           rowsInserted += 1;
+        }
+        if (table === "opening_learning_observations") {
+          for (const row of restoredObservations) {
+            await tx`UPDATE opening_learning_observations
+              SET root_observation_id=${row.root_observation_id == null ? null : String(row.root_observation_id)},
+                revises_observation_id=${row.revises_observation_id == null ? null : String(row.revises_observation_id)},
+                effective_head_id=${row.effective_head_id == null ? null : String(row.effective_head_id)}
+              WHERE id=${String(row.id)} AND workspace_id=${workspaceId} AND owner_user_id=${String(row.owner_user_id)}`;
+          }
         }
       }
 

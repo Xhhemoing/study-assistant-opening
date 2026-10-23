@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readStoredTeachingOutline } from "./teaching-outline";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import {
@@ -52,9 +53,12 @@ export function createCompileTeachingUnitWorkerDeps(
         buildProviderInput: async (scope, payload, options) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
+          const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
+          const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
           return createCompilerProviderInput({
             loadChunks,
             retrieveContext,
+            readOutline: () => outline,
             parentBudget: options?.parentBudget,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
@@ -97,10 +101,13 @@ export function createCompileTeachingUnitWorkerDeps(
     buildPublishInput: teachingCompilerOn
       ? async (scope, payload, providerOutput, providerInput) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
+          const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
+          const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
           let revisionNumber: number | null = null;
           const build = createTeachingCompilerPublishInput({
             loadChunks,
             evidenceChunks: providerInput?.chunks,
+            readOutline: () => outline,
             intentSummary: activity?.intentSummary,
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.

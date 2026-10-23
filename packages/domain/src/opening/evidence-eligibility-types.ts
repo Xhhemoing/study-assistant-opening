@@ -47,6 +47,8 @@ export interface EvidenceHelpExposure {
 }
 
 export interface EvidenceEligibilityContext {
+  /** Live material answer dispute, supplied by the repository, never client verdicts. */
+  materialAnswerDisputed?: boolean;
   /** Learner reports about the original answer conditions; they never change its mathematical verdict. */
   selfReportedAnswerConditions?: { copiedAnswer: boolean; reportedGuess: boolean };
   serverEvaluation?: ServerEvaluation | null;
@@ -104,6 +106,7 @@ export interface EvidenceEligibilityContext {
 }
 
 export type EvidenceEligibilityReasonCode =
+  | "material_answer_disputed"
   | "observation_identity_incomplete"
   | "attempt_timing_unknown"
   | "help_history_incomplete"
@@ -172,5 +175,5 @@ export interface EvidenceEligibility {
   usableForCurrentVersion: EvidenceEligibilityValue;
   usableForDelayedCheck: EvidenceEligibilityValue;
   reasonCodes: EvidenceEligibilityReasonCode[];
-  policyVersion: "opening-evidence-v1" | "opening-evidence-v2" | "opening-evidence-v3";
+  policyVersion: "opening-evidence-v1" | "opening-evidence-v2" | "opening-evidence-v3" | "opening-evidence-v4";
 }

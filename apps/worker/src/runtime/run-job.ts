@@ -18,7 +18,8 @@ export function canClaimJob(status: string): boolean {
 }
 
 export function isUnknownOutcome(error: unknown, kind?: string): boolean {
-  if (kind === "recognize-photo-question") {
+  if (kind === "grade-observation" && (error as { code?: string } | null)?.code === "GRADING_UNKNOWN_COST") return true;
+  if (kind === "recognize-photo-question" || kind === "grade-observation") {
     if (isBudgetReplayError(error)) return error.disposition.kind === "unknown" || error.disposition.kind === "in_flight";
     if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "markUnknown";
   }

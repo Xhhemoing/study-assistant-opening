@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isMaterialItemDisputed } from "./opening-material-questions";
 import type { Sql, TransactionSql } from "postgres";
 import { aiEvaluationSchema, type Scope } from "@aistudy/contracts";
 import { acceptedAiGradingOutcome, createInitialState, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
@@ -31,7 +32,8 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
       reference = `将两个向量和目标向量组成增广矩阵，检查每个坐标。\n行化简结果：${JSON.stringify(solution.reducedMatrix)}\n答案：${JSON.stringify(solution.solution)}`;
     }
   }
-  const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null);
+  const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null)
+    && !await isMaterialItemDisputed(tx,scope,head.item_version_id as string | null);
   if (!canCreate) {
     await tx`UPDATE cards SET auto_paused=true,updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND origin_observation_root_id=${rootId}`;

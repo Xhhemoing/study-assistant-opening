@@ -3,6 +3,11 @@ import { evaluateEvidenceEligibility } from "./evidence-eligibility";
 import { observation, context, exposure, withHelp } from "./evidence-eligibility-fixtures";
 
 describe("evaluateEvidenceEligibility", () => {
+  it("excludes disputed material answers even after an otherwise valid independent score",()=>{
+    expect(evaluateEvidenceEligibility(observation,{...context,materialAnswerDisputed:true})).toMatchObject({
+      verifiedCorrect:"unknown",usableForCurrentVersion:"no",usableForDelayedCheck:"no",reasonCodes:expect.arrayContaining(["material_answer_disputed"]),
+    });
+  });
   it("qualifies a complete, independently attempted, reference-checked delayed answer", () => {
     expect(evaluateEvidenceEligibility(observation, context)).toMatchObject({
       independentAttempt: "yes",

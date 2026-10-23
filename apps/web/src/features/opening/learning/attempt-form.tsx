@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent, type SetStateAction } from "react";
-import type { LearningAttempt, LearningAttemptCreateInput, LearningObservation, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
+import type { LearningAttempt, LearningAttemptCreateInput, LearningObservation, MaterialQuestionIdentity, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
+import { MaterialAnswerCheck } from "./material-answer-check";
 import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
@@ -48,7 +49,7 @@ const ASSISTANCE_OPTIONS: Array<{ value: LearningObservation["assistance"]; labe
 type Props = {
   courseId: string;
   initialFocus?: { skillLabel: string; requirementKey: string | null };
-  initialProblem?: { sourceId: string; sourceVersion: number; stem: string };
+  initialProblem?: { sourceId: string; sourceVersion: number; stem: string; materialQuestion?: MaterialQuestionIdentity };
   initialMode?: "matrix" | "practice";
   initialMatrixKey?: MatrixExerciseSpec["exerciseKey"];
   initialMatrixVariant?: number;
@@ -194,7 +195,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
           sessionId: request.sessionId, clientKey: request.clientKey,
           ...(questionAnchor ? { contextAnchor: questionAnchor } : {}),
           ...((retest?.requirementKey ?? initialFocus?.requirementKey) != null ? { requirementKey: retest?.requirementKey ?? initialFocus?.requirementKey } : {}),
-          ...(stem.trim() ? { problem: practiceQuestionInput(stem, sourceId) } : {}),
+          ...(initialProblem?.materialQuestion ? { materialQuestion:initialProblem.materialQuestion } : stem.trim() ? { problem: practiceQuestionInput(stem, sourceId) } : {}),
         };
         patch({ start: request });
         requireSaved();
@@ -213,7 +214,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     if (!attempt || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true); setError("");
-    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report", ...(referenceSourceId ? { referenceSourceId } : {}) }, retest?.retestId) } })).submission!;
+    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report", ...(referenceSourceId ? { referenceSourceId } : {}), ...(gradingPhoto.workSourceId ? { workSource: { id: gradingPhoto.workSourceId, version: gradingPhoto.workSourceVersion, physicalPage: gradingPhoto.physicalPage } } : {}) }, retest?.retestId) } })).submission!;
     try {
       if (draft.submission) {
         const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);
@@ -392,6 +393,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       ) : recorded ? (
         <div className="space-y-3">
           <p className="text-sm text-text" role="status">原答案已保存。</p>
+          {initialProblem?.materialQuestion && recorded.attemptId ? <MaterialAnswerCheck attemptId={recorded.attemptId} /> : null}
           <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={gradingPhoto.workSourceId ? gradingPhoto : undefined} completionAction={initialProblem ? { label: "结束练习", href: "/opening/today" } : undefined} onChanged={onRecorded} onUpdated={next => {
             const current = readPracticeDraft(scope, null, draft.id);
             if (!current || current.attemptId !== next.attemptId || current.start?.sessionId !== next.sessionId) return;

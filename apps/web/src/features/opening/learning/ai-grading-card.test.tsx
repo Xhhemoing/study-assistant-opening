@@ -68,8 +68,8 @@ it("allows grading an existing source-bound answer but excludes missing identity
   expect(canGradeObservation({ ...saved, itemVersionId: null })).toBe(false);
   expect(canGradeObservation({ ...saved, revisionKind: "retract" })).toBe(false);
   const html = renderToStaticMarkup(createElement(AiGradingCard, { record: saved, onGraded() {} }));
-  expect(html).toContain("AI 批改");
-  expect(html).toContain("添加作答照片");
+  expect(html).toContain("正在读取后台批改状态");
+  expect(html).not.toContain("添加作答照片");
 });
 
 it("submits only the saved observation identity and exact selected photo, never rewritten answer text", () => {
@@ -77,8 +77,8 @@ it("submits only the saved observation identity and exact selected photo, never 
   const photo = { workSourceId: "99999999-9999-4999-8999-999999999999", workSourceVersion: 4, physicalPage: 2 };
   expect(aiGradingRequest(record.id, photo)).toEqual({ observationId: record.id, ...photo });
   const html = renderToStaticMarkup(createElement(AiGradingCard, { record, photo, onGraded() {} }));
-  expect(html).toContain("/opening/library?tab=materials&amp;source=");
-  expect(html).toContain("version=4&amp;page=2");
+  expect(html).not.toContain("version=4&amp;page=2");
+  expect(html).not.toContain("查看作答照片");
 });
 
 it("reopens the assessed photo version from saved history even when the current draft selected another version", () => {

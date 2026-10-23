@@ -9,6 +9,7 @@ import { ui } from "../design/ui";
 import { parseOpeningResponse } from "../client/parse-response";
 import { rememberSourceReaderPage, sourceReaderInitialPage } from "./source-reader-position";
 import { SourceVersionDetails } from "./source-version-details";
+import { MaterialManifestPanel } from "./material-manifest-panel";
 const schema = z.object({ sourceId: z.string().uuid(), version: z.number().int().nonnegative(), currentVersion: z.number().int().nonnegative(),
   page: z.number().int().positive().nullable(), pages: z.array(z.number().int().positive().nullable()), pageKind: z.enum(["physical", "section"]),
   readablePages: z.number().int().nonnegative(), characters: z.number().int().nonnegative(), text: z.string().max(20000), truncated: z.boolean() });
@@ -57,6 +58,7 @@ export function SourceContent({ sourceId, version, initialPage, onExplain }: { s
   return <section aria-label="解析正文" className="space-y-3 border-t border-line pt-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-text">解析正文</h3>
       <button type="button" className={ui.quiet} disabled={loading} onClick={() => setRevision(value => value + 1)}><RefreshCw size={14} aria-hidden="true" />重新读取</button></div>
+    <MaterialManifestPanel key={sourceId} sourceId={sourceId} />
     {loading ? <p role="status" className="text-xs text-text-3">正在读取正文…</p> : null}
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
     {content ? <><div className="flex flex-wrap items-center gap-2">

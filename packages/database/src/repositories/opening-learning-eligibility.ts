@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { materialQuestionDisputed } from "./opening-material-questions";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
@@ -43,7 +44,7 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
           AND r.teaching_revision_id IS NOT DISTINCT FROM v.teaching_revision_id AND r.teaching_block_id IS NOT DISTINCT FROM v.teaching_block_id
           AND ${teachingQuestionIdentityMatches(db)}
           AND r.chunk_id IS NOT DISTINCT FROM v.chunk_id AND r.physical_page IS NOT DISTINCT FROM v.physical_page AND r.artifact_kind=v.artifact_kind
-        WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id)
+        WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id AND NOT ${materialQuestionDisputed(db,"v")})
         OR (o.item_version_id IS NULL AND exam_identity.observation_id IS NOT NULL))
         AND CASE WHEN exam_identity.identity_current IS NOT NULL THEN exam_identity.identity_current
           AND exam_identity.requirement_key IS NOT DISTINCT FROM o.requirement_key

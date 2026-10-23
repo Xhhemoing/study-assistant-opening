@@ -18,6 +18,7 @@ describe("createQueues", () => {
       "build-course-knowledge",
       "compile-teaching-unit",
       "extract-study-actions",
+      "grade-observation",
       "index-source",
       "parse",
       "parse-media",

@@ -1,4 +1,6 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { materialQuestionSpec, readMaterialQuestion } from "./opening-material-questions";
+import { assertMaterialPageReadable, readMaterialManifest } from "./opening-material-manifest";
 import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
@@ -58,9 +60,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (input.requirementKey || input.problemId) throw learningError("VALIDATION", "teaching block sets its own question and requirement key");
     requirementKey = `teaching:${input.teachingBlock.blockId}:v${input.teachingBlock.contentVersion}`;
   }
+  const materialQuestion = input.materialQuestion ? await readMaterialQuestion(tx,scope,input.materialQuestion) : null;
+  if (input.materialQuestion && (!(session.source_ids as string[]).includes(input.materialQuestion.sourceId)
+    || sourceVersions[input.materialQuestion.sourceId] !== input.materialQuestion.sourceVersion)) throw learningError("VALIDATION","资料题不在当前学习来源版本内");
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
-    ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}) };
+    ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}),
+    ...(input.materialQuestion ? { materialQuestion:input.materialQuestion } : {}) };
   const replay = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a
     LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.client_key=${input.clientKey}`;
@@ -105,6 +111,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   // Older browser checkpoints still contain a material problem payload. Retain it
   // only as request identity; classroom content always comes from the saved revision.
   let problem = teachingQuestion ? undefined : input.problem;
+  const materialSpec=input.materialQuestion ? materialQuestionSpec(input.materialQuestion) : null;
+  if (input.materialQuestion && materialQuestion) {
+    const [existing]=await tx`SELECT problem_id FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId}
+      AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND evaluation_spec=${tx.json(materialSpec!)} ORDER BY created_at,id LIMIT 1`;
+    problemId=existing ? String(existing.problem_id) : null;
+    if (!problemId) problem={sourceId:input.materialQuestion.sourceId,physicalPage:materialQuestion.page,stemSnapshot:materialQuestion.stem,artifactKind:"reference_item"};
+  }
   if (teachingQuestion) {
     const spec = teachingQuestion.spec;
     itemStem = Array.from(teachingQuestion.stem).slice(0, 2000).join("");
@@ -144,6 +157,11 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   }
   if (problem) {
     if (problem.sourceId && !(session.source_ids as string[]).includes(problem.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
+    if (problem.sourceId) await assertMaterialPageReadable(tx,scope,problem.sourceId,sourceVersions[problem.sourceId]!,problem.physicalPage ?? null);
+    if (problem.sourceId && !input.materialQuestion) {
+      const [classified]=await tx`SELECT material_manifest FROM opening_source_versions WHERE source_id=${problem.sourceId} AND version=${sourceVersions[problem.sourceId]!}`;
+      if(readMaterialManifest(classified?.material_manifest)?.questions.length) throw learningError("CONFLICT","这份资料已登记原题身份，请从资料题目列表开始，不能另建同题身份");
+    }
     if (!problem.sourceId && (problem.chunkId != null || problem.physicalPage != null)) throw learningError("VALIDATION", "problem page and chunk require a material source");
     if (problem.chunkId && problem.sourceId) {
       const chunks = await tx`SELECT id FROM opening_source_chunks WHERE id=${problem.chunkId} AND source_id=${problem.sourceId}
@@ -170,6 +188,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
       WHERE p.problem_id=${problemId} AND p.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id=${courseId} FOR SHARE OF p`;
     const ref = refs[0];
     if (!ref || (ref.source_id != null && !(session.source_ids as string[]).includes(String(ref.source_id)))) throw learningError("VALIDATION", "problem is outside the session course or sources");
+    if (ref.source_id != null) await assertMaterialPageReadable(tx,scope,String(ref.source_id),Number(ref.source_version),ref.physical_page == null ? null : Number(ref.physical_page));
     if (ref.source_id != null) sourceVersions[String(ref.source_id)] = Number(ref.source_version);
     itemStem = String(ref.stem_snapshot);
     const versions = await tx`SELECT id,evaluation_spec FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
@@ -183,7 +202,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
       requirementKey = matrixExerciseRequirement(matrixExercise);
     }
     if (!versions.length) await tx`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind,evaluation_spec)
-      VALUES (${itemVersionId},${scope.workspaceId},${scope.ownerUserId},${courseId},${String(session.activity_id)},${problemId},${ref.source_id},${ref.source_version},${ref.physical_page},${ref.chunk_id},${ref.stem_snapshot},${ref.artifact_kind},${spanSpec ? tx.json(spanSpec) : matrixExercise ? tx.json(matrixExercise) : null})`;
+      VALUES (${itemVersionId},${scope.workspaceId},${scope.ownerUserId},${courseId},${String(session.activity_id)},${problemId},${ref.source_id},${ref.source_version},${ref.physical_page},${ref.chunk_id},${ref.stem_snapshot},${ref.artifact_kind},${materialSpec ? tx.json(materialSpec) : spanSpec ? tx.json(spanSpec) : matrixExercise ? tx.json(matrixExercise) : null})`;
   }
   const contextAnchor = input.contextAnchor ? await resolveOpeningStudyContext(tx, scope, input.contextAnchor, {
     courseId, sessionId: input.sessionId, sourceIds: session.source_ids as string[],

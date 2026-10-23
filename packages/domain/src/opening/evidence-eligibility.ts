@@ -145,7 +145,7 @@ export function evaluateEvidenceEligibility(
     usableForCurrentVersion: "unknown",
     usableForDelayedCheck: "unknown",
     reasonCodes: [],
-    policyVersion: "opening-evidence-v3",
+    policyVersion: "opening-evidence-v4",
   };
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     result.reasonCodes.push("observation_identity_incomplete");
@@ -197,6 +197,11 @@ export function evaluateEvidenceEligibility(
     ? evaluateAiCorrectness(observation, context.aiEvaluation, reasons)
     : evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
+  if (context.materialAnswerDisputed) {
+    result.verifiedCorrect="unknown";
+    result.usableForCurrentVersion="no";
+    reasons.add("material_answer_disputed");
+  }
   result.usableForDelayedCheck = evaluateDelayedCheck(
     observation,
     context.delayedCheck,

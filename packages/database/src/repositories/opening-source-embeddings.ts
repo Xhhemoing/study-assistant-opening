@@ -4,6 +4,7 @@ import type { MaterialSegment } from "@aistudy/ai";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { mapChunk } from "./opening-source-chunks";
+import { materialPageReadable } from "./opening-material-manifest";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 export { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
@@ -32,6 +33,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(sourceIds)} AND s.upload_state='uploaded'
           AND c.source_version<=s.version AND (c.source_version<s.version OR s.parse_state='ready')
+          AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=w.id AND e.source_id=s.id)`;
       const allowed = new Map(rows.map(row => [String(row.id), Number(row.source_version)]));
       return { chunks: chunks.filter(chunk => allowed.get(chunk.id) === chunk.sourceVersion), privacyEpoch: Number(owner.privacy_epoch) };
@@ -95,6 +97,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+          AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
       ) SELECT *,embedding <=> ${JSON.stringify(input.vector)}::vector AS distance FROM authorized
         ORDER BY distance,id,segment_index LIMIT 48`;

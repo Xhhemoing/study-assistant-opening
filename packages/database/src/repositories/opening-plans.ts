@@ -148,6 +148,9 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       const rows = await sql`
         SELECT
           t.*,
+          target.id AS teaching_activity_id,
+          target.course_id AS teaching_course_id,
+          target.goal_json AS teaching_goal_json,
           a.id AS retest_activity_id,
           a.candidate_id AS retest_candidate_id,
           a.course_id AS retest_course_id,
@@ -156,6 +159,22 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           a.recommended_at AS retest_recommended_at,
           COALESCE(j.result->'inputSnapshot'->>'prompt', j.payload->>'prompt') AS retest_prompt
         FROM opening_tasks t
+        JOIN workspaces w ON w.id = t.workspace_id AND w.owner_user_id = t.owner_user_id
+        LEFT JOIN LATERAL (
+          SELECT teaching.id, teaching.course_id, teaching.goal_json
+          FROM opening_teaching_activities teaching
+          JOIN courses c ON c.id = teaching.course_id AND c.workspace_id = t.workspace_id AND c.archived_at IS NULL
+          WHERE teaching.workspace_id = t.workspace_id AND teaching.owner_user_id = t.owner_user_id
+            AND teaching.course_id = t.course_id AND teaching.status IN ('active', 'paused')
+            AND (
+              -- Use the stored task intent, never an accidental task-looking client key.
+              (teaching.create_intent->>'source' = 'task' AND lower(teaching.create_intent->>'taskId') = t.id::text)
+              OR (t.origin IN ('manual', 'course_seed') AND t.client_key = 'first-learning-activity:' || teaching.id::text
+                AND teaching.create_intent->>'source' = 'onboarding' AND teaching.client_key LIKE 'first-learning:%')
+            )
+          ORDER BY teaching.updated_at DESC, teaching.id ASC
+          LIMIT 1
+        ) target ON true
         LEFT JOIN opening_retest_activities a
           ON a.task_id = t.id
           AND a.workspace_id = t.workspace_id

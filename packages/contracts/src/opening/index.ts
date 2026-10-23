@@ -1,3 +1,4 @@
+export * from "./material-manifest";
 export {
   DOCLING_PINNED_VERSION,
   uuidSchema,
@@ -48,6 +49,8 @@ export {
   jobStatusResponseSchema,
   tutorJobErrorSchema,
   tutorMetadataJobPayloadSchema,
+  gradeObservationJobPayloadSchema,
+  type GradeObservationJobPayload,
   type JobKind,
   type JobStatus,
   type JobRecord,

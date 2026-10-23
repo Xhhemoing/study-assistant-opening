@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
+import { materialPageReadable } from "./opening-material-manifest";
 import {
   DEFAULT_OPENING_AI_SETTINGS, openingAdaptivePrefsSchema, openingAiSettingsSchema,
   plannedBlockSchema, systemQueryRequestSchema, systemQueryResultSchema,
@@ -81,6 +82,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         const rows = await tx`SELECT c.id,c.source_id,c.source_version,c.page,left(c.text,1200) AS excerpt,char_length(c.text) AS full_length,s.name
           FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id AND s.version=c.source_version
           WHERE s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded' AND s.parse_state='ready' AND length(btrim(c.text))>0
+            AND ${materialPageReadable(tx,"c.source_id","c.source_version","c.page")}
             AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
             AND NOT EXISTS(SELECT 1 FROM opening_source_versions v WHERE v.workspace_id=s.workspace_id AND v.source_id=s.id AND v.version=s.version AND v.availability='unavailable')
             AND ${a.courseId ? tx`EXISTS(SELECT 1 FROM course_asset_memberships m JOIN courses course ON course.id=m.course_id AND course.workspace_id=m.workspace_id AND course.archived_at IS NULL
