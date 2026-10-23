@@ -7,9 +7,9 @@ import { SpanLessonSession } from "../../../../../../../features/opening/teachin
 import { createStudyIntentService } from "../../../../../../../features/opening/teaching/span/intent-service";
 import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";
 import { requireOpeningScope } from "../../../../../../../features/opening/runtime";
-export default async function SpanLessonPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ retest?: string; intentEvent?: string; move?: string; lesson?: string }> }) {
+export default async function SpanLessonPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ retest?: string; intentEvent?: string; move?: string; lesson?: string; conversation?: string }> }) {
   const { id } = await params;
-  const { retest, intentEvent, lesson } = await searchParams;
+  const { retest, intentEvent, lesson, conversation } = await searchParams;
   let { move } = await searchParams;
   const request = new Request("http://opening.local/courses/study/span", { headers: await headers() });
   const context = await loadCourseStudyContext(request, id);
@@ -25,5 +25,5 @@ export default async function SpanLessonPage({ params, searchParams }: { params:
     if (event.signals.some(signal => signal === "guessed" || signal === "copied_answer")) initialNewEvidenceEventId = event.id;
     if (event.id !== intentEvent || !createSpanTeachingSequence(spanModeForIntent(event.intent)).some(candidate => candidate.id === move)) move = undefined;
   }
-  return <SpanLessonSession key={`${id}:${retest ?? "study"}`} initialActivityId={lesson} courseId={id} sourceIds={context.sourceIds} sourceLoadError={context.sourceLoadError} delayedRetestId={retest} initialIntent={initialIntent} initialMoveId={move} initialNewEvidenceEventId={initialNewEvidenceEventId} />;
+  return <SpanLessonSession key={`${id}:${retest ?? "study"}`} originalConversationId={conversation} initialActivityId={lesson} courseId={id} sourceIds={context.sourceIds} sourceLoadError={context.sourceLoadError} delayedRetestId={retest} initialIntent={initialIntent} initialMoveId={move} initialNewEvidenceEventId={initialNewEvidenceEventId} />;
 }

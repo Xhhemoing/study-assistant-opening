@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { apiFailureSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
 
-export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media", "extract-study-actions", "index-source", "tutor-metadata"]);
+export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media", "extract-study-actions", "index-source", "tutor-metadata", "recognize-photo-question"]);
 export const tutorMetadataJobPayloadSchema = z.object({
   tutorJobId: uuidSchema,
   assistantTurnId: uuidSchema,

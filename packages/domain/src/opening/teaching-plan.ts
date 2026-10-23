@@ -14,6 +14,7 @@ export const ALLOWED_TEACHING_BLOCK_TYPES = [
   "answer_key",
   "meta",
   "matrix_transform",
+  "vector_diagram",
 ] as const;
 
 export type AllowedTeachingBlockType = (typeof ALLOWED_TEACHING_BLOCK_TYPES)[number];

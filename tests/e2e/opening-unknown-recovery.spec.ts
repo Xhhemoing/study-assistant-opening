@@ -10,10 +10,11 @@ const newJobId = "33333333-3333-4333-8333-333333333333";
 const updatedAt = "2026-10-15T00:00:00.000Z";
 const question = "请给我一个关于导数的提示";
 
-async function openAssistant(page: Page, conversation?: string) {
-  await page.goto(`/opening/assistant${conversation ? `?conversation=${conversation}` : ""}`);
-  await expect(page).toHaveURL(url => url.pathname === "/opening/today" && url.searchParams.get("ai") === "1" && url.searchParams.get("conversation") === (conversation ?? null));
-  const assistant = page.getByRole("dialog", { name: "学习助手", exact: true });
+async function openAssistant(page: Page, conversation = conversationId) {
+  // Recovery restores the explicitly selected saved identity; the bare route is history.
+  await page.goto(`/opening/assistant?conversation=${encodeURIComponent(conversation)}`);
+  await expect(page).toHaveURL(url => url.pathname === "/opening/assistant" && url.searchParams.get("conversation") === conversation);
+  const assistant = page.getByRole("main").getByRole("region", { name: "学习对话", exact: true });
   await expect(assistant).toBeVisible();
   return assistant;
 }

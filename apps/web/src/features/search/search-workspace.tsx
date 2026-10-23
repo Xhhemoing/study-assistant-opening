@@ -4,7 +4,7 @@ import { RefreshCw, Search } from "lucide-react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { SearchHit } from "@aistudy/domain";
-import { PageHeading, ui } from "../opening/design/ui";
+import { PageHeader, ContentGrid, ui } from "../opening/design/ui";
 import { SearchResults } from "./search-results";
 import { createSearchApi } from "./search-api";
 
@@ -54,11 +54,11 @@ export function SearchWorkspace() {
   }
 
   return (
-    <section className="min-h-full min-w-0 bg-surface"><PageHeading title="搜索" /><div className="mx-auto max-w-[760px] space-y-5 px-5 py-5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col bg-bg text-text"><PageHeader title="搜索" /><div className="min-h-0 flex-1 overflow-y-auto"><ContentGrid className="px-5 py-5 sm:px-7">
 
-      <form className="flex gap-2" onSubmit={submitSearch} role="search">
+      <form className="flex flex-wrap gap-3" onSubmit={submitSearch} role="search">
         <label className="sr-only" htmlFor="global-search-input">搜索内容</label>
-        <div className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-panel border border-line bg-surface px-4 focus-within:border-line-strong focus-within:ring-2 focus-within:ring-accent/30">
+        <div className="flex min-w-0 flex-1 items-center gap-3 rounded-lg border border-line bg-surface px-3 focus-within:border-focus-ring focus-within:ring-2 focus-within:ring-focus-ring">
           <Search aria-hidden="true" className="shrink-0 text-text-2" size={18} />
           <input
             className="min-w-0 flex-1 bg-transparent py-2 text-sm text-text md:py-1.5 outline-none placeholder:text-text-2"
@@ -77,9 +77,9 @@ export function SearchWorkspace() {
 
       <div aria-live="polite">
         {loading ? <p className="border-t border-line py-8 text-sm text-text-2">正在搜索…</p> : null}
-        {error ? <div className="flex items-center gap-3 border-t border-line py-8" role="alert"><p className="text-sm text-danger">{error}</p><button aria-label="重试搜索" className="inline-flex min-h-10 md:min-h-8 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setReloadToken((value) => value + 1)} title="重试搜索" type="button"><RefreshCw aria-hidden="true" size={14} />重试</button></div> : null}
+        {error ? <div className="flex items-center gap-3 border-t border-line py-8" role="alert"><p className="text-sm text-danger">{error}</p><button aria-label="重试搜索" className="inline-flex min-h-10 md:min-h-8 items-center gap-2 rounded-md border border-line px-3 text-xs text-text hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={() => setReloadToken((value) => value + 1)} title="重试搜索" type="button"><RefreshCw aria-hidden="true" size={14} />重试</button></div> : null}
         {!loading && !error ? <SearchResults hits={hits} query={query} /> : null}
       </div>
-    </div></section>
+    </ContentGrid></div></section>
   );
 }

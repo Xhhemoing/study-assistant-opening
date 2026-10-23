@@ -193,6 +193,19 @@ async function request(
   return body;
 }
 
+/** Only these read-only lesson endpoints may retry; never replay an answer or save. */
+async function readTeaching(path: string, fetchImpl: FetchLike): Promise<unknown> {
+  try {
+    return await request(path, { method: "GET" }, fetchImpl);
+  } catch (error) {
+    const transient = error instanceof TypeError
+      || error instanceof OpeningApiError && [502, 503, 504].includes(error.status);
+    if (!transient) throw error;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return request(path, { method: "GET" }, fetchImpl);
+  }
+}
+
 const teachingActivityListSchema = z.array(teachingActivitySchema);
 const summaryListSchema = z.array(conversationSummarySchema);
 const turnListSchema = z.array(turnRecordSchema);
@@ -709,7 +722,7 @@ export function createOpeningApi(transport: FetchLike = fetch) {
     },
 
     async listTeachingActivities(): Promise<TeachingActivity[]> {
-      const body = await request("/api/opening/teaching-activities", { method: "GET" }, fetchImpl);
+      const body = await readTeaching("/api/opening/teaching-activities", fetchImpl);
       return parseOpeningResponse(teachingActivityListSchema, body);
     },
 
@@ -724,9 +737,8 @@ export function createOpeningApi(transport: FetchLike = fetch) {
     },
 
     async getTeachingActivity(id: string): Promise<TeachingActivity> {
-      const body = await request(
+      const body = await readTeaching(
         `/api/opening/teaching-activities/${id}`,
-        { method: "GET" },
         fetchImpl,
       );
       return parseOpeningResponse(teachingActivitySchema, body);
@@ -757,9 +769,8 @@ export function createOpeningApi(transport: FetchLike = fetch) {
 
 
     async getTeachingClientInit(activityId: string): Promise<ActivitySpecClientInit> {
-      const body = await request(
+      const body = await readTeaching(
         `/api/opening/teaching-activities/${activityId}/client-init`,
-        { method: "GET" },
         fetchImpl,
       );
       return parseOpeningResponse(activitySpecClientInitSchema, body);
@@ -809,9 +820,8 @@ export function createOpeningApi(transport: FetchLike = fetch) {
      * Full LearningResume package (not ConversationResume).
      */
     async getTeachingResume(activityId: string): Promise<LearningResume> {
-      const body = await request(
+      const body = await readTeaching(
         `/api/opening/teaching/activities/${activityId}/resume`,
-        { method: "GET" },
         fetchImpl,
       );
       return parseOpeningResponse(learningResumeSchema, body);

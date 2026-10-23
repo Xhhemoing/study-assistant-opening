@@ -1,4 +1,5 @@
 import { guardSessionRequest } from "../../auth/session-expiry";
+import { UploadUserError } from "./upload-error";
 
 export type PutProgress = (loaded: number, total: number) => void;
 
@@ -12,7 +13,7 @@ export function putPrivateBytes(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const guard = guardSessionRequest(url);
-    if (guard.blocked) { reject(new Error("请先登录原账户并验证，再继续上传。")); return; }
+    if (guard.blocked) { reject(new UploadUserError("请先登录原账户并验证，再继续上传。")); return; }
     const xhr = xhrFactory();
     xhr.open("PUT", url);
     // Same-origin relative URLs send cookies by default; keep credentials if begin ever returns absolute same-site URL.
@@ -29,11 +30,11 @@ export function putPrivateBytes(
           try { body = JSON.parse(xhr.responseText); } catch { /* Non-JSON gateway errors retain upload error handling. */ }
           guard.inspectFailure(xhr.status, body);
         }
-        reject(new Error(`上传对象失败 (${xhr.status})`));
+        reject(new UploadUserError(`上传对象失败 (${xhr.status})`));
       }
     };
-    xhr.onerror = () => reject(new Error("上传中断（网络错误）"));
-    xhr.onabort = () => reject(new Error("上传已取消"));
+    xhr.onerror = () => reject(new UploadUserError("上传中断（网络错误）"));
+    xhr.onabort = () => reject(new UploadUserError("上传已取消"));
     xhr.send(body);
   });
 }

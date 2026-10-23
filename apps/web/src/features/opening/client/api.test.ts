@@ -12,6 +12,51 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+describe("lesson read recovery", () => {
+  it.each([502, 503, 504, "network"])("recovers once from %s without a manual reload", async failure => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockImplementationOnce(async () => {
+        if (failure === "network") throw new TypeError("Failed to fetch");
+        return jsonResponse({ error: { message: "temporarily unavailable" } }, failure as number);
+      })
+      .mockImplementationOnce(async () => jsonResponse([]));
+    const api = createOpeningApi(fetchImpl);
+    await expect(api.listTeachingActivities()).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1]).toEqual(fetchImpl.mock.calls[0]);
+  });
+
+  it.each(["listTeachingActivities", "getTeachingActivity", "getTeachingClientInit", "getTeachingResume"] as const)(
+    "%s stops after one retry and preserves the final error", async method => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: "still unavailable", code: "UNAVAILABLE" } }, 503));
+      const api = createOpeningApi(fetchImpl);
+      await expect(api[method](U)).rejects.toMatchObject({ status: 503, code: "UNAVAILABLE", message: "still unavailable" });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([401, 403, 404, 409, 429, 500])("does not retry HTTP %s", async status => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: "action required" } }, status));
+    await expect(createOpeningApi(fetchImpl).listTeachingActivities()).rejects.toMatchObject({ status });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry cancellation or a malformed successful response", async () => {
+    const aborted = vi.fn(async () => { throw new DOMException("cancelled", "AbortError"); });
+    await expect(createOpeningApi(aborted).listTeachingActivities()).rejects.toMatchObject({ name: "AbortError" });
+    expect(aborted).toHaveBeenCalledTimes(1);
+    const malformed = vi.fn(async () => jsonResponse({ activities: [] }));
+    await expect(createOpeningApi(malformed).listTeachingActivities()).rejects.toThrow();
+    expect(malformed).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay a write on a transient server failure", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ error: { message: "temporarily unavailable" } }, 503));
+    await expect(createOpeningApi(fetchImpl).requestTeachingCompile(U, "compile:once")).rejects.toMatchObject({ status: 503 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("openingApi (RU-07 client)", () => {
   it("forwards abort signals through conversation recovery and job polling reads", async () => {
     const controller = new AbortController();

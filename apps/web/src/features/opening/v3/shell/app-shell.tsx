@@ -71,7 +71,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
 
   return (
     <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
-    <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="flex h-dvh text-text app-backdrop">
+    <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="group/workspace flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 

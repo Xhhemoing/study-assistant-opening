@@ -12,6 +12,7 @@ export type ChatMessageView = {
   status?: TurnRecord["status"];
   origin?: "saved" | "ephemeral";
   provenanceId?: string | null;
+  savedTurnId?: string;
   systemQuery?: boolean;
   queryEvidenceLinks?: readonly QueryEvidenceLink[];
   /** True when this assistant turn had selected materials / context intent (T02 general label). */
@@ -63,6 +64,8 @@ export function messagesFromTurns(turns: readonly TurnRecord[]): ChatMessageView
     citations: turn.citations,
     citationLabels: turn.citations.map((c) => c.label),
     status: turn.status,
+    origin: "saved",
+    savedTurnId: turn.role === "assistant" ? turn.id : undefined,
     systemQuery: Boolean(turn.systemQuery),
     queryEvidenceLinks: turn.role === "assistant" ? queryEvidenceLinks(turn.systemQuery) : [],
   }));

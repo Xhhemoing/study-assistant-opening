@@ -35,7 +35,7 @@ export function SourceContentBody({ content }: { content: Content }) {
     <p className="text-xs text-text-2">{content.pageKind === "physical" ? "物理页" : "文本段"} {content.page ?? "未编号"} · {content.pages.length} 页/段 · {content.characters} 个提取字符</p>
     <SourceVersionDetails requestedVersion={content.version} currentVersion={content.currentVersion} />
     <p className="text-xs text-warn">提取文字可能有遗漏，请核对原件。</p>
-    {content.text.trim() ? <pre data-study-reading-text="true" data-source-page={content.page ?? undefined} data-page-kind={content.pageKind} className="max-h-[65dvh] overflow-auto whitespace-pre-wrap break-words border-y border-line py-4 font-sans text-sm leading-7 text-text">{content.text}</pre>
+    {content.text.trim() ? <pre data-study-reading-text="true" data-source-id={content.sourceId} data-source-version={content.version} data-source-page={content.page ?? undefined} data-page-kind={content.pageKind} className="max-h-[65dvh] overflow-auto whitespace-pre-wrap break-words border-y border-line py-4 font-sans text-sm leading-7 text-text">{content.text}</pre>
       : <p className="py-4 text-sm text-warn">本页未提取到正文，不能作为文字依据；请核对原件。图片或扫描页在未配置 OCR 时无法提取文字。</p>}
     {content.truncated ? <p className="text-xs text-warn">本页显示内容已截断，请打开原件核对完整内容。</p> : null}
   </div>;

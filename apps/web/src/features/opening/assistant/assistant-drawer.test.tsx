@@ -88,17 +88,20 @@ describe("global assistant drawer lifetime", () => {
     expect(dialog?.textContent).toContain("第二步");
     expect(document.querySelector('[aria-label="切换本次提问"]')).toBeNull();
   });
-  it("intercepts an ordinary assistant link and leaves modified links to the browser", async () => {
+  it("leaves ordinary assistant history links to normal navigation", async () => {
     await render();
-    const link = document.createElement("a"); link.href = "/opening/assistant?fragment=linked"; host.appendChild(link);
-    const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
-    await act(async () => { link.dispatchEvent(plain); });
-    expect(plain.defaultPrevented).toBe(true);
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("linked");
-    // Prevent jsdom's unrelated navigation after checking that our handler left it alone.
-    let preventedByDrawer = true;
-    link.addEventListener("click", event => { preventedByDrawer = event.defaultPrevented; event.preventDefault(); });
-    await act(async () => { link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true })); });
-    expect(preventedByDrawer).toBe(false);
+    const link = document.createElement("a"); link.href = "/opening/assistant?conversation=saved"; host.appendChild(link);
+    let intercepted = true;
+    link.addEventListener("click", event => { intercepted = event.defaultPrevented; event.preventDefault(); });
+    await act(async () => { link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })); });
+    expect(intercepted).toBe(false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+  it("does not register a default Ctrl J shortcut", async () => {
+    await render();
+    const shortcut = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "j", ctrlKey: true });
+    await act(async () => { document.dispatchEvent(shortcut); });
+    expect(shortcut.defaultPrevented).toBe(false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 });

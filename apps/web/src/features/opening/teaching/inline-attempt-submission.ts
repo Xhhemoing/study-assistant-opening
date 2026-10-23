@@ -68,7 +68,7 @@ export function createInlineAttemptSubmission(
       publish();
     }
     const attempt = state.attempt;
-    const observation = await client.submitAttempt(attempt.id, { clientKey: captured.submitKey, answer: answer.answer, outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+    const observation = await client.submitAttempt(attempt.id, { clientKey: captured.submitKey, answer: answer.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report" });
     if (observation.attemptId !== attempt.id || observation.courseId !== attempt.courseId || observation.sessionId !== attempt.sessionId) {
       throw new Error("保存回执与原作答不一致，原答案和请求已保留，请到课程学习记录核实。");
     }
@@ -77,12 +77,15 @@ export function createInlineAttemptSubmission(
     publish();
     return state.result;
   }
+  let consumerPending: Promise<SubmissionResult> | null = null;
   return {
     submit() {
       // Save the immutable answer and both keys before the first outgoing write.
       publish();
       state.pending ??= run().finally(() => { state.pending = null; });
-      return state.pending;
+      // Each returning form receives identity advances, including a failed write.
+      consumerPending ??= state.pending.finally(() => { publish(); consumerPending = null; });
+      return consumerPending;
     },
   };
 }

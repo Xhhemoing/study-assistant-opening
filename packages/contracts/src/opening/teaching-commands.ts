@@ -6,6 +6,7 @@ export const TEACHING_COMMAND_LOG_MAX = 32;
 export const TEACHING_BRANCH_STACK_MAX = 16;
 
 export const teachingCommandKindSchema = z.enum([
+  "confused",
   "why",
   "rephrase",
   "expand",
@@ -87,7 +88,7 @@ export type TeachingCommandConflictCode = z.infer<
 
 export const teachingCommandAssistSchema = z
   .object({
-    kind: z.literal("why"),
+    kind: z.enum(["why", "confused"]),
     summary: z.string().min(1).max(4000),
   })
   .strict();

@@ -1,6 +1,7 @@
 import { Lightbulb } from "lucide-react";
 import { LearningProse } from "../assistant/learning-prose";
 import { ui } from "../design/ui";
+import { studentCopy } from "./student-copy";
 
 /**
  * 「卡住了」提示阶梯：只渲染服务端实际发放的提示，缺失的级别不出现。
@@ -22,5 +23,6 @@ export function HintLadder({ delivered, next }: { delivered: Array<{ id: string;
       <span className="text-meta text-text-3">提示会记入本题帮助</span>
       {next.blockedReason ? <p className="w-full text-xs leading-5 text-text-2">{next.blockedReason}</p> : null}
     </div> : null}
+    <p className="text-meta leading-5 text-text-2">{studentCopy.hintEncouragement}</p>
   </section>;
 }

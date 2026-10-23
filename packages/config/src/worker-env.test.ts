@@ -51,4 +51,10 @@ describe("loadWorkerEnv", () => {
     expect(() => loadWorkerEnv({ ...configured, NODE_ENV: "production", S3_ENDPOINT: "not a url" })).toThrow(/S3_ENDPOINT must be a valid URL/);
     expect(() => loadWorkerEnv({ ...configured, S3_FORCE_PATH_STYLE: "yes" })).toThrow(/S3_FORCE_PATH_STYLE/);
   });
+
+  it("accepts trimmed roles and rejects accidental role typos in production", () => {
+    expect(loadWorkerEnv({ ...configured, NODE_ENV: "production", WORKER_ROLE: " learning " }).workerRole).toBe("learning");
+    expect(loadWorkerEnv({ WORKER_ROLE: " " }).workerRole).toBe("all");
+    expect(() => loadWorkerEnv({ ...configured, NODE_ENV: "production", WORKER_ROLE: "parse" })).toThrow(/WORKER_ROLE/);
+  });
 });

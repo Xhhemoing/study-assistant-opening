@@ -22,7 +22,9 @@ export function readFirstLearningDraft(storage: Pick<Storage, "getItem">, key: s
 export function saveFirstLearningDraft(storage: Pick<Storage, "setItem">, key: string, draft: FirstLearningDraft) {
   try { storage.setItem(key, JSON.stringify(draft)); } catch { /* The form remains usable without optional storage. */ }
 }
-const resultSchema = z.object({ activityId: uuidSchema, taskId: uuidSchema, href: z.literal("/opening/today") });
+const resultSchema = z.object({ activityId: uuidSchema, taskId: uuidSchema, courseId: uuidSchema.nullish(), href: z.string() })
+  .refine(value => value.href === "/opening/today" || Boolean(value.courseId
+    && value.href === `/opening/courses/${value.courseId}/study?activity=${value.activityId}`), "学习入口与本次课程不一致");
 export async function submitFirstLearningDraft(draft: FirstLearningDraft, fetcher: typeof fetch = fetch) {
   const input = firstLearningInputSchema.parse({ ...draft, targetDate: draft.targetDate || null });
   let response: Response;

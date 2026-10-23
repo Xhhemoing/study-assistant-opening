@@ -95,6 +95,25 @@ it("replays the same grade once, while concurrent user corrections cannot be ove
   expect((await readOpeningObservationHistory(fixture.sql, fixture.scope, another.id)).headObservationId).toBe(userRevision.headObservationId);
 });
 
+it.each([
+  { answer: "2/2", model: "incorrect" as const },
+  { answer: "2", model: "correct" as const },
+  { answer: "1/2+1/2=2/4=1", model: "correct" as const },
+])("abstains on arithmetic disagreement without error cards or extra retest scans: %j", async ({ answer, model }) => {
+  const f = await learningAttemptFixture(fixture);
+  const original = await f.submit(await f.start(), { answer, outcome: "unverified" });
+  const graded = await grade(original, proposal(model));
+  expect(graded).toMatchObject({ outcome: "unverified", answer, eligibility: { verifiedCorrect: "unknown" },
+    aiEvaluation: { outcome: "unverified", misconceptionId: null } });
+  expect(graded.aiEvaluation?.feedback).toContain("程序验算");
+  const evidence = await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId);
+  expect(evidence.observations.map(row => row.id)).toEqual([graded.id]);
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE key=${`retest-scan:${f.courseId}:${graded.id}`}`).toHaveLength(0);
+  expect(await fixture.sql`SELECT id FROM cards WHERE origin_observation_root_id=${original.id}`).toHaveLength(0);
+  expect((await grade(original, proposal(model))).id).toBe(graded.id);
+  expect((await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id)).revisions).toHaveLength(2);
+});
+
 it("rejects other owners, stale material versions and privacy exclusions before grading or writing", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
   await expect(repository().context(fixture.otherScope, { observationId: original.id })).rejects.toMatchObject({ code: "NOT_FOUND" });

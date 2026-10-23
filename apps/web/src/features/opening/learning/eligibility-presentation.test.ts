@@ -1,6 +1,7 @@
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => true }));
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eligibilityReasonLabels } from "./eligibility-presentation";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { LearningAttemptForm } from "./attempt-form";
@@ -32,10 +33,11 @@ describe("learning eligibility presentation", () => {
   it("renders a start-first form with missing-material uncertainty", () => {
     const html = renderToStaticMarkup(createElement(LearningAttemptForm, { courseId: "11111111-1111-4111-8111-111111111111", onRecorded: () => undefined }));
     expect(html).toContain("开始本次练习");
-    const materialsDisclosure = html.match(/<details\b[^>]*><summary\b[^>]*>题目材料与题干（用于 AI 批改）<\/summary>/)?.[0];
+    expect(html).toContain("本次题干（可直接粘贴）");
+    const materialsDisclosure = html.match(/<details\b[^>]*><summary\b[^>]*>关联题目或参考材料（可选）<\/summary>/)?.[0];
     expect(materialsDisclosure).toBeDefined();
     expect(materialsDisclosure).not.toContain(" open");
-    expect(html).toContain("不关联资料，先记录作答");
+    expect(html).toContain("不关联资料，使用粘贴题干");
     expect(html).toContain("填入完整题干后，之后可以安排重做这道题。");
     expect(html).not.toContain("保存自报结果");
   });

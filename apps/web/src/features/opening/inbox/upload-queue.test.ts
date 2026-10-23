@@ -22,6 +22,30 @@ function file(name: string): LocalUploadFile {
 }
 
 describe("createUploadQueue", () => {
+  it("retains an unknown begin identity through legacy adapters and gives a new selection a new identity", async () => {
+    const begins: string[] = [];
+    const client = createUploadClient({
+      begin: async input => {
+        begins.push(input.uploadId!);
+        if (begins.length === 1) throw new Error("begin response lost");
+        return { source: { ...source, id: input.uploadId!, uploadState: "pending" }, uploadUrl: "https://minio.local/upload", expiresAt: source.createdAt };
+      },
+      put: async () => {}, complete: async id => ({ ...source, id }),
+    });
+    const selected = file("same.pdf");
+    const queue = createUploadQueue((input, onBytes, resume, operation) => client.uploadFile(input, { uploadId: operation?.uploadId, onBytes, resumeSourceId: resume?.sourceId, ticket: resume?.ticket }));
+    const [first] = queue.add([selected]);
+    await queue.start();
+    await queue.retry(first!.id);
+    expect(begins[0]).toBe(first!.id);
+    expect(begins[1]).toBe(first!.id);
+    expect(queue.snapshot()[0]?.state).toBe("saved");
+    const [next] = queue.add([selected]);
+    await queue.start();
+    expect(next!.id).not.toBe(first!.id);
+    expect(begins[2]).toBe(next!.id);
+  });
+
   it("accepts initial files as idle items and preserves their File object", () => {
     const initial = file("initial.pdf");
     const queue = createUploadQueue(vi.fn(async (): Promise<SourceRecord> => source), [initial]);
@@ -100,9 +124,8 @@ describe("createUploadQueue", () => {
 
     expect(queue.snapshot()[0]?.state).toBe("saved");
     expect(begin).toHaveBeenCalledTimes(1);
-    expect(refreshTicket).toHaveBeenCalledTimes(1);
-    expect(refreshTicket).toHaveBeenCalledWith(source.id);
-    expect(put).toHaveBeenCalledTimes(2);
+    expect(refreshTicket).not.toHaveBeenCalled();
+    expect(put).toHaveBeenCalledTimes(1);
     expect(putUrls.every((url) => url === `/api/opening/sources/${source.id}/staging`)).toBe(true);
     expect(putUrls.join("\n")).not.toContain("127.0.0.1:9000");
     expect(complete).toHaveBeenCalledTimes(2);
@@ -264,4 +287,95 @@ describe("createUploadQueue", () => {
     expect(progressLengths.at(-1)).toBe(0);
   });
 
+});
+
+
+it("releases saved buffers while retaining failed bytes and the original ticket for retry", async () => {
+  const savedFile = file("saved.pdf"), failedFile = file("failed.pdf");
+  const retainedTicket = { source, uploadUrl: "https://example.test/upload", expiresAt: source.createdAt } as UploadTicket;
+  const upload = vi.fn(async (input: LocalUploadFile) => input === failedFile
+    ? { phase: "interrupted" as const, keptLocal: true as const, ticket: retainedTicket, message: "网络中断" }
+    : source);
+  const queue = createUploadQueue(upload, [savedFile, failedFile]);
+  await queue.start();
+  const [saved, failed] = queue.snapshot();
+  expect(saved?.file).toEqual({ name: savedFile.name, type: savedFile.type, bytes: new Uint8Array() });
+  expect(saved?.source?.bytes).toBe(4);
+  expect(savedFile.bytes.byteLength).toBe(4);
+  expect(failed?.file).toBe(failedFile);
+  expect(failed?.file.bytes.byteLength).toBe(4);
+  expect(failed?.ticket).toBe(retainedTicket);
+});
+
+function browserFile(name: string, size = 4, type = "application/pdf") {
+  return { name, type, size, arrayBuffer: vi.fn(async () => new Uint8Array([1, 2, 3, 4]).buffer) } as unknown as File;
+}
+
+it("reads browser files only in their turn and serializes overlapping batches", async () => {
+  let finish!: () => void;
+  const wait = new Promise<void>(resolve => { finish = resolve; });
+  const first = browserFile("first.pdf"), second = browserFile("second.pdf");
+  const client = vi.fn(async (input: LocalUploadFile) => { if (input.name === first.name) await wait; return source; });
+  const queue = createUploadQueue(client);
+  queue.addFiles([first]);
+  expect(first.arrayBuffer).not.toHaveBeenCalled();
+  const running = queue.start();
+  await vi.waitFor(() => expect(client).toHaveBeenCalledOnce());
+  queue.addFiles([second]);
+  const overlapping = queue.start();
+  expect(overlapping).toBe(running);
+  expect(second.arrayBuffer).not.toHaveBeenCalled();
+  finish(); await running;
+  expect(second.arrayBuffer).toHaveBeenCalledOnce();
+  expect(queue.snapshot().map(item => item.state)).toEqual(["saved", "saved"]);
+  expect(queue.snapshot().every(item => item.file.bytes.byteLength === 0)).toBe(true);
+});
+
+it("retains unread files after a read failure and retries the same queue row", async () => {
+  const selected = browserFile("unread.pdf");
+  vi.mocked(selected.arrayBuffer).mockRejectedValueOnce(new Error("private disk path /secret"));
+  const client = vi.fn(async () => source);
+  const queue = createUploadQueue(client);
+  const [item] = queue.addFiles([selected]);
+  await queue.start();
+  expect(queue.snapshot()[0]).toMatchObject({ id: item!.id, state: "failed", message: expect.stringContaining("无法读取文件「unread.pdf」") });
+  expect(queue.snapshot()[0]?.message).not.toContain("/secret");
+  expect(client).not.toHaveBeenCalled();
+  await queue.retry(item!.id);
+  expect(selected.arrayBuffer).toHaveBeenCalledTimes(2);
+  expect(client).toHaveBeenCalledOnce();
+  expect(queue.snapshot()[0]).toMatchObject({ id: item!.id, state: "saved" });
+});
+
+it("counts unread and failed buffers across batches before another read can begin", async () => {
+  const queue = createUploadQueue(vi.fn(async () => source));
+  const large = browserFile("large.mp4", 400 * 1024 * 1024, "video/mp4");
+  vi.mocked(large.arrayBuffer).mockRejectedValue(new Error("not readable"));
+  const [failed] = queue.addFiles([large]);
+  const extra = browserFile("extra.mp4", 120 * 1024 * 1024, "video/mp4");
+  expect(() => queue.addFiles([extra])).toThrow("总大小不能超过 512 MiB");
+  expect(extra.arrayBuffer).not.toHaveBeenCalled();
+  await queue.start();
+  expect(() => queue.addFiles([extra])).toThrow("总大小不能超过 512 MiB");
+  queue.dismiss(failed!.id);
+  queue.addFiles([extra]);
+  expect(extra.arrayBuffer).not.toHaveBeenCalled();
+
+  const countQueue = createUploadQueue(vi.fn(async () => { throw new Error("private failure"); }));
+  countQueue.addFiles(Array.from({ length: 20 }, (_, index) => browserFile(`${index}.pdf`)));
+  await countQueue.start();
+  expect(() => countQueue.addFiles([browserFile("extra.pdf")])).toThrow("最多 20 份");
+  expect(() => countQueue.add([file("eager.pdf")])).toThrow("最多 20 份");
+  expect(countQueue.snapshot()[0]?.message).toBe("上传未完成，原件仍在本地，请重试。");
+});
+
+
+it("drains a batch added while an empty start is settling", async () => {
+  const client = vi.fn(async () => source);
+  const queue = createUploadQueue(client);
+  const emptyStart = queue.start();
+  queue.addFiles([browserFile("arrived.pdf")]);
+  await queue.start(); await emptyStart;
+  expect(client).toHaveBeenCalledOnce();
+  expect(queue.snapshot()[0]?.state).toBe("saved");
 });

@@ -1,33 +1,21 @@
-import { headers } from "next/headers";
-import { DEFAULT_WORKSPACE_TIME_ZONE, resolveWorkspaceTimeZone } from "@aistudy/domain";
-import { ApiError } from "../../../../features/auth/service";
-import type { TodayResumeState } from "../../../../features/opening/planning/today-read";
-import { createTodayResumeReader, loadTodayResumeState } from "../../../../features/opening/planning/today-service";
+import { redirect } from "next/navigation";
+import { loadTodayPage } from "../../../../features/opening/planning/load-today-page";
 import { TodayDashboard } from "../../../../features/opening/planning/today-dashboard";
-import { requireOpeningScope } from "../../../../features/opening/runtime";
-import { getPlanningSettingsService } from "../../../../features/opening/server/data-services";
+import { hasNoTodayCourses } from "../../../../features/opening/planning/today-read";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
+import { StartPage } from "../../../../features/opening/start/start-page";
+import { AssistantSession } from "../../../../features/opening/assistant/assistant-session";
+import { assistantEntry } from "../../../../features/opening/assistant/assistant-entry";
 
-
-export default async function OpeningTodayPage({ searchParams }: { searchParams: Promise<{ task?: string }> }) {
-  const { state, timeZone } = await loadPage(), { task } = await searchParams;
-  return <TodayDashboard state={state} focusTaskId={task} timeZone={timeZone} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
-}
-async function loadPage(): Promise<{ state: TodayResumeState; timeZone: string }> {
-  try {
-    const request = new Request("http://opening.local/today", { headers: await headers() });
-    const { scope, sql } = await requireOpeningScope(request);
-    // Workspace business zone (planning_settings.timeZone, default Asia/Shanghai);
-    // the client must not derive "today" from the browser zone.
-    const [state, preference] = await Promise.all([
-      loadTodayResumeState({ scope, reader: createTodayResumeReader(sql) }),
-      getPlanningSettingsService(sql).get(scope),
-    ]);
-    return { state, timeZone: resolveWorkspaceTimeZone(preference.settings?.timeZone) };
-  } catch (error) {
-    return {
-      state: { kind: error instanceof ApiError && error.status === 401 ? "loggedOut" : "error" },
-      timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
-    };
-  }
+export default async function OpeningTodayPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const query = await searchParams;
+  const task = typeof query.task === "string" ? query.task : typeof query.focusTask === "string" ? query.focusTask : undefined;
+  if (task) redirect(`/opening/settings/planning?task=${encodeURIComponent(task)}`);
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) if (typeof value === "string") params.set(key, value);
+  const entry = assistantEntry(`/opening/assistant?${params}`);
+  if (entry.conversation || entry.context || entry.error) return <AssistantSession entry={entry} embedded={false} />;
+  const loaded = await loadTodayPage();
+  if (hasNoTodayCourses(loaded.state)) return <StartPage {...loaded} />;
+  return <TodayDashboard {...loaded} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
 }

@@ -6,6 +6,7 @@ import { createOpeningLearningClient } from "../client/learning-client";
 import { LoadError, LoadingRows } from "../design/ui";
 import { materialAnalysisEntry } from "../library/material-analysis-link";
 import { AssistantView } from "./assistant-view";
+import { ConversationSurface } from "./conversation-companion";
 import type { AssistantEntry } from "./assistant-entry";
 import type { StudyConversationContext } from "./study-conversation-context";
 
@@ -21,7 +22,7 @@ function boundAttemptContext(selected: StudyConversationContext | undefined, att
   return { ...selected, ...bound, purpose: selected?.purpose ?? "learning_help" };
 }
 
-export function AssistantSession({ entry }: { entry: AssistantEntry & { learningAttempt?: LearningAttempt } }) {
+export function AssistantSession({ entry, embedded = true }: { entry: AssistantEntry & { learningAttempt?: LearningAttempt }; embedded?: boolean }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const [restored, setRestored] = useState<{ selectionKey: string; attempt: LearningAttempt } | null>(null);
   const [error, setError] = useState<{ selectionKey: string; message: string } | null>(null);
@@ -49,5 +50,6 @@ export function AssistantSession({ entry }: { entry: AssistantEntry & { learning
     catch { contextError = mismatchMessage; }
   }
   if ((attemptId || attempt) && (entry.error || !attempt || contextError)) return <div className="p-4">{entry.error || contextError ? <LoadError message={entry.error || contextError} onRetry={() => setRevision(value => value + 1)} /> : <LoadingRows label="正在准备本题提问…" />}</div>;
-  return <AssistantView embedded learningAttempt={attempt} initialConversationId={entry.conversation} initialCourseId={context?.courseId ?? null} {...(context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : {})} startFresh={entry.fresh} studyContext={context} studyContextError={entry.error} />;
+  if (!embedded && !attempt && !context && !entry.error) return <ConversationSurface initialConversationId={entry.conversation} startFresh={entry.fresh} />;
+  return <AssistantView embedded={embedded} learningAttempt={attempt} initialConversationId={entry.conversation} initialCourseId={context?.courseId ?? null} {...(context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : {})} startFresh={entry.fresh} studyContext={context} studyContextError={entry.error} />;
 }

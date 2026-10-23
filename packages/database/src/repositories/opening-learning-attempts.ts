@@ -26,6 +26,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
     itemVersionId: row.item_version_id as string | null, sourceIds: row.source_ids as string[], sourceVersions: row.source_versions as Record<string, number>,
     startedAt: learningIso(row.started_at)!, submittedAt: learningIso(row.submitted_at), observationId: row.observation_id as string | null,
     historyRevision: Number(row.history_revision), ...(matrixExercise ? { matrixExercise } : {}), ...(spanExercise ? { spanExercise } : {}),
+    ...(typeof row.item_stem_snapshot === "string" ? { stemSnapshot: row.item_stem_snapshot } : {}),
     ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),
     ...(spanValidation ? { spanValidation } : {}) };
 }
@@ -100,12 +101,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
       reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : previous ? "family_previously_issued" : null };
   }
   const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
-  let problemId = input.problemId ?? null, itemVersionId: string | null = null;
+  let problemId = input.problemId ?? null, itemVersionId: string | null = null, itemStem: string | null = null;
   // Older browser checkpoints still contain a material problem payload. Retain it
   // only as request identity; classroom content always comes from the saved revision.
   let problem = teachingQuestion ? undefined : input.problem;
   if (teachingQuestion) {
     const spec = teachingQuestion.spec;
+    itemStem = Array.from(teachingQuestion.stem).slice(0, 2000).join("");
     const [existing] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
         AND activity_id=${String(session.activity_id)} AND teaching_revision_id=${spec.revisionId} AND teaching_block_id=${spec.blockId}
@@ -141,15 +143,23 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!problemId) problem = { sourceId: input.matrixExercise.sourceId, stemSnapshot: matrixExerciseStem(matrixExercise), artifactKind: "unknown" };
   }
   if (problem) {
-    if (!(session.source_ids as string[]).includes(problem.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
-    if (problem.chunkId) {
+    if (problem.sourceId && !(session.source_ids as string[]).includes(problem.sourceId)) throw learningError("VALIDATION", "problem source is outside session");
+    if (!problem.sourceId && (problem.chunkId != null || problem.physicalPage != null)) throw learningError("VALIDATION", "problem page and chunk require a material source");
+    if (problem.chunkId && problem.sourceId) {
       const chunks = await tx`SELECT id FROM opening_source_chunks WHERE id=${problem.chunkId} AND source_id=${problem.sourceId}
         AND source_version=${sourceVersions[problem.sourceId]!} AND (${problem.physicalPage ?? null}::int IS NULL OR page=${problem.physicalPage ?? null})`;
       if (!chunks.length) throw learningError("VALIDATION", "problem chunk does not match captured source");
     }
-    problemId = randomUUID();
-    await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
-      VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId},${sourceVersions[problem.sourceId]!},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${problem.artifactKind})`;
+    // Pasting the same saved question again must retain its prior answer/help
+    // exposure across sessions. The course history lock serializes first creation.
+    const existing = !problem.sourceId ? await tx`SELECT problem_id FROM opening_learning_item_versions
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+        AND source_id IS NULL AND teaching_revision_id IS NULL AND teaching_block_id IS NULL
+        AND stem_snapshot=${problem.stemSnapshot}
+      ORDER BY created_at,id LIMIT 1` : [];
+    problemId = existing[0] ? String(existing[0].problem_id) : randomUUID();
+    if (!existing.length) await tx`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,physical_page,chunk_id,stem_snapshot,artifact_kind)
+      VALUES (${problemId},${scope.workspaceId},${input.sessionId},${problem.sourceId ?? null},${problem.sourceId ? sourceVersions[problem.sourceId]! : null},${problem.physicalPage ?? null},${problem.chunkId ?? null},${problem.stemSnapshot},${problem.artifactKind})`;
   }
   if (problemId && !teachingQuestion) {
     const examItems = await tx`SELECT id FROM opening_learning_item_versions
@@ -159,10 +169,11 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id
       WHERE p.problem_id=${problemId} AND p.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id=${courseId} FOR SHARE OF p`;
     const ref = refs[0];
-    if (!ref || !(session.source_ids as string[]).includes(String(ref.source_id))) throw learningError("VALIDATION", "problem is outside the session course or sources");
-    sourceVersions[String(ref.source_id)] = Number(ref.source_version);
+    if (!ref || (ref.source_id != null && !(session.source_ids as string[]).includes(String(ref.source_id)))) throw learningError("VALIDATION", "problem is outside the session course or sources");
+    if (ref.source_id != null) sourceVersions[String(ref.source_id)] = Number(ref.source_version);
+    itemStem = String(ref.stem_snapshot);
     const versions = await tx`SELECT id,evaluation_spec FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND problem_id=${problemId} AND source_id=${ref.source_id} AND source_version=${ref.source_version}
+      AND problem_id=${problemId} AND source_id IS NOT DISTINCT FROM ${ref.source_id} AND source_version IS NOT DISTINCT FROM ${ref.source_version}
       AND stem_snapshot=${ref.stem_snapshot} AND artifact_kind=${ref.artifact_kind}
       AND chunk_id IS NOT DISTINCT FROM ${ref.chunk_id} AND physical_page IS NOT DISTINCT FROM ${ref.physical_page} ORDER BY created_at LIMIT 1`;
     itemVersionId = versions[0] ? String(versions[0].id) : randomUUID();
@@ -189,7 +200,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   });
   await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json(savedAnchor)} WHERE id=${String(rows[0].id)}`;
   await captureOpeningLearnerShadowPredictions(tx, scope, String(rows[0].id));
-  return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: spanSpec ?? matrixExercise });
+  return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: spanSpec ?? matrixExercise, item_stem_snapshot: itemStem });
 
 }
 

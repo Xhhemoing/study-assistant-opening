@@ -38,6 +38,13 @@ beforeEach(() => {
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
+  it("rejects a client-forged card variant before creating any activity", async () => {
+    await expect(createOpeningTeachingActivityService(sql, {}).create(scope, { ...input,
+      createIntent: { kind: "card_review_variant", cardId: activityId, variantBlockId: activityId, reviewReps: 0 },
+    })).rejects.toMatchObject({ code: "VALIDATION", status: 400 });
+    expect(create).not.toHaveBeenCalled();
+    expect(requestCompile).not.toHaveBeenCalled();
+  });
   it("resumes the activity bound to a first-learning task instead of compiling another empty lesson", async () => {
     readTask.mockResolvedValue({ title: "首次学习", courseId: null, skillLabel: null, clientKey: `first-learning-activity:${activityId}` });
     const original = { id: activityId, clientKey: "first-learning:original-request:activity", sourceIds: [activityId], intentSummary: "原目标与材料" };

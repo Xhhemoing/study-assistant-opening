@@ -17,7 +17,7 @@ export {
 
 export { loadOpeningModelCatalog, OpeningModelConfigurationError, type OpeningModelCatalog } from "./opening-model-catalog";
 export { loadOpeningEmbeddingConfig, OpeningEmbeddingConfigurationError, type OpeningEmbeddingConfig } from "./opening-embedding";
-export { loadWorkerEnv, type WorkerEnv } from "./worker-env";
+export { loadWorkerEnv, type WorkerEnv, type WorkerRole } from "./worker-env";
 
 // PR-H typed configuration (server-only). Client code imports `@aistudy/config/public`.
 export { ENV_REGISTRY, ENV_GROUPS, REMOVED_PUBLIC_VARS, SECRET_ENV_NAMES, envSpec, type EnvVarSpec } from "./registry";

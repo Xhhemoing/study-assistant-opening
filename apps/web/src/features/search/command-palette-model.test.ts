@@ -54,7 +54,8 @@ describe("command palette keyboard model", () => {
     expect(ids).not.toContain("learn");
     expect(ids).not.toContain("library");
     expect(ids).not.toContain("goals");
-    expect(ids).not.toContain("review");
+    expect(ids).toContain("review");
+    expect(ids).toContain("sprint");
     expect(ids).not.toContain("export");
     expect(PALETTE_COMMANDS.filter((command) => command.kind === "command")).toEqual([]);
     expect(SEARCH_DEBOUNCE_MS).toBe(150);
@@ -63,7 +64,9 @@ describe("command palette keyboard model", () => {
       "/opening/assistant",
       "/opening/library?tab=notes",
       "/opening/courses",
-      "/opening/review?tab=cards",
+      "/opening/cards",
+      "/opening/review",
+      "/opening/sprint",
       "/opening/suggestions",
       "/opening/library?tab=materials",
       "/opening/settings/connections",

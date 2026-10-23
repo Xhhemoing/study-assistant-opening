@@ -3,7 +3,12 @@ import { OpeningApiError } from "../client/api";
 import type { ChatMessageView } from "./message-model";
 
 export function snippetSaveAvailability(message: ChatMessageView): "hidden" | "missing_provenance" | "query_not_supported" | "available" {
-  if (message.origin !== "ephemeral" || (message.status && message.status !== "complete")) return "hidden";
+  if (message.status && message.status !== "complete") return "hidden";
+  if (message.origin === "saved") {
+    if (message.role !== "assistant" || message.status !== "complete" || !message.savedTurnId) return "hidden";
+    return message.systemQuery ? "query_not_supported" : "available";
+  }
+  if (message.origin !== "ephemeral") return "hidden";
   if (message.systemQuery) return "query_not_supported";
   return message.provenanceId ? "available" : "missing_provenance";
 }
@@ -17,10 +22,11 @@ export const UNMAPPED_SELECTION_NOTICE = "无法精确定位选区，已改为�
 export type SnippetDraft = { input: SnippetCreateInput; notice?: string };
 
 export function prepareSnippetDraft(message: ChatMessageView, selection?: SelectedExcerpt): SnippetDraft | null {
-  if (snippetSaveAvailability(message) !== "available" || !message.provenanceId) return null;
+  if (snippetSaveAvailability(message) !== "available") return null;
   const selected = selection && "text" in selection && selection.text.trim() ? selection.text : undefined;
   const text = selected ?? message.text;
-  const input = { title: text.trim().split(/\r?\n/, 1)[0]?.slice(0, 80) || "对话片段", text, provenanceId: message.provenanceId };
+  const input = { title: text.trim().split(/\r?\n/, 1)[0]?.slice(0, 80) || "对话片段", text,
+    ...(message.origin === "saved" ? { savedTurnId: message.savedTurnId! } : { provenanceId: message.provenanceId! }) };
   return selection && "unmapped" in selection ? { input, notice: UNMAPPED_SELECTION_NOTICE } : { input };
 }
 

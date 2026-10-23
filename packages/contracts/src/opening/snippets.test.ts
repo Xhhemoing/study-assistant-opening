@@ -13,4 +13,11 @@ describe("explicit linked snippet input", () => {
     expect(ephemeralTurnInputSchema.parse({ text: "next", sourceIds: [], mode: "listen", history: [{ role: "assistant", text: "previous", provenanceId: id }] }).history[0]!.provenanceId).toBe(id);
     expect(ephemeralTurnResponseSchema.parse({ text: "answer", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 1, outputTokens: 1, privacyEpoch: 0, historyDiscarded: false }).provenanceId).toBeNull();
   });
+  it("accepts a saved turn as the only origin and rejects missing, mixed or client-derived origins", () => {
+    const content = { title: " saved note ", text: " selected answer " };
+    expect(snippetCreateInputSchema.parse({ ...content, savedTurnId: id })).toEqual({ title: "saved note", text: "selected answer", savedTurnId: id });
+    for (const origin of [{}, { provenanceId: id, savedTurnId: id }, { savedTurnId: "not-a-turn" }, { savedTurnId: id, sourceRefs: [] }, { savedTurnId: id, conversationId: id }]) {
+      expect(snippetCreateInputSchema.safeParse({ ...content, ...origin }).success).toBe(false);
+    }
+  });
 });

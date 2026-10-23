@@ -164,3 +164,21 @@ it("restores the exact eight-part span evidence scope without treating its event
   }
   expect(parsePracticeDraft({ ...draft, start: { ...draft.start, sessionInput: { ...draft.start.sessionInput, activityId: eventId } } }, scope)).toBeNull();
 });
+
+it("isolates photo drafts by question and image version without adding a measurement requirement", () => {
+  const focus = { skillLabel: "随手练习", requirementKey: null };
+  const question = { sourceId, sourceVersion: 2 };
+  const scope = practiceScope(courseId, "ordinary", null, focus, question);
+  const draft = { ...emptyPracticeDraft(scope, { skillLabel: focus.skillLabel, sourceId, stem: "计算 1+1" }),
+    start: { clientKey: "photo-start-key", sessionId,
+      sessionInput: { courseId, skillLabel: focus.skillLabel, sourceIds: [sourceId] },
+      createInput: { sessionId, clientKey: "photo-start-key", problem: { sourceId, stemSnapshot: "计算 1+1", artifactKind: "reference_item" as const } } } };
+  expect(scope).not.toBe(practiceScope(courseId, "ordinary", null, focus, { ...question, sourceVersion: 3 }));
+  expect(scope).not.toBe(practiceScope(courseId, "ordinary", null, focus, { ...question, sourceId: attemptId }));
+  expect(parsePracticeDraft(draft, scope)).toEqual(draft);
+  expect(draft.start.sessionInput).not.toHaveProperty("requirementKey");
+  expect(draft.start.createInput).not.toHaveProperty("requirementKey");
+  expect(() => assertPracticeAttempt(draft, { ...attempt, skillLabel: focus.skillLabel, sourceIds: [sourceId], sourceVersions: { [sourceId]: 2 } })).not.toThrow();
+  expect(() => assertPracticeAttempt(draft, { ...attempt, skillLabel: focus.skillLabel, sourceIds: [sourceId], sourceVersions: { [sourceId]: 3 } })).toThrow("题图版本已改变");
+  expect(parsePracticeDraft({ ...draft, fields: { ...draft.fields, sourceId: attemptId } }, scope)).toBeNull();
+});

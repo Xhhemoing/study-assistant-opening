@@ -35,3 +35,15 @@ it("keeps legacy null checks and unrelated referenceId documents compatible", ()
   expect(sourceReferences({})).toEqual([]);
   expect(sourceReferences({ payload: { referenceId: "non-source-business-reference" } })).toEqual([]);
 });
+
+it("accepts source-free question lineage only for question tables and retains malformed-source rejection", () => {
+  const row = { workspace_id: workspaceId, source_id: null, source_version: null, stem_snapshot: "17 × 23" };
+  const backup = (table: string, question: Record<string, unknown> = row): OpeningBackup => ({ format: "opening-backup", version: 1,
+    workspaceId, privacyEpoch: 0, deletionJournal: [], objects: [], tables: { [table]: [question] } });
+  for (const table of ["opening_problem_refs", "opening_learning_item_versions"]) {
+    expect(validateOpeningRestore(backup(table), []).allowed).toBe(true);
+    expect(validateOpeningRestore(backup(table, { ...row, source_id: "invalid" }), []).allowed).toBe(false);
+  }
+  expect(validateOpeningRestore(backup("opening_source_chunks"), []).allowed).toBe(false);
+  expect(sourceReferences(row)).toBeNull();
+});

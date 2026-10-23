@@ -4,7 +4,7 @@ import { ArrowLeft, BookOpen } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { EmptyState, LoadError, LoadingRows, PageHeading, ui } from "../opening/design/ui";
+import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from "../opening/design/ui";
 import { CourseLearningView, CourseSummaryPanel } from "../opening/learning/course-view";
 import type { CourseAsset, CourseSummary } from "./course-model";
 import { CourseAddMaterials } from "./course-add-materials";
@@ -20,6 +20,10 @@ import { sourceViewerHref } from "../opening/inbox/source-viewer";
 import { CoursePanel, CourseTabs } from "./course-tabs";
 import { legacyCourseStudyHref } from "./course-tabs-route";
 import { CourseSprintMode } from "./course-sprint-mode";
+import { conversationObjectHref } from "../opening/assistant/conversation-links";
+import { useConversationObjectHref } from "../opening/assistant/conversation-object-context";
+import { CourseSpaceHeader } from "./course-space";
+import { LibraryDocumentList } from "../workspace/library-document-list";
 import { LearnerStateCard } from "../opening/teaching/learner-state-card";
 import { useDiagnosticsEnabled } from "../opening/settings/appearance-preferences";
 
@@ -28,7 +32,8 @@ function revealCourseMaterials() {
   while (node) { if (node instanceof HTMLDetailsElement) node.open = true; node = node.parentElement; }
 }
 
-export function CourseContents({ courseId: _courseId, assets }: { courseId: string; assets: CourseAsset[] }) {
+export function CourseContents({ assets }: { courseId: string; assets: CourseAsset[] }) {
+  const objectHref = useConversationObjectHref();
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -42,13 +47,14 @@ export function CourseContents({ courseId: _courseId, assets }: { courseId: stri
   }, [assets, revision]);
   return <section aria-labelledby="course-contents-heading" className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold" id="course-contents-heading">本课内容</h2><a className={ui.quiet} href="#course-assets" onClick={revealCourseMaterials}>管理材料</a></div>
-    {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-accent underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent" href={sourceViewerHref(asset.source.id, versions[asset.source.id]!)}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-accent underline underline-offset-4" href={`/opening/library/${encodeURIComponent(asset.document.id)}`}>{asset.document.title}</Link> : <span className="break-words text-text-2">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <a className={ui.secondary} href="#course-assets" onClick={revealCourseMaterials}>添加本课材料</a>}
+    {assets.length ? <ul className="space-y-2">{assets.slice(0, 5).map(asset => <li className="min-w-0 text-sm" key={asset.id}>{asset.source && versions[asset.source.id] !== undefined ? <a className="break-words text-accent underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent" href={objectHref(sourceViewerHref(asset.source.id, versions[asset.source.id]!))}>{asset.source.name}</a> : asset.document ? <Link className="break-words text-accent underline underline-offset-4" href={objectHref(`/opening/library/${encodeURIComponent(asset.document.id)}`)}>{asset.document.title}</Link> : <span className="break-words text-text-2">{asset.source?.name ?? "课程材料"}</span>}</li>)}</ul> : <a className={ui.secondary} href="#course-assets" onClick={revealCourseMaterials}>添加本课材料</a>}
     {assets.length > 5 ? <a className={ui.quiet} href="#course-assets" onClick={revealCourseMaterials}>查看全部 {assets.length} 份材料</a> : null}
     {error ? <p className="text-xs leading-6 text-warn" role="status">{error}<button className={ui.quiet} type="button" onClick={() => setRevision(value => value + 1)}>重试</button></p> : null}
   </section>;
 }
 
 export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; libraryHref: string }) {
+  const objectHref = useConversationObjectHref();
   const diagnostics = useDiagnosticsEnabled();
   const [selected, setSelected] = useState<CourseAsset | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -62,7 +68,7 @@ export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { cou
     finally { setBusy(false); }
   }
   return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>
-    <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
+    <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={objectHref(`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`)} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
     <span className="shrink-0 text-xs text-text-3">{({ primary: "主要材料", reference: "参考材料", extra: "补充材料" } as Record<string, string>)[asset.role] ?? "课程材料"}</span><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(asset); setError(""); }} type="button" aria-label={`将 ${asset.document?.title ?? asset.source?.name ?? "未命名课程材料"} 移出此课程`}>移出课程</button>
     {diagnostics ? <p className="w-full break-all text-xs text-text-3">材料 ID：{asset.assetId} · 角色：{asset.role}</p> : null}
   </li>)}</ul>
@@ -86,6 +92,7 @@ export function readCourseMediaDeepLink(search: string): { sourceId: string | nu
 
 /** CT-01 / CT-08: list sources; mount at most one MediaReader after select. */
 export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/library?tab=materials" }: { assets: CourseAsset[]; libraryMaterialsHref?: string }) {
+  const objectHref = useConversationObjectHref();
   const sources = useMemo(
     () => assets.flatMap((asset) => (asset.source ? [{ id: asset.source.id, name: asset.source.name }] : [])),
     [assets],
@@ -145,7 +152,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
       ) : null}
       <p className="text-xs leading-5 text-text-3">
         若依据不能定位到片段，可仅打开材料库，暂不能定位到具体时间。
-        <Link className="ml-1 text-accent underline" href={libraryMaterialsHref}>打开材料库</Link>
+        <Link className="ml-1 text-accent underline" href={objectHref(libraryMaterialsHref)}>打开材料库</Link>
       </p>
     </section>
   );
@@ -207,9 +214,10 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 };
 
 /** Real-API course page for Opening and legacy /learn links. Never uses mock study data. */
-export function CourseDetail({ id, surface = "opening", mode }: { id: string; surface?: CourseDetailSurface; mode?: "sprint" }) {
+export function CourseDetail({ id, surface = "opening", mode, conversationId }: { id: string; surface?: CourseDetailSurface; mode?: "sprint"; conversationId?: string }) {
   const router = useRouter();
   const paths = COURSE_DETAIL_PATHS[surface];
+  const objectHref = (href: string) => conversationObjectHref(href, conversationId);
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   useEffect(() => {
     if (!paths.openingActions || mode === "sprint") return;
@@ -230,23 +238,37 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
   const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <h2 className="text-base font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
-      <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={reload} /><Link className={ui.quiet} href={paths.libraryMaterials}>打开资料</Link></div>
+      <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={reload} /><Link className={ui.quiet} href={objectHref(paths.libraryMaterials)}>打开资料</Link></div>
     </div>
-    {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有课程材料" description="点「添加材料」从资料中选择，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={paths.upload(id)}>上传并归入本课</Link>} />}
+    {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有课程材料" description="点「添加材料」从资料中选择，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={objectHref(paths.upload(id))}>上传并归入本课</Link>} />}
   </section>;
 
-  return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
-    <PageHeading title={course.title} description={course.description || "课程资料、学习安排与进度。"} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />
-    <div className="min-h-0 flex-1 overflow-y-auto"><div className="mx-auto w-full max-w-5xl space-y-6 px-5 py-5">
-      {paths.openingActions ? <CourseStudyProvider key={id} courseId={id}><CourseTabs courseId={id}>
+  const page = <section className="flex h-full min-h-0 flex-col bg-bg text-text">
+    {paths.openingActions ? <CourseSpaceHeader courseId={id} title={course.title} archived={Boolean(course.archivedAt)} /> : <PageHeader title={course.title} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />}
+    <div className="min-h-0 flex-1 overflow-y-auto"><ContentGrid className="px-5 py-5">
+      {paths.openingActions ? <CourseTabs courseId={id} conversationId={conversationId}>
         <CoursePanel name="overview">
           {studyActions}
           <CourseContents courseId={id} assets={assets} />
+          <Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units`)}>全部单元与学习目录</Link>
+        </CoursePanel>
+        <CoursePanel name="practice">
+          {course.archivedAt ? <p className="text-sm text-text-2">课程已归档。恢复课程后可继续练习，已有记录仍保留。</p> : <div className="flex flex-wrap gap-2"><Link className={ui.primary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/study?mode=practice`)}>开始独立练习</Link><Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/exam`)}>真题与考前练习</Link><Link className={ui.quiet} href={objectHref(`/opening/sprint?courseId=${encodeURIComponent(id)}`)}>考前冲刺</Link></div>}
+          <CourseExamProgress courseId={id} />
+        </CoursePanel>
+        <CoursePanel name="review">
+          <Link className={ui.primary} href={objectHref("/opening/review")}>开始到期复习</Link>
+          <CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} />
+          <p className="text-sm text-text-2">复习页汇集各门课的到期任务。本课的学习与补测也保留在任务列表中。</p>
+        </CoursePanel>
+        <CoursePanel name="notes">
+          <div className="flex flex-wrap gap-2"><Link className={ui.primary} href={`/opening/library/new?courseId=${encodeURIComponent(id)}`}>写本课笔记</Link><Link className={ui.quiet} href={objectHref(`/opening/library?tab=notes&courseId=${encodeURIComponent(id)}`)}>打开本课笔记</Link></div>
+          <LibraryDocumentList basePath="/opening/library" courseId={id} documentIds={assets.flatMap(asset => asset.document ? [asset.document.id] : [])} />
         </CoursePanel>
         <CoursePanel name="units">
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
           <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
-          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习进度。</p><Link className={ui.secondary} href={`/opening/courses/${encodeURIComponent(id)}/study/matrix`}>矩阵怎样变换平面向量</Link></section>
+          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习进度。</p><Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/study/matrix`)}>矩阵怎样变换平面向量</Link></section>
         </CoursePanel>
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
@@ -255,10 +277,11 @@ export function CourseDetail({ id, surface = "opening", mode }: { id: string; su
           <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
         </CoursePanel>
         <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</CoursePanel>
-      </CourseTabs></CourseStudyProvider> : <>
+      </CourseTabs> : <>
         {studyActions}<CourseLearningView courseId={id} />
         <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>
       </>}
-    </div></div>
+    </ContentGrid></div>
   </section>;
+  return paths.openingActions ? <CourseStudyProvider key={id} courseId={id}>{page}</CourseStudyProvider> : page;
 }

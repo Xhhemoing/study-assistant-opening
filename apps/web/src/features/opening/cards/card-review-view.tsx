@@ -1,14 +1,15 @@
 "use client";
 
-import type { GradeReviewResponse, ReviewGrade, ReviewQueueItem } from "@aistudy/contracts";
+import { cardReviewKind, type GradeReviewResponse, type ReviewGrade, type ReviewQueueItem } from "@aistudy/contracts";
 import { Check, CircleHelp, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";
 import { OpeningApiError } from "../client/api";
-import { EmptyState, LoadError, LoadingRows, PageHeader, secondaryButtonClass, ui } from "../design/ui";
+import { EmptyState, LoadError, LoadingRows, PageHeader, ContentBlock, secondaryButtonClass, ui } from "../design/ui";
 import { interactionMotionReduced, successfulInteractionHaptic } from "../design/haptics";
+import { CardVariantReview } from "./card-variant-review";
 import { CardStack } from "./card-stack";
 import { CardObservationOrigin } from "./card-observation-origin";
 import {
@@ -63,6 +64,8 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
   const refresh = useCallback(async () => {
     const request = ++requestId.current;
     setState({ kind: "loading" });
+    setGrading(false);
+    gradeInFlight.current = false;
     setGradeError("");
     gradeIdentity.current = null;
     try {
@@ -87,6 +90,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     return () => { requestId.current++; };
   }, [refresh, retryToken]);
 
+  const variantQueueRequest = requestId.current;
   const current = state.kind === "ready" ? state.items[state.index] ?? null : null;
   useEffect(() => {
     onRemainingChange?.(state.kind === "ready" ? Math.max(0, state.items.length - state.index) : null);
@@ -137,6 +141,14 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     }
   }, [client, current, grading, state, onGraded, onBusyChange]);
 
+  async function classify(reviewKind: "question" | "concept") {
+    if (!current || grading || gradeInFlight.current) return;
+    gradeInFlight.current = true; setGrading(true); setGradeError("");
+    try { await client.classify(current.card.id, reviewKind); await refresh(); }
+    catch (error) { setGradeError(error instanceof Error ? error.message : "选择未保存，请再试一次。"); }
+    finally { gradeInFlight.current = false; setGrading(false); }
+  }
+
   const headerActions = <div className="flex flex-wrap gap-2">
     {state.kind !== "loggedOut" && state.kind !== "loading" ? <button type="button" className={ui.quiet} disabled={grading} onClick={() => setRetryToken(value => value + 1)} aria-label="重新读取" title="重新读取"><RefreshCw size={14} aria-hidden /></button> : null}
   </div>;
@@ -180,16 +192,16 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
             description={`本次完成 ${state.items.length} 张。`}
             action={
               <Link href="/opening/today" className={secondaryButtonClass}>
-                返回今天
+                返回开始
               </Link>
             }
           />
         ) : null}
         {state.kind === "ready" && current ? (
-          <div className={`mx-auto flex w-full max-w-3xl flex-col ${compact ? "gap-2" : "gap-5"}`}>
+          <ContentBlock width="wide"><div className={`flex w-full min-w-0 flex-col ${compact ? "gap-2" : "gap-5"}`}>
             <progress value={state.index} max={state.items.length} aria-label="本组卡片已完成" className="h-[3px] w-full overflow-hidden rounded-full border-0 bg-surface-2 text-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" />
             <div className="flex items-end justify-between gap-3">
-              <p className="text-xs text-text-3">正面 → 揭示 → 四档评分</p>
+              <p className="text-xs text-text-3">{cardReviewKind(current.card) === "question" ? "做一道新变式" : "回忆这个知识点"}</p>
               <span className="text-sm tabular-nums text-text-3">
                 第 {Math.min(state.index + 1, state.items.length)}/{state.items.length} 张
               </span>
@@ -205,6 +217,19 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
                 {evidenceNotice}
               </p>
             ) : null}
+            {cardReviewKind(current.card) === "question" ? <CardVariantReview key={current.card.id} cardId={current.card.id} client={client} onBusyChange={busy => {
+                if (variantQueueRequest !== requestId.current) return;
+                gradeInFlight.current = busy; setGrading(busy); onBusyChange?.(busy);
+              }}
+              onComplete={result => {
+                if (variantQueueRequest !== requestId.current) return;
+                setState(value => advanceGradedCard(value, current.card.id, variantQueueRequest, requestId.current));
+                onGraded?.(current.card.id, result);
+              }} /> : cardReviewKind(current.card) === null ? <div className="space-y-3 rounded-lg border border-line p-4">
+                <p className="text-sm">这张旧卡片适合怎样复习？</p><p className="text-sm text-text-2">{current.card.front}</p>
+                <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={grading} onClick={() => void classify("question")}>题目：做新变式</button>
+                <button type="button" className={ui.secondary} disabled={grading} onClick={() => void classify("concept")}>定义或术语：翻卡回忆</button></div>
+              </div> : <>
             <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index} exiting={exiting} entering={state.index > 0}
               onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
               onGrade={gradeCard} />
@@ -224,9 +249,10 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
                 </button>
               ))}
             </div>
-          </div>
+            </>}
+          </div></ContentBlock>
         ) : null}
-        {state.kind === "ready" && !compact ? <details className="mx-auto max-w-3xl text-xs text-text-2"><summary className="cursor-pointer py-2">评分如何计入学习记录</summary><p className="py-2 leading-5">关联课程的评分按自报写入学习记录，不作为独立正确的证明；未关联课程只安排复习。</p><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details> : null}
+        {state.kind === "ready" && !compact && cardReviewKind(current?.card ?? { tags: [] }) === "concept" ? <ContentBlock width="wide"><details className="text-xs text-text-2"><summary className="cursor-pointer py-2">复习安排</summary><p className="py-2 leading-5">根据这次回忆的情况安排下一次复习，逐步记牢这个知识点。</p><LearnerStateCard courseId={current?.card.courseId ?? undefined} revision={state.index} /></details></ContentBlock> : null}
       </div>
     </section>
   );

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { createSessionJwt } from "../../../apps/web/src/lib/session";
-import { createBackupRestoreRepository, createCardRepository, hashSessionToken, createOpeningLearningRepository } from "@aistudy/database";
+import { createBackupRestoreRepository, createCardRepository, hashSessionToken, createOpeningLearningRepository, createOpeningAiGradingRepository, createOpeningCardVariantRepository, gradeCardVariant } from "@aistudy/database";
 import { createOpeningLearningAttemptRepository } from "../../../packages/database/src/repositories/opening-learning-attempts";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -44,6 +44,38 @@ async function seed(outcome: "incorrect" | "correct" = "incorrect", reference = 
   return { observation, sourceId, referenceSourceId, courseId };
 }
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
+
+/** Mirrors the existing variant repository fixture: publish, answer, and accept a real graded attempt. */
+async function prepareVariantAnswer(cardId: string, courseId: string, sourceIds: string[]) {
+  const variants = createOpeningCardVariantRepository(fixture.sql);
+  const begun = await variants.begin(fixture.scope, cardId);
+  const ready = await variants.complete(fixture.scope, cardId, begun.review.activity.id, {
+    prompt: "What limit defines the derivative of f at x?",
+    referenceAnswer: "The limit of (f(x+h)-f(x))/h as h tends to zero, when it exists.",
+    rubric: ["Form the difference quotient", "Take its limit as h tends to zero"],
+    hints: { direction: "Compare nearby function values.", concept: "A derivative is a limit of slopes.", firstStep: "Write the difference quotient." },
+    estimatedMinutes: 2,
+  });
+  const learning = createOpeningLearningRepository(fixture.sql);
+  const session = await learning.createSession(fixture.scope, { courseId, activityId: ready.activity.id, skillLabel: "derivatives", sourceIds });
+  const prompt = ready.clientInit!.blocks.find(block => block.role === "prompt")!;
+  expect(prompt.content).not.toBeNull();
+  expect(ready.clientInit!.blocks.find(block => block.role === "answer_key")!.content).toBeNull();
+  const attempt = await createOpeningLearningAttemptRepository(fixture.sql).create(fixture.scope, {
+    sessionId: session.id, clientKey: randomUUID(), teachingBlock: { blockId: prompt.blockId, contentVersion: ready.activity.contentVersion },
+  });
+  const submitted = await learning.insertObservation(fixture.scope, { sessionId: session.id, activityId: ready.activity.id,
+    courseId, skillLabel: "derivatives", sourceIds, attemptId: attempt.id, problemId: attempt.problemId,
+    answer: "lim as h tends to 0 of (f(x+h)-f(x))/h, if the limit exists.", outcome: "unverified", assistance: "independent", clientKey: randomUUID() });
+  const graded = await createOpeningAiGradingRepository(fixture.sql).apply(fixture.scope, { observationId: submitted.id }, {
+    outcome: "correct", questionMatch: true, confidence: 0.93, feedback: "The difference quotient and its limit are correct.",
+    criteria: [{ label: "Derivative definition", verdict: "correct", feedback: "Uses the difference quotient and h tending to zero." }],
+  }, "fixture");
+  expect(graded).toMatchObject({ attemptId: attempt.id, courseId, outcome: "correct", verdictSource: "ai_graded" });
+  expect(graded.sourceIds.sort()).toEqual([...sourceIds].sort());
+  return graded;
+}
+
 it("prefills question, reference, course and skill only for an owned submitted incorrect record", async () => {
   const { observation, courseId, referenceSourceId } = await seed();
   expect((await cardDraft(request(undefined, ""), params(observation.id))).status).toBe(401);
@@ -89,8 +121,13 @@ it("preserves server-owned lineage through review and rejects reads/exports/rest
   const [stored] = await fixture.sql`SELECT source_ids FROM cards WHERE id=${card.id}`;
   expect(stored?.source_ids.sort()).toEqual([sourceId, referenceSourceId].sort());
   const cards = createCardRepository(fixture.sql);
-  const review = await cards.grade({ ...fixture.scope, cardId: card.id, grade: "good", idempotencyKey: randomUUID(), occurredAt: new Date().toISOString() });
-  const [fact] = await fixture.sql`SELECT id,source_ids FROM opening_learning_observations WHERE client_key=${`card-review:${review.event.id}`}`;
+  await expect(cards.grade({ ...fixture.scope, cardId: card.id, grade: "good", idempotencyKey: randomUUID(), occurredAt: new Date().toISOString() })).rejects.toMatchObject({ code: "CONFLICT" });
+  const graded = await prepareVariantAnswer(card.id, courseId, [sourceId, referenceSourceId]);
+  const review = await gradeCardVariant(fixture.sql, fixture.scope, card.id, graded.id);
+  expect(review).toMatchObject({ created: true, evidence: "recorded", state: { reps: 1 } });
+  const [fact] = await fixture.sql`SELECT id,source_ids FROM opening_learning_observations WHERE id=${graded.id}`;
+  // The verified variant itself is the fact; a second self-reported review fact must not appear.
+  expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE client_key=${`card-review:${review.event.id}`}`).toHaveLength(0);
   expect(fact?.source_ids.sort()).toEqual([sourceId, referenceSourceId].sort());
   const native = createBackupRestoreRepository(fixture.sql), packed = await native.exportWorkspace(fixture.scope);
   const snapshot = await readOpeningBackupRecords(fixture.sql, fixture.scope);
@@ -152,14 +189,17 @@ it("rejects native archives with a foreign course or forged foreign source linea
   await expect(repository.restoreWorkspace({ ...fixture.scope, packed: altered, conflictPolicy: "skip" })).rejects.toMatchObject({ code: "VALIDATION" });
 });
 it("serializes grade and exclusion in workspace-history order without deadlock", async () => {
-  const { observation, courseId, sourceId } = await seed();
+  const { observation, courseId, sourceId, referenceSourceId } = await seed();
   const response = await createCard(request({ front: "Concurrent private question", back: "A", courseId, observationId: observation.id }));
-  const { card } = await response.json(), cards = createCardRepository(fixture.sql);
+  expect(response.status).toBe(201);
+  const { card } = await response.json();
+  const graded = await prepareVariantAnswer(card.id, courseId, [sourceId, referenceSourceId]);
   const results = await Promise.allSettled([
-    cards.grade({ ...fixture.scope, cardId: card.id, grade: "hard", idempotencyKey: randomUUID(), occurredAt: new Date().toISOString() }),
+    gradeCardVariant(fixture.sql, fixture.scope, card.id, graded.id),
     createOpeningPrivacyRepository(fixture.sql).recordExclusions(fixture.sql, fixture.scope, { sourceIds: [sourceId], memoryId: randomUUID(), deletedAt: new Date() }),
   ]);
   expect(results[1].status).toBe("fulfilled");
   if (results[0].status === "rejected") expect(results[0].reason).toMatchObject({ code: "NOT_FOUND" });
+  else expect(results[0].value).toMatchObject({ created: true, evidence: "recorded", state: { reps: 1 } });
   expect(JSON.stringify(await readOpeningBackupRecords(fixture.sql, fixture.scope))).not.toContain("Concurrent private question");
 });

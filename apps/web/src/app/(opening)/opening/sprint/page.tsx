@@ -1,3 +1,4 @@
+import { ConversationObjectFrame } from "../../../../features/opening/assistant/conversation-object-frame";
 import { redirect } from "next/navigation";
 import { SprintCourseChooser } from "../../../../features/opening/exam-sprint/sprint-course-chooser";
 import { sprintCourseHref, type SprintSearch } from "../../../../features/opening/exam-sprint/sprint-course-route";
@@ -6,5 +7,5 @@ export default async function OpeningSprintPage({ searchParams }: { searchParams
   const search = await searchParams;
   const href = sprintCourseHref(search);
   if (href) redirect(href);
-  return <SprintCourseChooser invalidCourse={search.courseId !== undefined} />;
+  return <ConversationObjectFrame conversation={search.conversation}><SprintCourseChooser invalidCourse={search.courseId !== undefined} /></ConversationObjectFrame>;
 }

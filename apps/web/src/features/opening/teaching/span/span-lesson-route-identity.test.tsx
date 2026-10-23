@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement, type ComponentProps } from "react";
+import { act, createElement, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SpanLessonSnapshot } from "@aistudy/contracts";
@@ -23,7 +23,7 @@ const baseProps = { courseId, sourceIds: [sourceId], sourceLoadError: false };
 let root: Root, container: HTMLDivElement;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  mocks.request.mockReset(); mocks.request.mockResolvedValue(details(snapshot));
+  mocks.request.mockReset(); mocks.request.mockImplementation(async (_path: string, _schema: unknown, init?: RequestInit) => init?.method === "POST" ? { ...snapshot, ...JSON.parse(String(init.body)), activityId: secondId } : details(snapshot));
   window.history.replaceState(null, "", `/opening/courses/${courseId}/study/span`);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -38,12 +38,13 @@ it.each(["retest", "course"] as const)("clears the old activity when same-page n
   expect(container.textContent).toContain("本次学习已结束");
   mocks.request.mockResolvedValueOnce(details(null));
   await render(kind === "retest" ? { delayedRetestId: secondId } : { courseId: secondId });
-  const url = new URL(mocks.request.mock.calls.at(-1)![0] as string, window.location.origin);
+  const reads = mocks.request.mock.calls.filter(call => !call[2]);
+  const url = new URL(reads.at(-1)![0] as string, window.location.origin);
   expect(url.searchParams.has("activityId")).toBe(false);
   expect(url.searchParams.get(kind === "retest" ? "retestId" : "courseId")).toBe(secondId);
   expect(container.textContent).not.toContain("本次学习已结束");
   expect(container.textContent).not.toContain("会话小结");
-  expect(container.textContent).toContain(kind === "retest" ? "开始本次延迟复测" : "开始本次学习");
+  expect(mocks.request.mock.calls.some(call => call[2]?.method === "POST")).toBe(true);
 });
 
 it("restores a different explicit activity and ignores a late save from the old one", async () => {
@@ -62,10 +63,8 @@ it("restores a different explicit activity and ignores a late save from the old 
 });
 
 it("adopts its own acknowledged lesson URL without reloading or replacing unsaved input", async () => {
-  mocks.request.mockResolvedValueOnce(details(null));
+  mocks.request.mockResolvedValueOnce(details(null)).mockResolvedValueOnce(snapshot);
   await render();
-  mocks.request.mockResolvedValueOnce(snapshot);
-  await act(async () => container.querySelector("button")!.click());
   const editor = container.querySelector<HTMLInputElement>("input")!;
   editor.value = "尚未提交的原始思考";
   const requests = mocks.request.mock.calls.length;
@@ -73,4 +72,11 @@ it("adopts its own acknowledged lesson URL without reloading or replacing unsave
   expect(mocks.request).toHaveBeenCalledTimes(requests);
   expect(container.querySelector("input")).toBe(editor);
   expect(editor.value).toBe("尚未提交的原始思考");
+});
+
+it("automatically creates only one session under StrictMode and restores it without a new POST", async () => {
+  mocks.request.mockImplementation(async (_path: string, _schema: unknown, init?: RequestInit) => init?.method === "POST" ? snapshot : details(null));
+  await act(async () => root.render(createElement(StrictMode, null, createElement(SpanLessonSession, baseProps))));
+  expect(mocks.request.mock.calls.filter(call => call[2]?.method === "POST")).toHaveLength(1);
+  expect(container.querySelector(`section[aria-label="${firstId}"]`)).not.toBeNull();
 });

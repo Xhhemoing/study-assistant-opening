@@ -9,3 +9,10 @@ it("keeps a requested matrix entry disabled until the outer draft has been read"
   expect(html).toContain('<fieldset disabled=""');
   expect(html).not.toContain("开始矩阵练习");
 });
+
+it("starts pasted questions with a saved problem even when no source is selected", async () => {
+  const { practiceQuestionInput } = await import("./attempt-form");
+  expect(practiceQuestionInput("  计算 17 × 23  ", "")).toEqual({ stemSnapshot: "计算 17 × 23", artifactKind: "reference_item" });
+  expect(practiceQuestionInput("题目", "source-id")).toEqual({ sourceId: "source-id", stemSnapshot: "题目", artifactKind: "reference_item" });
+  expect(practiceQuestionInput(" ", "")).toBeUndefined();
+});

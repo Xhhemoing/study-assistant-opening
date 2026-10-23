@@ -8,9 +8,9 @@ import { ShellHeaderTools } from "./header-tools-slot";
  * 一行：h1 + 可选一行事实 + 一个主操作 + 工具。滚动后顶栏变玻璃。
  * 有意不提供长 description：必要说明放在相关内容旁。sharedTitle 时标题承接来源行（共享元素过渡）。
  */
-export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false }: { title: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
+export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false, label }: { title: ReactNode; label?: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
   return (
-    <TopBar label={`${title} 顶栏`}
+    <TopBar label={label ?? (typeof title === "string" || typeof title === "number" ? `${title} 顶栏` : "页面顶栏")}
       title={
         <div className="flex min-w-0 flex-col sm:flex-row sm:items-baseline sm:gap-3">
           <h1 className={`truncate text-title font-semibold tracking-[-0.01em] text-text ${sharedTitle ? "[view-transition-name:object-title]" : ""}`}>{title}</h1>

@@ -336,7 +336,7 @@ export function validateOpeningRestore(
           errors.push("assistant candidate source turn is missing or invalid");
         }
       }
-      const refs = sourceReferences(row);
+      const refs = sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
       if (refs === null) errors.push(`table ${name} has invalid source lineage`);
       if (name === "opening_sources") {
         if (!isUuid(row.id)) errors.push("source identity is missing or invalid");

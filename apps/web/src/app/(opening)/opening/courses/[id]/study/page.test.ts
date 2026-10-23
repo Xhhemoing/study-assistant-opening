@@ -33,3 +33,12 @@ it("preserves the generic workspace when no owned span protocol matches", async 
   expect(page.props).toMatchObject({ courseId, activityId });
   expect(mocks.context).toHaveBeenCalledOnce(); expect(mocks.redirect).not.toHaveBeenCalled();
 });
+
+it("carries the original conversation reference without changing the teaching activity identity", async () => {
+  const conversation = "77777777-7777-4777-8777-777777777777";
+  const page = await CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, conversation }) });
+  expect(page.props).toMatchObject({ courseId, activityId, originalConversationId: conversation });
+  expect(page.key).not.toContain(conversation);
+  mocks.get.mockResolvedValue({ activityId, courseId, retestId: null });
+  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, conversation }) })).rejects.toThrow(`REDIRECT:/opening/courses/${courseId}/study/span?lesson=${activityId}&conversation=${conversation}`);
+});

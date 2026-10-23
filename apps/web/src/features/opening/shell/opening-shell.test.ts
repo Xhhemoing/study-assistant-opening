@@ -10,6 +10,7 @@ const effects: Array<() => unknown> = [];
 const stateSlots: unknown[] = [];
 let stateCall = 0;
 let pathname = "/opening/today";
+let search = "";
 
 vi.mock("react", async () => {
   const actual = await vi.importActual<typeof import("react")>("react");
@@ -32,6 +33,7 @@ vi.mock("react", async () => {
 
 vi.mock("next/navigation", () => ({
   usePathname: () => pathname,
+  useSearchParams: () => new URLSearchParams(search),
   useRouter: () => ({ replace: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -67,6 +69,7 @@ beforeEach(() => {
   stateSlots.length = 0;
   stateCall = 0;
   pathname = "/opening/today";
+  search = "";
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -171,9 +174,10 @@ describe("OpeningShell focus mode keyboard exit", () => {
     stateSlots[FOCUS_MODE_SLOT] = true;
   });
 
-  function pressEscape(prevented = false) {
+  function pressEscape(prevented = false, composing: { isComposing?: boolean; keyCode?: number } = {}) {
     const event = new Event("keydown", { cancelable: true });
     Object.defineProperty(event, "key", { value: "Escape" });
+    Object.defineProperties(event, Object.fromEntries(Object.entries(composing).map(([key, value]) => [key, { value }])));
     if (prevented) event.preventDefault();
     keyboardTarget.dispatchEvent(event);
   }
@@ -183,6 +187,13 @@ describe("OpeningShell focus mode keyboard exit", () => {
     await runCapturedEffects();
     pressEscape();
     expect(stateSlots[FOCUS_MODE_SLOT]).toBe(false);
+  });
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])("keeps focus while Escape cancels IME composition: %j", async composing => {
+    renderShell();
+    await runCapturedEffects();
+    pressEscape(false, composing);
+    expect(stateSlots[FOCUS_MODE_SLOT]).toBe(true);
   });
 
   it("leaves Escape to an open native dialog", async () => {
@@ -210,28 +221,39 @@ describe("OpeningShell focus mode keyboard exit", () => {
 });
 
 describe("course study focus layout", () => {
-  it("opens a lesson in focus and restores normal navigation outside the lesson", () => {
+  it("keeps navigation available when opening or switching a lesson", () => {
     pathname = "/opening/courses/course-a/study";
-    expect(renderShell()).toContain('data-focus="true"');
-    expect(renderShell()).toContain('aria-label="退出专注模式"');
-    pathname = "/opening/courses/course-a";
+    expect(renderShell()).toContain('data-focus="false"');
+    pathname = "/opening/courses/course-b/study";
     expect(renderShell()).toContain('data-focus="false"');
   });
 
-  it("lets Escape reveal navigation without leaving or restarting the lesson", async () => {
+  it("retains an explicit focus choice until Escape without changing the lesson", async () => {
     pathname = "/opening/courses/course-a/study";
+    stateSlots[FOCUS_MODE_SLOT] = true;
     const target = new EventTarget();
     vi.stubGlobal("window", Object.assign(target, { localStorage: { getItem: () => null } }));
     vi.stubGlobal("document", { querySelector: () => null });
     vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 404 }));
-    renderShell();
+    expect(renderShell()).toContain('data-focus="true"');
     await runCapturedEffects();
     const event = new Event("keydown");
     Object.defineProperty(event, "key", { value: "Escape" });
     target.dispatchEvent(event);
     expect(renderShell()).toContain('data-focus="false"');
     expect(pathname).toBe("/opening/courses/course-a/study");
-    pathname = "/opening/courses/course-b/study";
-    expect(renderShell()).toContain('data-focus="true"');
+  });
+});
+
+describe("shared-page navigation", () => {
+  it.each([
+    ["/opening/review", "tab=cards", "/opening/cards"],
+    ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
+  ])("reads the current query at %s", (path, query, expected) => {
+    pathname = path; search = query;
+    const html = renderShell();
+    const selected = [...html.matchAll(/<a[^>]*aria-current="page"[^>]*>/g)].map(match => match[0]);
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toContain(`href="${expected}"`);
   });
 });

@@ -28,6 +28,7 @@ async function render(timeZone?: string) {
   const { TodayDashboard } = await import("./today-dashboard");
   renderToStaticMarkup(createElement(TodayDashboard, {
     state: { kind: "ready" },
+    planning: true,
     api: {} as never,
     teachingWorkspaceEnabled: false,
     teachingLoopEnabled: false,

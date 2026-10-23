@@ -21,7 +21,7 @@ test.beforeAll(async ({ request, baseURL }) => {
   courseId = (await course.json() as { course: { id: string } }).course.id;
   const card = await request.post("/api/cards", {
     headers: { origin: baseURL! },
-    data: { front: cardFront, back: "第一列是第一个标准基向量变换后的向量。", courseId, skillLabel: "矩阵与基向量" },
+    data: { front: cardFront, back: "第一列是第一个标准基向量变换后的向量。", reviewKind: "concept", courseId, skillLabel: "矩阵与基向量" },
   });
   expect(card.ok(), "the review must contain a real card, not only an empty shell").toBe(true);
 });
@@ -63,7 +63,7 @@ async function openView(page: Page, view: View) {
     case "progress": {
       await page.goto(`${courseHref}?tab=${view}`);
       await expect(page.getByRole("heading", { name: courseTitle, exact: true })).toBeVisible();
-      const label = { overview: "概览", units: "单元", progress: "进展" }[view];
+      const label = { overview: "学习", units: "学习", progress: "进展" }[view];
       await expect(page.getByRole("navigation", { name: "课程分区" }).getByRole("link", { name: label, exact: true })).toHaveAttribute("aria-current", "page");
       if (view === "overview") await expect(page.getByRole("heading", { name: "本课内容", exact: true })).toBeVisible();
       if (view === "units") await expect(page.getByRole("heading", { name: "课程单元", exact: true })).toBeVisible();
@@ -96,10 +96,10 @@ async function openView(page: Page, view: View) {
       break;
     case "assistant": {
       await page.goto("/opening/assistant?context=none");
-      const drawer = page.getByRole("dialog", { name: "学习助手", exact: true });
-      await expect(drawer).toBeVisible();
-      await expect(drawer.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
-      await expect(drawer.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
+      const conversation = page.getByRole("region", { name: "学习对话", exact: true });
+      await expect(conversation).toBeVisible();
+      await expect(conversation.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
+      await expect(conversation.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
       break;
     }
   }
@@ -172,8 +172,12 @@ for (const condition of conditions) {
         await page.screenshot({ path: screenshotPath, fullPage: true });
         await testInfo.attach("view", { path: screenshotPath, contentType: "image/png" });
         if (view === "assistant") {
-          await page.getByRole("dialog", { name: "学习助手", exact: true }).getByRole("button", { name: "关闭抽屉", exact: true }).click();
-          await expect(page.getByRole("dialog", { name: "学习助手", exact: true })).toHaveCount(0);
+          // The assistant is a full-page conversation. Starting a fresh conversation
+          // must release any modal/inert state just as closing the old drawer did.
+          await page.getByRole("link", { name: "新对话", exact: true }).click();
+          await expect(page).toHaveURL(/\/opening\/assistant\?context=none$/);
+          const conversation = page.getByRole("region", { name: "学习对话", exact: true });
+          await expect(conversation.getByRole("heading", { name: "想弄懂什么？", exact: true })).toBeVisible();
           await expect(page.getByRole("main")).toBeVisible();
           await expect.poll(() => page.locator("main").evaluate(main => {
             return Boolean(main.closest('[aria-hidden="true"],[inert],[hidden]'));
@@ -182,6 +186,10 @@ for (const condition of conditions) {
             const focused = document.activeElement;
             return focused instanceof HTMLElement && Boolean(focused.closest('[inert],[hidden],[aria-hidden="true"]'));
           })).toBe(false);
+          const composer = conversation.getByRole("textbox", { name: "消息输入", exact: true });
+          await expect(composer).toBeEnabled();
+          await composer.focus();
+          await expect(composer).toBeFocused();
         }
       });
     }

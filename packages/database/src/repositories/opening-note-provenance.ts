@@ -39,11 +39,32 @@ export function createOpeningNoteRepository(sql: Sql) {
       return sql.begin(async tx => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningNoteError("NOT_FOUND", "workspace not found");
-        const receipts = await tx`SELECT context_source_refs FROM opening_ephemeral_provenance
-          WHERE id=${input.provenanceId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        if (!receipts.length) throw new OpeningNoteError("NOT_FOUND", "临时片段来源凭据不可用，请重新提问后保存。");
-        const refs = parseContextSourceRefs(receipts[0]!.context_source_refs);
-        if (refs === null) throw new OpeningNoteError("PROVENANCE_UNKNOWN", "临时历史来源不完整，无法保存为关联笔记。请开始新的临时对话。");
+        const origins = input.savedTurnId !== undefined
+          ? await tx`SELECT t.context_source_refs,t.citations FROM opening_turns t
+              JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+              WHERE t.id=${input.savedTurnId} AND t.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+                AND t.role='assistant' AND t.status='complete' AND NOT t.query_system AND t.system_query IS NULL
+                AND t.composer_purpose IS DISTINCT FROM 'query' AND t.composer_purpose IS DISTINCT FROM 'explain_state'
+                AND NOT EXISTS (SELECT 1 FROM opening_tutor_jobs j JOIN opening_turns u
+                  ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id
+                  WHERE j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id
+                    AND (u.query_system OR u.system_query IS NOT NULL OR u.composer_purpose IN ('query','explain_state')))
+              FOR SHARE OF t,c`
+          : await tx`SELECT context_source_refs FROM opening_ephemeral_provenance
+              WHERE id=${input.provenanceId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!origins.length) throw new OpeningNoteError("NOT_FOUND", input.savedTurnId
+          ? "已保存回答不可用，请重新打开已完成的普通对话回答后保存。"
+          : "临时片段来源凭据不可用，请重新提问后保存。");
+        const refs = parseContextSourceRefs(origins[0]!.context_source_refs);
+        if (refs === null) throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答来源不完整，无法保存为关联笔记。请重新提问后保存。");
+        if (input.savedTurnId) {
+          // Selected sources need not have been retrieved. Citations, unlike selection,
+          // claim consumed content and must be covered by the recorded lineage.
+          const citations = parseContextSourceRefs(origins[0]!.citations);
+          if (citations === null || citations.some(ref => !refs.some(parent => parent.sourceId === ref.sourceId && parent.sourceVersion === ref.sourceVersion))) {
+            throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答的关联材料来源不完整，请重新提问后保存。");
+          }
+        }
         const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)} AS included`;
         if (!admission[0]!.included) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联材料已删除、停止供 AI 使用或版本已变化，无法保存此片段。");
         const documentId = randomUUID();

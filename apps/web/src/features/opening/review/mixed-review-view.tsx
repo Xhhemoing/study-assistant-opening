@@ -2,6 +2,7 @@
 import Link from "next/link";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useConversationObjectHref } from "../assistant/conversation-object-context";
 import { getVerifiedSessionNamespace } from "../../auth/session-identity";
 import { CardReviewView } from "../cards/card-review-view";
 import { createOpeningCardsClient, type OpeningCardsClient } from "../cards/cards-client";
@@ -13,6 +14,7 @@ import type { TaskItem } from "@aistudy/contracts";
 
 type TaskClient = { listTasks: () => Promise<{ tasks: TaskItem[] }> };
 export function MixedReviewView({ cardsClient: suppliedCards, taskClient: suppliedTasks, next }: { cardsClient?: OpeningCardsClient; taskClient?: TaskClient; /** 一键学习会话：复习完成后接着去的学习页。 */ next?: { href: string; label: string } }) {
+  const objectHref = useConversationObjectHref();
   const cardsClient = useMemo(() => suppliedCards ?? createOpeningCardsClient(), [suppliedCards]);
   const taskClient = useMemo(() => suppliedTasks ?? createOpeningApi(), [suppliedTasks]);
   const [namespace] = useState(getVerifiedSessionNamespace);
@@ -105,7 +107,8 @@ export function MixedReviewView({ cardsClient: suppliedCards, taskClient: suppli
       {current?.status === "card" ? <CardReviewView key={current.item.card.id} embedded compact client={singleCardClient} onGraded={onGraded} onBusyChange={onBusyChange} onRemainingChange={onCardRemaining} returnTo="/opening/review?tab=session" /> : current?.status === "task" ? <article className="space-y-4 rounded-xl border border-line bg-surface p-5">
         <p className="text-xs text-text-2">{current.item.kind === "retest" ? "已安排复测" : "补强练习"} · 约 {current.item.task.minutes} 分钟</p>
         <h3 className="break-words text-base font-medium">{current.item.task.title}</h3>
-        <a className={ui.primary} href={current.item.href!} target="_blank" rel="noopener noreferrer">打开练习（新标签）</a>
+        <p className="text-sm leading-7 text-text-2">在新标签中完成练习后回到这里。返回时会自动核对；打开练习不会把任务标为完成。</p>
+        <a className={ui.primary} href={objectHref(current.item.href!)} target="_blank" rel="noopener noreferrer">打开练习（新标签）</a>
       </article> : <EmptyState title={session.entries.length ? "本轮当前没有可继续的项目" : "当前没有可开始的复习项目"} description={waiting ? "仍有尚未到期或暂不可用的项目。到时核对最新进度即可继续。" : skipped ? "本轮略过的项目没有被标为完成。重新安排本轮可再次加入。" : "可稍后重新安排本轮，纳入新的到期卡片和已接受任务。"} />}
       {current ? <button type="button" className={ui.quiet} disabled={busy} onClick={skip}>本轮先略过这一项</button> : null}
       {!current && next ? <Link className={ui.primary} href={next.href} data-session-next="true">接着学：{next.label}</Link> : null}

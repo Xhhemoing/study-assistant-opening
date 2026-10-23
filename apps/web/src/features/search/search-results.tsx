@@ -30,7 +30,7 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
               {group.hits.map((hit) => (
                 <li key={`${hit.type}-${hit.id}`}>
                   <Link
-                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-bg focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-600"
+                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-bg focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
                     href={searchHitHref(hit)}
                   >
                     <span className="min-w-0 space-y-1">

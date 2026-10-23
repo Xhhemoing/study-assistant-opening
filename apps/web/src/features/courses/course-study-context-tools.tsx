@@ -7,7 +7,9 @@ import { studyConversationIdentity } from "../opening/assistant/study-conversati
 import { ui } from "../opening/design/ui";
 
 export function CourseStudyContextTools({ context }: { context: TeachingToolsContext }) {
-  const [selected, setSelected] = useState(context.sourceRefs.length === 1 ? 0 : -1);
+  const sourceIdentity = JSON.stringify(context.sourceRefs.map(ref => [ref.sourceId, ref.version, ref.page]));
+  const [selection, setSelection] = useState({ identity: sourceIdentity, index: context.sourceRefs.length === 1 ? 0 : -1 });
+  const selected = selection.identity === sourceIdentity ? selection.index : context.sourceRefs.length === 1 ? 0 : -1;
   const ref = context.sourceRefs[selected];
   const version = ref && (typeof ref.version === "number" || (typeof ref.version === "string" && /^\d+$/.test(ref.version))) ? Number(ref.version) : undefined;
   const pinned = version !== undefined && Number.isSafeInteger(version) && version >= 0;
@@ -21,9 +23,9 @@ export function CourseStudyContextTools({ context }: { context: TeachingToolsCon
     label: context.unitTitle, fragment: context.unitText,
     ...(!questionBound && ref && pinned ? { sourceId: ref.sourceId, sourceVersion: version, page: ref.page ?? undefined } : {}),
   };
-  return <div className="space-y-4">
-    {context.sourceRefs.length > 1 && !questionBound ? <label className="block space-y-1 text-xs text-zinc-700"><span>本次提问的材料</span><select className={ui.input} value={selected} onChange={event => setSelected(Number(event.target.value))}><option value={-1}>选择一份固定版本原文</option>{context.sourceRefs.map((source, index) => <option key={index} value={index}>{context.sourceNameById?.[source.sourceId] || `引用材料 ${index + 1}`}{source.page ? ` · 第 ${source.page} 页` : ""}{source.version != null ? ` · v${source.version}` : " · 版本待核对"}</option>)}</select></label> : null}
+  return <div className="flex h-full min-h-0 flex-col gap-4">
+    {context.sourceRefs.length > 1 && !questionBound ? <label className="block shrink-0 space-y-1 text-xs text-text-2"><span>本次提问的材料</span><select className={ui.input} value={selected} onChange={event => setSelection({ identity: sourceIdentity, index: Number(event.target.value) })}><option value={-1}>选择一份固定版本原文</option>{context.sourceRefs.map((source, index) => <option key={index} value={index}>{context.sourceNameById?.[source.sourceId] || `引用材料 ${index + 1}`}{source.page ? ` · 第 ${source.page} 页` : ""}{source.version != null ? ` · v${source.version}` : " · 版本待核对"}</option>)}</select></label> : null}
     <StudyContextTools key={studyConversationIdentity(studyContext)} context={studyContext} isQuestion={context.isQuestion}
-      learningAttempt={context.learningAttempt} questionBlockedReason={blocked} />
+      learningAttempt={context.learningAttempt} questionBlockedReason={blocked} section={context.companionSection} askRequest={context.askRequest} />
   </div>;
 }
