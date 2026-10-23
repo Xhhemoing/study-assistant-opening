@@ -25,14 +25,13 @@ type LegacyUpload = (
   file: LocalUploadFile,
   onBytes?: (loaded: number, total: number) => void,
   resume?: { sourceId: string; ticket: UploadTicket; completionPending?: boolean },
+  operation?: { uploadId: string },
 ) => Promise<SourceRecord | UploadRejected>;
 
 type UploadOperation = UploadQueueClient | LegacyUpload;
 export type UploadQueueUpdate = (items: UploadQueueItem[]) => void;
 
 const DISMISSIBLE: ReadonlySet<UploadQueueState> = new Set(["idle", "uploading", "saved", "failed"]);
-
-let nextQueueItemId = 0;
 
 function isClient(client: UploadOperation): client is UploadQueueClient {
   return typeof client !== "function";
@@ -58,7 +57,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
   const add = (files: LocalUploadFile[]): UploadQueueItem[] => {
     assertRoom(files.map(file => ({ size: file.bytes.byteLength })));
     const added = files.map((file) => ({
-      id: `upload-${++nextQueueItemId}`,
+      id: globalThis.crypto.randomUUID(),
       file,
       state: "idle" as const,
       progress: 0,
@@ -110,17 +109,18 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       }
       if (isClient(client)) {
         result = await client.uploadFile(item.file, item.ticket ? {
+          uploadId: item.id,
           resumeSourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
           onBytes,
-        } : { onBytes });
+        } : { uploadId: item.id, onBytes });
       } else {
         result = await client(item.file, onBytes, item.ticket ? {
           sourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
-        } : undefined);
+        } : undefined, { uploadId: item.id });
       }
     } catch (error) {
       if (!stillActive(item.id)) return;

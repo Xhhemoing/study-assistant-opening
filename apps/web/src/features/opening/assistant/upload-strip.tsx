@@ -51,7 +51,8 @@ export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId 
     resolvePutUrl: resolveUploadPutUrl,
     refreshTicket: (id) => api.refreshUploadTicket(id),
   }), [api]);
-  const queue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
+  const queue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
+    uploadId: operation?.uploadId,
     onBytes,
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);

@@ -33,7 +33,8 @@ export function StartUploads({ api, sources, courseId, disabled, onBusyChange, o
     put: (url, body, progress, mime) => putPrivateBytes(url, body, mime, loaded => progress(loaded)),
     resolvePutUrl: resolveUploadPutUrl, refreshTicket: id => api.refreshUploadTicket(id),
   }), [api]);
-  const queue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
+  const queue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
+    uploadId: operation?.uploadId,
     onBytes, ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
   const published = useRef(new Set<string>());

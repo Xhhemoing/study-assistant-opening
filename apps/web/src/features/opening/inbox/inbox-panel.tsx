@@ -131,7 +131,8 @@ export function InboxPanel({
     refreshTicket: (id) => api.refreshUploadTicket(id),
   }), [api]);
 
-  const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume) => client.uploadFile(file, {
+  const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
+    uploadId: operation?.uploadId,
     onBytes,
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);

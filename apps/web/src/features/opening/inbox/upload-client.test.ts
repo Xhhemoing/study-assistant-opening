@@ -83,6 +83,7 @@ describe("createUploadClient", () => {
       mime: "application/pdf",
       bytes: bytes.byteLength,
       sha256: sha256(bytes),
+      uploadId: expect.any(String),
     });
   });
 
@@ -185,6 +186,22 @@ describe("createUploadClient", () => {
     ).resolves.toMatchObject({ phase: "unsupported", message: "请导出为 JPG 后上传" });
     expect(begin).not.toHaveBeenCalled();
   });
+});
+
+it("reuses one begin identity after its response is lost, then releases it after completion", async () => {
+  const seen: string[] = [];
+  const begin = vi.fn(async (input: { uploadId?: string }) => {
+    seen.push(input.uploadId!);
+    if (seen.length === 1) throw new Error("response lost after server commit");
+    return ticket({ id: input.uploadId });
+  });
+  const client = createUploadClient({ begin, put: async () => {}, complete: async id => source({ id, uploadState: "uploaded" }) });
+  const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
+  expect(await client.uploadFile(file)).toMatchObject({ phase: "interrupted", keptLocal: true });
+  expect(await client.uploadFile(file)).toMatchObject({ id: seen[0], uploadState: "uploaded" });
+  expect(seen[1]).toBe(seen[0]);
+  await client.uploadFile(file);
+  expect(seen[2]).not.toBe(seen[0]);
 });
 
 

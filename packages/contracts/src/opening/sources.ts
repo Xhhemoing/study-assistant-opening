@@ -52,6 +52,8 @@ export const uploadInputSchema = z
     mime: sourceMimeSchema,
     bytes: z.number().int().positive(),
     sha256: sha256HexSchema,
+    /** Stable identity of one upload operation; intentional new uploads use a new UUID. */
+    uploadId: uuidSchema.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

@@ -9,6 +9,7 @@ export type LocalUploadFile = {
 };
 
 export type UploadByteProgress = {
+  uploadId?: string;
   onBytes?: (loaded: number, total: number) => void;
   resumeSourceId?: string;
   ticket?: UploadTicket;
@@ -52,13 +53,20 @@ function rejectionDetail(error: unknown): string {
 
 /** begin → private PUT → complete. Byte callbacks are upload progress only. */
 export function createUploadClient(deps: UploadClientDeps) {
+  // Direct callers also retain the identity after an unknown begin response.
+  // Queue callers provide an explicit id so separate selections stay distinct.
+  const pendingBegins = new WeakMap<LocalUploadFile, string>();
   return {
     async uploadFile(
       file: LocalUploadFile,
       progress: UploadByteProgress = {},
     ): Promise<SourceRecord | UploadRejected> {
       if (progress.resumeSourceId && progress.completionPending) {
-        try { return await deps.complete(progress.resumeSourceId); }
+        try {
+          const result = await deps.complete(progress.resumeSourceId);
+          pendingBegins.delete(file);
+          return result;
+        }
         catch (error) {
           return { phase: "interrupted", sourceId: progress.resumeSourceId, ticket: progress.ticket,
             completionPending: true, keptLocal: true,
@@ -81,11 +89,14 @@ export function createUploadClient(deps: UploadClientDeps) {
             ? await deps.refreshTicket(progress.resumeSourceId)
             : progress.ticket;
         } else {
+          const uploadId = progress.uploadId ?? pendingBegins.get(file) ?? globalThis.crypto.randomUUID();
+          pendingBegins.set(file, uploadId);
           ticket = await deps.begin({
             name: file.name.slice(0, 180),
             mime,
             bytes: file.bytes.byteLength,
             sha256: await sha256Hex(file.bytes),
+            uploadId,
           });
         }
       } catch (error) {
@@ -122,7 +133,9 @@ export function createUploadClient(deps: UploadClientDeps) {
         };
       }
       try {
-        return await deps.complete(ticket.source.id);
+        const result = await deps.complete(ticket.source.id);
+        pendingBegins.delete(file);
+        return result;
       } catch (error) {
         return {
           phase: "interrupted",

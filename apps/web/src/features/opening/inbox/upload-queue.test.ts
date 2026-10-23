@@ -22,6 +22,30 @@ function file(name: string): LocalUploadFile {
 }
 
 describe("createUploadQueue", () => {
+  it("retains an unknown begin identity through legacy adapters and gives a new selection a new identity", async () => {
+    const begins: string[] = [];
+    const client = createUploadClient({
+      begin: async input => {
+        begins.push(input.uploadId!);
+        if (begins.length === 1) throw new Error("begin response lost");
+        return { source: { ...source, id: input.uploadId!, uploadState: "pending" }, uploadUrl: "https://minio.local/upload", expiresAt: source.createdAt };
+      },
+      put: async () => {}, complete: async id => ({ ...source, id }),
+    });
+    const selected = file("same.pdf");
+    const queue = createUploadQueue((input, onBytes, resume, operation) => client.uploadFile(input, { uploadId: operation?.uploadId, onBytes, resumeSourceId: resume?.sourceId, ticket: resume?.ticket }));
+    const [first] = queue.add([selected]);
+    await queue.start();
+    await queue.retry(first!.id);
+    expect(begins[0]).toBe(first!.id);
+    expect(begins[1]).toBe(first!.id);
+    expect(queue.snapshot()[0]?.state).toBe("saved");
+    const [next] = queue.add([selected]);
+    await queue.start();
+    expect(next!.id).not.toBe(first!.id);
+    expect(begins[2]).toBe(next!.id);
+  });
+
   it("accepts initial files as idle items and preserves their File object", () => {
     const initial = file("initial.pdf");
     const queue = createUploadQueue(vi.fn(async (): Promise<SourceRecord> => source), [initial]);
