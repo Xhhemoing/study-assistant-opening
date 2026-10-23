@@ -30,9 +30,14 @@ let root: Root;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
+  vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
+    media, matches: false, onchange: null,
+    addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+  })));
   host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 async function click(label: string) {
   const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === label)!;
   await act(async () => button.click());
