@@ -7,6 +7,6 @@ type Context = { params: Promise<{ id: string }> };
 /** Read-only estimate. Unlike getToday, this does not create an automatic draft. */
 export const GET = (request: Request, context: Context) => examSprintResponse(async () => {
   const { scope, sql } = await requireOpeningScope(request);
-  const courseId = uuidSchema.parse((await context.params).id);
+  const courseId = uuidSchema.parse((await context.params).id).toLowerCase();
   return getSprintBudgetService(sql).read(scope, courseId);
 });

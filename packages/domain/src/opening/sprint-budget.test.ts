@@ -37,6 +37,36 @@ function deepFreeze<T>(value: T): T {
 }
 
 describe("forecastSprintBudget", () => {
+  it("uses later accepted task identities without adding their dates to the bounded output", () => {
+    const result = forecastSprintBudget(input({ tasks: [task(1), task(2)], horizonTruncated: true,
+      examDate: "2026-12-01", constraints: { accepted: [accepted(1, "2026-11-25", "09:00", "09:30")], locked: [] } }));
+    expect(result.days.map(value => value.date)).toEqual(["2026-10-23"]);
+    expect(result.scheduledTaskIds).toEqual([id(2)]);
+    expect(result.unscheduled).toEqual([]);
+    expect(result.days[0]?.committedMinutes).toBe(0);
+  });
+
+  it("clips absolute cross-midnight commitments and locks from outside the output days", () => {
+    const result = forecastSprintBudget(input({ now: new Date(at("2026-10-23", "00:00")),
+      days: [day("2026-10-23", [slot("2026-10-23", "00:00", "03:00")])], tasks: [task(1), task(2)], dailyMinutes: 120,
+      constraints: {
+        accepted: [{ taskId: id(1), start: at("2026-10-22", "23:30"), end: at("2026-10-23", "00:30"), reason: "跨午夜" }],
+        locked: [{ start: at("2026-10-22", "23:00"), end: at("2026-10-23", "01:00"), kind: "locked" }],
+      } }));
+    expect(result.days[0]).toMatchObject({ committedMinutes: 30, plannedMinutes: 30 });
+    expect(projected(result)).toEqual([{ taskId: id(2), start: at("2026-10-23", "01:00"), end: at("2026-10-23", "01:30") }]);
+  });
+
+  it("preserves after-exam accepts but warns rather than silently pulling them before the exam", () => {
+    const result = forecastSprintBudget(input({ constraints: { accepted: [accepted(1, "2026-10-28", "09:00", "09:30")], locked: [] } }));
+    expect(result.scheduledTaskIds).toEqual([]);
+    expect(result.warnings).toContainEqual(expect.stringContaining("晚于考试"));
+  });
+
+  it("rejects malformed external constraints and stale derived block kinds", () => {
+    expect(() => forecastSprintBudget(input({ constraints: { accepted: [], locked: [slot("2026-10-23", "09:00", "10:00", "class")] } }))).toThrow("explicit locks");
+    expect(() => forecastSprintBudget(input({ constraints: { accepted: [accepted(1, "2026-10-23", "10:00", "09:00")], locked: [] } }))).toThrow();
+  });
   it("forecasts only pending tasks in this course, including legacy retest course projections", () => {
     const result = forecastSprintBudget(input({ tasks: [
       task(1), task(2, { courseId: otherCourseId }), task(3, { status: "done" }),

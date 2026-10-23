@@ -8,13 +8,14 @@ import {
 const deps = vi.hoisted(() => ({
   learningFactory: vi.fn(), prefsFactory: vi.fn(), settingsFactory: vi.fn(), plansFactory: vi.fn(),
   assertOwnedCourse: vi.fn(), preferences: vi.fn(), settings: vi.fn(),
-  listTasks: vi.fn(), listTimetable: vi.fn(), getToday: vi.fn(), listHardBlocks: vi.fn(), write: vi.fn(),
+  listTasks: vi.fn(), listTimetable: vi.fn(), constraints: vi.fn(), write: vi.fn(),
 }));
 vi.mock("@aistudy/database", () => ({
   createOpeningLearningRepository: deps.learningFactory,
   createOpeningAdaptivePrefsRepository: deps.prefsFactory,
   createOpeningPlanningSettingsRepository: deps.settingsFactory,
   createOpeningPlansRepository: deps.plansFactory,
+  readOpeningSprintBudgetConstraints: deps.constraints,
 }));
 
 import { getSprintBudgetService } from "./sprint-budget-runtime";
@@ -79,14 +80,12 @@ beforeEach(() => {
   deps.settings.mockResolvedValue(settings());
   deps.listTasks.mockResolvedValue(structuredClone(tasks));
   deps.listTimetable.mockResolvedValue([]);
-  deps.getToday.mockResolvedValue({ acceptedVersion: 1, blocks: accepted, hardBlocksFingerprint: "existing" });
-  deps.listHardBlocks.mockResolvedValue([{ start: "2026-10-23T09:15:00.000Z", end: "2026-10-23T09:30:00.000Z", kind: "locked" }]);
+  deps.constraints.mockResolvedValue({ accepted, locked: [{ start: "2026-10-23T09:15:00.000Z", end: "2026-10-23T09:30:00.000Z", kind: "locked" }] });
   deps.learningFactory.mockReturnValue({ assertOwnedCourse: deps.assertOwnedCourse, createSession: deps.write });
   deps.prefsFactory.mockReturnValue({ get: deps.preferences, patch: deps.write });
   deps.settingsFactory.mockReturnValue({ get: deps.settings, set: deps.write, initialize: deps.write });
   deps.plansFactory.mockReturnValue({
     listTasks: deps.listTasks, listTimetable: deps.listTimetable,
-    getToday: deps.getToday, listHardBlocks: deps.listHardBlocks,
     ensureAutoDraft: deps.write, proposePlan: deps.write, acceptPlan: deps.write, createTask: deps.write,
     updateTaskStatus: deps.write, upsertHardBlocks: deps.write, replaceTimetable: deps.write,
   });
@@ -108,8 +107,7 @@ describe("sprint budget runtime with repository doubles", () => {
     }
     expect(deps.assertOwnedCourse).toHaveBeenCalledExactlyOnceWith(scope, courseId);
     for (const read of [deps.preferences, deps.settings, deps.listTasks, deps.listTimetable]) expect(read).toHaveBeenCalledExactlyOnceWith(scope);
-    expect(deps.getToday).toHaveBeenCalledExactlyOnceWith(scope, "2026-10-23");
-    expect(deps.listHardBlocks).toHaveBeenCalledExactlyOnceWith(scope, "2026-10-23");
+    expect(deps.constraints).toHaveBeenCalledExactlyOnceWith(db.tx, scope, { windowStart: "2026-10-23T00:00:00.000Z", windowEnd: "2026-10-24T00:00:00.000Z", now, taskIds: [taskId] });
     expect(result).toMatchObject({ status: "ready", generatedAt: now, tasks: [{ id: taskId, title: tasks[0]!.title }], scheduledTaskIds: [taskId] });
     expect(result.days[0]?.blocks).toEqual([expect.objectContaining({ taskId, start: "2026-10-23T09:30:00.000Z", end: "2026-10-23T10:00:00.000Z" })]);
     expect(db.events).toEqual(["begin:isolation level repeatable read read only", "commit"]);
@@ -119,8 +117,7 @@ describe("sprint budget runtime with repository doubles", () => {
   });
 
   it("treats a missing accepted plan as empty, and never asks the planning service to create one", async () => {
-    deps.getToday.mockResolvedValue(null);
-    deps.listHardBlocks.mockResolvedValue([]);
+    deps.constraints.mockResolvedValue({ accepted: [], locked: [] });
     const db = transactionHarness();
     const result = await getSprintBudgetService(db.sql).read(scope, courseId);
     expect(result.days[0]?.blocks).toEqual([expect.objectContaining({ taskId, start: "2026-10-23T09:00:00.000Z" })]);
@@ -133,7 +130,7 @@ describe("sprint budget runtime with repository doubles", () => {
     const db = transactionHarness();
     const pending = getSprintBudgetService(db.sql).read(scope, courseId);
     expect(deps.assertOwnedCourse).toHaveBeenCalledOnce();
-    for (const read of [deps.preferences, deps.settings, deps.listTasks, deps.listTimetable, deps.getToday, deps.listHardBlocks]) expect(read).not.toHaveBeenCalled();
+    for (const read of [deps.preferences, deps.settings, deps.listTasks, deps.listTimetable, deps.constraints]) expect(read).not.toHaveBeenCalled();
     allow();
     await pending;
     expect(db.events.at(-1)).toBe("commit");
@@ -141,13 +138,13 @@ describe("sprint budget runtime with repository doubles", () => {
 
   it.each(["ownership", "day"])("propagates a %s failure out of the snapshot without fallback or partial success", async stage => {
     const failure = new Error("snapshot read failed");
-    (stage === "ownership" ? deps.assertOwnedCourse : deps.listHardBlocks).mockRejectedValue(failure);
+    (stage === "ownership" ? deps.assertOwnedCourse : deps.constraints).mockRejectedValue(failure);
     const db = transactionHarness();
     await expect(getSprintBudgetService(db.sql).read(scope, courseId)).rejects.toBe(failure);
     expect(db.events).toEqual(["begin:isolation level repeatable read read only", "rollback"]);
     expect(db.begin).toHaveBeenCalledOnce();
     if (stage === "ownership") {
-      for (const read of [deps.preferences, deps.settings, deps.listTasks, deps.listTimetable, deps.getToday, deps.listHardBlocks]) expect(read).not.toHaveBeenCalled();
+      for (const read of [deps.preferences, deps.settings, deps.listTasks, deps.listTimetable, deps.constraints]) expect(read).not.toHaveBeenCalled();
     }
     expect(db.root).not.toHaveBeenCalled();
     expect(db.forbidden).not.toHaveBeenCalled();
@@ -157,16 +154,18 @@ describe("sprint budget runtime with repository doubles", () => {
 // Exercise production repository factories too; the fake is only the tagged SQL
 // transport. No database client, migrations, app runtime, or model is started.
 async function useRealRepositories() {
-  const [learning, prefs, planningSettings, plans] = await Promise.all([
+  const [learning, prefs, planningSettings, plans, constraints] = await Promise.all([
     import("../../../../../../packages/database/src/repositories/opening-learning"),
     import("../../../../../../packages/database/src/repositories/opening-adaptive-prefs"),
     import("../../../../../../packages/database/src/repositories/opening-planning-settings"),
     import("../../../../../../packages/database/src/repositories/opening-plans"),
+    import("../../../../../../packages/database/src/repositories/opening-sprint-budget"),
   ]);
   deps.learningFactory.mockImplementation(learning.createOpeningLearningRepository);
   deps.prefsFactory.mockImplementation(prefs.createOpeningAdaptivePrefsRepository);
   deps.settingsFactory.mockImplementation(planningSettings.createOpeningPlanningSettingsRepository);
   deps.plansFactory.mockImplementation(plans.createOpeningPlansRepository);
+  deps.constraints.mockImplementation(constraints.readOpeningSprintBudgetConstraints);
 }
 function storedReader(overrides: { owned?: boolean; prefs?: unknown; settings?: unknown } = {}) {
   const stored = {
@@ -189,11 +188,12 @@ function storedReader(overrides: { owned?: boolean; prefs?: unknown; settings?: 
     if (text.includes("FROM opening_tasks t")) return stored.tasks;
     if (text.includes("FROM opening_timetable_sessions")) return [];
     if (text.includes("FROM opening_plan_state")) {
-      expect(values).toEqual([scope.workspaceId, "2026-10-23"]);
-      return [{ accepted_version: 1, accepted_blocks: stored.accepted, hard_blocks_fingerprint: "saved" }];
+      expect(values).toEqual(expect.arrayContaining([scope.workspaceId, scope.ownerUserId, "2026-10-23T00:00:00.000Z", "2026-10-24T00:00:00.000Z", now]));
+      expect(values).toContainEqual([taskId]);
+      return stored.accepted.map(block => ({ block }));
     }
     if (text.includes("FROM opening_hard_blocks")) {
-      expect(values).toEqual([scope.workspaceId, scope.ownerUserId, "2026-10-23"]);
+      expect(values).toEqual(expect.arrayContaining([scope.workspaceId, scope.ownerUserId, "2026-10-23T00:00:00.000Z", "2026-10-24T00:00:00.000Z"]));
       return stored.hard;
     }
     throw new Error(`unexpected query: ${text}`);
@@ -212,7 +212,7 @@ describe("sprint budget production factory wiring with tagged-SQL fake", () => {
     expect(db.queries[0]?.text).toContain("FROM courses c");
     for (const query of db.queries) {
       expect(query.values).toContain(scope.workspaceId);
-      if (!query.text.includes("FROM opening_plan_state")) expect(query.values).toContain(scope.ownerUserId);
+      expect(query.values).toContain(scope.ownerUserId);
     }
     for (const factory of [deps.learningFactory, deps.prefsFactory, deps.settingsFactory, deps.plansFactory]) expect(factory).toHaveBeenCalledExactlyOnceWith(db.tx);
     expect(db.events).toEqual(["begin:isolation level repeatable read read only", "commit"]);

@@ -1,6 +1,6 @@
 import "server-only";
 import type { Sql } from "postgres";
-import { createOpeningAdaptivePrefsRepository, createOpeningLearningRepository, createOpeningPlanningSettingsRepository, createOpeningPlansRepository } from "@aistudy/database";
+import { createOpeningAdaptivePrefsRepository, createOpeningLearningRepository, createOpeningPlanningSettingsRepository, createOpeningPlansRepository, readOpeningSprintBudgetConstraints } from "@aistudy/database";
 import { createSprintBudgetService } from "./sprint-budget-service";
 
 export function getSprintBudgetService(sql: Sql) {
@@ -14,7 +14,7 @@ export function getSprintBudgetService(sql: Sql) {
         settings: owned => createOpeningPlanningSettingsRepository(db).get(owned),
         tasks: owned => plans.listTasks(owned),
         timetable: owned => plans.listTimetable(owned),
-        day: async (owned, date) => ({ accepted: (await plans.getToday(owned, date))?.blocks ?? [], hard: await plans.listHardBlocks(owned, date) }),
+        constraints: (owned, input) => readOpeningSprintBudgetConstraints(db, owned, input),
       }).read(scope, courseId);
     }),
   };

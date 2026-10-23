@@ -38,13 +38,16 @@ function fixture(options: {
     settings: vi.fn<SprintBudgetReader["settings"]>().mockResolvedValue(stored.settings),
     tasks: vi.fn<SprintBudgetReader["tasks"]>().mockResolvedValue(stored.tasks),
     timetable: vi.fn<SprintBudgetReader["timetable"]>().mockResolvedValue(stored.timetable),
-    day: vi.fn<SprintBudgetReader["day"]>().mockImplementation(async (_scope, date) => stored.days[date] ?? { accepted: [], hard: [] }),
+    constraints: vi.fn<SprintBudgetReader["constraints"]>().mockImplementation(async () => ({
+      accepted: Object.values(stored.days).flatMap(day => day.accepted),
+      locked: Object.values(stored.days).flatMap(day => day.hard).filter(block => block.kind === "locked"),
+    })),
   } satisfies SprintBudgetReader;
   const clock = vi.fn(() => new Date(options.now ?? now));
   return { stored, reader, clock, service: createSprintBudgetService(reader, clock) };
 }
 function expectNoPlanningReads(reader: ReturnType<typeof fixture>["reader"]) {
-  for (const read of [reader.tasks, reader.timetable, reader.day]) expect(read).not.toHaveBeenCalled();
+  for (const read of [reader.tasks, reader.timetable, reader.constraints]) expect(read).not.toHaveBeenCalled();
 }
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
@@ -61,14 +64,14 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
     reader.assertCourse.mockReturnValue(new Promise<void>(resolve => { allow = resolve; }));
     const pending = service.read(scope, courseId);
     expect(reader.assertCourse).toHaveBeenCalledExactlyOnceWith(scope, courseId);
-    for (const read of [reader.preferences, reader.settings, reader.tasks, reader.timetable, reader.day]) expect(read).not.toHaveBeenCalled();
+    for (const read of [reader.preferences, reader.settings, reader.tasks, reader.timetable, reader.constraints]) expect(read).not.toHaveBeenCalled();
     allow();
     expect((await pending).status).toBe("ready");
     expect(reader.preferences).toHaveBeenCalledExactlyOnceWith(scope);
     expect(reader.settings).toHaveBeenCalledExactlyOnceWith(scope);
     expect(reader.tasks).toHaveBeenCalledExactlyOnceWith(scope);
     expect(reader.timetable).toHaveBeenCalledExactlyOnceWith(scope);
-    expect(reader.day).toHaveBeenCalledExactlyOnceWith(scope, "2026-10-23");
+    expect(reader.constraints).toHaveBeenCalledExactlyOnceWith(scope, { windowStart: "2026-10-23T00:00:00.000Z", windowEnd: "2026-10-24T00:00:00.000Z", now, taskIds: [id(1)] });
   });
 
   it("does not leak any workspace data when ownership is rejected", async () => {
@@ -143,14 +146,14 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
     const { reader, service } = fixture({ timetable: [{ courseName: "线性代数", courseId: otherCourseId,
       weekday: 5, weeks: [1], startPeriod: 1, endPeriod: 1 }] });
     expect(await service.read(scope, courseId)).toMatchObject({ status: "invalid_settings", days: [], tasks: [] });
-    expect(reader.day).not.toHaveBeenCalled();
+    expect(reader.constraints).not.toHaveBeenCalled();
   });
 
   it("returns invalid_settings, not a guessed instant, for a nonexistent DST clock", async () => {
     const { reader, service } = fixture({ now: "2026-03-08T05:00:00.000Z", prefs: preferences("2026-03-09"),
       settings: settings({ timeZone: "America/New_York", dailyWindow: { start: "02:30", end: "04:00" } }) });
     expect(await service.read(scope, courseId)).toMatchObject({ status: "invalid_settings", days: [] });
-    expect(reader.day).not.toHaveBeenCalled();
+    expect(reader.constraints).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -164,7 +167,7 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
     const result = await service.read(scope, courseId);
     expect(result).toMatchObject({ generatedAt: sample.time, timeZone: sample.zone, status: sample.status });
     expect(result.days.map(day => day.date)).toEqual(sample.dates);
-    expect(reader.day.mock.calls.map(([, date]) => date)).toEqual(sample.dates);
+    expect(reader.constraints).toHaveBeenCalledTimes(sample.dates.length ? 1 : 0);
     if (!sample.dates.length) expectNoPlanningReads(reader);
   });
 
@@ -188,9 +191,7 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
     expect(result.days[0]?.date).toBe("2026-10-23");
     expect(result.days.at(-1)?.date).toBe("2026-11-19");
     expect(new Set(result.days.map(day => day.date)).size).toBe(28);
-    expect(reader.day.mock.calls.map(([, date]) => date)).toEqual(result.days.map(day => day.date));
-    expect(reader.day).toHaveBeenCalledTimes(28);
-    expect(reader.day).not.toHaveBeenCalledWith(scope, "2026-11-20");
+    expect(reader.constraints).toHaveBeenCalledExactlyOnceWith(scope, { windowStart: "2026-10-23T00:00:00.000Z", windowEnd: "2026-11-20T00:00:00.000Z", now, taskIds: [id(1)] });
     expect(result.deferredTaskIds).toEqual([id(1)]);
     expect(result.scheduledTaskIds).toEqual([]);
     expect(result.unscheduled).toEqual([]);
@@ -232,7 +233,7 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
     expect(stored).toEqual(before);
     expect(clock).toHaveBeenCalledOnce();
     // The complete supplied interface contains reads only, yet the real forecast succeeds.
-    expect(Object.keys(reader).sort()).toEqual(["assertCourse", "day", "preferences", "settings", "tasks", "timetable"]);
+    expect(Object.keys(reader).sort()).toEqual(["assertCourse", "constraints", "preferences", "settings", "tasks", "timetable"]);
     expect(Object.keys(service)).toEqual(["read"]);
   });
 
@@ -252,10 +253,10 @@ describe("sprint budget service (real deriveDayBlocks and forecastSprintBudget)"
   it("rejects an oversized task snapshot instead of silently planning a truncated subset", async () => {
     const { reader, service } = fixture({ tasks: Array.from({ length: 2001 }, (_, n) => task(n)) });
     await expect(service.read(scope, courseId)).rejects.toThrow(RangeError);
-    expect(reader.day).not.toHaveBeenCalled();
+    expect(reader.constraints).not.toHaveBeenCalled();
   });
 
-  it.each(["preferences", "settings", "tasks", "timetable", "day"] as const)("propagates %s read failures instead of returning an empty successful forecast", async field => {
+  it.each(["preferences", "settings", "tasks", "timetable", "constraints"] as const)("propagates %s read failures instead of returning an empty successful forecast", async field => {
     const { reader, service } = fixture();
     const failure = new Error(`failed ${field}`);
     reader[field].mockRejectedValue(failure);

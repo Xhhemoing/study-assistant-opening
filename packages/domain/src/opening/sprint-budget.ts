@@ -26,6 +26,8 @@ export type SprintBudgetForecastInput = {
   timeZone: string;
   now: Date;
   horizonTruncated: boolean;
+  /** Complete absolute constraints, independent of the bounded output days. */
+  constraints?: { accepted: readonly PlannedBlock[]; locked: readonly TimeBlock[] };
 };
 
 export type SprintBudgetUnscheduledReason = UnscheduledReasonCode
@@ -119,6 +121,21 @@ function validateDays(input: SprintBudgetForecastInput): ValidatedDay[] {
   }).sort((a, b) => compareText(a.date, b.date));
 }
 
+function validateConstraints(input: SprintBudgetForecastInput) {
+  const accepted = (input.constraints?.accepted ?? []).map(raw => {
+    const block = plannedBlockSchema.parse(raw);
+    assertInterval(block);
+    return block;
+  });
+  const locked = (input.constraints?.locked ?? []).map(raw => {
+    const block = timeBlockSchema.parse(raw);
+    assertInterval(block);
+    if (block.kind !== "locked") throw new Error("persisted sprint constraints must be explicit locks");
+    return block;
+  });
+  return { accepted, locked };
+}
+
 function clipBlocks(blocks: readonly TimeBlock[], start: number, end: number): TimeBlock[] {
   return blocks.flatMap(block => {
     const from = Math.max(start, Date.parse(block.start));
@@ -168,6 +185,7 @@ export function forecastSprintBudget(input: SprintBudgetForecastInput): SprintBu
   const byId = new Map(tasks.map(task => [task.id, task]));
   // Validate even ignored past/exam days; malformed constraints must not disappear silently.
   const allDays = validateDays(input);
+  const constraints = validateConstraints(input);
   const days = allDays.filter(day => day.date >= today && day.date < input.examDate);
   const windowEnd = days.at(-1)?.end ?? Math.min(nowMs, examStart);
   const warnings = new Set<string>();
@@ -177,18 +195,16 @@ export function forecastSprintBudget(input: SprintBudgetForecastInput): SprintBu
 
   const acceptedIds = new Set<string>();
   const acceptedByInterval = new Map<string, PlannedBlock>();
-  for (const day of allDays) {
-    for (const block of day.accepted) {
-      const key = JSON.stringify([block.taskId, Date.parse(block.start), Date.parse(block.end)]);
-      if (acceptedByInterval.has(key)) continue;
-      if (acceptedIds.has(block.taskId)) {
-        warnings.add("同一任务存在多个已接受时段，保留占槽且不重复预测；请检查已有安排。");
-      }
-      acceptedByInterval.set(key, block);
-      acceptedIds.add(block.taskId);
-      if (!byId.has(block.taskId)) {
-        warnings.add("部分已接受安排缺少任务归属，仅占用时间槽，未计入本课预算。");
-      }
+  for (const block of [...allDays.flatMap(day => day.accepted), ...constraints.accepted]) {
+    const key = JSON.stringify([block.taskId, Date.parse(block.start), Date.parse(block.end)]);
+    if (acceptedByInterval.has(key)) continue;
+    if (acceptedIds.has(block.taskId)) {
+      warnings.add("同一任务存在多个已接受时段，保留占槽且不重复预测；请检查已有安排。");
+    }
+    acceptedByInterval.set(key, block);
+    acceptedIds.add(block.taskId);
+    if (!byId.has(block.taskId)) {
+      warnings.add("部分已接受安排缺少任务归属，仅占用时间槽，未计入本课预算。");
     }
   }
   const accepted = [...acceptedByInterval.values()];
@@ -200,7 +216,11 @@ export function forecastSprintBudget(input: SprintBudgetForecastInput): SprintBu
     })
     .map(block => ({ start: block.start, end: block.end, kind: "free" }));
   // Absolute hard constraints also protect adjacent days when their intervals cross midnight.
-  const hardBlocks = allDays.flatMap(day => day.blocks.filter(block => block.kind !== "free"));
+  const hardBlocks = [...allDays.flatMap(day => day.blocks.filter(block => block.kind !== "free")), ...constraints.locked];
+  if (accepted.some(block => {
+    const task = byId.get(block.taskId);
+    return task && taskCourseId(task) === input.courseId && Date.parse(block.end) > examStart;
+  })) warnings.add("本课有已确认安排晚于考试开始，本次保留原安排且不重复排入；请检查并调整正式计划。");
   const pending = tasks.filter(task => task.status === "pending"
     && taskCourseId(task) === input.courseId && !acceptedIds.has(task.id)).sort(compareTasks);
   const notBefore = new Map(pending.map(task => {

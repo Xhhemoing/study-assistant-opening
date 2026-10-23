@@ -3,7 +3,7 @@ import {
   uuidSchema, type OpeningAdaptivePrefsResponse, type OpeningPlanningSettingsResponse,
   type PlannedBlock, type Scope, type SprintBudgetResponse, type TaskItem, type TimeBlock, type WeekSession,
 } from "@aistudy/contracts";
-import { addLocalDays, deriveDayBlocks, forecastSprintBudget, localDateKeyInZone, resolveWorkspaceTimeZone, taskCourseId } from "@aistudy/domain";
+import { addLocalDays, deriveDayBlocks, forecastSprintBudget, localDateKeyInZone, resolveLocalDayBounds, resolveWorkspaceTimeZone, taskCourseId } from "@aistudy/domain";
 
 export type SprintBudgetReader = {
   assertCourse(scope: Scope, courseId: string): Promise<void>;
@@ -11,13 +11,13 @@ export type SprintBudgetReader = {
   settings(scope: Scope): Promise<OpeningPlanningSettingsResponse>;
   tasks(scope: Scope): Promise<TaskItem[]>;
   timetable(scope: Scope): Promise<WeekSession[]>;
-  day(scope: Scope, date: string): Promise<{ accepted: PlannedBlock[]; hard: TimeBlock[] }>;
+  constraints(scope: Scope, input: { windowStart: string; windowEnd: string; now: string; taskIds: readonly string[] }): Promise<{ accepted: PlannedBlock[]; locked: TimeBlock[] }>;
 };
 
 /** The reader exposes no write/model operation: opening this preview must never accept a plan. */
 export function createSprintBudgetService(reader: SprintBudgetReader, clock = () => new Date()) {
   return { async read(scope: Scope, rawCourseId: string): Promise<SprintBudgetResponse> {
-    const courseId = uuidSchema.parse(rawCourseId), now = clock();
+    const courseId = uuidSchema.parse(rawCourseId).toLowerCase(), now = clock();
     await reader.assertCourse(scope, courseId);
     const [prefsRaw, settingsRaw] = await Promise.all([reader.preferences(scope), reader.settings(scope)]);
     const prefs = openingAdaptivePrefsResponseSchema.parse(prefsRaw), settings = openingPlanningSettingsResponseSchema.parse(settingsRaw);
@@ -45,11 +45,17 @@ export function createSprintBudgetService(reader: SprintBudgetReader, clock = ()
       let derived: TimeBlock[];
       try { derived = deriveDayBlocks(date, settings.settings, timetable); }
       catch { return { ...result, status: "invalid_settings" }; }
-      const saved = await reader.day(scope, date);
-      days.push({ date, blocks: [...derived, ...saved.hard.filter(block => block.kind !== "free")], accepted: saved.accepted });
+      days.push({ date, blocks: derived, accepted: [] });
     }
+    // A bounded output horizon must not hide crossing intervals or later accepts.
+    const constraints = await reader.constraints(scope, {
+      windowStart: resolveLocalDayBounds(startDate, result.timeZone).dayStart.toISOString(),
+      windowEnd: resolveLocalDayBounds(dates.at(-1)!, result.timeZone).nextDayStart.toISOString(),
+      now: now.toISOString(),
+      taskIds: tasks.filter(task => taskCourseId(task) === courseId && task.status === "pending").map(task => task.id),
+    });
     const forecast = forecastSprintBudget({ tasks, days, courseId, examDate: goal.targetDate,
-      dailyMinutes: result.dailyMinutes!, timeZone: result.timeZone, now, horizonTruncated: result.horizonTruncated });
+      dailyMinutes: result.dailyMinutes!, timeZone: result.timeZone, now, horizonTruncated: result.horizonTruncated, constraints });
     return sprintBudgetResponseSchema.parse({ ...result, ...forecast,
       tasks: tasks.filter(task => taskCourseId(task) === courseId && task.status === "pending").map(({ id, title }) => ({ id, title })),
       warnings: [...result.warnings, ...forecast.warnings],
