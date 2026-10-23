@@ -117,7 +117,7 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     {!messages.length ? <div className={`mx-auto flex w-full max-w-lg flex-1 flex-col justify-center motion-safe:animate-enter ${compact ? "py-4" : "py-12"}`}>
       <span className="mb-4 inline-flex self-start" aria-hidden="true"><AiSpark size={compact ? 28 : 36} /></span>
       <h2 className="font-serif text-xl font-medium leading-7 text-text">想弄懂什么？</h2>
-      <p className="mt-2 text-sm leading-6 text-text-2">{studyMode ? "围绕当前这一步提问，帮助会关联本次学习。" : "自由交流，或选一份材料一起读。"}</p>
+      <p className="mt-2 text-sm leading-6 text-text">{studyMode ? "围绕当前这一步提问，帮助会关联本次学习。" : "自由交流，或选一份材料一起读。"}</p>
       {onStarter || onPrompt ? <div className="mt-4 divide-y divide-line overflow-hidden rounded-xl border border-line">{assistantStarters(studyMode, queryAvailable).map(starter => <button key={starter.label} type="button" disabled={disabled} onClick={() => onStarter ? onStarter(starter) : onPrompt?.(starter.text)} className="group flex min-h-11 w-full items-center justify-between gap-3 bg-surface px-4 text-left text-sm text-text transition-colors duration-150 hover:bg-surface-2 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none"><span>{starter.label}</span><ArrowUpRight size={14} aria-hidden="true" className="text-text-3" /></button>)}</div> : null}
     </div> : <ul className="mx-auto flex w-full max-w-[72ch] flex-col gap-6">{messages.map((message, index) => {
       const saveAvailability = (onSaveSnippet || directSaveApi || onCreateCard) ? snippetSaveAvailability(message) : "hidden";
