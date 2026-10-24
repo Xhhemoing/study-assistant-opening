@@ -59,6 +59,11 @@ Name unit and integration tests `*.test.ts`/`*.test.tsx`; name browser tests `*.
 - UI 交付提供页面入口、环境/数据前提、操作步骤、预期结果和已知问题。没有用户反馈时标记“待用户浏览器验收”，不得声称浏览器通过或伪造截图证据。用户反馈问题后，Agent 定位修复并完成非浏览器回归，再交用户复验。
 - 本约定优先于既有计划和技能流程中的 Agent 浏览器验收要求；不修改或禁用现有 CI 浏览器检查，不抹去历史失败，不把待验收记为通过。
 
+## 公开仓库信息边界
+
+- 公开文档不记录本机绝对路径、主机/IP、生产拓扑、release symlink 命名、服务启动时间、进程/PID 或重启次数等运维快照；使用不含主机信息的行为描述。原始日志、真实学习资料、账号信息和部署快照留在私有位置。
+- 可公开的验证证据以精确提交、CI 链接和脱敏测试结论为主；历史快照必须标明时点，不能当作当前状态。
+
 ## Commits and Pull Requests
 
 Use Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `test:`, and follow `.agents/skills/aistudy-git-workflow/SKILL.md` for the safe Git flow. PRs should explain the behavior change, link an issue when applicable, list verification commands, call out migrations or configuration changes, and include screenshots for UI changes.
