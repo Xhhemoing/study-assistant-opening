@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 
 export type StartSuggestion = { id: string; label: string; meta?: string; href: string };
 export type StartConfiguration = { greeting: string; suggestions: StartSuggestion[]; examples?: string[] };

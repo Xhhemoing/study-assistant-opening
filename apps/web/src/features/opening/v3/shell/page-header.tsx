@@ -6,14 +6,15 @@ import { ShellHeaderTools } from "./header-tools-slot";
 /**
  * 页头 = 顶栏：标题直接放在顶栏左侧、贴近顶部与左缘，不再单独占一块大标题区，把面积留给核心内容。
  * 一行：h1 + 可选一行事实 + 一个主操作 + 工具。滚动后顶栏变玻璃。
- * 有意不提供长 description：必要说明放在相关内容旁。sharedTitle 时标题承接来源行（共享元素过渡）。
+ * 有意不提供长 description：必要说明放在相关内容旁。
+ * 页面切换时标题平滑过渡到新标题；从带 vtSource 的列表行进入时，标题从那一行「飞」过来（共享元素）。
  */
 export function PageHeader({ title, fact, action, tools = <ShellHeaderTools />, sharedTitle = false, label }: { title: ReactNode; label?: string; fact?: ReactNode; action?: ReactNode; tools?: ReactNode; sharedTitle?: boolean }) {
   return (
     <TopBar label={label ?? (typeof title === "string" || typeof title === "number" ? `${title} 顶栏` : "页面顶栏")}
       title={
         <div className="flex min-w-0 flex-col sm:flex-row sm:items-baseline sm:gap-3">
-          <h1 className={`truncate text-title font-semibold tracking-[-0.01em] text-text ${sharedTitle ? "[view-transition-name:object-title]" : ""}`}>{title}</h1>
+          <h1 data-page-title={sharedTitle ? "shared" : "page"} className="truncate text-title font-semibold tracking-[-0.01em] text-text">{title}</h1>
           {fact ? <p className="truncate text-meta text-text-2">{fact}</p> : null}
         </div>
       }

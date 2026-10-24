@@ -2,13 +2,14 @@
 
 import type { CourseGoal, PlanDraft, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi, type TodayPlanRead } from "../client/api";
 import { useConversationObjectHref } from "../assistant/conversation-object-context";
 import { LoadingRows, PageHeader, ui } from "../design/ui";
 import { planAcceptFailure } from "../planning/plan-accept-errors";
 import { clearSprintCheckpoint, readSprintCheckpoint, resumeSprintAcceptance, saveSprintCheckpoint, sprintAcceptance, type SprintCheckpoint } from "./sprint-checkpoint";
+import { SprintBudgetPreview } from "./sprint-budget-preview";
 import { sprintCandidateBlocks, sprintPlanChanges, sprintTaskHref, sprintTaskTitle, sprintTodayTasks } from "./sprint-plan-model";
 
 type SprintApi = Pick<OpeningApi, "getPlanningSettings" | "getAdaptivePrefs" | "getToday" | "listTasks" | "proposePlan" | "acceptPlan" | "rejectPlan">;
@@ -158,6 +159,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
         <section aria-label="调整安排" className="space-y-3">
           <button type="button" className={ui.quiet} aria-expanded={adjusting} aria-controls="sprint-adjustments" disabled={busy} onClick={() => { if (!flight.current) setAdjusting(value => !value); }}>{adjusting ? "收起调整" : "调整安排"}</button>
           {adjusting ? <div id="sprint-adjustments" className="space-y-4">
+            <SprintBudgetPreview key={`${courseId}/${data.plan.acceptedVersion}`} courseId={courseId} />
             <p className="text-xs text-text-2">候选包含今天所有课程的共同安排。确认应用后才会替换今天的计划。</p>
             <fieldset disabled={busy || pendingApplication || Boolean(recoveryProblem)} className="space-y-2"><legend className="sr-only">候选安排</legend>{options.map((option, index) => <label key={option.id} className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border border-line p-3 has-[:checked]:border-accent"><input type="radio" name="sprint-option" checked={previewId === option.id} onChange={() => { if (!flight.current && !checkpointRef.current?.acceptInput && !recoveryProblem) {
               try { remember({ version: 1, courseId, date: data.plan.date, draft: option, acceptInput: null }); setPreviewId(option.id); setError(""); }

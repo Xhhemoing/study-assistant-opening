@@ -1,5 +1,5 @@
 import { ArrowLeft } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../../../../../features/opening/v3/motion/view-transition";
 import { ExportMenu } from "../../../../../features/library/export-menu";
 import { BackupMenu } from "../../../../../features/library/backup-menu";
 import { PageHeading, ui } from "../../../../../features/opening/design/ui";

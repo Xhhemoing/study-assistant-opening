@@ -1,6 +1,6 @@
 import type { Citation, ConversationResume, EphemeralTurnInput, TurnRecord } from "@aistudy/contracts";
 
-import { queryEvidenceLinks, type QueryEvidenceLink } from "./query-evidence-links";
+import { queryEvidenceLinks, querySteps, type QueryEvidenceLink, type QueryStep } from "./query-evidence-links";
 import type { StreamingReply } from "./job-stream";
 
 export type ChatMessageView = {
@@ -15,6 +15,8 @@ export type ChatMessageView = {
   savedTurnId?: string;
   systemQuery?: boolean;
   queryEvidenceLinks?: readonly QueryEvidenceLink[];
+  /** 回答前读过的记录（Agent 步骤行） */
+  querySteps?: readonly QueryStep[];
   /** True when this assistant turn had selected materials / context intent (T02 general label). */
   hadMaterialContext?: boolean;
   /** Provider text has already appeared incrementally; never replay a reveal animation. */
@@ -68,6 +70,7 @@ export function messagesFromTurns(turns: readonly TurnRecord[]): ChatMessageView
     savedTurnId: turn.role === "assistant" ? turn.id : undefined,
     systemQuery: Boolean(turn.systemQuery),
     queryEvidenceLinks: turn.role === "assistant" ? queryEvidenceLinks(turn.systemQuery) : [],
+    querySteps: turn.role === "assistant" ? querySteps(turn.systemQuery) : [],
   }));
 }
 

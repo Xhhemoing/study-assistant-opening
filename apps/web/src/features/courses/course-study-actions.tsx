@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { localDateKeyInZone, resolveGoalLearningContext } from "@aistudy/domain";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";

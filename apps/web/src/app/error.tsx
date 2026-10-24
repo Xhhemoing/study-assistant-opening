@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../features/opening/v3/motion/view-transition";
 import { ErrorState, ui } from "@aistudy/ui";
 
 export default function ErrorPage({ reset }: { error: Error & { digest?: string }; reset: () => void }) {

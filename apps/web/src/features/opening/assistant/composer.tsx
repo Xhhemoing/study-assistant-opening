@@ -94,7 +94,7 @@ export function Composer({ compact = false, practiceMode = false, questionMode =
       // The parent shows the error; retain this intent's idempotency key.
     } finally { locked.current = false; setSending(false); }
   }
-  return <form ref={form} aria-busy={Boolean(pending || sending)} className={`shrink-0 ${startMode ? "" : "border-t border-line/70 px-3 py-2 sm:px-5"}`} onSubmit={handleSubmit}>
+  return <form ref={form} aria-busy={Boolean(pending || sending)} className={`shrink-0 rounded-panel glass [--glass-bg:var(--glass-bg-strong)] px-3 py-2 sm:px-4 ${startMode ? "" : "mx-2 mb-2 sm:mx-4 sm:mb-3"}`} onSubmit={handleSubmit}>
     <div className="mb-1 flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-text-2">
       {onPrivacyChange && !practiceMode ? <details>
         <summary className="flex min-h-8 cursor-pointer items-center gap-1.5 rounded px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"><LockKeyhole size={13} aria-hidden />{effectivePrivacy === "saved" ? "保存对话" : "临时对话"}<span className="text-text-3">· 更改</span></summary>

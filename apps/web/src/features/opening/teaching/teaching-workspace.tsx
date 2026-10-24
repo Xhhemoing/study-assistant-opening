@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowLeft, ArrowRight, BookOpen, Focus, Maximize2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {

@@ -1,7 +1,7 @@
 "use client";
 
 import type { KnowledgeNode } from "@aistudy/contracts";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 
 export const knowledgeKindLabel: Record<KnowledgeNode["kind"], string> = { chapter: "章节", concept: "概念", procedure: "方法", problem_type: "题型" };

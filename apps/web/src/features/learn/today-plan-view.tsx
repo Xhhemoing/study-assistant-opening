@@ -1,7 +1,7 @@
 "use client";
 
 import { CalendarCheck, Check, Circle, LoaderCircle, Pin, RefreshCw, SkipForward } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useCallback, useEffect, useState } from "react";
 import type { PlannedTask, TodayPlan } from "@aistudy/contracts";
 import { EmptyState, PageHeading, ui } from "../opening/design/ui";

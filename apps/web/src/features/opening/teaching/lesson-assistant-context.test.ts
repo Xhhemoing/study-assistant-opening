@@ -8,11 +8,13 @@ function context(): TeachingToolsContext {
 it("keeps a unique pinned source and current activity identity on explanation selections", () => {
   expect(teachingAssistantContext(context())).toMatchObject({ blockedReason: undefined, context: { courseId: id, activityId: id, blockId: id, contentVersion: 3, sourceId: id, sourceVersion: 2 } });
 });
-it("does not bypass source choice or missing source-version guards", () => {
+it("keeps explanations askable but never pins an ambiguous or unversioned source", () => {
   const value = context(); value.sourceRefs.push({ sourceId: id, version: 3 });
-  expect(teachingAssistantContext(value).blockedReason).toContain("选定");
-  value.sourceRefs = [{ sourceId: id }]; expect(teachingAssistantContext(value).blockedReason).toContain("版本暂不可核实");
-  value.sourceRefs = []; expect(teachingAssistantContext(value).blockedReason).toContain("没有可锁定");
+  expect(teachingAssistantContext(value)).toMatchObject({ blockedReason: undefined, context: { courseId: id, activityId: id } });
+  expect(teachingAssistantContext(value).context.sourceId).toBeUndefined();
+  value.sourceRefs = [{ sourceId: id }]; expect(teachingAssistantContext(value).blockedReason).toBeUndefined();
+  expect(teachingAssistantContext(value).context.sourceId).toBeUndefined();
+  value.sourceRefs = []; expect(teachingAssistantContext(value).blockedReason).toBeUndefined();
 });
 it("blocks generic question help until the real attempt is available", () => {
   const value = { ...context(), isQuestion: true };
@@ -23,8 +25,9 @@ it("blocks generic question help until the real attempt is available", () => {
   expect(teachingAssistantContext({ ...value, contentVersion: 4 }).learningAttempt).toBeNull();
   expect(teachingAssistantContext({ ...value, activity: { ...value.activity, courseId: null } }).learningAttempt).toBeNull();
 });
-it("separates span retest and new-evidence entries, and blocks unavailable demonstrations", () => {
+it("separates span retest and new-evidence entries; demonstrations are askable, unstarted questions are not", () => {
   expect(spanPracticeEntryKey(id, "self_study", "reserved:auto", id)).not.toBe(spanPracticeEntryKey(id, "self_study", "reserved:auto", undefined, id));
-  expect(spanAssistantContext(id, true, null, false)).toMatchObject({ learningAttempt: null, blockedReason: expect.any(String) });
+  expect(spanAssistantContext(id, true, null, false)).toMatchObject({ learningAttempt: null, blockedReason: undefined, context: { courseId: id } });
+  expect(spanAssistantContext(id, true, null, false).context).not.toHaveProperty("attemptId");
   expect(spanAssistantContext(id, false, null, false)).toMatchObject({ learningAttempt: null, blockedReason: expect.any(String) });
 });

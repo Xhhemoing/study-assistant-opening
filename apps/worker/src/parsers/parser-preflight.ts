@@ -17,7 +17,9 @@ export async function preflightParser(config: ParserConfig = loadParserConfig())
   }
   const runner = createNodeRunner(config);
   try {
-    const result = await runner(["-m", "opening_parser", "--check"], AbortSignal.timeout(30_000));
+    // Cold Docling/Torch imports took 70s on the shared production host.
+    // Keep a bounded preflight, but do not reject a healthy cold parser at 30s.
+    const result = await runner(["-m", "opening_parser", "--check"], AbortSignal.timeout(120_000));
     if (result.exitCode !== 0) throw new Error(result.stderr || `exit ${result.exitCode}`);
   } catch (error) {
     throw new Error(`Parser startup failed (${config.pythonExecutable} -m opening_parser --check): ${String(error)}. Check PARSER_PYTHON/PARSER_CWD and install services/parser/requirements-lock.txt.`);

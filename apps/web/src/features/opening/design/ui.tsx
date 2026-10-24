@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { ReactNode } from "react";
 import { ArrowUpRight, ClipboardCheck, Layers2, Link2, Notebook, Sun } from "lucide-react";
 

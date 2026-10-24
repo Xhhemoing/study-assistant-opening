@@ -57,6 +57,7 @@ export {
   expandWeekSessions,
   normalizeWeekSessions,
 } from "./opening/timetable";
+export { forecastSprintBudget } from "./opening/sprint-budget";
 export { deriveDayBlocks } from "./opening/day-blocks";
 export {
   resolveLocalDayBounds,

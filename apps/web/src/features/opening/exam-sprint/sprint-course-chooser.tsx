@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useConversationObjectHref } from "../assistant/conversation-object-context";
 import { EmptyState, LoadError, LoadingRows, PageHeader, ui } from "../design/ui";
 import { hasStringFields, useJsonList } from "../design/use-json-list";

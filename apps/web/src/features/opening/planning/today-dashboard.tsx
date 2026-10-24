@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TaskQueueRefreshContext } from "./task-status-control";
 import { buttonClass, EmptyState, ui } from "../design/ui";
@@ -31,6 +31,7 @@ import { useNextStepMetrics } from "./use-next-step-metrics";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 import { ASSISTANT_OPEN_EVENT } from "../assistant/assistant-entry";
 import { Sparkles } from "lucide-react";
+import { finishedTodayActivity } from "./today-finished";
 
 /** 一键学习会话入口：连续复习 → 当前学习单元。 */
 export function todaySessionHref(next: { href: string; label: string }): string {
@@ -344,12 +345,15 @@ export function TodayDashboard({
   if (state.kind === "loggedOut" || state.kind === "error") {
     return <TodayResumeBody state={state} />;
   }
+  // 今天已学完一节且没有进行中的小节：卡片说清楚已学完，主按钮改为接着学下一节。
+  const finishedToday = !currentActivity && currentCourse && !state.continueItem ? finishedTodayActivity(activities, currentCourse.id, timeZone) : null;
+  const courseStudyHref = currentCourse ? `/opening/courses/${encodeURIComponent(currentCourse.id)}/study${finishedToday ? `?after=${encodeURIComponent(finishedToday.id)}` : ""}` : "";
   // F1 一键学习会话：有到期卡片时，主按钮先进入连续复习，完成后直接接到当前学习单元。
   const sessionStudy = currentActivity?.courseId
     ? { href: `/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`, label: currentActivity.intentSummary }
-    : !currentActivity && currentCourse ? { href: `/opening/courses/${encodeURIComponent(currentCourse.id)}/study`, label: currentCourse.title } : null;
+    : !currentActivity && currentCourse ? { href: courseStudyHref, label: currentCourse.title } : null;
   const sessionPrimary = sessionStudy && dueCardCount > 0
-    ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>开始学习 · 先复习 {dueCardCount} 张卡</Link>
+    ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>{finishedToday ? `先复习 ${dueCardCount} 张卡，再学下一节` : `开始学习 · 先复习 ${dueCardCount} 张卡`}</Link>
     : null;
   const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "今日学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
   const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : pendingReviewCount === 0 ? "hidden" : "group-data-[focus=true]/workspace:hidden"}`}>
@@ -372,6 +376,7 @@ export function TodayDashboard({
             courseTitle={courseTitle}
             course={currentCourse}
             timeZone={timeZone}
+            finished={finishedToday}
             activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
             resume={learningResume}
             primaryAction={sessionPrimary ?? (currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
@@ -384,7 +389,7 @@ export function TodayDashboard({
               >
                 {ctaBusy ? "处理中…" : ctaLabel}
               </button>
-            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentCourse.id)}/study`} data-today-primary-cta="true">开始学习</Link> : null)}
+            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={courseStudyHref} data-today-primary-cta="true">{finishedToday ? "学下一节" : "开始学习"}</Link> : null)}
             secondaryAction={
               <Link href={assistantHref} className={ui.quiet}>
                 自由对话

@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { BookOpen } from "lucide-react";
 import type { ReactNode } from "react";
 import type { LearningResume } from "@aistudy/contracts";
@@ -17,7 +17,9 @@ export function continuePosition(activity: ActivityContext | null | undefined, r
   return index < 0 ? null : { current: index + 1, total: steps.length };
 }
 
-export function ContinueCard({ item, activity, courseTitle, course, timeZone, resume, primaryAction, secondaryAction }: {
+export function ContinueCard({ item, activity, courseTitle, course, timeZone, resume, primaryAction, secondaryAction, finished }: {
+  /** 今天在当前课程里已学完的最近一节（没有进行中的小节时才展示）。 */
+  finished?: { title: string; count: number } | null;
   item?: TodayResumeState["continueItem"];
   activity?: ActivityContext | null;
   resume?: LearningResume | null;
@@ -34,13 +36,15 @@ export function ContinueCard({ item, activity, courseTitle, course, timeZone, re
   const position = continuePosition(activity, resume);
   const math = continueMathObject(activity, resume);
   const sourceCount = Object.keys(item?.sourceVersions ?? {}).length;
+  const done = !activity && currentCourse && finished ? finished : null;
   return <article aria-label="继续学习" className="rounded-2xl border border-line bg-surface px-5 py-5 shadow-sm transition-transform duration-200 motion-safe:hover:-translate-y-0.5 motion-reduce:transition-none" data-continue-card="true">
     <div className="flex items-start gap-4">
       <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent"><BookOpen size={22} aria-hidden="true" /></span>
       <div className="min-w-0 flex-1">
-        <p className="text-xs text-text-3">{activity ? "继续这一节" : item ? "上次保存的对话" : "你的学习起点"}</p>
+        <p className="text-xs text-text-3">{activity ? "继续这一节" : done ? (done.count > 1 ? `今天已学完 ${done.count} 节` : "今天已学完一节") : item ? "上次保存的对话" : "你的学习起点"}</p>
         {courseId && title ? <p className="mt-1 text-xs font-medium text-accent">{title}</p> : null}
-        <h2 className="mt-1 break-words font-serif text-xl leading-8 text-text">{activity ? `继续学习：${activity.title}` : item ? `上次对话：${item.title}` : currentCourse ? "今天先学一个小节" : "从一个问题、一次练习或一篇笔记开始"}</h2>
+        <h2 className="mt-1 break-words font-serif text-xl leading-8 text-text">{activity ? `继续学习：${activity.title}` : done ? `已学完：${done.title}` : item ? `上次对话：${item.title}` : currentCourse ? "今天先学一个小节" : "从一个问题、一次练习或一篇笔记开始"}</h2>
+        {done ? <p className="mt-2 text-sm leading-6 text-text-2">可以接着学下一节，或者先复习刚学的内容。</p> : null}
         {goalSummary ? <p className="mt-2 text-sm leading-6 text-text-2">{goalSummary}</p> : null}
         {position ? <div className="mt-3 space-y-2"><p className="text-xs text-text-2">上次停在第 {position.current} / {position.total} 步</p><progress className="h-1 w-full max-w-80 overflow-hidden rounded-full accent-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" aria-label="上次阅读位置" value={position.current} max={position.total} /></div> : null}
         {!activity && item ? <p className="mt-2 text-xs leading-6 text-text-2">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}

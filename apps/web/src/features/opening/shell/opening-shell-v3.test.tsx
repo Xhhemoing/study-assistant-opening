@@ -14,6 +14,7 @@ vi.mock("next/link", () => ({ default: ({ children, ...props }: ComponentProps<"
 vi.mock("../v3/motion/view-transition", () => ({
   TransitionLink: ({ children, ...props }: ComponentProps<"a">) => createElement("a", props, children),
   ViewTransitionBoundary: () => null,
+  runViewTransition: (update: () => void) => update(),
 }));
 vi.mock("../../search/command-palette", () => ({ CommandPalette: () => null }));
 vi.mock("../assistant/assistant-drawer", () => ({ AssistantDrawer: () => null }));
@@ -56,6 +57,7 @@ function desktopNavigation() { return host.querySelector('nav[aria-label="学习
 describe("production V3 shell business wiring", () => {
   it.each([
     ["/opening/today", "", "/opening/today"],
+    ["/opening/agent", "", "/opening/agent"],
     ["/opening/review", "", "/opening/review"],
     ["/opening/review", "tab=cards", "/opening/cards"],
     ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],

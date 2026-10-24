@@ -2,7 +2,7 @@
 
 import { cardReviewKind, type GradeReviewResponse, type ReviewGrade, type ReviewQueueItem } from "@aistudy/contracts";
 import { Check, CircleHelp, RefreshCw, RotateCcw, Sparkles } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { studyConversationHref } from "../assistant/study-conversation-context";

@@ -2,7 +2,7 @@
 
 import { openingAiSettingsResponseSchema, type OpeningAiSettingsResponse } from "@aistudy/contracts";
 import { Check, LoaderCircle, WandSparkles } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useRef, useState } from "react";
 import { ProviderMediaBudgetFields } from "./provider-media-budget-fields";
 import { ui } from "../opening/design/ui";

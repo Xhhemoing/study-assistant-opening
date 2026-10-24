@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowUpRight, BookOpen, Download } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { Citation } from "@aistudy/contracts";
 import { ArtifactView } from "@aistudy/jingwei/react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -117,13 +117,21 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     {!messages.length ? <div className={`mx-auto flex w-full max-w-lg flex-1 flex-col justify-center motion-safe:animate-enter ${compact ? "py-4" : "py-12"}`}>
       <span className="mb-4 inline-flex self-start" aria-hidden="true"><AiSpark size={compact ? 28 : 36} /></span>
       <h2 className="font-serif text-xl font-medium leading-7 text-text">想弄懂什么？</h2>
-      <p className="mt-2 text-sm leading-6 text-text-2">{studyMode ? "围绕当前这一步提问，帮助会关联本次学习。" : "自由交流，或选一份材料一起读。"}</p>
+      <p className="mt-2 text-sm leading-6 text-text">{studyMode ? "围绕当前这一步提问，帮助会关联本次学习。" : "自由交流，或选一份材料一起读。"}</p>
       {onStarter || onPrompt ? <div className="mt-4 divide-y divide-line overflow-hidden rounded-xl border border-line">{assistantStarters(studyMode, queryAvailable).map(starter => <button key={starter.label} type="button" disabled={disabled} onClick={() => onStarter ? onStarter(starter) : onPrompt?.(starter.text)} className="group flex min-h-11 w-full items-center justify-between gap-3 bg-surface px-4 text-left text-sm text-text transition-colors duration-150 hover:bg-surface-2 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent motion-reduce:transition-none"><span>{starter.label}</span><ArrowUpRight size={14} aria-hidden="true" className="text-text-3" /></button>)}</div> : null}
     </div> : <ul className="mx-auto flex w-full max-w-[72ch] flex-col gap-6">{messages.map((message, index) => {
       const saveAvailability = (onSaveSnippet || directSaveApi || onCreateCard) ? snippetSaveAvailability(message) : "hidden";
       const lastAssistant = message.role === "assistant" && index === messages.length - 1 && (!message.status || message.status === "complete");
       return <li key={message.id} className={message.role === "user" ? "ml-4 self-end rounded-xl bg-surface-2 px-4 py-3 text-text sm:ml-12" : "w-full min-w-0 motion-safe:animate-enter"}>
       <p className={`mb-2 flex items-center gap-2 text-xs font-medium text-text-2`}>{message.role === "user" ? "你" : <><AiSpark size={20} />学习助理</>}</p>
+      {message.role === "assistant" && message.querySteps?.length ? <details className="mb-2 text-xs text-text-2" data-query-steps>
+        <summary className="inline-flex min-h-7 cursor-pointer list-none items-center gap-1.5 rounded-pill px-2 hover:bg-text/5 [&::-webkit-details-marker]:hidden">
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-accent" />先查了 {message.querySteps.map(step => step.label).join("、")}
+        </summary>
+        <ol aria-label="助理查询步骤" className="mt-1 space-y-0.5 border-l border-line pl-3">
+          {message.querySteps.map((step, stepIndex) => <li key={`${step.name}-${stepIndex}`} className="flex items-center gap-2"><span className={step.ok ? "text-text" : "text-warn"}>{step.label}</span><span className="text-text-3">· {step.outcome}</span></li>)}
+        </ol>
+      </details> : null}
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
         ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}

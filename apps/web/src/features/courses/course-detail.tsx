@@ -1,7 +1,8 @@
 "use client";
 
+import { builtInLessonsForCourse } from "./built-in-lessons";
 import { ArrowLeft, BookOpen } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from "../opening/design/ui";
@@ -268,7 +269,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="units">
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
           <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
-          <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">概念课示例</h2><p className="text-sm leading-6 text-text-2">用一节完整的线性代数课体验图示、思考与独立练习。示例不会替换本课程的任务或学习进度。</p><Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/study/matrix`)}>矩阵怎样变换平面向量</Link></section>
+          {builtInLessonsForCourse(id, course).length ? <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">现成的线性代数课</h2><p className="text-sm leading-6 text-text-2">图示、思考与独立练习都已备好，不会替换本课程的任务或学习进度。</p><div className="flex flex-wrap gap-2">{builtInLessonsForCourse(id, course).map(lesson => <Link key={lesson.id} className={ui.secondary} href={objectHref(lesson.href)}>{lesson.label}</Link>)}</div></section> : null}
         </CoursePanel>
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>

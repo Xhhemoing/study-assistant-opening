@@ -4,7 +4,7 @@ import { zh } from "@blocknote/core/locales";
 import { promotionResponseSchema } from "@aistudy/contracts";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
 import { ArrowLeft, Check, Clock3, PanelRight, Redo2, Save, Undo2 } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { BacklinksPanel } from "./backlinks-panel";
@@ -150,7 +150,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   }
 
   async function saveDocument() {
-    if (!document || !draft || saveState === "saving" || saveInFlight.current || conflictRef.current) return;
+    if (!document || !draft || saveState === "saved" || saveState === "saving" || saveInFlight.current || conflictRef.current) return;
     saveInFlight.current = true;
     const requestVersion = editVersionRef.current;
     setSaveState("saving");

@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useConversationObjectHref } from "../opening/assistant/conversation-object-context";
 import { EmptyState, ui } from "../opening/design/ui";
 import { ExamSprintView } from "../opening/exam-sprint/sprint-view";

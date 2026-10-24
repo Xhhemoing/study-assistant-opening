@@ -5,7 +5,7 @@
 
 "use client";
 
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ui } from "../design/ui";
 
 export function TeachingLoopTrialEmpty({

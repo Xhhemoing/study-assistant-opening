@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDownUp, ArrowUpRight, FileText, Search } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useMemo, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, ui } from "../opening/design/ui";
 import { displayDate, hasStringFields, useJsonList } from "../opening/design/use-json-list";

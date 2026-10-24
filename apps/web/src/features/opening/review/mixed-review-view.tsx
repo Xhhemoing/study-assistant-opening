@@ -1,5 +1,5 @@
 "use client";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useConversationObjectHref } from "../assistant/conversation-object-context";

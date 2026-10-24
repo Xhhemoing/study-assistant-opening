@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import Link from "next/link";
+import { TransitionLink } from "../v3/motion/view-transition";
 import { ShellNavLink } from "./shell-nav-link";
 
 describe("ShellNavLink soft navigation", () => {
-  it("delegates internal navigation to Next Link", () => {
+  it("delegates internal navigation to the transition-aware Next Link", () => {
     const node = ShellNavLink({ href: "/opening/assistant", children: "助理" });
-    expect(node.type).toBe(Link);
+    expect(node.type).toBe(TransitionLink);
     expect(node.props.href).toBe("/opening/assistant");
     expect(node.props.onClick).toBeUndefined();
   });

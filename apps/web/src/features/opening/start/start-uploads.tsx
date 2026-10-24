@@ -1,7 +1,7 @@
 "use client";
 
 import { Camera, Paperclip, X } from "lucide-react";
-import Link from "next/link";
+import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useMemo, useRef, useState } from "react";
 import type { SourceRecord } from "@aistudy/contracts";
 import { resolveUploadPutUrl, type OpeningApi } from "../client/api";

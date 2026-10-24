@@ -2,7 +2,7 @@
 
 import { FilePlus2, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import { useEffect, useRef, useState } from "react";
 import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
 import { createSingleFlight } from "./single-flight";
