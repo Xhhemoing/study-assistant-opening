@@ -6,6 +6,7 @@ import { assistanceLevelSchema, observationOutcomeSchema, publicVerdictSourceSch
 import { referenceCheckInputSchema, sourceVersionsSchema } from "./learning-evidence";
 import { matrixExerciseInputSchema, matrixExerciseSpecSchema } from "./matrix-evaluation";
 import { aiGradingWorkSourceSchema } from "./ai-evaluation";
+import { materialQuestionIdentitySchema } from "./material-manifest";
 
 export const learningAttemptProblemInputSchema = z.object({
   sourceId: uuidSchema.optional(),
@@ -23,9 +24,11 @@ export const learningAttemptCreateInputSchema = z.object({
   contextAnchor: studyContextAnchorSchema.optional(),
   spanExercise: spanExerciseInputSchema.optional(),
   matrixExercise: matrixExerciseInputSchema.optional(),
+  materialQuestion: materialQuestionIdentitySchema.optional(),
 }).strict().refine((input) => !(input.problemId && input.problem), "choose an existing problem or a new problem")
   .refine(input => !input.spanExercise || !(input.matrixExercise || input.problemId || input.problem || input.teachingBlock || input.requirementKey), "span exercise sets its own question and requirement")
-  .refine(input => !input.matrixExercise || !(input.problemId || input.problem || input.teachingBlock || input.requirementKey), "matrix exercise sets its own question and requirement");
+  .refine(input => !input.matrixExercise || !(input.problemId || input.problem || input.teachingBlock || input.requirementKey), "matrix exercise sets its own question and requirement")
+  .refine(input => !input.materialQuestion || !(input.problemId || input.problem || input.teachingBlock || input.spanExercise || input.matrixExercise), "资料题必须使用已保存的唯一身份");
 export const learningAttemptSubmitInputSchema = z.object({
   clientKey: z.string().min(8).max(200), answer: z.string().max(20_000),
   outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,

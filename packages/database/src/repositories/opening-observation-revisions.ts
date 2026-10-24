@@ -3,7 +3,8 @@ import { refreshOpeningLearningEligibility } from "./opening-learning-eligibilit
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
-import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, observationRevisionInputSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
+import { aiEvaluationSchema, aiGradingInputSchema, aiGradingMaterialProvenanceSchema, aiGradingProposalSchema, observationRevisionInputSchema, type AiGradingInput, type AiGradingMaterialProvenance, type AiGradingProposal, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
+import { assertOpeningMaterialProvenance } from "./opening-material-assessment";
 import { admitLearningSources, learnerVerdictSource, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
@@ -14,11 +15,12 @@ export { readOpeningObservationHistory } from "./opening-observation-revision-hi
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
 export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, raw: ObservationRevisionInput,
-  options: { aiGrading?: { input: AiGradingInput; proposal: AiGradingProposal; modelLabel: string | null } } = {},
+  options: { aiGrading?: { input: AiGradingInput; proposal: AiGradingProposal; modelLabel: string | null; materialProvenance?: AiGradingMaterialProvenance } } = {},
 ): Promise<ObservationRevisionResult> {
   const input = observationRevisionInputSchema.parse(raw);
   const grading = options.aiGrading ? { input: aiGradingInputSchema.parse(options.aiGrading.input),
-    proposal: aiGradingProposalSchema.parse(options.aiGrading.proposal), modelLabel: options.aiGrading.modelLabel } : null;
+    proposal: aiGradingProposalSchema.parse(options.aiGrading.proposal), modelLabel: options.aiGrading.modelLabel,
+    ...(options.aiGrading.materialProvenance === undefined ? {} : { materialProvenance: aiGradingMaterialProvenanceSchema.parse(options.aiGrading.materialProvenance) }) } : null;
   const intent = JSON.parse(JSON.stringify({ ...input, ...(grading ? { aiGrading: grading } : {}) }));
   return sql.begin(async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
@@ -56,6 +58,9 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     if (!head || !courseIds.includes(String(head.course_id))) throw learningError("CONFLICT", "observation attribution changed");
     const previous = await qualifyObservationRevision(tx, scope, head);
     const gradingContext = grading ? await readOpeningAiGradingContext(tx, scope, grading.input) : null;
+    // The source/manifest writer takes the same workspace lock. Compare inside
+    // the final head transaction, not only in the pre-send/pre-apply context read.
+    if (grading?.materialProvenance && gradingContext) assertOpeningMaterialProvenance(grading.materialProvenance, gradingContext.materialProvenance);
     if (grading && (input.revisionKind !== "replace" || grading.input.observationId !== headId
       || replacement?.answer !== previous.answer || replacement.assistance !== previous.assistance
       || replacement.courseId !== undefined || replacement.skillLabel !== undefined || replacement.requirementKey !== undefined)) {
@@ -102,6 +107,7 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       outcome: acceptedAiGradingOutcome(checkedProposal), observationId: id, attemptId: previous.attemptId,
       problemId: previous.problemId, itemVersionId: previous.itemVersionId, requirementKey: previous.requirementKey ?? null,
       evaluatorVersion: "ai-rubric-v1", modelLabel: grading.modelLabel, evaluatedAt: new Date(clock!.at as Date).toISOString(),
+      ...grading.materialProvenance,
       ...(gradingContext?.workSource ? { workSource: gradingContext.workSource } : {}) }) : null;
     const sourceIds = gradingContext?.sourceIds ?? head.source_ids;
     const sourceVersions = gradingContext?.sourceVersions ?? head.source_versions;
@@ -131,6 +137,7 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     await tx`UPDATE opening_learning_observations SET effective_head_id=${id} WHERE id=${root.id}`;
     if (answerChanged && head.attempt_id && head.item_version_id && head.problem_id
       && (replacement?.answer.trim() || workSource)) {
+      // The shared enqueue owner checks disputes for original and revised answers.
       await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: String(root.id), answerRevision });
     }
     const identity = (observation: Pick<LearningObservation, "courseId" | "requirementKey" | "skillLabel">) => ({ courseId: observation.courseId, requirementKey: observation.requirementKey ?? null, skillLabel: observation.skillLabel });

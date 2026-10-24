@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
+import { assertTeachingMaterialsReadable } from "./opening-material-teaching";
 import type {
   ActivitySpec,
   ActivitySpecClientInit,
@@ -492,6 +493,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       const activity = await assertOwnedActivity(sql, scope, activityId);
       const spec = await this.getActivitySpec(scope, activityId);
       if (!spec) return null;
+      await assertTeachingMaterialsReadable(sql,scope,spec.sourceRefs);
 
       const revision = await library.getRevision({
         workspaceId: scope.workspaceId,
@@ -667,6 +669,9 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       documentId: string,
       revisionNumber: number,
     ): Promise<RevisionRecord> {
+      const refs = await sql`SELECT source_refs FROM opening_teaching_activity_specs WHERE workspace_id=${scope.workspaceId}
+        AND owner_user_id=${scope.ownerUserId} AND document_id=${documentId}`;
+      for (const row of refs) await assertTeachingMaterialsReadable(sql,scope,asSourceRefs(row.source_refs));
       return library.getRevision({
         workspaceId: scope.workspaceId,
         documentId,

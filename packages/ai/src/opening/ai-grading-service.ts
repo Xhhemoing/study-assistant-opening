@@ -1,8 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
 import { buildAnswerGradingInput } from "./answer-grading";
 import { isBudgetReplayError } from "./budgeted-call";
 import { OpeningModelRoutingError } from "./model-routing";
 import type { ModelGateway } from "./model-gateway";
-import { aiGradingInputSchema, aiGradingProposalSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { aiGradingInputSchema, aiGradingMaterialProvenanceSchema, aiGradingProposalSchema, type AiGradingInput, type AiGradingMaterialProvenance, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
 /** Structural boundary: AI must not import database (database already uses AI). */
@@ -13,8 +14,9 @@ export type OpeningAiGradingServiceDeps = {
       stem: string; referenceText: string; misconceptions: TeachingMisconception[];
       workSource: { id: string; version: number; physicalPage: number } | null;
       answerRevision: number; operationId: string;
+      materialProvenance: AiGradingMaterialProvenance;
     }>;
-    apply(scope: Scope, input: AiGradingInput, proposal: AiGradingProposal, modelLabel: string | null): Promise<LearningObservation>;
+    apply(scope: Scope, input: AiGradingInput, proposal: AiGradingProposal, modelLabel: string | null, materialProvenance: AiGradingMaterialProvenance): Promise<LearningObservation>;
     ledger(scope: Scope, operationId: string): Promise<"unsent" | "in_flight" | "unknown" | "completed" | "blocked">;
     /** Optional for older adapters. Only an exact, scope/purpose/parent-matching
      * confirmed release may bypass the old reservation's model/price snapshot. */
@@ -68,6 +70,9 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
       const input = aiGradingInputSchema.parse(raw);
       const context = await deps.repository.context(scope, input);
       if (context.existing) return context.existing;
+      // Clone the original dependencies that produced the prompt, never replace
+      // them with a newer context merely because the question/answer ids match.
+      const materialProvenance = aiGradingMaterialProvenanceSchema.parse(context.materialProvenance);
       const imageParts = context.workSource ? await deps.images(scope, {
         sourceIds: [context.workSource.id], sourceVersions: { [context.workSource.id]: context.workSource.version },
         physicalPage: context.workSource.physicalPage,
@@ -80,7 +85,12 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
         await callGrader(deps, scope, imageParts.length ? "practice.grade-photo" : "practice.grade-text", {
           budget: deps.budget(scope), operationId: context.operationId,
           resultRef: `ai-grade:${input.observationId}`, signal,
-          beforeSend: async () => { await deps.repository.context(scope, input); },
+          beforeSend: async () => {
+            const live = await deps.repository.context(scope, input);
+            if (!isDeepStrictEqual(materialProvenance, live.materialProvenance)) {
+              throw conflict("批改使用的答案或资料分类已修订，原答案已保存，请核验后重试。");
+            }
+          },
           onModel: model => { modelLabel = model.modelSnapshot.modelName; },
           input: buildAnswerGradingInput({ question: context.stem, answer: context.observation.answer,
             referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts }),
@@ -88,15 +98,21 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
             let proposal;
             try { proposal = aiGradingProposalSchema.parse(JSON.parse(output.text)); }
             catch { throw conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。"); }
-            result = await deps.repository.apply(scope, input, proposal, modelLabel);
+            result = await deps.repository.apply(scope, input, proposal, modelLabel, materialProvenance);
           },
         });
       } catch (error) {
         // Publication is fenced inside apply; an interrupted settlement does not
         // erase an already durable result. The status reader still reports unknown cost.
-        const saved = await deps.repository.context(scope, input);
-        if (saved.existing) return saved.existing;
+        let recoveryError: unknown;
+        const saved = await deps.repository.context(scope, input).catch(error => {
+          // A newly disputed/unreadable source may now reject context reads. It
+          // does not erase a send receipt or turn unknown spend into retryable work.
+          recoveryError = error; return null;
+        });
+        if (saved?.existing) return saved.existing;
         if (["unknown", "in_flight"].includes(await deps.repository.ledger(scope, context.operationId))) throw unknownCost();
+        if (recoveryError) throw recoveryError;
         if (isBudgetReplayError(error)) {
           if (["in_flight", "unknown"].includes(error.disposition.kind)) throw unknownCost();
           throw conflict("这次批改尚未完成，原答案已保存，可以手动改评。");

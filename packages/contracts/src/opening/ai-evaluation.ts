@@ -36,6 +36,20 @@ export const aiGradingInputSchema = z.object({
   : input.workSourceVersion === undefined && input.physicalPage === undefined,
 "photo grading requires the source, captured version and physical page together");
 
+/** Server-captured metadata revisions, not a learner/model assertion of answer authority. */
+export const materialAssessmentRefSchema = z.object({
+  sourceId: uuidSchema,
+  sourceVersion: z.number().int().nonnegative(),
+  manifestRevision: z.number().int().nonnegative(),
+}).strict();
+export const aiGradingMaterialProvenanceSchema = z.object({
+  /** All applicable answer-link manifests consulted; only trusted answer text is used. */
+  materialAnswerRefs: z.array(materialAssessmentRefSchema),
+  /** Classification revisions of question/reference sources, including unclassified revision 0. */
+  materialSourceRefs: z.array(materialAssessmentRefSchema),
+}).strict();
+export type AiGradingMaterialProvenance = z.infer<typeof aiGradingMaterialProvenanceSchema>;
+
 export const aiEvaluationSchema = aiGradingProposalSchema.extend({
   observationId: uuidSchema,
   attemptId: uuidSchema,
@@ -45,6 +59,9 @@ export const aiEvaluationSchema = aiGradingProposalSchema.extend({
   evaluatorVersion: z.literal("ai-rubric-v1"),
   modelLabel: z.string().min(1).max(300).nullable(),
   evaluatedAt: isoDateTimeSchema,
+  /** Optional only for historical assessments; absence cannot prove current material authority. */
+  materialAnswerRefs: aiGradingMaterialProvenanceSchema.shape.materialAnswerRefs.optional(),
+  materialSourceRefs: aiGradingMaterialProvenanceSchema.shape.materialSourceRefs.optional(),
   /** Captured server-owned photo identity for reopening the assessed original. */
   workSource: z.object({
     id: uuidSchema, version: z.number().int().nonnegative(), physicalPage: z.number().int().positive(),

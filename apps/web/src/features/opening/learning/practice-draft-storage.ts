@@ -35,9 +35,9 @@ const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 
-export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }): string {
+export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number; materialQuestion?: {family:string;number:string;subquestion:string} }): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
-  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []), ...(!retest && problem ? [{ sourceId: problem.sourceId, sourceVersion: problem.sourceVersion }] : [])]);
+  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []), ...(!retest && problem ? [{ sourceId: problem.sourceId, sourceVersion: problem.sourceVersion, ...(problem.materialQuestion ? {question:problem.materialQuestion} : {}) }] : [])]);
 }
 
 export function emptyPracticeDraft(scope: string, fields: Partial<PracticeFields> = {}): PracticeDraft {

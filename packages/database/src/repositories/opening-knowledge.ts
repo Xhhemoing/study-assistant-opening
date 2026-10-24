@@ -9,6 +9,7 @@ import {
 import { knowledgeNodeDefinition, sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
+import { materialPageReadable } from "./opening-material-manifest";
 
 export type OpeningKnowledgeErrorCode = "NOT_FOUND" | "VALIDATION" | "CONFLICT";
 
@@ -121,6 +122,7 @@ async function assertAuthorizedChunks(
       AND s.parse_state = 'ready'
       AND c.source_version = s.version
       AND v.availability = 'available'
+      AND ${materialPageReadable(tx, "c.source_id", "c.source_version", "c.page")}
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
       AND c.id IN ${tx(chunkIds)}
     FOR SHARE`;
@@ -164,6 +166,11 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
     },
     async assertExtractionBatch(scope: Scope, courseId: string, chunks: readonly SourceChunk[]): Promise<void> {
       await sql.begin(async tx => {
+        // Also serialize metadata admission for callers without a job claim.
+        // Manifest edits hold the workspace exclusively before source/version locks.
+        const [owner] = await tx`SELECT id FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!owner) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
         await lockOpeningJobExecution(tx, scope);
         await assertOwnedCourse(tx, scope, courseId);
         const ids = [...new Set(chunks.map(chunk => chunk.id))];
@@ -215,6 +222,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           AND s.parse_state = 'ready'
           AND c.source_version = s.version
           AND v.availability = 'available'
+          AND ${materialPageReadable(sql, "c.source_id", "c.source_version", "c.page")}
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
           AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         ORDER BY c.source_id, c.page NULLS LAST, c.created_at`;

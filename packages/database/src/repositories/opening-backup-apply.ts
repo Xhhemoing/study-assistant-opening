@@ -1,5 +1,6 @@
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
+import { readMaterialManifest } from "./opening-material-manifest";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 /**
@@ -142,6 +143,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   opening_source_versions: [
     "source_id", "workspace_id", "version", "bytes", "sha256", "availability",
+    "material_manifest", "material_manifest_revision", "material_reviewed_by", "material_reviewed_at",
   ],
   opening_source_chunks: [
     "id", "source_id", "source_version", "page", "slide_label", "start_ms", "end_ms", "text", "created_at",
@@ -270,6 +272,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "opening_source_versions.material_manifest",
   "opening_retest_activities.learning_protocol",
   "learning_events.payload",
   "workspace_preferences.ai_settings",
@@ -447,6 +450,9 @@ export async function executeOpeningRestoreApply(
         throw err;
       }
 
+      for (const version of (backup.tables.opening_source_versions ?? []) as Record<string,unknown>[]) {
+        if (version.material_manifest != null) readMaterialManifest(version.material_manifest);
+      }
       const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
       let restoredObservations = observations;
       if (observations.length) {

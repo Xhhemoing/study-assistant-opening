@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { assertTeachingMaterialsReadable } from "./opening-material-teaching";
 import type { Sql } from "postgres";
 import type {
   ActivitySpecClientInit,
@@ -245,6 +246,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             });
           }
           const spec = specRows[0] as unknown as SpecRow;
+          await assertTeachingMaterialsReadable(tx,scope,Array.isArray(spec.source_refs) ? spec.source_refs : []);
           const blockOrder = asBlockOrder(spec.block_order);
           const presentIds = new Set(blockOrder.map((b) => b.blockId));
           const branchStack = readBranchStack(checkpoint);
