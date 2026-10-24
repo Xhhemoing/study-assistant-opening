@@ -18,6 +18,12 @@ from opening_parser import physical_pages
 from opening_parser.ranges import json_line, failure
 
 
+def child_environment():
+    # pytest's pythonpath setting changes only the parent sys.path. Explicitly
+    # carry the local parser package into real subprocesses as production cwd does.
+    return {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1]) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+
+
 def result(start, end, text="第二页\n∞"):
     pages = [NS(page_no=n, assembled=NS(elements=[NS(page_no=n, text=text)] if n == start else []))
              for n in range(start, end + 1)]
@@ -147,7 +153,7 @@ sys.exit(cli.main(["--input", sys.argv[1], "--mime", cli.PDF, "--max-pages", "3"
 '''
         with tempfile.NamedTemporaryFile() as source:
             child = subprocess.run([sys.executable, "-c", script, source.name],
-                                   capture_output=True, timeout=3)
+                                   capture_output=True, timeout=3, env=child_environment())
         self.assertEqual(child.returncode, 4)
         rows = [json.loads(line) for line in child.stdout.splitlines()]
         self.assertEqual([row["range"] for row in rows], [[1, 1], [2, 2]])
@@ -244,7 +250,7 @@ with tempfile.NamedTemporaryFile() as source:
     sys.exit(cli.main(["--input", source.name, "--mime", cli.PDF, "--max-pages", "4", "--ranges", "1-1,3-3"]))
 '''
         process = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_environment())
         first = []
         reader = threading.Thread(target=lambda: first.append(process.stdout.readline()), daemon=True)
         reader.start()
