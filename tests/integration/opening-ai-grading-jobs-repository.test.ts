@@ -271,3 +271,71 @@ it("does not count AI feedback, manual re-evaluation or retraction as a new answ
   expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ answerRevision: 2, status: "queued", headObservationId: changed.headObservationId });
   expect((await grades().context(fixture.scope, { observationId: changed.headObservationId })).operationId).toBe(`ai-grade:${fixture.scope.workspaceId}:${original.id}:2`);
 });
+
+
+it("keeps a six-minute in-flight grading execution alive through both recovery sweepers", async () => {
+  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
+  const job = await jobFor(original), repository = queue();
+  await reserve(job.key, { claimed: true });
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  let pending: Promise<boolean> | undefined;
+  const heartbeat = vi.fn((...args: Parameters<typeof repository.heartbeat>) => {
+    pending = repository.heartbeat(...args);
+    return pending;
+  });
+  // Leave PostgreSQL and socket clocks real; advance only the runtime interval.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const running = runJob({ ...repository, heartbeat }, job.id, async () => { started(); await gate; return { ok: true }; });
+  try {
+    await ready;
+    for (let minute = 1; minute <= 6; minute += 1) {
+      // Simulate one minute passing in the database before each runtime tick.
+      await fixture.sql`UPDATE opening_jobs SET updated_at=updated_at-interval '1 minute' WHERE id=${job.id}`;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await pending).toBe(true);
+      expect(await jobs().recoverExpired()).toBe(0);
+      expect(await repository.recoverExpired()).toBe(0);
+      expect((await repository.get(fixture.scope, job.id)).state).toBe("running");
+    }
+    expect(heartbeat).toHaveBeenCalledTimes(6);
+    expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${job.id}`).toHaveLength(1);
+    release();
+    expect(await running).toBe(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(heartbeat).toHaveBeenCalledTimes(6);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    release();
+    await running.finally(() => { vi.useRealTimers(); });
+  }
+});
+
+it("rejects wrong-scope and old-token heartbeats without extending a newer grading claim", async () => {
+  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
+  const job = await jobFor(original), first = (await queue().claim(job.id))!;
+  await stale(job.id);
+  expect(await jobs().recoverExpired()).toBe(1);
+  const next = (await queue().claim(job.id))!;
+  await stale(job.id);
+  const before = (await fixture.sql`SELECT updated_at FROM opening_jobs WHERE id=${job.id}`)[0]!.updated_at;
+  expect(await queue().heartbeat(job.id, first.claimToken!, fixture.scope)).toBe(false);
+  expect(await queue().heartbeat(job.id, next.claimToken!, { ...fixture.scope, workspaceId: fixture.otherScope.workspaceId })).toBe(false);
+  expect(await queue().heartbeat(job.id, next.claimToken!, { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId })).toBe(false);
+  expect((await fixture.sql`SELECT updated_at FROM opening_jobs WHERE id=${job.id}`)[0]!.updated_at).toEqual(before);
+  expect(await queue().heartbeat(job.id, next.claimToken!, fixture.scope)).toBe(true);
+  expect(await jobs().recoverExpired()).toBe(0);
+});
+
+it.each(["succeeded", "failed", "outcome_unknown", "cancelled"] as const)("does not revive or touch a %s grading job with a late heartbeat", async state => {
+  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
+  const job = await jobFor(original), claimed = (await queue().claim(job.id))!;
+  if (state === "cancelled") await queue().cancel(fixture.scope, job.id);
+  else expect(await queue().finish(job.id, state, {}, claimed.claimToken)).toBe(true);
+  await stale(job.id);
+  const before = (await fixture.sql`SELECT state, updated_at FROM opening_jobs WHERE id=${job.id}`)[0]!;
+  expect(await queue().heartbeat(job.id, claimed.claimToken!, fixture.scope)).toBe(false);
+  expect((await fixture.sql`SELECT state, updated_at FROM opening_jobs WHERE id=${job.id}`)[0]).toEqual(before);
+  expect(await queue().claim(job.id)).toBeNull();
+});

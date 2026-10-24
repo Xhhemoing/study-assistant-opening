@@ -4,6 +4,24 @@ import { loadOpeningTutorConfig } from "./opening-model";
 import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
+import { loadWorkerStartupConfig } from "./worker-startup";
+
+it("strictly validates startup budgets, cache TTL, and bounded backoff", () => {
+  expect(loadWorkerStartupConfig({}).parserTimeoutMs).toBe(120000);
+  expect(loadWorkerStartupConfig({}).ocrTimeoutMs).toBe(120000);
+  expect(loadWorkerStartupConfig({ PARSER_OCR_PREFLIGHT_TIMEOUT_MS: "240000" }).ocrTimeoutMs).toBe(240000);
+  for (const value of ["0", "-1", "1.5", "10tail", "600001"]) {
+    expect(() => loadWorkerEnv({ PARSER_OCR_PREFLIGHT_TIMEOUT_MS: value })).toThrow(EnvValidationError);
+  }
+  expect(loadWorkerStartupConfig({ WORKER_ROLE: "parser" }).readinessFile).toBe(".tmp/worker-parser-ready.json");
+  expect(loadWorkerStartupConfig({ PARSER_PREFLIGHT_CACHE_TTL_MS: "0" }).parserCacheTtlMs).toBe(0);
+  for (const name of ["WORKER_READY_TIMEOUT_MS", "PARSER_PREFLIGHT_TIMEOUT_MS", "PARSER_PREFLIGHT_CACHE_TTL_MS", "WORKER_STARTUP_RETRY_INITIAL_MS", "WORKER_STARTUP_RETRY_MAX_MS"]) {
+    for (const value of ["-1", "1.5", "10tail", "Infinity", "9007199254740992"]) {
+      expect(() => loadWorkerEnv({ [name]: value })).toThrow(EnvValidationError);
+    }
+  }
+  expect(() => loadWorkerStartupConfig({ WORKER_STARTUP_RETRY_INITIAL_MS: "6000", WORKER_STARTUP_RETRY_MAX_MS: "5000" })).toThrow(/must be >=/);
+});
 
 it("defaults worker consumers to all and validates explicit isolation roles", () => {
   expect(loadWorkerEnv({}).workerRole).toBe("all");
