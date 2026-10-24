@@ -10,6 +10,8 @@ import { loadOpeningModelCatalog } from "@aistudy/config";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { readAiReadinessInputs } from "../../../../features/opening/server/data-services";
+import { readParserHealth } from "../../../../features/opening/server/parser-health-service";
+import { parserOcrReadinessItem } from "../../../../features/opening/assistant/ai-readiness-model";
 
 export const runtime = "nodejs";
 
@@ -85,7 +87,10 @@ async function buildItems(
     workerDetail = "无法读取 worker 积压";
   }
 
-  const parserOcrReady = Boolean(process.env.PARSER_OCR_MODEL_DIR?.trim());
+  let parserReport: Awaited<ReturnType<typeof readParserHealth>> = null;
+  try { parserReport = await readParserHealth(sql); }
+  catch { /* Older schema/unavailable health storage is unknown, never ready. */ }
+  const ocrItem = parserOcrReadinessItem(parserReport);
 
   return buildAiReadinessItems({
     keyedModelCount: keyed.length,
@@ -95,11 +100,11 @@ async function buildItems(
     remainingCents: remaining,
     reconciledUnknownCount: reconciledUnknown,
     visionAvailable: vision,
-    parserOcrReady,
+    parserOcrReady: ocrItem.ok,
     workerOk,
     workerDetail,
     availableModelCount: available.length,
-  });
+  }).map(item => item.key === "parser_ocr" ? ocrItem : item);
 }
 
 export async function GET(request: Request): Promise<Response> {

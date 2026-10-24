@@ -54,6 +54,87 @@ OCR is off by default. To enable PDF OCR, explicitly set `PARSER_OCR_MODEL_DIR` 
 
 Prepare models online before worker startup, using RapidOCR's supported `EngineType.TORCH`, `OCRVersion.PPOCRV4`, and `ModelType.MOBILE` configuration for Det/Cls/Rec. `Global.model_root_dir` must be a Python `Path`, not a string. RapidOCR may place the recognition dictionary in its installed `models` directory; copy it into the configured OCR directory too. No uploaded document is involved in model setup. Runtime uses explicit local model and dictionary paths; missing files fail the parser check instead of triggering a document-time download. The existing locked Torch and RapidOCR dependencies are sufficient; ONNXRuntime is not required for this backend.
 
-Restart the worker with the environment variable to apply the setting. This does not reparse existing materials. Do not overwrite a cited version's chunks to enable OCR retroactively; existing citation targets must remain stable. OCR output, especially formulas, needs comparison with the original and is not proof of semantic correctness. A real single-page image-based PDF conversion succeeded locally; a 72-page CPU OCR probe exceeded 1,000 seconds. Large scanned documents require bounded batch/versioned reprocessing before they can be claimed usable.
+Restart the worker with the environment variable to apply the setting. This does not reparse existing materials. Do not overwrite a cited version's chunks to enable OCR retroactively; existing citation targets must remain stable. OCR output, especially formulas, needs comparison with the original and is not proof of semantic correctness. A real single-page image-based PDF conversion succeeded locally; a 72-page CPU OCR probe exceeded 1,000 seconds. The bounded PDF segments below address recovery/CPU cancellation, not recognition accuracy or the usability of that historical 72-page example.
 
+## OPT-02a: Worker OCR health and resumable PDF segments
+
+Worker `all`/`parser` measures OCR in **its own** Python environment. `learning` neither invokes Python nor overwrites parser health. The probe `python -m opening_parser.ocr` returns a path-free JSON observation:
+
+- `not_configured`: no explicit OCR directory; text PDFs remain supported.
+- `missing_files`: directory is not absolute/available, or one of the four named files is missing, empty, or unreadable.
+- `preflight_failed`: import/model initialization/inference failed, malformed probe output, or the 60-second outer deadline expired.
+- `ready`: directory and all four files are readable, and detection, classification **and** recognition each completed on a tiny generated 64×192 image. A blank detector result cannot silently skip classification/recognition. This is liveness, **not** OCR accuracy.
+
+All model/dictionary paths are explicit. Hugging Face offline mode remains forced; RapidOCR's own download fallback is also disabled, including removal-after-stat races. No user document or paid model is used. Configured but unhealthy OCR refuses new parser consumers. Startup/import errors still fail closed. DB reports contain status/booleans/allowed missing filenames/inference duration, never model paths or stderr. Reports expire after 10 minutes; refresh with a **new probe**, not a timestamp-only heartbeat, every 5 minutes. A healthy report from one consumer does not mask an unhealthy live consumer. No fresh report (including an unreadable/missing table) is Web `unknown`, not `ready` or `not_configured`; OCR remains a soft hint and never blocks text tutoring.
+
+PDF jobs first run a cheap `--inspect-pdf` count (30-second limit), then serial `--page-start N --page-end M` conversions, **10 pages by default**, each with a **240-second outer deadline** including Python imports/model load. `createParseSourceHandler` allows bounded `segmentPages` (1–100) and positive `segmentTimeoutSeconds` injection; no new environment setting is introduced. PPTX keeps the prior one-conversion path. PDF physical page numbers and blank pages remain intact; incomplete/rebased/partial-success results are failures. Limits remain 2,000 pages, per-page text cap, and 8 MiB combined output.
+
+PDF text uses **`ConversionResult.pages[].assembled` before cross-page merging**, not `document.texts[].orig[charspan]`. Docling 2.126.0's reading-order merge removes a trailing hard/soft hyphen but keeps offsets calculated before removal (`inter-` / `national` is a concrete failing case); the merged document alone cannot recover the two page strings. The CLI retains `ConversionResult`, and the extractor runs only Docling's rule-based reading-order/serialization stage independently on each retained page (no extra layout/OCR inference). Tables, captions, page furniture and formula `orig` when formula text is empty remain page-local. Missing, duplicate, foreign-page or incomplete assemblies fail explicitly, never masquerade as blank success or duplicate full-document text on each page. PPTX's SimplePipeline still uses its page-local document without requiring PDF assemblies; document-only multi-page text/table provenance is rejected rather than guessed. This preserves physical provenance, not a guarantee of recognition or formula accuracy.
+
+`opening_pdf_parse_segments` persists ready/failed segments keyed by source/version/parser profile/physical range. The profile is a pinned implementation version plus OCR mode (no hash or private path); bump it when model/extraction semantics change. Successful segments are immutable within that key, are reused across a **new manually admitted retry job**, and are not replaced by late failures. Failed/missing segments alone execute again. The run continues past independent failed segments to retain subsequent successes, then fails without publishing a partial source. Only a fully successful result calls the existing `replaceChunks` path (including knowledge/index behavior). Source deletion cascades cache data. Excluded sources cannot be read/reparsed via cache. Existing `outcome_unknown` admission/reconciliation is unchanged; cached data is not permission to replay unknown paid jobs.
+
+The physical-page extraction profile is now **`docling-2.126.0/pdf-segments-v2/<OCR mode>`**. It deliberately does not reuse v1's potentially mis-sliced ready segments. Version-0 uploads are legitimate: `beginUpload → completeWithParseJob` retains `source.version = 0`; both cache read/save and the database constraint accept nonnegative versions. Do not increment source versions to bypass a cache check. The regression starts from this real service/repository path, stubs only object storage, and then reads/saves/reuses the cache at version 0.
+
+Each cache read/write checks owner, workspace, job kind/source, source version, execution token/running state, privacy epoch and exclusion. Writes reuse `lockOpeningJobExecution` **inside** the transaction, in the existing workspace → job → source lock order. DB cancellation and cache/chunk publication therefore serialize: cancellation that commits first prevents even a failed-segment record; a publication that got the lock first committed before cancellation, not after it. A serial 1-second execution check aborts the running subprocess promptly; polling alone is not the write fence. POSIX children run in an owned process group and use SIGKILL for the whole group (Windows uses `taskkill /T /F`); promises settle only after `close`, then unique per-attempt temporary directories are removed. Old/new attempts cannot unlink each other's input.
+
+### Migration and rollback
+
+Apply additive **0094_opening_parser_health_segments.sql** after the separately owned 0093, then **0095_opening_pdf_segment_zero_version.sql** before running the corrected parser workers. Keep the already-applied 0094 file and checksum unchanged: 0095 replaces only its source-version check (`>= 1` → `>= 0`) and retains all rows. No backfill, source/chunk rewrite or automatic reparse. New parser workers require the segment repository binding; omitted binding on a claimed PDF job fails closed rather than silently running without recovery. Web may deploy before the DDL and will show OCR unknown.
+
+Rollback order: stop/drain **new parser/all workers first** (do not run old/new parser consumers together); cancel undesired queued/running parse jobs via the existing API, and reconcile any `outcome_unknown` separately. Retire health observations on a clean shutdown, or let their 10-minute leases expire after a crash. Roll back application code only after all new child processes are gone. **Keep 0094 tables, both 0094/0095 migration records, the nonnegative version constraint and successful cached pages**; pre-segment code ignores the additive DDL and normal source deletion still cascades. Do not restore the `>= 1` check or roll parser workers back to the known-broken v1 cache/extraction path. Do not delete version-0 sources/cache/chunks, reset jobs to queued or drop shared job-kind checks as part of rollback. Removing these tables requires a separate audited archival/deletion migration after no consumer uses them; no destructive down migration is supplied.
+
+### Shared-file integration (main-thread owner)
+
+`packages/database/src/index.ts` must export these two new modules (this slice does not edit the shared barrel):
+
+```ts
+export * from "./repositories/opening-parser-health";
+export * from "./repositories/opening-pdf-segments";
+```
+
+In `apps/worker/src/index.ts`, import `randomUUID`, `createOpeningParserHealthRepository`, `createOpeningPdfSegmentsRepository`. Allocate one worker ID per process, create SQL lazily before role preparation without opening a connection yet, and call:
+
+```ts
+const workerId = randomUUID();
+const sql = createSqlClient(env.databaseUrl);
+const parserHealth = createOpeningParserHealthRepository(sql);
+// On startup failure, close sql and rethrow; do not retire the failed diagnostic.
+const prepared = await prepareWorkerRole(env.workerRole, undefined, {
+  record: report => parserHealth.record(workerId, report),
+});
+const { parserRunner: runner, queueKinds, refreshParserHealth } = prepared;
+// Existing createParseSourceHandler call:
+const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner,
+  tempDir: env.parserTempDir, segments: createOpeningPdfSegmentsRepository(sql) }) : parserDisabled;
+```
+
+Remove the later duplicate `const sql`. Add a `createSerialTask(refreshParserHealth, reportError)` only when non-null, register it in existing `tasks`, schedule `.run()` every 300,000 ms in existing `timers`. During clean shutdown: clear timers → drain tasks/workers → `parserHealth.retire(workerId)` → `sql.end`. Keep startup failures outside consumer creation and close the lazily created SQL client on startup error. No new orchestration framework is needed. `prepareWorkerRole` returns `parserOcrHealth` and `refreshParserHealth`; the latter remeasures and persists, and `learning` returns null.
+
+### Focused verification
+
+Cheap stdlib-only behavior tests (fake engines, no installed models) and a Node 24+ small actual-code/process smoke:
+
+```sh
+PYTHONPATH=services/parser python3 -m unittest discover -s services/parser/tests -p test_segments_health_unit.py -v
+bash scripts/run-heavy.sh node services/parser/tests/worker-segments-smoke.mjs
+```
+
+After shared exports/dependencies are available, serialize these with the existing heavy lock (do not overlap builds/typechecks):
+
+```sh
+bash scripts/run-heavy.sh npx vitest run --project unit --maxWorkers 1 --no-file-parallelism apps/worker/src/parsers/pdf-segments.test.ts apps/worker/src/parsers/ocr-health.test.ts apps/worker/src/parsers/docling-process.test.ts apps/worker/src/parsers/docling-cancel.test.ts apps/worker/src/jobs/parse-source.test.ts apps/worker/src/runtime/worker-role.test.ts apps/web/src/app/api/opening/ai-readiness/route.test.ts apps/web/src/features/opening/assistant/ai-readiness-model.test.ts
+bash scripts/run-heavy.sh npx vitest run --project integration --maxWorkers 1 --no-file-parallelism tests/integration/opening-parser-health-segments.repository.test.ts
+# separately, in the prepared Python 3.13 environment:
+bash scripts/run-heavy.sh "$PARSER_PYTHON" -m pytest services/parser/tests -q
+```
+
+Pinned Docling API regression **without any converter/model inference** (real `ConversionResult`, `Page`, `ReadingOrderModel` hard/soft-hyphen merges and table/formula serialization):
+
+```sh
+PYTHONPATH=services/parser bash scripts/run-heavy.sh "$PARSER_PYTHON" -m unittest discover -s services/parser/tests -p test_physical_pages_docling.py -v
+```
+
+Keep this distinct from `test_segments_health_unit.py` (stdlib-only boundary doubles) and the real PDF/PPTX conversion suite (requires prepared local models). A passing fake-assembly test does not establish compatibility with the installed Docling classes or actual PDF conversion.
+
+SQL tests require the existing isolated `OPENING_TEST_DB=1` / guarded test DB setup, never production. The concurrency case requires independent PostgreSQL connections (single-backend emulators do not establish that race). Unit tests do not establish real Docling model inference, CPU latency or OCR accuracy. Browser validation remains with the user: authenticated `/api/opening/ai-readiness` should agree with the Worker report despite absent/different Web OCR env; text tutoring must remain usable for all four OCR statuses and unknown.
 The lock has platform markers, including upstream Linux CUDA dependencies; this is not a custom CPU-only distribution. Windows checks and a Linux workflow definition do not prove a Linux run passed. The repository's actual GitHub `quality` job is the Linux acceptance evidence.

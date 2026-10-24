@@ -19,6 +19,7 @@ describe("opening worker runtime guards", () => {
   });
 
   it("uses provider error codes for unknown outcomes", () => {
+    expect(isUnknownOutcome(Object.assign(new Error("unknown cost"), { code: "GRADING_UNKNOWN_COST" }), "grade-observation")).toBe(true);
     expect(isUnknownOutcome(new Error("PROVIDER_NETWORK"))).toBe(false);
     expect(isUnknownOutcome(new OpeningProviderError("PROVIDER_TIMEOUT", "timed out"))).toBe(true);
     expect(isUnknownOutcome(new OpeningProviderError("PROVIDER_AUTH", "unauthorized"))).toBe(false);
@@ -32,7 +33,7 @@ describe("opening worker runtime guards", () => {
   });
 
   it("exposes only supported handlers and rejects unknown kinds", async () => {
-    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "index-source", "parse", "parse-media", "recognize-photo-question", "remind", "retest", "tutor", "tutor-metadata"]);
+    expect(Object.keys(handlers).sort()).toEqual(["build-course-knowledge", "compile-teaching-unit", "extract-study-actions", "grade-observation", "index-source", "parse", "parse-media", "recognize-photo-question", "remind", "retest", "tutor", "tutor-metadata"]);
     await expect(handlers.parse({} as never, {})).rejects.toThrow("not implemented until I02/T02");
     expect(() => handlerForKind("unknown")).toThrow("unknown opening job kind");
   });

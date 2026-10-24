@@ -514,6 +514,7 @@ export function compileCurrentActivity(input: CompileCurrentInput): CompileCurre
     generationConfig: {
       extras: {
         outlineId: outline.outlineId,
+        outline: { ...outline, focusItemId },
         focusItemId,
         focusItemTitle: focus.title,
         compiler: "teaching-compiler",
@@ -661,7 +662,7 @@ async function prepareCompile(
   const chunks = options.loadChunks ? await options.loadChunks(scope, sourceIds) : [];
 
   let outline = options.readOutline?.() ?? null;
-  if (!outline && providerText) {
+  if (!outline && providerText && !options.requireModelOutput) {
     try {
       const parsed = JSON.parse(providerText) as { outline?: TeachingOutline };
       if (parsed?.outline?.kind === "teaching_path") {
@@ -691,21 +692,25 @@ async function prepareCompile(
 
   assertOutlineHonest(proposed);
 
-  const query = proposed.items.find((i) => i.itemId === proposed.focusItemId)?.title ?? proposed.focusItemId;
+  const focus = proposed.items.find((i) => i.itemId === proposed.focusItemId)!;
+  const query = focus.title;
+  const focusSources = new Set(focus.sourceIds);
+  const scopedChunks = chunks.filter(chunk => focusSources.has(chunk.sourceId));
+  const scopedSourceIds = sourceIds.filter(id => focusSources.has(id));
   const evidenceChunks = options.evidenceChunks ?? (options.retrieveContext
     ? (await options.retrieveContext(scope as { workspaceId: string; ownerUserId: string }, {
-        chunks, sourceIds, query, maxCharacters: 6000, preferPage: options.currentPage ?? undefined,
+        chunks: scopedChunks, sourceIds: scopedSourceIds, query, maxCharacters: 6000, preferPage: options.currentPage ?? undefined,
         operationId: `teaching:${payload.activityId}:${payload.expectedContentVersion}`,
         parentBudget: options.parentBudget,
-      })).chunks : chunks);
+      })).chunks : scopedChunks);
   const pack = assembleTeachingEvidencePack({
-    chunks: evidenceChunks,
+    chunks: evidenceChunks.filter(chunk => focusSources.has(chunk.sourceId) && sourceIds.includes(chunk.sourceId)),
     ranked: Boolean(options.retrieveContext || options.evidenceChunks),
     query,
     maxCharacters: 6000,
     preferPage:
       options.currentPage == null ? undefined : options.currentPage,
-    allowlistSourceIds: sourceIds.length > 0 ? sourceIds : undefined,
+    allowlistSourceIds: scopedSourceIds,
     denylist: options.denylist,
     privacyExcludedSourceIds: options.privacyExcludedSourceIds,
   });
@@ -792,7 +797,8 @@ export function createCompilerBuildPublishInput(
         throw new TeachingCompileOutputError("each check must be immediately followed by its own answer key");
       }
     }
-    if (modelOutput) proposed = applyModelItemTitles(proposed, modelOutput.itemTitles);
+    // Stored/user-edited titles belong to the saved outline, not this model reply.
+    if (modelOutput && !options.readOutline?.()) proposed = applyModelItemTitles(proposed, modelOutput.itemTitles);
 
     const revisionNumber =
       typeof payload.expectedUnitVersion === "number" &&

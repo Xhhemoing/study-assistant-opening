@@ -4,7 +4,14 @@ import { selectableSuggestedKeys } from "../planning/daily-draft-selection";
 
 export function sprintTaskHref(task: TaskItem): string {
   if (task.suggestionKind === "review_cards") return "/opening/review?tab=cards";
-  return task.courseId ? `${courseStudyHref(task.courseId)}?task=${encodeURIComponent(task.id)}` : `/opening/settings/planning?task=${encodeURIComponent(task.id)}#task-${encodeURIComponent(task.id)}`;
+  if (!task.courseId) return `/opening/settings/planning?task=${encodeURIComponent(task.id)}#task-${encodeURIComponent(task.id)}`;
+  const query = new URLSearchParams({ task: task.id });
+  const target = task.teachingTarget;
+  const requirementKey = task.requirementKey !== undefined ? task.requirementKey : task.retest?.requirementKey;
+  // Keep task in the URL: the activity is a hint and must pass fresh task admission on entry.
+  if (target?.courseId === task.courseId
+    && (requirementKey === undefined || target.requirementKey === requirementKey)) query.set("activity", target.activityId);
+  return `${courseStudyHref(task.courseId)}?${query}`;
 }
 
 export function sprintTodayTasks(tasks: TaskItem[], blocks: PlannedBlock[], courseId: string, now = new Date()) {

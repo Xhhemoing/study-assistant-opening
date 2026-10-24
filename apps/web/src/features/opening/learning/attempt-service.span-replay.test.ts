@@ -28,5 +28,5 @@ it("keeps a dedicated span lesson's submitted assistance stable as later help in
 it("leaves the pre-existing normalized request semantics unchanged for legacy span sessions", async () => {
   mocks.spanLesson.mockResolvedValue(null);
   await createOpeningAttemptService(mocks.sql as unknown as Sql).submit(scope, id, body);
-  expect(mocks.insert).toHaveBeenCalledWith(scope, expect.objectContaining({ assistance: "hinted" }));
+  expect(mocks.insert).toHaveBeenCalledWith(scope, expect.objectContaining({ assistance: "hinted" }), { workSource: undefined });
 });

@@ -9,6 +9,7 @@ import { qualifyObservationRevision } from "./opening-observation-revision-histo
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
 import { acceptedAiGradingOutcome, corroborateArithmeticGrade } from "@aistudy/domain";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
+import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
@@ -119,7 +120,19 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
        ${root.id},${headId},${input.revisionKind},${input.reason},${scope.ownerUserId},${aiEvaluation ? tx.json(aiEvaluation) : null})
       ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
     if (!record) throw learningError("CONFLICT", "revision clientKey already used");
+    // Replacement cannot change the sealed photo. Only changed answer text is a
+    // new paid input; judgement, attribution, help and retraction retain its ledger.
+    const answerChanged = !grading && replacement !== null && replacement.answer !== previous.answer;
+    const answerRevision = Number(head.answer_revision) + (answerChanged ? 1 : 0);
+    const workSource = gradingContext?.workSource ?? head.grading_work_source ?? previous.aiEvaluation?.workSource ?? null;
+    await tx`UPDATE opening_learning_observations SET answer_revision=${answerRevision},
+      grading_work_source=${workSource ? tx.json(workSource) : null},
+      grading_operation_id=${answerChanged ? `ai-grade:${scope.workspaceId}:${root.id}:${answerRevision}` : String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${headId}`)} WHERE id=${id}`;
     await tx`UPDATE opening_learning_observations SET effective_head_id=${id} WHERE id=${root.id}`;
+    if (answerChanged && head.attempt_id && head.item_version_id && head.problem_id
+      && (replacement?.answer.trim() || workSource)) {
+      await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: String(root.id), answerRevision });
+    }
     const identity = (observation: Pick<LearningObservation, "courseId" | "requirementKey" | "skillLabel">) => ({ courseId: observation.courseId, requirementKey: observation.requirementKey ?? null, skillLabel: observation.skillLabel });
     await reconcileOpeningRetestEvidence(tx, scope, { rootObservationId: String(root.id), previousHeadObservationId: headId, headObservationId: id,
       previousIdentity: identity(previous), currentIdentity: input.revisionKind === "retract" ? null : identity({ courseId, requirementKey, skillLabel }), historyRevision: revision });

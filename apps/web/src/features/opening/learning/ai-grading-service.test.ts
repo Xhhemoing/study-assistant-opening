@@ -17,8 +17,10 @@ const output = { text: JSON.stringify(proposal), inputTokens: 100, outputTokens:
 function setup() {
   const context = { observation: original, stem: "v=(1,0,1), w=(0,1,1), u=(2,3,5)，u是否在span{v,w}中？",
     referenceText: "u属于span{v,w}当且仅当存在系数使u=av+bw。", sourceIds: [id(5)], sourceVersions: { [id(5)]: 1 },
+    answerRevision: 1, operationId: `ai-grade:${scope.workspaceId}:${input.observationId}`,
     workSource: null as { id: string; version: number; physicalPage: number } | null, existing: null as LearningObservation | null };
-  const repository = { context: vi.fn(async () => context), apply: vi.fn(async () => { context.existing = graded; return graded; }) };
+  const repository = { context: vi.fn(async () => context), apply: vi.fn(async () => { context.existing = graded; return graded; }),
+    ledger: vi.fn(async (): Promise<"unsent" | "unknown" | "completed" | "blocked"> => "unsent") };
   const images = vi.fn(async () => [{ sourceId: id(6), physicalPage: 1, mediaType: "image/png" as const, data: "data:image/png;base64,AAAA" }]);
   const call = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
     await options.beforeSend?.();
@@ -122,7 +124,7 @@ describe("saved answer AI grading", () => {
     const { service, call, repository } = setup();
     call.mockRejectedValue(new BudgetReplayError(kind === "in_flight"
       ? { kind, reservationId: "reservation" } : { kind, reservationId: "reservation", pendingReconcileCents: 0, reconciled: false }));
-    await expect(service.grade(scope, input)).rejects.toThrow(kind === "in_flight" ? "正在批改" : "尚未完成");
+    await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
     expect(call).toHaveBeenCalledTimes(1); expect(repository.apply).not.toHaveBeenCalled();
   });
 
@@ -139,7 +141,7 @@ describe("saved answer AI grading", () => {
     const { service, call } = setup();
     call.mockRejectedValueOnce(new BudgetReplayError({ kind: "released", reservationId: "first", reason: "not_sent" }));
     call.mockRejectedValueOnce(new BudgetReplayError({ kind: "unknown", reservationId: "second", pendingReconcileCents: 0, reconciled: false }));
-    await expect(service.grade(scope, input)).rejects.toThrow("尚未完成");
+    await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
     expect(call).toHaveBeenCalledTimes(2);
   });
 
@@ -156,5 +158,28 @@ describe("saved answer AI grading", () => {
     await expect(service.grade(scope, input)).rejects.toThrow("设置中配置可用的批改模型");
     call.mockRejectedValueOnce(new Error("secret upstream endpoint and token"));
     await expect(service.grade(scope, input)).rejects.toThrow("AI 批改暂时未完成");
+  });
+
+  it("uses the sealed revision operation key rather than inventing a new worker key", async () => {
+    const { service, context, call } = setup();
+    context.operationId = `ai-grade:${scope.workspaceId}:${id(7)}:3`;
+    await service.grade(scope, input);
+    expect(call.mock.calls[0]![2].operationId).toBe(context.operationId);
+  });
+
+  it.each(["unknown", "completed", "blocked"] as const)("reads the existing ledger family without invoking the gateway for %s", async ledger => {
+    const { service, call, repository } = setup();
+    repository.ledger.mockResolvedValue(ledger);
+    await expect(service.grade(scope, input)).rejects.toThrow();
+    expect(call).not.toHaveBeenCalled();
+    expect(repository.apply).not.toHaveBeenCalled();
+  });
+
+  it("will not bypass a previously unknown fallback after a primary not-sent release", async () => {
+    const { service, call, repository } = setup();
+    repository.ledger.mockResolvedValueOnce("unsent").mockResolvedValue("unknown");
+    call.mockRejectedValueOnce(new BudgetReplayError({ kind: "released", reservationId: "primary", reason: "not_sent" }));
+    await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+    expect(call).toHaveBeenCalledTimes(1);
   });
 });

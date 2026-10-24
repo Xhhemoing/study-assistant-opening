@@ -2,12 +2,12 @@
 import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
+import type { AiGradingStatus, LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 
 const api = vi.hoisted(() => ({
   getSubmittedAttempt: vi.fn(), getSummary: vi.fn(), getCourseKnowledge: vi.fn(),
-  createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), gradeObservation: vi.fn(),
+  createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), gradeObservation: vi.fn(), getGradingStatus: vi.fn(),
   getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(), associateTeachingActivityCourse: vi.fn(),
 }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => api }));
@@ -39,21 +39,30 @@ const context: InlineAttemptContext = { id: blockId, courseId: record.courseId, 
   onObservationReady: vi.fn(), onAttemptReady: vi.fn() };
 context.completionAction = { label: "下一题", onClick: vi.fn() };
 const initialDraft = { prompt: "1/2 + 1/2 = ?", skillLabel: record.skillLabel, answer: record.answer };
+const gradingStatus = (patch: Partial<AiGradingStatus> = {}): AiGradingStatus => ({
+  rootObservationId: record.id, headObservationId: record.id, answerRevision: 1,
+  jobId: blockId, status: "needs_manual", retryable: true, workSource: null, ...patch,
+});
 
 let container: HTMLDivElement, root: Root, head: LearningObservation;
 beforeEach(() => {
-  vi.resetAllMocks(); head = record;
+  vi.resetAllMocks(); vi.useFakeTimers(); head = record;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   api.getSubmittedAttempt.mockResolvedValue(null);
   api.getSummary.mockResolvedValue([]); api.getCourseKnowledge.mockResolvedValue({ snapshot: null });
   api.createSession.mockResolvedValue({ id: record.sessionId }); api.createAttempt.mockResolvedValue(attempt);
-  api.submitAttempt.mockResolvedValue(record);
-  api.gradeObservation.mockImplementation(async () => { head = graded; return graded; });
+  // Saving enqueues on the server; GET + history recover the worker's durable result.
+  api.submitAttempt.mockImplementation(async () => { head = graded; return record; });
+  api.getGradingStatus.mockImplementation(async () => gradingStatus({ headObservationId: head.id,
+    status: head.aiEvaluation ? "graded" : "needs_manual", retryable: !head.aiEvaluation }));
+  api.gradeObservation.mockImplementation(async () => {
+    head = graded; return gradingStatus({ status: "queued", retryable: false });
+  });
   api.getObservationHistory.mockImplementation(async () => ({ rootObservationId: record.id,
     headObservationId: head.id, revisions: [record, ...(head.id !== record.id ? [head] : [])] }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); });
 
 const render = (status: InlineAttemptContext["status"] = "active") => act(async () => root.render(createElement(StrictMode, null,
   createElement(InlineAttemptForm, { blockId, prompt: initialDraft.prompt, context: { ...context, status }, ready: true,
@@ -67,17 +76,18 @@ async function submit() {
   await act(async () => form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
 }
 
-it("grades a newly saved lesson answer once and reports the effective result to the learning flow", async () => {
+it("reads a newly saved lesson's background grade without enqueueing on render and reports the effective result", async () => {
   await render(); expect(api.gradeObservation).not.toHaveBeenCalled();
   await submit(); await render();
   expect(api.submitAttempt).toHaveBeenCalledOnce();
   expect(api.submitAttempt).toHaveBeenCalledWith(attemptId, expect.objectContaining({ answer: record.answer, outcome: "unverified" }));
-  expect(api.gradeObservation).toHaveBeenCalledExactlyOnceWith({ observationId: record.id });
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  expect(api.getGradingStatus).toHaveBeenCalledWith(record.id);
   expect(container.textContent).toContain(record.answer);
   expect(container.textContent).toContain("AI 批改 · 正确");
   expect(container.querySelector('[data-feedback-verdict="correct"]')).not.toBeNull();
   expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, graded);
-  expect(api.getObservationHistory).not.toHaveBeenCalled();
+  expect(api.getObservationHistory).toHaveBeenCalledExactlyOnceWith(record.id);
 });
 
 it("automatically assigns a course once without asking the learner to choose one", async () => {
@@ -95,7 +105,9 @@ it("restores an ungraded answer without starting another model call and allows e
   await render();
   expect(api.gradeObservation).not.toHaveBeenCalled(); expect(api.submitAttempt).not.toHaveBeenCalled();
   expect(container.textContent).toContain(record.answer);
-  await click("AI 批改");
+  expect(api.getGradingStatus).toHaveBeenCalledWith(record.id);
+  expect(api.getObservationHistory).not.toHaveBeenCalled();
+  await click("重试批改");
   expect(api.gradeObservation).toHaveBeenCalledExactlyOnceWith({ observationId: record.id });
   expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, graded);
 });
@@ -111,10 +123,10 @@ it("keeps a learner correction after an AI grade without automatically grading i
   await click("保存纠正"); await render();
   expect(api.reviseObservation).toHaveBeenCalledWith(expect.objectContaining({ expectedHead: graded.id,
     replacement: expect.objectContaining({ answer: record.answer, outcome: "incorrect", verdictSource: "self_report" }) }));
-  expect(api.gradeObservation).toHaveBeenCalledTimes(1);
+  expect(api.gradeObservation).not.toHaveBeenCalled();
   expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, corrected);
   expect(container.querySelector('[data-feedback-verdict="unverified"]')).not.toBeNull();
-  expect(api.getObservationHistory).toHaveBeenCalledTimes(1); // Only the explicit dispute opens history.
+  expect(api.getObservationHistory).toHaveBeenCalledTimes(2); // Head recovery + dispute; no reread after correction.
 });
 
 it.each([graded, { ...record, outcome: "correct", verdictSource: "deterministic",
@@ -131,7 +143,9 @@ it.each([record, graded])("keeps completed lesson history read-only: $verdictSou
   expect(container.textContent).toContain(record.answer);
   if (observation.aiEvaluation) expect(container.textContent).toContain("AI 批改 · 正确");
   expect(container.querySelector("form")).toBeNull();
-  expect(Array.from(container.querySelectorAll("button")).some(button => ["AI 批改", "判错了", "纠正记录", "撤回记录"].includes(button.textContent ?? ""))).toBe(false);
+  expect(Array.from(container.querySelectorAll("button")).some(button => ["AI 批改", "重试批改", "修改这一步", "判错了", "纠正记录", "撤回记录"].includes(button.textContent ?? ""))).toBe(false);
+  expect(api.getGradingStatus).not.toHaveBeenCalled();
+  expect(api.getObservationHistory).not.toHaveBeenCalled();
   expect(api.gradeObservation).not.toHaveBeenCalled(); expect(api.submitAttempt).not.toHaveBeenCalled();
 });
 
@@ -146,12 +160,26 @@ it("prepares a question without an extra click and does not submit or grade it",
 });
 
 it("offers the one completion action only after grading, and removes it for an uncertain correction", async () => {
-  let finishGrade!: (result: LearningObservation) => void;
-  api.gradeObservation.mockImplementation(() => new Promise<LearningObservation>(resolve => { finishGrade = resolve; }));
+  api.submitAttempt.mockResolvedValue(record);
+  let jobStatus: AiGradingStatus["status"] = "queued";
+  api.getGradingStatus.mockImplementation(async () => gradingStatus({ status: jobStatus, retryable: false }));
   await render(); await submit();
   expect(container.querySelector('[data-attempt-stage="processing"]')).not.toBeNull();
   expect(container.textContent).not.toContain("下一题");
-  await act(async () => { head = graded; finishGrade(graded); });
+  expect(api.getObservationHistory).not.toHaveBeenCalled();
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  const initialStatusReads = api.getGradingStatus.mock.calls.length;
+  jobStatus = "grading";
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  // StrictMode may read on both effect mounts; the live poll adds one GET, never a POST.
+  expect(api.getGradingStatus).toHaveBeenCalledTimes(initialStatusReads + 1);
+  expect(container.querySelector('[data-attempt-stage="processing"]')).not.toBeNull();
+  expect(container.textContent).not.toContain("下一题");
+  expect(api.getObservationHistory).not.toHaveBeenCalled();
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  head = graded;
+  api.getGradingStatus.mockResolvedValue(gradingStatus({ headObservationId: graded.id, status: "graded", retryable: false }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
   const complete = Array.from(container.querySelectorAll('[data-attempt-stage="reliable"] button')).filter(button => button.textContent === "下一题");
   expect(complete).toHaveLength(1);
   await act(async () => (complete[0] as HTMLButtonElement).click());
@@ -160,31 +188,53 @@ it("offers the one completion action only after grading, and removes it for an u
   api.reviseObservation.mockImplementation(async () => {
     head = { ...record, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", rootObservationId: record.id,
       revisesObservationId: graded.id, revisionKind: "replace", outcome: "unverified" };
+    api.getGradingStatus.mockResolvedValue(gradingStatus({ headObservationId: head.id }));
     return { disposition: "applied", observation: head };
   });
   await click("判错了"); await click("保存纠正");
   expect(container.textContent).not.toContain("下一题");
-  expect(api.gradeObservation).toHaveBeenCalledOnce();
+  expect(api.gradeObservation).not.toHaveBeenCalled();
 });
 
 it("keeps completion absent after a failed or low-confidence grade", async () => {
+  api.submitAttempt.mockResolvedValue(record);
   api.gradeObservation.mockRejectedValue(new Error("批改服务未完成"));
   await render(); await submit();
   expect(container.textContent).toContain("重试批改");
   expect(container.textContent).not.toContain("下一题");
-  api.gradeObservation.mockImplementation(async () => ({ ...graded, outcome: "unverified", aiEvaluation: { ...graded.aiEvaluation!, confidence: 0.2 } }));
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  await click("重试批改");
+  expect(container.textContent).toContain("批改服务未完成");
+  expect(container.textContent).not.toContain("下一题");
+  api.gradeObservation.mockImplementation(async () => {
+    head = { ...graded, outcome: "unverified", aiEvaluation: { ...graded.aiEvaluation!, confidence: 0.2 } };
+    api.getGradingStatus.mockResolvedValue(gradingStatus({ headObservationId: head.id, status: "needs_manual", retryable: false }));
+    return gradingStatus({ status: "queued", retryable: false });
+  });
   await click("重试批改");
   expect(container.textContent).toContain("修改这一步");
   expect(container.textContent).not.toContain("下一题");
+  expect(api.gradeObservation).toHaveBeenCalledTimes(2);
+  expect(api.gradeObservation).toHaveBeenNthCalledWith(1, { observationId: record.id });
+  expect(api.gradeObservation).toHaveBeenNthCalledWith(2, { observationId: record.id });
+  expect(api.getObservationHistory).toHaveBeenCalledWith(record.id);
+  expect(container.textContent).toContain(record.answer);
+  expect(container.textContent).toContain("AI 批改 · 暂不能判断");
+  expect(container.querySelector('[data-feedback-verdict="unverified"]')).not.toBeNull();
+  expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, head);
 });
 
 it("offers completion for a known learner correction without regrading or claiming an assessed answer", async () => {
   const corrected = { ...record, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", rootObservationId: record.id,
     revisionKind: "replace" as const, outcome: "incorrect" as const };
+  head = corrected;
   api.getSubmittedAttempt.mockResolvedValue({ attempt, observation: corrected });
   await render();
   expect(container.querySelector('[data-attempt-stage="corrected"]')?.textContent).toContain("下一题");
-  expect(container.textContent).toContain("重新批改");
+  // The single primary action is completion for a known correction, not another paid grade.
+  expect(api.getGradingStatus).toHaveBeenCalledWith(corrected.id);
+  expect(Array.from(container.querySelectorAll("button")).filter(button => button.textContent === "下一题")).toHaveLength(1);
+  expect(container.textContent).not.toContain("重试批改");
   expect(container.querySelector('[data-feedback-verdict="unverified"]')).not.toBeNull();
   expect(api.gradeObservation).not.toHaveBeenCalled();
 });

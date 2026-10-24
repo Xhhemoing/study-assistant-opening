@@ -183,7 +183,7 @@ it("rejects original classroom material as a work photo while retaining legitima
     replacement: { answer: "秩为2", outcome: "unverified", assistance: "unknown" } });
   expect((await f.grader.context(fixture.scope, { observationId: correction.headObservationId, ...work })).workSource?.id).toBe(photoId);
   await expect(f.grader.context(fixture.scope, { observationId: correction.headObservationId,
-    workSourceId: f.sourceId, workSourceVersion: 1, physicalPage: 1 })).rejects.toMatchObject({ code: "VALIDATION" });
+    workSourceId: f.sourceId, workSourceVersion: 1, physicalPage: 1 })).rejects.toMatchObject({ code: "CONFLICT" });
 });
 
 it("keeps choice options in the canonical question and preserves optional teaching feedback", async () => {

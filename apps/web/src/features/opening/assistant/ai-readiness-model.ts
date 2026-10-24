@@ -4,7 +4,27 @@ export type AiReadinessChecklistItem = {
   detail: string;
   fixHint: string;
   severity?: "hard" | "soft";
+  status?: "not_configured" | "missing_files" | "preflight_failed" | "ready" | "unknown";
+  checkedAt?: string | null;
 };
+
+/** Worker observations only. A configured Web environment is not OCR proof. */
+export function parserOcrReadinessItem(report: {
+  status: "not_configured" | "missing_files" | "preflight_failed" | "ready";
+  checkedAt: string; expiresAt: string; missingFiles: string[];
+} | null, now = Date.now()): AiReadinessChecklistItem {
+  const status = report && Date.parse(report.expiresAt) > now ? report.status : "unknown";
+  const details = {
+    not_configured: "解析 Worker 未配置离线 OCR；扫描件可能没有可读文字。",
+    missing_files: "解析 Worker 的 OCR 目录或模型文件不完整。",
+    preflight_failed: "解析 Worker 的 OCR 小推理检查失败或超时。",
+    ready: "解析 Worker 已验证 OCR 目录、四个模型文件与小推理；不代表公式识别准确。",
+    unknown: "尚无有效的解析 Worker OCR 实测报告（未上报或已过期）。",
+  };
+  return { key: "parser_ocr", ok: status === "ready", severity: "soft", status,
+    checkedAt: status === "unknown" ? null : report!.checkedAt, detail: details[status],
+    fixHint: "由管理员检查解析 Worker 的离线 OCR 模型与健康报告；文字辅导不受此项阻挡。" };
+}
 
 /** Soft checklist keys (legacy payloads without severity stay soft). */
 export const AI_READINESS_CHECKLIST_SOFT_KEYS = new Set([

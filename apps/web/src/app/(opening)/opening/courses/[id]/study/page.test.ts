@@ -13,15 +13,27 @@ const scope = { workspaceId: courseId, ownerUserId: activityId }, sql = {};
 beforeEach(() => { vi.clearAllMocks(); mocks.get.mockResolvedValue(null); mocks.scope.mockResolvedValue({ scope, sql }); mocks.context.mockResolvedValue({ sourceIds: [], sourceLoadError: false, teachingEnabled: true, matrixInteractiveEnabled: false, timeZone: "UTC" }); });
 it("routes an owned span activity from the generic resume link using its persisted identity", async () => {
   mocks.get.mockResolvedValue({ activityId, courseId, retestId: null });
-  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, retest: retestId, task: retestId }) })).rejects.toThrow(`REDIRECT:/opening/courses/${courseId}/study/span?lesson=${activityId}`);
+  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId }) })).rejects.toThrow(`REDIRECT:/opening/courses/${courseId}/study/span?lesson=${activityId}`);
   expect(mocks.get).toHaveBeenCalledWith(scope, activityId);
   expect(mocks.redirect).toHaveBeenCalledWith(`/opening/courses/${courseId}/study/span?lesson=${activityId}`);
   expect(mocks.context).not.toHaveBeenCalled();
 });
-it("restores the persisted retest instead of the caller's query parameter", async () => {
+it("restores the persisted retest from a standalone activity's saved identity", async () => {
   mocks.get.mockResolvedValue({ activityId, courseId, retestId });
-  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, retest: courseId }) })).rejects.toThrow("REDIRECT:");
+  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId }) })).rejects.toThrow("REDIRECT:");
   expect(mocks.redirect).toHaveBeenCalledWith(`/opening/courses/${courseId}/study/span?lesson=${activityId}&retest=${retestId}`);
+});
+it.each([
+  { activity: activityId, task: retestId, retest: undefined },
+  { activity: activityId, task: retestId, retest: courseId },
+  { activity: activityId, task: undefined, retest: courseId },
+])("keeps combined navigation in the workspace for admission checks: %j", async query => {
+  mocks.get.mockResolvedValue({ activityId, courseId, retestId });
+  const page = await CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve(query) });
+  expect(page.props).toMatchObject({ courseId, activityId, taskId: query.task, retestId: query.retest });
+  expect(mocks.context).toHaveBeenCalledOnce();
+  expect(mocks.get).not.toHaveBeenCalled();
+  expect(mocks.redirect).not.toHaveBeenCalled();
 });
 it("does not attach an owned span activity to a different course", async () => {
   mocks.get.mockResolvedValue({ activityId, courseId: retestId, retestId: null });

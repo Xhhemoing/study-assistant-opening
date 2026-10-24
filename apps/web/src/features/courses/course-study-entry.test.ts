@@ -150,8 +150,112 @@ describe("course study entry", () => {
   });
   it("refuses an existing task activity with a known different requirement", async () => {
     const existing = activity({ clientKey: `task:${taskId}`, learnerFocus: { skillLabel: "矩阵", requirementKey: "old", activityKind: "diagnose", reasonCode: "first", focusObservationId: null, recentAssistance: [], strategyVersion: "test" } });
-    const client = api([existing]); client.listTasks.mockResolvedValue({ tasks: [task({ requirementKey: "new" })] });
+    const client = api([existing]); client.listTasks.mockResolvedValue({ tasks: [task({ requirementKey: "new", teachingTarget: { activityId, courseId, requirementKey: "old" } })] });
     await expect(openCourseStudy(client, { ...options, taskId })).rejects.toThrow("学习要求已调整");
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("task-bound direct activity entry", () => {
+  const teachingTarget = { activityId, courseId, requirementKey: null };
+  const direct = { ...options, taskId, activityId };
+  const focus = { skillLabel: "矩阵", requirementKey: "matrix:v1", activityKind: "diagnose" as const,
+    reasonCode: "first", focusObservationId: null, recentAssistance: [], strategyVersion: "test" };
+
+  it.each([
+    undefined, task({ courseId: otherCourseId }), task({ status: "done" }), task({ status: "skipped" }),
+    task({ notBefore: "2099-10-17T00:00:00.000Z" }),
+    task({ retest: { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "补测",
+      recommendedAt: "2099-10-17T00:00:00.000Z" } }),
+  ])("validates current task admission before the explicit activity: %j", async selected => {
+    const client = api([activity()]);
+    client.listTasks.mockResolvedValue({ tasks: selected ? [{ ...selected, teachingTarget }] : [] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("重新选择");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.listTeachingActivities).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { activityId }])("uses the authoritative target, including non-task onboarding keys, without listing or creating: %j", async query => {
+    const existing = activity({ clientKey: `first-learning:${courseId}:activity`, status: "paused" });
+    const client = api([existing]); client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget })] });
+    expect(await openCourseStudy(client, { ...options, taskId, compilerEnabled: false, ...query })).toEqual({ kind: "activity", activity: existing });
+    expect(client.getTeachingActivity).toHaveBeenCalledExactlyOnceWith(activityId);
+    expect(client.listTasks.mock.invocationCallOrder[0]).toBeLessThan(client.getTeachingActivity.mock.invocationCallOrder[0]!);
+    expect(client.listTeachingActivities).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    undefined, { ...teachingTarget, activityId: otherCourseId }, { ...teachingTarget, courseId: otherCourseId },
+  ])("rejects missing/changed/mismatched projections even when a client key looks bound: %j", async target => {
+    const client = api([activity({ clientKey: `task:${taskId}` })]);
+    client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: target })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("目标已变化");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "old"])("rejects a missing or changed projected requirement (%s) before loading content", async requirementKey => {
+    const client = api([activity({ learnerFocus: focus })]);
+    client.listTasks.mockResolvedValue({ tasks: [task({ requirementKey: "matrix:v1", teachingTarget: { ...teachingTarget, requirementKey } })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("学习要求已调整");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { id: otherCourseId }, { courseId: otherCourseId }, { status: "completed" as const }, { status: "skipped" as const },
+    { learnerFocus: { skillLabel: "矩阵", requirementKey: "old", activityKind: "diagnose" as const,
+      reasonCode: "first", focusObservationId: null, recentAssistance: [], strategyVersion: "test" } },
+  ])("rechecks the fetched activity rather than trusting the projection snapshot: %j", async change => {
+    const client = api([activity(change)]); client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it("requires the loaded activity's exact requirement and never falls back after a failed read", async () => {
+    const selected = task({ requirementKey: "matrix:v1", teachingTarget: { ...teachingTarget, requirementKey: "matrix:v1" } });
+    const client = api([activity()]); client.listTasks.mockResolvedValue({ tasks: [selected] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("学习要求已调整");
+    client.getTeachingActivity.mockResolvedValueOnce(activity({ learnerFocus: focus }));
+    expect((await openCourseStudy(client, direct)).kind).toBe("activity");
+    client.getTeachingActivity.mockRejectedValueOnce(new Error("目标读取失败"));
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("目标读取失败");
+    client.listTasks.mockRejectedValueOnce(new Error("任务读取失败"));
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("任务读取失败");
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it("keeps teaching disabled and non-teaching task routes free of activity reads", async () => {
+    const client = api([activity()]); client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget })] });
+    expect(await openCourseStudy(client, { ...direct, teachingEnabled: false })).toEqual({ kind: "practice", task: task({ teachingTarget }) });
+    client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget, suggestionKind: "review_cards" })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("目标已变化");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy unbound requirements usable while rejecting explicit null versus a concrete requirement", async () => {
+    const client = api([activity({ learnerFocus: focus })]);
+    const target = { ...teachingTarget, requirementKey: "matrix:v1" };
+    client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: target })] });
+    expect((await openCourseStudy(client, direct)).kind).toBe("activity");
+    client.getTeachingActivity.mockClear();
+    client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: target, requirementKey: null })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("学习要求已调整");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not let an activity or a second selector bypass retest identity and completion", async () => {
+    const retest = { candidateId: courseId, activityId, courseId, skillLabel: "矩阵", prompt: "补测", recommendedAt: null };
+    const client = api([activity()]); client.listTasks.mockResolvedValue({ tasks: [task({ retest, status: "done" })] });
+    expect(await openCourseStudy(client, direct)).toMatchObject({ kind: "retest-review" });
+    await expect(openCourseStudy(client, { ...direct, retestId: otherCourseId })).rejects.toThrow("重新选择");
+    client.listTasks.mockResolvedValue({ tasks: [task({ retest: { ...retest, requirementKey: "old" }, requirementKey: "new" })] });
+    await expect(openCourseStudy(client, direct)).rejects.toThrow("学习要求已调整");
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
     expect(client.createTeachingActivity).not.toHaveBeenCalled();
   });
 });

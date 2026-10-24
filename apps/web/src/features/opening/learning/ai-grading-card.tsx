@@ -1,17 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AiGradingInput, LearningObservation, SourceRecord } from "@aistudy/contracts";
-import { createOpeningApi } from "../client/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AiGradingInput, AiGradingStatus, LearningObservation } from "@aistudy/contracts";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { LearningProse } from "../assistant/learning-prose";
 import { sourceViewerHref } from "../inbox/source-viewer";
-import { AiGradingPhotoFields, emptyGradingPhoto, type GradingPhotoSelection } from "./ai-grading-photo";
-import { pendingPracticeRequest, runPracticeRequest } from "./practice-draft";
+import type { GradingPhotoSelection } from "./ai-grading-photo";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { FeedbackPractice } from "./feedback-practice";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "./stage-action-bar";
-import { readGradingPhotoDraft, saveGradingPhotoDraft } from "./ai-grading-photo-draft";
+
 
 export const aiOutcomeLabels = { correct: "正确", incorrect: "需改进", unverified: "暂不能判断" } as const;
 
@@ -53,82 +51,76 @@ export function AiGradingCard(props: AiGradingCardProps) {
   return <GradingCard key={props.record.id} {...props} />;
 }
 
-function GradingCard({ record, autoGrade = false, photo: suppliedPhoto, disabled = false, onGraded, onDispute, onPendingChange, completionAction }: AiGradingCardProps) {
+function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingChange, completionAction }: AiGradingCardProps) {
   const client = useMemo(() => createOpeningLearningClient(), []);
-  const [photo, setPhoto] = useState(suppliedPhoto ?? emptyGradingPhoto);
-  const [photoReady, setPhotoReady] = useState(Boolean(suppliedPhoto));
-  const [photoWarning, setPhotoWarning] = useState(false);
-  useEffect(() => {
-    if (!suppliedPhoto) setPhoto(readGradingPhotoDraft(record.id));
-    setPhotoReady(true);
-  }, [record.id, suppliedPhoto]);
-  const [sources, setSources] = useState<SourceRecord[]>([]);
-  const [photoOpen, setPhotoOpen] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<AiGradingStatus | null>(null);
+  const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => { onPendingChange?.(pending); }, [pending, onPendingChange]);
-  useEffect(() => () => { onPendingChange?.(false); }, [onPendingChange]);
+  const [refresh, setRefresh] = useState(0);
   const inFlight = useRef(false);
-  const autoRequested = useRef<string | null>(null);
   const mounted = useRef(true);
-  const currentRecordId = useRef(record.id);
-  currentRecordId.current = record.id;
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const selectedPhoto = suppliedPhoto ?? photo;
-  const assessedPhoto = record.aiEvaluation?.workSource;
-  const photoHref = assessedPhoto ? sourceViewerHref(assessedPhoto.id, assessedPhoto.version, { page: assessedPhoto.physicalPage })
-    : selectedPhoto.workSourceId ? sourceViewerHref(selectedPhoto.workSourceId, selectedPhoto.workSourceVersion, { page: selectedPhoto.physicalPage }) : null;
+  const onGradedRef = useRef(onGraded);
+  onGradedRef.current = onGraded;
   const canGrade = canGradeObservation(record);
-  const completion = !pending && !error && completionAction && canCompleteObservation(record)
-    ? { ...completionAction, disabled: disabled || completionAction.disabled } : undefined;
+  const pending = sending || status?.status === "queued" || status?.status === "grading";
+  useEffect(() => { onPendingChange?.(pending); }, [pending, onPendingChange]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; onPendingChange?.(false); }; }, [onPendingChange]);
 
-  const requestKey = `ai-grade:${JSON.stringify(aiGradingRequest(record.id, selectedPhoto))}`;
-  const grade = useCallback(async (resumeOnly = false) => {
-    const existing = pendingPracticeRequest<LearningObservation>(requestKey);
-    if (inFlight.current || !photoReady || disabled || !canGrade || record.aiEvaluation || resumeOnly && !existing) return;
-    inFlight.current = true; setPending(true); setError("");
-    try {
-      const input = aiGradingRequest(record.id, selectedPhoto);
-      const next = await (existing ?? runPracticeRequest(requestKey, () => client.gradeObservation(input)));
-      if (mounted.current && currentRecordId.current === record.id) onGraded(next);
-    } catch (reason) {
-      if (mounted.current && currentRecordId.current === record.id) setError(`原答案已保存。${reason instanceof Error ? reason.message : "本次批改未完成，请重试。"}`);
-    } finally {
-      inFlight.current = false;
-      if (mounted.current) setPending(false);
-    }
-  }, [canGrade, client, disabled, onGraded, photoReady, record.aiEvaluation, record.id, requestKey, selectedPhoto]);
-
-  useEffect(() => { void grade(true); }, [grade]);
-
+  // Even autoGrade callers only READ. Saving the answer already enqueued its
+  // durable job. Closing this card only stops polling, never the job itself.
   useEffect(() => {
-    if (!photoReady || !autoGrade || !canGrade || record.aiEvaluation || disabled || autoRequested.current === record.id) return;
-    autoRequested.current = record.id;
-    void grade();
-  }, [autoGrade, canGrade, disabled, grade, photoReady, record.aiEvaluation, record.id]);
-
-  async function loadPhotos() {
-    setPhotoOpen(true);
-    try {
-      const next = await createOpeningApi().listSources();
-      if (mounted.current) setSources(next);
+    if (!canGrade && !record.aiEvaluation) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll() {
+      try {
+        const next = await client.getGradingStatus(record.id);
+        if (stopped) return;
+        setStatus(next); setError("");
+        if (next.headObservationId !== record.id) {
+          const history = await client.getObservationHistory(record.id);
+          if (stopped) return;
+          const head = history.revisions.find(row => row.id === history.headObservationId);
+          if (head && head.id !== record.id) { onGradedRef.current(head); return; }
+        }
+        if (["queued", "grading", "unknown_cost"].includes(next.status)) timer = setTimeout(() => void poll(), next.status === "unknown_cost" ? 10000 : 2000);
+      } catch (reason) {
+        if (stopped) return;
+        setError(`原答案已保存。${reason instanceof Error ? reason.message : "暂时无法读取批改状态。"}`);
+        timer = setTimeout(() => void poll(), 5000);
+      }
     }
-    catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "文件暂时无法读取，请重试。"); }
+    void poll();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [canGrade, client, record.aiEvaluation, record.id, refresh]);
+
+  async function enqueue() {
+    if (inFlight.current || disabled || !status?.retryable) return;
+    inFlight.current = true; setSending(true); setError("");
+    try {
+      const next = await client.gradeObservation({ observationId: record.id });
+      if (mounted.current) { setStatus(next); setRefresh(value => value + 1); }
+    } catch (reason) {
+      if (mounted.current) setError(`原答案已保存。${reason instanceof Error ? reason.message : "未能加入批改队列。"}`);
+    } finally { inFlight.current = false; if (mounted.current) setSending(false); }
   }
 
   if (!canGrade && !record.aiEvaluation) return null;
+  const photo = status?.workSource ?? record.aiEvaluation?.workSource;
+  const photoHref = photo ? sourceViewerHref(photo.id, photo.version, { page: photo.physicalPage }) : null;
+  const unknown = status?.status === "unknown_cost";
+  const completion = !pending && !error && completionAction && canCompleteObservation(record)
+    ? { ...completionAction, disabled: disabled || completionAction.disabled } : undefined;
+  const message = error || (unknown ? "批改费用或发送结果尚未确认，不会重复发送。原答案已保存，可以手动改评。"
+    : pending ? "答案已保存，正在后台批改；离开页面不会取消。"
+      : status?.status === "needs_manual" ? "原答案已保存，请核对结果或手动改评。" : !status ? "正在读取后台批改状态。" : undefined);
   return <div className="space-y-3" aria-busy={pending}>
     {photoHref ? <a className="inline-flex min-h-10 items-center text-xs text-accent underline underline-offset-4" target="_blank" rel="noreferrer" href={photoHref}>查看作答照片</a> : null}
     <AiGradingResult record={record} />
-    {!record.aiEvaluation && photoOpen && !suppliedPhoto ? <AiGradingPhotoFields sources={sources} value={photo} onChange={value => { setPhoto(value); setPhotoWarning(!saveGradingPhotoDraft(record.id, value)); }} disabled={pending || disabled} onRefresh={() => void loadPhotos()} /> : null}
-    {photoWarning ? <p role="status" className="text-xs text-warn">照片选择仅在本页保留，刷新后请重新选择；原答案不受影响。</p> : null}
-    <StageActionBar stage={pending ? "processing" : error ? "failed" : observationStage(record) === "corrected" ? "corrected" : record.aiEvaluation ? observationStage(record) : "draft"}
-      message={pending ? "正在批改，你的答案已保存。" : error || (record.aiEvaluation && observationStage(record) === "evaluation-pending" ? "这次结果不确定，请说明需要修改的判断。" : undefined)}
-      primary={completion ?? (!record.aiEvaluation ? { label: error ? "重试批改" : "AI 批改", disabled: !photoReady || disabled, onClick: () => void grade() }
-        : observationStage(record) === "evaluation-pending" && onDispute ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>
-      {completion && !record.aiEvaluation && canGrade ? <button type="button" className="min-h-11 px-2 py-2 text-xs text-text-2 underline underline-offset-4 disabled:opacity-50" disabled={!photoReady || disabled} onClick={() => void grade()}>重新批改</button> : null}
-      {record.aiEvaluation && observationStage(record) !== "evaluation-pending" && onDispute ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
-      {!record.aiEvaluation && !photoOpen && !suppliedPhoto ? <button type="button" className="min-h-11 px-2 py-2 text-xs text-text-2 underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled || !photoReady} onClick={() => void loadPhotos()}>添加作答照片</button> : null}
+    <StageActionBar stage={error ? "failed" : pending ? "processing" : unknown ? "evaluation-pending" : observationStage(record)} message={message}
+      primary={completion ?? (status?.retryable ? { label: "重试批改", disabled: disabled || sending, onClick: () => void enqueue() }
+        : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>
+      {record.aiEvaluation && onDispute ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
     </StageActionBar>
   </div>;
 }

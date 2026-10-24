@@ -5,6 +5,7 @@ import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { assistanceLevelSchema, observationOutcomeSchema, publicVerdictSourceSchema } from "./learning";
 import { referenceCheckInputSchema, sourceVersionsSchema } from "./learning-evidence";
 import { matrixExerciseInputSchema, matrixExerciseSpecSchema } from "./matrix-evaluation";
+import { aiGradingWorkSourceSchema } from "./ai-evaluation";
 
 export const learningAttemptProblemInputSchema = z.object({
   sourceId: uuidSchema.optional(),
@@ -30,6 +31,7 @@ export const learningAttemptSubmitInputSchema = z.object({
   outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,
   verdictSource: publicVerdictSourceSchema.optional(), referenceSourceId: uuidSchema.nullable().optional(),
   referenceCheck: referenceCheckInputSchema.optional(), retestId: uuidSchema.nullable().optional(),
+  workSource: aiGradingWorkSourceSchema.optional(),
 }).strict();
 export const learningAttemptSchema = z.object({
   id: uuidSchema, workspaceId: uuidSchema, sessionId: uuidSchema, courseId: uuidSchema,

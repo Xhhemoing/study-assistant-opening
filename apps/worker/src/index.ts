@@ -1,4 +1,8 @@
 import { Worker } from "bullmq";
+import { randomUUID } from "node:crypto";
+import { createGradeObservationHandler } from "./jobs/grade-observation";
+import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository,
+  createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository } from "@aistudy/database";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
@@ -15,6 +19,8 @@ import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
 import { prepareWorkerRole } from "./runtime/worker-role";
+import { validateParserPaths } from "./parsers/parser-preflight";
+import { createParserHealthLease } from "./runtime/parser-health-lease";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
@@ -54,7 +60,10 @@ export function processSmokeJob(input: unknown): {
 export async function main(): Promise<void> {
   // PR-H: full registry validation (strict booleans, dependencies, no NEXT_PUBLIC_*) before any connection.
   const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
-  const { parserRunner: runner, queueKinds } = await prepareWorkerRole(env.workerRole);
+
+  // Reject invalid local parser paths before allocating connection resources.
+  // The full OCR inference/report remains inside the managed startup lifecycle.
+  if (env.workerRole !== "learning") await validateParserPaths();
   const openingModel = loadOpeningModelCatalog();
   const embeddingConfig = loadOpeningEmbeddingConfig();
   const redis = createRedisConnection({ url: env.redisUrl });
@@ -63,23 +72,37 @@ export async function main(): Promise<void> {
   redis.on("error", reportError);
   producer.on("error", reportError);
   const sql = createSqlClient(env.databaseUrl);
+  // Isolate report writes so shutdown can cancel a hung renewal without
+  // abandoning an INSERT that might later overwrite the retirement receipt.
+  const parserHealthSql = createSqlClient(env.databaseUrl, { max: 1 });
+  const parserHealth = createOpeningParserHealthRepository(parserHealthSql);
+  const parserWorkerId = randomUUID();
   const workers: Worker[] = [];
   const openedQueues: ReturnType<typeof createQueues>[string][] = [];
   const tasks: ReturnType<typeof createSerialTask>[] = [];
   const timers: ReturnType<typeof setInterval>[] = [];
   let stopping = false;
+  let parserStarted = false;
+  let parserReportedAt = 0;
+  let parserLease: ReturnType<typeof createParserHealthLease> | undefined;
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = () => shutdownPromise ??= (async () => {
     stopping = true;
+    parserLease?.stop();
     for (const timer of timers) clearInterval(timer);
     const failures: unknown[] = [];
     const closeAll = async (closers: Array<() => Promise<unknown>>) => {
       const results = await Promise.allSettled(closers.map((close) => Promise.resolve().then(close)));
       for (const result of results) if (result.status === "rejected") failures.push(result.reason);
     };
+    // Pause fetching immediately, before draining a possibly hung health refresh.
+    // Active jobs still finish under their ordinary execution fences.
+    await closeAll(workers.map((worker) => () => worker.pause(true)));
+    await closeAll([() => parserHealthSql.end({ timeout: 5 })]);
     await closeAll(tasks.map((task) => () => task.stop()));
     await closeAll(workers.map((worker) => () => worker.close()));
     await closeAll(openedQueues.map((queue) => () => queue.close()));
+    if (parserStarted) await closeAll([() => createOpeningParserHealthRepository(sql).retire(parserWorkerId)]);
     producer.disconnect();
     redis.disconnect();
     await closeAll([() => sql.end({ timeout: 5 })]);
@@ -89,6 +112,26 @@ export async function main(): Promise<void> {
     }
   })();
   try {
+  const { parserRunner: runner, queueKinds, refreshParserHealth } = await prepareWorkerRole(env.workerRole, undefined,
+    { record: async report => {
+      const startedAt = performance.now();
+      await parserHealth.record(parserWorkerId, report);
+      parserReportedAt = startedAt;
+    } });
+  parserStarted = runner !== null;
+  if (refreshParserHealth) {
+    parserLease = createParserHealthLease({ reportedAt: parserReportedAt, refresh: refreshParserHealth,
+      onUnavailable: error => {
+        reportError(error);
+        process.exitCode = 1;
+        // Do not await shutdown inside the active refresh task: shutdown drains it.
+        void shutdown().catch(reportError);
+      } });
+    parserLease.assertCurrent();
+    const refresh = createSerialTask(() => parserLease!.renew(), reportError);
+    tasks.push(refresh);
+    timers.push(setInterval(() => { void refresh.run(); }, 5 * 60_000));
+  }
 
   const repository = createOpeningJobRepository(sql);
   const privacyRepo = createOpeningPrivacyRepository(sql);
@@ -98,7 +141,8 @@ export async function main(): Promise<void> {
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3(env.s3);
   const parserDisabled: JobHandler = async () => { throw new Error("parser queues are disabled for WORKER_ROLE=learning"); };
-  const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir }) : parserDisabled;
+  const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
+    segments: createOpeningPdfSegmentsRepository(sql) }) : parserDisabled;
   const retest = createRetestCandidateHandler({
     readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),
     readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
@@ -174,6 +218,8 @@ export async function main(): Promise<void> {
     createCompileTeachingUnitWorkerDeps(sql, { budget, chunks, privacy: privacyRepo }),
   );
   const handlers = createHandlers(parse, {
+    "grade-observation": createGradeObservationHandler({ repository: createOpeningAiGradingRepository(sql), gateway: models,
+      budget: scope => scopeBudget(budget, scope), images: createSourcePageImages(sql, storage) }),
     "recognize-photo-question": createRecognizePhotoQuestionHandler({ repository: createOpeningPhotoRecognitionRepository(sql), gateway: models,
       budget: scope => scopeBudget(budget, scope), images: createSourcePageImages(sql, storage) }),
     "index-source": indexSource,
@@ -229,6 +275,7 @@ export async function main(): Promise<void> {
     if (!queueKinds.has(kind)) continue;
     const worker = new Worker(queue.name, async (job) => {
     if (stopping) throw new Error("worker is shutting down");
+    if (kind === "parse" || kind === "parse-media") parserLease!.assertCurrent();
     if (kind === "tutor") {
       const data = job.data as { jobId?: string };
       if (!data.jobId) throw new Error("tutor queue job is missing its tutor job id");
@@ -241,6 +288,7 @@ export async function main(): Promise<void> {
     worker.on("error", reportError);
   }
   const dispatch = createSerialTask(async () => {
+    await createOpeningAiGradingJobRepository(sql).recoverExpired();
     await repository.recoverExpired();
     await tutorJobs.recoverExpired();
     await dispatchPending({ repository, queues });

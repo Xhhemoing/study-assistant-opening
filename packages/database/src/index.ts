@@ -246,6 +246,11 @@ export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, ty
 export * from "./schema/opening-exam-integration";
 export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
 export { createOpeningAiGradingRepository, type OpeningAiGradingContext } from "./repositories/opening-ai-grading";
+export { createOpeningAiGradingJobRepository } from "./repositories/opening-ai-grading-jobs";
+export { createOpeningParserHealthRepository, parseParserOcrHealth, PARSER_OCR_FILES, PARSER_HEALTH_TTL_MS,
+  type ParserOcrHealth, type ParserOcrObservation, type ParserOcrStatus } from "./repositories/opening-parser-health";
+export { createOpeningPdfSegmentsRepository, validatePdfSegmentPages, type OpeningPdfSegmentsRepository,
+  type PdfSegmentPage, type PdfSegmentIdentity, type PdfSegment } from "./repositories/opening-pdf-segments";
 export { createOpeningExamReviewsRepository } from "./repositories/opening-exam-reviews";
 export * from "./schema/opening-exam-forecast";
 export { createOpeningExamForecastRepository } from "./repositories/opening-exam-forecast";

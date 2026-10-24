@@ -1,4 +1,4 @@
-import { suggestionKindSchema, type TaskCreateInput, type TaskItem, type TaskOrigin } from "@aistudy/contracts";
+import { suggestionKindSchema, teachingLearnerFocusSchema, type TaskCreateInput, type TaskItem, type TaskOrigin } from "@aistudy/contracts";
 import { parseSuggestionKey } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
@@ -15,6 +15,16 @@ export function withTaskPlanningFields(task: TaskItem, row: Record<string, unkno
   if (suggestionKind) out.suggestionKind = suggestionKind;
   if (row.not_before) out.notBefore = new Date(row.not_before as string | Date).toISOString();
   if (row.close_source === "learner" || row.close_source === "system") out.closeSource = row.close_source;
+  if (typeof row.teaching_activity_id === "string" && row.teaching_course_id === out.courseId
+    && out.courseId && suggestionKind !== "review_cards") {
+    const goal = row.teaching_goal_json as { learnerFocus?: unknown } | null;
+    const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
+    out.teachingTarget = {
+      activityId: row.teaching_activity_id,
+      courseId: out.courseId,
+      requirementKey: focus.success ? focus.data.requirementKey ?? null : null,
+    };
+  }
   return out;
 }
 

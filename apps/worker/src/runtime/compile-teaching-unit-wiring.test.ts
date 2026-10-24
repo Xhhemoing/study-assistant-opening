@@ -9,6 +9,7 @@ const activities = vi.hoisted(() => ({
 }));
 const content = vi.hoisted(() => ({
   createUnit: vi.fn(),
+  getActivitySpec: vi.fn(),
   getUnit: vi.fn(),
   writeUnitBlocks: vi.fn(),
   readRevision: vi.fn(),
@@ -103,6 +104,7 @@ let published: ActivitySpecPublishInput[];
 beforeEach(() => {
   vi.clearAllMocks();
   readFocus.mockResolvedValue({});
+  content.getActivitySpec.mockResolvedValue(null);
   model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
   statuses = [];
   writtenBlocks = [];

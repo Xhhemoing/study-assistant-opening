@@ -36,16 +36,23 @@ describe("docling parser bridge", () => {
 
   it("aborts a running child process", async () => {
     const runner = createNodeRunner({ pythonExecutable: process.execPath, cwd: process.cwd() });
-    await expect(runner(["-e", "setTimeout(() => {}, 10000)"], AbortSignal.timeout(50))).rejects.toMatchObject({ name: "AbortError" });
+    const controller = new AbortController();
+    const running = runner(["-e", "setTimeout(() => {}, 10000)"], controller.signal);
+    controller.abort();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("bounds captured output even when a child emits excessive data", async () => {
     const runner = createNodeRunner({ pythonExecutable: process.execPath, cwd: process.cwd() });
     const result = await runner(["-e", "process.stdout.write('x'.repeat(4 * 1024 * 1024)); process.stderr.write('e'.repeat(128 * 1024)); process.exitCode = 4;"], new AbortController().signal);
-    expect(result.stdout.length).toBeGreaterThanOrEqual(2 * 1024 * 1024);
-    expect(result.stdout.length).toBeLessThan(3 * 1024 * 1024);
+    expect(result.stdout.length).toBe(4 * 1024 * 1024);
     expect(result.stderr?.length).toBeLessThanOrEqual(400);
     expect(result.exitCode).toBe(4);
+  });
+
+  it("rejects over-cap stdout rather than silently accepting truncated JSON", async () => {
+    const runner = createNodeRunner({ pythonExecutable: process.execPath, cwd: process.cwd() });
+    await expect(runner(["-e", "process.stdout.write('x'.repeat(9 * 1024 * 1024))"], new AbortController().signal)).rejects.toBeInstanceOf(BoundsExceededError);
   });
 
   it("forces UTF-8 child stdout encoding for non-ASCII math text", async () => {
