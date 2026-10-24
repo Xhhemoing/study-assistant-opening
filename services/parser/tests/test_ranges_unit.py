@@ -52,11 +52,60 @@ class RangesTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as source, \
                 patch.object(cli, "create_converter", return_value=converter) as factory, \
                 patch.object(cli, "pdf_page_count", return_value=total), \
+                patch.object(cli, "initialize_pdf_converter", side_effect=lambda c: c.initialize_pipeline("pdf") if hasattr(c, "initialize_pipeline") else None), \
                 patch.object(physical_pages, "_assemble_page", side_effect=assemble), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(stderr):
             code = cli.main(["--input", source.name, "--mime", cli.PDF, "--max-pages", "2000",
                              "--ranges", ranges, *extra])
         return code, [json.loads(line) for line in output.getvalue().splitlines()], factory, stderr.getvalue()
+
+    def test_warmup_once_before_any_range_timer(self):
+        from opening_parser import ranges as module
+        events = []
+        converter = NS(initialize_pipeline=lambda fmt: events.append(("warmup", fmt)))
+        def timed_conversion(*args):
+            self.assertEqual(events[0], ("warmup", "pdf"))
+            events.append("timer")
+            return result(*args[-1])
+        with patch.object(module, "convert_range", side_effect=timed_conversion):
+            code, lines, _, _ = self.invoke(converter)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(events, [("warmup", "pdf"), "timer", "timer"])
+
+    def test_pdf_initializer_uses_docling_pdf_format(self):
+        from unittest.mock import Mock
+        pdf = object()
+        converter = NS(initialize_pipeline=Mock())
+        with patch.dict(sys.modules, {"docling.datamodel.base_models": NS(InputFormat=NS(PDF=pdf))}):
+            cli.initialize_pdf_converter(converter)
+        converter.initialize_pipeline.assert_called_once_with(pdf)
+
+    def test_torch_threads_are_applied_before_converter_imports(self):
+        from unittest.mock import Mock
+        class StopAfterThreads(Exception):
+            pass
+        setter = Mock(side_effect=StopAfterThreads)
+        for value in (None, "2", "4"):
+            env = {} if value is None else {"PARSER_TORCH_THREADS": value}
+            with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, {"torch": NS(set_num_threads=setter)}):
+                with self.assertRaises(StopAfterThreads):
+                    cli.create_converter()
+            setter.assert_called_with(int(value or "1"))
+        for value in ("", "0", "5", "1.5", "2junk"):
+            with patch.dict(os.environ, {"PARSER_TORCH_THREADS": value}), self.assertRaises(ValueError):
+                cli.create_converter()
+
+    def test_warmup_failure_is_initialization_failure_without_conversion(self):
+        from unittest.mock import Mock
+        warmup = Mock(side_effect=RuntimeError("warmup failed"))
+        convert = Mock()
+        code, lines, _, stderr = self.invoke(NS(initialize_pipeline=warmup, convert=convert))
+        self.assertEqual(code, 4)
+        self.assertEqual(lines, [failure((11, 12), "conversion_failed"), failure((15, 16), "conversion_failed")])
+        warmup.assert_called_once_with("pdf")
+        convert.assert_not_called()
+        self.assertIn("converter initialization failed", stderr)
 
     def test_single_factory_flush_before_next_range_and_physical_blank_pages(self):
         output = ObservableOutput()
@@ -148,6 +197,7 @@ class Converter:
             time.sleep(30)
         return NS(number=page_range[0], status=NS(value="success"))
 cli.create_converter = Converter
+cli.initialize_pdf_converter = lambda _: None
 sys.exit(cli.main(["--input", sys.argv[1], "--mime", cli.PDF, "--max-pages", "3",
                    "--ranges", "1-1,2-2,3-3", "--timeout-seconds", "0.05"], terminate_on_timeout=True))
 '''
@@ -246,6 +296,7 @@ class Converter:
             sys.stdin.readline()
         return NS(number=page_range[0], status=NS(value="success"))
 cli.create_converter = Converter
+cli.initialize_pdf_converter = lambda _: None
 with tempfile.NamedTemporaryFile() as source:
     sys.exit(cli.main(["--input", source.name, "--mime", cli.PDF, "--max-pages", "4", "--ranges", "1-1,3-3"]))
 '''

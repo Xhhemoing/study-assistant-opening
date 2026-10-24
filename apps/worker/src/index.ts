@@ -190,6 +190,7 @@ export async function main(): Promise<void> {
   const storage = new OpeningS3(env.s3);
   const parserDisabled: JobHandler = async () => { throw new Error("parser queues are disabled for WORKER_ROLE=learning"); };
   const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
+    segmentPages: env.parserPdfSegmentPages, segmentTimeoutSeconds: env.parserPdfSegmentTimeoutSeconds,
     segments: createOpeningPdfSegmentsRepository(sql) }) : parserDisabled;
   const retest = createRetestCandidateHandler({
     readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),

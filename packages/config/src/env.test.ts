@@ -6,6 +6,13 @@ import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
 import { loadWorkerStartupConfig } from "./worker-startup";
 
+it("validates parser configuration at worker startup", () => {
+  expect(loadWorkerEnv({})).toMatchObject({ parserPdfSegmentPages: 5, parserPdfSegmentTimeoutSeconds: 240, parserTorchThreads: 1 });
+  expect(() => loadWorkerEnv({ PARSER_PDF_SEGMENT_PAGES: "101" })).toThrow(/PARSER_PDF_SEGMENT_PAGES/);
+  expect(() => loadWorkerEnv({ PARSER_PDF_SEGMENT_TIMEOUT_SECONDS: "29" })).toThrow(/PARSER_PDF_SEGMENT_TIMEOUT_SECONDS/);
+  expect(() => loadWorkerEnv({ PARSER_TORCH_THREADS: "5" })).toThrow(/PARSER_TORCH_THREADS/);
+});
+
 it("strictly validates startup budgets, cache TTL, and bounded backoff", () => {
   expect(loadWorkerStartupConfig({}).parserTimeoutMs).toBe(120000);
   expect(loadWorkerStartupConfig({}).ocrTimeoutMs).toBe(120000);

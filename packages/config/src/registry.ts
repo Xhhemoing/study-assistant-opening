@@ -66,6 +66,11 @@ const modelCatalogExample: TemplateLine = {
 };
 
 export const ENV_REGISTRY: readonly EnvVarSpec[] = [
+  ...([
+    ["PARSER_PDF_SEGMENT_PAGES", 5, 1, 100, "PDF pages per cached range; converter reuse makes small ranges inexpensive."],
+    ["PARSER_PDF_SEGMENT_TIMEOUT_SECONDS", 240, 30, 3600, "Per-range conversion timeout, excluding converter creation and PDF warmup."],
+    ["PARSER_TORCH_THREADS", 1, 1, 4, "Torch CPU threads per parser process; opt in to more threads after measuring resource use."],
+  ] as const).map(([name, value, min, max, doc]): EnvVarSpec => ({ name, group: "parser", doc, consumers: ["worker"], kind: "int", min, max, secret: false, dev: { value: String(value) }, docker: { value: String(value) } })),
   { name: "NODE_ENV", group: "runtime", doc: "development | test | production.", consumers: [...both, "compose"], kind: "enum", enumValues: ["development", "test", "production"], secret: false, dev: { value: "development" }, docker: { value: "production" } },
   { name: "WORKER_ROLE", group: "runtime", doc: "Worker consumers: all (default), learning (no document/media parsing), or parser (document/media parsing only). all/parser require parser startup checks.", consumers: ["worker"], kind: "enum", enumValues: ["all", "learning", "parser"], secret: false, dev: { value: "all" }, docker: { value: "all" } },
   ...([

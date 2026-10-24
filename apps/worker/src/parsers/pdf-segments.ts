@@ -3,7 +3,7 @@ import { BoundsExceededError, ConversionFailedError } from "./docling-process";
 import { pdfParserProfile } from "./ocr-health";
 import type { ParserRunner } from "./types";
 
-export const DEFAULT_PDF_SEGMENT_PAGES = 10;
+export const DEFAULT_PDF_SEGMENT_PAGES = 5;
 export const DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS = 240;
 export const PDF_EXECUTION_POLL_MS = 1_000;
 
@@ -67,9 +67,9 @@ export async function parsePdfSegments(input: {
     else missing.push(identity);
   }
   if (missing.length) {
-    // Startup/imports are outside Python's per-range conversion timer. Bound
-    // both the per-range budget and the batch deadline below Node's timer limit.
-    const startupMs = 120_000;
+    // Measured converter creation: 45–50s, PDF pipeline warmup: ~40s.
+    // Both are outside range timers; allow extra startup time under load.
+    const startupMs = 240_000;
     const budgetMs = startupMs + missing.length * Math.ceil(timeoutSeconds * 1000);
     if (!Number.isSafeInteger(budgetMs) || budgetMs > 24 * 60 * 60 * 1000) throw new RangeError("PDF execution budget exceeds one day");
     const deadline = AbortSignal.any([input.signal, AbortSignal.timeout(budgetMs)]);

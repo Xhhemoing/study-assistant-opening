@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import time
 
 
 def parse_ranges(value):
@@ -98,7 +99,7 @@ def pages_for_range(conversion, page_range, texts_by_page, text_cap):
 
 
 def run(args, path, ranges, create_converter, pdf_page_count, texts_by_page, cap, text_cap, *,
-        terminate_on_timeout=False):
+        initialize_converter, terminate_on_timeout=False):
     with protocol_stdout() as output:
         try:
             total = pdf_page_count(path)
@@ -122,7 +123,10 @@ def run(args, path, ranges, create_converter, pdf_page_count, texts_by_page, cap
         converter = None
         initialization_failed = False
         try:
+            started = time.monotonic()
             converter = create_converter()
+            initialize_converter(converter)
+            print(f"converter initialized in {time.monotonic() - started:.2f}s", file=sys.stderr, flush=True)
         except BaseException as error:
             print(f"converter initialization failed: {error}", file=sys.stderr)
             initialization_failed = True
@@ -135,7 +139,12 @@ def run(args, path, ranges, create_converter, pdf_page_count, texts_by_page, cap
             try:
                 if initialization_failed:
                     raise RuntimeError("converter unavailable")
-                conversion = convert_range(converter, path, args.timeout_seconds, page_range)
+                started = time.monotonic()
+                try:
+                    conversion = convert_range(converter, path, args.timeout_seconds, page_range)
+                finally:
+                    print(f"range {page_range[0]}-{page_range[1]} conversion elapsed {time.monotonic() - started:.2f}s",
+                          file=sys.stderr, flush=True)
             except TimeoutError:
                 payload = failure(page_range, "timeout")
                 timed_out = True

@@ -33,7 +33,7 @@ function setup(total = 23) {
     return { exitCode, stdout: "" };
   });
   const controller = new AbortController();
-  const input = { path: "/document", sourceId: "source", sourceVersion: 0, scope, runner, segments, signal: controller.signal, parserProfile: "text-v1" };
+  const input = { path: "/document", sourceId: "source", sourceVersion: 0, scope, runner, segments, signal: controller.signal, parserProfile: "text-v1", segmentPages: 10 };
   return { input, ranges, batches, failures, data, controller, segments };
 }
 
@@ -63,7 +63,7 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toEqual([]);
   });
 
-  it("defaults to ten physical pages and only retries failed segments after a new invocation", async () => {
+  it("supports configured ten-page ranges and only retries failed segments after a new invocation", async () => {
     const d = setup();
     d.failures.add(11);
     await expect(parsePdfSegments(d.input)).rejects.toThrow("11-20");
@@ -104,7 +104,16 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toHaveLength(1);
   });
 
-  it("starts just one converter for seven default ten-page ranges", async () => {
+  it("defaults to five-page ranges in one converter and does not reuse different cached ranges", async () => {
+    const d = setup(10);
+    await parsePdfSegments(d.input);
+    d.ranges.length = 0;
+    await parsePdfSegments({ ...d.input, segmentPages: undefined });
+    expect(d.ranges).toEqual([[1, 5], [6, 10]]);
+    expect(d.batches).toEqual(["1-10", "1-5,6-10"]);
+  });
+
+  it("starts just one converter for seven configured ten-page ranges", async () => {
     const d = setup(70);
     expect(await parsePdfSegments(d.input)).toHaveLength(70);
     expect(d.batches).toEqual(["1-10,11-20,21-30,31-40,41-50,51-60,61-70"]);
@@ -170,7 +179,7 @@ describe("bounded resumable PDF parser", () => {
     const timeout = vi.spyOn(AbortSignal, "timeout");
     try {
       await parsePdfSegments(d.input);
-      expect(timeout).toHaveBeenCalledWith(120_000 + 7 * 240_000);
+      expect(timeout).toHaveBeenCalledWith(240_000 + 7 * 240_000);
     } finally { timeout.mockRestore(); }
   });
 

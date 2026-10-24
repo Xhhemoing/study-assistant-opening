@@ -24,6 +24,9 @@ export type WorkerEnv = {
   redisUrl: string;
   s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean };
   parserTempDir: string;
+  parserPdfSegmentPages: number;
+  parserPdfSegmentTimeoutSeconds: number;
+  parserTorchThreads: number;
 };
 
 /**
@@ -34,6 +37,17 @@ export function loadWorkerEnv(source: NodeJS.ProcessEnv = process.env): WorkerEn
   loadWorkerStartupConfig(source);
   const nodeEnv = source.NODE_ENV === "production" ? "production" : source.NODE_ENV === "test" ? "test" : "development";
   const issues: string[] = [];
+  const integer = (key: string, fallback: number, min: number, max: number) => {
+    const raw = source[key]?.trim() ?? String(fallback);
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) {
+      issues.push(`${key}: must be an integer between ${min} and ${max}`);
+    }
+    return value;
+  };
+  const parserPdfSegmentPages = integer("PARSER_PDF_SEGMENT_PAGES", 5, 1, 100);
+  const parserPdfSegmentTimeoutSeconds = integer("PARSER_PDF_SEGMENT_TIMEOUT_SECONDS", 240, 30, 3600);
+  const parserTorchThreads = integer("PARSER_TORCH_THREADS", 1, 1, 4);
   const workerRole = source.WORKER_ROLE?.trim() || "all";
   if (!["all", "learning", "parser"].includes(workerRole)) {
     issues.push("WORKER_ROLE: must be all, learning or parser");
@@ -69,5 +83,8 @@ export function loadWorkerEnv(source: NodeJS.ProcessEnv = process.env): WorkerEn
       forcePathStyle: forcePathStyle !== "false",
     },
     parserTempDir: source.PARSER_TEMP_DIR?.trim() || ".tmp/opening-parser",
+    parserPdfSegmentPages,
+    parserPdfSegmentTimeoutSeconds,
+    parserTorchThreads,
   };
 }

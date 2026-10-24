@@ -11,14 +11,14 @@ describe("parser subprocess environment", () => {
   it("allows runtime/cache settings, rejects credentials and loader hooks, and forces offline Python", () => {
     const source = {
       PATH: "/bin", HOME: "/home/worker", TMPDIR: "/tmp/worker", LANG: "zh_CN.UTF-8",
-      HF_HOME: "/models/hf", PARSER_OCR_MODEL_DIR: "/models/ocr", OMP_NUM_THREADS: "2",
+      HF_HOME: "/models/hf", PARSER_OCR_MODEL_DIR: "/models/ocr", OMP_NUM_THREADS: "2", PARSER_TORCH_THREADS: "2",
       PYTHONPATH: "/untrusted/python", PYTHONHOME: "/untrusted/home", NODE_OPTIONS: "--require=/untrusted/node",
       LD_PRELOAD: "/untrusted/lib.so", LD_LIBRARY_PATH: "/untrusted/lib", HTTPS_PROXY: "https://user:password@proxy",
       HF_HUB_OFFLINE: "0", PYTHONNOUSERSITE: "0", ...Object.fromEntries(secrets.map(key => [key, "sensitive"])),
     };
     expect(createParserSubprocessEnv("python", source)).toEqual({
       PATH: "/bin", HOME: "/home/worker", TMPDIR: "/tmp/worker", LANG: "zh_CN.UTF-8",
-      HF_HOME: "/models/hf", PARSER_OCR_MODEL_DIR: "/models/ocr", OMP_NUM_THREADS: "2",
+      HF_HOME: "/models/hf", PARSER_OCR_MODEL_DIR: "/models/ocr", OMP_NUM_THREADS: "2", PARSER_TORCH_THREADS: "2",
       PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", HF_HUB_OFFLINE: "1",
       TRANSFORMERS_OFFLINE: "1", HF_HUB_DISABLE_IMPLICIT_TOKEN: "1",
     });

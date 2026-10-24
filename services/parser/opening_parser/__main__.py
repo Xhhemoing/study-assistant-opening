@@ -30,6 +30,11 @@ def parser():
 
 
 def create_converter():
+    threads = os.environ.get("PARSER_TORCH_THREADS", "1").strip()
+    if threads not in ("1", "2", "3", "4"):
+        raise ValueError("PARSER_TORCH_THREADS must be an integer between 1 and 4")
+    import torch
+    torch.set_num_threads(int(threads))
     root = Path(__file__).resolve().parents[3]
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ.setdefault("HF_HOME", str(root / ".local" / "hf-home"))
@@ -56,6 +61,11 @@ def create_converter():
     layout = next(model for model in manifest["models"] if model["model"] == options.layout_options.model_spec.repo_id)
     options.layout_options.model_spec.revision = layout["revision"]
     return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+
+
+def initialize_pdf_converter(converter):
+    from docling.datamodel.base_models import InputFormat
+    converter.initialize_pipeline(InputFormat.PDF)
 
 
 def convert(path: Path, timeout: float, page_range=None):
@@ -134,6 +144,7 @@ def main(argv=None, *, terminate_on_timeout=False):
     if ranges is not None:
         from .ranges import run
         return run(args, path, ranges, create_converter, pdf_page_count, texts_by_page, CAP, TEXT_CAP,
+                   initialize_converter=initialize_pdf_converter,
                    terminate_on_timeout=terminate_on_timeout)
     started = time.monotonic()
     try:
