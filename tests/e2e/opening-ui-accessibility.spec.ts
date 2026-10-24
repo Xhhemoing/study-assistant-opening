@@ -96,7 +96,15 @@ async function openView(page: Page, view: View) {
       break;
     case "agent": {
       await page.goto("/opening/agent");
-      await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeVisible();
+      const input = page.getByRole("textbox", { name: "消息输入", exact: true });
+      await expect(input).toBeVisible();
+      // The initial conversation/source load disables the composer. Axe reads
+      // text and computed colors in separate passes; starting while controls
+      // unlock can pair enabled DOM with the previous disabled opacity.
+      // Inspect the actual usable state, retaining every contrast assertion.
+      await expect(input).toBeEnabled();
+      await expect(page.getByRole("button", { name: "拍题", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "上传", exact: true })).toBeEnabled();
       break;
     }
     case "assistant": {
