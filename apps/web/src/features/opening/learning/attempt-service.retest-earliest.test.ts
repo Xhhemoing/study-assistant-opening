@@ -117,6 +117,7 @@ describe("attempt submit retest earliest gate (DL11)", () => {
     expect(insertObservationMock).toHaveBeenCalledWith(
       scope,
       expect.objectContaining({ retestId: RETEST, answer: "42" }),
+      { workSource: undefined },
     );
   });
 

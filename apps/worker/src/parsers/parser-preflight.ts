@@ -4,7 +4,7 @@ import { createNodeRunner } from "./docling-process";
 import { loadParserConfig, type ParserConfig } from "./parser-config";
 import type { ParserRunner } from "./types";
 
-export async function preflightParser(config: ParserConfig = loadParserConfig()): Promise<ParserRunner> {
+export async function validateParserPaths(config: ParserConfig = loadParserConfig()): Promise<void> {
   try {
     if (!(await stat(config.cwd)).isDirectory()) throw new Error("not a directory");
   } catch {
@@ -15,6 +15,10 @@ export async function preflightParser(config: ParserConfig = loadParserConfig())
   } catch {
     throw new Error(`PARSER_PYTHON is not an executable: ${config.pythonExecutable}. Create the parser venv and install services/parser/requirements-lock.txt.`);
   }
+}
+
+export async function preflightParser(config: ParserConfig = loadParserConfig()): Promise<ParserRunner> {
+  await validateParserPaths(config);
   const runner = createNodeRunner(config);
   try {
     // Cold Docling/Torch imports took 70s on the shared production host.
