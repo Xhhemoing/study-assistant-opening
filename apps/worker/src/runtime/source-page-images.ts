@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { OpeningS3, OpeningSourceError } from "@aistudy/database";
+import { OpeningS3, OpeningSourceError, assertMaterialPageReadable } from "@aistudy/database";
 import type { Scope } from "@aistudy/contracts";
 import { renderPdfPageImages } from "../parsers/pdf-page-images";
 
@@ -16,6 +16,7 @@ export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
     for (const sourceId of input.sourceIds) {
       const version = input.sourceVersions[sourceId];
       if (version === undefined) throw new OpeningSourceError("CONFLICT", "材料版本尚未确认");
+      await assertMaterialPageReadable(sql,scope,sourceId,version,input.physicalPage);
       const rows = await sql`SELECT s.mime,s.bytes FROM opening_sources s
         JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
         WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'

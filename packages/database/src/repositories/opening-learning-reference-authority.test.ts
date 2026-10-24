@@ -19,9 +19,12 @@ const observation: LearningObservation = {
 };
 
 function database(priors: Record<string, unknown>[] = []) {
-  return ((strings: TemplateStringsArray | unknown[]) => {
+  const sql = ((strings: TemplateStringsArray | unknown[]) => {
     if (!Object.hasOwn(strings, "raw")) return {};
     const query = strings.join("?");
+    if(query.includes("SELECT o.id,material.state")) return Promise.resolve([{id:id(3),state:{
+      materialSourceRefs:[{sourceId:id(9),sourceVersion:1,manifestRevision:0}],materialAnswerRefs:[],disputed:false,
+    }}]);
     // Nested identity predicates are SQL fragments, not executed mock queries.
     if (query.trimStart().startsWith("(v.teaching_revision_id")) return {};
     if (query.includes("FROM opening_course_knowledge") || query.includes("WITH current_nodes AS")) return {};
@@ -37,6 +40,8 @@ function database(priors: Record<string, unknown>[] = []) {
     if (query.includes("FROM opening_learning_observations")) return Promise.resolve([{ id: id(3), answer: "1", recorded_at: time(4), source_ids: [id(9)], source_versions: { [id(9)]: 1 } }]);
     throw new Error(`Unexpected evidence query: ${query}`);
   }) as unknown as Sql;
+  sql.unsafe=(()=>({})) as unknown as Sql["unsafe"];
+  return sql;
 }
 
 describe("manual reference provenance and exposure", () => {
@@ -45,7 +50,7 @@ describe("manual reference provenance and exposure", () => {
     const facts = await readOpeningLearningEvidenceContext(database(), scope, forged);
     expect(facts.context.referenceCheckAuthority).toBe("learner");
     expect(evaluateEvidenceEligibility(facts.observation, facts.context)).toMatchObject({
-      independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3",
+      independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v4",
     });
   });
 

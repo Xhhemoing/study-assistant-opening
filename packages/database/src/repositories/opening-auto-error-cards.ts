@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { mapLearningObservation } from "./opening-learning-facts";
 import type { Sql, TransactionSql } from "postgres";
 import { aiEvaluationSchema, type Scope } from "@aistudy/contracts";
-import { acceptedAiGradingOutcome, createInitialState, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
+import { acceptedAiGradingOutcome, createInitialState, evaluateEvidenceEligibility, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
 import { captureOpeningObservationCardOrigin } from "./opening-card-drafts";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { writeState } from "./cards-ops";
@@ -15,6 +17,8 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
       AND COALESCE(root.effective_head_id,root.id)=o.id`;
   if (!head) return;
   const rootId = String(head.root_observation_id ?? head.id);
+  const evidence = await readOpeningLearningEvidenceContext(tx, scope, mapLearningObservation(head));
+  const eligibility = evaluateEvidenceEligibility(evidence.observation, evidence.context);
   const assessment = aiEvaluationSchema.safeParse(head.ai_evaluation);
   const validAi = head.verdict_source === "ai_graded" && assessment.success && assessment.data.observationId === head.id
     && acceptedAiGradingOutcome(assessment.data) === "incorrect";
@@ -31,7 +35,8 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
       reference = `将两个向量和目标向量组成增广矩阵，检查每个坐标。\n行化简结果：${JSON.stringify(solution.reducedMatrix)}\n答案：${JSON.stringify(solution.solution)}`;
     }
   }
-  const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null);
+  const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null)
+    && eligibility.verifiedCorrect === "no" && eligibility.usableForCurrentVersion === "yes";
   if (!canCreate) {
     await tx`UPDATE cards SET auto_paused=true,updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND origin_observation_root_id=${rootId}`;

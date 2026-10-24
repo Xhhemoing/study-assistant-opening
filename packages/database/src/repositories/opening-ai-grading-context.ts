@@ -1,8 +1,13 @@
 import { readTeachingQuestionForGrading } from "./opening-teaching-question";
+import { readMaterialAnswers } from "./opening-material-questions";
+import { captureOpeningMaterialProvenance } from "./opening-material-assessment";
+import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { materialPageReadable } from "./opening-material-manifest";
 import { isDeepStrictEqual } from "node:util";
-import { aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type AiGradingMaterialProvenance, type LearningObservation, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
-import { admitLearningSources, learningError, lockLearningOwner } from "./opening-learning-facts";
+import { admitLearningSources, learningError, lockLearningOwner, mapLearningObservation } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 
 export interface OpeningAiGradingContext {
@@ -16,6 +21,7 @@ export interface OpeningAiGradingContext {
   existing: LearningObservation | null;
   answerRevision: number;
   operationId: string;
+  materialProvenance: AiGradingMaterialProvenance;
 }
 
 export const aiGradingClientKey = (input: AiGradingInput) => `ai-grade:${input.observationId}`;
@@ -27,7 +33,9 @@ export const isOpeningManualGradingRevision = (row: Record<string, unknown>) =>
   row.revision_kind === "replace" && row.ai_evaluation == null && row.answer === row.previous_answer;
 
 /** Resolve only the sealed answer and its captured question; never accept a client grading context. */
-export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Scope, raw: AiGradingInput): Promise<OpeningAiGradingContext> {
+export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Scope, raw: AiGradingInput,
+  options: { provenanceOnly?: boolean } = {},
+): Promise<OpeningAiGradingContext> {
   let input = aiGradingInputSchema.parse(raw);
   await lockLearningOwner(tx, scope);
   const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL FOR SHARE`;
@@ -48,7 +56,11 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
     }
     input = { ...input, workSourceId: sealedPhoto.id, workSourceVersion: sealedPhoto.version, physicalPage: sealedPhoto.physicalPage };
   }
-  const observation = await qualifyObservationRevision(tx, scope, row);
+  const captured = mapLearningObservation(row);
+  const evidence = await readOpeningLearningEvidenceContext(tx, scope, captured);
+  if (evidence.context.version?.applicability === "privacy_excluded") throw learningError("NOT_FOUND", "observation history unavailable");
+  const observation = { ...captured, eligibility: evaluateEvidenceEligibility(evidence.observation, evidence.context) };
+  if (!options.provenanceOnly && evidence.context.materialAnswerDisputed) throw learningError("CONFLICT","这道题的参考答案有争议，暂不计分或更新薄弱度，请先核验。");
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     throw learningError("VALIDATION", "请先关联题目并保存作答，再进行批改");
   }
@@ -71,7 +83,13 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
       AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND a.session_id=${observation.sessionId} AND a.submitted_at IS NOT NULL`;
   if (!item || typeof item.stem_snapshot !== "string" || !item.stem_snapshot.trim()) throw learningError("VALIDATION", "缺少完整题目，请补充题目后开始新练习");
-  if (observation.eligibility?.usableForCurrentVersion !== "yes") throw learningError("CONFLICT", item.teaching_revision_id
+  // The trusted submission caller validates photo/question provenance, not permission
+  // to score. A disputed reference must not roll back a learner's original answer.
+  const version = evidence.context.version;
+  const versionAllowed = options.provenanceOnly
+    ? version?.applicability === "exact" && version.currentItemVersionId === observation.itemVersionId
+    : observation.eligibility.usableForCurrentVersion === "yes";
+  if (!versionAllowed) throw learningError("CONFLICT", item.teaching_revision_id
     ? "原课堂内容或关联资料不可读取，请重新打开课程开始新练习" : "题目材料已变化，请刷新后重新开始这道题");
   if (!input.workSourceId && !observation.answer.trim()) throw learningError("VALIDATION", "请填写答案或选择作答照片");
   const sourceIds = [...new Set([...observation.sourceIds, ...Object.keys(observation.sourceVersions ?? {}),
@@ -92,6 +110,7 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
     // Classroom items have no synthetic material source. Their attempt sealed the original
     // teaching materials; a later student photo is added only to observation provenance.
     if (workSource.id === item.source_id || observation.referenceSourceId === workSource.id
+      || evidence.dependencies.materialDependencies.materialAnswerRefs.some(ref => ref.sourceId === workSource.id)
       || item.teaching_revision_id != null && (item.attempt_source_ids as string[]).includes(workSource.id)) throw learningError("VALIDATION", "请选择自己的作答照片，不要选择原题或参考答案");
     const [photo] = await tx`SELECT id,mime,version,bytes,sha256,parse_state FROM opening_sources s
       WHERE s.id=${workSource.id} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
@@ -111,16 +130,28 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
       ON CONFLICT(source_id,version) DO NOTHING`;
     sourceVersions[workSource.id] = workSource.version;
   }
-  const teaching = await readTeachingQuestionForGrading(tx, scope, item);
+  const teaching = options.provenanceOnly ? null : await readTeachingQuestionForGrading(tx, scope, item);
+  const linkedAnswers = !options.provenanceOnly && (item.evaluation_spec as {kind?:string}|null)?.kind === "material_question"
+    ? (await readMaterialAnswers(tx,scope,observation.attemptId)).filter(answer=>answer.status==="trusted") : [];
+  for (const answer of linkedAnswers) {
+    if (!sourceIds.includes(answer.sourceId)) sourceIds.push(answer.sourceId);
+    sourceVersions[answer.sourceId]=answer.sourceVersion;
+  }
+  sourceIds.sort();
+  if (!learningObservationSchema.shape.sourceIds.safeParse(sourceIds).success) {
+    throw learningError("VALIDATION", "批改关联材料超过可封存范围，不能丢弃答案来源后评分");
+  }
   const referenceIds = sourceIds.filter(id => id !== input.workSourceId);
-  const chunks = referenceIds.length ? await tx`SELECT c.source_id,c.page,c.text FROM opening_source_chunks c
+  const chunks = !options.provenanceOnly && referenceIds.length ? await tx`SELECT c.source_id,c.page,c.text FROM opening_source_chunks c
     WHERE c.source_id=ANY(${referenceIds}::uuid[]) AND c.source_version::text=${tx.json(sourceVersions)}->>c.source_id::text
+      AND ${materialPageReadable(tx,"c.source_id","c.source_version","c.page")}
       AND (c.source_id=${observation.referenceSourceId} OR c.id=${item.chunk_id as string | null}
         OR c.source_id=${item.source_id as string | null} AND c.page IS NOT DISTINCT FROM ${item.physical_page as number | null})
     ORDER BY (c.source_id=${observation.referenceSourceId}) DESC NULLS LAST,c.page,c.id LIMIT 24` : [];
   return { observation, stem: teaching?.stem ?? item.stem_snapshot,
     misconceptions: teaching?.misconceptions ?? [],
-    referenceText: [teaching?.referenceText, ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
+    referenceText: [teaching?.referenceText, ...linkedAnswers.map(answer=>answer.text), ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
     sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
+    materialProvenance: captureOpeningMaterialProvenance(evidence.dependencies.materialDependencies),
     answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`) };
 }
