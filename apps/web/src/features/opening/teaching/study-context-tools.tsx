@@ -8,6 +8,7 @@ import { libraryNotePath } from "../../editor/library-paths";
 import { AssistantView } from "../assistant/assistant-view";
 import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 import { textareaClass, ui } from "../design/ui";
+import { SelfExplanationPanel } from "./self-explanation-panel";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { associateStudyNote, readStudyNote, saveStudyNote, subscribeStudyNote, writeStudyNote, type StudyNoteDraft } from "./study-note-draft";
 
@@ -22,27 +23,38 @@ export function StudyContextTools({ context, isQuestion = false, learningAttempt
   askRequest?: { id: string; text: string };
 }) {
   const diagnostics = useDiagnosticsEnabled();
-  const [tab, setTab] = useState<"question" | "note">("question");
+  const [tab, setTab] = useState<"question" | "note" | "understanding">("question");
+  const [checkRequest, setCheckRequest] = useState<{ id: string; text: string; identity: string }>();
+  const [checkChat, setCheckChat] = useState(false);
   const [questionVisited, setQuestionVisited] = useState(Boolean(initialQuestion));
-  const visibleTab = section ? section === "notes" ? "note" : "question" : tab;
+  const visibleTab = tab === "understanding" ? "understanding" : checkChat ? "question" : section ? section === "notes" ? "note" : "question" : tab;
   const identity = studyConversationIdentity(context);
   const canAsk = !questionBlockedReason && (!isQuestion || Boolean(learningAttempt));
+  useEffect(() => { setCheckRequest(undefined); setCheckChat(false); setTab("question"); }, [identity, section, askRequest?.id]);
   useEffect(() => { if (askRequest && canAsk) setQuestionVisited(true); }, [askRequest?.id, canAsk]);
   return <div className="flex h-full min-h-0 min-w-0 flex-col gap-3">
     <p title={context.label} className="line-clamp-2 shrink-0 break-words text-xs leading-5 text-text-2">围绕：{context.label || "当前内容"}{diagnostics && context.sourceVersion !== undefined ? ` · v${context.sourceVersion}` : ""}{context.page ? ` · 指定第 ${context.page} 页` : ""}</p>
     <div hidden={Boolean(section)} className={section ? "hidden" : "flex flex-wrap gap-2"} aria-label="选择上下文工具">
-      <button type="button" className={tab === "question" ? ui.secondary : ui.quiet} aria-pressed={tab === "question"} onClick={() => setTab("question")}>提问</button>
-      <button type="button" className={tab === "note" ? ui.secondary : ui.quiet} aria-pressed={tab === "note"} onClick={() => setTab("note")}>记笔记</button>
+      <button type="button" className={tab === "question" ? ui.secondary : ui.quiet} aria-pressed={tab === "question"} onClick={() => { setCheckChat(false); setTab("question"); }}>提问</button>
+      <button type="button" className={tab === "note" ? ui.secondary : ui.quiet} aria-pressed={tab === "note"} onClick={() => { setCheckChat(false); setTab("note"); }}>记笔记</button>
+    </div>
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className={visibleTab === "understanding" ? ui.secondary : ui.quiet} aria-pressed={visibleTab === "understanding"} onClick={() => { setCheckChat(false); setTab("understanding"); }}>我的理解</button>
+      {visibleTab === "understanding" || (section === "notes" && checkChat) ? <button type="button" className={ui.quiet} onClick={() => { setCheckChat(false); setTab("question"); }}>返回{section === "notes" ? "笔记" : "提问"}</button> : null}
     </div>
     <div hidden={visibleTab !== "question"} className={visibleTab === "question" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
       {!canAsk ? <p className="text-sm leading-7 text-text-2">{questionBlockedReason || "先在题目下保存自己的原答案，再继续提问。之后的辅导会关联本次作答，并记录实际获得的帮助。"}</p> : <>
         {!questionVisited ? <button type="button" className={ui.secondary} onClick={() => setQuestionVisited(true)}>打开此处提问</button> : null}
         {questionVisited ? <div className="min-h-0 min-w-0 flex-1" key={identity}><AssistantView embedded startFresh studyContext={context}
           initialCourseId={context.courseId} initialSourceIds={learningAttempt?.sourceIds ?? (context.sourceId ? [context.sourceId] : [])}
-          initialPage={context.page ?? null} initialDraft={initialQuestion} promptRequest={askRequest} learningAttempt={learningAttempt ?? undefined} /></div> : null}
+          initialPage={context.page ?? null} initialDraft={initialQuestion} promptRequest={checkRequest?.identity === identity ? checkRequest : askRequest} learningAttempt={learningAttempt ?? undefined} /></div> : null}
       </>}
     </div>
     <div hidden={visibleTab !== "note"} className={visibleTab === "note" ? "min-h-0 flex-1 overflow-y-auto" : "hidden"}><StudyNotePanel key={identity} context={context} /></div>
+    <div hidden={visibleTab !== "understanding"} className={visibleTab === "understanding" ? "min-h-0 flex-1 overflow-y-auto" : "hidden"}><SelfExplanationPanel key={identity} context={context} canAsk={canAsk} blockedReason={questionBlockedReason} onCheck={text => {
+      if (!canAsk) return;
+      setCheckRequest({ id: crypto.randomUUID(), text, identity }); setQuestionVisited(true); setCheckChat(true); setTab("question");
+    }} /></div>
   </div>;
 }
 

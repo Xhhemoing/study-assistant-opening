@@ -10,6 +10,14 @@
 
 接入原则：先读 editor/createDocument/block schema与现有note provenance，找到其拥有者再实现；不新建第二套笔记库，不把三个字符串拼成不能归属的正文。若已有JSON元数据足够，使用当前版本语义与既有公开接口，避免空泛新表。
 
+## 本地实现进度（2026-10-24）
+
+P07a已接入StudyContextTools“我的理解”：用户原话冻结、可选修订、显式预填现有对话不发送、显式保存为用户笔记。AI反馈仍在原会话，不自动捕获/评分。草稿作用域绑定已验证账号/workspace；未知保存结果锁住重建；超长JSON编码输入完整留在当前面板供复制，不写坏草稿。普通笔记切换和notes受控入口已补回归。
+
+实际主代理复跑：P07a的13条draft与6条UI测试通过；分支纯算法33项同时通过（合计本批52项），改动ESLint及git diff检查通过。分支纯算法另做独立strict TypeScript检查通过；完整Web类型仍待CI，不宣称全树通过。
+
+P07b正式解释评分未实施；不写observation/BKT/FSRS，不把保存当掌握。用户浏览器验收待反馈。
+
 ## 3B 正式解释题
 
 题目必须有稳定task identity、concept/node、source/version/manifestRevision、rubric version。评价core accuracy/necessary conditions/reasoning/examples，对应criteria中的correct/incorrect/unverified与反馈；模型不可信输入沿现有schema parse。
