@@ -61,6 +61,28 @@ const ATTEMPT = "33333333-3333-4333-8333-333333333333";
 const OBSERVATION = "44444444-4444-4444-8444-444444444444";
 const SOURCE = "55555555-5555-4555-8555-555555555555";
 const ISO = "2026-09-28T10:00:00.000Z";
+
+it("reads grading status without enqueueing and validates the asynchronous enqueue response", async () => {
+  const status = { rootObservationId: OBSERVATION, headObservationId: OBSERVATION, answerRevision: 1,
+    jobId: ATTEMPT, status: "queued", retryable: false, workSource: null };
+  const transport = vi.fn(async () => Response.json(status, { status: 202 }));
+  const client = createOpeningLearningClient(transport);
+  expect(await client.getGradingStatus(OBSERVATION)).toEqual(status);
+  expect(transport).toHaveBeenLastCalledWith(`/api/opening/observations/grade?observationId=${OBSERVATION}`,
+    expect.objectContaining({ method: "GET", cache: "no-store" }));
+  expect(await client.gradeObservation({ observationId: OBSERVATION })).toEqual(status);
+  expect(transport).toHaveBeenLastCalledWith("/api/opening/observations/grade",
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ observationId: OBSERVATION }) }));
+});
+
+it("sends the selected photo with the answer submission, never in a separate grading-only request", async () => {
+  const workSource = { id: SOURCE, version: 2, physicalPage: 1 };
+  const input = { clientKey: "photo-submission", answer: "", outcome: "unverified" as const, assistance: "unknown" as const, workSource };
+  const transport = vi.fn(async () => Response.json({ ...learningObservation, allowsIndependent: false }));
+  await createOpeningLearningClient(transport).submitAttempt(ATTEMPT, input);
+  expect(transport).toHaveBeenCalledExactlyOnceWith(`/api/opening/attempts/${ATTEMPT}/submit`,
+    expect.objectContaining({ body: JSON.stringify(input) }));
+});
 const attempt = {
   id: ATTEMPT, workspaceId: COURSE, sessionId: SESSION, courseId: COURSE, skillLabel: "fractions", requirementKey: null,
   problemId: null, itemVersionId: null, sourceIds: [SOURCE], sourceVersions: { [SOURCE]: 2 },

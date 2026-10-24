@@ -12,15 +12,18 @@ import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
 import { evaluateOpeningSpanAttempt } from "./opening-span-evaluation";
 import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
 import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
+import type { AiGradingWorkSource } from "@aistudy/contracts";
+import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
+import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
 export async function insertOpeningLearningObservationInTx(tx: TransactionSql, scope: Scope, input: ObservationInput,
-  opts: { verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
@@ -73,6 +76,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     answer: input.answer, outcome: input.outcome, assistance: submittedAssistance, verdictSource: submittedVerdictSource, referenceSourceId,
     referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
     ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
+  if (opts.workSource) Object.assign(intent, { workSource: opts.workSource });
   const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
   const linkSkillEvidence = async (observationId: string) => {
     if (!skillNodeId || !skillDimension) return;
@@ -163,6 +167,18 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
   if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
   if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;
+  await tx`UPDATE opening_learning_observations SET grading_operation_id=${`ai-grade:${scope.workspaceId}:${id}:1`},
+    grading_work_source=${opts.workSource ? tx.json(opts.workSource) : null} WHERE id=${id}`;
+  if (opts.workSource) {
+    // Photo admission, answer and jobs commit together; foreign/stale photos
+    // roll the entire submission back, never leave a text-only grading job.
+    const context = await readOpeningAiGradingContext(tx, scope, { observationId: id });
+    await tx`UPDATE opening_learning_observations SET source_ids=${context.sourceIds},source_versions=${tx.json(context.sourceVersions)} WHERE id=${id}`;
+    Object.assign(rows[0], { source_ids: context.sourceIds, source_versions: context.sourceVersions });
+  }
+  if (!controlledEvaluation && attempt && problemId && itemVersionId && (input.answer.trim() || opts.workSource)) {
+    await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: id, answerRevision: 1 });
+  }
   if (retestActivity) {
     // Lock the activity before its task. Task status updates and direct
     // completion use the same order to serialize the shared decision.

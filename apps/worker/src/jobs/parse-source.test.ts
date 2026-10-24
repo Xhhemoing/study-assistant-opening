@@ -1,9 +1,10 @@
 import { mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
-import type { OpeningJobRecord } from "@aistudy/database";
+import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
+import type { ParserRunner } from "../parsers/types";
 import { createParseSourceHandler } from "./parse-source";
 
 type State = "not_started" | "queued" | "running" | "ready" | "failed" | "unsupported";
@@ -32,9 +33,9 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
     replaceInput: () => replaceInput,
     handler: createParseSourceHandler({
       sources: { get: async () => current, markParseState: async (_scope, _id, state) => { states.push(state); return current; } },
-      chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [] },
+      chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
-      runner: async (...args: Parameters<Parameters<typeof createParseSourceHandler>["runner"]>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
+      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? '{"pageCount":2}' : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
       tempDir,
     }),
   }));
@@ -46,7 +47,7 @@ describe("parse source handler", () => {
   it("passes an absolute temp path so the parser child (cwd=services/parser) finds the input", async () => {
     const d = await deps();
     await d.handler(job, job.payload);
-    expect(d.argvs().length).toBe(1);
+    expect(d.argvs().length).toBe(2);
     const inputArg = d.argvs()[0][3]; // -m opening_parser --input <path>
     expect(path.isAbsolute(inputArg)).toBe(true);
     expect(await readdir(d.tempDir)).toEqual([]);
@@ -93,9 +94,9 @@ describe("parse source handler", () => {
     const original = d.handler;
     const conflict = createParseSourceHandler({
       sources: { get: async () => source(), markParseState: async () => source() },
-      chunks: { replaceChunks: async () => { throw new Error("CONFLICT: source version changed during parse"); }, listChunks: async () => [] },
+      chunks: { replaceChunks: async () => { throw new Error("CONFLICT: source version changed during parse"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
-      runner: async () => ({ exitCode: 0, stdout: '{"pages":[]}' }), tempDir: d.tempDir,
+      runner: async argv => ({ exitCode: 0, stdout: argv.includes("--inspect-pdf") ? '{"pageCount":1}' : '{"pages":[{"page":1,"text":"body","imagePath":null}]}' }), tempDir: d.tempDir,
     });
     void original;
     await expect(conflict(job, { sourceId })).rejects.toThrow("CONFLICT");
@@ -108,5 +109,40 @@ describe("parse source handler", () => {
   it("rejects parser bounds failures", async () => {
     const d = await deps({ exitCode: 5 });
     await expect(d.handler(job, { sourceId })).rejects.toThrow("parser bounds exceeded");
+  });
+
+  it("kills an in-flight segment after execution cancellation and never writes chunks/cache", async () => {
+    const d = await deps();
+    let cancelled = false;
+    const save = vi.fn(async () => {});
+    const replace = vi.fn(async () => {});
+    const segments: OpeningPdfSegmentsRepository = {
+      assertCurrent: async () => { if (cancelled) throw new Error("job cancelled"); }, read: async () => null, save,
+    };
+    const runner: ParserRunner = async (argv, signal) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":1}' };
+      cancelled = true;
+      return new Promise((_resolve, reject) => {
+        const hold = setTimeout(() => reject(new Error("cancellation was not propagated")), 1000);
+        signal.addEventListener("abort", () => { clearTimeout(hold); reject(signal.reason); }, { once: true });
+      });
+    };
+    const handler = createParseSourceHandler({
+      sources: { get: async () => source(), markParseState: async () => source() },
+      chunks: { replaceChunks: replace, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
+      runner, tempDir: d.tempDir, segments, executionPollMs: 5,
+    });
+    await expect(handler({ ...job, state: "running", claimToken: "claim" }, { sourceId })).rejects.toThrow("job cancelled");
+    expect(save).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    expect(await readdir(d.tempDir)).toEqual([]);
+  });
+
+  it("fails closed rather than running a claimed PDF without persistent cache wiring", async () => {
+    const d = await deps();
+    await expect(d.handler({ ...job, claimToken: "claim" }, { sourceId })).rejects.toThrow("repository is required");
+    expect(d.runs()).toBe(0);
+    expect(d.replaceInput()).toBeUndefined();
   });
 });

@@ -14,32 +14,53 @@ export interface OpeningAiGradingContext {
   sourceVersions: Record<string, number>;
   workSource: { id: string; version: number; physicalPage: number } | null;
   existing: LearningObservation | null;
+  answerRevision: number;
+  operationId: string;
 }
 
 export const aiGradingClientKey = (input: AiGradingInput) => `ai-grade:${input.observationId}`;
 
+/** The revision contract cannot replace a photo. An unchanged-text learner
+ * correction is a judgement/metadata override, not consent to grade it again.
+ * Compare immutable answers too, so pre-fix revisions are protected. */
+export const isOpeningManualGradingRevision = (row: Record<string, unknown>) =>
+  row.revision_kind === "replace" && row.ai_evaluation == null && row.answer === row.previous_answer;
+
 /** Resolve only the sealed answer and its captured question; never accept a client grading context. */
 export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Scope, raw: AiGradingInput): Promise<OpeningAiGradingContext> {
-  const input = aiGradingInputSchema.parse(raw);
+  let input = aiGradingInputSchema.parse(raw);
   await lockLearningOwner(tx, scope);
-  const [row] = await tx`SELECT o.*,COALESCE(root.effective_head_id,root.id) AS current_head_id
+  const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL FOR SHARE`;
+  if (!owner) throw learningError("NOT_FOUND", "workspace owner unavailable");
+  const [row] = await tx`SELECT o.*,previous.answer AS previous_answer,COALESCE(root.effective_head_id,root.id) AS current_head_id
     FROM opening_learning_observations o
     JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
       AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
+    LEFT JOIN opening_learning_observations previous ON previous.id=o.revises_observation_id
+      AND previous.workspace_id=o.workspace_id AND previous.owner_user_id=o.owner_user_id
     JOIN courses c ON c.id=o.course_id AND c.workspace_id=o.workspace_id AND c.archived_at IS NULL
     WHERE o.id=${input.observationId} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}`;
   if (!row) throw learningError("NOT_FOUND", "找不到这次作答");
+  const sealedPhoto = row.grading_work_source as { id: string; version: number; physicalPage: number } | null;
+  if (sealedPhoto) {
+    if (input.workSourceId && (input.workSourceId !== sealedPhoto.id || input.workSourceVersion !== sealedPhoto.version || input.physicalPage !== sealedPhoto.physicalPage)) {
+      throw learningError("CONFLICT", "作答照片已封存，请开始新作答以更换照片");
+    }
+    input = { ...input, workSourceId: sealedPhoto.id, workSourceVersion: sealedPhoto.version, physicalPage: sealedPhoto.physicalPage };
+  }
   const observation = await qualifyObservationRevision(tx, scope, row);
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     throw learningError("VALIDATION", "请先关联题目并保存作答，再进行批改");
   }
   const [existingRow] = await tx`SELECT * FROM opening_learning_observations
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${aiGradingClientKey(input)}`;
-  if (existingRow && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, input)) {
+  if (existingRow && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, raw)
+    && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, input)) {
     throw learningError("CONFLICT", "这次作答已使用其他照片批改，请先查看当前结果");
   }
   if (existingRow && row.current_head_id !== existingRow.id) throw learningError("CONFLICT", "批改后作答已更正，请刷新查看当前结果");
   if (!existingRow && row.current_head_id !== input.observationId) throw learningError("CONFLICT", "作答已更正，请刷新后再批改");
+  if (isOpeningManualGradingRevision(row)) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
   if (observation.revisionKind === "retract" || observation.verdictSource === "deterministic" || observation.aiEvaluation) {
     throw learningError("CONFLICT", "请查看已有结果，或先更正作答后再批改");
   }
@@ -100,5 +121,6 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   return { observation, stem: teaching?.stem ?? item.stem_snapshot,
     misconceptions: teaching?.misconceptions ?? [],
     referenceText: [teaching?.referenceText, ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
-    sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null };
+    sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
+    answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`) };
 }

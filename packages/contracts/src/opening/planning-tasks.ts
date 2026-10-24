@@ -13,6 +13,14 @@ export const taskRetestProjectionSchema = z.object({
   recommendedAt: isoDateTimeSchema.nullable(),
 }).strict();
 
+/** A read-only navigation hint, not permission to bypass task admission or a course cursor. */
+const taskTeachingTargetSchema = z.object({
+  activityId: uuidSchema,
+  courseId: uuidSchema,
+  /** The bound activity's requirement, not a copy of the task's current requirement. */
+  requirementKey: z.string().max(200).nullable(),
+}).strict();
+
 /** Who put the task in the queue. `planner`/`agent` tasks only exist after the learner accepted a draft. */
 export const taskOriginSchema = z.enum(["manual", "course_seed", "retest", "planner", "agent"]);
 export const suggestionKindSchema = z.enum(["weak_skill", "review_cards", "new_skill", "course_pace"]);
@@ -29,6 +37,8 @@ export const taskItemSchema = z.object({
   closeSource: z.enum(["learner", "system"]).optional(),
   /** Present for retest-origin tasks; null/omitted for ordinary tasks. */
   retest: taskRetestProjectionSchema.nullable().optional(),
+  /** Present only for an owned, course-matched resumable teaching activity. Always re-read on entry. */
+  teachingTarget: taskTeachingTargetSchema.optional(),
   /** Adaptive planning (0061); omitted when unset. */
   courseId: uuidSchema.optional(),
   skillLabel: z.string().min(1).max(200).optional(),

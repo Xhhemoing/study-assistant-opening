@@ -213,7 +213,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     if (!attempt || pendingRef.current) return;
     pendingRef.current = true;
     setPending(true); setError("");
-    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report", ...(referenceSourceId ? { referenceSourceId } : {}) }, retest?.retestId) } })).submission!;
+    const submission = patch(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: withRetestSubmit({ clientKey: `answer-${crypto.randomUUID()}`, answer, outcome, assistance: raiseAssistanceOnly(assistance, deliveredAssistance), verdictSource: "self_report", ...(referenceSourceId ? { referenceSourceId } : {}), ...(gradingPhoto.workSourceId ? { workSource: { id: gradingPhoto.workSourceId, version: gradingPhoto.workSourceVersion, physicalPage: gradingPhoto.physicalPage } } : {}) }, retest?.retestId) } })).submission!;
     try {
       if (draft.submission) {
         const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);

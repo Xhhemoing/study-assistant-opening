@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+from .physical_pages import texts_by_page
+
 PDF = "application/pdf"
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 CAP = 8 * 1024 * 1024
@@ -14,12 +16,15 @@ TEXT_CAP = 200_000
 
 
 def parser():
-    result = argparse.ArgumentParser(description="Offline Docling parser; OCR and image extraction are deferred.")
+    result = argparse.ArgumentParser(description="Offline Docling parser with optional prepared local OCR.")
     result.add_argument("--check", action="store_true", help="Check parser imports without converting a document")
     result.add_argument("--input")
     result.add_argument("--mime")
     result.add_argument("--max-pages", type=int)
     result.add_argument("--timeout-seconds", type=float, default=240)
+    result.add_argument("--page-start", type=int)
+    result.add_argument("--page-end", type=int)
+    result.add_argument("--inspect-pdf", action="store_true")
     return result
 
 
@@ -39,17 +44,9 @@ def create_converter():
     ocr_dir = os.environ.get("PARSER_OCR_MODEL_DIR")
     if ocr_dir:
         from docling.datamodel.pipeline_options import RapidOcrOptions
-        from rapidocr import OCRVersion, ModelType
-        directory = Path(ocr_dir).resolve()
-        files = {"det": directory / "ch_PP-OCRv4_det_mobile.pth",
-                 "cls": directory / "ch_ptocr_mobile_v2.0_cls_mobile.pth",
-                 "rec": directory / "ch_PP-OCRv4_rec_mobile.pth",
-                 "keys": directory / "ppocr_keys_v1.txt"}
-        if not all(file.is_file() for file in files.values()):
-            raise FileNotFoundError("OCR requires prepared offline RapidOCR Torch PP-OCRv4 models and ppocr_keys_v1.txt in PARSER_OCR_MODEL_DIR")
-        params = {f"{stage}.ocr_version": OCRVersion.PPOCRV4 for stage in ("Det", "Cls", "Rec")}
-        params.update({f"{stage}.model_type": ModelType.MOBILE for stage in ("Det", "Cls", "Rec")})
-        params["Global.log_level"] = "critical"
+        from .ocr import local_models, model_params
+        files = local_models(ocr_dir)
+        params = model_params()
         options.do_ocr = True
         options.ocr_options = RapidOcrOptions(backend="torch", lang=["ch"],
             det_model_path=str(files["det"]), cls_model_path=str(files["cls"]), rec_model_path=str(files["rec"]),
@@ -60,13 +57,13 @@ def create_converter():
     return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
 
 
-def convert(path: Path, timeout: float):
+def convert(path: Path, timeout: float, page_range=None):
     converter = create_converter()
     box = {}
 
     def work():
         try:
-            box["result"] = converter.convert(path)
+            box["result"] = converter.convert(path, **({"page_range": page_range} if page_range else {}))
         except BaseException as error:
             box["error"] = error
 
@@ -77,31 +74,21 @@ def convert(path: Path, timeout: float):
         raise TimeoutError("conversion timed out")
     if "error" in box:
         raise box["error"]
-    return box["result"].document
-
-
-def texts_by_page(document):
-    result = {page: [] for page in document.pages}
-    for item in document.texts:
-        # Docling can merge text across pages. Its provenance offsets address
-        # orig (before sanitization), not text; copying the full item leaks text
-        # into citations for the other physical pages.
-        page_numbers = {provenance.page_no for provenance in item.prov}
-        if len(page_numbers) == 1:
-            page_no = next(iter(page_numbers))
-            if page_no in result:
-                result[page_no].append(item.text)
-            continue
-        for provenance in item.prov:
-            if provenance.page_no in result:
-                start, end = provenance.charspan
-                result[provenance.page_no].append(item.orig[start:end])
-    for table in getattr(document, "tables", []):
-        text = table.export_to_markdown(doc=document)
-        for page_no in {provenance.page_no for provenance in table.prov}:
-            if page_no in result:
-                result[page_no].append(text)
+    result = box["result"]
+    if getattr(getattr(result, "status", None), "value", None) != "success":
+        raise RuntimeError("conversion did not complete every requested page")
+    # Keep page.assembled: the final document has already merged page text and
+    # cannot recover physical-page fragments reliably from provenance spans.
     return result
+
+
+def pdf_page_count(path):
+    import pypdfium2 as pdfium
+    document = pdfium.PdfDocument(path)
+    try:
+        return len(document)
+    finally:
+        document.close()
 
 
 def main(argv=None):
@@ -122,6 +109,10 @@ def main(argv=None):
         parser().error("--input, --mime and --max-pages are required for conversion")
     if args.max_pages <= 0 or args.timeout_seconds <= 0:
         parser().error("max-pages and timeout-seconds must be positive")
+    if (args.page_start is None) != (args.page_end is None):
+        parser().error("page-start and page-end must be supplied together")
+    if args.page_start is not None and (args.mime != PDF or args.page_start < 1 or args.page_end < args.page_start):
+        parser().error("invalid PDF physical page range")
     if args.mime not in (PDF, PPTX):
         print("unsupported mime", file=sys.stderr)
         return 3
@@ -131,9 +122,26 @@ def main(argv=None):
         return 4
     started = time.monotonic()
     try:
-        document = convert(path, args.timeout_seconds)
+        if args.inspect_pdf or args.page_start is not None:
+            if args.mime != PDF:
+                raise ValueError("page inspection requires PDF")
+            total = pdf_page_count(path)
+            if total < 1 or total > args.max_pages:
+                raise ValueError("max-pages would truncate pages")
+            if args.inspect_pdf:
+                print(json.dumps({"pageCount": total}))
+                return 0
+            if args.page_end > total:
+                raise ValueError("page range exceeds PDF")
+        page_range = (args.page_start, args.page_end) if args.page_start is not None else None
+        conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
-        for page_number, texts in sorted(texts_by_page(document).items()):
+        by_page = texts_by_page(conversion)
+        if page_range:
+            expected = set(range(args.page_start, args.page_end + 1))
+            if set(by_page) != expected:
+                raise ValueError("parser did not preserve the requested physical page range")
+        for page_number, texts in sorted(by_page.items()):
             text = "\n".join(texts)
             if len(text) > TEXT_CAP:
                 text = text[:TEXT_CAP] + "\n…[truncated]"

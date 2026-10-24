@@ -54,3 +54,20 @@ export const aiEvaluationSchema = aiGradingProposalSchema.extend({
 export type AiGradingInput = z.infer<typeof aiGradingInputSchema>;
 export type AiGradingProposal = z.infer<typeof aiGradingProposalSchema>;
 export type AiEvaluation = z.infer<typeof aiEvaluationSchema>;
+
+/** A photo is part of the submitted answer, not a browser-only grading option. */
+export const aiGradingWorkSourceSchema = z.object({
+  id: uuidSchema, version: z.number().int().nonnegative(), physicalPage: z.number().int().positive(),
+}).strict();
+
+export const aiGradingStatusSchema = z.object({
+  rootObservationId: uuidSchema,
+  headObservationId: uuidSchema,
+  answerRevision: z.number().int().positive(),
+  jobId: uuidSchema.nullable(),
+  status: z.enum(["queued", "grading", "graded", "needs_manual", "unknown_cost"]),
+  retryable: z.boolean(),
+  workSource: aiGradingWorkSourceSchema.nullable(),
+}).strict();
+export type AiGradingStatus = z.infer<typeof aiGradingStatusSchema>;
+export type AiGradingWorkSource = z.infer<typeof aiGradingWorkSourceSchema>;

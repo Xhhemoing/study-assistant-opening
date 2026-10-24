@@ -7,7 +7,7 @@ import {
   learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningAttemptContextReadSchema, learningObservationSchema,
   type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
-  aiGradingInputSchema, type AiGradingInput,
+  aiGradingInputSchema, aiGradingStatusSchema, type AiGradingInput,
   observationHistorySchema, observationRevisionInputSchema, observationRevisionResultSchema,
   type ObservationRevisionInput,
   type LearningSummary, type CourseLearningSummaryInput,
@@ -89,7 +89,13 @@ export function createOpeningLearningClient(transport: FetchLike = fetch) {
 
     async gradeObservation(input: AiGradingInput) {
       const payload = aiGradingInputSchema.parse(input);
-      return parseOpeningResponse(learningObservationSchema, await request("/api/opening/observations/grade", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+      return parseOpeningResponse(aiGradingStatusSchema, await request("/api/opening/observations/grade", { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+    },
+
+    async getGradingStatus(observationId: string) {
+      const payload = aiGradingInputSchema.parse({ observationId });
+      return parseOpeningResponse(aiGradingStatusSchema, await request(`/api/opening/observations/grade?observationId=${encodeURIComponent(payload.observationId)}`,
+        { method: "GET", cache: "no-store" }, fetchImpl));
     },
 
     async listRevisionCourses() {

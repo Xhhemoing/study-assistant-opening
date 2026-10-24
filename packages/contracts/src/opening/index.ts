@@ -48,6 +48,8 @@ export {
   jobStatusResponseSchema,
   tutorJobErrorSchema,
   tutorMetadataJobPayloadSchema,
+  gradeObservationJobPayloadSchema,
+  type GradeObservationJobPayload,
   type JobKind,
   type JobStatus,
   type JobRecord,
