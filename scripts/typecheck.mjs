@@ -5,8 +5,11 @@
  * Check set is derived from configuration only, identically on every platform:
  *   - every workspace (root package.json "workspaces" globs, in glob order then name)
  *     whose package.json defines a "typecheck" script -> `tsc -p tsconfig.json --noEmit`
+ *     by default; workspace "aistudy.typecheck": { project, mode: "build" }
+ *     selects a solution checked with `tsc -b <project> --stopBuildOnErrors`;
  *     run with cwd = that workspace;
- *   - plus root-level projects listed in package.json "aistudy.typecheck.extraProjects".
+ *   - plus root-level projects listed in package.json "aistudy.typecheck.extraProjects"
+ *     (path strings or { project, mode } objects). Missing configs fail closed.
  *
  * Resource policy: the orchestrator takes the heavy-task slot ONCE (by re-executing
  * itself through scripts/run-heavy.mjs unless HERMES_HEAVY_LOCK_HELD=1) and then runs
@@ -49,14 +52,23 @@ export function deriveTypecheckSet(rootDir = root) {
     for (const dir of expandWorkspaceGlob(rootDir, pattern)) {
       const manifest = path.join(rootDir, dir, "package.json");
       if (!existsSync(manifest)) continue;
-      const scripts = JSON.parse(readFileSync(manifest, "utf8")).scripts ?? {};
-      if (scripts.typecheck && existsSync(path.join(rootDir, dir, "tsconfig.json"))) {
-        set.push({ name: dir, cwd: dir, project: "tsconfig.json" });
+      const workspace = JSON.parse(readFileSync(manifest, "utf8"));
+      if (workspace.scripts?.typecheck) {
+        const config = workspace.aistudy?.typecheck ?? {};
+        const project = config.project ?? "tsconfig.json";
+        const mode = config.mode ?? "project";
+        if (!["project", "build"].includes(mode)) throw new Error(`invalid typecheck mode in ${dir}: ${mode}`);
+        if (!existsSync(path.join(rootDir, dir, project))) throw new Error(`missing typecheck project: ${dir}/${project}`);
+        set.push({ name: dir, cwd: dir, project, mode });
       }
     }
   }
-  for (const project of pkg.aistudy?.typecheck?.extraProjects ?? []) {
-    set.push({ name: project, cwd: ".", project });
+  for (const entry of pkg.aistudy?.typecheck?.extraProjects ?? []) {
+    const config = typeof entry === "string" ? { project: entry } : entry;
+    const { project, mode = "project" } = config;
+    if (!["project", "build"].includes(mode)) throw new Error(`invalid typecheck mode: ${mode}`);
+    if (!existsSync(path.join(rootDir, project))) throw new Error(`missing typecheck project: ${project}`);
+    set.push({ name: project, cwd: ".", project, mode });
   }
   return set;
 }
@@ -79,11 +91,19 @@ function parseArgs(argv) {
   return opts;
 }
 
+export function tscArgs(task) {
+  // TS 5.8 build supports independent noEmit leaves beneath a solution. Do not
+  // add leaf-to-leaf references without a real composite/declaration boundary.
+  return task.mode === "build"
+    ? ["-b", task.project, "--stopBuildOnErrors"]
+    : ["-p", task.project, "--noEmit"];
+}
+
 function tscCommand(task) {
   // Override via TYPECHECK_TSC_CMD (JSON array) is for tests only.
   if (process.env.TYPECHECK_TSC_CMD) return [...JSON.parse(process.env.TYPECHECK_TSC_CMD), task.name];
   const tsc = createRequire(path.join(root, "package.json")).resolve("typescript/bin/tsc");
-  return [process.execPath, tsc, "-p", task.project, "--noEmit"];
+  return [process.execPath, tsc, ...tscArgs(task)];
 }
 
 export async function runTypecheck(argv = process.argv.slice(2)) {

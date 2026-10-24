@@ -76,6 +76,7 @@ jobs:
           --health-retries 15
 
     env:
+      NODE_OPTIONS: --max-old-space-size=6144
       HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_TEST_DB: "1"
@@ -268,6 +269,7 @@ jobs:
           --health-retries 15
 
     env:
+      NODE_OPTIONS: --max-old-space-size=6144
       HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_E2E: "1"

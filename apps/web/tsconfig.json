@@ -9,6 +9,7 @@
     "noEmit": true,
     "allowJs": true,
     "incremental": true,
+    "tsBuildInfoFile": "./.cache/product.tsbuildinfo",
     "composite": false,
     "paths": {
       "@/*": ["./src/*"],
