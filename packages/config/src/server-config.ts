@@ -123,6 +123,7 @@ export type FeatureSwitches = {
   matrixTransformInteractive: boolean;
   chatArtifacts: boolean;
   chatProse: boolean;
+  chatSenseWeave: "off" | "shadow" | "on";
   openingRelease: boolean;
   adaptivePlanning: boolean;
   planAgent: boolean;
@@ -143,6 +144,9 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
+  const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "shadow";
+  const chatSenseWeave = senseWeaveRaw === "off" || senseWeaveRaw === "shadow" || senseWeaveRaw === "on" ? senseWeaveRaw : "off";
+  if (chatSenseWeave !== senseWeaveRaw) issues.push(`OPENING_CHAT_SENSEWEAVE: must be one of off, shadow, on`);
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
@@ -156,7 +160,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   }
   if (issues.length) throw new EnvValidationError(issues);
   return {
-    teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, openingRelease,
+    teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
     adaptivePlanning, planAgent, systemQuery,
   };
 }
@@ -181,6 +185,8 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     matrixTransformInteractive: switches.matrixTransformInteractive,
     chatArtifacts: switches.chatArtifacts,
     chatProse: switches.chatProse,
+    // Fragments are rendered by LearningProse; without it there is nothing to embed into.
+    chatSenseWeave: switches.chatProse ? switches.chatSenseWeave : "off",
     registrationOpen: !switches.openingRelease,
     adaptivePlanning: switches.adaptivePlanning,
     planAgent: switches.adaptivePlanning && switches.planAgent,
