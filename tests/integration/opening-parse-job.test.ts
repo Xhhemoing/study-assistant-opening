@@ -36,7 +36,9 @@ async function upload(name: string, mime: (typeof documents)[number]["mime"] | "
 }
 
 async function parse(sourceId: string, tempDir: string) {
-  const handler = createParseSourceHandler({ sources: createOpeningSourceRepository(fixture.sql), chunks: createOpeningSourceChunksRepository(fixture.sql), storage, runner: createNodeRunner(), tempDir });
+  // Two-page PDF fixtures exercise the production JSONL multi-range path, not
+  // merely a single range in a new process. PPTX ignores this PDF-only option.
+  const handler = createParseSourceHandler({ sources: createOpeningSourceRepository(fixture.sql), chunks: createOpeningSourceChunksRepository(fixture.sql), storage, runner: createNodeRunner(), tempDir, segmentPages: 1 });
   return handler({ id: "job", workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.scope.ownerUserId, key: "key", kind: "parse", payload: { sourceId }, result: null, state: "queued", privacyEpoch: 0 }, { sourceId });
 }
 

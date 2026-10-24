@@ -15,17 +15,26 @@ function setup(total = 23) {
   };
   const ranges: number[][] = [];
   const failures = new Set<number>();
-  const runner: ParserRunner = vi.fn(async argv => {
+  const batches: string[] = [];
+  const runner: ParserRunner = vi.fn(async (argv, signal, stream) => {
     if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: total }) };
-    const start = Number(argv[argv.indexOf("--page-start") + 1]);
-    const end = Number(argv[argv.indexOf("--page-end") + 1]);
-    ranges.push([start, end]);
-    return failures.has(start) ? { exitCode: 4, stdout: "" } : { exitCode: 0,
-      stdout: JSON.stringify({ pages: Array.from({ length: end - start + 1 }, (_, index) => ({ page: start + index, text: `page ${start + index}`, imagePath: null })) }) };
+    const requested = argv[argv.indexOf("--ranges") + 1]!;
+    batches.push(requested);
+    let exitCode = 0;
+    for (const range of requested.split(",")) {
+      const [start, end] = range.split("-").map(Number) as [number, number];
+      ranges.push([start, end]);
+      signal.throwIfAborted();
+      const row = failures.has(start) ? { range: [start, end], error: "conversion_failed" }
+        : { range: [start, end], pages: Array.from({ length: end - start + 1 }, (_, index) => ({ page: start + index, text: `page ${start + index}`, imagePath: null })) };
+      await stream!.onLine(JSON.stringify(row));
+      if (failures.has(start)) exitCode = 4;
+    }
+    return { exitCode, stdout: "" };
   });
   const controller = new AbortController();
   const input = { path: "/document", sourceId: "source", sourceVersion: 0, scope, runner, segments, signal: controller.signal, parserProfile: "text-v1" };
-  return { input, ranges, failures, data, controller, segments };
+  return { input, ranges, batches, failures, data, controller, segments };
 }
 
 describe("bounded resumable PDF parser", () => {
@@ -75,16 +84,15 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toHaveLength(3);
   });
 
-  it("cancellation during inference does not save ready or failed pages or start more segments", async () => {
+  it("cancellation during inference cannot save or start more segments", async () => {
     const d = setup();
-    const original = d.input.runner;
-    d.input.runner = async (argv, signal) => {
-      const value = await original(argv, signal);
-      if (!argv.includes("--inspect-pdf")) d.controller.abort();
-      return value; // even a runner that ignores abort cannot publish its result
+    d.input.runner = async (argv, _signal, stream) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":23}' };
+      d.controller.abort();
+      await stream!.onLine(JSON.stringify({ range: [1, 10], pages: [] }));
+      return { exitCode: 0, stdout: "" };
     };
     await expect(parsePdfSegments(d.input)).rejects.toMatchObject({ name: "AbortError" });
-    expect(d.ranges).toHaveLength(1);
     expect(d.segments.save).not.toHaveBeenCalled();
   });
 
@@ -96,28 +104,97 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toHaveLength(1);
   });
 
-  it("rejects incomplete/rebased segment output without publishing partial pages", async () => {
-    const d = setup(12);
-    d.input.runner = async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf") ? { pageCount: 12 }
-      : { pages: [{ page: 1, text: "incomplete", imagePath: null }] }) });
-    await expect(parsePdfSegments(d.input)).rejects.toThrow("1-10, 11-12");
-    expect([...d.data.values()]).toEqual([{ state: "failed", errorCode: "invalid_output" }, { state: "failed", errorCode: "invalid_output" }]);
+  it("starts just one converter for seven default ten-page ranges", async () => {
+    const d = setup(70);
+    expect(await parsePdfSegments(d.input)).toHaveLength(70);
+    expect(d.batches).toEqual(["1-10,11-20,21-30,31-40,41-50,51-60,61-70"]);
+    expect(d.segments.read).toHaveBeenCalledTimes(7);
+    expect(d.segments.save).toHaveBeenCalledTimes(7);
+    expect(vi.mocked(d.segments.read).mock.invocationCallOrder.at(-1))
+      .toBeLessThan(vi.mocked(d.segments.save).mock.invocationCallOrder[0]!);
   });
 
-  it("enforces an outer timeout, saves only the timeout failure and continues with the next segment", async () => {
-    const d = setup(11);
-    const original = d.input.runner;
-    d.input.runner = async (argv, signal) => {
-      if (argv.includes("--page-start") && argv[argv.indexOf("--page-start") + 1] === "1") {
-        return new Promise((_resolve, reject) => {
-          const hold = setTimeout(() => reject(new Error("deadline did not fire")), 1000);
-          signal.addEventListener("abort", () => { clearTimeout(hold); reject(signal.reason); }, { once: true });
-        });
-      }
-      return original(argv, signal);
+  it.each([
+    "not json",
+    JSON.stringify({ range: [11, 12], pages: [] }),
+    JSON.stringify({ range: [1, 10], pages: [{ page: 1, text: "missing", imagePath: null }] }),
+    JSON.stringify({ range: [1, 10], error: "unknown" }),
+    JSON.stringify({ range: [1, 10], error: ["timeout"] }),
+    JSON.stringify({ range: [1, 10], error: "timeout", pages: [] }),
+  ])("rejects bad stream rows without publishing or inventing failed cache entries: %s", async line => {
+    const d = setup(12);
+    d.input.runner = async (argv, _signal, stream) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":12}' };
+      await stream!.onLine(line);
+      return { exitCode: 0, stdout: "" };
     };
-    await expect(parsePdfSegments({ ...d.input, timeoutSeconds: 0.02 })).rejects.toThrow("1-10");
-    expect([...d.data.values()].map(s => s.state === "failed" ? s.errorCode : s.state)).toEqual(["timeout", "ready"]);
+    await expect(parsePdfSegments(d.input)).rejects.toThrow();
+    expect(d.segments.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "crash", "timeout", "duplicate"])("retains successful cache on %s, no automatic replay, next invocation requests only the missing range", async mode => {
+    const d = setup(12);
+    const original = d.input.runner;
+    d.input.runner = async (argv, _signal, stream) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":12}' };
+      d.batches.push(argv[argv.indexOf("--ranges") + 1]!);
+      const line = JSON.stringify({ range: [1, 10], pages: Array.from({ length: 10 }, (_, i) => ({ page: i + 1, text: "ok", imagePath: null })) });
+      await stream!.onLine(line);
+      expect([...d.data.values()]).toHaveLength(1); // persisted before process ends
+      if (mode === "crash") throw new Error("child crashed");
+      if (mode === "duplicate") await stream!.onLine(line);
+      if (mode === "timeout") await stream!.onLine(JSON.stringify({ range: [11, 12], error: "timeout" }));
+      return { exitCode: mode === "timeout" ? 4 : 0, stdout: "" };
+    };
+    await expect(parsePdfSegments(d.input)).rejects.toThrow();
+    expect(d.batches).toEqual(["1-10,11-12"]);
+    expect([...d.data.values()][0]?.state).toBe("ready");
+    d.input.runner = original;
+    d.batches.length = 0;
+    expect(await parsePdfSegments(d.input)).toHaveLength(12);
+    expect(d.batches).toEqual(["11-12"]);
+  });
+
+  it("does not swallow a failed-row DB fence rejection or continue processing", async () => {
+    const d = setup();
+    d.failures.add(1);
+    const conflict = Object.assign(new Error("privacy epoch changed"), { code: "CONFLICT" });
+    d.segments.save = vi.fn(async () => { throw conflict; });
+    await expect(parsePdfSegments(d.input)).rejects.toBe(conflict);
+    expect(d.ranges).toEqual([[1, 10]]);
+    expect(d.segments.save).toHaveBeenCalledOnce();
+  });
+
+  it("includes startup plus every missing-range timeout in the bounded outer budget", async () => {
+    const d = setup(70);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await parsePdfSegments(d.input);
+      expect(timeout).toHaveBeenCalledWith(120_000 + 7 * 240_000);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it("an outer timeout stops the batch, retains its committed cache and does not replay any range", async () => {
+    const d = setup(12);
+    const expired = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+      return ms === 30_000 ? new AbortController().signal : expired.signal;
+    });
+    let conversions = 0;
+    d.input.runner = async (argv, deadline, stream) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":12}' };
+      conversions++;
+      await stream!.onLine(JSON.stringify({ range: [1, 10], pages: Array.from({ length: 10 }, (_, i) => ({ page: i + 1, text: "ok", imagePath: null })) }));
+      expired.abort(new DOMException("batch timed out", "TimeoutError"));
+      deadline.throwIfAborted();
+      return { exitCode: 0, stdout: "" };
+    };
+    try {
+      await expect(parsePdfSegments(d.input)).rejects.toMatchObject({ name: "TimeoutError" });
+      expect(conversions).toBe(1);
+      expect([...d.data.values()].map(value => value.state)).toEqual(["ready"]);
+      expect(d.segments.save).toHaveBeenCalledOnce();
+    } finally { timeout.mockRestore(); }
   });
 
   it("polls execution serially and fails closed on revoked lease/privacy or unavailable DB", async () => {

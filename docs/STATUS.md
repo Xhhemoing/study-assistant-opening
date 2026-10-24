@@ -14,6 +14,8 @@
 
 ## 进行中
 
+- A2-R02：`perf/sprint-a2-parser-ranges-20261024` 单进程多页段、JSONL逐段缓存与取消/超时清理已接通；默认Node79项、补充超时50项、原生PG11项、Python29项通过（重叠不求和），实际Docling两页双段成功。类型/lint通过，精确head CI与70页性能门禁单列；不等于已发布，详见[切片计划](plans/2026-10-24-study-a2-parser-ranges.md)。
+
 - 2026-10-24 开发总结/提交准备：[统一进展、问题与待确认清单](plans/2026-10-24-study-development-summary.md)。提交前已核对主干 `d6ec6a6f` 与 PR-A `20c862b0`；本页下方旧时点记录不代表当前合并/部署状态，后续单独归档。
 - 期中 PR-A：`feat/sprint-a-grading-ocr-outline-20261024` 基于含 #114 的主线，后台批改/OCR、夹具、大纲已拆出，原生 PG 79 项及相关包类型通过；完整 CI、真实批改准确率和用户浏览器验收待完成。
 - PR-B 答案隔离、PR-C Explore 1–2A 分别留在已推送同步候选 `codex/sprint-a0-20261023`，不随 PR-A 发布；Explore 阶段 3–4 冻结。

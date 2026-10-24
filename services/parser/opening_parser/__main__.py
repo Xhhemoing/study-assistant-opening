@@ -25,6 +25,7 @@ def parser():
     result.add_argument("--page-start", type=int)
     result.add_argument("--page-end", type=int)
     result.add_argument("--inspect-pdf", action="store_true")
+    result.add_argument("--ranges", help="Ordered disjoint PDF physical ranges, e.g. 1-10,11-20,31-40 (JSONL)")
     return result
 
 
@@ -91,12 +92,22 @@ def pdf_page_count(path):
         document.close()
 
 
-def main(argv=None):
+def main(argv=None, *, terminate_on_timeout=False):
     # Mathematical PDFs extract to non-ASCII text (˙, ∞, →). On Windows a
     # redirected stdout defaults to the ANSI codepage and would crash on print.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    ranges = None
+    if args.ranges is not None:
+        from .ranges import parse_ranges
+        if args.mime != PDF or args.inspect_pdf or args.check or args.page_start is not None or args.page_end is not None:
+            parser().error("--ranges requires PDF and conflicts with check/inspect-pdf/page-start/page-end")
+        try:
+            ranges = parse_ranges(args.ranges)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 5
     if args.check:
         try:
             create_converter()
@@ -120,6 +131,10 @@ def main(argv=None):
     if not path.is_file():
         print("conversion failed: input file does not exist", file=sys.stderr)
         return 4
+    if ranges is not None:
+        from .ranges import run
+        return run(args, path, ranges, create_converter, pdf_page_count, texts_by_page, CAP, TEXT_CAP,
+                   terminate_on_timeout=terminate_on_timeout)
     started = time.monotonic()
     try:
         if args.inspect_pdf or args.page_start is not None:
@@ -166,4 +181,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(terminate_on_timeout=True))

@@ -35,7 +35,17 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
       sources: { get: async () => current, markParseState: async (_scope, _id, state) => { states.push(state); return current; } },
       chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
-      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? '{"pageCount":2}' : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
+      runner: async (argv, _signal, stream) => {
+        argvs.push(argv); runs += 1;
+        const exitCode = input.exitCode ?? 0;
+        if (argv.includes("--inspect-pdf")) return { exitCode, stdout: '{"pageCount":2}' };
+        const stdout = input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] });
+        if (stream) {
+          if (exitCode === 0) await stream.onLine(JSON.stringify({ range: [1, 2], ...JSON.parse(stdout) }));
+          return { exitCode, stdout: "" };
+        }
+        return { exitCode, stdout };
+      },
       tempDir,
     }),
   }));
@@ -48,7 +58,7 @@ describe("parse source handler", () => {
     const d = await deps();
     await d.handler(job, job.payload);
     expect(d.argvs().length).toBe(2);
-    const inputArg = d.argvs()[0][3]; // -m opening_parser --input <path>
+    const inputArg = d.argvs()[0]![3]!; // -m opening_parser --input <path>; invocation count asserted above
     expect(path.isAbsolute(inputArg)).toBe(true);
     expect(await readdir(d.tempDir)).toEqual([]);
   });
@@ -96,7 +106,11 @@ describe("parse source handler", () => {
       sources: { get: async () => source(), markParseState: async () => source() },
       chunks: { replaceChunks: async () => { throw new Error("CONFLICT: source version changed during parse"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
-      runner: async argv => ({ exitCode: 0, stdout: argv.includes("--inspect-pdf") ? '{"pageCount":1}' : '{"pages":[{"page":1,"text":"body","imagePath":null}]}' }), tempDir: d.tempDir,
+      runner: async (argv, _signal, stream) => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":1}' };
+        await stream!.onLine('{"range":[1,1],"pages":[{"page":1,"text":"body","imagePath":null}]}');
+        return { exitCode: 0, stdout: "" };
+      }, tempDir: d.tempDir,
     });
     void original;
     await expect(conflict(job, { sourceId })).rejects.toThrow("CONFLICT");
@@ -137,6 +151,29 @@ describe("parse source handler", () => {
     expect(save).not.toHaveBeenCalled();
     expect(replace).not.toHaveBeenCalled();
     expect(await readdir(d.tempDir)).toEqual([]);
+  });
+
+  it("never publishes source chunks when a later range fails after an immediate cache save", async () => {
+    const d = await deps();
+    const save = vi.fn(async () => {}), replace = vi.fn(async () => {});
+    const handler = createParseSourceHandler({
+      sources: { get: async () => source(), markParseState: async () => source() },
+      chunks: { replaceChunks: replace, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
+      runner: async (argv, _signal, stream) => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        await stream!.onLine('{"range":[1,1],"pages":[{"page":1,"text":"body","imagePath":null}]}');
+        expect(save).toHaveBeenCalledOnce();
+        expect(replace).not.toHaveBeenCalled();
+        await stream!.onLine('{"range":[2,2],"error":"conversion_failed"}');
+        return { exitCode: 4, stdout: "" };
+      },
+      tempDir: d.tempDir, segmentPages: 1,
+      segments: { assertCurrent: async () => {}, read: async () => null, save },
+    });
+    await expect(handler({ ...job, state: "running", claimToken: "claim" }, { sourceId })).rejects.toThrow("document conversion failed");
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(replace).not.toHaveBeenCalled();
   });
 
   it("fails closed rather than running a claimed PDF without persistent cache wiring", async () => {

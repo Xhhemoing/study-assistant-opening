@@ -46,14 +46,14 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
 }
 
 export function createNodeRunner({ pythonExecutable, cwd }: ParserConfig = loadParserConfig()): ParserRunner {
-  return (argv, signal) => new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(signal.reason); return; }
-    // Own a process group so cancellation also kills subprocess descendants.
-    // Do not settle until close: callers may then safely remove the input file.
+  return async (argv, signal, stream) => {
+    signal.throwIfAborted();
+    // Detached process groups include model/conversion descendants, not just Python.
     const child = spawn(pythonExecutable, argv, { cwd, detached: process.platform !== "win32", windowsHide: true, env: createParserSubprocessEnv("python") });
     const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    const bound = 8 * 1024 * 1024;
     let stdoutBytes = 0, stderrBytes = 0;
-    let failure: unknown;
+    let failed = false, failure: unknown;
     const killTree = () => {
       if (!child.pid) return;
       if (process.platform === "win32") {
@@ -64,25 +64,74 @@ export function createNodeRunner({ pythonExecutable, cwd }: ParserConfig = loadP
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") child.kill("SIGKILL"); }
       }
     };
-    const abort = () => { failure = signal.reason; killTree(); };
+    const fail = (error: unknown) => {
+      if (!failed) { failed = true; failure = error; }
+      killTree();
+    };
+    const abort = () => fail(signal.reason);
+    const closed = new Promise<number | null>(resolve => {
+      child.on("error", fail);
+      child.on("close", resolve);
+    });
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > 8 * 1024 * 1024) { failure = new BoundsExceededError("parser stdout exceeds capture bound"); killTree(); }
-      else stdout.push(chunk);
-    });
     child.stderr.on("data", (chunk: Buffer) => {
       const kept = chunk.subarray(0, Math.max(0, 64 * 1024 - stderrBytes));
       if (kept.length) stderr.push(kept);
       stderrBytes += kept.length;
     });
-    child.on("error", error => { failure = error; });
-    child.on("close", (exitCode) => {
-      signal.removeEventListener("abort", abort);
-      if (failure) { reject(failure); return; }
-      const detail = exitCode ? Buffer.concat(stderr).toString("utf8").slice(-400).trimEnd() : "";
-      resolve({ exitCode: exitCode ?? 4, stdout: Buffer.concat(stdout).toString("utf8"), stderr: detail });
-    });
-  });
+    // An async iterator pauses the readable while the callback is awaiting its
+    // fenced DB write. Never queue one promise per line or retain streamed stdout.
+    const consumed = (async () => {
+      let fragments: Buffer[] = [];
+      let lineBytes = 0;
+      const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+      const emit = async (line: Buffer) => {
+        if (failed) return;
+        if (line.length > bound) throw new BoundsExceededError("parser line exceeds capture bound");
+        await stream!.onLine(decoder.decode(line).replace(/\r$/, ""));
+      };
+      try {
+        for await (const chunk of child.stdout) {
+          if (failed) continue;
+          const bytes = chunk as Buffer;
+          stdoutBytes += bytes.length;
+          if (stdoutBytes > bound) throw new BoundsExceededError("parser stdout exceeds capture bound");
+          if (!stream) { stdout.push(bytes); continue; }
+          // Search only this chunk, retaining slices without copying an ever-
+          // growing prefix. Assemble a fragmented line exactly once, at emission.
+          let offset = 0, newline: number;
+          while ((newline = bytes.indexOf(10, offset)) !== -1) {
+            const tail = bytes.subarray(offset, newline);
+            let line = tail;
+            if (fragments.length) {
+              fragments.push(tail);
+              line = Buffer.concat(fragments, lineBytes + tail.length);
+              fragments = [];
+              lineBytes = 0;
+            }
+            await emit(line);
+            offset = newline + 1;
+            if (failed) break;
+          }
+          if (!failed && offset < bytes.length) {
+            const tail = bytes.subarray(offset);
+            fragments.push(tail);
+            lineBytes += tail.length;
+            if (lineBytes > bound) throw new BoundsExceededError("parser line exceeds capture bound");
+          }
+        }
+        if (stream && lineBytes && !failed) {
+          await emit(fragments.length === 1 ? fragments[0]! : Buffer.concat(fragments, lineBytes));
+        }
+      } catch (error) { fail(error); }
+    })();
+    // close may precede an in-flight callback. Both must drain before the input
+    // file is removed by the caller; callback rejections are always observed.
+    const [exitCode] = await Promise.all([closed, consumed]);
+    signal.removeEventListener("abort", abort);
+    if (failed) throw failure;
+    return { exitCode: exitCode ?? 4, stdout: stream ? "" : Buffer.concat(stdout).toString("utf8"),
+      stderr: exitCode ? Buffer.concat(stderr).toString("utf8").slice(-400).trimEnd() : "" };
+  };
 }

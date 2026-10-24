@@ -31,7 +31,7 @@ The setup command deliberately enables network access and downloads only the mod
 
 Development defaults resolve from the repository root, including when `npm run worker:dev` launches in `apps/worker`: `.local/docling-venv/Scripts/python.exe` on Windows, `.local/docling-venv/bin/python` on Linux/macOS, and `services/parser` as the module directory. Relative overrides resolve from the same root. CI and production deployments must set `PARSER_PYTHON` and `PARSER_CWD` to absolute deployment paths; production rejects missing settings. `HF_HOME` is optional and defaults to `<repository>/.local/hf-home`. Copy the parser package and its model manifest into `PARSER_CWD` when deploying separately.
 
-Before connecting Redis, PostgreSQL or S3, worker startup checks the executable and working directory, then runs `python -m opening_parser --check` with a 30-second limit. Failures name the relevant settings or the dependency installation command. `--check` validates imports and converter configuration; the actual PDF/PPTX tests additionally exercise the offline models. CI runs both before the existing Node integration suite, including the real two-page PDF → persisted chunks/state → temporary-file cleanup test. No parser test is skipped because Python or its cache is missing.
+Before connecting Redis, PostgreSQL or S3, worker startup checks the executable and working directory, then runs `python -m opening_parser --check` with a configurable 120-second default limit (`PARSER_PREFLIGHT_TIMEOUT_MS`). Failures name the relevant settings or the dependency installation command. `--check` validates imports and converter configuration; the actual PDF/PPTX tests additionally exercise the offline models. CI runs both before the existing Node integration suite, including the real two-page PDF → persisted chunks/state → temporary-file cleanup test. No parser test is skipped because Python or its cache is missing.
 
 For direct conversion, run from `PARSER_CWD`:
 
@@ -41,7 +41,39 @@ $ErrorActionPreference = 'Stop'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-The CLI emits one JSON result on stdout. PDF and PPTX text and table extraction are supported. Image extraction and image semantics remain deferred. Exit codes: 0 success, 2 usage, 3 unsupported MIME, 4 conversion failure/timeout, and 5 page/output bound violation. Node cancellation and capture limits remain in place.
+The default CLI emits one JSON result on stdout. PDF and PPTX text and table extraction are supported. Image extraction and image semantics remain deferred. Exit codes: 0 success, 2 usage, 3 unsupported MIME, 4 conversion failure/timeout, and 5 page/output bound violation. Node cancellation and capture limits remain in place.
+
+### A2-R02: single-process PDF ranges (JSONL)
+
+From `services/parser`, an explicit multi-range invocation is:
+
+```sh
+python -m opening_parser --input /absolute/path/document.pdf --mime application/pdf --max-pages 2000 --timeout-seconds 240 --ranges '1-10,11-20,31-40'
+```
+
+`--ranges` accepts positive inclusive physical page ranges in strictly ascending, non-overlapping order; gaps are allowed. Empty/malformed, overlapping, descending or out-of-document ranges fail with exit 5 before converter initialization. The full PDF count must also fit `--max-pages`. Non-PDF input and combinations with `--inspect-pdf`, `--page-start`, `--page-end` or `--check` are usage errors (exit 2). Existing `convert(path, timeout, page_range=None)`, inspection, single-range and PPTX paths retain their prior API/output.
+
+The process creates **one** `DocumentConverter`, then calls its `.convert(path, page_range=(start, end))` serially. Each completed segment writes and immediately flushes exactly one compact UTF-8 JSON line:
+
+```json
+{"range":[11,12],"pages":[{"page":11,"text":"physical page eleven","imagePath":null},{"page":12,"text":"","imagePath":null}]}
+{"range":[15,16],"error":"conversion_failed"}
+```
+
+Errors are limited to `timeout`, `invalid_output` and `conversion_failed`. A successful line requires the exact requested physical page set from the existing pre-merge extractor; rebased, missing/duplicate/foreign assemblies and partial conversion results never become successful blank pages. Text uses the existing 200,000-character per-page cap and truncation marker. Python/native stdout and logging during multi-range work are kept off the protocol stream (diagnostics go to stderr).
+
+The **combined stdout limit is 8 MiB**, counting every JSON envelope, UTF-8 byte and newline, including error lines. Space for pending failure records is reserved before emitting success. A segment whose successful payload cannot fit becomes `invalid_output`; subsequent ranges can continue within the budget, and the final exit is 5. If even the minimal error budget cannot fit, the invocation exits 5 with no stdout and no converter initialization. Other invalid segment output and non-timeout conversion failures emit their line and continue; the final exit is 4. All successful segments exit 0.
+
+A conversion-thread timeout emits and flushes the current `timeout` record and **ends the standalone CLI with exit 4 without processing remaining ranges**. The CLI uses a hard exit after flushing because converter executors/native threads can otherwise keep Python alive during shutdown. Embedded `main()` calls retain the return-value API and must discard the invocation or explicitly opt into CLI termination. The Node consumer persists the timeout under the existing fence, rejects the callback and kills the process group so descendants cannot consume the remaining batch budget. Previously saved successes remain reusable; unattempted ranges have no line. Initialization failure emits `conversion_failed` for each requested range without retrying initialization.
+
+Stdlib-only acceptance commands for the parent/main thread (no Docling/model inference):
+
+```sh
+PYTHONPATH=services/parser python3 -m unittest discover -s services/parser/tests -p 'test_ranges*.py' -v
+PYTHONPATH=services/parser python3 -m unittest discover -s services/parser/tests -p test_segments_health_unit.py -v
+```
+
+These fake-converter tests include a real child-process pipe/flush and native-stdout isolation check, not real document conversion or a model performance claim.
 
 ## Optional Offline OCR
 

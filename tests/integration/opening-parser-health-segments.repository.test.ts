@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningJobRepository, createOpeningSourceChunksRepository, openingJobScope, type OpeningStorage } from "@aistudy/database";
+import { createOpeningJobRepository, createOpeningSourceChunksRepository, createOpeningSourceRepository, openingJobScope, type OpeningStorage } from "@aistudy/database";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
+import { createNodeRunner } from "../../apps/worker/src/parsers/docling-process";
+import { createParserActivity } from "../../apps/worker/src/parsers/parser-activity";
+import type { ParserRunner } from "../../apps/worker/src/parsers/types";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningPdfSegmentsRepository } from "../../packages/database/src/repositories/opening-pdf-segments";
 import { createOpeningParserHealthRepository, type ParserOcrHealth } from "../../packages/database/src/repositories/opening-parser-health";
@@ -56,7 +62,7 @@ async function seed() {
   expect(rows[0]!.payload).toEqual({ sourceId: source.id, sourceVersion: 0 });
   const claimed = await jobs.claim(rows[0]!.id as string);
   if (!claimed) throw new Error("fixture job not claimed");
-  return { jobs, claimed, scope: openingJobScope(claimed), identity: { sourceId: source.id, sourceVersion: source.version, parserProfile: "test-docling-v2/text", pageStart: 1, pageEnd: 1 } };
+  return { jobs, claimed, bytes, storage, scope: openingJobScope(claimed), identity: { sourceId: source.id, sourceVersion: source.version, parserProfile: "test-docling-v2/text", pageStart: 1, pageEnd: 1 } };
 }
 
 describe("0094/0095 PDF segment persistence and execution fencing", () => {
@@ -145,6 +151,69 @@ describe("0094/0095 PDF segment persistence and execution fencing", () => {
     controller.abort();
     await expect(repo.save(d.scope, d.identity, { state: "ready", pages: [page] }, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(await f.sql`SELECT * FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId}`).toHaveLength(0);
+  });
+});
+
+describe("streamed subprocess to native PostgreSQL cache and source publication", () => {
+  function bridge(options: { failSecond?: boolean; ranges: string[] }): ParserRunner {
+    const child = createNodeRunner({ pythonExecutable: process.execPath, cwd: process.cwd() });
+    return createParserActivity().wrap(async (argv, signal, stream) => {
+      if (argv.includes("--inspect-pdf")) return child(["-e", "console.log('{\"pageCount\":2}')"], signal);
+      const selected = argv[argv.indexOf("--ranges") + 1]!;
+      options.ranges.push(selected);
+      const records = selected.split(",").map(range => {
+        const [start, end] = range.split("-").map(Number) as [number, number];
+        return start === 2 && options.failSecond ? { range: [start, end], error: "conversion_failed" }
+          : { range: [start, end], pages: [{ page: start, text: `native stream page ${start}`, imagePath: null }] };
+      });
+      // A real child pipe and real fenced SQL, but deliberately synthetic model
+      // output. This is not a Docling or queue-consumption acceptance claim.
+      return child(["-e", `process.stdout.end(${JSON.stringify(records.map(row => JSON.stringify(row)).join("\n") + "\n")});process.exitCode=${options.failSecond ? 4 : 0};`], signal, stream);
+    });
+  }
+  it("persists completed ranges, withholds partial publication, then retries only the missing range", async () => {
+    const d = await seed(), tempDir = await mkdtemp(path.join(tmpdir(), "stream-pg-"));
+    const sources = createOpeningSourceRepository(f.sql), segments = createOpeningPdfSegmentsRepository(f.sql);
+    const options = { failSecond: true, ranges: [] as string[] };
+    const handler = createParseSourceHandler({ sources, segments, chunks: createOpeningSourceChunksRepository(f.sql),
+      storage: { ...d.storage, presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: bridge(options), tempDir, segmentPages: 1, executionPollMs: 10_000 });
+    try {
+      await expect(handler(d.claimed, d.claimed.payload)).rejects.toThrow(/2-2/);
+      expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId} ORDER BY page_start`)
+        .toEqual([{ page_start: 1, state: "ready" }, { page_start: 2, state: "failed" }]);
+      expect(await f.sql`SELECT id FROM opening_source_chunks WHERE source_id=${d.identity.sourceId}`).toHaveLength(0);
+      expect((await sources.get(f.scope, d.identity.sourceId)).parseState).not.toBe("ready");
+      await d.jobs.finish(d.claimed.id, "failed", { retryable: true }, d.claimed.claimToken);
+      const retry = await d.jobs.createOnce(f.scope, { key: randomUUID(), kind: "parse", payload: d.claimed.payload, privacyEpoch: d.claimed.privacyEpoch });
+      const current = (await d.jobs.claim(retry.id))!;
+      options.failSecond = false;
+      expect(await handler(current, current.payload)).toEqual({ pages: 2 });
+      expect(options.ranges).toEqual(["1-1,2-2", "2-2"]);
+      expect(await f.sql`SELECT page,text FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
+        .toEqual([{ page: 1, text: "native stream page 1" }, { page: 2, text: "native stream page 2" }]);
+      expect((await sources.get(f.scope, d.identity.sourceId)).parseState).toBe("ready");
+      expect(await readdir(tempDir)).toEqual([]);
+    } finally { await rm(tempDir, { recursive: true, force: true }); }
+  });
+  it("cancellation committed between streamed ranges rejects the next fenced write without publishing chunks", async () => {
+    const d = await seed(), tempDir = await mkdtemp(path.join(tmpdir(), "stream-pg-cancel-"));
+    const repo = createOpeningPdfSegmentsRepository(f.sql), sources = createOpeningSourceRepository(f.sql);
+    const handler = createParseSourceHandler({ sources, chunks: createOpeningSourceChunksRepository(f.sql),
+      segments: { ...repo, save: async (scope, identity, value, signal) => {
+        await repo.save(scope, identity, value, signal);
+        if (identity.pageStart === 1) await d.jobs.cancel(f.scope, d.claimed.id);
+      } },
+      storage: { ...d.storage, presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: bridge({ ranges: [] }), tempDir, segmentPages: 1, executionPollMs: 10_000 });
+    try {
+      await expect(handler(d.claimed, d.claimed.payload)).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId}`)
+        .toEqual([{ page_start: 1, state: "ready" }]);
+      expect(await f.sql`SELECT id FROM opening_source_chunks WHERE source_id=${d.identity.sourceId}`).toHaveLength(0);
+      expect((await sources.get(f.scope, d.identity.sourceId)).parseState).not.toBe("ready");
+      expect(await readdir(tempDir)).toEqual([]);
+    } finally { await rm(tempDir, { recursive: true, force: true }); }
   });
 });
 

@@ -9,12 +9,22 @@ export function createParserActivity(now: () => number = () => performance.now()
   return {
     canReuseHealth(maxAgeMs: number) { return active > 0 && now() - succeededAt < maxAgeMs; },
     wrap(run: ParserRunner): ParserRunner {
-      return async (argv, signal) => {
+      return async (argv, signal, stream) => {
         active += 1;
         try {
-          const result = await run(argv, signal);
+          const document = argv.includes("--input") && !argv.includes("--inspect-pdf");
+          const result = await run(argv, signal, stream ? { onLine: async line => {
+            // The consumer validates requested range/order/completeness and commits
+            // its fenced write first. Rejected callbacks are never success evidence.
+            await stream.onLine(line);
+            signal.throwIfAborted();
+            if (document) {
+              const row = JSON.parse(line) as { pages?: unknown; error?: unknown };
+              if (!("error" in row) && Array.isArray(row.pages) && decodeParserOutput(line).length > 0) succeededAt = now();
+            }
+          } } : undefined);
           signal.throwIfAborted();
-          if (result.exitCode === 0 && argv.includes("--input") && !argv.includes("--inspect-pdf")
+          if (!stream && result.exitCode === 0 && document
             && decodeParserOutput(result.stdout).length > 0) succeededAt = now();
           return result;
         } finally { active -= 1; }

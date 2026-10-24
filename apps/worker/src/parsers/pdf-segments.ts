@@ -1,5 +1,5 @@
-import { validatePdfSegmentPages, type OpeningPdfSegmentsRepository, type OpeningScope, type PdfSegmentPage } from "@aistudy/database";
-import { BoundsExceededError, ConversionFailedError, createDoclingProcess } from "./docling-process";
+import { validatePdfSegmentPages, type OpeningPdfSegmentsRepository, type OpeningScope, type PdfSegmentPage, type PdfSegmentIdentity } from "@aistudy/database";
+import { BoundsExceededError, ConversionFailedError } from "./docling-process";
 import { pdfParserProfile } from "./ocr-health";
 import type { ParserRunner } from "./types";
 
@@ -44,44 +44,72 @@ export async function parsePdfSegments(input: {
   if (inspected.exitCode !== 0) throw new ConversionFailedError("document conversion failed during PDF inspection");
   const { pageCount } = JSON.parse(inspected.stdout) as { pageCount?: unknown };
   if (!Number.isInteger(pageCount) || Number(pageCount) < 1 || Number(pageCount) > 2000) throw new RangeError("invalid PDF page count");
-  const parser = createDoclingProcess({ run: input.runner });
-  const pages: PdfSegmentPage[] = [];
+  const identities: PdfSegmentIdentity[] = [];
+  const missing: PdfSegmentIdentity[] = [];
+  const completed = new Map<number, PdfSegmentPage[]>();
   let outputBytes = 0;
-  const append = (segment: PdfSegmentPage[]) => {
-    outputBytes += Buffer.byteLength(JSON.stringify(segment));
+  const accept = (identity: PdfSegmentIdentity, pages: PdfSegmentPage[]) => {
+    outputBytes += Buffer.byteLength(JSON.stringify(pages));
     if (outputBytes > 8 * 1024 * 1024) throw new BoundsExceededError("combined PDF output exceeds capture bound");
-    pages.push(...segment);
+    completed.set(identity.pageStart, pages);
   };
-  const failed: string[] = [];
+  // Finish all cache reads before starting the single converter. Cache reads and
+  // each subsequent save retain the repository's authoritative execution fence.
   for (let start = 1; start <= Number(pageCount); start += size) {
     input.signal.throwIfAborted();
     const end = Math.min(Number(pageCount), start + size - 1);
     const identity = { sourceId: input.sourceId, sourceVersion: input.sourceVersion,
       parserProfile: input.parserProfile ?? pdfParserProfile(), pageStart: start, pageEnd: end };
+    identities.push(identity);
     const cached = await input.segments?.read(input.scope, identity);
     input.signal.throwIfAborted();
-    if (cached?.state === "ready") {
-      append(validatePdfSegmentPages(cached.pages, start, end));
-      continue;
+    if (cached?.state === "ready") accept(identity, validatePdfSegmentPages(cached.pages, start, end));
+    else missing.push(identity);
+  }
+  if (missing.length) {
+    // Startup/imports are outside Python's per-range conversion timer. Bound
+    // both the per-range budget and the batch deadline below Node's timer limit.
+    const startupMs = 120_000;
+    const budgetMs = startupMs + missing.length * Math.ceil(timeoutSeconds * 1000);
+    if (!Number.isSafeInteger(budgetMs) || budgetMs > 24 * 60 * 60 * 1000) throw new RangeError("PDF execution budget exceeds one day");
+    const deadline = AbortSignal.any([input.signal, AbortSignal.timeout(budgetMs)]);
+    const argv = ["-m", "opening_parser", "--input", input.path, "--mime", "application/pdf", "--max-pages", "2000",
+      "--timeout-seconds", String(timeoutSeconds), "--ranges", missing.map(i => `${i.pageStart}-${i.pageEnd}`).join(",")];
+    let received = 0;
+    const failed: string[] = [];
+    const result = await input.runner(argv, deadline, { onLine: async line => {
+      deadline.throwIfAborted();
+      const identity = missing[received];
+      const value: unknown = JSON.parse(line);
+      if (!identity || !value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("unexpected PDF range output");
+      const row = value as Record<string, unknown>;
+      if (!Array.isArray(row.range) || row.range.length !== 2 || row.range[0] !== identity.pageStart || row.range[1] !== identity.pageEnd) {
+        throw new TypeError("out-of-order, duplicate or unrequested PDF range");
+      }
+      if ("error" in row) {
+        if ("pages" in row || typeof row.error !== "string" || !["timeout", "invalid_output", "conversion_failed"].includes(row.error)) throw new TypeError("invalid PDF range error");
+        // Do not catch save failures: a lost claim/privacy/version fence must
+        // terminate the stream, not be rewritten as an ordinary failed segment.
+        await input.segments?.save(input.scope, identity, { state: "failed", errorCode: row.error as "timeout" | "invalid_output" | "conversion_failed" }, input.signal);
+        failed.push(`${identity.pageStart}-${identity.pageEnd}`);
+        // A timed-out Python converter can retain executor/native threads or
+        // descendants. The runner kills its process group on callback failure;
+        // do not wait out the entire remaining batch deadline after this receipt.
+        if (row.error === "timeout") throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")}); retry reuses completed segments`);
+      } else {
+        const pages = validatePdfSegmentPages(row.pages, identity.pageStart, identity.pageEnd);
+        accept(identity, pages);
+        await input.segments?.save(input.scope, identity, { state: "ready", pages }, input.signal);
+      }
+      deadline.throwIfAborted();
+      received++;
+    } });
+    deadline.throwIfAborted();
+    if (result.exitCode === 5) throw new BoundsExceededError("parser bounds exceeded");
+    if (result.exitCode !== 0 || failed.length || received !== missing.length) {
+      throw new ConversionFailedError(`PDF segments failed (${failed.join(", ") || "process failure or missing ranges"}); retry reuses completed segments`);
     }
-    let parsed: PdfSegmentPage[];
-    try {
-      parsed = validatePdfSegmentPages(await parser.parseDocument({ path: input.path, mime: "application/pdf", maxPages: 2000,
-        pageStart: start, pageEnd: end, timeoutSeconds }, input.signal), start, end);
-    } catch (error) {
-      // A cancelled/revoked/old execution must not even write a failed segment.
-      input.signal.throwIfAborted();
-      const errorCode = error instanceof Error && error.name === "TimeoutError" ? "timeout"
-        : error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError ? "invalid_output" : "conversion_failed";
-      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal);
-      failed.push(`${start}-${end}`);
-      continue;
-    }
-    input.signal.throwIfAborted();
-    await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed }, input.signal);
-    append(parsed);
   }
   input.signal.throwIfAborted();
-  if (failed.length) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")}); retry reuses completed segments`);
-  return pages;
+  return identities.flatMap(identity => completed.get(identity.pageStart)!);
 }
