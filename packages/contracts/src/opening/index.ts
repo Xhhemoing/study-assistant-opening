@@ -234,6 +234,7 @@ export * from "./system-query";
 export * from "./planning-settings";
 export * from "./plan-feedback";
 export { taskFeedbackInputSchema, taskFeedbackReasonSchema, type TaskFeedbackInput } from "./planning-tasks";
+export * from "./sprint-budget";
 export * from "./adaptive-planning";
 export * from "./goal-learning";
 export * from "./intervention-prefs";
