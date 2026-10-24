@@ -15,6 +15,7 @@ function db(handler: (query: string, values: unknown[]) => unknown[]) {
     const query = (strings as TemplateStringsArray).join("?");
     return Promise.resolve(handler(query, values));
   }) as unknown as Sql;
+  sql.unsafe = ((query: string) => query) as unknown as Sql["unsafe"];
   sql.begin = ((options: string | ((tx: Sql) => unknown), callback?: (tx: Sql) => unknown) =>
     (typeof options === "function" ? options : callback!)(sql)) as Sql["begin"];
   return sql;
@@ -122,6 +123,10 @@ function flagsDatabase(options: { version?: number; excluded?: boolean; help?: b
       decision: "correct", outcome: "correct", reasonCodes: ["matrix_compared"], evaluatedAt: at },
   };
   const sql = db(query => {
+    if (query.includes("SELECT o.id,material.state")) return [{ id: observationId, state: {
+      materialSourceRefs: [{ sourceId, sourceVersion: options.version ?? 1, manifestRevision: 0 }],
+      materialAnswerRefs: [], disputed: false,
+    } }];
     if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
     if (query.includes("FROM opening_skill_evidence")) return [row];
     if (query.includes("FROM opening_learning_sessions")) return [{ id: sessionId, course_id: courseId }];

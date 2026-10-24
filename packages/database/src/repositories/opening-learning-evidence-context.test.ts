@@ -17,13 +17,19 @@ function evidenceDatabase() {
     recorded_at: "2026-01-01T10:01:00Z", source_turn_ids: [], verdict_source: "reference_checked", reference_source_id: sourceId,
     reference_check: { status: "checked", checkedAt: "2026-01-01T10:01:00Z", referenceId: sourceId }, history_revision: index + 1,
   }));
-  let queries = 0, answerConditionQueries = 0;
+  let queries = 0, answerConditionQueries = 0, materialStateQueries = 0;
   const db = Object.assign((strings: TemplateStringsArray | readonly unknown[]) => {
     if (!("raw" in strings)) return {};
     const query = strings.join("?");
     return { then(resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) {
     queries++;
     try {
+    if (query.includes("SELECT o.id,material.state")) {
+      materialStateQueries++;
+      return Promise.resolve(rows.map(row => ({ id: row.id, state: {
+        materialSourceRefs: [{ sourceId, sourceVersion: 1, manifestRevision: 0 }], materialAnswerRefs: [], disputed: false,
+      } }))).then(resolve, reject);
+    }
     if (query.includes("SELECT * FROM (?) identity")) return Promise.resolve([]).then(resolve, reject);
     if (query.includes("FROM opening_study_intent_events")) {
       answerConditionQueries++;
@@ -41,8 +47,9 @@ function evidenceDatabase() {
     throw new Error(`Unexpected evidence query: ${query}`);
     } catch (error) { return reject(error); }
     } };
-  }, { begin: async (_options: string, run: (tx: Sql) => unknown) => run(db as unknown as Sql) });
-  return { db: db as unknown as Sql, queries: () => queries, answerConditionQueries: () => answerConditionQueries };
+  }, { begin: async (_options: string, run: (tx: Sql) => unknown) => run(db as unknown as Sql), unsafe: (query: string) => query });
+  return { db: db as unknown as Sql, queries: () => queries, answerConditionQueries: () => answerConditionQueries,
+    materialStateQueries: () => materialStateQueries };
 }
 
 describe("course evidence batch contexts", () => {
@@ -55,6 +62,8 @@ describe("course evidence batch contexts", () => {
     ).independentAttempt)).toEqual(Array(8).fill("yes"));
     // Answer-condition declarations add one batch read, never one per head.
     expect(fixture.answerConditionQueries()).toBe(1);
-    expect(fixture.queries()).toBeLessThanOrEqual(12);
+    // Material provenance adds exactly one batch read for all eight heads.
+    expect(fixture.materialStateQueries()).toBe(1);
+    expect(fixture.queries() - fixture.materialStateQueries()).toBeLessThanOrEqual(12);
   });
 });

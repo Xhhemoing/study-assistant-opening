@@ -15,7 +15,8 @@ function setup() {
   const assertLease = () => { if (cancelled) throw Object.assign(new Error("lease cancelled"), { code: "CONFLICT" }); };
   const repository = {
     context: vi.fn(async () => { assertLease(); return { observation: original, existing: null, answerRevision: 1,
-      operationId: job.key, stem: "1/2+1/2?", referenceText: "1", misconceptions: [], workSource: null }; }),
+      operationId: job.key, stem: "1/2+1/2?", referenceText: "1", misconceptions: [], workSource: null,
+      materialProvenance: { materialAnswerRefs: [], materialSourceRefs: [] } }; }),
     ledger: vi.fn(async () => "unsent" as const),
     apply: vi.fn<OpeningAiGradingServiceDeps["repository"]["apply"]>(async () => { assertLease(); return graded; }),
   };

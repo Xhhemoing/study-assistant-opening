@@ -41,8 +41,12 @@ function fixture(options: { links?: Record<string, unknown>[]; record?: Learning
     ...(record.id !== observation.id ? [{ id: record.id, root_observation_id: observation.id, revises_observation_id: observation.id,
       answer: record.answer, recorded_at: record.recordedAt, source_ids: [id(16)], source_versions: { [id(16)]: 1 } }] : []),
   ];
-  const db = ((strings: TemplateStringsArray) => {
+  const db = Object.assign((strings: TemplateStringsArray) => {
     const query = strings.join("?");
+    if (query.includes("SELECT o.id,material.state")) return Promise.resolve([{ id: record.id, state: {
+      materialSourceRefs: [{ sourceId: id(16), sourceVersion: options.sourceVersion ?? 1, manifestRevision: 0 }],
+      materialAnswerRefs: [], disputed: false,
+    } }]);
     // Nested identity predicates are SQL fragments, not executed mock queries.
     if (query.trimStart().startsWith("(v.teaching_revision_id")) return {};
     if (query.includes("FROM opening_course_knowledge") || query.includes("WITH current_nodes AS")) return {};
@@ -62,7 +66,7 @@ function fixture(options: { links?: Record<string, unknown>[]; record?: Learning
     if (query.includes("FROM opening_learning_observations") && query.includes("JOIN opening_learning_observations root")) return Promise.resolve([]);
     if (query.includes("FROM opening_learning_observations")) return Promise.resolve(options.chain ?? chain);
     throw new Error(`Unexpected query: ${query}`);
-  }) as unknown as Sql;
+  }, { unsafe: (query: string) => query }) as unknown as Sql;
   return { db, record };
 }
 

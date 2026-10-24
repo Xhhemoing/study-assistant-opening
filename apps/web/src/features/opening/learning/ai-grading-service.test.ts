@@ -17,6 +17,7 @@ const output = { text: JSON.stringify(proposal), inputTokens: 100, outputTokens:
 function setup() {
   const context = { observation: original, stem: "v=(1,0,1), w=(0,1,1), u=(2,3,5)，u是否在span{v,w}中？",
     referenceText: "u属于span{v,w}当且仅当存在系数使u=av+bw。", sourceIds: [id(5)], sourceVersions: { [id(5)]: 1 },
+    materialProvenance: { materialAnswerRefs: [], materialSourceRefs: [{ sourceId: id(5), sourceVersion: 1, manifestRevision: 0 }] },
     answerRevision: 1, operationId: `ai-grade:${scope.workspaceId}:${input.observationId}`,
     workSource: null as { id: string; version: number; physicalPage: number } | null, existing: null as LearningObservation | null };
   const repository = { context: vi.fn(async () => context), apply: vi.fn(async () => { context.existing = graded; return graded; }),
@@ -44,7 +45,7 @@ describe("saved answer AI grading", () => {
     expect(JSON.parse(options.input.text)).toEqual({ question: context.stem, studentAnswer: original.answer, reference: context.referenceText });
     expect(options.input.mediaCapability).toBe("text_only");
     expect(repository.context).toHaveBeenCalledTimes(2);
-    expect(repository.apply).toHaveBeenCalledWith(scope, input, proposal, "test-grader");
+    expect(repository.apply).toHaveBeenCalledWith(scope, input, proposal, "test-grader", context.materialProvenance);
     expect(images).not.toHaveBeenCalled();
     expect(original.answer).toBe("u=2v+3w");
   });
