@@ -15,6 +15,7 @@ import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
 import { LoadingRows, secondaryButtonClass } from "../design/ui";
 import { ResponsiveInspector } from "../design/inspector";
 import { TaskContext } from "./task-context";
+import { ContextReview } from "./context-review";
 import { replacePromptDraft, type StudyTask } from "../planning/study-task";
 import { MemoryPanel } from "./memory-panel";
 import { prepareSnippetDraft, type SelectedExcerpt } from "./save-snippet";
@@ -1005,19 +1006,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           }} className={v3ui.iconSm} aria-label="新对话" aria-disabled={interactionDisabled || (!isActiveConversation && !start && !onStartNew && (pending || loading || recoveryRequired))} title="新对话"><Plus size={15} aria-hidden /></Link> : null}
         </TopBarTools>} /> : null}
       {!start && !embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
-      {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
-        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
-        <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : studyContext.sourceId ? "指定材料" : "已绑定的课程")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
-        <p>{studyContext.activityId || studyContext.fragment ? "背景将在你发送时作为文字附上；资料依据仍以回答中的真实引用为准。" : studyContext.sourceId ? "已指定参考材料和位置；回答中的实际引用用于核对依据。" : "继续先前绑定的课程提问；导航不会自动更换这段对话的课程。"}</p>
-        {returnHref && !embedded ? <a href={returnHref} className="text-accent underline">返回原内容</a> : null}
-        {studyContext.fragment ? <p className="line-clamp-3 whitespace-pre-wrap border-l-2 border-line-strong pl-2">{studyContext.fragment}</p> : null}
-        {diagnostics ? <dl aria-label="提问背景诊断" className="break-all">
-          {studyContext.courseId ? <><dt>课程</dt><dd>{studyContext.courseId}</dd></> : null}
-          {studyContext.activityId ? <><dt>活动 / 内容版本</dt><dd>{studyContext.activityId} / {studyContext.contentVersion ?? "未指定"}</dd></> : null}
-          {studyContext.blockId ? <><dt>学习单元</dt><dd>{studyContext.blockId}</dd></> : null}
-          {studyContext.sourceId ? <><dt>材料 / 版本</dt><dd>{studyContext.sourceId} / {studyContext.sourceVersion ?? "提交时当前版本"}</dd></> : null}
-        </dl> : null}
-      </div> : null}
+      <ContextReview studyContext={studyContext} courseBound={Boolean(boundCourseId)}
+        courseLabel={organization?.courses.find(course => course.id === boundCourseId)?.title}
+        taskLabel={task?.title} attemptBound={Boolean(learningAttempt)} selectedSourceCount={selectedSourceIds.length}
+        materialMode={materialMode} privacy={privacy} returnHref={returnHref} embedded={embedded} diagnostics={diagnostics}>
+        {studyContext && learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
+      </ContextReview>
       {contextProblem ? <p role="alert" className="mx-4 mt-2 rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">{contextProblem}{returnHref ? <a href={returnHref} className="ml-2 underline">返回阅读</a> : null}</p> : null}
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired || interactionDisabled} onPrompt={setPrompt} /> : null}
       {privacy === "ephemeral" ? <div className="shrink-0 border-b border-line px-4 py-2 text-xs leading-5 text-text-2" role="status">

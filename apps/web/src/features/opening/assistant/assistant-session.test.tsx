@@ -18,6 +18,7 @@ vi.mock("../client/learning-client", () => {
 vi.mock("./assistant-view", () => ({ AssistantView: () => null }));
 import { AssistantSession } from "./assistant-session";
 import { AssistantView } from "./assistant-view";
+import { ConversationSurface } from "./conversation-companion";
 import type { AssistantEntry } from "./assistant-entry";
 import { LoadError, LoadingRows } from "../design/ui";
 
@@ -123,6 +124,27 @@ describe("assistant canonical attempt restoration", () => {
     expect(hooks.read).not.toHaveBeenCalled();
     const wrong = { ...selected, context: { attemptId: id, courseId: other } };
     expect(render(wrong).props.children.type).toBe(LoadError);
+  });
+
+  it("restores an independent saved chat through the ordinary host without changing its identity", () => {
+    hooks.cursor = 0;
+    const result = AssistantSession({ entry: { ...entry, context: undefined, conversation: id, fresh: false }, embedded: false }) as ReactElement<{ initialConversationId: string; startFresh: boolean }>;
+    expect(result.type).toBe(ConversationSurface);
+    expect(result.props.initialConversationId).toBe(id);
+    expect(result.props.startFresh).toBe(false);
+    runEffects();
+    expect(hooks.read).not.toHaveBeenCalled();
+  });
+
+  it("keeps independent task help outside the ordinary host, including its selection and support purpose", async () => {
+    const selected = { ...entry, context: { attemptId: id, purpose: "language_support" as const, fragment: "确切选区" } };
+    hooks.cursor = 0;
+    AssistantSession({ entry: selected, embedded: false }); runEffects(); await flush();
+    hooks.cursor = 0;
+    const result = AssistantSession({ entry: selected, embedded: false }) as Tree;
+    expect(result.type).toBe(AssistantView);
+    expect(result.props.learningAttempt).toEqual(attempt);
+    expect(result.props.studyContext).toMatchObject({ ...attempt.contextAnchor, fragment: "确切选区", purpose: "language_support" });
   });
 
   it("preserves ordinary free conversation without inventing a learning attempt", () => {

@@ -15,7 +15,7 @@ const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8
 const binding: CurrentStudyContext = { isQuestion: true, learningAttempt: { id } as NonNullable<CurrentStudyContext["learningAttempt"]>,
   context: { courseId: id, activityId: id, blockId: id, contentVersion: 2, attemptId: id, itemVersionId: id, purpose: "learning_help", label: "当前题" } };
 function dom(text = "选中的真实题干", excluded = false, crossRegion = false) {
-  const region = {} as Element;
+  const region = { closest: () => null } as unknown as Element;
   const start = { nodeType: 1, closest: (selector: string) => selector.startsWith("input") ? excluded ? {} : null : region } as unknown as Element;
   const end = { nodeType: 1, closest: (selector: string) => selector.startsWith("input") ? null : crossRegion ? {} : region } as unknown as Element;
   return { root: { contains: (value: unknown) => [start, end, region].includes(value as Element) } as HTMLElement,

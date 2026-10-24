@@ -11,6 +11,8 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { isQueryEvidenceHref, type QueryEvidenceLink } from "./query-evidence-links";
 import { ReplyRevealEnabled, ReplyTextGroup } from "./ai-response";
+import { remarkConceptAnchors, type ConceptAnchor } from "../concepts/remark-concept-anchors";
+export type { ConceptAnchor } from "../concepts/remark-concept-anchors";
 
 /** Model text is untrusted: no `trust` commands, capped sizes and macro expansion. */
 const KATEX_OPTIONS: KatexOptions = { trust: false, strict: "ignore", maxSize: 10, maxExpand: 200, errorColor: "#b91c1c" };
@@ -110,7 +112,7 @@ export function rehypeReplyReveal() {
           for (let index = 0; index < letters.length; index += 2) groups.push({ type: "element", tagName: "span", properties: { dataReplyReveal: ++order }, children: [{ type: "text", value: letters.slice(index, index + 2).join("") }] });
           return groups;
         }
-        if (node.type === "element" && !["a", "code", "pre", "sup"].includes(node.tagName)
+        if (node.type === "element" && !["a", "button", "code", "pre", "sup"].includes(node.tagName)
           && !(Array.isArray(node.properties.className) && node.properties.className.some(name => String(name).startsWith("katex")))) walk(node);
         return [node];
       }) as ElementContent[];
@@ -159,11 +161,22 @@ export class PlainTextFallback extends Component<{ text: string; children: React
 
 const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-accent no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring";
 const NO_CITATIONS: readonly CitationLink[] = [];
-type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[]; objectHref?: (href: string) => string };
+const NO_CONCEPTS: readonly ConceptAnchor[] = [];
+type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[]; objectHref?: (href: string) => string; conceptAnchors?: readonly ConceptAnchor[]; onConcept?: (id: string) => void };
+
+/** Native button supplies Enter/Space activation; identity must still belong to the trusted caller. */
+export function ConceptAnchorButton({ id, candidates, onConcept, children }: { id: string; candidates: readonly ConceptAnchor[]; onConcept?: (id: string) => void; children: ReactNode }) {
+  if (!onConcept || !candidates.some(candidate => candidate.id === id)) return <>{children}</>;
+  return <button type="button" data-concept-id={id} onClick={() => onConcept(id)} className="inline rounded text-accent underline decoration-dotted underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</button>;
+}
 
 /** Citation links are derived by the message list; equivalent links do not require reparsing math. */
 export function sameLearningProseContent(previous: LearningProseProps, next: LearningProseProps): boolean {
-  if (previous.text !== next.text || previous.objectHref !== next.objectHref) return false;
+  if (previous.text !== next.text || previous.objectHref !== next.objectHref || previous.onConcept !== next.onConcept) return false;
+  const beforeConcepts = previous.conceptAnchors ?? NO_CONCEPTS;
+  const afterConcepts = next.conceptAnchors ?? NO_CONCEPTS;
+  if (beforeConcepts.length !== afterConcepts.length || beforeConcepts.some((candidate, index) =>
+    candidate.id !== afterConcepts[index]?.id || candidate.label !== afterConcepts[index]?.label)) return false;
   const beforeEvidence = previous.queryEvidenceLinks ?? NO_CITATIONS;
   const afterEvidence = next.queryEvidenceLinks ?? NO_CITATIONS;
   if (beforeEvidence.length !== afterEvidence.length || beforeEvidence.some((link, index) =>
@@ -178,11 +191,12 @@ export function sameLearningProseContent(previous: LearningProseProps, next: Lea
  * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
-export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS, objectHref }: LearningProseProps) {
+export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS, objectHref, conceptAnchors = NO_CONCEPTS, onConcept }: LearningProseProps) {
   const reveal = useContext(ReplyRevealEnabled);
   const approvedHrefs = useMemo(() => new Set(queryEvidenceLinks.map(link => link.href).filter(isQueryEvidenceHref)), [queryEvidenceLinks]);
   const withCitations = useMemo<Components>(() => ({
     ...components,
+    button: ({ children, node }) => <ConceptAnchorButton id={String(node?.properties.dataConceptId ?? "")} candidates={conceptAnchors} onConcept={onConcept}>{children}</ConceptAnchorButton>,
     a: ({ href, children }) => href && approvedHrefs.has(href)
       ? <Link href={objectHref?.(href) ?? href} className="text-accent underline decoration-accent/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</Link>
       : href ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline decoration-accent/40 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{children}</a> : <span>{children}</span>,
@@ -192,11 +206,11 @@ export const LearningProse = memo(function LearningProse({ text, citationLinks =
         ? <sup className="text-xs"><a href={link.href} title={link.label} aria-label={`来源 ${String(children)}：${link.label}`} className={CITE_LINK_CLASS}>{children}</a></sup>
         : <sup>{children}</sup>;
     },
-  }), [citationLinks, approvedHrefs, objectHref]);
+  }), [citationLinks, approvedHrefs, objectHref, conceptAnchors, onConcept]);
   return <PlainTextFallback text={text}>
     <div className="font-reading text-[17px] leading-[30px] break-words [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown
-        remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
+        remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }], [remarkConceptAnchors, { candidates: onConcept ? conceptAnchors : NO_CONCEPTS }]]}
         rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS], ...(reveal ? [rehypeReplyReveal] : [])]}
         skipHtml
         urlTransform={(url, key) => key === "href" && approvedHrefs.has(url) ? url : proseUrlTransform(url)}

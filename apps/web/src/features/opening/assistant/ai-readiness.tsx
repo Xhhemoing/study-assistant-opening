@@ -96,6 +96,9 @@ export function AiReadinessChecklistView({
       </div></details>
       <Link href={showBudgetCta ? BUDGET_CONFIRM_HREF : "/opening/settings/advanced"} className="inline-flex min-h-8 shrink-0 items-center self-center rounded-pill bg-ink px-3 text-xs font-medium text-on-ink" data-testid={showBudgetCta ? "ai-readiness-budget-cta" : undefined}>{showBudgetCta ? BUDGET_CONFIRM_CTA : "去设置"}</Link>
       </div>
+      <p className="pb-2 text-xs text-text-2">
+        暂时不配置也可以：<Link href="/demo/learning" prefetch={false} className="inline-flex min-h-9 items-center rounded underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">体验静态示例课（不调用模型）</Link>
+      </p>
     </section>
   );
 }

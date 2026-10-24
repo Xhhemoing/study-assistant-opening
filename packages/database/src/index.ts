@@ -291,3 +291,4 @@ export { createOpeningTutorLearnerContextRepository } from "./repositories/openi
 
 export { gradeCardVariant } from "./repositories/opening-card-variant-grade";
 export { createOpeningPhotoRecognitionRepository } from "./repositories/opening-photo-recognition";
+export * from "./repositories/opening-concept-preview";
