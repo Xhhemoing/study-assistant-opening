@@ -1,5 +1,9 @@
 import { Worker } from "bullmq";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { loadWorkerStartupConfig } from "@aistudy/config";
+import { assertConsumersActive, consumersReady, createWorkerReadiness, type ReadyConsumer } from "./runtime/worker-readiness";
+import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
 import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository,
   createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository } from "@aistudy/database";
@@ -18,7 +22,7 @@ import { createRedisConnection, createProducerRedisConnection, createQueues } fr
 import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
-import { prepareWorkerRole } from "./runtime/worker-role";
+import { prepareWorkerRole, isParserQueue, reconcileParserConsumers } from "./runtime/worker-role";
 import { validateParserPaths } from "./parsers/parser-preflight";
 import { createParserHealthLease } from "./runtime/parser-health-lease";
 import { createParseSourceHandler } from "./jobs/parse-source";
@@ -60,6 +64,9 @@ export function processSmokeJob(input: unknown): {
 export async function main(): Promise<void> {
   // PR-H: full registry validation (strict booleans, dependencies, no NEXT_PUBLIC_*) before any connection.
   const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
+  const startup = loadWorkerStartupConfig();
+  let readiness = createWorkerReadiness(startup.readinessFile, { role: env.workerRole,
+    release: realpathSync(process.cwd()), queueKinds: [] });
 
   // Reject invalid local parser paths before allocating connection resources.
   // The full OCR inference/report remains inside the managed startup lifecycle.
@@ -71,13 +78,27 @@ export async function main(): Promise<void> {
   const reportError = (error: unknown) => console.error("worker background operation failed", error instanceof Error ? error.name : "unknown error");
   redis.on("error", reportError);
   producer.on("error", reportError);
-  const sql = createSqlClient(env.databaseUrl);
+  let sql: ReturnType<typeof createSqlClient>;
+  let parserHealthSql: ReturnType<typeof createSqlClient>;
+  try {
+    sql = createSqlClient(env.databaseUrl);
+    try { parserHealthSql = createSqlClient(env.databaseUrl, { max: 1 }); }
+    catch (error) { await sql.end({ timeout: 5 }); throw error; }
+  } catch (error) {
+    producer.disconnect();
+    redis.disconnect();
+    throw error;
+  }
   // Isolate report writes so shutdown can cancel a hung renewal without
   // abandoning an INSERT that might later overwrite the retirement receipt.
-  const parserHealthSql = createSqlClient(env.databaseUrl, { max: 1 });
+
   const parserHealth = createOpeningParserHealthRepository(parserHealthSql);
   const parserWorkerId = randomUUID();
   const workers: Worker[] = [];
+  const consumers: ReadyConsumer[] = [];
+  const parserConsumers: Array<{ kind: string; pause(): Promise<unknown>; resume(): Promise<unknown> }> = [];
+  const learningConsumers: ReadyConsumer[] = [];
+  const parsingConsumers: ReadyConsumer[] = [];
   const openedQueues: ReturnType<typeof createQueues>[string][] = [];
   const tasks: ReturnType<typeof createSerialTask>[] = [];
   const timers: ReturnType<typeof setInterval>[] = [];
@@ -85,9 +106,18 @@ export async function main(): Promise<void> {
   let parserStarted = false;
   let parserReportedAt = 0;
   let parserLease: ReturnType<typeof createParserHealthLease> | undefined;
+  const parserState = createSerialTask(async () => {
+    let current: boolean;
+    do {
+      current = parserLease?.isCurrent() ?? false;
+      await reconcileParserConsumers(parserConsumers, () => parserLease?.isCurrent() ?? false, () => stopping);
+    } while (!stopping && current !== parserLease?.isCurrent());
+  }, reportError);
+  tasks.push(parserState);
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = () => shutdownPromise ??= (async () => {
     stopping = true;
+    readiness.invalidate();
     parserLease?.stop();
     for (const timer of timers) clearInterval(timer);
     const failures: unknown[] = [];
@@ -97,10 +127,11 @@ export async function main(): Promise<void> {
     };
     // Pause fetching immediately, before draining a possibly hung health refresh.
     // Active jobs still finish under their ordinary execution fences.
-    await closeAll(workers.map((worker) => () => worker.pause(true)));
+    await parserState.stop();
+    if (started) await closeAll(workers.map((worker) => () => worker.pause(true)));
     await closeAll([() => parserHealthSql.end({ timeout: 5 })]);
     await closeAll(tasks.map((task) => () => task.stop()));
-    await closeAll(workers.map((worker) => () => worker.close()));
+    await closeAll(workers.map((worker) => () => worker.close(!started)));
     await closeAll(openedQueues.map((queue) => () => queue.close()));
     if (parserStarted) await closeAll([() => createOpeningParserHealthRepository(sql).retire(parserWorkerId)]);
     producer.disconnect();
@@ -111,6 +142,21 @@ export async function main(): Promise<void> {
       throw failures[0];
     }
   })();
+  let started = false;
+  const unavailable = (error: unknown) => {
+    if (stopping) return;
+    reportError(error);
+    readiness.invalidate();
+    process.exitCode = 1;
+    void shutdown().catch(reportError);
+  };
+  redis.on("close", () => unavailable(new Error("Worker Redis disconnected")));
+  producer.on("close", () => unavailable(new Error("Worker producer disconnected")));
+  redis.on("error", unavailable);
+  producer.on("error", unavailable);
+  const onSignal = () => { void shutdown().catch(reportError); };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
   const { parserRunner: runner, queueKinds, refreshParserHealth } = await prepareWorkerRole(env.workerRole, undefined,
     { record: async report => {
@@ -119,18 +165,20 @@ export async function main(): Promise<void> {
       parserReportedAt = startedAt;
     } });
   parserStarted = runner !== null;
+  if (stopping) throw new Error("Worker stopped during parser startup");
   if (refreshParserHealth) {
     parserLease = createParserHealthLease({ reportedAt: parserReportedAt, refresh: refreshParserHealth,
+      renewalTimeoutMs: startup.ocrTimeoutMs + 30_000,
       onUnavailable: error => {
         reportError(error);
-        process.exitCode = 1;
-        // Do not await shutdown inside the active refresh task: shutdown drains it.
-        void shutdown().catch(reportError);
-      } });
+        readiness.degrade();
+        void parserState.run();
+      },
+      onAvailable: () => { if (!stopping) void parserState.run(); } });
     parserLease.assertCurrent();
     const refresh = createSerialTask(() => parserLease!.renew(), reportError);
     tasks.push(refresh);
-    timers.push(setInterval(() => { void refresh.run(); }, 5 * 60_000));
+    timers.push(setInterval(() => { void refresh.run(); }, 2 * 60_000));
   }
 
   const repository = createOpeningJobRepository(sql);
@@ -275,7 +323,7 @@ export async function main(): Promise<void> {
     if (!queueKinds.has(kind)) continue;
     const worker = new Worker(queue.name, async (job) => {
     if (stopping) throw new Error("worker is shutting down");
-    if (kind === "parse" || kind === "parse-media") parserLease!.assertCurrent();
+    if (isParserQueue(kind)) parserLease!.assertCurrent();
     if (kind === "tutor") {
       const data = job.data as { jobId?: string };
       if (!data.jobId) throw new Error("tutor queue job is missing its tutor job id");
@@ -283,10 +331,47 @@ export async function main(): Promise<void> {
       return;
     }
     await runJob(repository, job.data.jobId ?? job.id, handlerForKind(kind, handlers));
-  }, { connection: redis, concurrency: kind === "parse" || kind === "tutor-metadata" ? 1 : 2 });
+  }, { connection: redis, name: `${process.pid}-${parserWorkerId}-${kind}`, concurrency: kind === "parse" || kind === "tutor-metadata" ? 1 : 2 });
     workers.push(worker);
-    worker.on("error", reportError);
+    consumers.push({ waitUntilReady: () => worker.waitUntilReady(), isRunning: () => worker.isRunning(),
+      isPaused: () => worker.isPaused(), getWorkers: () => queue.getWorkers(), name: worker.opts.name! });
+    if (isParserQueue(kind)) {
+      parsingConsumers.push(consumers[consumers.length - 1]!);
+      parserConsumers.push({ kind,
+        pause: async () => { if (!worker.isPaused()) await worker.pause(true); },
+        resume: async () => { if (worker.isPaused()) await worker.resume(); } });
+    } else learningConsumers.push(consumers[consumers.length - 1]!);
+    worker.on("error", unavailable);
+    worker.on("closed", () => unavailable(new Error("Worker consumer closed")));
   }
+  if (consumers.length !== queueKinds.size) throw new Error("Worker consumer queue set is incomplete");
+  await assertConsumersActive(consumers, startup.readyTimeoutMs);
+  if (stopping) throw new Error("Worker stopped during startup");
+  // Recreate with the complete, actually verified consumer set.
+  readiness = createWorkerReadiness(startup.readinessFile, { role: env.workerRole,
+    release: realpathSync(process.cwd()), queueKinds: [...queueKinds] });
+  const heartbeat = createSerialTask(async () => {
+    if (!await consumersReady(learningConsumers, startup.readyTimeoutMs)) { readiness.degrade(); return; }
+    if (stopping) return;
+    if (parserLease) {
+      await parserState.run();
+      if (stopping) return;
+      if (!parserLease.isCurrent()) { readiness.degrade(); return; }
+      try {
+        if (!await consumersReady(parsingConsumers, startup.readyTimeoutMs)) { readiness.degrade(); return; }
+      }
+      catch (error) { readiness.degrade(); reportError(error); return; }
+      if (stopping) return;
+      if (!parserLease.isCurrent()) { readiness.degrade(); return; }
+    }
+    readiness.publish();
+  }, unavailable);
+  tasks.push(heartbeat);
+  await heartbeat.run();
+  if (stopping) throw new Error("Worker stopped before readiness");
+  started = true;
+  process.exitCode = undefined;
+  timers.push(setInterval(() => { void heartbeat.run(); }, 5_000));
   const dispatch = createSerialTask(async () => {
     await createOpeningAiGradingJobRepository(sql).recoverExpired();
     await repository.recoverExpired();
@@ -304,18 +389,19 @@ export async function main(): Promise<void> {
   const sweep = createSerialTask(async () => { await sweepPendingUploads(); await createOpeningEphemeralProvenanceRepository(sql).purgeExpiredQueries?.(); }, reportError);
   tasks.push(sweep);
   timers.push(setInterval(() => { void sweep.run(); }, PENDING_UPLOAD_SWEEP_INTERVAL_MS));
-  process.once("SIGINT", () => { void shutdown().catch(reportError); });
-  process.once("SIGTERM", () => { void shutdown().catch(reportError); });
+
   await dispatch.run();
   } catch (error) {
     await shutdown().catch(reportError);
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     throw error;
   }
 }
 
 const entry = process.argv[1] ?? "";
 if (entry.endsWith("index.ts") || entry.endsWith("index.js")) {
-  void main().catch((error: unknown) => {
+  void runStartupWithBackoff(main, loadWorkerStartupConfig()).catch((error: unknown) => {
     console.error("worker startup failed", error instanceof Error ? error.name : "unknown error");
     process.exitCode = 1;
   });

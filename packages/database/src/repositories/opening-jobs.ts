@@ -56,7 +56,7 @@ export type OpeningJobRepository = {
     limit?: number,
   ): Promise<number>;
   claim(id: string): Promise<OpeningJobRecord | null>;
-  heartbeat(id: string, claimToken: string): Promise<boolean>;
+  heartbeat(id: string, claimToken: string, scope: OpeningScope): Promise<boolean>;
   recoverExpired(limit?: number): Promise<number>;
   sourcePrivacyEpoch(sourceId: string, workspaceId: string): Promise<number | null>;
   /** Workspace privacy epoch (M02); defaults to 0 if column absent / row missing. */
@@ -170,9 +170,10 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         return job;
       });
     },
-    async heartbeat(id, claimToken) {
+    async heartbeat(id, claimToken, scope) {
       const rows = await sql`UPDATE opening_jobs SET updated_at = now()
-        WHERE id = ${id} AND state = 'running' AND claim_token = ${claimToken} RETURNING id`;
+        WHERE id = ${id} AND state = 'running' AND claim_token = ${claimToken}
+          AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} RETURNING id`;
       return rows.length > 0;
     },
     async recoverExpired(limit = 50) {

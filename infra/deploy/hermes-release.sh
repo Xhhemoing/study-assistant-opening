@@ -204,12 +204,14 @@ health() {
   local body attempt
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
-  for attempt in {1..12}; do
+  # Cold parser imports + OCR probe can exceed two minutes. Readiness, not
+  # systemd active, controls success; a bounded retry also covers startup backoff.
+  for attempt in {1..120}; do
     body=$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
     if [[ "$body" == *'"status":"ok"'* ]]; then
       if [[ "$required" == 1 ]] && ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
       [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is not installed; first complete a managed deployment.' >&2; return 1; }
-      if node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; else return 1; fi
+      if node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
     fi
     sleep 2
   done

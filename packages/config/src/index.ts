@@ -33,3 +33,4 @@ export {
   type ServerConfig,
 } from "./server-config";
 export { ENV_TEMPLATE_FILES, renderEnvTemplate, type EnvTemplateTarget } from "./env-template";
+export { loadWorkerStartupConfig } from "./worker-startup";

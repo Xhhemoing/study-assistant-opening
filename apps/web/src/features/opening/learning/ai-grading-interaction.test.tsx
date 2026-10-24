@@ -29,10 +29,11 @@ function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Erro
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
   vi.resetAllMocks(); vi.useFakeTimers(); api.getGradingStatus.mockResolvedValue(status());
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.useRealTimers(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.useRealTimers(); });
 async function click(label: string) {
   const button = Array.from(container.querySelectorAll("button")).find(element => element.textContent === label);
   expect(button, `button ${label}`).toBeTruthy(); await act(async () => button!.click());
@@ -84,6 +85,107 @@ it("ignores a stale poll/history response after switching to another answer", as
   await renderCard({ record: next, onGraded });
   await act(async () => request.resolve(status({ status: "graded", headObservationId: graded.id })));
   expect(onGraded).not.toHaveBeenCalled(); expect(api.getObservationHistory).not.toHaveBeenCalled();
+});
+
+async function advance(ms: number) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+}
+async function visibility(value: DocumentVisibilityState) {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(value);
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+}
+
+it("backs queued/grading off at 2, 4, 8, then capped 15 seconds without resetting on status changes", async () => {
+  api.getGradingStatus.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await renderCard();
+  let reads = 1;
+  for (const delay of [2000, 4000, 8000, 15000, 15000]) {
+    await advance(delay - 1); expect(api.getGradingStatus).toHaveBeenCalledTimes(reads);
+    api.getGradingStatus.mockResolvedValue(status({ status: "grading", retryable: false }));
+    await advance(1); expect(api.getGradingStatus).toHaveBeenCalledTimes(++reads);
+  }
+});
+
+it("counts five cards over 60s: exact backoff needs 35 reads including mount, 30 subsequent polls", async () => {
+  const times: number[] = [], start = Date.now();
+  api.getGradingStatus.mockImplementation(async (id: string) => {
+    times.push(Date.now() - start);
+    return status({ rootObservationId: id, headObservationId: id, status: "queued", retryable: false });
+  });
+  await act(async () => root.render(createElement("div", null, ...Array.from({ length: 5 }, (_, index) =>
+    createElement(AiGradingCard, { key: index, record: { ...record, id: `card-${index}` }, onGraded() {} })))));
+  await advance(60000);
+  expect(times).toHaveLength(35);
+  expect(times.filter(time => time > 0)).toHaveLength(30);
+  expect(times.filter((_, index) => index % 5 === 0)).toEqual([0, 2000, 6000, 14000, 29000, 44000, 59000]);
+});
+
+it("unknown cost waits 15s and never speeds up an already capped poll", async () => {
+  api.getGradingStatus.mockResolvedValue(status({ status: "unknown_cost", retryable: false }));
+  await renderCard();
+  await advance(14999); expect(api.getGradingStatus).toHaveBeenCalledTimes(1);
+  await advance(1); expect(api.getGradingStatus).toHaveBeenCalledTimes(2);
+  api.getGradingStatus.mockRejectedValueOnce(new Error("offline"));
+  await advance(15000); expect(api.getGradingStatus).toHaveBeenCalledTimes(3);
+  await advance(14999); expect(api.getGradingStatus).toHaveBeenCalledTimes(3);
+  await advance(1); expect(api.getGradingStatus).toHaveBeenCalledTimes(4);
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+});
+
+it("hidden clears its timer; visible immediately reads and preserves the backoff step", async () => {
+  api.getGradingStatus.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await renderCard(); await visibility("hidden");
+  expect(vi.getTimerCount()).toBe(0);
+  await advance(60000); expect(api.getGradingStatus).toHaveBeenCalledTimes(1);
+  await visibility("visible"); expect(api.getGradingStatus).toHaveBeenCalledTimes(2);
+  await advance(3999); expect(api.getGradingStatus).toHaveBeenCalledTimes(2);
+  await advance(1); expect(api.getGradingStatus).toHaveBeenCalledTimes(3);
+});
+
+it("mounting hidden does not read until visible", async () => {
+  await visibility("hidden"); await renderCard();
+  expect(api.getGradingStatus).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  await visibility("visible"); expect(api.getGradingStatus).toHaveBeenCalledTimes(1);
+});
+
+it("visibility flapping and StrictMode cannot overlap reads or apply a stale response", async () => {
+  const request = deferred<AiGradingStatus>(), onGraded = vi.fn();
+  api.getGradingStatus.mockReturnValueOnce(request.promise);
+  await act(async () => root.render(createElement(StrictMode, null, createElement(AiGradingCard, { record, onGraded }))));
+  await visibility("hidden"); await visibility("visible"); await visibility("hidden"); await visibility("visible");
+  await advance(60000); expect(api.getGradingStatus).toHaveBeenCalledTimes(1);
+  api.getGradingStatus.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await act(async () => request.resolve(status({ status: "graded", headObservationId: graded.id })));
+  expect(api.getGradingStatus).toHaveBeenCalledTimes(2);
+  expect(api.getObservationHistory).not.toHaveBeenCalled(); expect(onGraded).not.toHaveBeenCalled();
+});
+
+it("ignores history arriving hidden or after unmount, and notifies only the latest callback on fresh recovery", async () => {
+  const history = deferred<ObservationHistory>(), staleCallback = vi.fn(), onGraded = vi.fn();
+  api.getGradingStatus.mockResolvedValue(status({ status: "graded", headObservationId: graded.id }));
+  api.getObservationHistory.mockReturnValueOnce(history.promise);
+  await renderCard({ onGraded: staleCallback }); await visibility("hidden");
+  await act(async () => history.resolve({ rootObservationId: record.id, headObservationId: graded.id, revisions: [record, graded] }));
+  expect(staleCallback).not.toHaveBeenCalled();
+  await renderCard({ onGraded });
+  api.getObservationHistory.mockResolvedValue({ rootObservationId: record.id, headObservationId: graded.id, revisions: [record, graded] });
+  await visibility("visible"); expect(onGraded).toHaveBeenCalledExactlyOnceWith(graded);
+  expect(staleCallback).not.toHaveBeenCalled();
+  const late = deferred<ObservationHistory>(); api.getObservationHistory.mockReturnValueOnce(late.promise);
+  await visibility("hidden"); await visibility("visible"); await act(async () => root.render(null));
+  await act(async () => late.resolve({ rootObservationId: record.id, headObservationId: graded.id, revisions: [record, graded] }));
+  await advance(60000); expect(onGraded).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+});
+
+it("retry and visible recovery share one lock and do not poll while enqueue is unresolved", async () => {
+  const request = deferred<AiGradingStatus>(); api.gradeObservation.mockReturnValueOnce(request.promise);
+  await renderCard(); await click("重试批改");
+  await visibility("hidden"); await visibility("visible"); await advance(60000);
+  expect(api.getGradingStatus).toHaveBeenCalledTimes(1);
+  api.getGradingStatus.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await act(async () => request.resolve(status({ status: "queued", retryable: false })));
+  expect(api.getGradingStatus).toHaveBeenCalledTimes(2); expect(api.gradeObservation).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain("正在后台批改");
 });
 
 it("uses persisted photo identity and ignores a conflicting local-only photo draft", async () => {

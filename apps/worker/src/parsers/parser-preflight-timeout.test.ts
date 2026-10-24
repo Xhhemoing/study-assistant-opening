@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { preflightParser } from "./parser-preflight";
 
 const deps = vi.hoisted(() => ({ access: vi.fn(), stat: vi.fn(), runner: vi.fn() }));
-vi.mock("node:fs/promises", () => ({ access: deps.access, stat: deps.stat }));
+vi.mock("node:fs/promises", async importOriginal => ({ ...await importOriginal<typeof import("node:fs/promises")>(), access: deps.access, stat: deps.stat }));
 vi.mock("./docling-process", () => ({ createNodeRunner: () => deps.runner }));
+vi.mock("./preflight-cache", () => ({ parserFingerprint: vi.fn(), successfulPreflight: ({ check }: { check: () => Promise<void> }) => check() }));
 const config = { cwd: "/parser", pythonExecutable: "/venv/python" };
 
 beforeEach(() => {
