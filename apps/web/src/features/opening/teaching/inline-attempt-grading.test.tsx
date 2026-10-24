@@ -179,7 +179,12 @@ it("offers the one completion action only after grading, and removes it for an u
   expect(api.gradeObservation).not.toHaveBeenCalled();
   head = graded;
   api.getGradingStatus.mockResolvedValue(gradingStatus({ headObservationId: graded.id, status: "graded", retryable: false }));
-  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  // Pending reads back off from 2s to 4s; the old fixed 2s fixture would inspect
+  // the DOM before the next status read. Completion must stay absent until then.
+  await act(async () => { await vi.advanceTimersByTimeAsync(3999); });
+  expect(api.getGradingStatus).toHaveBeenCalledTimes(initialStatusReads + 1);
+  expect(container.textContent).not.toContain("下一题");
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   const complete = Array.from(container.querySelectorAll('[data-attempt-stage="reliable"] button')).filter(button => button.textContent === "下一题");
   expect(complete).toHaveLength(1);
   await act(async () => (complete[0] as HTMLButtonElement).click());
