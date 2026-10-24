@@ -39,7 +39,7 @@ it('reuses canonical original-question identity across sessions and releases onl
  const b=await f.start();expect(b.problemId).toBe(a.problemId);expect(b.itemVersionId).toBe(a.itemVersionId);
  const answers=await readMaterialAnswers(fixture.sql,scope,a.id);expect(answers).toHaveLength(1);expect(answers[0]).toMatchObject({text:'1',status:'unverified',reviewedBy:scope.ownerUserId});
  await expect(readMaterialAnswers(fixture.sql,fixture.otherScope,a.id)).rejects.toMatchObject({code:'CONFLICT'});
- expect((await readOpeningBackupRecords(fixture.sql,scope)).tables.opening_source_versions).toEqual(expect.arrayContaining([expect.objectContaining({material_manifest:f.manifest})]));
+ expect((await readOpeningBackupRecords(fixture.sql,scope)).tables.opening_source_versions).toEqual(expect.arrayContaining([expect.objectContaining({material_manifest:expect.objectContaining({questions:f.manifest.questions,answers:expect.arrayContaining([expect.objectContaining(f.manifest.answers[0]!)])})})]));
 });
 it('rejects repeated body identity, answer-page questions and forged answer linkage without partial writes',async()=>{
  const f=await setup(),{scope,sql}=fixture;

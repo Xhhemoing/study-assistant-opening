@@ -11,7 +11,13 @@ export function toSnapshotEvidence(
   // Reuse the earliest observed spelling. Labels are still display identities,
   // but whitespace/case aliases must not become two separate daily suggestions.
   const labels = new Map<string, string>();
-  const ordered = [...evidence.observations].sort((a, b) =>
+  // A quarantined answer is retained in history, not an extra weak performance
+  // or a latest-attempt override of a valid independent result.
+  const performance = evidence.observations.filter(row => {
+    const context=evidence.evidenceContexts[row.id]?.context;
+    return !context?.materialAnswerDisputed && context?.materialAssessmentValidity !== "changed" && context?.materialAssessmentValidity !== "unknown";
+  });
+  const ordered = [...performance].sort((a, b) =>
     (evidence.evidenceContexts[a.id]?.observation.submittedAt ?? Date.parse(a.submittedAt ?? a.occurredAt))
     - (evidence.evidenceContexts[b.id]?.observation.submittedAt ?? Date.parse(b.submittedAt ?? b.occurredAt))
     || a.id.localeCompare(b.id));
@@ -19,7 +25,7 @@ export function toSnapshotEvidence(
     const key = adaptiveSkillIdentity(normalizeSkillLabelKey(row.skillLabel), evidence.evidenceContexts[row.id]?.observation.requirementKey);
     if (!labels.has(key)) labels.set(key, row.skillLabel);
   }
-  const canonical = evidence.observations.map(row => ({
+  const canonical = performance.map(row => ({
     ...row, skillLabel: labels.get(adaptiveSkillIdentity(normalizeSkillLabelKey(row.skillLabel), evidence.evidenceContexts[row.id]?.observation.requirementKey))!,
   }));
   const summaries = summarizeObservations(canonical, now.toISOString(), {

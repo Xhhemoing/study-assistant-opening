@@ -42,8 +42,8 @@ export async function readMaterialAnswers(db: DB, scope: Scope, attemptId: strin
     JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
     WHERE a.id=${attemptId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
   if (!attempt?.submitted_at) throw learningError("CONFLICT","请先保存独立作答，再核对答案关联");
-  const spec=attempt.evaluation_spec as Record<string,unknown>;
-  if (spec.kind!=="material_question") throw learningError("VALIDATION","这次作答没有资料题身份");
+  const spec=attempt.evaluation_spec as Record<string,unknown> | null;
+  if (!spec || spec.kind!=="material_question") throw learningError("VALIDATION","这次作答没有资料题身份");
   const {kind: _kind,...raw}=spec;
   const identity=materialQuestionIdentitySchema.parse(raw);
   await readMaterialQuestion(db,scope,identity);
@@ -53,6 +53,6 @@ export async function readMaterialAnswers(db: DB, scope: Scope, attemptId: strin
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=s.id)`;
   return rows.flatMap(row=>(readMaterialManifest(row.material_manifest)?.answers ?? []).filter(a=>a.questionSourceId===identity.sourceId && a.questionSourceVersion===identity.sourceVersion
     && a.question.family===identity.family && a.question.number===identity.number && a.question.subquestion===identity.subquestion)
-    .map(a=>({ ...a, sourceId:String(row.source_id), sourceVersion:Number(row.version), reviewedBy:row.material_reviewed_by,
-      reviewedAt:row.material_reviewed_at ? new Date(row.material_reviewed_at).toISOString() : null })));
+    .map(a=>({ ...a, sourceId:String(row.source_id), sourceVersion:Number(row.version), reviewedBy:a.reviewedBy ?? row.material_reviewed_by,
+      reviewedAt:a.reviewedAt ?? (row.material_reviewed_at ? new Date(row.material_reviewed_at).toISOString() : null) })));
 }

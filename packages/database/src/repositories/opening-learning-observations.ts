@@ -172,7 +172,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (opts.workSource) {
     // Photo admission, answer and jobs commit together; foreign/stale photos
     // roll the entire submission back, never leave a text-only grading job.
-    const context = await readOpeningAiGradingContext(tx, scope, { observationId: id });
+    const context = await readOpeningAiGradingContext(tx, scope, { observationId: id }, { provenanceOnly: true });
     await tx`UPDATE opening_learning_observations SET source_ids=${context.sourceIds},source_versions=${tx.json(context.sourceVersions)} WHERE id=${id}`;
     Object.assign(rows[0], { source_ids: context.sourceIds, source_versions: context.sourceVersions });
   }

@@ -1,6 +1,9 @@
 import type { LearningEvidenceEligibility } from "@aistudy/contracts";
 
 const REASON_LABELS: Record<string, string> = {
+  material_answer_disputed: "参考答案存在争议，暂不计分或增加薄弱度",
+  material_assessment_changed: "批改依据已修订，历史结果保留但须重新核验",
+  material_assessment_provenance_unknown: "旧批改缺少答案版本依据，暂不用于当前评分",
   observation_identity_incomplete: "缺少尝试、题目或当时版本，待核验",
   attempt_timing_unknown: "尝试的开始或提交时序不明",
   help_history_incomplete: "帮助历史不完整",

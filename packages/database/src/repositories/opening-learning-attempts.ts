@@ -1,5 +1,6 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
-import { materialQuestionSpec, readMaterialQuestion } from "./opening-material-questions";
+import { readMaterialQuestion } from "./opening-material-questions";
+import { resolveOpeningMaterialIdentity } from "./opening-material-identity";
 import { assertMaterialPageReadable, readMaterialManifest } from "./opening-material-manifest";
 import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
@@ -60,7 +61,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (input.requirementKey || input.problemId) throw learningError("VALIDATION", "teaching block sets its own question and requirement key");
     requirementKey = `teaching:${input.teachingBlock.blockId}:v${input.teachingBlock.contentVersion}`;
   }
-  const materialQuestion = input.materialQuestion ? await readMaterialQuestion(tx,scope,input.materialQuestion) : null;
+  if (input.materialQuestion) await readMaterialQuestion(tx, scope, input.materialQuestion);
   if (input.materialQuestion && (!(session.source_ids as string[]).includes(input.materialQuestion.sourceId)
     || sourceVersions[input.materialQuestion.sourceId] !== input.materialQuestion.sourceVersion)) throw learningError("VALIDATION","资料题不在当前学习来源版本内");
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
@@ -111,12 +112,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   // Older browser checkpoints still contain a material problem payload. Retain it
   // only as request identity; classroom content always comes from the saved revision.
   let problem = teachingQuestion ? undefined : input.problem;
-  const materialSpec=input.materialQuestion ? materialQuestionSpec(input.materialQuestion) : null;
-  if (input.materialQuestion && materialQuestion) {
-    const [existing]=await tx`SELECT problem_id FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId}
-      AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND evaluation_spec=${tx.json(materialSpec!)} ORDER BY created_at,id LIMIT 1`;
-    problemId=existing ? String(existing.problem_id) : null;
-    if (!problemId) problem={sourceId:input.materialQuestion.sourceId,physicalPage:materialQuestion.page,stemSnapshot:materialQuestion.stem,artifactKind:"reference_item"};
+  let materialIdentity = input.materialQuestion
+    ? await resolveOpeningMaterialIdentity(tx, scope, { courseId, identity: input.materialQuestion }) : null;
+  if (input.materialQuestion) {
+    if (!materialIdentity) throw learningError("CONFLICT", "资料题目身份未登记，请重新选择正文题目");
+    problemId = materialIdentity.problemId;
+    if (!problemId) problem = { sourceId: input.materialQuestion.sourceId, physicalPage: materialIdentity.question.page,
+      stemSnapshot: materialIdentity.question.stem, artifactKind: "reference_item" };
   }
   if (teachingQuestion) {
     const spec = teachingQuestion.spec;
@@ -184,17 +186,33 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND problem_id=${problemId} AND (evaluation_spec->>'kind'='exam_choice' OR teaching_revision_id IS NOT NULL) LIMIT 1`;
     if (examItems.length) throw learningError("CONFLICT", "这道题须在原课程或冲刺入口创建作答，不能复制为普通练习");
-    const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id
+    const refs = await tx`SELECT p.* FROM opening_problem_refs p JOIN opening_learning_sessions l ON l.id=p.session_id AND l.workspace_id=p.workspace_id
       WHERE p.problem_id=${problemId} AND p.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND l.course_id=${courseId} FOR SHARE OF p`;
     const ref = refs[0];
     if (!ref || (ref.source_id != null && !(session.source_ids as string[]).includes(String(ref.source_id)))) throw learningError("VALIDATION", "problem is outside the session course or sources");
+    // Supplied IDs obey the same classification as the material-question route.
+    // Reuse the old problem, but append a canonical item rather than changing its
+    // prior item/grades. The ref's captured version is authoritative, not today's
+    // source version accidentally substituted into a legacy record.
+    if (!input.materialQuestion) materialIdentity = await resolveOpeningMaterialIdentity(tx, scope, { courseId, existingRecord: {
+      problemId, courseId, sourceId: ref.source_id == null ? null : String(ref.source_id),
+      sourceVersion: ref.source_version == null ? null : Number(ref.source_version),
+      page: ref.physical_page == null ? null : Number(ref.physical_page), stem: String(ref.stem_snapshot),
+    } });
+    const materialSpec = materialIdentity?.spec ?? null;
+    if (materialIdentity && (ref.source_id !== materialIdentity.spec.sourceId || ref.source_version !== materialIdentity.spec.sourceVersion
+      || ref.physical_page !== materialIdentity.question.page || ref.stem_snapshot !== materialIdentity.question.stem)) {
+      throw learningError("CONFLICT", "资料题目身份已改变，请核对原题");
+    }
     if (ref.source_id != null) await assertMaterialPageReadable(tx,scope,String(ref.source_id),Number(ref.source_version),ref.physical_page == null ? null : Number(ref.physical_page));
     if (ref.source_id != null) sourceVersions[String(ref.source_id)] = Number(ref.source_version);
     itemStem = String(ref.stem_snapshot);
     const versions = await tx`SELECT id,evaluation_spec FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND problem_id=${problemId} AND source_id IS NOT DISTINCT FROM ${ref.source_id} AND source_version IS NOT DISTINCT FROM ${ref.source_version}
+      AND course_id=${courseId} AND problem_id=${problemId} AND source_id IS NOT DISTINCT FROM ${ref.source_id} AND source_version IS NOT DISTINCT FROM ${ref.source_version}
       AND stem_snapshot=${ref.stem_snapshot} AND artifact_kind=${ref.artifact_kind}
-      AND chunk_id IS NOT DISTINCT FROM ${ref.chunk_id} AND physical_page IS NOT DISTINCT FROM ${ref.physical_page} ORDER BY created_at LIMIT 1`;
+      AND chunk_id IS NOT DISTINCT FROM ${ref.chunk_id} AND physical_page IS NOT DISTINCT FROM ${ref.physical_page}
+      AND (${materialSpec ? tx`evaluation_spec=${tx.json(materialSpec)}` : tx`evaluation_spec IS NULL OR evaluation_spec->>'kind' IS DISTINCT FROM 'material_question'`})
+      ORDER BY created_at,id LIMIT 1`;
     itemVersionId = versions[0] ? String(versions[0].id) : randomUUID();
     if (versions[0]) matrixExercise = parseCanonicalMatrixExercise(versions[0].evaluation_spec);
     if (matrixExercise) {

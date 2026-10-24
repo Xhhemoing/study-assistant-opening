@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { isMaterialItemDisputed } from "./opening-material-questions";
+import { readOpeningLearningEvidenceContext } from "./opening-learning-evidence-context";
+import { mapLearningObservation } from "./opening-learning-facts";
 import type { Sql, TransactionSql } from "postgres";
 import { aiEvaluationSchema, type Scope } from "@aistudy/contracts";
-import { acceptedAiGradingOutcome, createInitialState, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
+import { acceptedAiGradingOutcome, createInitialState, evaluateEvidenceEligibility, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
 import { captureOpeningObservationCardOrigin } from "./opening-card-drafts";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { writeState } from "./cards-ops";
@@ -16,6 +17,8 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
       AND COALESCE(root.effective_head_id,root.id)=o.id`;
   if (!head) return;
   const rootId = String(head.root_observation_id ?? head.id);
+  const evidence = await readOpeningLearningEvidenceContext(tx, scope, mapLearningObservation(head));
+  const eligibility = evaluateEvidenceEligibility(evidence.observation, evidence.context);
   const assessment = aiEvaluationSchema.safeParse(head.ai_evaluation);
   const validAi = head.verdict_source === "ai_graded" && assessment.success && assessment.data.observationId === head.id
     && acceptedAiGradingOutcome(assessment.data) === "incorrect";
@@ -33,7 +36,7 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
     }
   }
   const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null)
-    && !await isMaterialItemDisputed(tx,scope,head.item_version_id as string | null);
+    && eligibility.verifiedCorrect === "no" && eligibility.usableForCurrentVersion === "yes";
   if (!canCreate) {
     await tx`UPDATE cards SET auto_paused=true,updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND origin_observation_root_id=${rootId}`;

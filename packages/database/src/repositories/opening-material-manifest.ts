@@ -3,6 +3,8 @@ import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { syncOpeningAutomaticErrorCard } from "./opening-auto-error-cards";
+import { recordMaterialAnswerExposure } from "./opening-material-exposure";
+import { invalidateMaterialDerived } from "./opening-material-derived";
 
 type DB = Sql | TransactionSql;
 /** Malformed persisted classification must not silently become unrestricted. */
@@ -14,11 +16,11 @@ export function readMaterialManifest(raw: unknown): MaterialManifest | null {
 export function materialPageReadable(db: DB, source: string, version: string, page: string) {
   for (const value of [source,version,page]) if (!/^[a-z_]+\.[a-z_]+$/.test(value)) throw new Error("invalid internal material alias");
   return db.unsafe(`NOT EXISTS (SELECT 1 FROM opening_source_versions mv WHERE mv.source_id=${source} AND mv.version=${version}
-    AND mv.material_manifest IS NOT NULL AND NOT (
+    AND mv.material_manifest IS NOT NULL AND NOT COALESCE((
       mv.material_manifest->>'role' IN ('lecture','exercise','exam_spec') OR
       (mv.material_manifest->>'role'='mixed' AND EXISTS (SELECT 1 FROM jsonb_array_elements(mv.material_manifest->'sections') sec
         WHERE (sec->>'startPage')::int<=${page} AND (sec->>'endPage')::int>=${page}
-          AND sec->>'role' IN ('lecture','exercise','exam_spec')))))`);
+          AND sec->>'role' IN ('lecture','exercise','exam_spec')))),FALSE))`);
 }
 export async function assertMaterialPageReadable(db: DB, scope: Scope, sourceId: string, version: number, page: number | null) {
   const [row] = await db`SELECT v.material_manifest FROM opening_source_versions v JOIN workspaces w ON w.id=v.workspace_id
@@ -29,15 +31,30 @@ export async function assertMaterialPageReadable(db: DB, scope: Scope, sourceId:
   }
 }
 export function createOpeningMaterialManifestRepository(sql: Sql) {
-  return {
-    async read(scope: Scope, sourceId: string) {
-      const [row] = await sql`SELECT s.version,v.material_manifest,v.material_manifest_revision,v.material_reviewed_by,v.material_reviewed_at
+  const load = async (db: DB, scope: Scope, sourceId: string) => {
+      const [row] = await db`SELECT s.version,v.material_manifest,v.material_manifest_revision,v.material_reviewed_by,v.material_reviewed_at
         FROM opening_sources s JOIN workspaces w ON w.id=s.workspace_id
+        JOIN users u ON u.id=w.owner_user_id AND u.disabled_at IS NULL
         LEFT JOIN opening_source_versions v ON v.source_id=s.id AND v.version=s.version
         WHERE s.id=${sourceId} AND w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
       if (!row) throw learningError("NOT_FOUND","source not found");
       return { sourceVersion: Number(row.version), revision: Number(row.material_manifest_revision ?? 0), manifest: readMaterialManifest(row.material_manifest),
         reviewedBy: row.material_reviewed_by ?? null, reviewedAt: row.material_reviewed_at ? new Date(row.material_reviewed_at).toISOString() : null };
+    };
+  const publicRead = async (scope: Scope, sourceId: string) => {
+    const result = await load(sql,scope,sourceId);
+    const answerCount = result.manifest?.answers.length ?? 0;
+    return { ...result, manifest: result.manifest ? { ...result.manifest, answers: [] } : null, answerCount, answersWithheld: answerCount > 0 };
+  };
+  return {
+    read: publicRead,
+    async revealForEditing(scope: Scope, sourceId: string) {
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx,scope);
+        const result=await load(tx,scope,sourceId);
+        await recordMaterialAnswerExposure(tx,scope,result.manifest?.answers ?? [],`material-editor:${sourceId}:${result.sourceVersion}:${result.revision}`);
+        return {...result,answerCount:result.manifest?.answers.length ?? 0,answersWithheld:false};
+      });
     },
     async write(scope: Scope, sourceId: string, raw: unknown) {
       const input = materialManifestWriteSchema.parse(raw);
@@ -61,6 +78,16 @@ export function createOpeningMaterialManifestRepository(sql: Sql) {
         for (const section of input.manifest.sections) if (!knownPages.has(section.startPage) || !knownPages.has(section.endPage)) throw learningError("VALIDATION","页段边界不在已解析资料中");
         // Identity/stem remains immutable within a source version once classified.
         const before = readMaterialManifest(old!.material_manifest);
+        const [clock]=await tx`SELECT clock_timestamp() AS at`;
+        const enteredAnswers=input.manifest.answers.map(answer=>({...answer,reviewedBy:scope.ownerUserId,reviewedAt:new Date(clock!.at).toISOString()}));
+        input.manifest.answers=enteredAnswers;
+        if (input.mergeAnswerLinks && before) {
+          const same = (a: MaterialManifest["answers"][number], b: MaterialManifest["answers"][number]) =>
+            a.page===b.page && a.questionSourceId===b.questionSourceId && a.questionSourceVersion===b.questionSourceVersion
+            && a.question.family===b.question.family && a.question.number===b.question.number && a.question.subquestion===b.question.subquestion;
+          input.manifest.answers=[...before.answers.filter(old=>!enteredAnswers.some(next=>same(old,next))),...enteredAnswers];
+          materialManifestSchema.parse(input.manifest);
+        }
         for (const q of before?.questions ?? []) {
           const match = input.manifest.questions.find(n => n.family===q.family && n.number===q.number && n.subquestion===q.subquestion);
           if (!match || match.page!==q.page || match.stem!==q.stem) throw learningError("CONFLICT","已登记的题目身份或正文不能在同一资料版本内改写");
@@ -78,21 +105,29 @@ export function createOpeningMaterialManifestRepository(sql: Sql) {
         }
         await tx`UPDATE opening_source_versions SET material_manifest=${tx.json(input.manifest)},material_manifest_revision=material_manifest_revision+1,
           material_reviewed_by=${scope.ownerUserId},material_reviewed_at=clock_timestamp() WHERE source_id=${sourceId} AND version=${input.sourceVersion}`;
+        // A reverse link added and then removed must not resurrect the old
+        // dependency set. Advance the existing question-source revision too.
+        const questionVersions=new Map([...input.manifest.answers,...(before?.answers ?? [])]
+          .filter(answer=>answer.questionSourceId!==sourceId || answer.questionSourceVersion!==input.sourceVersion)
+          .map(answer=>[`${answer.questionSourceId}:${answer.questionSourceVersion}`,answer]));
+        for(const answer of questionVersions.values()) await tx`UPDATE opening_source_versions
+          SET material_manifest_revision=material_manifest_revision+1
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${answer.questionSourceId} AND version=${answer.questionSourceVersion}`;
+        await recordMaterialAnswerExposure(tx,scope,enteredAnswers,`material-edit:${sourceId}:${input.sourceVersion}:${input.expectedRevision+1}`);
         await nextWorkspaceLearningHistoryRevision(tx,scope);
         const affected=[sourceId,...input.manifest.answers.map(a=>a.questionSourceId),...(before?.answers ?? []).map(a=>a.questionSourceId)];
         await invalidateOpeningLearningEligibility(tx,scope,{sourceIds:[...new Set(affected)]});
         // Revoke in-flight model snapshots before newly restricted content can
         // publish; retained learner facts are not rewritten.
         await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
-        await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ?| ${affected}::text[]`;
+        await invalidateMaterialDerived(tx,scope,sourceId,input.sourceVersion);
         const heads=await tx`SELECT h.id FROM opening_learning_observations root
           JOIN opening_learning_observations h ON h.id=COALESCE(root.effective_head_id,root.id)
           WHERE root.workspace_id=${scope.workspaceId} AND root.owner_user_id=${scope.ownerUserId}
             AND (root.root_observation_id IS NULL OR root.root_observation_id=root.id) AND h.source_ids && ${affected}::uuid[]`;
         for (const head of heads) await syncOpeningAutomaticErrorCard(tx,scope,String(head.id));
       });
-      return this.read(scope,sourceId);
+      return publicRead(scope,sourceId);
     },
   };
 }

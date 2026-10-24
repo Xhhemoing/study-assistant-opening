@@ -2,10 +2,10 @@
 import { useState } from "react";
 import { BookOpenCheck } from "lucide-react";
 import { z } from "zod";
-import { materialAnswerLinkSchema } from "@aistudy/contracts";
+import { materialAnswerReadSchema } from "@aistudy/contracts";
 import { LearningProse } from "../assistant/learning-prose";
 import { ui } from "../design/ui";
-const answersSchema=z.array(materialAnswerLinkSchema.and(z.object({sourceId:z.string().uuid(),sourceVersion:z.number().int(),reviewedBy:z.string().uuid().nullable(),reviewedAt:z.string().nullable()})));
+export const answersSchema=z.array(materialAnswerReadSchema);
 export function MaterialAnswerCheck({attemptId}:{attemptId:string}) {
  const [answers,setAnswers]=useState<z.infer<typeof answersSchema>|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  async function load(){setBusy(true);setError('');try{

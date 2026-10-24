@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { uuidSchema } from "./foundation";
+import { uuidSchema, isoDateTimeSchema } from "./foundation";
 
 export const materialRoleSchema = z.enum(["lecture", "exercise", "answer_key", "solution", "exam_spec", "mixed"]);
 export const materialQuestionKeySchema = z.object({
@@ -9,13 +9,22 @@ export const materialQuestionKeySchema = z.object({
 export const materialQuestionSchema = materialQuestionKeySchema.extend({
   page: z.number().int().positive(), stem: z.string().trim().min(1).max(2000),
 }).strict();
-export const materialAnswerLinkSchema = z.object({
+const materialAnswerLinkFields = z.object({
   page: z.number().int().positive(), questionSourceId: uuidSchema, questionSourceVersion: z.number().int().nonnegative(),
   question: materialQuestionKeySchema,
   text: z.string().trim().min(1).max(8000),
   status: z.enum(["trusted", "disputed", "unverified"]).default("unverified"),
   reason: z.string().trim().max(1000).default(""),
-}).strict().refine(value => value.status === "unverified" || value.reason.length > 0, "核验或争议须填写理由");
+  /** Set by the repository on edits; an incoming claimed reviewer is never trusted. */
+  reviewedBy: uuidSchema.optional(),
+  reviewedAt: isoDateTimeSchema.optional(),
+}).strict();
+const hasReviewReason = (value: {status:string;reason:string}) => value.status === "unverified" || value.reason.length > 0;
+export const materialAnswerLinkSchema = materialAnswerLinkFields.refine(hasReviewReason,"核验或争议须填写理由");
+export const materialAnswerReadSchema = materialAnswerLinkFields.extend({
+  sourceId:uuidSchema,sourceVersion:z.number().int().nonnegative(),
+  reviewedBy:uuidSchema.nullable().optional(),reviewedAt:isoDateTimeSchema.nullable().optional(),
+}).refine(hasReviewReason,"核验或争议须填写理由");
 export const materialManifestSchema = z.object({
   role: materialRoleSchema,
   sections: z.array(z.object({ startPage: z.number().int().positive(), endPage: z.number().int().positive(),
@@ -45,6 +54,9 @@ export function materialPageRole(manifest: { role: z.infer<typeof materialRoleSc
   return page == null ? "mixed" : manifest.sections.find(s => s.startPage <= page && s.endPage >= page)?.role ?? "mixed";
 }
 export const materialManifestWriteSchema = z.object({ sourceVersion: z.number().int().nonnegative(),
-  expectedRevision: z.number().int().nonnegative(), manifest: materialManifestSchema }).strict();
+  expectedRevision: z.number().int().nonnegative(), manifest: materialManifestSchema,
+  /** Metadata-only editors preserve hidden answers and replace supplied matching links. */
+  mergeAnswerLinks: z.boolean().optional(),
+}).strict();
 export const materialQuestionIdentitySchema = materialQuestionKeySchema.extend({ sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative() }).strict();
 export type MaterialQuestionIdentity = z.infer<typeof materialQuestionIdentitySchema>;

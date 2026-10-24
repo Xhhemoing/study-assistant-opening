@@ -94,7 +94,7 @@ describe("evaluateEvidenceEligibility correctness", () => {
     const result = evaluateEvidenceEligibility(observation, { ...context, referenceCheckAuthority: undefined });
     expect(result.verifiedCorrect).toBe("unknown");
     expect(result.reasonCodes).toContain("reference_check_authority_unknown");
-    expect(result.policyVersion).toBe("opening-evidence-v3");
+    expect(result.policyVersion).toBe("opening-evidence-v4");
   });
 
   it.each(["Compared every step", "已由另一名教师核对", "trusted_review"])("cannot upgrade a learner check by claiming method %s", method => {

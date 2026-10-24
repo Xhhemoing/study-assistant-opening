@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
+import { assertTeachingMaterialsReadable } from "./opening-material-teaching";
 import { teachingHintResponseSchema, teachingPartialHintsSchema, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
@@ -38,6 +39,7 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
   if (Number(spec.version) !== contentVersion) throw learningError("CONFLICT", "teaching specification version changed");
   const capturedVersions = attempt.source_versions as Record<string, number>;
   const sourceRefs = spec.source_refs as TeachingSourceRef[];
+  await assertTeachingMaterialsReadable(tx,scope,sourceRefs);
   for (const ref of sourceRefs) {
     const version = ref.version == null ? NaN : Number(ref.version);
     if (Number.isInteger(version) && (currentVersions.get(ref.sourceId) !== version || capturedVersions[ref.sourceId] !== version)) {

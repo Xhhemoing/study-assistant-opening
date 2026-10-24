@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema } from "./ai-evaluation";
+import { aiEvaluationSchema, aiGradingInputSchema, aiGradingMaterialProvenanceSchema, aiGradingProposalSchema } from "./ai-evaluation";
 import { learningAttemptSubmitInputSchema } from "./learning-attempts";
 import { observationInputSchema } from "./learning";
 import { observationReplacementSchema } from "./learning-revisions";
@@ -7,6 +7,22 @@ import { observationReplacementSchema } from "./learning-revisions";
 const id = "11111111-1111-4111-8111-111111111111";
 const proposal = { outcome: "correct", confidence: 0.9, questionMatch: true, feedback: "计算正确。",
   criteria: [{ label: "结果", verdict: "correct", feedback: "1 + 1 = 2。" }] };
+
+it("preserves server-owned source/version/manifest provenance without accepting it as client or model authority", () => {
+  const ref = { sourceId: id, sourceVersion: 0, manifestRevision: 2 };
+  const provenance = { materialAnswerRefs: [ref], materialSourceRefs: [ref] };
+  expect(aiGradingMaterialProvenanceSchema.parse(provenance)).toEqual(provenance);
+  const evaluation = { ...proposal, ...provenance, observationId: id, attemptId: id, problemId: id, itemVersionId: id,
+    requirementKey: null, evaluatorVersion: "ai-rubric-v1", modelLabel: null, evaluatedAt: "2026-10-21T08:00:00Z" };
+  expect(aiEvaluationSchema.parse(evaluation)).toEqual(evaluation);
+  for (const invalid of [{ sourceVersion: -1 }, { manifestRevision: -1 }, { manifestRevision: null }, { sourceId: "not-a-uuid" }]) {
+    expect(aiGradingMaterialProvenanceSchema.safeParse({ ...provenance, materialAnswerRefs: [{ ...ref, ...invalid }] }).success).toBe(false);
+  }
+  expect(aiGradingMaterialProvenanceSchema.safeParse({ materialSourceRefs: [] }).success).toBe(false);
+  expect(aiGradingProposalSchema.safeParse({ ...proposal, ...provenance }).success).toBe(false);
+  expect(aiGradingInputSchema.safeParse({ observationId: id, materialProvenance: provenance }).success).toBe(false);
+  expect(observationReplacementSchema.safeParse({ answer: "1", outcome: "correct", assistance: "independent", ...provenance }).success).toBe(false);
+});
 
 it("accepts text and pinned photos, and rejects incomplete photo identity", () => {
   expect(aiGradingInputSchema.parse({ observationId: id })).toEqual({ observationId: id });
