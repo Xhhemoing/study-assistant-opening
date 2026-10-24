@@ -68,7 +68,7 @@
 
 | 本轮切片 | 负责 | 分支 | 状态 |
 |---|---|---|---|
-| OPT-05 已有任务预算预估 | Hermes | `feat/sprint-budget-preview-20261023` | 基于f4c4b3fd；本地检查点f7f00d88后修复UUID、跨窗口接受与旧派生时段。194项单元、18项原生隔离PG通过；Contracts/Domain/Database类型及17文件定向语义检查通过。完整Web类型600秒超时，未作通过声明；无迁移、模型调用、推送、合并或部署，用户浏览器待验收。 |
+| OPT-05 已有任务预算预估 | Hermes | `feat/sprint-budget-preview-20261023` | 基于f4c4b3fd；f7f00d88/372c30b0实现只读预算并修复UUID、跨窗口接受与旧派生时段。2026-10-24快速复验：176项单元、18项原生隔离PG通过；Contracts/Domain/Database类型、17文件定向语义与20文件lint通过。GitHub交付与完整CI以本分支PR为准；本轮未重跑完整Web类型（此前600秒超时），无迁移、模型调用、合并或部署，用户浏览器待验收。 |
 
 - 本次模型/证据交接已快进推送到 `feat/opening-release`；已删除远端 `claude/keen-carson-ls19ie`、`feat/adaptive-loop-v2` 与内容已被目标分支覆盖的 `feat/course-seed-today-plan`。其余分支仍含独有提交，未删除。
 - 合并与删除 worktree 会被 Claude 的权限拦截：需用户/Shipper 合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
