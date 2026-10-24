@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-import { act, useState } from "react";
+import { useState } from "react";
+import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CurrentStudyContext } from "./current-study-context";
@@ -24,6 +25,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   pathname = "/opening/today";
   bound = null;
+  window.localStorage.clear();
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -37,6 +39,28 @@ async function render() { await act(async () => root.render(<AssistantDrawer />)
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); }
 
 describe("global assistant drawer lifetime", () => {
+  it("keeps the exact selected background and draft mounted across wide toggles and toolbar reopening", async () => {
+    await render();
+    await act(async () => openAssistantDrawer("/opening/assistant?fragment=selected&label=selection"));
+    const original = document.querySelector("[data-draft]");
+    await click(original);
+    const expand = document.querySelector('[aria-label="展开为对话页"]');
+    expect(expand?.getAttribute("aria-pressed")).toBe("false");
+    await click(expand);
+    expect(document.querySelector('[aria-label="收窄对话"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem("aistudy:assistant-wide")).toBe("1");
+    expect(document.querySelector("[data-draft]")).toBe(original);
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("selected");
+    await click(document.querySelector('[aria-label="收窄对话"]'));
+    await click(document.querySelector('[aria-label="关闭抽屉"]'));
+    await settle();
+    await act(async () => openAssistantDrawer());
+    expect(document.querySelector("[data-draft]")).toBe(original);
+    expect(original?.textContent).toBe("保留");
+    expect(document.querySelector('[aria-label="展开为对话页"]')?.getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("selected");
+    // Seven UI transitions exceed 5s on the shared host; keep every lifetime assertion.
+  }, 20_000);
   it("retains the same draft after closing and navigation, with no hidden dialog in the document", async () => {
     await render();
     await act(async () => openAssistantDrawer());

@@ -66,6 +66,7 @@ const modelCatalogExample: TemplateLine = {
 };
 
 export const ENV_REGISTRY: readonly EnvVarSpec[] = [
+  { name: "OPENING_EXPLORE_PREVIEW", group: "teaching", doc: "Explore stages 1–2A only; default OFF. Server re-checks preview API and demo route; UI reads runtime capabilities. Stages 3–4 frozen.", consumers: ["web"], kind: "bool", secret: false, dev: { value: "0", commented: true }, docker: { value: "0", commented: true } },
   { name: "NODE_ENV", group: "runtime", doc: "development | test | production.", consumers: [...both, "compose"], kind: "enum", enumValues: ["development", "test", "production"], secret: false, dev: { value: "development" }, docker: { value: "production" } },
   { name: "WORKER_ROLE", group: "runtime", doc: "Worker consumers: all (default), learning (no document/media parsing), or parser (document/media parsing only). all/parser require parser startup checks.", consumers: ["worker"], kind: "enum", enumValues: ["all", "learning", "parser"], secret: false, dev: { value: "all" }, docker: { value: "all" } },
   { name: "PUBLIC_BASE_URL", group: "runtime", doc: "Public web origin; cookie-auth Origin checks use it.", consumers: ["web"], kind: "url", secret: false, required: "always", dev: { value: "http://localhost:3000" }, docker: { value: "https://REPLACE_ME.example" } },

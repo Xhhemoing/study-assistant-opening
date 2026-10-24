@@ -4,6 +4,18 @@ import { loadOpeningTutorConfig } from "./opening-model";
 import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
+it("Explore defaults OFF, requires explicit ON and closes anonymous capabilities", () => {
+  for (const value of [undefined, "0", "false"]) {
+    const switches = loadFeatureSwitches({ OPENING_EXPLORE_PREVIEW: value });
+    expect(switches.explorePreview).toBe(false);
+    expect(resolveCapabilities(switches, "owner").explorePreview).toBe(false);
+  }
+  const enabled = loadFeatureSwitches({ OPENING_EXPLORE_PREVIEW: "1" });
+  expect(enabled.explorePreview).toBe(true);
+  expect(resolveCapabilities(enabled, "owner").explorePreview).toBe(true);
+  expect(resolveCapabilities(enabled, null).explorePreview).toBe(false);
+  expect(() => loadFeatureSwitches({ OPENING_EXPLORE_PREVIEW: "perhaps" })).toThrow(EnvValidationError);
+});
 
 it("defaults worker consumers to all and validates explicit isolation roles", () => {
   expect(loadWorkerEnv({}).workerRole).toBe("all");

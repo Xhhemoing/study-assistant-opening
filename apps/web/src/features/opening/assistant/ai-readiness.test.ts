@@ -1,6 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const caps = vi.hoisted(() => ({ explorePreview: false }));
+vi.mock("../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => caps }));
+beforeEach(() => { caps.explorePreview = false; });
 
 vi.mock("next/link", () => ({
   default: ({ children, href, ...props }: { children: unknown; href: string }) =>
@@ -58,6 +61,12 @@ const hardProviderFail: AiReadinessChecklistItem = {
 };
 
 describe("AiReadinessChecklist hard-blocker filter", () => {
+  it.each([false, true])("shows the static demo link only when runtime Explore=%s", explorePreview => {
+    caps.explorePreview = explorePreview;
+    const html = renderToStaticMarkup(createElement(AiReadinessChecklistView, { items: [hardBudgetFail] }));
+    expect(html.includes('/demo/learning')).toBe(explorePreview);
+    expect(html).toContain(BUDGET_CONFIRM_HREF);
+  });
   it("does not treat missing vision as a hard blocker", () => {
     expect(isAiReadinessChecklistHardBlocker({
       key: "vision_model", ok: false, detail: "x", fixHint: "y", severity: "soft",

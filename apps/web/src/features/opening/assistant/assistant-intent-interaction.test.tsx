@@ -5,10 +5,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LearningAttempt } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 
-const readiness = vi.hoisted(() => ({ blocked: true }));
+const readiness = vi.hoisted(() => ({ blocked: true, explorePreview: false }));
 vi.mock("../capabilities/capabilities-provider", async () => {
   const { CLOSED_CAPABILITIES } = await import("@aistudy/config/public");
-  return { useOpeningCapabilities: () => ({ ...CLOSED_CAPABILITIES, systemQuery: true }) };
+  return { useOpeningCapabilities: () => ({ ...CLOSED_CAPABILITIES, systemQuery: true, explorePreview: readiness.explorePreview }) };
 });
 vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ read: async () => ({ courses: [], memberships: [] }) }) }));
 vi.mock("../teaching/learner-state-card", () => ({ LearnerStateCard: () => null }));
@@ -20,6 +20,7 @@ vi.mock("./ai-readiness", async () => {
   } };
 });
 vi.mock("./proposal-panel", () => ({ ProposalPanel: () => null }));
+vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => true }));
 
 import { AssistantView } from "./assistant-view";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
@@ -31,6 +32,7 @@ const jobId = "44444444-4444-4444-8444-444444444444";
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
   readiness.blocked = true;
+  readiness.explorePreview = false;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   localStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
@@ -91,7 +93,8 @@ it("direct explanation sends once, preserves a written draft, and retries the sa
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我正在写的推导");
 });
 
-it("uses a new direct-explanation request when the help scope changes after a failed response", async () => {
+it.each([false, true])("keeps original help scope and request identity when Explore=%s", async explorePreview => {
+  readiness.explorePreview = explorePreview;
   readiness.blocked = false;
   const attempt: LearningAttempt = {
     id: sourceId, workspaceId: sourceId, sessionId: sourceId, courseId,
@@ -112,7 +115,13 @@ it("uses a new direct-explanation request when the help scope changes after a fa
     getJob: vi.fn(async () => ({ id: jobId, status: "succeeded", error: null, updatedAt: "2026-10-21T10:00:00Z" })),
   } as unknown as OpeningApi;
   await act(async () => root.render(<AssistantView api={api} learningAttempt={attempt}
-    studyContext={{ courseId, attemptId: attempt.id }} initialDraft="这一题怎么开始？" />));
+    studyContext={{ courseId, attemptId: attempt.id, fragment: "原选区背景" }} initialDraft="这一题怎么开始？" />));
+  expect(Boolean(host.querySelector('[aria-label="上下文审阅"]'))).toBe(explorePreview);
+  expect(host.textContent).toContain("提问背景：");
+  expect(host.textContent).toContain("帮助范围");
+  expect(host.textContent).toContain("原选区背景");
+  expect(host.querySelector('[aria-label="提问背景诊断"]')?.textContent).toContain(courseId);
+  expect(Array.from(host.querySelectorAll("a")).some(link => link.textContent === "返回原内容")).toBe(true);
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
   const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
   await act(async () => explain().click());

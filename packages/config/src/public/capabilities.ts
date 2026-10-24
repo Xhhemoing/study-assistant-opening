@@ -24,6 +24,7 @@ export const openingCapabilitiesSchema = z.object({
   /** Model-assisted re-planning (L7); requires adaptivePlanning. */
   planAgent: z.boolean(),
   systemQuery: z.boolean().default(false),
+  explorePreview: z.boolean().default(false),
 }).strict();
 
 export const openingCapabilitiesResponseSchema = z.object({
@@ -46,6 +47,7 @@ export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   adaptivePlanning: false,
   planAgent: false,
   systemQuery: false,
+  explorePreview: false,
 };
 
 /**

@@ -15,6 +15,12 @@ import { StudyToolsPanel } from "../teaching/study-tools-panel";
 import { StudyContextTools } from "../teaching/study-context-tools";
 import { OriginalConversationSlot } from "../assistant/conversation-companion";
 import { studyConversationIdentity } from "../assistant/study-conversation-context";
+import { ConceptPreview, type ConceptPreviewHandle, type ConceptPreviewLoader } from "../concepts/concept-preview";
+import { requestConceptPreview } from "../concepts/preview-client";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { getVerifiedSessionNamespace } from "../../auth/session-identity";
+
+const loadConceptPreview: ConceptPreviewLoader = (request, signal) => requestConceptPreview(request, { signal });
 
 export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint, children }: {
   title: string;
@@ -29,6 +35,11 @@ export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint
     <Dialog.Overlay className="fixed inset-0 z-[60] bg-ink/40" />
     <Dialog.Content ref={content} aria-modal="true" aria-describedby={undefined} data-material-reader="true"
       onEscapeKeyDown={event => {
+        // The preview is above reader tools; close it before native panels or the frame.
+        if (content.current?.querySelector('[aria-label="概念预览"]')) {
+          onEscapeKeyDown?.(event);
+          if (event.defaultPrevented) return;
+        }
         const focused = event.target instanceof Element ? event.target.closest<HTMLDialogElement>("dialog[open]") : null;
         // Native tool/save dialogs live inside this reader. Radix receives
         // Escape first; preserve their cancel handlers, including busy guards.
@@ -81,6 +92,8 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
   const [selectionNotice, setSelectionNotice] = useState("");
   const [selection, setSelection] = useState<ReaderSelection | null>(null);
   const body = useRef<HTMLDivElement>(null);
+  const preview = useRef<ConceptPreviewHandle>(null);
+  const { explorePreview } = useOpeningCapabilities();
   const selectionAnchor = useRef<Element | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState("");
@@ -107,8 +120,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
     document.addEventListener("selectionchange", update);
     return () => { document.removeEventListener("selectionchange", update); selectionAnchor.current?.classList.remove("[anchor-name:--reader-selection]"); };
   }, [record.id, requestedVersion]);
-  function selectExcerpt() {
-    const selected = selection;
+  function selectExcerpt(selected = selection) {
     if (!selected || selected.sourceId !== record.id || selected.version !== requestedVersion) {
       setSelectionNotice("选区已失效，请在当前材料中重新选择文字。"); return;
     }
@@ -129,6 +141,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
   return <SourceReaderFrame title={latestRecord.name} returnPoint={returnPoint} onClose={onClose} onEscapeKeyDown={event => {
     // Radix owns document-capture Escape before the native tool panel can
     // cancel. Close that inner surface first, on both narrow and wide layouts.
+    if (preview.current?.close()) { event.preventDefault(); return; }
     if (tool) { event.preventDefault(); setTool(null); }
   }}>
     {startMs != null || slideLabel ? <p className="text-sm text-warn">引用定位：{slideLabel ? `幻灯片 ${slideLabel}` : ""}{slideLabel && startMs != null ? " · " : ""}{startMs != null ? `${Math.floor(startMs / 60000)}:${String(Math.floor(startMs / 1000) % 60).padStart(2, "0")}` : ""}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
@@ -142,9 +155,10 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
           download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading fillHeight toolsOpen={tool !== null} onExplain={explain} />}
       </StudyToolsPanel>
       {selection ? <div className="sticky bottom-0 z-[70] flex shrink-0 flex-wrap items-center gap-2 rounded border border-line bg-popover p-2 text-xs text-text-2 [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:fixed [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-anchor:--reader-selection] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-area:block-end] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:[position-try-fallbacks:flip-block,flip-inline] [@media(pointer:fine)]:[@supports(anchor-name:--reader-selection)]:bottom-auto" data-reader-selection-actions="true">
-        <button type="button" className={ui.secondary} onPointerDown={event => event.preventDefault()} onClick={selectExcerpt}>问选中内容</button>
+        <button type="button" className={ui.secondary} onPointerDown={event => event.preventDefault()} onClick={() => selectExcerpt()}>问选中内容</button>
         <span>v{selection.version}{selection.page ? ` · 第 ${selection.page} 页` : ""} · {selection.text.length} 字</span>
       </div> : null}
+      {explorePreview ? <ConceptPreview ref={preview} bindingKey={`${getVerifiedSessionNamespace()}:${record.id}:${requestedVersion}:${Boolean(questionProtected)}`} sourceId={record.id} sourceLabel={latestRecord.name} sourceVersion={requestedVersion} selection={selection} load={loadConceptPreview} questionProtected={questionProtected} onContinue={selectExcerpt} /> : null}
       <div className="mt-2 shrink-0 space-y-1">{selectionNotice ? <p role="status" className="text-xs leading-6 text-text-2">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-text-3">提问定位：物理第 {questionPage} 页 · v{requestedVersion}。</p> : null}</div>
     </div>
     {latest && latestRecord.parseState === "failed" && latestRecord.error?.retryable !== false && onRetry ? <button type="button" className={ui.secondary} disabled={retrying} onClick={() => void retry()}>{retrying ? "正在重新解析…" : "重新解析"}</button> : null}

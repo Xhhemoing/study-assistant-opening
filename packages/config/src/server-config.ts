@@ -123,6 +123,7 @@ export type FeatureSwitches = {
   matrixTransformInteractive: boolean;
   chatArtifacts: boolean;
   chatProse: boolean;
+  explorePreview: boolean;
   openingRelease: boolean;
   adaptivePlanning: boolean;
   planAgent: boolean;
@@ -143,6 +144,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
+  const explorePreview = read("OPENING_EXPLORE_PREVIEW", false);
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
@@ -157,7 +159,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   if (issues.length) throw new EnvValidationError(issues);
   return {
     teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, openingRelease,
-    adaptivePlanning, planAgent, systemQuery,
+    adaptivePlanning, planAgent, systemQuery, explorePreview,
   };
 }
 
@@ -181,6 +183,7 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     matrixTransformInteractive: switches.matrixTransformInteractive,
     chatArtifacts: switches.chatArtifacts,
     chatProse: switches.chatProse,
+    explorePreview: userId !== null && switches.explorePreview,
     registrationOpen: !switches.openingRelease,
     adaptivePlanning: switches.adaptivePlanning,
     planAgent: switches.adaptivePlanning && switches.planAgent,
