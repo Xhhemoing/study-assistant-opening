@@ -8,6 +8,7 @@ import { ENV_REGISTRY, REMOVED_PUBLIC_VARS, type EnvConsumer, type EnvVarSpec } 
 import { loadWorkerEnv, type WorkerEnv } from "./worker-env";
 import { computeBuildConfigDigest } from "./public/build-config.mjs";
 import { CLOSED_CAPABILITIES, type OpeningCapabilities } from "./public/capabilities";
+import { senseWeaveGatesSchema, SENSEWEAVE_INITIAL_GATES, type SenseWeaveGates } from "./public/senseweave";
 
 type Source = NodeJS.ProcessEnv | Record<string, string | undefined>;
 export type ServerRole = "web" | "worker";
@@ -124,6 +125,8 @@ export type FeatureSwitches = {
   chatArtifacts: boolean;
   chatProse: boolean;
   chatSenseWeave: "off" | "shadow" | "on";
+  senseWeaveBetaUsers?: readonly string[];
+  senseWeaveGates?: SenseWeaveGates;
   openingRelease: boolean;
   adaptivePlanning: boolean;
   planAgent: boolean;
@@ -147,6 +150,17 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "shadow";
   const chatSenseWeave = senseWeaveRaw === "off" || senseWeaveRaw === "shadow" || senseWeaveRaw === "on" ? senseWeaveRaw : "off";
   if (chatSenseWeave !== senseWeaveRaw) issues.push(`OPENING_CHAT_SENSEWEAVE: must be one of off, shadow, on`);
+  const betaUsersRaw = present(source, "OPENING_CHAT_SENSEWEAVE_BETA_USERS");
+  const senseWeaveBetaUsers = betaUsersRaw?.split(",").map(value => value.trim()).filter(Boolean) ?? [];
+  if (senseWeaveBetaUsers.length > 100 || senseWeaveBetaUsers.some(value => !/^[a-zA-Z0-9_-]{1,128}$/.test(value))) {
+    issues.push("OPENING_CHAT_SENSEWEAVE_BETA_USERS: expected at most 100 explicit account IDs (no wildcard)");
+  }
+  let senseWeaveGates = SENSEWEAVE_INITIAL_GATES;
+  const gatesRaw = present(source, "OPENING_CHAT_SENSEWEAVE_GATES");
+  if (gatesRaw) {
+    try { senseWeaveGates = senseWeaveGatesSchema.parse(JSON.parse(gatesRaw)); }
+    catch { issues.push("OPENING_CHAT_SENSEWEAVE_GATES: invalid versioned gating table"); }
+  }
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const planAgent = read("OPENING_PLAN_AGENT", false);
@@ -162,6 +176,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   return {
     teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
     adaptivePlanning, planAgent, systemQuery,
+    senseWeaveBetaUsers, senseWeaveGates,
   };
 }
 
@@ -186,7 +201,10 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     chatArtifacts: switches.chatArtifacts,
     chatProse: switches.chatProse,
     // Fragments are rendered by LearningProse; without it there is nothing to embed into.
-    chatSenseWeave: switches.chatProse ? switches.chatSenseWeave : "off",
+    chatSenseWeave: !switches.chatProse || userId === null ? "off"
+      : switches.chatSenseWeave === "on" && !switches.senseWeaveBetaUsers?.includes(userId) ? "shadow"
+      : switches.chatSenseWeave,
+    senseWeaveGates: switches.senseWeaveGates ?? SENSEWEAVE_INITIAL_GATES,
     registrationOpen: !switches.openingRelease,
     adaptivePlanning: switches.adaptivePlanning,
     planAgent: switches.adaptivePlanning && switches.planAgent,

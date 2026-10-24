@@ -1,15 +1,15 @@
 import {planningLists} from './lists.mjs';
-import {dataProfile, qualityNotes} from './evidence.mjs';
+import {qualityNotes} from './evidence.mjs';
+import {scoreCandidate as score} from './features.mjs';
 /** Local-first presentation decisions. Scores are design heuristics, NOT probabilities or
  * measured learning gains. Data availability and user control are hard gates before scoring.
  */
 import {discoverFormats} from '../formats/index.mjs';
 import {validateDocument,plainDocument,splitText,SCHEMA_VERSION,requireContract,cleanText,CATALOG} from '../core/document.mjs';
-import {negotiateCapabilities} from '../runtime/capabilities.mjs';
+import {negotiateCapabilities} from '../core/capabilities.mjs';
 export const POLICY_VERSION='0.5-local-2';
 export const DEFAULT_POLICY=Object.freeze({mode:'auto',maxEnhancements:2,maxVisualCost:4,minScore:0.68});
 const TASKS=['auto','lookup','compare','trend','relation','explain','review','inspect','plan'];
-const COST={table:1,plot:3,chart:2,diagram:2,json:1,diff:1,math:1,details:1};
 export function normalizePolicy(input={}) {
   requireContract(input&&typeof input==='object'&&!Array.isArray(input),'POLICY','Expected policy object');
   const p={...DEFAULT_POLICY,...input};
@@ -50,34 +50,6 @@ function plotAlternative(candidate,task) {
   else if((task==='trend'&&['temporal','ordinal','quantitative'].includes(xc.kind))||(task==='inspect'&&['temporal','ordinal'].includes(xc.kind)&&rows.length>=4)||(task==='relation'&&xc.kind==='quantitative'))block={type:'plot',data:{kind:task==='relation'?'scatter':'line',xKind:xc.kind,xLabel:xc.label,yLabel:yc.label,yUnit:yc.unit,points:rows.map(r=>({x:r[xi],y:r[yi]}))}};
   if(!block)return null;
   try {block.id=candidate.id;const v=validateDocument({schemaVersion:SCHEMA_VERSION,id:'probe',revision:1,title:'',blocks:[block]}).blocks[0];return {...candidate,block:v,variant:true};}catch{return null;}
-}
-function score(candidate,ctx,preferences) {
-  const b=candidate.block,type=b.type,reasons=['已识别完整结构，组件数据可由原文直接获得'];
-  let value=0.74;
-  if(type==='table'){
-    const r=b.data.rows.length,c=b.data.columns.length;
-    value=candidate.format==='markdown-table'?0.54:0.74;
-    if(r>=5||c>=4){value+=0.16;reasons.push('行列规模使本地筛选/排序有价值');}
-    if(['inspect','compare'].includes(ctx.task)){value+=0.16;reasons.push('当前任务需要查找或比较');}
-    if(ctx.viewport==='compact'&&c>4){value-=0.16;reasons.push('窄屏宽表增加阅读负担');}
-    if(r<=2&&c<=2){value-=0.08;reasons.push('小表格通常不需要额外交互');}
-  }
-  if(type==='checklist'||type==='steps'){value=0.88;reasons.push(type==='checklist'?'计划任务中的显式条目可逐项核对；勾选仅为本页状态':'原文有明确编号顺序，保留每一项，不推断新步骤');}
-  if(type==='json'){value=0.64+(JSON.stringify(b.data.value).length>=100?0.12:0)+(ctx.task==='inspect'?0.12:0);reasons.push('树状折叠只用于结构检查，不执行对象内容');}
-  if(type==='math'){value=0.78;reasons.push('受限公式可无模型编译为 MathML');}
-  if(type==='diff'){value=0.8;reasons.push('保留每条差异，仅增强阅读，不应用补丁');}
-  if(type==='diagram'){value=0.8;reasons.push('仅采用显式节点和边，不从自然语言猜关系');}
-  if(candidate.variant&&candidate.explored){value=0.6;reasons.push('备选视图：轴语义与单位明确、无新增数值；是否更合适由语义选择器结合问题判断');}
-  else if(candidate.variant){value=0.92;reasons.push('任务匹配，轴语义与单位明确，无新增数值');}
-  if(ctx.preference==='visual'){value+=0.1;reasons.push('用户明确偏好增强展示');}
-  if(ctx.screenReader&&['plot','chart','diagram'].includes(type)){value-=0.2;reasons.push('屏幕阅读器优先结构化文字/数据表');}
-  const profile=dataProfile(b);
-  if(candidate.variant && profile.constant){value-=0.24;reasons.push('数据没有数值变化，优先保留可核对的数据表');}
-  if(candidate.variant && profile.missingRatio>=0.3){value-=0.14;reasons.push('缺失比例增加图形误读风险，优先数据核对');}
-  if(candidate.variant && ctx.viewport==='compact' && profile.rows>10){value-=0.12;reasons.push('窄屏下较多数据点或分类需要更高的阅读成本');}
-  const feedback=preferences?.adjustment?.(type,ctx.task)??0;
-  if(feedback){value+=feedback;reasons.push('依据当前实例显式的有用/无用反馈保守调整');}
-  return {score:Math.round(Math.max(0,Math.min(1,value))*1000)/1000,reasons,visualCost:COST[type]??1};
 }
 export function preparePresentation(text,options={}) {
   cleanText(text,60000);

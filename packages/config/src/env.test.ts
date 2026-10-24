@@ -6,12 +6,31 @@ import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
 import { loadWorkerStartupConfig } from "./worker-startup";
 
+import { SENSEWEAVE_INITIAL_GATES } from "./public/senseweave";
+
 it("defaults auto grading to 50 and rejects malformed or out-of-range caps", () => {
   expect(loadOpeningAutoGradeDailyCap({})).toBe(50);
   expect(loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: "0" })).toBe(0);
   expect(loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: "10000" })).toBe(10000);
   for (const value of ["", "-1", "1.5", "50oops", "10001", "Infinity"]) {
     expect(() => loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: value })).toThrow(EnvValidationError);
+  }
+});
+
+it("SenseWeave beta allowlist and gating configuration fail closed", () => {
+  expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_BETA_USERS: "*" })).toThrow(EnvValidationError);
+  const caps = resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "private-account" }), "private-account");
+  expect(caps.chatSenseWeave).toBe("on");
+  expect(JSON.stringify(caps)).not.toContain("private-account");
+  expect(caps.senseWeaveGates).toEqual(SENSEWEAVE_INITIAL_GATES);
+  const disabled = structuredClone(SENSEWEAVE_INITIAL_GATES);
+  disabled.version = "sw-gates-test-disabled";
+  disabled.presets.explain = ["prose"];
+  expect(resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_GATES: JSON.stringify(disabled) }), "u").senseWeaveGates).toEqual(disabled);
+  const unsafe = structuredClone(disabled);
+  unsafe.presets.hint = ["diagram"];
+  for (const raw of ["invalid", JSON.stringify(unsafe), JSON.stringify({ ...disabled, extra: true })]) {
+    expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_GATES: raw })).toThrow(/OPENING_CHAT_SENSEWEAVE_GATES/);
   }
 });
 

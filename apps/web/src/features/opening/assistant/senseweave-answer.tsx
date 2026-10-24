@@ -4,7 +4,8 @@ import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import type { BlockSegment, PreparedAnswer } from "@aistudy/senseweave/host";
 import { LearningProse, type CitationLink } from "./learning-prose";
 import type { QueryEvidenceLink } from "./query-evidence-links";
-import { SENSEWEAVE_TOKENS, senseWeaveAdapter, type SenseWeaveMode } from "./senseweave-host";
+import { SENSEWEAVE_TOKENS, senseWeaveFeedback, type SenseWeaveMode } from "./senseweave-host";
+import { recordSenseWeaveRevert, senseWeaveShadowSnapshot } from "./senseweave-telemetry";
 
 type ProseProps = {
   citationLinks?: readonly CitationLink[];
@@ -15,7 +16,7 @@ type ProseProps = {
 class BlockBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(error: unknown) { console.warn("senseweave block failed; showing the original text", error); }
+  componentDidCatch() { console.warn("senseweave block failed; showing the original text"); }
   render() { return this.state.failed ? this.props.fallback : this.props.children; }
 }
 
@@ -46,10 +47,19 @@ function SenseWeaveBlock({ segment, onFail }: { segment: BlockSegment; onFail: (
 type Props = ProseProps & { text: string; prepared: PreparedAnswer };
 
 /** Diagnostics only: what SenseWeave chose for this answer (shadow mode shows it without changing the answer). */
+/** Export only the bounded, whitelist-projected local records, by an explicit reviewer action. */
+function downloadShadow() {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(senseWeaveShadowSnapshot(), null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url; link.download = "senseweave-shadow.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export function SenseWeaveDiagnostics({ prepared, mode }: { prepared: PreparedAnswer; mode: Exclude<SenseWeaveMode, "off"> }) {
   const types = prepared.segments.flatMap(segment => segment.kind === "block" ? [segment.type] : []);
   return <p className="mt-2 text-xs text-text-3" data-senseweave-diagnostics={mode}>
     SenseWeave{mode === "shadow" ? "（影子）" : ""}：{types.length ? types.join("、") : "保持文字"} · {prepared.preset} · {prepared.ms.toFixed(1)} ms
+    <button type="button" onClick={downloadShadow} className="ml-2 min-h-7 underline focus-visible:ring-2 focus-visible:ring-focus-ring">导出本页匿名统计</button>
   </p>;
 }
 
@@ -59,6 +69,7 @@ export function SenseWeaveDiagnostics({ prepared, mode }: { prepared: PreparedAn
  */
 export function SenseWeaveAnswer({ text, prepared, ...prose }: Props) {
   const [asText, setAsText] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => { setAsText(new Set()); }, [text]);
   const keepText = (blockId: string) => setAsText(previous => new Set(previous).add(blockId));
   if (!prepared.enhanced) return <LearningProse text={text} {...prose} />;
   return <>
@@ -66,7 +77,7 @@ export function SenseWeaveAnswer({ text, prepared, ...prose }: Props) {
       const key = `${segment.start}:${segment.end}`;
       const original = <LearningProse text={segment.source} sourceOffset={segment.start} {...prose} />;
       if (segment.kind === "text" || asText.has(segment.blockId)) return <div key={key}>{original}</div>;
-      return <figure key={key} className="my-4" aria-label="图示（由回答内容整理，原文为准）">
+      return <figure key={key} className="my-4 motion-safe:animate-enter" aria-label="图示（由回答内容整理，原文为准）">
         <BlockBoundary fallback={original}><SenseWeaveBlock segment={segment} onFail={() => keepText(segment.blockId)} /></BlockBoundary>
         <figcaption className="mt-1 flex justify-end">
           <button
@@ -74,7 +85,8 @@ export function SenseWeaveAnswer({ text, prepared, ...prose }: Props) {
             className="min-h-7 rounded-pill px-2 text-xs text-text-3 transition-colors hover:bg-text/5 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
             onClick={() => {
               keepText(segment.blockId);
-              senseWeaveAdapter().feedback({ type: segment.type, preset: prepared.preset, helpful: false });
+              recordSenseWeaveRevert(prepared, segment.blockId);
+              senseWeaveFeedback(prepared, segment.type, false);
             }}
           >改回文字</button>
         </figcaption>

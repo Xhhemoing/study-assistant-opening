@@ -169,7 +169,10 @@ describe("capabilities", () => {
 
   it("SenseWeave defaults to shadow, accepts off/shadow/on and needs prose", () => {
     expect(resolveCapabilities(sw({}), "u1").chatSenseWeave).toBe("shadow");
-    expect(resolveCapabilities(sw({ OPENING_CHAT_SENSEWEAVE: "on" }), "u1").chatSenseWeave).toBe("on");
+    expect(resolveCapabilities(sw({ OPENING_CHAT_SENSEWEAVE: "on" }), "u1").chatSenseWeave).toBe("shadow");
+    expect(resolveCapabilities(sw({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "u1" }), "u1").chatSenseWeave).toBe("on");
+    expect(resolveCapabilities(sw({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "u1" }), "u2").chatSenseWeave).toBe("shadow");
+    expect(resolveCapabilities(sw({}), null).chatSenseWeave).toBe("off");
     expect(resolveCapabilities(sw({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_PROSE: "0" }), "u1").chatSenseWeave).toBe("off");
     expect(() => sw({ OPENING_CHAT_SENSEWEAVE: "maybe" })).toThrow(/OPENING_CHAT_SENSEWEAVE/);
   });

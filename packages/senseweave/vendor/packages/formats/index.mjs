@@ -3,6 +3,7 @@
  */
 import {validateDocument, SCHEMA_VERSION, cleanText, ContractError} from '../core/document.mjs';
 import {validISODate, MAX_TABLE_ROWS} from '../core/extended.mjs';
+import {markdownBlockContext} from '../core/block-context.mjs';
 const FORMATS=['auto','markdown','csv','tsv','json','diff','mermaid','latex'];
 // Size checks carry what was measured, so a fallback can name the limit and the real count.
 function need(ok,message,measure,limit,actual){
@@ -104,15 +105,17 @@ function jsonBlock(text,hints) {
   }
   return {type:'json',data:{value}};
 }
-// Mermaid flowchart subset. Shapes are read for their label only; every arrow becomes a
-// 'sequence' relation, so line style (dotted/thick) is not carried over.
-const MERMAID_SHAPES={'(((':[')))'],'([':['])'],'[[':[']]'],'[(':[')]'],'((':['))'],'{{':['}}'],'[/':['/]','\\]'],'[\\':['\\]','/]'],'[':[']'],'(':[')'],'{':['}'],'>':[']']};
+// Mermaid has no shape/direction/style fields in the current diagram IR.
+// Recognize unsupported syntax so the whole adapter fails rather than erasing it.
 const MERMAID_NODE=/^([\p{L}\p{N}_]{1,32})(?:(\(\(\(|\(\[|\[\[|\[\(|\(\(|\{\{|\[\/|\[\\|\[|\(|\{|>)([\s\S]*?)(\)\)\)|\]\)|\]\]|\)\]|\)\)|\}\}|\/\]|\\\]|\]|\)|\}))?$/u;
 const MERMAID_TEXT_LINK=/(--|==|-\.)\s*(?![->=.|\s])([^\n]*?)\s*(-{2,}>|={2,}>|\.-+>)/y;
 const MERMAID_LINK=/(<?(?:-{2,}|={2,}|-\.+-|~{3,})[>ox]?)(?:\s*\|([^|\n]*)\|)?/y;
 const MERMAID_RESERVED=/^(?:end|subgraph|click|style|classDef|class|linkStyle|direction|callback|call|href|accTitle|accDescr)$/;
 function mermaidLabel(raw=''){
   let t=raw.trim();if(/^"[\s\S]*"$/.test(t))t=t.slice(1,-1);
+  // Mermaid resolves #decimal;/#name; and HTML entities before rendering; our
+  // plain-label IR cannot carry that syntax without changing its meaning.
+  need(!/(?:#(?:[0-9]+|x[0-9a-f]+|[a-z][a-z0-9]*);|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);)/i.test(t),'Encoded Mermaid labels require the original renderer');
   t=t.replace(/<br\s*\/?>/gi,' ').replace(/\s+/g,' ').trim();
   need(t.length<=80,'Mermaid label exceeds 80 chars');return t;
 }
@@ -122,9 +125,9 @@ function splitTop(text,sep){
   for(let i=0;i<text.length;i++){const c=text[i];if(quote){if(c==='"')quote=false;continue;}if(c==='"')quote=true;else if('[({'.includes(c))depth++;else if(')]}'.includes(c))depth=Math.max(0,depth-1);else if(c===sep&&!depth){out.push(text.slice(start,i));start=i+1;}}
   out.push(text.slice(start));return out;
 }
-/** Auditable flowchart subset: common node shapes, directed arrows (--> ==> -.->), edge labels
- * (-->|x| and -- x -->), chains and `&`. Styling, click/links, subgraphs, init directives and
- * undirected/bidirectional links fail the whole adapter; nothing is dropped silently.
+/** Auditable flowchart subset: rectangular nodes, default/TD/TB direction and -->
+ * only, edge labels, chains and `&`. Any unrepresentable shape, direction, line
+ * style, directive or metadata fails the whole adapter; nothing is dropped.
  */
 export function parseMermaid(text) {
   const statements=[];
@@ -133,13 +136,13 @@ export function parseMermaid(text) {
     if(t.startsWith('%%')){need(!t.startsWith('%%{'),'Mermaid init directives are not supported');continue;}
     statements.push(...splitTop(t,';').map(s=>s.trim()).filter(Boolean));
   }
-  need(/^(?:flowchart|graph)(?:\s+(?:LR|RL|TD|TB|BT))?$/.test(statements.shift()??''),'Expected flowchart/graph with LR/RL/TD/TB/BT');
+  need(/^(?:flowchart|graph)(?:\s+(?:TD|TB))?$/.test(statements.shift()??''),'Only default/TD/TB Mermaid direction is representable');
   const labels=new Map(),raw=[];
   const node=src=>{
     const t=src.trim();need(!t.includes(':::')&&!t.includes('@{'),'Mermaid classes and shape metadata are not supported');
     const m=t.match(MERMAID_NODE);need(m&&!MERMAID_RESERVED.test(m[1]),'Unsupported Mermaid node syntax');
     if(m[2]!==undefined){
-      need(MERMAID_SHAPES[m[2]].includes(m[4]),'Mismatched Mermaid node shape');
+      need(m[2]==='['&&m[4]===']','Only rectangular Mermaid nodes are representable');
       const label=mermaidLabel(m[3]);need(label,'Empty Mermaid node label');
       const old=labels.get(m[1]);need(old===undefined||old===m[1]||old===label,'Conflicting node labels');labels.set(m[1],label);
     } else if(!labels.has(m[1]))labels.set(m[1],m[1]);
@@ -158,7 +161,7 @@ export function parseMermaid(text) {
         if((m=MERMAID_TEXT_LINK.exec(st))){need({'--':'-','==':'=','-.':'.'}[m[1]]===m[3][0],'Mismatched Mermaid link');arrow=m[3][0]==='.'?'-.->':m[3];label=m[2];}
         else {MERMAID_LINK.lastIndex=i;if((m=MERMAID_LINK.exec(st))){arrow=m[1];label=m[2];}}
         if(m){
-          need(/^(?:-{2,}>|={2,}>|-\.+->)$/.test(arrow),'Only directed Mermaid arrows are supported');
+          need(arrow==='-->','Only ordinary Mermaid arrows are representable');
           groups.push(st.slice(start,i));links.push(mermaidLabel(label));i=start=m.index+m[0].length;continue;
         }
       }
@@ -237,7 +240,24 @@ function fromFormat(format,text,hints) {
   if(format==='diff'){need(/^@@ |^diff --git |^--- /m.test(text),'Expected unified diff');return {type:'diff',data:{patch:text}};}
   throw new Error('Unsupported adapter');
 }
-function tableCells(line){need(!line.includes('`'),'Code spans in table cells remain Markdown');return line.trim().replace(/^\|/,'').replace(/(?<!\\)\|$/,'').split(/(?<!\\)\|/).map(v=>v.trim().replace(/\\\|/g,'|'));}
+function tableCells(line){
+  need(!line.includes('`'),'Code spans in table cells remain Markdown');
+  // Bare component cells cannot preserve Markdown emphasis, links, TeX or raw HTML.
+  // Keep these tables in the host renderer rather than expose delimiters as labels.
+  const unescaped=line.replace(/\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g,'');
+  need(!/[`*_~$<>]/.test(unescaped)&&!/&(?:#\d+|#x[0-9a-f]+|[a-z]+);/i.test(unescaped)&&!/[\[\]]/.test(unescaped)&&!/\\[a-zA-Z([]/.test(line),'Inline markup requires the original Markdown renderer');
+  const cells=[],s=line.trim();let value='';
+  for(let i=0;i<s.length;i++){
+    const c=s[i];
+    if(c==='\\'&&i+1<s.length){const next=s[i+1];if(/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(next)){value+=next;i++;continue;}}
+    if(c==='|'){cells.push(value.trim());value='';}else value+=c;
+  }
+  cells.push(value.trim());
+  if(line.trim().startsWith('|'))cells.shift();
+  // An escaped final pipe belongs to the last cell, not an outer delimiter.
+  if(value===''&&line.trim().endsWith('|'))cells.pop();
+  return cells;
+}
 const SEP=/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}={}) {
   cleanText(text,60000);need(FORMATS.includes(inputFormat),'Unknown inputFormat');need(Array.isArray(columns)&&columns.length<=12,'Invalid column hints');
@@ -250,26 +270,34 @@ export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}=
     }catch(e){pushFormatFallback(diagnostics,format,e,start,end);}
   };
   if(!['auto','markdown'].includes(inputFormat)){add(inputFormat,text,0,text.length);return {candidates,diagnostics};}
-  const lines=[...text.matchAll(/[^\n]*(?:\n|$)/g)].filter(m=>m[0].length).map(m=>({raw:m[0],text:m[0].replace(/\r?\n$/,''),start:m.index,end:m.index+m[0].length}));
+  const lines=markdownBlockContext(text);
   for(let i=0;i<lines.length;i++){
-    // Info string: only its first word names the language ("```CSV", "```json title=x", "```{.csv}").
-    const l=lines[i];const fence=l.text.match(/^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)(?:[ \t][^`]*)?$/);
-    if(fence){const close=new RegExp(`^ {0,3}${fence[1][0]==='`'?'`':'~'}{${fence[1].length},}\\s*$`);let j=i+1;while(j<lines.length&&!close.test(lines[j].text))j++;
-      if(j>=lines.length)break;
-      const lang=fence[2].toLowerCase().replace(/^[{.]+|}$/g,'');
+    // Only the guard may admit a genuinely closed, root-level fence.
+    const l=lines[i];
+    if(l.kind==='fence'){
+      const j=l.close;
+      if(j===undefined)break;
+      const lang=l.fence.info.split(/[ \t]/)[0].toLowerCase().replace(/^[{.]+|}$/g,'');
       const aliases={patch:'diff',udiff:'diff',tex:'latex',katex:'latex',math:'latex',mmd:'mermaid'};const format=aliases[lang]??lang;
       if(FORMATS.includes(format)&&!['auto','markdown'].includes(format))add(format,text.slice(l.end,lines[j].start),l.start,lines[j].end);
       i=j;continue;
     }
+    if(l.kind!=='root')continue;
     // Native Markdown tables: no shape inference from prose or inside arbitrary code blocks.
-    if(l.text.includes('|')&&SEP.test(lines[i+1]?.text??'')){
-      let j=i+2;while(j<lines.length&&lines[j].text.includes('|')&&lines[j].text.trim())j++;
-      try {const header=tableCells(l.text),rows=lines.slice(i+2,j).map(x=>tableCells(x.text));need(header.every(Boolean)&&new Set(header).size===header.length,'Invalid headers');need(rows.length>0&&rows.every(r=>r.length===header.length),'Ragged table');add('markdown-table',text.slice(l.start,lines[j-1].end),l.start,lines[j-1].end,{type:'table',data:makeTable(header,rows,columns)});}catch(e){pushFormatFallback(diagnostics,'markdown-table',e,l.start,lines[j-1].end);}i=j-1;continue;
+    if(l.text.includes('|')&&lines[i+1]?.kind==='root'&&SEP.test(lines[i+1].text)){
+      let j=i+2;while(j<lines.length&&lines[j].kind==='root'&&lines[j].text.includes('|')&&lines[j].text.trim())j++;
+      try {
+        const next=lines[j];
+        // GFM permits body rows without a pipe. We do not pad missing cells or
+        // enhance a prefix and reclassify the final row as prose.
+        need(!next||!next.text.trim()||next.kind==='fence'||/^ {0,3}#{1,6}\s/.test(next.text),'Ambiguous table continuation');
+        const header=tableCells(l.text),rows=lines.slice(i+2,j).map(x=>tableCells(x.text));need(header.every(Boolean)&&new Set(header).size===header.length,'Invalid headers');need(rows.length>0&&rows.every(r=>r.length===header.length),'Ragged table');add('markdown-table',text.slice(l.start,lines[j-1].end),l.start,lines[j-1].end,{type:'table',data:makeTable(header,rows,columns)});
+      }catch(e){pushFormatFallback(diagnostics,'markdown-table',e,l.start,lines[j-1].end);}i=j-1;continue;
     }
-    if(l.text.trim()==='$$'||l.text.trim()==='\\['){const close=l.text.trim()==='$$'?'$$':'\\]';let j=i+1;while(j<lines.length&&lines[j].text.trim()!==close)j++;if(j<lines.length){add('latex',text.slice(l.end,lines[j].start),l.start,lines[j].end);i=j;}}
+    if(l.text.trim()==='$$'||l.text.trim()==='\\['){const close=l.text.trim()==='$$'?'$$':'\\]';let j=i+1;while(j<lines.length&&lines[j].kind==='root'&&lines[j].text.trim()!==close)j++;if(j<lines.length&&lines[j].kind==='root'&&lines[j].text.trim()===close){add('latex',text.slice(l.end,lines[j].start),l.start,lines[j].end);i=j;}}
   }
   // Whole JSON is recognizable without guessing CSV from commas in prose.
-  if(!candidates.length&&inputFormat==='auto'&&/^[\s]*[\[{]/.test(text))add('json',text,0,text.length);
+  if(!candidates.length&&inputFormat==='auto'&&lines.find(l=>l.text.trim())?.kind==='root'&&/^[\s]*[\[{]/.test(text))add('json',text,0,text.length);
   return {candidates,diagnostics};
 }
 export const INPUT_FORMATS=Object.freeze(FORMATS);

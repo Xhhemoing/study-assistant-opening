@@ -11,6 +11,7 @@
  * A fence that fails validation stays in the prose as visible JSON: no text is ever dropped.
  */
 import {validateDocument, splitText, plainDocument, cleanText, SCHEMA_VERSION, CATALOG} from './document.mjs';
+import {markdownBlockContext} from './block-context.mjs';
 const SW_OPEN = /^ {0,3}(`{3,})\s*sw:([A-Za-z]+)\s*$/;
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const META = ['id', 'title', 'body', 'qualifiers', 'refs', 'format'];
@@ -55,6 +56,7 @@ export function composeText(
   const blocks = [],
     warnings = [],
     used = new Set();
+  const contexts = markdownBlockContext(lines.join('\n'));
   let prose = [],
     segment = 0,
     components = 0,
@@ -85,9 +87,9 @@ export function composeText(
       if (new RegExp(`^ {0,3}\\${code[0]}{${code.length},}\\s*$`).test(line)) code = null;
       continue;
     }
-    const open = line.match(SW_OPEN);
+    const open = contexts[i]?.kind === 'fence' ? line.match(SW_OPEN) : null;
     if (!open || blocks.length >= MAX_BLOCKS - 1) {
-      const fence = line.match(FENCE);
+      const fence = contexts[i]?.kind === 'fence' ? line.match(FENCE) : null;
       if (fence) code = fence[1];
       prose.push(line);
       continue;

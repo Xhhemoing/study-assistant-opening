@@ -36,6 +36,7 @@ describe("message-model", () => {
       }],
     });
     expect(messages[0]?.status).toBe("outcome_unknown");
+    expect(messages[0]?.mode).toBe("explain");
   });
 
   it("prefers turn records with citation labels when available", () => {

@@ -11,7 +11,7 @@ const diagramAnswer = [
   "做这类题可以按固定流程来：先画受力图，再根据牛顿第二定律求加速度，最后选择不含未知量的运动学公式代入并检查单位 [1]。",
   "",
   "```mermaid",
-  "flowchart LR",
+  "flowchart TD",
   "A[受力分析] --> B[求加速度] --> C[选公式] --> D[代入检验]",
   "```",
   "",
@@ -32,6 +32,21 @@ describe("SenseWeave host (SW0)", () => {
     expect(senseWeavePreset("这个公式怎么推导")).toBe("derive");
     expect(senseWeavePreset("讲讲匀变速运动")).toBe("explain");
     expect(senseWeavePreset(undefined)).toBe("explain");
+  });
+
+  it("actual vendored entry keeps HTML, nested lists and encoded Mermaid labels as text", () => {
+    const prefix = "保真回归。".repeat(30);
+    const cases = [
+      { text: `<pre>\n${prefix}\n\n| name | time (ms) |\n| --- | --- |\n| A | 1 |\n| B | 2 |\n| C | 3 |\n\n</pre>`, prompt: "比较区别" },
+      { text: `${prefix}\n\n- - 第一项\n- - 第二项\n- - 第三项`, prompt: "制定计划" },
+      { text: `${prefix}\n\n- - -\n- - -\n- - -`, prompt: "制定计划" },
+      { text: `${prefix}\n\n\`\`\`mermaid\nflowchart TD\nA["#9829;"] --> B[结束]\n\`\`\``, prompt: "讲解" },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const output = prepareSenseWeave({ id: `regression-${index}`, text: item.text }, item.prompt);
+      expect(output.enhanced).toBe(false);
+      expect(output.segments.map(segment => segment.source).join("")).toBe(item.text);
+    }
   });
 
   it("splits a finished answer losslessly and keeps short or hint answers as text", () => {
@@ -65,11 +80,24 @@ describe("MessageList with chatSenseWeave", () => {
     const start = diagramAnswer.indexOf("```mermaid");
     expect(html).toContain(`data-src-start="${start}"`);
     expect(html).toContain("注意：减速到零之后物体不会反向运动。");
-    expect(html).not.toContain("flowchart LR");
+    expect(html).not.toContain("flowchart TD");
   });
 
   it("an enhanced answer does not also get the rules-planner 图解", () => {
     expect(render("on", true)).not.toContain("data-message-artifact");
+  });
+
+  it("trusted hint mode and host gating keep enhanced components out of the real message renderer", () => {
+    for (const override of [{ mode: "hint" as const }, {}]) {
+      const gates = structuredClone(CLOSED_CAPABILITIES.senseWeaveGates);
+      if (!override.mode) gates.presets.explain = ["prose"];
+      const html = renderToStaticMarkup(createElement(OpeningCapabilitiesContext.Provider,
+        { value: { ...CLOSED_CAPABILITIES, chatProse: true, chatSenseWeave: "on", senseWeaveGates: gates } },
+        createElement(MessageList, { messages: [messages[0]!, { ...messages[1]!, ...override }] }),
+      ));
+      expect(html).not.toContain("data-senseweave-block");
+      expect(html).toContain("flowchart TD");
+    }
   });
 
   it("streaming answers are never split", () => {

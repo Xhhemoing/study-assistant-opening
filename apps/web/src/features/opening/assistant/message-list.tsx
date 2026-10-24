@@ -20,6 +20,7 @@ import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
 import { SenseWeaveAnswer, SenseWeaveDiagnostics } from "./senseweave-answer";
 import { prepareSenseWeave } from "./senseweave-host";
+import { observeSenseWeave } from "./senseweave-telemetry";
 import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
 import { assistantStarters, type AssistantStarter } from "./assistant-starters";
@@ -64,7 +65,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
 }
 
 export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
-  const { chatArtifacts, chatProse, chatSenseWeave } = useOpeningCapabilities();
+  const { chatArtifacts, chatProse, chatSenseWeave, senseWeaveGates } = useOpeningCapabilities();
   const diagnostics = useDiagnosticsEnabled();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -107,10 +108,17 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     for (const message of messages) {
       if (message.role === "user") { question = message.text; continue; }
       if (message.status && message.status !== "complete" || !message.text) continue;
-      prepared[message.id] = prepareSenseWeave(message, question);
+      prepared[message.id] = prepareSenseWeave(message, question, senseWeaveGates, studyMode);
     }
     return prepared;
-  }, [senseWeaveMode, messages]);
+  }, [senseWeaveMode, messages, senseWeaveGates, studyMode]);
+  useEffect(() => {
+    if (senseWeaveMode === "off") return;
+    for (const message of messages) {
+      const prepared = senseWeave[message.id];
+      if (prepared) observeSenseWeave(prepared, message.text.length, senseWeaveGates.version, senseWeaveMode === "on", message.id);
+    }
+  }, [messages, senseWeave, senseWeaveMode, senseWeaveGates]);
   const artifacts = useMemo(() => {
     if (!artifactsEnabled) return {};
     const planned = artifactsForMessages(messages);

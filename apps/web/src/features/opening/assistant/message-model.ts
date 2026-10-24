@@ -10,6 +10,8 @@ export type ChatMessageView = {
   citations: Citation[];
   citationLabels: string[];
   status?: TurnRecord["status"];
+  /** Trusted stored/request mode takes precedence over question keyword inference. */
+  mode?: TurnRecord["mode"];
   origin?: "saved" | "ephemeral";
   provenanceId?: string | null;
   savedTurnId?: string;
@@ -66,6 +68,7 @@ export function messagesFromTurns(turns: readonly TurnRecord[]): ChatMessageView
     citations: turn.citations,
     citationLabels: turn.citations.map((c) => c.label),
     status: turn.status,
+    mode: turn.mode,
     origin: "saved",
     savedTurnId: turn.role === "assistant" ? turn.id : undefined,
     systemQuery: Boolean(turn.systemQuery),
