@@ -4,6 +4,20 @@ import { toSnapshotEvidence } from "./snapshot-evidence";
 
 const now = new Date(learningObservation.occurredAt);
 
+it.each(["disputed", "changed", "unknown"] as const)("does not turn quarantined %s material into a weak point or replace earlier independent success", disposition => {
+  const earlier={...learningObservation,id:"earlier"},later={...learningObservation,id:"later",outcome:"incorrect" as const};
+  const evidence={observations:[earlier,later],evidenceContexts:{
+    earlier:qualifiedInput,
+    later:{observation:{...qualifiedInput.observation,outcome:"incorrect" as const,submittedAt:(qualifiedInput.observation.submittedAt??0)+1000},
+      context:{...qualifiedInput.context,...(disposition==="disputed"?{materialAnswerDisputed:true}:{materialAssessmentValidity:disposition})}},
+  }};
+  const mapped=toSnapshotEvidence(evidence,now);
+  expect(mapped.observations.map(row=>row.id)).toEqual(["earlier"]);
+  expect(mapped.summaries[0]?.status).toBe("observed_independent");
+  expect(evidence.observations).toHaveLength(2);
+  expect(toSnapshotEvidence({observations:[later],evidenceContexts:evidence.evidenceContexts},now)).toEqual({summaries:[],observations:[]});
+});
+
 it("preserves requirement and captured item identity through the full-evidence projection", () => {
   const evidence = courseEvidence();
   const mapped = toSnapshotEvidence(evidence, now);

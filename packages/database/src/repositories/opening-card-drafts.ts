@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
+import { materialPageReadable } from "./opening-material-manifest";
 import type { ObservationCardDraft, Scope } from "@aistudy/contracts";
 import { admitLearningSources, learningError } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
@@ -31,6 +32,7 @@ export async function captureOpeningObservationCardOrigin(tx: TransactionSql, sc
       JOIN opening_sources s ON s.id=c.source_id AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
         AND c.source_version=${referenceVersion}
       WHERE c.source_id=${observation.referenceSourceId}
+        AND ${materialPageReadable(tx,"c.source_id","c.source_version","c.page")}
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=c.source_id)
       ORDER BY c.page NULLS LAST,c.start_ms NULLS LAST,c.id LIMIT 8` : [];
     const lineage = await tx`SELECT r.source_ids,r.source_versions,r.reference_source_id,r.reference_check FROM opening_learning_observations r

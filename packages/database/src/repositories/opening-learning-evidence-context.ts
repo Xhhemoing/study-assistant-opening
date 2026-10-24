@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { openingMaterialAssessmentValidity, readOpeningMaterialAssessmentStates, type OpeningMaterialAssessmentState } from "./opening-material-assessment";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { aiEvaluationSchema, serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
@@ -13,6 +14,7 @@ export type OpeningEvidenceDependencies = {
   itemMatches: boolean;
   sourceStates: Array<{ sourceId: string; version: number | null; uploaded: boolean; historicalUnavailable: boolean }>;
   privacySourceIds: string[];
+  materialDependencies: OpeningMaterialAssessmentState;
 };
 export type OpeningEvidenceInput = {
   observation: EvidenceObservation;
@@ -96,6 +98,7 @@ export async function readOpeningLearningEvidenceContexts(
   const problemIds = [...new Set(records.flatMap(row => row.problemId ? [row.problemId] : []))];
   const rootIds = [...new Set(records.map(row => row.rootObservationId ?? row.id))];
   const itemIds = [...new Set(records.flatMap(row => row.itemVersionId ? [row.itemVersionId] : []))];
+  const materialStates = await readOpeningMaterialAssessmentStates(db, scope, records.map(row => row.id));
   const answerConditions = attemptIds.length ? await db`SELECT attempt_id,
       bool_or(COALESCE(payload->'signals' ? 'copied_answer',FALSE)) AS copied_answer,
       bool_or(COALESCE(payload->'signals' ? 'guessed',FALSE)) AS reported_guess
@@ -374,10 +377,14 @@ export async function readOpeningLearningEvidenceContexts(
       assistance: record.assistance, outcome: record.outcome, verdictSource: record.verdictSource,
     };
     const declaredConditions = answerConditions.find(row => row.attempt_id === record.attemptId);
+    const materialDependencies = materialStates.get(record.id)!;
+    const aiEvaluation = aiEvaluationSchema.safeParse(record.aiEvaluation).data ?? null;
     const context: EvidenceEligibilityContext = {
+      materialAnswerDisputed: materialDependencies.disputed,
+      materialAssessmentValidity: openingMaterialAssessmentValidity(aiEvaluation, materialDependencies),
       selfReportedAnswerConditions: { copiedAnswer: declaredConditions?.copied_answer === true, reportedGuess: declaredConditions?.reported_guess === true },
       serverEvaluation: serverEvaluationSchema.safeParse(record.serverEvaluation).data ?? null,
-      aiEvaluation: aiEvaluationSchema.safeParse(record.aiEvaluation).data ?? null,
+      aiEvaluation,
       // Every existing manual-check write is learner-owned. Persisted JSON and
       // historical checker ids cannot grant independent-review authority.
       referenceCheckAuthority: "learner",
@@ -493,7 +500,7 @@ export async function readOpeningLearningEvidenceContexts(
     if (!identityCurrent && context.version?.applicability !== "privacy_excluded") context.version = { applicability: "unavailable" };
     result[record.id] = { observation, context, dependencies: {
       helpRevision: history.reduce((latest, row) => Math.max(latest, Number(row.history_revision ?? 0)), 0),
-      itemMatches, sourceStates, privacySourceIds,
+      itemMatches, sourceStates, privacySourceIds, materialDependencies,
     } };
   }
   return result;

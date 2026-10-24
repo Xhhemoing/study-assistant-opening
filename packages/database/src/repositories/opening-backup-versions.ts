@@ -36,7 +36,8 @@ export async function readOpeningBackupVersionRows(tx: TransactionSql, scope: Op
     SELECT r.source_id,r.version,s.workspace_id,
       CASE WHEN r.version=s.version THEN s.bytes ELSE v.bytes END AS bytes,
       CASE WHEN r.version=s.version THEN s.sha256 ELSE v.sha256 END AS sha256,
-      COALESCE(v.availability,CASE WHEN r.version=s.version THEN 'available' ELSE 'unknown' END) AS availability
+      COALESCE(v.availability,CASE WHEN r.version=s.version THEN 'available' ELSE 'unknown' END) AS availability,
+      v.material_manifest,COALESCE(v.material_manifest_revision,0) AS material_manifest_revision,v.material_reviewed_by,v.material_reviewed_at
     FROM refs r JOIN owned s ON s.id=r.source_id
     LEFT JOIN opening_source_versions v ON v.source_id=r.source_id AND v.version=r.version AND v.workspace_id=${w}
     WHERE r.version IS NOT NULL ORDER BY r.source_id,r.version`;

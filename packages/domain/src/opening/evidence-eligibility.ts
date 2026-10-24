@@ -145,7 +145,7 @@ export function evaluateEvidenceEligibility(
     usableForCurrentVersion: "unknown",
     usableForDelayedCheck: "unknown",
     reasonCodes: [],
-    policyVersion: "opening-evidence-v3",
+    policyVersion: "opening-evidence-v4",
   };
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     result.reasonCodes.push("observation_identity_incomplete");
@@ -193,10 +193,22 @@ export function evaluateEvidenceEligibility(
       reasons.add("exam_answer_history_unknown");
     }
   }
-  result.verifiedCorrect = observation.verdictSource === "ai_graded"
+  const materialWithheld = context.materialAnswerDisputed || context.materialAssessmentValidity === "changed"
+    || context.materialAssessmentValidity === "unknown";
+  // Withheld reference evidence is neither a correct nor an incorrect performance.
+  // Do not leave affirmative grading reason codes for downstream raw-reason readers.
+  result.verifiedCorrect = materialWithheld ? "unknown" : observation.verdictSource === "ai_graded"
     ? evaluateAiCorrectness(observation, context.aiEvaluation, reasons)
     : evaluateCorrectness(observation, context.referenceCheck, reasons, context.serverEvaluation, context.referenceCheckAuthority);
   result.usableForCurrentVersion = evaluateVersion(observation, context.version, reasons);
+  if (context.materialAssessmentValidity === "changed" || context.materialAssessmentValidity === "unknown") {
+    if (result.usableForCurrentVersion !== "no") result.usableForCurrentVersion = "unknown";
+    reasons.add(context.materialAssessmentValidity === "changed" ? "material_assessment_changed" : "material_assessment_provenance_unknown");
+  }
+  if (context.materialAnswerDisputed) {
+    result.usableForCurrentVersion = "no";
+    reasons.add("material_answer_disputed");
+  }
   result.usableForDelayedCheck = evaluateDelayedCheck(
     observation,
     context.delayedCheck,

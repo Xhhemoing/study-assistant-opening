@@ -14,6 +14,7 @@
 
 ## 进行中
 
+- 2026-10-24 开发总结/提交准备：[统一进展、问题与待确认清单](plans/2026-10-24-study-development-summary.md)。提交前已核对主干 `d6ec6a6f` 与 PR-A `20c862b0`；本页下方旧时点记录不代表当前合并/部署状态，后续单独归档。
 - 期中 PR-A：`feat/sprint-a-grading-ocr-outline-20261024` 基于含 #114 的主线，后台批改/OCR、夹具、大纲已拆出，原生 PG 79 项及相关包类型通过；完整 CI、真实批改准确率和用户浏览器验收待完成。
 - PR-B 答案隔离独立收口；PR-C Explore 1–2A 已在 `feat/sprint-c-explore-preview-20261024` 按增量拆出，统一 runtime flag 默认 OFF，保留 UI v5；依赖 B 合入后验收 API/DB 与类型，不随 PR-A 发布。阶段 3–4 冻结，详见 [C 交付边界](plans/2026-10-24-explore-learning/DELIVERY.md)。
 

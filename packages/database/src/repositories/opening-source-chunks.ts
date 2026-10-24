@@ -4,10 +4,11 @@ import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { materialPageReadable } from "./opening-material-manifest";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
 export type OpeningSourceChunksRepository = { replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[] }): Promise<void>; listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>; listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>; listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>; };
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
-async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number): Promise<SourceChunk[]> { const rows = await sql`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id = c.source_id WHERE c.source_id = ${sourceId} AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded' AND c.source_version = ${version} ORDER BY c.page NULLS LAST, c.created_at`; return rows.map((row) => mapChunk(row as Record<string, unknown>)); }
+async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number): Promise<SourceChunk[]> { const rows = await sql`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id = c.source_id WHERE c.source_id = ${sourceId} AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded' AND c.source_version = ${version} AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")} ORDER BY c.page NULLS LAST, c.created_at`; return rows.map((row) => mapChunk(row as Record<string, unknown>)); }
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
   return chunks.some((chunk) => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey?.trim()));
 }
@@ -40,6 +41,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
         AND s.parse_state = 'ready' AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         AND c.source_version = s.version
         AND c.source_id IN ${sql(sourceIds)}
+        AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at
     `;
     return rows.map((row) => mapChunk(row as Record<string, unknown>));

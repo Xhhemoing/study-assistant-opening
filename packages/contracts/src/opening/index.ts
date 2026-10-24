@@ -1,3 +1,4 @@
+export * from "./material-manifest";
 export {
   DOCLING_PINNED_VERSION,
   uuidSchema,

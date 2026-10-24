@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { openingMaterialAssessmentStateQuery } from "./opening-material-assessment";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
@@ -49,8 +50,10 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
           AND exam_identity.requirement_key IS NOT DISTINCT FROM o.requirement_key
           ELSE COALESCE(o.server_evaluation->>'evaluatorVersion','')<>'exam-choice-exact-v1'
             AND COALESCE(o.requirement_key,'') NOT LIKE 'exam-skill:%' END AS live_item_matches,
-      COALESCE(sources.states,'[]'::jsonb) AS live_source_states,COALESCE(privacy.ids,ARRAY[]::text[]) AS live_privacy_ids
+      COALESCE(sources.states,'[]'::jsonb) AS live_source_states,COALESCE(privacy.ids,ARRAY[]::text[]) AS live_privacy_ids,
+      material.state AS live_material_dependencies
     FROM heads o
+    CROSS JOIN LATERAL (${openingMaterialAssessmentStateQuery(db, "o")}) material
     LEFT JOIN LATERAL (SELECT identity_current,requirement_key,observation_id FROM (${openingExamIdentityStateQuery(db, scope)}) identity
       WHERE identity.attempt_id=o.attempt_id OR identity.observation_id=o.current_root_id LIMIT 1) exam_identity ON TRUE
     LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_help_exposures h
@@ -93,10 +96,13 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
       WHERE chain.workspace_id=o.workspace_id AND chain.owner_user_id=o.owner_user_id
         AND COALESCE(chain.root_observation_id,chain.id)=o.current_root_id AND refs.source_id IS NOT NULL AND refs.source_id<>'') privacy ON TRUE
   ) SELECT live.*,p.head_observation_id AS projected_head_id,p.input_revision AS projected_input_revision,p.policy_version AS projected_policy_version,
+    p.source_states AS projected_source_states,
     p.independent_attempt,p.verified_correct,p.usable_for_current_version,p.usable_for_delayed_check,p.reason_codes,p.version_applicability,
     COALESCE(p.head_observation_id=live.id AND p.head_revision=live.workspace_history_revision
       AND p.policy_version=${openingEligibilityPolicyVersion()} AND p.help_revision=live.live_help_revision
-      AND p.item_matches=live.live_item_matches AND p.source_states=live.live_source_states AND p.privacy_source_ids=live.live_privacy_ids,FALSE) AS fresh,
+      AND p.item_matches=live.live_item_matches
+      AND p.source_states=jsonb_build_object('sourceStates',live.live_source_states,'materialDependencies',live.live_material_dependencies)
+      AND p.privacy_source_ids=live.live_privacy_ids,FALSE) AS fresh,
     EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=live.workspace_id AND e.source_id::text=ANY(live.live_privacy_ids)) AS privacy_excluded
     FROM live LEFT JOIN opening_learning_eligibility p ON p.workspace_id=live.workspace_id AND p.owner_user_id=live.owner_user_id AND p.root_observation_id=live.current_root_id`;
 }
@@ -120,16 +126,20 @@ async function writeProjections(tx: TransactionSql, scope: Scope, entries: Array
   const inputs = entries.map(({ row, evidence }) => {
     const eligibility = evaluateEvidenceEligibility(evidence.observation, evidence.context), d = evidence.dependencies;
     return { root_id: String(row.current_root_id ?? row.root_observation_id ?? row.id), head_id: row.id, head_revision: row.workspace_history_revision,
-      policy_version: eligibility.policyVersion, help_revision: d.helpRevision, item_matches: d.itemMatches, source_states: d.sourceStates,
+      policy_version: eligibility.policyVersion, help_revision: d.helpRevision, item_matches: d.itemMatches,
+      // Reuse the rebuildable JSONB dependency column. Old array-only projections
+      // are stale, without a migration or conflating metadata with byte identity.
+      source_states: { sourceStates: d.sourceStates, materialDependencies: d.materialDependencies },
       privacy_ids: d.privacySourceIds, independent_attempt: eligibility.independentAttempt, verified_correct: eligibility.verifiedCorrect,
       usable_current: eligibility.usableForCurrentVersion, usable_delayed: eligibility.usableForDelayedCheck, reasons: eligibility.reasonCodes,
       applicability: evidence.context.version?.applicability ?? "version_unknown", old_head: row.projected_head_id ?? null,
-      old_revision: row.projected_input_revision ?? null, old_policy: row.projected_policy_version ?? null };
+      old_revision: row.projected_input_revision ?? null, old_policy: row.projected_policy_version ?? null,
+      old_source_states: row.projected_source_states ?? null };
   });
   const installed = await tx`WITH inputs AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(inputs)}::text::jsonb) AS x(
       root_id uuid,head_id uuid,head_revision bigint,policy_version text,help_revision bigint,item_matches boolean,source_states jsonb,
       privacy_ids text[],independent_attempt text,verified_correct text,usable_current text,usable_delayed text,reasons text[],applicability text,
-      old_head uuid,old_revision bigint,old_policy text))
+      old_head uuid,old_revision bigint,old_policy text,old_source_states jsonb))
     INSERT INTO opening_learning_eligibility(workspace_id,owner_user_id,root_observation_id,head_observation_id,head_revision,input_revision,
       policy_version,help_revision,item_matches,source_states,privacy_source_ids,independent_attempt,verified_correct,usable_for_current_version,usable_for_delayed_check,reason_codes,version_applicability)
     SELECT ${scope.workspaceId},${scope.ownerUserId},root_id,head_id,head_revision,${revision},policy_version,help_revision,item_matches,source_states,
@@ -142,7 +152,8 @@ async function writeProjections(tx: TransactionSql, scope: Scope, entries: Array
     WHERE ${!compare} OR EXISTS(SELECT 1 FROM inputs i WHERE i.root_id=opening_learning_eligibility.root_observation_id
       AND opening_learning_eligibility.head_observation_id IS NOT DISTINCT FROM i.old_head
       AND opening_learning_eligibility.input_revision IS NOT DISTINCT FROM i.old_revision
-      AND opening_learning_eligibility.policy_version IS NOT DISTINCT FROM i.old_policy)
+      AND opening_learning_eligibility.policy_version IS NOT DISTINCT FROM i.old_policy
+      AND opening_learning_eligibility.source_states IS NOT DISTINCT FROM i.old_source_states)
     RETURNING root_observation_id`;
   return installed.length;
 }
@@ -174,7 +185,8 @@ export async function repairOpeningLearningEligibility(sql: Sql, scope: Scope, f
       const current = byRoot.get(String(row.current_root_id)), evidence = batch.inputs[String(row.id)]!, d = evidence.dependencies;
       if (!current || current.id !== row.id || current.privacy_excluded || Number(current.live_help_revision) !== d.helpRevision
         || current.live_item_matches !== d.itemMatches || !isDeepStrictEqual(current.live_source_states, d.sourceStates)
-        || !isDeepStrictEqual(current.live_privacy_ids, d.privacySourceIds)) continue;
+        || !isDeepStrictEqual(current.live_privacy_ids, d.privacySourceIds)
+        || !isDeepStrictEqual(current.live_material_dependencies, d.materialDependencies)) continue;
       accepted.push({ row, evidence });
     }
     return writeProjections(tx, scope, accepted, batch.revision, true);

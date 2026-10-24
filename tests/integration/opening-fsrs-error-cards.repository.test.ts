@@ -73,7 +73,15 @@ it("creates one source-linked error card, suspends it on correction/retraction a
   expect((await cards.getState({ ...f.scope, cardId: auto.id }))?.reps).toBe(1);
   expect((await cards.listQueue({ ...f.scope, mode: "free" })).map(row => row.card.id)).toEqual([manual.id]);
   await expect(cards.grade({ ...f.scope, cardId: auto.id, grade: "good", idempotencyKey: randomUUID(), occurredAt: now.toISOString() })).rejects.toMatchObject({ code: "CONFLICT" });
-  const regraded = await grading.apply(f.scope, { observationId: corrected.headObservationId }, proposal, "test");
+  await expect(grading.apply(f.scope, { observationId: corrected.headObservationId }, proposal, "test"))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await cards.getCard({ workspaceId: f.scope.workspaceId, cardId: auto.id })).autoPaused).toBe(true);
+  const changedAnswer = await reviseOpeningLearningObservation(f.sql, f.scope, {
+    rootObservationId: original.id, revisesObservationId: corrected.headObservationId,
+    expectedHead: corrected.headObservationId, revisionKind: "replace", reason: "修改原答案后重新核对", clientKey: randomUUID(),
+    replacement: { answer: "A_DIFFERENT_WRONG_ANSWER", outcome: "unverified", assistance: graded.assistance },
+  });
+  const regraded = await grading.apply(f.scope, { observationId: changedAnswer.headObservationId }, proposal, "test");
   expect((await cards.listCards(f.scope))).toHaveLength(2);
   expect((await cards.getCard({ workspaceId: f.scope.workspaceId, cardId: auto.id })).autoPaused).toBe(false);
   await reviseOpeningLearningObservation(f.sql, f.scope, { rootObservationId: original.id, revisesObservationId: regraded.id, expectedHead: regraded.id,

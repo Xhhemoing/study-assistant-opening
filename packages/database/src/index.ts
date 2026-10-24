@@ -1,5 +1,8 @@
 export const DATABASE_PACKAGE = "@aistudy/database" as const;
 export { createOpeningConceptPreviewRepository } from "./repositories/opening-concept-preview";
+export * from "./repositories/opening-material-answer-delivery";
+export * from "./repositories/opening-material-manifest";
+export * from "./repositories/opening-material-questions";
 export * from "./schema/library";
 export * from "./schema/courses";
 export * from "./schema/goals";

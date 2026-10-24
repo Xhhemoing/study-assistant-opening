@@ -106,7 +106,11 @@ it.each([false,true])("restores attempt facts, revision and historical objects i
       await fixture.sql.begin(async tx => {
         for (const { table } of [...plan.plan.batches].reverse()) await tx.unsafe(`DELETE FROM ${table}`);
         for (const { table, rows } of plan.plan.batches) if (rows) {
-          await tx.unsafe(`INSERT INTO ${table} SELECT * FROM json_populate_recordset(NULL::${table}, $1::text::json)`, [JSON.stringify(archive.metadata.tables[table])]);
+          // Select only archived columns so newly added SQL defaults remain defaults,
+          // rather than json_populate_recordset turning absent fields into NULL.
+          const archivedRows = archive.metadata.tables[table] as Record<string, unknown>[];
+          const columns = Object.keys(archivedRows[0]!).map(name => `"${name.replaceAll('"', '""')}"`).join(',');
+          await tx.unsafe(`INSERT INTO ${table} (${columns}) SELECT ${columns} FROM json_populate_recordset(NULL::${table}, $1::text::json)`, [JSON.stringify(archivedRows)]);
         }
       });
       const history = await readOpeningObservationHistory(fixture.sql,fixture.scope,observation.id);

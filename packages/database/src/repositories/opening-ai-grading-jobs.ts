@@ -5,6 +5,7 @@ import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "
 import { isOpeningManualGradingRevision, readOpeningAiGradingContext } from "./opening-ai-grading-context";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
+import { isMaterialItemDisputed } from "./opening-material-questions";
 
 const kind = "grade-observation";
 export const openingAiGradingJobKey = (scope: Scope, input: GradeObservationJobPayload) =>
@@ -20,6 +21,9 @@ export async function enqueueOpeningAiGradingInTx(tx: TransactionSql, scope: Sco
   const input = gradeObservationJobPayloadSchema.parse(raw);
   const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   if (!workspace) throw learningError("NOT_FOUND", "workspace not found");
+  const [answer]=await tx`SELECT item_version_id FROM opening_learning_observations WHERE id=${input.observationId}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (await isMaterialItemDisputed(tx,scope,answer?.item_version_id as string | null)) return;
   const [created] = await tx`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,privacy_epoch)
     VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${openingAiGradingJobKey(scope, input)},${kind},${tx.json(input)},${workspace.privacy_epoch})
     ON CONFLICT(workspace_id,key) DO NOTHING RETURNING id`;
@@ -118,7 +122,8 @@ export function createOpeningAiGradingJobRepository(sql: Sql) {
             WHERE id=${payload.observationId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
           const ledger = await readOpeningAiGradingLedger(tx, scope, String(target?.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${payload.observationId}`));
           const matchingResult = head?.ai_evaluation && (head.submitted_intent as { aiGrading?: { input?: { observationId?: string } } })?.aiGrading?.input?.observationId === payload.observationId;
-          const obsolete = workspace.disabled_at != null || !head || Number(head.answer_revision) !== payload.answerRevision || head.revision_kind === "retract"
+          const disputed = head && await isMaterialItemDisputed(tx,scope,head.item_version_id as string | null);
+          const obsolete = workspace.disabled_at != null || !head || disputed || Number(head.answer_revision) !== payload.answerRevision || head.revision_kind === "retract"
             || Number(workspace.privacy_epoch) !== Number(job.privacy_epoch)
             || head.id !== payload.observationId && !matchingResult;
           const saved = !obsolete && matchingResult;

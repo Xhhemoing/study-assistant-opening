@@ -1,4 +1,5 @@
 import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
+import { assertTeachingMaterialsReadable } from "./opening-material-teaching";
 import { teachingMisconceptionsSchema, teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer } from "@aistudy/domain";
@@ -50,6 +51,7 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
     throw learningError("CONFLICT", "the question requires all original teaching materials");
   }
   const references = row.source_refs as TeachingSourceRef[];
+  await assertTeachingMaterialsReadable(tx,scope,references);
   for (const reference of references) {
     const version = reference.version == null ? NaN : Number(reference.version);
     if (!(reference.sourceId in sourceVersions) || !Number.isInteger(version) || sourceVersions[reference.sourceId] !== version) {

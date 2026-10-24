@@ -4,6 +4,7 @@ import type { MaterialSegment } from "@aistudy/ai";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { mapChunk } from "./opening-source-chunks";
+import { materialPageReadable } from "./opening-material-manifest";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 export { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
@@ -19,7 +20,9 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=w.id AND e.source_id=s.id)`;
     if (!source) return null;
     const rows = await db`SELECT c.* FROM opening_source_chunks c WHERE c.source_id=${sourceId}
-      AND c.source_version=${Number(source.version)} ORDER BY c.page NULLS LAST,c.id`;
+      AND c.source_version=${Number(source.version)}
+      AND ${materialPageReadable(db, "c.source_id", "c.source_version", "c.page")}
+      ORDER BY c.page NULLS LAST,c.id`;
     return { sourceId, sourceVersion: Number(source.version), privacyEpoch: Number(source.privacy_epoch), chunks: rows.map(row => mapChunk(row)) };
   };
   return {
@@ -32,6 +35,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(sourceIds)} AND s.upload_state='uploaded'
           AND c.source_version<=s.version AND (c.source_version<s.version OR s.parse_state='ready')
+          AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=w.id AND e.source_id=s.id)`;
       const allowed = new Map(rows.map(row => [String(row.id), Number(row.source_version)]));
       return { chunks: chunks.filter(chunk => allowed.get(chunk.id) === chunk.sourceVersion), privacyEpoch: Number(owner.privacy_epoch) };
@@ -53,10 +57,12 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
     },
     async listIndexedKeys(scope: OpeningScope, snapshot: SourceIndexSnapshot, model: ModelIdentity): Promise<string[]> {
       const rows = await sql`SELECT e.chunk_id,e.segment_index FROM opening_source_embeddings e
+        JOIN opening_source_chunks c ON c.id=e.chunk_id AND c.source_id=e.source_id AND c.source_version=e.source_version
         JOIN opening_sources s ON s.id=e.source_id JOIN workspaces w ON w.id=s.workspace_id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId} AND s.id=${snapshot.sourceId}
-          AND s.version=${snapshot.sourceVersion} AND e.source_version=s.version
+          AND s.version=${snapshot.sourceVersion} AND e.source_version=s.version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${model.modelKey} AND e.dimensions=${model.dimensions}
+          AND ${materialPageReadable(sql, "c.source_id", "c.source_version", "c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)`;
       return rows.map(row => `${row.chunk_id}:${row.segment_index}`);
     },
@@ -95,6 +101,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+          AND ${materialPageReadable(sql,"c.source_id","c.source_version","c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
       ) SELECT *,embedding <=> ${JSON.stringify(input.vector)}::vector AS distance FROM authorized
         ORDER BY distance,id,segment_index LIMIT 48`;
@@ -102,10 +109,13 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
     },
     async hasIndex(scope: OpeningScope, input: ModelIdentity & { sourceIds: string[] }): Promise<boolean> {
       if (!input.sourceIds.length) return false;
-      const rows = await sql`SELECT 1 FROM opening_source_embeddings e JOIN opening_sources s ON s.id=e.source_id
+      const rows = await sql`SELECT 1 FROM opening_source_embeddings e
+        JOIN opening_source_chunks c ON c.id=e.chunk_id AND c.source_id=e.source_id AND c.source_version=e.source_version
+        JOIN opening_sources s ON s.id=e.source_id
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=e.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+          AND ${materialPageReadable(sql, "c.source_id", "c.source_version", "c.page")}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id) LIMIT 1`;
       return rows.length > 0;
     },
