@@ -43,7 +43,7 @@ describe("attempt submit: server-side retest timing + independence (PR-B §4.1)"
     retestRows.mockReturnValue([{ not_before_at: hourAgo(), recommended_at: hourAgo(), scheduled_start_at: null }]);
     const { createOpeningAttemptService } = await import("./attempt-service");
     await createOpeningAttemptService(sql).submit(scope, ATTEMPT, { ...body, retestId: RETEST });
-    expect(insertObservation).toHaveBeenCalledWith(scope, expect.objectContaining({ retestId: RETEST, assistance: "independent", nodeId: NODE }));
+    expect(insertObservation).toHaveBeenCalledWith(scope, expect.objectContaining({ retestId: RETEST, assistance: "independent", nodeId: NODE }), { workSource: undefined });
   });
 
   it("client claims independent but a hint was delivered: stored as hinted, no skill evidence", async () => {

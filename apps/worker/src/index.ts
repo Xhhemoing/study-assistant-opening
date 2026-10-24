@@ -19,6 +19,7 @@ import { createSerialTask } from "./runtime/lifecycle";
 import { dispatchPending, dispatchTutorTurns } from "./runtime/dispatch";
 import { createHandlers, handlerForKind } from "./runtime/handlers";
 import { prepareWorkerRole } from "./runtime/worker-role";
+import { validateParserPaths } from "./parsers/parser-preflight";
 import { createParserHealthLease } from "./runtime/parser-health-lease";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
@@ -60,6 +61,9 @@ export async function main(): Promise<void> {
   // PR-H: full registry validation (strict booleans, dependencies, no NEXT_PUBLIC_*) before any connection.
   const { env } = loadServerConfig(process.env, "worker") as Extract<ReturnType<typeof loadServerConfig>, { role: "worker" }>;
 
+  // Reject invalid local parser paths before allocating connection resources.
+  // The full OCR inference/report remains inside the managed startup lifecycle.
+  if (env.workerRole !== "learning") await validateParserPaths();
   const openingModel = loadOpeningModelCatalog();
   const embeddingConfig = loadOpeningEmbeddingConfig();
   const redis = createRedisConnection({ url: env.redisUrl });
