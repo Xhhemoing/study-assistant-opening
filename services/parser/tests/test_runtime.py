@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from opening_parser import __main__ as cli
 
 
@@ -62,15 +64,17 @@ def test_table_body_is_kept_on_its_physical_page():
     assert cli.texts_by_page(doc)[1] == ['caption', '| x | y |\n| 1 | 2 |']
 
 
-def test_cross_page_text_uses_original_character_spans():
-    # Sanitization changes offsets (the ligature expands); charspan refers to orig.
+def test_document_only_cross_page_text_rejects_original_character_spans():
+    # Even plausible orig offsets are not trustworthy after Docling 2.126 merges.
+    # Ligature expansion is another reason not to slice the merged text.
     original = 'ﬁrst page\n第二页'
     doc = SimpleNamespace(pages=[1, 2], texts=[SimpleNamespace(
         orig=original, text='first page 第二页', prov=[
             SimpleNamespace(page_no=1, charspan=(0, 9)),
             SimpleNamespace(page_no=2, charspan=(10, 13)),
         ])])
-    assert cli.texts_by_page(doc) == {1: ['ﬁrst page'], 2: ['第二页']}
+    with pytest.raises(RuntimeError, match='pre-merge assembly required'):
+        cli.texts_by_page(doc)
 
 
 def test_multiple_fragments_on_one_page_preserve_sanitized_text_once():
@@ -82,14 +86,67 @@ def test_multiple_fragments_on_one_page_preserve_sanitized_text_once():
     assert cli.texts_by_page(doc) == {1: ['first second']}
 
 
-def test_cross_page_fragments_keep_their_order_and_empty_pages():
+def test_document_only_cross_page_fragments_reject_even_with_empty_pages():
     doc = SimpleNamespace(pages=[1, 2, 3], texts=[SimpleNamespace(
         orig='one two three', text='one two three', prov=[
             SimpleNamespace(page_no=1, charspan=(0, 3)),
             SimpleNamespace(page_no=1, charspan=(4, 7)),
             SimpleNamespace(page_no=2, charspan=(8, 13)),
         ])])
-    assert cli.texts_by_page(doc) == {1: ['one', 'two'], 2: ['three'], 3: []}
+    with pytest.raises(RuntimeError, match='pre-merge assembly required'):
+        cli.texts_by_page(doc)
+
+
+def premerge_conversion(*page_texts):
+    """Real Docling page data; no converter, backend, models or network."""
+    from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStatus, InputFormat, Page, TextElement
+    from docling.datamodel.document import ConversionResult, InputDocument
+    from docling_core.types.doc import BoundingBox, DocItemLabel, DoclingDocument, Size
+
+    size = Size(width=612, height=792)
+    pages = []
+    doc = DoclingDocument(name='runtime-premerge')
+    # Non-one-based physical page numbers catch accidental reindexing.
+    for number, texts in enumerate(page_texts, 11):
+        elements = [TextElement(
+            id=index, label=DocItemLabel.TEXT, page_no=number, text=text,
+            cluster=Cluster(id=index, label=DocItemLabel.TEXT,
+                bbox=BoundingBox(l=72, t=72 + index * 40, r=500, b=100 + index * 40)),
+        ) for index, text in enumerate(texts, 1)]
+        pages.append(Page(page_no=number, size=size, assembled=AssembledUnit(elements=elements)))
+        doc.add_page(page_no=number, size=size)
+    source = InputDocument.model_construct(
+        file=Path('runtime-premerge.pdf'), format=InputFormat.PDF, document_hash='0' * 64)
+    return ConversionResult(input=source, status=ConversionStatus.SUCCESS, pages=pages,
+        assembled=AssembledUnit(elements=[element for page in pages for element in page.assembled.elements]),
+        document=doc)
+
+
+def test_premerge_fragments_keep_physical_order_and_empty_pages():
+    conversion = premerge_conversion(['one', 'two'], ['three'], [], ['four'])
+    before = [page.assembled.model_dump_json() for page in conversion.pages]
+    # Document mapping order is not the physical page assembly order.
+    conversion.document.pages = dict(reversed(list(conversion.document.pages.items())))
+    output = cli.texts_by_page(conversion)
+    assert list(output.items()) == [(11, ['one', 'two']), (12, ['three']), (13, []), (14, ['four'])]
+    assert [page.assembled.model_dump_json() for page in conversion.pages] == before
+
+
+def test_premerge_cross_page_ligature_text_is_not_resliced():
+    from docling.models.stages.page_assemble.page_assemble_model import PageAssembleModel, PageAssembleOptions
+    from docling.models.stages.reading_order.readingorder_model import ReadingOrderModel, ReadingOrderOptions
+
+    # Real pre-merge page assemblies hold sanitized, page-local text.
+    normalized = PageAssembleModel(PageAssembleOptions()).sanitize_text(['ﬁrst inter-'])
+    assert normalized == 'first inter-'
+    conversion = premerge_conversion([normalized], ['national 第二页'], [])
+    before = [page.assembled.model_dump_json() for page in conversion.pages]
+    conversion.document = ReadingOrderModel(ReadingOrderOptions())(conversion)
+    assert [item.text for item in conversion.document.texts] == ['first international 第二页']
+    with pytest.raises(RuntimeError, match='pre-merge assembly required'):
+        cli.texts_by_page(conversion.document)
+    assert cli.texts_by_page(conversion) == {11: ['first inter-'], 12: ['national 第二页'], 13: []}
+    assert [page.assembled.model_dump_json() for page in conversion.pages] == before
 
 
 def test_text_cap_is_preserved(monkeypatch, tmp_path, capsys):
