@@ -7,13 +7,12 @@
     "dev": "next dev --port 3000",
     "build": "node ../../scripts/run-heavy.mjs next build",
     "start": "next start --port 3000",
-    "typecheck": "node ../../scripts/run-heavy.mjs tsc -b tsconfig.typecheck.json --stopBuildOnErrors",
+    "typecheck": "node ../../scripts/run-heavy.mjs tsc -p tsconfig.json --noEmit && node ../../scripts/run-heavy.mjs tsc -p tsconfig.tests.json --noEmit",
     "test": "node ../../scripts/run-heavy.mjs vitest run"
   },
   "aistudy": {
     "typecheck": {
-      "project": "tsconfig.typecheck.json",
-      "mode": "build"
+      "projects": ["tsconfig.json", "tsconfig.tests.json"]
     }
   },
   "dependencies": {

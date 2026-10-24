@@ -5,11 +5,11 @@
  * Check set is derived from configuration only, identically on every platform:
  *   - every workspace (root package.json "workspaces" globs, in glob order then name)
  *     whose package.json defines a "typecheck" script -> `tsc -p tsconfig.json --noEmit`
- *     by default; workspace "aistudy.typecheck": { project, mode: "build" }
- *     selects a solution checked with `tsc -b <project> --stopBuildOnErrors`;
+ *     by default; workspace "aistudy.typecheck": { projects: [...] }
+ *     selects multiple projects, each checked with `tsc -p <project> --noEmit`;
  *     run with cwd = that workspace;
  *   - plus root-level projects listed in package.json "aistudy.typecheck.extraProjects"
- *     (path strings or { project, mode } objects). Missing configs fail closed.
+ *     (path strings). Missing configs fail closed.
  *
  * Resource policy: the orchestrator takes the heavy-task slot ONCE (by re-executing
  * itself through scripts/run-heavy.mjs unless HERMES_HEAVY_LOCK_HELD=1) and then runs
@@ -54,21 +54,22 @@ export function deriveTypecheckSet(rootDir = root) {
       if (!existsSync(manifest)) continue;
       const workspace = JSON.parse(readFileSync(manifest, "utf8"));
       if (workspace.scripts?.typecheck) {
-        const config = workspace.aistudy?.typecheck ?? {};
-        const project = config.project ?? "tsconfig.json";
-        const mode = config.mode ?? "project";
-        if (!["project", "build"].includes(mode)) throw new Error(`invalid typecheck mode in ${dir}: ${mode}`);
-        if (!existsSync(path.join(rootDir, dir, project))) throw new Error(`missing typecheck project: ${dir}/${project}`);
-        set.push({ name: dir, cwd: dir, project, mode });
+        const config = workspace.aistudy?.typecheck;
+        const projects = config === undefined ? ["tsconfig.json"] : config.projects;
+        if (!Array.isArray(projects) || projects.length === 0 || projects.some((project) => typeof project !== "string" || !project)) {
+          throw new Error(`invalid typecheck projects in ${dir}`);
+        }
+        for (const project of projects) {
+          if (!existsSync(path.join(rootDir, dir, project))) throw new Error(`missing typecheck project: ${dir}/${project}`);
+          set.push({ name: projects.length === 1 ? dir : `${dir}/${project}`, cwd: dir, project });
+        }
       }
     }
   }
-  for (const entry of pkg.aistudy?.typecheck?.extraProjects ?? []) {
-    const config = typeof entry === "string" ? { project: entry } : entry;
-    const { project, mode = "project" } = config;
-    if (!["project", "build"].includes(mode)) throw new Error(`invalid typecheck mode: ${mode}`);
+  for (const project of pkg.aistudy?.typecheck?.extraProjects ?? []) {
+    if (typeof project !== "string" || !project) throw new Error("invalid extra typecheck project");
     if (!existsSync(path.join(rootDir, project))) throw new Error(`missing typecheck project: ${project}`);
-    set.push({ name: project, cwd: ".", project, mode });
+    set.push({ name: project, cwd: ".", project });
   }
   return set;
 }
@@ -92,11 +93,8 @@ function parseArgs(argv) {
 }
 
 export function tscArgs(task) {
-  // TS 5.8 build supports independent noEmit leaves beneath a solution. Do not
-  // add leaf-to-leaf references without a real composite/declaration boundary.
-  return task.mode === "build"
-    ? ["-b", task.project, "--stopBuildOnErrors"]
-    : ["-p", task.project, "--noEmit"];
+  // Project mode checks versions of imported non-root sources in warm caches too.
+  return ["-p", task.project, "--noEmit"];
 }
 
 function tscCommand(task) {

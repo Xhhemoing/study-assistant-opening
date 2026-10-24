@@ -30,7 +30,7 @@ describe("scripts/typecheck.mjs", () => {
     expect(r.stdout).toContain("packages/database");
     expect(r.stdout).toContain("packages/jingwei");
     expect(r.stdout).toContain("tsconfig.e2e.json");
-    expect(r.stdout.trim().split("\n")).toHaveLength(10);
+    expect(r.stdout.trim().split("\n")).toHaveLength(11);
   });
 
   it.each([1, 3])("respects --jobs %i as peak concurrency", (jobs) => {
