@@ -1,4 +1,4 @@
-import { ephemeralTurnInputSchema } from "@aistudy/contracts";
+import { ephemeralTurnInputSchema, type TutorMode } from "@aistudy/contracts";
 import { composerMessageText, inferComposerIntent } from "@aistudy/domain";
 import "server-only";
 import { createOpeningAttemptService } from "./learning/attempt-service";
@@ -13,6 +13,7 @@ import {
   createOpeningSourceChunksRepository,
   createOpeningCourseReadySourcesRepository,
   type OpeningConversationRepository,
+  type OpeningConversationScope,
   type OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
@@ -42,7 +43,7 @@ import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "./tutor/ephemeral-system-query";
-import type { SystemQueryPlanner } from "@aistudy/ai";
+import { OpeningModelRoutingError, type SystemQueryPlanner } from "@aistudy/ai";
 
 export async function requireOpeningScope(request: Request) {
   const runtime = getAuthRuntime();
@@ -69,7 +70,27 @@ export function getTutorService(sql: Sql): TutorService {
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
     listReadySourceIdsForCourse: (scope, courseId) =>
       createOpeningCourseReadySourcesRepository(sql).listReadySourceIdsForCourse(scope, courseId),
+    tutorModelReady: (scope, mode) => tutorModelReady(sql, scope, mode),
   });
+}
+
+/**
+ * Same routing the worker uses (resolveTutorModel → user fallback). Only a routing verdict
+ * (missing key, removed/unavailable model) blocks the send; anything else is left to the
+ * worker so a transient lookup problem never turns into a false "not configured".
+ */
+async function tutorModelReady(sql: Sql, scope: OpeningConversationScope, mode: TutorMode): Promise<boolean> {
+  try {
+    await resolveTutorModel(sql, scope, mode);
+    return true;
+  } catch (error) {
+    if (!(error instanceof OpeningModelRoutingError)) return true;
+    try {
+      return Boolean(await resolveTutorFallbackModel(sql, scope, mode));
+    } catch (fallbackError) {
+      return !(fallbackError instanceof OpeningModelRoutingError);
+    }
+  }
 }
 
 export function getObservationService(sql: Sql) {

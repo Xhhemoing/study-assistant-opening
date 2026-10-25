@@ -9,7 +9,7 @@ import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
-import { formatTurnError, pageForSubmit } from "./turn-errors";
+import { MODEL_SETUP_HREF, formatTurnError, pageForSubmit } from "./turn-errors";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
 import { LoadingRows, secondaryButtonClass } from "../design/ui";
@@ -29,7 +29,7 @@ import {
   uniqueCappedSourceIds,
 } from "./course-source-selection";
 import { AiReadinessChecklist } from "./ai-readiness";
-import { inferComposerIntent, type ThinTutorAction } from "@aistudy/domain";
+import { inferComposerIntent, TUTOR_MODEL_SETUP_MESSAGE, type ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 import { turnsWithKnownOutcome, unknownTurnQuestion, unknownTurnRecovery } from "./unknown-turn-recovery";
@@ -1086,7 +1086,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
           <button type="button" className="min-h-6 min-w-6 shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
         </div>
       ) : null}
-      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
+      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">

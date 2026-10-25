@@ -11,8 +11,9 @@ import {
   type StudyContextAnchor,
   type StudyIntentEvent,
   type QueryHistory,
+  type TutorMode,
 } from "@aistudy/contracts";
-import { composerMessageText, inferComposerIntent, requestsFinalAnswer } from "@aistudy/domain";
+import { composerMessageText, inferComposerIntent, requestsFinalAnswer, TUTOR_MODEL_SETUP_MESSAGE } from "@aistudy/domain";
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
@@ -33,7 +34,8 @@ export type TutorHttpErrorCode =
   | "NOT_FOUND"
   | "SOURCE_UNAVAILABLE"
   | "VALIDATION"
-  | "CONFLICT";
+  | "CONFLICT"
+  | "AI_MODEL_UNAVAILABLE";
 
 export class TutorServiceError extends Error {
   readonly code: TutorHttpErrorCode;
@@ -68,6 +70,12 @@ export function createTutorService(deps: {
   studyContext?: { sessionIntent(scope: OpeningConversationScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
   readSelection(scope: OpeningConversationScope, conversationId: string): Promise<PageSelectionInput | null>;
+  /**
+   * Whether the worker could route this tutor mode to any usable model (primary or the user's
+   * fallback). Checked before a new turn is queued so a missing key fails at send time with
+   * AI_MODEL_UNAVAILABLE instead of leaving a job for the worker to fail later.
+   */
+  tutorModelReady?(scope: OpeningConversationScope, mode: TutorMode): Promise<boolean>;
   /** Course membership ready pool (Data). Caps 32 + privacy exclusions inside Data. */
   listReadySourceIdsForCourse?(
     scope: OpeningConversationScope,
@@ -257,6 +265,10 @@ export function createTutorService(deps: {
         learningSessionId = null;
       }
 
+      // Replays keep their original job; only a new turn is refused before it is queued.
+      if (!existing && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
+        throw new TutorServiceError("AI_MODEL_UNAVAILABLE", TUTOR_MODEL_SETUP_MESSAGE, 409);
+      }
       const saved = await deps.conversations.appendSavedTurn({
         scope,
         conversationId: input.conversationId,

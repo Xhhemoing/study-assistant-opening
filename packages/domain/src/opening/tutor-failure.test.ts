@@ -10,6 +10,11 @@ describe("tutor failure presentation", () => {
     expect(tutorFailureForDisplay("failed", { code: "BUDGET_EXCEEDED", message: "SQL secret" }))
       .toEqual({ code: "BUDGET_EXCEEDED", message: "今日 AI 预算已达上限，请在设置中核对预算，或明天再试。" });
   });
+  it("points every no-usable-model failure at settings with one plain sentence", () => {
+    for (const code of ["AI_ROUTE_UNAVAILABLE", "AI_MODEL_UNAVAILABLE", "PROVIDER_DISABLED"]) {
+      expect(tutorFailureForDisplay("failed", { code, message: "所选模型暂不可用 secret" })).toEqual({ code, message: "还没有配置可用的 AI 模型，去设置里配置。" });
+    }
+  });
   it("retains the controlled clarify action without trusting its stored text", () => {
     expect(tutorFailureForDisplay("failed", { code: "page_not_in_sources", nextAction: "clarify", message: "internal" }))
       .toEqual({ code: "page_not_in_sources", nextAction: "clarify", message: PAGE_CITATION_CLARIFY_MESSAGE });

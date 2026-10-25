@@ -1,5 +1,9 @@
 import { OpeningApiError } from "../client/api";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { TUTOR_MODEL_SETUP_MESSAGE } from "@aistudy/domain";
+
+/** Where the learner fixes "no usable model". */
+export const MODEL_SETUP_HREF = "/opening/settings#quick-model-setup";
 
 /** Validate an optional physical page against scope-authorized, parse-ready chunks. */
 export function formatTurnError(err: unknown): string {
@@ -13,6 +17,7 @@ export function formatTurnError(err: unknown): string {
     if (err.code === "page_chunk_mismatch") {
       return "页码与片段不一致。";
     }
+    if (err.code === "AI_MODEL_UNAVAILABLE" || err.code === "PROVIDER_DISABLED") return TUTOR_MODEL_SETUP_MESSAGE;
     if (err.code?.startsWith("PROVIDER_")) return "AI 服务暂时没有响应，请稍后再试。";
     if (err.code === "BUDGET_EXCEEDED" || err.code === "REQUEST_CAP_EXCEEDED") return userFacingMessage(err, "今日 AI 用量已达上限，请明天再试或到设置调整额度。");
   }

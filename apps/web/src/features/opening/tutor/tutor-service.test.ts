@@ -17,6 +17,7 @@ const scope = { workspaceId: "55555555-5555-4555-8555-555555555555", ownerUserId
 function createService(opts?: {
   courseId?: string | null;
   listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
+  tutorModelReady?: ReturnType<typeof vi.fn>;
 }) {
   const conversations = {
     getOwned: vi.fn(async () => ({
@@ -44,6 +45,7 @@ function createService(opts?: {
       sourceChunks,
       readSelection,
       ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
+      ...(opts?.tutorModelReady ? { tutorModelReady: opts.tutorModelReady } : {}),
     }),
     conversations,
     sourceChunks,
@@ -440,4 +442,25 @@ it("routes a continued saved query from prior user intent rather than assistant 
   const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
   await service.submitTurn(scope, { conversationId: CONVERSATION, text: "那练习情况呢", sourceIds: [], mode: "listen", privacy: "saved", clientKey: "followup-status" });
   expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
+});
+
+describe("tutor model readiness at send time", () => {
+  const send = { conversationId: CONVERSATION, text: "为什么？", sourceIds: [], sourceSelection: "none" as const, mode: "hint" as const, privacy: "saved" as const };
+  it("refuses a new turn with AI_MODEL_UNAVAILABLE before queueing a job when no model can serve it", async () => {
+    const tutorModelReady = vi.fn(async () => false);
+    const f = createService({ tutorModelReady });
+    await expect(f.service.submitTurn(scope, { ...send, clientKey: "no-model-key-1" })).rejects.toMatchObject({
+      code: "AI_MODEL_UNAVAILABLE", status: 409, message: "还没有配置可用的 AI 模型，去设置里配置。",
+    });
+    expect(tutorModelReady).toHaveBeenCalledWith(scope, "hint");
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+  it("never blocks a replay of an already-queued turn, and queues normally when a model is usable", async () => {
+    const blocked = createService({ tutorModelReady: vi.fn(async () => false) });
+    blocked.conversations.findTurnByClientKey.mockResolvedValueOnce({ userTurnId: "77777777-7777-4777-8777-777777777777",
+      jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999", learningSessionId: null } as never);
+    await expect(blocked.service.submitTurn(scope, { ...send, clientKey: "replayed-key-1" })).resolves.toMatchObject({ replayed: true });
+    const ready = createService({ tutorModelReady: vi.fn(async () => true) });
+    await expect(ready.service.submitTurn(scope, { ...send, clientKey: "ready-key-1" })).resolves.toMatchObject({ replayed: false });
+  });
 });
