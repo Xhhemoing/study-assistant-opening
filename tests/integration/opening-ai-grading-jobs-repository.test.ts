@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { AiGradingProposal, LearningObservation, ObservationInput } from "@aistudy/contracts";
-import { createOpeningAiGradingRepository, createOpeningJobRepository, openingJobScope, readOpeningCourseEvidence } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningJobRepository, openingJobScope, readOpeningCourseEvidence, type OpeningAutoGradePolicy } from "@aistudy/database";
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { insertOpeningLearningObservationInTx } from "../../packages/database/src/repositories/opening-learning-observations";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
@@ -20,6 +20,25 @@ afterAll(async () => { await fixture?.close(); });
 const jobs = () => createOpeningAiGradingJobRepository(fixture.sql);
 const grades = () => createOpeningAiGradingRepository(fixture.sql);
 const queue = () => createOpeningJobRepository(fixture.sql);
+// Exercise actual priced admission, including the independent media bound.
+const autoGrade = (): OpeningAutoGradePolicy => ({
+  enabled: true, modelAvailable: true, dailyCap: 50,
+  dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
+  primaryModel: {
+    modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture",
+      inputCentsPerMillion: 100, outputCentsPerMillion: 100,
+      mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 1024, mediaInputCentsPerMillion: 100 },
+    inputCentsPerMillion: 100, outputCentsPerMillion: 100,
+  },
+  budgetOptions: { envCapCents: 10000 },
+});
+async function photoSource() {
+  const id = await backupRows(fixture.sql, fixture.scope).source();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=", "base64");
+  await fixture.sql`UPDATE opening_sources SET mime='image/png',parse_state='not_started',
+    bytes=${png.length},sha256=${createHash("sha256").update(png).digest("hex")} WHERE id=${id}`;
+  return id;
+}
 const proposal = (outcome: "correct" | "incorrect" = "correct"): AiGradingProposal => ({ outcome, confidence: .95, questionMatch: true, feedback: "检查计算结果。",
   criteria: [{ label: "计算", verdict: outcome, feedback: "分子相加。" }] });
 async function jobFor(original: LearningObservation) {
@@ -60,10 +79,9 @@ it("rolls back the answer, attempt submission, job and outbox when the enclosing
   const input: ObservationInput = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "1", outcome: "unverified", assistance: "independent", clientKey: randomUUID() };
   await expect(fixture.sql.begin(async tx => {
-    const saved = await insertOpeningLearningObservationInTx(tx, fixture.scope, input, { autoGrade: {
-      enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
-    } });
+    const saved = await insertOpeningLearningObservationInTx(tx, fixture.scope, input, { autoGrade: autoGrade() });
     expect(await tx`SELECT id FROM opening_jobs WHERE payload->>'observationId'=${saved.id} AND kind='grade-observation'`).toHaveLength(1);
+    expect(await tx`SELECT o.id FROM opening_outbox o JOIN opening_jobs j ON j.id=o.job_id WHERE j.payload->>'observationId'=${saved.id} AND j.kind='grade-observation'`).toHaveLength(1);
     throw new Error("commit failed");
   })).rejects.toThrow("commit failed");
   expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE attempt_id=${attempt.id}`).toHaveLength(0);
@@ -74,14 +92,11 @@ it("rolls back the answer, attempt submission, job and outbox when the enclosing
 
 it("seals the original photo and its version with submission; retries cannot swap it and bad photos roll everything back", async () => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
-  const rows = backupRows(fixture.sql, fixture.scope), photoId = await rows.source();
-  await fixture.sql`UPDATE opening_sources SET mime='image/png',parse_state='not_started' WHERE id=${photoId}`;
+  const photoId = await photoSource();
   const input: ObservationInput = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "", outcome: "unverified", assistance: "independent", clientKey: randomUUID() };
   const workSource = { id: photoId, version: 1, physicalPage: 1 };
-  const original = await f.learning.insertObservation(fixture.scope, input, { workSource, autoGrade: {
-    enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
-  } });
+  const original = await f.learning.insertObservation(fixture.scope, input, { workSource, autoGrade: autoGrade() });
   expect((await grades().context(fixture.scope, { observationId: original.id })).workSource).toEqual(workSource);
   expect(original.sourceIds).toContain(photoId);
   expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ status: "queued", workSource });
@@ -179,14 +194,11 @@ it("read-only status does not enqueue and checks owner, privacy exclusions and d
 
 it.each(["judgement", "attribution", "assistance"] as const)("retains the legacy unknown ledger and sealed photo after a %s-only correction", async change => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
-  const photoId = await backupRows(fixture.sql, fixture.scope).source();
-  await fixture.sql`UPDATE opening_sources SET mime='image/png',parse_state='not_started' WHERE id=${photoId}`;
+  const photoId = await photoSource();
   const workSource = { id: photoId, version: 1, physicalPage: 1 };
   const original = await f.learning.insertObservation(fixture.scope, { attemptId: attempt.id, sessionId: f.sessionId,
     courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId], answer: "", outcome: "unverified",
-    assistance: "independent", clientKey: randomUUID() }, { workSource, autoGrade: {
-      enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
-    } });
+    assistance: "independent", clientKey: randomUUID() }, { workSource, autoGrade: autoGrade() });
   const job = await jobFor(original), claimed = (await queue().claim(job.id))!;
   const operationId = `ai-grade:${fixture.scope.workspaceId}:${original.id}`;
   await fixture.sql`UPDATE opening_learning_observations SET grading_operation_id=${operationId} WHERE id=${original.id}`;

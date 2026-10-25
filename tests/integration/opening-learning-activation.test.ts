@@ -7,7 +7,7 @@ import {
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
-const enabled = { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true };
+const enabled = { autoGradeOnSave: true, assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true };
 
 describe("opening learning automation activation", () => {
   let fixture: OpeningFixture;
@@ -28,7 +28,7 @@ describe("opening learning automation activation", () => {
   it("keeps account opt-in required and rejects foreign scope", async () => {
     await setCourseLearningPreferences(fixture.sql, fixture.scope, courseId, enabled);
     expect(await read()).toEqual({
-      preferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      preferences: { autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
       retestSuggestionsEnabledAt: null, automaticRemindersEnabledAt: null,
     });
     await expect(readLearningAutomationState(fixture.sql, fixture.otherScope, courseId))
@@ -142,15 +142,20 @@ describe("opening learning automation activation", () => {
       locked();
       await hold;
     });
-    await entered;
+    // Observe rejection immediately, including failures before the lock barrier.
+    const consumerOutcome = consumer.then(() => null, (error: unknown) => error);
     let archived = false;
-    const writer = fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`
-      .then(() => { archived = true; });
+    let writer: Promise<void> | undefined;
     try {
+      await Promise.race([entered, consumerOutcome.then(error => { if (error) throw error; })]);
+      writer = fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`
+        .then(() => { archived = true; });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(archived).toBe(false);
-    } finally { release(); }
-    await Promise.all([consumer, writer]);
+    } finally {
+      release();
+      await Promise.all([consumer, writer]);
+    }
     await Promise.all([
       account().setLearningPreferences(fixture.scope, { ...enabled, retestSuggestionsEnabled: false }),
       fixture.sql`UPDATE courses SET archived_at=NULL WHERE id=${courseId}`,
