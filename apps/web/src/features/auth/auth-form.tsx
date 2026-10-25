@@ -4,6 +4,7 @@ import { ArrowRight, Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
 import {
+  authServerErrorMessage,
   type FormErrors,
   validateLoginInput,
   validateRegisterInput,
@@ -65,13 +66,11 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         ),
       });
       if (!response.ok) {
-        const body = await response.json().catch(error => {
+        const body: unknown = await response.json().catch(error => {
           if (controller.signal.aborted) throw error;
           return null;
-        }) as
-          | { error?: { message?: string } }
-          | null;
-        setServerError(typeof body?.error?.message === "string" && body.error.message ? body.error.message : "暂时无法完成请求，请稍后重试");
+        });
+        setServerError(authServerErrorMessage(body));
         return;
       }
       authenticated = true;
