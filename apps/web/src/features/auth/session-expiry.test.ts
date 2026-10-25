@@ -8,7 +8,7 @@ import { createMeasurementClient } from "../opening/measurement/client";
 import { clearSessionExpiry, createSessionFetch, installSessionFetch, subscribeToSessionExpiry } from "./session-expiry";
 
 const sessionError = { error: { code: "UNAUTHENTICATED", message: "Authentication required" } };
-let onExpired: ReturnType<typeof vi.fn>;
+let onExpired: ReturnType<typeof vi.fn<() => void>>;
 let unsubscribe: () => void;
 
 beforeEach(() => {
@@ -175,7 +175,7 @@ describe("global session fetch installation", () => {
 
   it("ignores a late raw-fetch 401 after successful identity revalidation", async () => {
     let finish!: (response: Response) => void;
-    window.fetch = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    window.fetch = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
     const uninstall = installSessionFetch();
     try {
       const request = window.fetch("/api/opening/today");

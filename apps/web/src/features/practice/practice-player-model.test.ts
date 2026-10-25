@@ -108,7 +108,7 @@ describe("attempt idempotency identity", () => {
     ["answer", { answer: "B", verdict: false, errorCause: "concept" }],
     ["verdict", { verdict: false, errorCause: "concept" }],
     ["confidence", { confidence: 2 }],
-    ["error cause", { verdict: false, errorCause: "careless" }],
+    ["error cause", { verdict: false, errorCause: "misread" }],
     ["hint count", { hintCount: 2 }],
     ["assisted", { assisted: true }],
   ])("issues a new key when the learner changes the %s", (_label, overrides) => {

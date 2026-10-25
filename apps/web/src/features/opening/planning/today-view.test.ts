@@ -169,7 +169,7 @@ it("successful updateTaskStatus triggers TaskQueueRefreshContext reread (control
     priority: 1,
     status: "done" as const,
   };
-  const updateTaskStatus = vi.fn(async () => updated);
+  const updateTaskStatus = vi.fn<Parameters<typeof createTaskStatusSession>[0]>(async () => updated);
   const session = createTaskStatusSession(
     (id, input) => updateTaskStatus(id, input),
     { taskId: PENDING.id, expectedVersion: 1 },

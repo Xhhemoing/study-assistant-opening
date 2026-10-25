@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: { children: unknown; href: string }) =>
+  default: ({ children, href, ...props }: { children: import("react").ReactNode; href: string }) =>
     createElement("a", { ...props, href }, children),
 }));
 

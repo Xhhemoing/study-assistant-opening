@@ -3,12 +3,13 @@ import { summarizeOpeningHealth } from "./health-summary";
 
 describe("opening health response", () => {
   it("returns only coarse status and never exposes probe details", () => {
-    const result = summarizeOpeningHealth({
+    const probes = {
       database: { ok: true, detail: "reachable postgres://secret" },
       redis: { ok: false, detail: "unreachable (ECONNREFUSED)" },
       storage: { ok: true, detail: "bucket reachable" },
       workerBacklog: { ok: true, detail: "no stale backlog" },
-    });
+    };
+    const result = summarizeOpeningHealth(probes);
 
     expect(result).toEqual({
       status: "down",

@@ -49,7 +49,7 @@ describe("course section routes", () => {
     expect(legacyCourseStudyHref("c", "", "#course-assets")).toBeNull();
   });
   it("keeps inactive panel content mounted and provides ordinary navigable section links", () => {
-    const html = renderToStaticMarkup(createElement(CourseTabs, { courseId: "c" },
+    const html = renderToStaticMarkup(createElement(CourseTabs, { courseId: "c", children: null },
       createElement(CoursePanel, { name: "overview", children: createElement("input", { name: "goal", defaultValue: "draft" }) }),
       createElement(CoursePanel, { name: "materials", children: createElement("input", { name: "material", defaultValue: "unsaved" }) }),
     ));

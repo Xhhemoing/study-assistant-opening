@@ -9,7 +9,7 @@ const activityId = "44444444-4444-4444-8444-444444444444";
 const request = { conversationId, clientKey: "automatic-turn-1", sourceIds: [], privacy: "saved" as const };
 
 function fixture() {
-  const appendSavedTurn = vi.fn(async () => ({ jobId: "job", turnId: "turn", assistantTurnId: "assistant" }));
+  const appendSavedTurn = vi.fn<OpeningConversationRepository["appendSavedTurn"]>(async () => ({ jobId: "job", turnId: "turn", assistantTurnId: "assistant" }));
   const findTurnByClientKey = vi.fn<OpeningConversationRepository["findTurnByClientKey"]>(async () => null);
   const loadContinuityTurns = vi.fn<OpeningConversationRepository["loadContinuityTurns"]>(async () => [{ role: "user" as const, text: "今天的学习计划是什么？", citations: [] }]);
   const listTurns = vi.fn<OpeningConversationRepository["listTurns"]>(async () => []);

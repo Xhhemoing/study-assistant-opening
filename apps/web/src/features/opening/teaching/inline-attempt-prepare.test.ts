@@ -5,7 +5,8 @@ import { createInlineAttemptDrafts, inlineAttemptDraftConflict, inlineAttemptIde
 import type { LearningAttempt } from "@aistudy/contracts";
 const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8222-222222222222";
 const input = { activityId: id, courseId: id, blockId: id, contentVersion: 1, sourceIds: [id], prompt: "题目", skillLabel: "技能" };
-const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: input.skillLabel, requirementKey: `teaching:${id}:v1`, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: null, itemVersionId: null, submittedAt: null, observationId: null, startedAt: "2026-10-21T00:00:00Z" };
+const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: input.skillLabel, requirementKey: `teaching:${id}:v1`, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: null, itemVersionId: null, submittedAt: null, observationId: null, historyRevision: 0,
+ startedAt: "2026-10-21T00:00:00Z" };
 function client() { return { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(attempt), submitAttempt: vi.fn().mockResolvedValue({ id, attemptId: id, sessionId: id, courseId: id }) }; }
 it("prepares canonical identity without an answer, then seals only the actual submitted text under that same identity", async () => {
   const api = client(); let checkpoint!: InlineAttemptPreparationCheckpoint;

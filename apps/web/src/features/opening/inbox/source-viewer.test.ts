@@ -14,7 +14,7 @@ const record = {
   version: 2,
   uploadState: "uploaded",
   parseState: "failed",
-  error: { code: "PARSE", message: "parser failed" },
+  error: { code: "PARSE", message: "parser failed", retryable: true },
   createdAt: "2026-09-21T00:00:00.000Z",
 } satisfies SourceRecord;
 
@@ -155,7 +155,7 @@ describe("source preview panes", () => {
   });
 
   it("renders an img preview for image MIME", () => {
-    const image = { ...record, name: "photo.png", mime: "image/png" };
+    const image = { ...record, name: "photo.png", mime: "image/png" as const };
     const html = renderToStaticMarkup(createElement(SourceViewer, {
       record: image,
       latestRecord: image,
@@ -168,7 +168,7 @@ describe("source preview panes", () => {
   });
 
   it("renders a text preview pane for plain text MIME", () => {
-    const plain = { ...record, name: "notes.txt", mime: "text/plain" };
+    const plain = { ...record, name: "notes.txt", mime: "text/plain" as const };
     const html = renderToStaticMarkup(createElement(SourceViewer, {
       record: plain,
       latestRecord: plain,
@@ -184,7 +184,7 @@ describe("source preview panes", () => {
     const pptx = {
       ...record,
       name: "deck.pptx",
-      mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" as const,
     };
     const html = renderToStaticMarkup(createElement(SourceViewer, {
       record: pptx,

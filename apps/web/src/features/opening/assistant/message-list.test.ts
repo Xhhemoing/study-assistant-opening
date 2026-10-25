@@ -152,7 +152,7 @@ describe("MessageList", () => {
   // LAB-U01 (ported from 05ffeec): an ordinary failure keeps the red failure line.
   it("keeps the red failure line for an ordinary failed assistant turn", () => {
     const html = renderToStaticMarkup(createElement(MessageList, {
-      messages: [{ id: "turn-f", role: "assistant", text: "provider rejected the request", citationLabels: [], status: "failed" }],
+      messages: [{ id: "turn-f", role: "assistant", text: "provider rejected the request", citationLabels: [], citations: [], status: "failed" }],
     }));
     expect(html).toContain("本轮失败，未得到有效回答。");
     expect(html).not.toContain(CLARIFY_FOLLOW_UP);
@@ -186,6 +186,7 @@ describe("MessageList", () => {
     const html = renderToStaticMarkup(createElement(MessageList, {
       messages: [{
         id: "turn-1",
+        citations: [],
         role: "assistant",
         text: "provider timeout",
         citationLabels: [],

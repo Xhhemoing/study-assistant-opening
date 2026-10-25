@@ -11,8 +11,8 @@ vi.mock("../../../../../../../features/opening/runtime", () => ({
 }));
 
 vi.mock("../../../../../../../features/auth/service", () => ({
-  jsonError: (...args: unknown[]) => jsonError(...args),
-  mapDomainError: (...args: unknown[]) => mapDomainError(...args),
+  jsonError: (err: unknown) => jsonError(err),
+  mapDomainError: (err: unknown) => mapDomainError(err),
 }));
 
 import { GET } from "./route";

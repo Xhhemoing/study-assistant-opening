@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { createOpeningSourceService } from "./source-service";
@@ -252,7 +252,7 @@ describe("opening signed upload service", () => {
     const prevUrl = process.env.PUBLIC_BASE_URL;
     const prevEnv = process.env.NODE_ENV;
     delete process.env.PUBLIC_BASE_URL;
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     try {
       const { svc } = setup();
       await expect(
@@ -266,8 +266,7 @@ describe("opening signed upload service", () => {
     } finally {
       if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
       else process.env.PUBLIC_BASE_URL = prevUrl;
-      if (prevEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = prevEnv;
+      vi.stubEnv("NODE_ENV", prevEnv);
     }
   });
 
@@ -275,7 +274,7 @@ describe("opening signed upload service", () => {
     const prevUrl = process.env.PUBLIC_BASE_URL;
     const prevEnv = process.env.NODE_ENV;
     process.env.PUBLIC_BASE_URL = "https://study.example.com";
-    process.env.NODE_ENV = "production";
+    vi.stubEnv("NODE_ENV", "production");
     try {
       const { svc } = setup();
       const ticket = await svc.beginUpload(principal, {
@@ -291,8 +290,7 @@ describe("opening signed upload service", () => {
     } finally {
       if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
       else process.env.PUBLIC_BASE_URL = prevUrl;
-      if (prevEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = prevEnv;
+      vi.stubEnv("NODE_ENV", prevEnv);
     }
   });
 
@@ -300,7 +298,7 @@ describe("opening signed upload service", () => {
     const prevUrl = process.env.PUBLIC_BASE_URL;
     const prevEnv = process.env.NODE_ENV;
     delete process.env.PUBLIC_BASE_URL;
-    process.env.NODE_ENV = "test";
+    vi.stubEnv("NODE_ENV", "test");
     try {
       const { svc } = setup();
       const ticket = await svc.beginUpload(principal, {
@@ -315,8 +313,7 @@ describe("opening signed upload service", () => {
     } finally {
       if (prevUrl === undefined) delete process.env.PUBLIC_BASE_URL;
       else process.env.PUBLIC_BASE_URL = prevUrl;
-      if (prevEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = prevEnv;
+      vi.stubEnv("NODE_ENV", prevEnv);
     }
   });
 

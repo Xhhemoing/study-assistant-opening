@@ -36,7 +36,7 @@ import { HintLadder } from "../hint-ladder";
 import { SpanPractice, spanPracticeScope } from "./span-practice";
 import { SpanLesson } from "./span-lesson";
 const id = "11111111-1111-4111-8111-111111111111";
-const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
+const attempt: LearningAttempt = { requirementKey: null, historyRevision: 0, id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
   sourceIds: [id], sourceVersions: { [id]: 1 }, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, spanExercise: getSpanProblem("span-independent-3d")! };
 const record = { id, answer: JSON.stringify({ membership: "in_span" }), assistance: "hinted" } as LearningObservation;
 const props: ComponentProps<typeof SpanPractice> = { courseId: id, sourceIds: [id], problemId: "span-independent-3d", intent: { purpose: "self_study", timeBudgetMinutes: 15, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, onRecorded: vi.fn(), onAttempt: vi.fn() };

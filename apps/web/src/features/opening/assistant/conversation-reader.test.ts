@@ -41,7 +41,7 @@ describe("conversation recovery reads", () => {
     api.resumeConversation.mockReturnValueOnce(delayed.promise);
     const reader = createConversationReader(api);
     const first = reader.read("same-conversation");
-    const firstSignal = api.resumeConversation.mock.calls[0][1];
+    const firstSignal = api.resumeConversation.mock.calls[0]?.[1];
     await expect(reader.read("same-conversation")).resolves.toMatchObject({ pending: { kind: "ready" } });
     expect(firstSignal?.aborted).toBe(true);
     delayed.resolve(resume("same-conversation"));
@@ -57,7 +57,7 @@ describe("conversation recovery reads", () => {
     const controller = new AbortController();
     const reading = reader.read("first", controller.signal);
     controller.abort();
-    expect(api.resumeConversation.mock.calls[0][1]?.aborted).toBe(true);
+    expect(api.resumeConversation.mock.calls[0]?.[1]?.aborted).toBe(true);
     delayed.resolve(resume("first"));
     await expect(reading).resolves.toBeNull();
     expect(api.getPendingJob).not.toHaveBeenCalled();

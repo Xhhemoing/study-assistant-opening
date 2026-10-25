@@ -13,6 +13,8 @@ const queue: ReviewQueueItem[] = [
   {
     card: {
       id: "66666666-6666-4666-8666-666666666601",
+      courseId: null,
+      skillLabel: null,
       ownerUserId: "11111111-1111-4111-8111-111111111111",
       front: "卡片一正面",
       back: "卡片一背面",
@@ -40,6 +42,8 @@ const queue: ReviewQueueItem[] = [
   {
     card: {
       id: "66666666-6666-4666-8666-666666666602",
+      courseId: null,
+      skillLabel: null,
       ownerUserId: "11111111-1111-4111-8111-111111111111",
       front: "卡片二正面",
       back: "卡片二背面",

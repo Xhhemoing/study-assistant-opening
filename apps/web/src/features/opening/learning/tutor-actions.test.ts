@@ -274,7 +274,7 @@ describe("listTutorActionsForCourse authorization", () => {
   it("derives recommendations from delivered exposures", async () => {
     const deps = createDeps({
       getSession: vi.fn(async () => ({ id: SESSION, courseId: COURSE })),
-      listDeliveredExposures: vi.fn(async () => ["revealed", "hinted"]),
+      listDeliveredExposures: vi.fn(async () => ["revealed" as const, "hinted" as const]),
     });
     const actions = await listTutorActionsForCourse(
       {} as never,

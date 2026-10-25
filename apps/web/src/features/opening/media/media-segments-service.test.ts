@@ -8,6 +8,7 @@ import {
   linkFrameChunkIds,
   openingSourceVersionPrefix,
   rewriteOpeningSourceVersionKey,
+  type OpeningMediaSegmentsServiceDeps,
 } from "./media-segments-service";
 
 describe("media segment correction contract", () => {
@@ -132,24 +133,30 @@ describe("applyCorrections → K01 markNeedsCheckForSources + enqueueRebuild", (
   const scope = { workspaceId: principal.workspaceId, ownerUserId: principal.userId };
 
   function makeService(overrides: {
-    markNeedsCheckForSources?: ReturnType<typeof vi.fn>;
-    enqueueRebuild?: ReturnType<typeof vi.fn>;
-    commitCorrectionBump?: ReturnType<typeof vi.fn>;
+    markNeedsCheckForSources?: NonNullable<OpeningMediaSegmentsServiceDeps["knowledge"]>["markNeedsCheckForSources"];
+    enqueueRebuild?: NonNullable<OpeningMediaSegmentsServiceDeps["knowledge"]>["enqueueRebuild"];
+    commitCorrectionBump?: OpeningMediaSegmentsServiceDeps["commitCorrectionBump"];
   }) {
     const markNeedsCheckForSources =
-      overrides.markNeedsCheckForSources ??
-      vi.fn(async () => ({ updated: 2, courseIds: [courseIdA, courseIdB] }));
+      vi.fn(overrides.markNeedsCheckForSources ??
+      (async () => ({ updated: 2, courseIds: [courseIdA, courseIdB] })));
     const enqueueRebuild =
-      overrides.enqueueRebuild ??
-      vi.fn(async () => ({ jobId: "rebuild-job", kind: "build-course-knowledge" as const, created: true }));
+      vi.fn(overrides.enqueueRebuild ??
+      (async () => ({ jobId: "rebuild-job", kind: "build-course-knowledge" as const, created: true })));
     const commitCorrectionBump =
-      overrides.commitCorrectionBump ??
-      vi.fn(async () => 2);
-    const createOnce = vi.fn(async () => ({
+      vi.fn(overrides.commitCorrectionBump ?? (async () => 2));
+    const job = {
       id: jobId,
-      state: "queued" as const,
-    }));
-    const claim = vi.fn(async () => ({ id: jobId, state: "running" as const }));
+      ...scope,
+      key: "correct-key-01",
+      kind: "media-correction",
+      payload: {},
+      result: null,
+      privacyEpoch: 0,
+      state: "queued",
+    };
+    const createOnce = vi.fn(async () => ({ ...job }));
+    const claim = vi.fn(async () => ({ ...job, state: "running" }));
     const finish = vi.fn(async () => true);
     const service = createOpeningMediaSegmentsService({} as never, {} as never, {
       sources: {
@@ -185,6 +192,7 @@ describe("applyCorrections → K01 markNeedsCheckForSources + enqueueRebuild", (
     // Ordering: bump commits before knowledge mark.
     const bumpOrder = commitCorrectionBump.mock.invocationCallOrder[0];
     const markOrder = markNeedsCheckForSources.mock.invocationCallOrder[0];
+    if (markOrder === undefined) throw new Error("Missing knowledge mark call");
     expect(bumpOrder).toBeLessThan(markOrder);
   });
 
@@ -201,6 +209,7 @@ describe("applyCorrections → K01 markNeedsCheckForSources + enqueueRebuild", (
     // Ordering: mark then enqueue (full-course, not time-scoped).
     const markOrder = markNeedsCheckForSources.mock.invocationCallOrder[0];
     const enqueueOrder = enqueueRebuild.mock.invocationCallOrder[0];
+    if (markOrder === undefined || enqueueOrder === undefined) throw new Error("Missing knowledge calls");
     expect(markOrder).toBeLessThan(enqueueOrder);
     expect(commitCorrectionBump.mock.invocationCallOrder[0]).toBeLessThan(markOrder);
   });

@@ -1,6 +1,7 @@
 ﻿/** Opening-release access policy (registration + cookie-auth origin). */
 
 export const OPENING_TEST_FIXTURE_ORIGIN = "http://opening-fixture.test";
+type OpeningPolicyEnv = { NODE_ENV?: string; OPENING_RELEASE?: string };
 
 export function allowRegistration(input: {
   openingRelease: boolean;
@@ -9,7 +10,7 @@ export function allowRegistration(input: {
 }
 
 export function isOpeningRelease(
-  env: NodeJS.ProcessEnv = process.env,
+  env: OpeningPolicyEnv = process.env,
 ): boolean {
   const raw = env.OPENING_RELEASE?.trim().toLowerCase();
   if (!raw) return env.NODE_ENV === "production";
@@ -25,14 +26,14 @@ export function isOpeningRelease(
  * production runtime. Isolation must not depend only on OPENING_RELEASE.
  */
 export function allowsDemoStudyData(
-  env: NodeJS.ProcessEnv = process.env,
+  env: OpeningPolicyEnv = process.env,
 ): boolean {
   return env.NODE_ENV !== "production";
 }
 
 /** Redirect mock-backed legacy pages in opening release *or* production. */
 export function shouldRedirectLegacyMockPages(
-  env: NodeJS.ProcessEnv = process.env,
+  env: OpeningPolicyEnv = process.env,
 ): boolean {
   return isOpeningRelease(env) || !allowsDemoStudyData(env);
 }

@@ -105,6 +105,6 @@ describe("TeachingBlockItem", () => {
     expect(html).toContain("存为笔记");
     expect(html).toContain("做成卡片");
     expect(html).toContain("继续问");
-    expect(renderItem({ block: { ...block, blockType: "question", role: "question" } as typeof block, showCommands: false, explanationContext: { activityId: AID }, onAskExplanation() {} })).not.toContain("data-anchor");
+    expect(renderItem({ block: { ...block, blockType: "question", role: "prompt", content: { stem: "题目", answer: "答案", hints: [] } }, showCommands: false, explanationContext: { activityId: AID }, onAskExplanation() {} })).not.toContain("data-anchor");
   });
 });

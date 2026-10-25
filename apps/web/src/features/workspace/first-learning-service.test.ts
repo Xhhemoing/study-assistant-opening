@@ -22,7 +22,7 @@ function setup() {
     plans: { createTaskWithOutcome: vi.fn<FirstLearningDependencies["plans"]["createTaskWithOutcome"]>(async () => ({ task, replayed: false })),
       getToday: vi.fn(async () => ({ date: "2026-10-19", acceptedVersion: 0, blocks: [], hardBlocks: [], dailyDraft: null, dailyDraftSkippedReason: null })) },
     settings: { get: vi.fn<FirstLearningDependencies["settings"]["get"]>(async () => ({ settings: null, saved: false, invalidStoredSettings: false })),
-      initialize: vi.fn(async () => true), set: vi.fn() },
+      initialize: vi.fn<FirstLearningDependencies["settings"]["initialize"]>(async () => true), set: vi.fn() },
     now: () => new Date("2026-10-19T10:30:00Z") };
   return { deps: deps as FirstLearningDependencies, calls: deps, initialized };
 }

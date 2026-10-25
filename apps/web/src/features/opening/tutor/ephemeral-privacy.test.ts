@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
 import type { ProviderInput, ProviderOutput, SourceChunk } from "@aistudy/contracts";
 import { createEphemeralTutorService } from "./ephemeral-service";
+import type { EphemeralProvenanceRepository } from "@aistudy/database";
 
 const scope = { workspaceId: "10000000-0000-4000-8000-000000000001", ownerUserId: "10000000-0000-4000-8000-000000000002" };
 const privateId = "10000000-0000-4000-8000-000000000003";
@@ -25,7 +26,7 @@ function fixture() {
     currentEpoch: vi.fn(async () => state.epoch),
   };
   const provenance = {
-    resolveHistory: vi.fn(async () => []),
+    resolveHistory: vi.fn<EphemeralProvenanceRepository["resolveHistory"]>(async () => []),
     record: vi.fn(async () => "30000000-0000-4000-8000-000000000001"),
   };
   const service = createEphemeralTutorService({

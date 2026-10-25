@@ -16,8 +16,8 @@ vi.mock("../../../../../../../features/opening/request-body", () => ({
 }));
 
 vi.mock("../../../../../../../features/auth/service", () => ({
-  jsonError: (...args: unknown[]) => jsonError(...args),
-  mapDomainError: (...args: unknown[]) => mapDomainError(...args),
+  jsonError: (err: unknown) => jsonError(err),
+  mapDomainError: (err: unknown) => mapDomainError(err),
 }));
 
 import { POST } from "./route";

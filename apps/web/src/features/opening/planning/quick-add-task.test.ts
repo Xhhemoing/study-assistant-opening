@@ -140,7 +140,7 @@ describe("createQuickAddAttempt", () => {
   });
 
   it("ignores overlapping submits while one request is in flight", async () => {
-    let release: (() => void) | null = null;
+    let release!: () => void;
     const create = vi.fn(async () => {
       await new Promise<void>((resolve) => { release = resolve; });
       return {
@@ -157,7 +157,7 @@ describe("createQuickAddAttempt", () => {
     const first = attempt.submit(draft);
     await Promise.resolve();
     expect(await attempt.submit(draft)).toBeNull();
-    release?.();
+    release();
     expect(await first).toMatchObject({ kind: "created" });
     expect(create).toHaveBeenCalledTimes(1);
   });

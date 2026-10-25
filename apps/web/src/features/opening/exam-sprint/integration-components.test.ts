@@ -28,7 +28,7 @@ describe("exam integration evidence presentation", () => {
   it("clears a previous human confirmation before requesting a new image review", () => {
     const sent: unknown[] = [];
     const drafts: unknown[] = [];
-    const context = { integration: { ...integration, binding: { materials: [{ sourceTitle: "原卷", sourceId: "ref-1", sourceVersion: 3 }] } }, resources: { sources: [{ id: "photo-1", mime: "image/png", name: "解答照片", version: 2 }] }, review: null, send: (value: unknown) => sent.push(value), refresh: () => undefined } as WorkReviewContext;
+    const context: WorkReviewContext = { integration: { ...integration, binding: { courseId: "course", milestoneId: null, packSourceId: "ref-1", boundAt: "2026-10-17T00:00:00Z", skills: [], materials: [{ sourceTitle: "原卷", sourceId: "ref-1", sourceVersion: 3 }] } }, resources: { courses: [], goals: {}, sources: [{ id: "photo-1", workspaceId: "workspace", mime: "image/png", name: "解答照片", version: 2, bytes: 8, sha256: "a".repeat(64), uploadState: "uploaded", parseState: "ready", error: null, createdAt: "2026-10-17T00:00:00Z" }] }, review: null, send: (value: unknown) => { sent.push(value); }, refresh: () => undefined };
     const tree = WorkReviewPanel({ source: { id: "item", topicId: "topic", label: "Q1", sourceTitle: "原卷", sourcePage: 4, kind: "choice", suggestedDay: 1, skills: [] }, context, draft: { workSourceId: "photo-1", answerText: "解答", referenceChecked: true }, onChange: value => drafts.push(value), disabled: false });
     type Props = { children?: ReactNode; onClick?: () => void };
     function button(node: ReactNode): ReactElement<Props> | undefined {
@@ -49,7 +49,9 @@ describe("exam integration evidence presentation", () => {
   });
 
   it("shows historical interval together with the sample denominator", () => {
-    const result: ExamForecastOverview = { ...forecast, status: "limited_history", topics: [{ ...forecast.topics[0], examinedPapers: 1, totalPapers: 2, meanPoints: 8 }], papers: [{ id: "paper", courseId: "course", sourceId: "source", sourceVersion: 1, teacher: "老师 A", year: 2025, label: "期末", kind: "past_exam", skills: [{ skillId: "skill-1", points: 8 }], recordedAt: "2026-10-17T00:00:00Z" }] };
+    const topic = forecast.topics[0];
+    if (!topic) throw new Error("missing topic fixture");
+    const result: ExamForecastOverview = { ...forecast, status: "limited_history", topics: [{ ...topic, examinedPapers: 1, totalPapers: 2, meanPoints: 8 }], papers: [{ id: "paper", courseId: "course", sourceId: "source", sourceVersion: 1, teacher: "老师 A", year: 2025, label: "期末", kind: "past_exam", skills: [{ skillId: "skill-1", points: 8 }], recordedAt: "2026-10-17T00:00:00Z" }] };
     const html = renderToStaticMarkup(createElement(ForecastResults, { overview, forecast: result }));
     expect(html).toContain("1 / 2");
     expect(html).toContain("10%–90%");
@@ -82,7 +84,7 @@ describe("exam integration evidence presentation", () => {
   it("accepts unavailable source evidence and never counts it as waiting for completion", () => {
     const state = { ...integration, links: [{ examAttemptId: "mock-a1", learningAttemptId: "learning-1", observationId: null, nodeId: "node-1", requirementKey: "r-1", publication: "unavailable" as const }] };
     const parsed = integrationSchema.parse(state);
-    expect(parsed.links[0].publication).toBe("unavailable");
+    expect(parsed.links[0]?.publication).toBe("unavailable");
     const html = renderToStaticMarkup(createElement(EvidenceLinks, { integration: parsed }));
     expect(html).toContain("已保存答案，材料或技能身份待核对，未计入正式证据");
     expect(html).toContain("已关联 0 次 · 未提交/未作答 0 次 · 材料或技能待核对 1 次");

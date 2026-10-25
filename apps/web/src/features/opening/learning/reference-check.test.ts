@@ -60,11 +60,10 @@ describe("buildSelfCompareRevision", () => {
         referenceSourceId: SOURCE,
         choice: "mismatch",
         clientKey: "k-mismatch",
-      })?.replacement,
+      }),
     ).toMatchObject({
-      answer: observation.answer,
-      outcome: "incorrect",
-      referenceCheck: { scope: "whole_answer", method: "learner_self_compare" },
+      revisionKind: "replace",
+      replacement: { answer: observation.answer, outcome: "incorrect", referenceCheck: { scope: "whole_answer", method: "learner_self_compare" } },
     });
     expect(
       buildSelfCompareRevision({
@@ -72,11 +71,10 @@ describe("buildSelfCompareRevision", () => {
         referenceSourceId: SOURCE,
         choice: "partial",
         clientKey: "k-partial",
-      })?.replacement,
+      }),
     ).toMatchObject({
-      answer: observation.answer,
-      outcome: "unverified",
-      referenceCheck: { scope: "partial" },
+      revisionKind: "replace",
+      replacement: { answer: observation.answer, outcome: "unverified", referenceCheck: { scope: "partial" } },
     });
   });
 

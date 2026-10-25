@@ -55,7 +55,17 @@ HERMES_HEAVY_LOCK_TIMEOUT=2400 node scripts/run-heavy.mjs node --test tests/tool
 HERMES_HEAVY_LOCK_TIMEOUT=2400 node scripts/run-heavy.mjs npx vitest run --project contract tests/contract/typecheck-orchestrator.test.ts
 ```
 
-完整 Web/仓库类型检查与构建交现有 CI，本地定向测试不能替代其结果。
+完整仓库检查与构建交现有 CI，本地定向测试不能替代其结果。
 首次新增测试叶子可能暴露原未检查的 `.test.ts` 错误，应修正真实类型，不移除叶子或
 缩减 inputs。Next 生成类型存在时检查；干净 checkout 没有生成文件时，原 Next build
 仍负责生成与再次类型检查。
+
+### 2026-10-25 新增覆盖收尾
+
+首次 CI `40129160892` 在新测试叶子发现既有夹具类型错误；已补齐真实接口/记录字段、
+mock 方法签名、数组存在性与判别联合收窄，不排除测试或加入 any/ts-ignore。
+两处生产签名仅声明实际依赖（assessment 的 learningEvents、access-policy 的环境字段），
+授权及运行逻辑不变。最终本地 `npm run typecheck -w @aistudy/web` 的产品和测试叶子均
+退出 0；49 文件 623 项近测、修改路径 lint 通过，最后 exam fixture 调整另有 9 项复查
+（批次重叠，不相加）。独立静态复审未发现 P1/P2。新提交仍等待自己的完整 CI，
+不能用旧 head 的 Worker/PDF 成功代替；没有本地浏览器、真实模型、合并或部署验收。

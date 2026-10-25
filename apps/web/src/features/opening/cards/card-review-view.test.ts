@@ -18,7 +18,7 @@ vi.mock("react", async (importOriginal) => {
 });
 
 vi.mock("next/link", () => ({
-  default: ({ children, href, ...props }: { children: unknown; href: string }) => createElement("a", { ...props, href }, children),
+  default: ({ children, href, ...props }: { children: import("react").ReactNode; href: string }) => createElement("a", { ...props, href }, children),
 }));
 vi.mock("./card-stack", async importOriginal => {
   const actual = await importOriginal<typeof import("./card-stack")>();
@@ -34,7 +34,7 @@ import { createOpeningCardsClient } from "./cards-client";
 function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
   return {
-    card: { id, ownerUserId: "owner", front: "问题", back: "答案", sourceDocumentId: null, syllabusPointId: null,
+    card: { id, ownerUserId: "owner", front: "问题", back: "答案", sourceDocumentId: null, syllabusPointId: null, courseId: null, skillLabel: null,
       tags: ["review:concept"], archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: at },
     state: { cardId: id, ease: 2.5, intervalDays: 1, dueAt: at, reps: 0, lapses: 0, lastGrade: null, updatedAt: at },
     goalPriority: 0,

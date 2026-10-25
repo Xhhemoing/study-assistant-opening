@@ -46,7 +46,7 @@ function deps(overrides?: {
 }) {
   const writes: string[] = [];
   const budget = {
-    reserve: vi.fn(async () => {
+    reserve: vi.fn<EphemeralTutorDeps["budget"]["reserve"]>(async () => {
       writes.push("budget:reserve");
       return { id: "res-1" };
     }),
@@ -118,7 +118,7 @@ describe("ephemeral tutor service", () => {
   });
 
   it("does not silently ignore images on the temporary route", async () => {
-    const complete = vi.fn(async () => output);
+    const complete = vi.fn<(input: ProviderInput) => Promise<ProviderOutput>>(async () => output);
     const images = [{ mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId, physicalPage: 2 }];
     const service = createEphemeralTutorService({ sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
       privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
@@ -417,7 +417,7 @@ describe("ephemeral content-free provenance", () => {
       const pending = f.service.replyEphemeral(scope, { text: `${marker}-prompt`, sourceIds: [sourceId], mode: "listen", history: [{ role: "user", text: `${marker}-history`, provenanceId: sourceId }], historyPrivacyEpoch: 0 });
       if (fail) await expect(pending).rejects.toMatchObject({ code: "PROVIDER_NETWORK" });
       else expect((await pending).text).toBe(`${marker}-answer`);
-      const persisted = [f.budget.reserve, f.budget.release, f.budget.settle, f.budget.markUnknown, provenance.record].flatMap(mock => mock.mock.calls);
+      const persisted = [f.budget.reserve, f.budget.release, f.budget.settle, f.budget.markUnknown, provenance.record].map(mock => mock.mock.calls);
       expect(JSON.stringify(persisted)).not.toContain(marker);
       expect(spies.flatMap(spy => spy.mock.calls.map(args => format(...args))).join("\n")).not.toContain(marker);
       if (fail) expect(provenance.record).not.toHaveBeenCalled();

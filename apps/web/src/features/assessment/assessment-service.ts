@@ -16,7 +16,7 @@ function notFound(eventId: string): never {
 }
 
 async function loadVisibleEvent(
-  runtime: AuthRuntime,
+  runtime: Pick<AuthRuntime, "learningEvents">,
   principal: Principal,
   eventId: string,
 ): Promise<LearningEvent> {
@@ -36,7 +36,7 @@ async function loadVisibleEvent(
 }
 
 export async function listAssessmentForPrincipal(
-  runtime: AuthRuntime,
+  runtime: Pick<AuthRuntime, "learningEvents">,
   principal: Principal,
   query: unknown,
   now = new Date(),
@@ -51,7 +51,7 @@ export async function listAssessmentForPrincipal(
 }
 
 export async function appendStatusCorrectionForPrincipal(
-  runtime: AuthRuntime,
+  runtime: Pick<AuthRuntime, "learningEvents">,
   principal: Principal,
   body: unknown,
   now = new Date(),

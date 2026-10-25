@@ -73,11 +73,13 @@ describe("course summary pagination and repair state", () => {
     expect(view.state().groups.map(item => item.identity.requirementKey)).toEqual(["safe"]);
   });
   it("cancels a departed scope and does not continue its repair requests", async () => {
-    const late = deferred<CourseLearningSummaryPage>(), request = vi.fn(() => late.promise);
+    const late = deferred<CourseLearningSummaryPage>(), request = vi.fn<Parameters<typeof createCourseSummaryController>[0]>(() => late.promise);
     const view = setup(request); const pending = view.controller.start(); view.controller.cancel();
     late.resolve(updating(4)); await pending;
     expect(request).toHaveBeenCalledTimes(1);
-    expect(request.mock.calls[0]![1].aborted).toBe(true);
+    const signal = request.mock.calls[0]?.[1];
+    if (!signal) throw new Error("Missing request abort signal");
+    expect(signal.aborted).toBe(true);
     expect(view.state().groups).toEqual([]);
   });
 });

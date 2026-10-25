@@ -38,6 +38,18 @@ function controls(node: ReactNode, type: string): Array<ReactElement<ControlProp
   return [...(node.type === type ? [node] : []), ...controls(node.props.children, type)];
 }
 
+function control(node: ReactNode, type: string, index = 0): ReactElement<ControlProps> {
+  const result = controls(node, type)[index];
+  if (!result) throw new Error(`Missing ${type} control at ${index}`);
+  return result;
+}
+
+function timerRef(index: number): { current: unknown } {
+  const result = refs[index];
+  if (!result) throw new Error(`Missing timer ref at ${index}`);
+  return result;
+}
+
 class TimerNode {}
 let documentTarget: EventTarget;
 let inside: TimerNode;
@@ -51,8 +63,8 @@ function renderTimer() {
   stateIndex = 0;
   refIndex = 0;
   const tree = FocusTimer();
-  refs[0].current = { isConnected: true, contains: (target: unknown) => target === inside };
-  refs[1].current = { focus: focusTrigger };
+  timerRef(0).current = { isConnected: true, contains: (target: unknown) => target === inside };
+  timerRef(1).current = { focus: focusTrigger };
   for (const effect of effects) {
     const cleanup = effect();
     if (typeof cleanup === "function") cleanups.push(cleanup as () => void);
@@ -62,7 +74,7 @@ function renderTimer() {
 
 function openTimer() {
   const tree = renderTimer();
-  controls(tree, "button")[0].props.onClick?.();
+  control(tree, "button").props.onClick?.();
   return renderTimer();
 }
 
@@ -97,14 +109,14 @@ describe("focus timer panel dismissal", () => {
   it("closes on Escape, restores trigger focus, and consumes the shortcut", () => {
     openTimer();
     const event = keydown();
-    expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(false);
+    expect(control(renderTimer(), "button").props["aria-expanded"]).toBe(false);
     expect(focusTrigger).toHaveBeenCalledOnce();
     expect(event.defaultPrevented).toBe(true);
   });
 
   it("leaves Escape untouched when its retained panel is detached", () => {
     openTimer();
-    (refs[0].current as { isConnected: boolean }).isConnected = false;
+    (timerRef(0).current as { isConnected: boolean }).isConnected = false;
     expect(keydown().defaultPrevented).toBe(false);
     expect(focusTrigger).not.toHaveBeenCalled();
   });
@@ -114,11 +126,11 @@ describe("focus timer panel dismissal", () => {
     const pointer = new Event("pointerdown");
     Object.defineProperty(pointer, "target", { value: inside });
     documentTarget.dispatchEvent(pointer);
-    expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(true);
+    expect(control(renderTimer(), "button").props["aria-expanded"]).toBe(true);
     const outsidePointer = new Event("pointerdown");
     Object.defineProperty(outsidePointer, "target", { value: new TimerNode() });
     documentTarget.dispatchEvent(outsidePointer);
-    expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(false);
+    expect(control(renderTimer(), "button").props["aria-expanded"]).toBe(false);
     expect(focusTrigger).not.toHaveBeenCalled();
   });
 
@@ -126,33 +138,33 @@ describe("focus timer panel dismissal", () => {
     openTimer();
     querySelector.mockReturnValue({ open: true });
     expect(keydown().defaultPrevented).toBe(false);
-    expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(true);
+    expect(control(renderTimer(), "button").props["aria-expanded"]).toBe(true);
     querySelector.mockReturnValue(null);
     const handled = new Event("keydown", { cancelable: true });
     Object.defineProperty(handled, "key", { value: "Escape" });
     handled.preventDefault();
     documentTarget.dispatchEvent(handled);
-    expect(controls(renderTimer(), "button")[0].props["aria-expanded"]).toBe(true);
+    expect(control(renderTimer(), "button").props["aria-expanded"]).toBe(true);
     expect(focusTrigger).not.toHaveBeenCalled();
   });
 
   it("preserves the running timer on dismissal and keeps pause, duration, and reset working", () => {
     let tree = openTimer();
-    controls(tree, "select")[0].props.onChange?.({ target: { value: "15" } });
+    control(tree, "select").props.onChange?.({ target: { value: "15" } });
     tree = renderTimer();
-    controls(tree, "button")[1].props.onClick?.();
+    control(tree, "button", 1).props.onClick?.();
     renderTimer();
     vi.advanceTimersByTime(10_000);
     keydown();
     expect(states[1]).toBe(890);
     expect(states[2]).not.toBeNull();
     tree = openTimer();
-    expect(controls(tree, "select")[0].props.disabled).toBe(true);
-    controls(tree, "button")[1].props.onClick?.();
+    expect(control(tree, "select").props.disabled).toBe(true);
+    control(tree, "button", 1).props.onClick?.();
     tree = renderTimer();
-    expect(controls(tree, "select")[0].props.disabled).toBe(false);
+    expect(control(tree, "select").props.disabled).toBe(false);
     expect(states[1]).toBe(890);
-    controls(tree, "button")[2].props.onClick?.();
+    control(tree, "button", 2).props.onClick?.();
     renderTimer();
     expect(states[1]).toBe(900);
     expect(states[2]).toBeNull();

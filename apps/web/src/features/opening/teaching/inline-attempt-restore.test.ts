@@ -40,7 +40,7 @@ import { OpeningApiError } from "../client/api";
 import { TeachingBlockItem } from "./teaching-block-item";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 const id = "11111111-1111-4111-8111-111111111111";
-const canonicalAttempt: LearningAttempt = { id, workspaceId: id, courseId: id, sessionId: id, skillLabel: "技能", requirementKey: `teaching:${id}:v3`, sourceIds: [], sourceVersions: {}, itemVersionId: null, problemId: null, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null };
+const canonicalAttempt: LearningAttempt = { historyRevision: 0, id, workspaceId: id, courseId: id, sessionId: id, skillLabel: "技能", requirementKey: `teaching:${id}:v3`, sourceIds: [], sourceVersions: {}, itemVersionId: null, problemId: null, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null };
 const saved = { attempt: canonicalAttempt, observation: { id, attemptId: id, courseId: id, sessionId: id, answer: "原先保存的答案", referenceCheck: { method: "comparison" }, outcome: "correct" } };
 const context: InlineAttemptContext = { id, courseId: id, sourceIds: [], contentVersion: 3, status: "active", intentSummary: "练习", onCourseAssociated: vi.fn(), onObservationReady: vi.fn(), onAttemptReady: vi.fn() };
 function text(node: ReactNode): string {

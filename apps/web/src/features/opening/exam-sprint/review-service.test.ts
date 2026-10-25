@@ -15,7 +15,7 @@ const repository = {
 };
 const call = vi.fn(), images = vi.fn();
 const service = createExamPhotoReviewService({ repository, gateway: { call }, images, budget: () => ({} as Options["budget"]) });
-const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20 };
+const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20, citedChunkIds: [], requestId: "review-test", candidates: [] };
 
 describe("exam photo review is a durable proposal", () => {
   beforeEach(() => {
@@ -84,7 +84,7 @@ describe("exam photo review is a durable proposal", () => {
     expect(stored.proposal).toBeNull();
   });
   it("does not reinterpret a previous unknown send as a not-sent failure", async () => {
-    call.mockRejectedValue(new BudgetReplayError({ kind: "unknown", reservationId: "r" }));
+    call.mockRejectedValue(new BudgetReplayError({ kind: "unknown", reservationId: "r", pendingReconcileCents: 0, reconciled: false }));
     expect((await service.review(scope, input)).status).toBe("unknown");
     expect(repository.assertCurrent).not.toHaveBeenCalled();
   });

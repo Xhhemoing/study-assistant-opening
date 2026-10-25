@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import type { OpeningApi } from "../client/api";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { PlanDraft, PlannedBlock } from "@aistudy/contracts";
@@ -98,8 +99,8 @@ describe("createSuggestPlanControllers", () => {
       }],
       unscheduledTaskIds: [],
     });
-    const proposePlan = vi.fn(async () => proposed);
-    const acceptPlan = vi.fn(async () => ({ ...proposed, status: "accepted" as const }));
+    const proposePlan = vi.fn<OpeningApi["proposePlan"]>(async () => proposed);
+    const acceptPlan = vi.fn<OpeningApi["acceptPlan"]>(async () => ({ ...proposed, status: "accepted" as const }));
     const rejectPlan = vi.fn(async () => ({ ...proposed, status: "rejected" as const }));
     const controllers = createSuggestPlanControllers(
       { proposePlan, acceptPlan, rejectPlan },

@@ -65,7 +65,7 @@ describe("AI settings presentation", () => {
   });
   it("reports missing audio capability on an explicit fallback", () => {
     const settings = setTaskRoute(DEFAULT_OPENING_AI_SETTINGS, "tutor.hint", { fallback: "a" });
-    expect(effectiveTaskRoutes({ ...data, tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: ["audio"] }] }, settings)[0].fallbackProblem).toBe("不支持音频输入");
+    expect(effectiveTaskRoutes({ ...data, tasks: [{ key: "tutor.hint", label: "提示", group: "tutor", needs: ["audio"] }] }, settings)[0]?.fallbackProblem).toBe("不支持音频输入");
   });
   it("removes a cleared route and omits an empty taskRoutes object", () => {
     const settings = setTaskRoute(DEFAULT_OPENING_AI_SETTINGS, "tutor.hint", { primary: "a", fallback: "b" });

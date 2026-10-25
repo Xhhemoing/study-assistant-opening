@@ -22,6 +22,8 @@ const card: ReviewCard = {
   front: "导数",
   back: "极限定义",
   sourceDocumentId: null,
+  courseId: null,
+  skillLabel: null,
   syllabusPointId: null,
   tags: ["高数"],
   archived: false,

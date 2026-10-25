@@ -12,7 +12,7 @@ const proposal: AiGradingProposal = { outcome: "correct", confidence: 0.91, ques
 const original = { id: id(3), answer: "u=2v+3w", outcome: "unverified", verdictSource: "self_report" } as LearningObservation;
 const graded = { ...original, id: id(4), verdictSource: "ai_graded", outcome: "correct" } as LearningObservation;
 type Options = Parameters<ModelGateway["call"]>[2];
-const output = { text: JSON.stringify(proposal), inputTokens: 100, outputTokens: 120 };
+const output = { text: JSON.stringify(proposal), inputTokens: 100, outputTokens: 120, citedChunkIds: [], requestId: "grading-test", candidates: [] };
 
 function setup() {
   const context = { observation: original, stem: "v=(1,0,1), w=(0,1,1), u=(2,3,5)，u是否在span{v,w}中？",

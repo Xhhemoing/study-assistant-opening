@@ -284,7 +284,7 @@ describe("openingApi integration helpers", () => {
     id: S,
     workspaceId: U,
     name: "lec.pdf",
-    mime: "application/pdf",
+    mime: "application/pdf" as const,
     bytes: 12,
     sha256: "a".repeat(64),
     version: 0,

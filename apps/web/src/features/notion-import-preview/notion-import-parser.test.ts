@@ -59,31 +59,38 @@ describe("notion html page parser", () => {
     ]);
 
     const heading = page.blocks[1];
+    if (!heading) throw new Error("missing heading");
     expect(heading.level).toBe(2);
     expect(heading.text).toBe("从先验到后验");
 
     const linkParagraph = page.blocks[2];
+    if (!linkParagraph) throw new Error("missing link paragraph");
     expect(linkParagraph.links?.[0]).toMatchObject({
       pageId: "9b2f4c1d8e7a4f6b9c3d5e7f8a9b0c1d",
       label: "诊断测试的例子",
     });
 
     const todo = page.blocks[5];
+    if (!todo) throw new Error("missing todo");
     expect(todo.checked).toBe(false);
 
     const toggle = page.blocks[6];
+    if (!toggle) throw new Error("missing toggle");
     expect(toggle.text).toBe("折叠标题");
     expect(toggle.losses).toContain("toggle-flattened");
-    expect(toggle.children?.[0].type).toBe("paragraph");
+    expect(toggle.children?.[0]?.type).toBe("paragraph");
 
     const callout = page.blocks[7];
+    if (!callout) throw new Error("missing callout");
     expect(callout.text).toContain("💡");
     expect(callout.losses).toContain("callout-style");
 
     const image = page.blocks[9];
+    if (!image) throw new Error("missing image");
     expect(image.src).toBe("Bayes-7f3a9c2e.png");
 
     const table = page.blocks[10];
+    if (!table) throw new Error("missing table");
     expect(table.rows).toEqual([
       ["方法", "准确率"],
       ["规则", "0.85"],
@@ -112,9 +119,9 @@ describe("notion html page parser", () => {
       </div>`,
       "columns-1234567890abcdef1234567890abcdef.html",
     );
-    expect(page.blocks[0].type).toBe("columns");
-    expect(page.blocks[0].columns?.[0][0].text).toBe("左列");
-    expect(page.blocks[0].columns?.[1][0].text).toBe("右列");
+    expect(page.blocks[0]?.type).toBe("columns");
+    expect(page.blocks[0]?.columns?.[0]?.[0]?.text).toBe("左列");
+    expect(page.blocks[0]?.columns?.[1]?.[0]?.text).toBe("右列");
   });
 });
 
@@ -130,7 +137,7 @@ describe("notion zip index", () => {
     const result = indexNotionZip(entries);
 
     expect(result.pages).toHaveLength(1);
-    expect(result.pages[0].id).toBe("4f5e6d7c8b9a0f1e2d3c4b5a69788776");
+    expect(result.pages[0]?.id).toBe("4f5e6d7c8b9a0f1e2d3c4b5a69788776");
     expect(result.attachments.map((attachment) => attachment.path)).toEqual(["Bayes-7f3a9c2e.png"]);
     expect(result.report.pages).toBe(1);
     expect(result.report.blocks).toBe(12);

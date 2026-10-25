@@ -14,7 +14,7 @@ const ownerUserId = "33333333-3333-4333-8333-333333333333";
 const otherWorkspace = "44444444-4444-4444-8444-444444444444";
 const pointA = "55555555-5555-4555-8555-555555555555";
 const contentId = "77777777-7777-4777-8777-777777777777";
-const principal = { userId: ownerUserId, workspaceId };
+const principal = { userId: ownerUserId, workspaceId, sessionId: "assessment-test" };
 
 function attempt(id: string, pointId: string, occurredAt: string, extra: Partial<LearningEvent["payload"]> = {}): LearningEvent {
   return {
@@ -117,7 +117,7 @@ function runtimeWith(events: {
   listForOwner: AuthRuntime["learningEvents"]["listForOwner"];
   get?: AuthRuntime["learningEvents"]["get"];
   append?: AuthRuntime["learningEvents"]["append"];
-}): AuthRuntime {
+}): Pick<AuthRuntime, "learningEvents"> {
   return {
     learningEvents: {
       listForOwner: events.listForOwner,
@@ -129,7 +129,7 @@ function runtimeWith(events: {
       }),
       findByIdempotency: async () => null,
     },
-  } as AuthRuntime;
+  };
 }
 
 describe("listAssessmentForPrincipal", () => {

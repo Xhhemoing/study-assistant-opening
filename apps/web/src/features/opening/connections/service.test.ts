@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import type { OpeningConnectionServiceDeps } from "./service";
 import { ApiError } from "../../auth/service";
 import { createOpeningConnectionService } from "./service";
 
@@ -29,7 +30,7 @@ const dingtalkConnection = {
 
 const clientKey = randomUUID();
 
-function fakeConnections(connection: typeof imapConnection | typeof dingtalkConnection) {
+function fakeConnections(connection: Awaited<ReturnType<NonNullable<OpeningConnectionServiceDeps["connections"]>["get"]>>) {
   return {
     list: vi.fn(),
     get: vi.fn(async () => connection),

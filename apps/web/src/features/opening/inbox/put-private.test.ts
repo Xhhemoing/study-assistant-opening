@@ -22,7 +22,7 @@ class FakeXhr {
   }
 }
 
-let onExpired: ReturnType<typeof vi.fn>;
+let onExpired: ReturnType<typeof vi.fn<() => void>>;
 let unsubscribe: () => void;
 beforeEach(() => {
   vi.stubGlobal("window", Object.assign(new EventTarget(), { location: new URL("https://study.example/opening/library") }));

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { OpeningConversationRepository, OpeningSourceChunksRepository } from "@aistudy/database";
 import {
   createTutorService,
   exposureLevelForMode,
@@ -16,22 +17,28 @@ const scope = { workspaceId: "55555555-5555-4555-8555-555555555555", ownerUserId
 
 function createService(opts?: {
   courseId?: string | null;
-  listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
+  listReadySourceIdsForCourse?: NonNullable<Parameters<typeof createTutorService>[0]["listReadySourceIdsForCourse"]>;
 }) {
   const conversations = {
+    create: vi.fn<OpeningConversationRepository["create"]>(),
+    listSummaries: vi.fn<OpeningConversationRepository["listSummaries"]>(),
+    listTurns: vi.fn<OpeningConversationRepository["listTurns"]>(async () => []),
     getOwned: vi.fn(async () => ({
       id: CONVERSATION,
       title: "t",
       courseId: opts?.courseId === undefined ? null : opts.courseId,
       updatedAt: "2026-09-20T00:00:00.000Z",
     })),
-    loadContinuityTurns: vi.fn(async () => []),
+    loadContinuityTurns: vi.fn<OpeningConversationRepository["loadContinuityTurns"]>(async () => []),
     releaseReturnedTurnIds: vi.fn(async () => undefined),
-    appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
-    findTurnByClientKey: vi.fn(async () => null),
+    appendSavedTurn: vi.fn<OpeningConversationRepository["appendSavedTurn"]>(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
+    findTurnByClientKey: vi.fn<OpeningConversationRepository["findTurnByClientKey"]>(async () => null),
   };
   const sourceChunks = {
-    listForSources: vi.fn(async () => [
+    replaceChunks: vi.fn<OpeningSourceChunksRepository["replaceChunks"]>(),
+    listChunks: vi.fn<OpeningSourceChunksRepository["listChunks"]>(),
+    listChunksAtVersion: vi.fn<OpeningSourceChunksRepository["listChunksAtVersion"]>(),
+    listForSources: vi.fn<OpeningSourceChunksRepository["listForSources"]>(async () => [
       { id: C, sourceId: S, sourceVersion: 1, page: 4, slideLabel: null, startMs: null, endMs: null, text: "page four", imageObjectKey: null },
       { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId: OTHER_SOURCE, sourceVersion: 1, page: 9, slideLabel: null, startMs: null, endMs: null, text: "other", imageObjectKey: null },
     ]),
@@ -348,7 +355,7 @@ describe("tutor-service Package C thin pick", () => {
       clientKey: "pkg-c-pick-1",
       privacy: "saved",
     })).resolves.toMatchObject({ jobId: "88888888-8888-4888-8888-888888888888" });
-    const savedIds = conversations.appendSavedTurn.mock.calls[0][0].sourceIds as string[];
+    const savedIds = conversations.appendSavedTurn.mock.calls[0]?.[0].sourceIds;
     expect(savedIds).toEqual(poolIds);
   });
 

@@ -13,7 +13,7 @@ it.each([1, 4] as const)("accepts only the actual generic level %s and its unkno
   expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toEqual({ attemptId: id, level });
 });
 it.each([{ attemptId: other }, { activityId: other }, { blockId: other }, { contentVersion: 4 }, { courseId: other }, { itemVersionId: other }, { purpose: "language_support" }])("rejects a release for a different question anchor", async patch => {
-  const body = response(); body.exposureReceipt.contextAnchor = { ...body.exposureReceipt.contextAnchor, ...patch };
+  const body = response(); Object.assign(body.exposureReceipt.contextAnchor, patch);
   await expect(requestTeachingHint(attempt, context, 1, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow();
 });
 it.each([{ supportDomain: "language" }, { origin: "history_solution" }, { releasedAt: null }])("does not display mismatched or unreleased help", async patch => {
@@ -29,7 +29,7 @@ it("restores only released hints with a GET and retains their original receipts"
   expect(fetcher).toHaveBeenCalledExactlyOnceWith(`/api/opening/teaching/hint?attemptId=${id}`, { cache: "no-store" });
 });
 it.each([{ attemptId: other }, { courseId: other }, { itemVersionId: other }, { activityId: other }, { blockId: other }, { contentVersion: 4 }])("rejects restored hints for a different canonical identity", async patch => {
-  const hint = response(); hint.exposureReceipt.contextAnchor = { ...hint.exposureReceipt.contextAnchor, ...patch };
+  const hint = response(); Object.assign(hint.exposureReceipt.contextAnchor, patch);
   await expect(readReleasedTeachingHints(attempt, context, vi.fn().mockResolvedValue(Response.json({ hints: [hint] })))).rejects.toThrow();
 });
 it.each([{ origin: "history_solution" }, { releasedAt: null }, { releaseKey: `teaching-hint-v1:${other}:1` }])("rejects mismatched release provenance on recovery", async patch => {

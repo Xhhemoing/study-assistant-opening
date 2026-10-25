@@ -11,7 +11,7 @@ import { AdvancedSettingsView } from "./advanced-settings-view";
 import OpeningAdvancedSettingsPage from "../../app/(opening)/opening/settings/advanced/page";
 
 it("keeps advanced settings back and export actions inside the Opening workspace", () => {
-  const html = renderToStaticMarkup(createElement(AdvancedSettingsView, { basePath: "/opening/settings" }));
+  const html = renderToStaticMarkup(createElement(() => AdvancedSettingsView({ basePath: "/opening/settings" })));
   expect(html).toContain('href="/opening/settings"');
   expect(html).toContain('href="/opening/settings/export"');
   expect(html).not.toContain('href="/settings"');

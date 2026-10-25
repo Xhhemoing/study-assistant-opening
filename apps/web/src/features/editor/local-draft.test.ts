@@ -28,7 +28,7 @@ describe("local note draft", () => {
 
   it.each([undefined, { randomUUID: undefined }])("keeps UUID block ids without randomUUID (%j)", (cryptoApi) => {
     vi.stubGlobal("crypto", cryptoApi);
-    onTestFinished(() => vi.unstubAllGlobals());
+    onTestFinished(() => { vi.unstubAllGlobals(); });
     const [block] = createEmptyLocalDraft().blocks;
     expect(block?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });

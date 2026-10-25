@@ -67,7 +67,7 @@ describe("job poller recovery and visibility", () => {
     const poller = createJobPoller({ getJob, onStatus, onError, visibility });
     poller.start();
     visibility.show(true);
-    expect(getJob.mock.calls[0][0].aborted).toBe(true);
+    expect(getJob.mock.calls[0]?.[0].aborted).toBe(true);
     resolve(job);
     await flush();
     expect(onStatus).not.toHaveBeenCalled();

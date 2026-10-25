@@ -31,7 +31,9 @@ describe("Tailwind source discovery", () => {
       write("apps/web/.next-opening-e2e/generated.js", 'const html = "text-fuchsia-950";');
       write(".gitignore", "node_modules/\n.next/\n.next-opening-e2e/\n");
 
-      const result = await postcss([tailwind({ base: path.resolve(root, cwd) })]).process(css, { from });
+      // Tailwind can resolve a different PostCSS minor than the workspace processor.
+      const plugin = tailwind({ base: path.resolve(root, cwd) }) as postcss.Plugin;
+      const result = await postcss([plugin]).process(css, { from });
       expect(result.css).toContain(".p-7");
       expect(result.css).toContain(".m-9");
 

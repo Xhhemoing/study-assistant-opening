@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { PlanDraft } from "@aistudy/contracts";
+import type { OpeningApi } from "../client/api";
 import {
   createDailyDraftControllers,
   DailyDraftCard,
@@ -13,17 +14,17 @@ const draftId = "11111111-1111-4111-8111-111111111111";
 const taskA = "22222222-2222-4222-8222-222222222222";
 
 function draftApi(partial: {
-  proposePlan?: ReturnType<typeof vi.fn>;
-  acceptPlan?: ReturnType<typeof vi.fn>;
-  rejectPlan?: ReturnType<typeof vi.fn>;
+  proposePlan?: OpeningApi["proposePlan"];
+  acceptPlan?: OpeningApi["acceptPlan"];
+  rejectPlan?: OpeningApi["rejectPlan"];
 } = {}) {
   return {
-    proposePlan: partial.proposePlan ?? vi.fn(),
-    acceptPlan: partial.acceptPlan ?? vi.fn(),
-    rejectPlan: partial.rejectPlan ?? vi.fn(),
-    getPlanningSettings: vi.fn(),
-    putPlanningSettings: vi.fn(),
-    createTask: vi.fn(),
+    proposePlan: partial.proposePlan ?? vi.fn<OpeningApi["proposePlan"]>(),
+    acceptPlan: partial.acceptPlan ?? vi.fn<OpeningApi["acceptPlan"]>(),
+    rejectPlan: partial.rejectPlan ?? vi.fn<OpeningApi["rejectPlan"]>(),
+    getPlanningSettings: vi.fn<OpeningApi["getPlanningSettings"]>(),
+    putPlanningSettings: vi.fn<OpeningApi["putPlanningSettings"]>(),
+    createTask: vi.fn<OpeningApi["createTask"]>(),
   };
 }
 
@@ -80,8 +81,8 @@ describe("createDailyDraftControllers", () => {
       blocks: sampleDraft.blocks,
       unscheduledTaskIds: [],
     });
-    const proposePlan = vi.fn(async () => proposed);
-    const acceptPlan = vi.fn(async () => ({ ...sampleDraft, status: "accepted" as const }));
+    const proposePlan = vi.fn<OpeningApi["proposePlan"]>(async () => proposed);
+    const acceptPlan = vi.fn<OpeningApi["acceptPlan"]>(async () => ({ ...sampleDraft, status: "accepted" as const }));
     const rejectPlan = vi.fn(async () => ({ ...sampleDraft, status: "rejected" as const }));
     const controllers = createDailyDraftControllers(
       { proposePlan, acceptPlan, rejectPlan },
@@ -113,7 +114,7 @@ describe("createDailyDraftControllers", () => {
   });
 
   it("sends only the normalized selected keys and keeps retries on the same intent key", async () => {
-    const acceptPlan = vi.fn().mockRejectedValueOnce(new Error("network lost")).mockResolvedValue(suggestedDraft);
+    const acceptPlan = vi.fn<OpeningApi["acceptPlan"]>().mockRejectedValueOnce(new Error("network lost")).mockResolvedValue(suggestedDraft);
     let sequence = 0;
     const controllers = createDailyDraftControllers(draftApi({ acceptPlan }), { date: sampleDraft.date, mintClientKey: () => `intent-key-${++sequence}` });
     await expect(controllers.accept(suggestedDraft, [keyB, keyA, keyB, "unknown", suggestedDraft.suggestedTasks![2]!.key])).rejects.toThrow("network lost");
