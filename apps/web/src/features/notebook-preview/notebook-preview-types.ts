@@ -16,7 +16,7 @@ export const pageTitle = "概率推理：从贝叶斯公式到决策";
 export const pageInfo = [
   { label: "状态", value: "进行中" },
   { label: "标签", value: "概率论 · 决策" },
-  { label: "来源", value: "来源锚点 · 教材第 42 页" },
+  { label: "来源", value: "出处 · 教材第 42 页" },
   { label: "版本", value: "当前版本 · v12" },
 ];
 

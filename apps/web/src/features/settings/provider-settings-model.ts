@@ -77,7 +77,7 @@ export function validateModelDraft(draft: ProviderModelDraft): string | null {
   if (media.some(value => !isBlank(value))) {
     if (media.some(isBlank)) return "媒体 token 上界、总字节上限和价格必须一起填写或全部留空。";
     const tokens = Number(media[0]), bytes = Number(media[1]);
-    if (!/^\d+$/.test(media[0]!.trim()) || !Number.isSafeInteger(tokens) || tokens <= 0) return "媒体 token 上界必须是供应商可核验的正整数。";
+    if (!/^\d+$/.test(media[0]!.trim()) || !Number.isSafeInteger(tokens) || tokens <= 0) return "媒体 token 上界必须是正整数，以供应商公布的为准。";
     if (!/^\d+$/.test(media[1]!.trim()) || !Number.isSafeInteger(bytes) || bytes <= 0 || bytes > 104_857_600) return "媒体总字节上限须为 1–104857600 的整数。";
     if (price(media[2]!, free) === null) return free ? "媒体输入价格必须为不小于 0 的数字。" : "按量计费的媒体输入价格必须大于 0。";
   }

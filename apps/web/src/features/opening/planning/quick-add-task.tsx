@@ -5,6 +5,7 @@ import { taskCreateInputSchema, type TaskCreateInput, type TaskCreateResult } fr
 import { OpeningApiError, type OpeningApi } from "../client/api";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { TaskQueueRefreshContext } from "./task-status-control";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export const QUICK_ADD_MINUTES = [15, 25, 45] as const;
 export const QUICK_ADD_DEFAULT_MINUTES = 25;
@@ -115,7 +116,7 @@ export function createQuickAddAttempt(
       } catch (error) {
         clientKey = undefined;
         pending = undefined;
-        return { kind: "failed", message: error instanceof Error ? error.message : "请检查任务内容后重试。" };
+        return { kind: "failed", message: userFacingMessage(error, "请检查任务内容后重试。") };
       }
       if (pending && JSON.stringify({ ...pending, clientKey: "" }) !== JSON.stringify({ ...input, clientKey: "" })) {
         // The user changed the request after an unknown outcome: that is a new intent.

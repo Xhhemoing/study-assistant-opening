@@ -25,7 +25,7 @@ function allowedReturn(value: string): boolean {
   if (!value.startsWith("/opening/") || value.includes("\\")) return false;
   try {
     const url = new URL(value, "https://study.invalid");
-    return url.origin === "https://study.invalid" && (["/opening/library", "/opening/cards", "/opening/review", "/opening/today", "/opening/exam-sprint"].includes(url.pathname) || /^\/opening\/courses\/[0-9a-f-]{36}(?:\/study(?:\/span|\/matrix)?)?$/.test(url.pathname));
+    return url.origin === "https://study.invalid" && (["/opening/library", "/opening/cards", "/opening/review", "/opening/today", "/opening/sprint"].includes(url.pathname) || /^\/opening\/courses\/[0-9a-f-]{36}(?:\/study(?:\/span|\/matrix)?)?$/.test(url.pathname));
   } catch { return false; }
 }
 const integerQuery = z.string().regex(/^(0|[1-9]\d*)$/).transform(Number).pipe(z.number().int().nonnegative());
@@ -39,8 +39,8 @@ const contextSchema = z.object({
   chunkId: z.string().uuid().optional(), fragment: z.string().max(4000).optional(), label: z.string().max(160).optional(),
   returnTo: z.string().max(2000).refine(allowedReturn).optional(),
 }).superRefine((value, ctx) => {
-  if ((value.version !== undefined || value.page !== undefined || value.chunkId) && !value.source) ctx.addIssue({ code: "custom", message: "材料定位缺少材料身份" });
-  if ((value.blockId || value.contentVersion !== undefined) && !value.activityId) ctx.addIssue({ code: "custom", message: "学习单元定位缺少活动身份" });
+  if ((value.version !== undefined || value.page !== undefined || value.chunkId) && !value.source) ctx.addIssue({ code: "custom", message: "缺少材料" });
+  if ((value.blockId || value.contentVersion !== undefined) && !value.activityId) ctx.addIssue({ code: "custom", message: "缺少学习单元" });
 });
 
 export function parseStudyConversationContext(query: StudyConversationQuery): { context: StudyConversationContext | null; error: string | null } {
@@ -86,12 +86,20 @@ export function studyContextReturnHref(context?: StudyConversationContext): stri
   return null;
 }
 
+/** Current header first; older saved questions keep theirs. */
+const STUDY_CONTEXT_HEADERS = [
+  "【从学习界面带入的提问背景；仅供参考，不代表我已掌握】",
+  "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】", // learner-copy-ignore: legacy header kept for saved questions
+] as const;
+
 /** This is user-carried background text, never an authoritative citation or mastery record. */
 export function questionWithStudyContext(question: string, context?: StudyConversationContext): string {
   if (!context || !(context.activityId || context.fragment)) return question;
   const label = context.label?.trim() || "当前学习内容";
-  const prefix = `【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n${label}${context.fragment ? `\n选中片段：\n${context.fragment}` : ""}\n\n我的问题：\n`;
-  return question.startsWith(prefix) ? question : `${prefix}${question}`;
+  // A resent question (重试) already carries its background; never stack a second one.
+  if (STUDY_CONTEXT_HEADERS.some(header => question.startsWith(header))) return question;
+  const prefix = `${STUDY_CONTEXT_HEADERS[0]}\n${label}${context.fragment ? `\n选中片段：\n${context.fragment}` : ""}\n\n我的问题：\n`;
+  return `${prefix}${question}`;
 }
 
 export function pinnedStudySourceProblem(context: StudyConversationContext | undefined, sources: readonly SourceRecord[]): string | null {

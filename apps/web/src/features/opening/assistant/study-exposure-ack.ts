@@ -6,7 +6,7 @@ export function acknowledgeStudyExposure(receipt: { id: string } | null | undefi
   const existing = pending.get(receipt.id);
   if (existing) return existing;
   const request = fetcher(`/api/opening/study/exposures/${encodeURIComponent(receipt.id)}/ack`, { method: "POST" })
-    .then(response => { if (!response.ok) throw new Error("交付确认暂未完成"); acknowledged.add(receipt.id); })
+    .then(response => { if (!response.ok) throw new Error("学习记录暂未同步"); acknowledged.add(receipt.id); })
     .finally(() => pending.delete(receipt.id));
   pending.set(receipt.id, request);
   return request;

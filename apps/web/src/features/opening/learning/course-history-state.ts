@@ -1,5 +1,6 @@
 import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import type { CourseLearningHistoryInput, CourseLearningHistoryPage, LearningObservation } from "@aistudy/contracts";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type CourseHistoryState = {
   status: "idle" | "loading" | "ready" | "loading_more" | "error";
@@ -44,13 +45,13 @@ export function createCourseHistoryController(
         if (page.visibilityChanged) throw new Error("记录可见性仍在变化，请手动刷新历史。");
         append = false;
       }
-      if (append && page.snapshotRevision !== previous.snapshotRevision) throw new Error("历史快照已变化，请刷新后重新翻阅。");
+      if (append && page.snapshotRevision !== previous.snapshotRevision) throw new Error("学习记录有更新，请刷新后再翻阅。");
       update({ ...state, status: "ready", observations: append ? [...previous.observations, ...page.observations] : page.observations,
         snapshotRevision: page.snapshotRevision, totalCount: page.totalCount, nextCursor: page.nextCursor, error: "" });
     } catch (error) {
       if (generation !== current) return;
       update({ ...emptyCourseHistory(), status: "error", snapshotKey: current, notice: state.notice,
-        error: error instanceof Error ? error.message : "课程历史暂时无法读取，请刷新后重试。" });
+        error: userFacingMessage(error, "课程历史暂时无法读取，请刷新后重试。") });
     }
   }
   return {

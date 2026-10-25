@@ -11,6 +11,7 @@ import {
   needsBudgetConfirmCta,
   type AiReadinessChecklistItem,
 } from "./ai-readiness-model";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type ReadinessItem = AiReadinessChecklistItem;
 
@@ -122,7 +123,7 @@ export function AiReadinessChecklist({
         if (!response.ok) throw new Error(typeof body.error?.message === "string" ? body.error.message : "就绪清单暂时无法读取");
         if (!controller.signal.aborted) setItems(Array.isArray(body.items) ? body.items : []);
       } catch (failure) {
-        if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "就绪清单暂时无法读取");
+        if (!controller.signal.aborted) setError(userFacingMessage(failure, "就绪清单暂时无法读取"));
       }
     })();
     return () => controller.abort();

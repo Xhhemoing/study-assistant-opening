@@ -56,7 +56,7 @@ export function MixedReviewView({ cardsClient: suppliedCards, taskClient: suppli
     setSession(next);
     if (namespace) {
       try { saveMixedReviewSession(window.localStorage, namespace, next); setStorageError(""); }
-      catch { setStorageError("本轮顺序暂时只能保留在当前页面。已保存的评分和作答仍在服务端，请恢复浏览器存储后再离开。"); }
+      catch { setStorageError("本轮顺序暂时只能保留在当前页面。已保存的评分和作答不会丢；请先恢复浏览器存储再离开。"); }
     }
   }, [namespace, stillOwned]);
   useEffect(() => {

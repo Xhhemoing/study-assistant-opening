@@ -12,7 +12,8 @@ vi.mock("react", async importOriginal => ({
   useState: () => [states[index++], vi.fn()],
 }));
 
-import { CourseDetail, type CourseDetailSurface } from "./course-detail";
+import { COURSE_NOT_FOUND, CourseDetail, courseReadMissing, type CourseDetailSurface } from "./course-detail";
+import { EmptyState, LoadError } from "../opening/design/ui";
 import { CourseGoalForm } from "./course-goal-form";
 import { CourseSprintMode } from "./course-sprint-mode";
 import { CoursePanel } from "./course-tabs";
@@ -40,6 +41,14 @@ describe("course detail planning capability", () => {
     expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(false);
     states[0] = null; states[3] = "课程读取失败";
     expect(contains(render("opening", "sprint"), type => type === CourseSprintMode)).toBe(false);
+  });
+  it("shows a final not-found state with a way back instead of a retry", () => {
+    states[0] = null; states[3] = COURSE_NOT_FOUND;
+    const tree = render();
+    expect(contains(tree, type => type === EmptyState)).toBe(true);
+    expect(contains(tree, type => type === LoadError)).toBe(false);
+    expect(courseReadMissing(404)).toBe(true);
+    expect(courseReadMissing(500)).toBe(false);
   });
   it("keeps the basic goal section visible while adaptive planning is closed", () => {
     const tree = render();

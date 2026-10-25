@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import type { LearningObservation } from "@aistudy/contracts";
 import { ui } from "../../design/ui";
+import { userFacingMessage } from "../../../../lib/user-facing-error";
 const receiptSchema = z.object({ taskId: z.string().uuid(), notBeforeAt: z.string().datetime(), href: z.string().startsWith("/opening/courses/") });
 /** 答错（需修正）的题自动排进 3 天后复测；答对或未定判分仍由学习者自己决定。 */
 export function shouldAutoScheduleRetest(record: Pick<LearningObservation, "serverEvaluation">): boolean {
@@ -26,7 +27,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       setReceipt(receiptSchema.parse(body));
     } catch (reason) {
       // 自动安排失败（例如复测建议已关闭）时不打扰，保留手动按钮；手动点击才显示原因。
-      if (!auto) setError(reason instanceof Error ? reason.message : "复测保存未确认");
+      if (!auto) setError(userFacingMessage(reason, "复测保存未确认"));
     }
     finally { setPending(false); }
   }

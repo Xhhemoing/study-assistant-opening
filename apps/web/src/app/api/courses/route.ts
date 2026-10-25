@@ -7,12 +7,13 @@ import {
   requirePrincipal,
 } from "../../../features/auth/service";
 import { getAuthRuntime } from "../../../server/runtime";
+import { createCourseBodySchema, parseCourseRequest, readCourseJson } from "../../../features/courses/server/course-request-schemas";
 
 export async function POST(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
-    const body = await request.json();
+    const body = parseCourseRequest(createCourseBodySchema, await readCourseJson(request));
     const course = await createCourseForPrincipal(runtime, principal, body);
     return Response.json({ course }, { status: 201 });
   } catch (error) {

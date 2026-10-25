@@ -10,6 +10,7 @@ import {
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { buttonClass, inputClass, secondaryButtonClass, ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Common 45-minute period template (editable after apply). */
 export const PERIOD_45MIN_TEMPLATE: OpeningPlanningSettings["periodTimes"] = {
@@ -66,7 +67,7 @@ export function validateSemesterDraft(draft: OpeningPlanningSettings): string | 
   const parsed = openingPlanningSettingsSchema.safeParse(draft);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
-    return first?.message ?? "学期设置校验失败。";
+    return first?.message ?? "学期设置有误，请检查后再保存。";
   }
   return null;
 }
@@ -162,7 +163,7 @@ export function SemesterSettingsForm() {
       receive(await loadPlanningSettings(signal));
     } catch (failure) {
       if (!signal?.aborted) {
-        setError(failure instanceof Error ? failure.message : "学期设置暂时无法读取，请重试。");
+        setError(userFacingMessage(failure, "学期设置暂时无法读取，请重试。"));
       }
     } finally {
       if (!signal?.aborted) setBusy(false);
@@ -190,7 +191,7 @@ export function SemesterSettingsForm() {
       receive(await savePlanningSettings(parsed));
       setNotice("学期设置已保存（跨端一致，不使用本地缓存）。");
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "学期设置保存失败，请重试。");
+      setError(userFacingMessage(failure, "学期设置保存失败，请重试。"));
     } finally {
       setBusy(false);
     }
@@ -206,7 +207,7 @@ export function SemesterSettingsForm() {
       receive(await savePlanningSettings(null));
       setNotice("学期设置已清除。");
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "清除失败，请重试。");
+      setError(userFacingMessage(failure, "清除失败，请重试。"));
     } finally {
       setBusy(false);
     }

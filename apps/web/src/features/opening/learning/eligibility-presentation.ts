@@ -1,7 +1,7 @@
 import type { LearningEvidenceEligibility } from "@aistudy/contracts";
 
 const REASON_LABELS: Record<string, string> = {
-  observation_identity_incomplete: "缺少尝试、题目或当时版本，待核验",
+  observation_identity_incomplete: "缺少作答、题目或当时的内容，暂不确定",
   attempt_timing_unknown: "尝试的开始或提交时序不明",
   help_history_incomplete: "帮助历史不完整",
   help_delivery_unknown: "帮助是否可取回不明",
@@ -14,14 +14,14 @@ const REASON_LABELS: Record<string, string> = {
   prior_evaluation_feedback: "本次作答前已有同一道内置题的核算反馈",
   exam_family_already_seen: "此前已接触同一题族，本次不计新的独立证据",
   exam_answer_changed: "提交后改过答案，不再计为首次独立作答",
-  exam_answer_history_unknown: "首答或修订历史不完整，独立性待核验",
-  verification_source_untrusted: "自报或模型建议尚未构成参考核验",
+  exam_answer_history_unknown: "第一次作答或修改记录不完整，暂不确定是否独立完成",
+  verification_source_untrusted: "自己判断或 AI 建议还不算对照过参考答案",
   learner_reference_compare: "学习者自对照参考，尚未经独立评分",
   reference_check_authority_unknown: "无法确认参考核对的独立评分来源",
   server_evaluation_incomplete: "缺少服务器评价记录或不支持该评价版本",
   server_evaluation_identity_mismatch: "服务器评价与本次题目、要求或记录不一致",
   server_evaluation_outcome_conflict: "服务器评价与记录结果不一致",
-  server_evaluation_abstained: "本次自动评价未能判定，保留待核验",
+  server_evaluation_abstained: "这次自动批改没能判断，先保留",
   deterministic_correct: "服务器按结构化题目精确核算，答案正确",
   deterministic_incorrect: "服务器按结构化题目精确核算，答案有误",
   ai_evaluation_incomplete: "批改信息尚不完整",
@@ -39,26 +39,26 @@ const REASON_LABELS: Record<string, string> = {
   reference_check_outcome_conflict: "参考核对与记录结果不一致",
   reference_checked_correct: "有记录的参考核对结果为正确",
   reference_checked_incorrect: "有记录的参考核对结果为错误",
-  outcome_unverified: "结果尚未核验",
-  version_unknown: "当时内容版本不明",
-  version_exact: "对应当前内容版本",
-  version_exact_mismatch: "记录与当前内容版本不一致",
+  outcome_unverified: "结果还没确认",
+  version_unknown: "不清楚当时用的是哪一版内容",
+  version_exact: "对应当前内容",
+  version_exact_mismatch: "记录对应的是旧版内容",
   version_equivalent_confirmed: "版本等价性已在限定范围内确认",
   version_equivalence_unconfirmed: "版本等价性尚未确认",
   version_changed_needs_check: "材料或题目已变化，旧记录需复核",
   version_unavailable: "引用来源或历史版本不可用",
   version_privacy_excluded: "引用来源已被隐私排除",
-  delayed_protocol_incomplete: "没有完整延迟检验协议",
-  delayed_protocol_mismatch: "延迟检验协议与本次尝试不一致",
+  delayed_protocol_incomplete: "没有完整的延迟复查安排",
+  delayed_protocol_mismatch: "延迟复查安排与这次作答不一致",
   delayed_check_too_early: "本次开始时间早于延迟检验要求",
   delayed_prior_answer_policy_unknown: "延迟检验对既往答案曝光的要求不明",
   delayed_requires_unseen_problem: "延迟检验要求未见答案的新题",
   delayed_prerequisite_not_met: "尚未满足延迟检验的前置资格",
-  delayed_prerequisite_unknown: "延迟检验的前置资格仍待核验",
+  delayed_prerequisite_unknown: "还不确定是否满足延迟复查的条件",
 };
 
 export function eligibilityReasonLabels(eligibility: LearningEvidenceEligibility): string[] {
-  return [...new Set(eligibility.reasonCodes.map((code) => REASON_LABELS[code] ?? "资格原因尚无法解释，请保留待核验状态"))];
+  return [...new Set(eligibility.reasonCodes.map((code) => REASON_LABELS[code] ?? "暂时无法说明原因，先保留"))];
 }
 
-export const ELIGIBILITY_VALUE_LABEL = { yes: "符合", no: "不符合", unknown: "待核验" } as const;
+export const ELIGIBILITY_VALUE_LABEL = { yes: "符合", no: "不符合", unknown: "待确认" } as const;

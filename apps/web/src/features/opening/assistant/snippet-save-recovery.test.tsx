@@ -103,7 +103,7 @@ it("keeps a direct answer save uncertain across reopening instead of displaying 
   await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "存为笔记")!.click());
   await act(async () => root.render(null));
   await act(async () => root.render(createElement(MessageList, props)));
-  expect(host.textContent).toContain("保存结果尚未确认");
+  expect(host.textContent).toContain("还不确定是否已经存好");
   expect(Array.from(host.querySelectorAll("button")).find(button => button.textContent === "存为笔记")!.disabled).toBe(true);
   expect(createSnippet).toHaveBeenCalledOnce();
 });

@@ -31,10 +31,13 @@ describe("study conversation entry", () => {
   it("marks carried content as question background rather than authoritative evidence", () => {
     const text = questionWithStudyContext("为什么？", context);
     expect(text).toContain(context.fragment);
-    expect(text).toContain("尚未作为资料证据核验");
+    expect(text).toContain("仅供参考，不代表我已掌握");
     expect(text).toContain("我的问题：\n为什么？");
     expect(text).not.toContain(id);
     expect(questionWithStudyContext(text, context)).toBe(text);
+    // A retried legacy question (older header) is never wrapped twice, even from another context.
+    const legacy = "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n旧\n\n我的问题：\n为什么？";
+    expect(questionWithStudyContext(legacy, { ...context, fragment: "别的片段" })).toBe(legacy);
     expect(questionWithStudyContext("自由提问")).toBe("自由提问");
   });
   it("blocks fixed old versions and inaccessible material while preserving a pinned reading return", () => {
@@ -45,5 +48,7 @@ describe("study conversation entry", () => {
     expect(studyContextReturnHref({ sourceId, sourceVersion: 0, page: 3 })).toContain(`source=${sourceId}&version=0&page=3`);
     expect(studyContextReturnHref(context)).toBe(context.returnTo);
     expect(studyContextReturnHref({ ...context, returnTo: "https://evil.example" })).toContain("/opening/library?");
+    expect(studyContextReturnHref({ ...context, returnTo: "/opening/sprint" })).toBe("/opening/sprint");
+    expect(studyContextReturnHref({ ...context, returnTo: "/opening/exam-sprint" })).not.toBe("/opening/exam-sprint");
   });
 });

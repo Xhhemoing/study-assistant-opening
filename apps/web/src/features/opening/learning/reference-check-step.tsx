@@ -89,7 +89,7 @@ export function ReferenceCheckStep({
 
   function skipUnclear() {
     setChoice("unclear");
-    setMessage("已保留原自报结果，未写入参考核对。");
+    setMessage("已保留你原来的判断，这次对照没有保存。");
     onSkip();
   }
 

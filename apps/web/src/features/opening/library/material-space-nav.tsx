@@ -5,6 +5,7 @@ import type { SourceRecord } from "@aistudy/contracts";
 import type { MaterialOrganization } from "./material-organization-client";
 import { materialsInSpace, type MaterialSpace } from "./material-spaces";
 import { ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function MaterialSpaceNav({ sources, organization, space, onSpace, onCreate, disabled }: {
   sources: SourceRecord[]; organization: MaterialOrganization; space: MaterialSpace;
@@ -18,7 +19,7 @@ export function MaterialSpaceNav({ sources, organization, space, onSpace, onCrea
     if (!title.trim() || disabled) return;
     setError("");
     try { await onCreate(title); setTitle(""); setCreating(false); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "课程创建失败"); }
+    catch (reason) { setError(userFacingMessage(reason, "课程创建失败")); }
   }
   return <div className="min-w-0 lg:border-r lg:border-line lg:pr-4">
     <h2 className="mb-2 hidden text-xs font-semibold text-text-3 lg:block">资料视图</h2>

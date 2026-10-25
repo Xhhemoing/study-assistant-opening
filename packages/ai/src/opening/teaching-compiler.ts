@@ -40,6 +40,7 @@ import {
   type TeachingEvidenceDenylist,
   type TeachingEvidencePack,
 } from "./teaching-evidence";
+import { parseModelJson } from "./latex-json";
 
 export type ProposeOutlineInput = {
   activityId: string;
@@ -83,7 +84,7 @@ const MODEL_TEXT_LIMIT = 4000;
 export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlySet<string>): CompileModelOutput {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = parseModelJson(text);
   } catch {
     throw new TeachingCompileOutputError("teaching compile output is not JSON");
   }
@@ -664,7 +665,7 @@ async function prepareCompile(
   let outline = options.readOutline?.() ?? null;
   if (!outline && providerText && !options.requireModelOutput) {
     try {
-      const parsed = JSON.parse(providerText) as { outline?: TeachingOutline };
+      const parsed = parseModelJson(providerText) as { outline?: TeachingOutline };
       if (parsed?.outline?.kind === "teaching_path") {
         outline = parsed.outline;
       }

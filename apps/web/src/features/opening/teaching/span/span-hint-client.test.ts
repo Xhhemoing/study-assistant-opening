@@ -23,30 +23,30 @@ it.each(["attempt", "level", "receiptAttempt", "itemVersion", "course", "release
   if (kind === "course") body.exposureReceipt.contextAnchor.courseId = other;
   if (kind === "release") body.exposureReceipt.releasedAt = null;
   if (kind === "domain") body.exposureReceipt.supportDomain = "language";
-  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("不一致");
+  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("对不上");
 });
 it("keeps retries at the same level after a failed delivery", async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValueOnce(Response.json(hint()));
   const delivered: SpanHintResponse[] = [];
-  await expect(requestSpanHint(attempt, nextSpanHintLevel(delivered)!, fetcher)).rejects.toThrow("原答案保留");
+  await expect(requestSpanHint(attempt, nextSpanHintLevel(delivered)!, fetcher)).rejects.toThrow("答案还在");
   expect(nextSpanHintLevel(delivered)).toBe(1);
   delivered.push(await requestSpanHint(attempt, nextSpanHintLevel(delivered)!, fetcher));
   expect(nextSpanHintLevel(delivered)).toBe(2);
   expect(nextSpanHintLevel([{ level: 1 }, { level: 2 }, { level: 3 }, { level: 4 }])).toBeNull();
 });
 it("does not display hint content without a readable release receipt", async () => {
-  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json({ attemptId: id, level: 1, text: "unverified content" })))).rejects.toThrow("回执暂无法核实");
+  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json({ attemptId: id, level: 1, text: "unverified content" })))).rejects.toThrow("暂时没加载好");
 });
 it("accepts the existing full-solution receipt with its original unknown domain", async () => {
   const body = hint(); body.level = 4;
   body.exposureReceipt = { ...body.exposureReceipt, releaseKey: `span-feedback:${id}`, supportDomain: "unknown", origin: "history_solution", contextAnchor: { ...body.exposureReceipt.contextAnchor, purpose: "history_solution" } };
   expect(await requestSpanHint(attempt, 4, vi.fn().mockResolvedValue(Response.json(body)))).toEqual(body);
   body.exposureReceipt.supportDomain = "language";
-  await expect(requestSpanHint(attempt, 4, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("不一致");
+  await expect(requestSpanHint(attempt, 4, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("对不上");
 });
 it("does not reinterpret an unknown hint or an assistant release as a full solution", async () => {
   const body = hint(); body.exposureReceipt.supportDomain = "unknown";
-  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("不一致");
+  await expect(requestSpanHint(attempt, 1, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("对不上");
   body.level = 4;
-  await expect(requestSpanHint(attempt, 4, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("不一致");
+  await expect(requestSpanHint(attempt, 4, vi.fn().mockResolvedValue(Response.json(body)))).rejects.toThrow("对不上");
 });

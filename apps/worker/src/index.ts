@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { loadWorkerStartupConfig } from "@aistudy/config";
+import { loadOpeningJobStaleConfig, loadWorkerStartupConfig } from "@aistudy/config";
 import { assertConsumersActive, consumersReady, createWorkerReadiness, type ReadyConsumer } from "./runtime/worker-readiness";
 import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
@@ -45,7 +45,7 @@ import { runJob, type JobHandler } from "./runtime/run-job";
 import { createCompileTeachingUnitWorkerDeps } from "./runtime/compile-teaching-unit-wiring";
 import { createMediaTranscribeWorkerDeps } from "./runtime/media-transcribe-wiring";
 import { createDbSystemQueryService, createDbAssistantProposalService } from "./runtime/system-query";
-import { createOpeningEphemeralProvenanceRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
+import { createOpeningEphemeralProvenanceRepository, createOpeningStudyExposureRepository, reconcileStaleTeachingGenerations } from "@aistudy/database";
 
 /**
  * In-memory smoke processor. Kept pure so unit tests do not require Redis.
@@ -386,7 +386,15 @@ export async function main(): Promise<void> {
   const sweepPendingUploads = createSweepPendingUploadsJob({
     sweepAll: (options) => sweepExpiredPendingUploadsAll(sql, options),
   });
-  const sweep = createSerialTask(async () => { await sweepPendingUploads(); await createOpeningEphemeralProvenanceRepository(sql).purgeExpiredQueries?.(); }, reportError);
+  // Backstop for jobs nobody polls: a lost queue message / dead compile must not leave a
+  // lesson "正在准备讲解" or a tutor answer pending forever (web reads reconcile too).
+  const staleJobs = loadOpeningJobStaleConfig();
+  const sweep = createSerialTask(async () => {
+    await sweepPendingUploads();
+    await createOpeningEphemeralProvenanceRepository(sql).purgeExpiredQueries?.();
+    await reconcileStaleTeachingGenerations(sql, { staleMs: staleJobs.teachingGenerateStaleMs });
+    await tutorJobs.expireStale({ staleMs: staleJobs.tutorJobStaleMs });
+  }, reportError);
   tasks.push(sweep);
   timers.push(setInterval(() => { void sweep.run(); }, PENDING_UPLOAD_SWEEP_INTERVAL_MS));
 

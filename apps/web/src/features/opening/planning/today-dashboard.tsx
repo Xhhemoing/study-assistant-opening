@@ -32,6 +32,7 @@ import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 import { ASSISTANT_OPEN_EVENT } from "../assistant/assistant-entry";
 import { Sparkles } from "lucide-react";
 import { finishedTodayActivity } from "./today-finished";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** 一键学习会话入口：连续复习 → 当前学习单元。 */
 export function todaySessionHref(next: { href: string; label: string }): string {
@@ -331,7 +332,7 @@ export function TodayDashboard({
       setSelectedActivity(created); setActivityLoad("ready");
       setCtaPreferWorkspace(true); setCtaFocusNonce((n) => n + 1); setQueueOpen(false);
       if (planning && created.courseId) window.location.assign(`/opening/courses/${encodeURIComponent(created.courseId)}/study?activity=${encodeURIComponent(created.id)}`);
-    } catch (reason) { setCtaError(reason instanceof Error ? reason.message : "任务主讲创建未确认，请用同一任务重新读取。"); }
+    } catch (reason) { setCtaError(userFacingMessage(reason, "任务主讲创建未确认，请用同一任务重新读取。")); }
     finally { taskStartInFlight.current = false; setCtaBusy(false); }
   }, [api, planning, teachingLoopTrialEnabled, timeZone]);
 

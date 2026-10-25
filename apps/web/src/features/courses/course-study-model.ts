@@ -33,7 +33,7 @@ export function courseActivityNextStep(activity: TeachingActivity): string {
   if (activity.generateStatus === "queued" || activity.generateStatus === "generating") return "讲解正在准备，进入后可刷新状态或先独立练习。";
   if (activity.generateStatus === "failed" || activity.generateStatus === "cancelled" || activity.generateStatus === "stale") return "讲解暂不可用，进入后可恢复生成或先独立练习。";
   if (activity.generateStatus === "unknown") return "讲解状态待确认，进入后可重新读取。";
-  if (activity.generateStatus === "needs_check") return "讲解需要核查，可恢复原学习位置并查看提醒。";
+  if (activity.generateStatus === "needs_check") return "这节讲解还在核对引用，可以先学。";
   if (activity.contentVersion === 0) return "当前还没有讲解内容，可以先独立练习。";
   return activity.status === "paused" ? "从已保存的学习位置继续。" : "继续当前学习单元，保留原回答与帮助记录。";
 }

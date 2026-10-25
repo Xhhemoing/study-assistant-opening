@@ -1,4 +1,5 @@
 import { OpeningApiError } from "../client/api";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Describe the failure without claiming a refresh or removal has already happened. */
 export function planAcceptFailure(reason: unknown): { message: string; reread: boolean } {
@@ -19,5 +20,5 @@ export function planAcceptFailure(reason: unknown): { message: string; reread: b
     }
     return { message: "计划已变化，请重新读取后再确认；没有重复提交。", reread: false };
   }
-  return { message: reason instanceof Error ? reason.message : "确认推荐草案失败", reread: false };
+  return { message: userFacingMessage(reason, "确认推荐草案失败"), reread: false };
 }

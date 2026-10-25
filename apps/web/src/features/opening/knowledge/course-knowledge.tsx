@@ -6,6 +6,7 @@ import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const KIND_ORDER: Record<KnowledgeNode["kind"], number> = {
   chapter: 0, concept: 1, procedure: 2, problem_type: 3,
@@ -73,7 +74,7 @@ export function CourseKnowledge({
         setActions([]);
       }
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : "课程知识暂时无法读取";
+      const message = userFacingMessage(reason, "课程知识暂时无法读取");
       if (/503|不可用|not configured|CONFIGURATION/i.test(message)) {
         setUnavailable(true);
         setSnapshot(null);

@@ -81,7 +81,7 @@ it("keeps a failed grade on the same card without feedback, and retries with the
   grade.mockRejectedValueOnce(new Error("offline"));
   await render(); await reveal();
   await act(async () => gradeButton().click());
-  expect(container.textContent).toContain("offline");
+  expect(container.textContent).toContain("评分保存失败");
   expect(card().textContent).toContain("答案 a");
   expect(vibrate).not.toHaveBeenCalled();
   expect(container.querySelector('[data-card-transition="exit"]')).toBeNull();

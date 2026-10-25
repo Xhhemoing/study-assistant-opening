@@ -5,6 +5,7 @@ import type { RevisionProposalRecord } from "@aistudy/contracts";
 import { Check, RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createRevisionProposalApi, RevisionProposalApiError } from "./revision-proposal-api";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 type Props = { documentId: string };
 
@@ -38,7 +39,7 @@ export function RevisionReviewPanel({ documentId }: Props) {
       if (!currentRevision) throw new Error("缺少冲突版本，请重新读取提案。");
       const result = await api.resolve(proposal.id, { action: "preserve_both", selectedProposalBlockIds: ids, expectedCurrentRevisionNumber: currentRevision });
       setProposals((current) => current.map((item) => item.id === proposal.id ? result.proposal : item));
-    } catch (cause) { setError(cause instanceof RevisionProposalApiError ? cause.message : cause instanceof Error ? cause.message : "操作失败，请重试。"); } finally { setPending(null); }
+    } catch (cause) { setError(cause instanceof RevisionProposalApiError ? cause.message : userFacingMessage(cause, "操作失败，请重试。")); } finally { setPending(null); }
   }
 
   if (loading) return <section className="rounded-lg border border-zinc-200 bg-white p-4" aria-label="修订提案"><p role="status" className="text-sm text-zinc-500">正在读取修订提案...</p></section>;

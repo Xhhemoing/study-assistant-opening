@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { PhotoQuestionRecognitionProposal, PhotoQuestionRecognitionResponse } from "@aistudy/contracts";
 import { photoQuestionRecognition } from "./photo-practice-client";
 import { ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const stateCopy = {
   queued: "正在排队识别题干；你也可以直接手动填写。",
@@ -28,7 +29,7 @@ export function PhotoRecognitionEditor({ sourceId, sourceVersion, disabled, onUs
         if (!active) return;
         setResult(value); setError("");
         if (value.status === "queued" || value.status === "running") timer = setTimeout(() => { void read(); }, 2000);
-      } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : "识别状态暂不可读取，仍可手动填写。"); }
+      } catch (reason) { if (active) setError(userFacingMessage(reason, "识别状态暂不可读取，仍可手动填写。")); }
     }
     void read();
     return () => { active = false; if (timer) clearTimeout(timer); };
@@ -37,7 +38,7 @@ export function PhotoRecognitionEditor({ sourceId, sourceVersion, disabled, onUs
     if (busy || disabled || result?.status !== "idle") return;
     setBusy(true); setError("");
     try { setResult(await photoQuestionRecognition({ sourceId, sourceVersion }, true)); setRevision(value => value + 1); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "请求结果尚未确认，请重新读取状态或手动填写。"); setResult(null); }
+    catch (reason) { setError(userFacingMessage(reason, "请求结果尚未确认，请重新读取状态或手动填写。")); setResult(null); }
     finally { setBusy(false); }
   }
   return <section className="space-y-2 rounded-lg border border-line bg-surface-2 p-3" aria-label="题干识别">

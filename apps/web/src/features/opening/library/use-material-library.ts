@@ -5,6 +5,7 @@ import type { OpeningApi } from "../client/api";
 import { createMaterialOrganizationClient, type MaterialOrganization, type OrganizationResult } from "./material-organization-client";
 import { deleteSelectedMaterials } from "./material-batch-delete";
 import { selectedMaterials, type MaterialSpace } from "./material-spaces";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const empty: MaterialOrganization = { courses: [], memberships: [] };
 export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: string | null } = {}) {
@@ -55,7 +56,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       setResult(next); setSelected(next.failed.map(item => item.id));
       await refresh();
     } catch (reason) {
-      if (mounted.current) setOrganizationError(reason instanceof Error ? reason.message : "整理结果尚未确认，请刷新后核对。");
+      if (mounted.current) setOrganizationError(userFacingMessage(reason, "整理结果尚未确认，请刷新后核对。"));
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
   async function createCourse(title: string) {
@@ -78,7 +79,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       setResult(next);
       await refresh();
     } catch (reason) {
-      if (mounted.current) setOrganizationError(reason instanceof Error ? reason.message : "整理结果尚未确认，请刷新后核对。");
+      if (mounted.current) setOrganizationError(userFacingMessage(reason, "整理结果尚未确认，请刷新后核对。"));
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
   async function deleteSelected() {
@@ -91,7 +92,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       setSelected(next.failed.map(item => item.id));
       await refresh();
     } catch (reason) {
-      if (mounted.current) setError(reason instanceof Error ? reason.message : "删除结果尚未确认，请刷新后核对。");
+      if (mounted.current) setError(userFacingMessage(reason, "删除结果尚未确认，请刷新后核对。"));
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
   return { sources, organization, space, selection, loading, refreshing, busy, organizationReady, error, organizationError, result, uploadCourseId,

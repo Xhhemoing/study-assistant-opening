@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { PromotionCandidateKind, PromotionRecord } from "@aistudy/contracts";
 import { EmptyState, LoadError, LoadingRows, PageHeading, textareaClass, ui } from "../opening/design/ui";
 import { PromotionApi } from "./promotion-api";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 const candidateKinds: Array<{ value: PromotionCandidateKind; label: string }> = [
   { value: "note", label: "笔记" }, { value: "card", label: "复习卡片" },
@@ -24,7 +25,7 @@ export function PromotionReview({ explorationId }: { explorationId: string }) {
   const load = useCallback(async () => {
     setLoading(true); setError(undefined);
     try { setItems(await PromotionApi.list(explorationId)); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "候选读取失败，请重试。"); }
+    catch (reason) { setError(userFacingMessage(reason, "候选读取失败，请重试。")); }
     finally { setLoading(false); }
   }, [explorationId]);
   useEffect(() => { void load(); }, [load]);
@@ -36,7 +37,7 @@ export function PromotionReview({ explorationId }: { explorationId: string }) {
     try {
       const created = await PromotionApi.create(explorationId, { kind, title, body });
       setItems((current) => [...current, created]); setTitle(""); setBody("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "候选创建失败，请重试。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "候选创建失败，请重试。")); }
     finally { setBusy(false); }
   }
   async function decide(item: PromotionRecord, action: "accept" | "reject") {
@@ -45,7 +46,7 @@ export function PromotionReview({ explorationId }: { explorationId: string }) {
     try {
       const updated = await PromotionApi[action](item.id);
       setItems((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "审核失败，请重试。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "审核失败，请重试。")); }
     finally { setBusy(false); }
   }
 

@@ -4,6 +4,7 @@ import type { WeekSession } from "@aistudy/contracts";
 import { useCallback, useState, type ChangeEvent } from "react";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { parseTimetableFile, type ParsedTimetable } from "./xlsx-reader";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const WEEKDAY_LABELS = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"] as const;
 
@@ -32,7 +33,7 @@ export async function confirmTimetableImport(
     const saved = await put(sessions);
     return { ok: true, sessions: saved };
   } catch (reason) {
-    return { ok: false, message: reason instanceof Error ? reason.message : "课表保存失败，请重试。" };
+    return { ok: false, message: userFacingMessage(reason, "课表保存失败，请重试。") };
   }
 }
 
@@ -102,7 +103,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
     } catch (reason) {
       setState({
         phase: "error",
-        message: reason instanceof Error ? reason.message : "无法读取课表文件，请选择有效的 xlsx。",
+        message: userFacingMessage(reason, "无法读取课表文件，请选择有效的 xlsx。"),
       });
     } finally {
       setBusy(false);
@@ -211,7 +212,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
               disabled={busy || !preview.parsed.sessions.length}
               onClick={() => void onConfirm()}
             >
-              {busy && state.phase === "saving" ? "正在保存…" : "确认写入课表"}
+              {busy && state.phase === "saving" ? "正在保存…" : "确认加入课表"}
             </button>
             <button type="button" className={secondaryButtonClass} disabled={busy} onClick={onCancel}>
               取消预览

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readStudyNote, saveStudyNote, studyNoteDocument, writeStudyNote } from "./study-note-draft";
+import { associateStudyNote, readStudyNote, saveStudyNote, studyNoteDocument, writeStudyNote } from "./study-note-draft";
 import type { StudyConversationContext } from "../assistant/study-conversation-context";
 import { EditorApiError } from "../../editor/editor-api";
 
@@ -128,4 +128,19 @@ it("does not overwrite a new note with a late course-association response for th
   writeStudyNote(ctx, { ...readStudyNote(ctx), status: "editing", text: "正在写第二篇", documentId: null, associationFailed: false });
   finish(); await pending;
   expect(readStudyNote(ctx)).toMatchObject({ status: "editing", text: "正在写第二篇", documentId: null });
+});
+
+describe("associateStudyNote", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const respond = (status: number, body: unknown) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })));
+  it("treats an existing association (409 duplicate) as linked", async () => {
+    respond(409, { error: { code: "CONFLICT", message: "exists", businessCode: "DUPLICATE_MEMBERSHIP" } });
+    await expect(associateStudyNote("c", "d")).resolves.toBeUndefined();
+  });
+  it("still reports other conflicts and failures", async () => {
+    respond(409, { error: { code: "CONFLICT", message: "archived" } });
+    await expect(associateStudyNote("c", "d")).rejects.toThrow("课程关联未确认");
+    respond(500, {});
+    await expect(associateStudyNote("c", "d")).rejects.toThrow("课程关联未确认");
+  });
 });

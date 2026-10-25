@@ -18,6 +18,7 @@ import {
   type WorkspacePanel,
   type WorkspaceTextStyle,
 } from "./notion-import-workspace";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 type ImportState = "idle" | "loading" | "done" | "error";
 
@@ -67,7 +68,7 @@ export function NotionImportPreview() {
       setSelectedId(firstPage.id);
       setState("done");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "解析失败，请确认这是 Notion 导出的 ZIP");
+      setError(userFacingMessage(cause, "解析失败，请确认这是 Notion 导出的 ZIP"));
       setState("error");
     }
   }, []);
@@ -76,7 +77,7 @@ export function NotionImportPreview() {
     setState("loading");
     setError("");
     void readZip(file).then(handleEntries).catch((cause) => {
-      setError(cause instanceof Error ? cause.message : "无法读取 ZIP 文件");
+      setError(userFacingMessage(cause, "无法读取 ZIP 文件"));
       setState("error");
     });
   }, [handleEntries]);
@@ -92,7 +93,7 @@ export function NotionImportPreview() {
       .then(readZip)
       .then(handleEntries)
       .catch((cause) => {
-        setError(cause instanceof Error ? cause.message : "示例导出加载失败");
+        setError(userFacingMessage(cause, "示例导出加载失败"));
         setState("error");
       });
   }, [handleEntries]);

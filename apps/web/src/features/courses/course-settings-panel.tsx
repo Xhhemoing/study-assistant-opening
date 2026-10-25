@@ -7,6 +7,7 @@ import { LoadError, ui } from "../opening/design/ui";
 import type { CourseSummary } from "./course-model";
 import { createCourseStateClient } from "./course-state-client";
 import { courseRestrictionDraft, courseRestrictionUpdate } from "./course-state-model";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 const client = createCourseStateClient();
 const fields: Array<{ key: keyof LearningPreferences; label: string }> = [
@@ -28,7 +29,7 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
     setLoading(true); setError(""); setEffective(null); setAccount(null);
     Promise.all([client.getAccountPreferences(), client.getPreferences(course.id)])
       .then(([currentAccount, currentEffective]) => { if (active) { setAccount(currentAccount); setEffective(currentEffective); } })
-      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "课程设置读取失败，请重试。"); })
+      .catch((reason: unknown) => { if (active) setError(userFacingMessage(reason, "课程设置读取失败，请重试。")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [course.id, course.archivedAt, retry]);
@@ -39,7 +40,7 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
       setEffective(await client.savePreferences(course.id, draft));
       onChange({ ...course, learningPreferenceOverrides: courseRestrictionUpdate(draft) });
       setMessage("课程设置已保存。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "课程设置保存失败，请重试。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "课程设置保存失败，请重试。")); }
     finally { setBusy(false); }
   }
   async function changeArchive() {
@@ -48,7 +49,7 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
       const saved = await client.setArchived(course.id, !course.archivedAt);
       onChange(saved); setConfirmArchive(false);
       setMessage(saved.archivedAt ? "课程已归档，材料和学习记录仍保留。" : "课程已恢复，不会重发归档前积压的自动建议或提醒。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "课程状态保存失败，请重试。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "课程状态保存失败，请重试。")); }
     finally { setBusy(false); }
   }
   const savedDraft = courseRestrictionDraft(course.learningPreferenceOverrides);

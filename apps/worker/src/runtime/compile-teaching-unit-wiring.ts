@@ -92,8 +92,12 @@ export function createCompileTeachingUnitWorkerDeps(
       if (payload.teachingUnitId) return payload.teachingUnitId;
       // A library document needs at least one block; the compiled blocks
       // replace this placeholder as the next revision before publish.
+      // The unit is a learner-visible library document (search, notes, citations),
+      // so title it after what the learner asked to study, never an internal label.
+      const activity = await teachingActivities.get(scope, payload.activityId);
+      const title = activity?.intentSummary?.split("\n")[0]?.trim().slice(0, 120) || "学习讲义";
       const unit = await teachingContent.createUnit(scope, {
-        title: `Teaching draft ${payload.activityId.slice(0, 8)}`,
+        title,
         blocks: [{ id: randomUUID(), type: "meta", content: { text: "draft" } }],
       });
       return unit.id;

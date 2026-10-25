@@ -47,7 +47,7 @@ describe("confirmTimetableImport", () => {
     });
     expect(await confirmTimetableImport(sampleSessions, put)).toEqual({
       ok: false,
-      message: "network",
+      message: "课表保存失败，请重试。",
     });
   });
 });

@@ -9,7 +9,7 @@ async function readResponseBody(response: Response): Promise<unknown> {
   const body: unknown = await response.json();
   if (!response.ok) {
     const error = z.object({ error: z.object({ message: z.string() }) }).safeParse(body);
-    throw new OpeningApiError(response.status, error.success ? error.data.error.message : "提示尚未确认交付，原答案保留，可重试。");
+    throw new OpeningApiError(response.status, error.success ? error.data.error.message : "提示还没加载出来，你的答案还在，可以再点一次。");
   }
   return body;
 }
@@ -22,7 +22,7 @@ function validateHint(hint: TeachingHintResponse, attempt: HintAttempt, context:
     || receipt.origin !== (level === 4 ? "history_solution" : "assistant")
     || anchor.purpose !== (level === 4 ? "history_solution" : "learning_help")
     || level !== 4 && hint.referenceSourceId !== null) {
-    throw new Error("提示回执与当前题目或级别不一致，已停止显示。原答案保留。");
+    throw new Error("这条提示和当前题目对不上，已先隐藏。你的答案还在，可以再点一次。");
   }
   return hint;
 }
@@ -31,7 +31,7 @@ export async function requestTeachingHint(attempt: HintAttempt, context: Teachin
   const response = await fetcher("/api/opening/teaching/hint", { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(teachingHintRequestSchema.parse({ attemptId: attempt.id, level })) });
   const parsed = teachingHintResponseSchema.safeParse(await readResponseBody(response));
-  if (!parsed.success || parsed.data.level !== level) throw new Error("提示回执暂无法核实，原答案保留；请重试。");
+  if (!parsed.success || parsed.data.level !== level) throw new Error("提示暂时没加载好，你的答案还在，可以再点一次。");
   return validateHint(parsed.data, attempt, context);
 }
 
@@ -41,7 +41,7 @@ export async function readReleasedTeachingHints(attempt: HintAttempt, context: T
   const response = await fetcher(`/api/opening/teaching/hint?${new URLSearchParams({ attemptId })}`, { cache: "no-store" });
   const parsed = z.object({ hints: z.array(teachingHintResponseSchema).max(4) }).strict().safeParse(await readResponseBody(response));
   if (!parsed.success || new Set(parsed.data.hints.map(hint => hint.level)).size !== parsed.data.hints.length) {
-    throw new Error("已读提示回执暂无法核实，原答案保留；请重试读取。");
+    throw new Error("之前看过的提示暂时没加载好，你的答案还在，可以稍后再试。");
   }
   return parsed.data.hints.map(hint => validateHint(hint, attempt, context)).sort((a, b) => a.level - b.level);
 }

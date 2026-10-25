@@ -3,6 +3,7 @@ import { isBudgetReplayError } from "./budgeted-call";
 import { OpeningModelRoutingError } from "./model-routing";
 import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { parseModelJson } from "./latex-json";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
 /** Structural boundary: AI must not import database (database already uses AI). */
@@ -86,7 +87,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
             referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts }),
           persistResult: async output => {
             let proposal;
-            try { proposal = aiGradingProposalSchema.parse(JSON.parse(output.text)); }
+            try { proposal = aiGradingProposalSchema.parse(parseModelJson(output.text)); }
             catch { throw conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。"); }
             result = await deps.repository.apply(scope, input, proposal, modelLabel);
           },

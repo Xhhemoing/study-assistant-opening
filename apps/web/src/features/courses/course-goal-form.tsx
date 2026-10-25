@@ -5,6 +5,7 @@ import type { CourseGoal, CourseGoalUpdate, GoalLearningMode, OpeningAdaptivePre
 import { createOpeningApi, type OpeningApi } from "../opening/client/api";
 import { ui } from "../opening/design/ui";
 import { CourseMilestones } from "./course-milestones";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 const WEEKLY_MIN = 0;
 const WEEKLY_MAX = 3000;
@@ -100,7 +101,7 @@ export function CourseGoalForm({
       .catch((reason: unknown) => {
         if (active) {
           setLoadFailed(true);
-          setError(reason instanceof Error ? reason.message : "课程目标读取失败，请重试。");
+          setError(userFacingMessage(reason, "课程目标读取失败，请重试。"));
         }
       })
       .finally(() => {
@@ -147,7 +148,7 @@ export function CourseGoalForm({
     } catch (reason) {
       if (scopeRef.current !== courseId) return;
       setMustReload(true);
-      setError(reason instanceof Error ? reason.message : "课程目标保存失败，请重试。");
+      setError(userFacingMessage(reason, "课程目标保存失败，请重试。"));
     } finally {
       saving.current = false;
       if (scopeRef.current === courseId) setBusy(false);
@@ -174,7 +175,7 @@ export function CourseGoalForm({
     } catch (reason) {
       if (scopeRef.current !== courseId) return;
       setMustReload(true);
-      setError(reason instanceof Error ? reason.message : "清除课程目标失败，请重试。");
+      setError(userFacingMessage(reason, "清除课程目标失败，请重试。"));
     } finally {
       saving.current = false;
       if (scopeRef.current === courseId) setBusy(false);

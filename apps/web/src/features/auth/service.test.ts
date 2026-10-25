@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningPlanError } from "@aistudy/database";
+import { CourseMembershipError, OpeningPlanError } from "@aistudy/database";
 import {
   RETEST_SUBMIT_TOO_EARLY_CODE,
   RETEST_SUBMIT_TOO_EARLY_MESSAGE,
@@ -87,5 +87,16 @@ describe("unexpected HTTP errors", () => {
     const response = jsonError(new ApiError("RATE_LIMITED", "稍后重试", 429, 42));
     expect(response.status).toBe(429);
     expect(response.headers.get("Retry-After")).toBe("42");
+  });
+});
+
+describe("mapDomainError course membership conflicts", () => {
+  it("names a duplicate association apart from other conflicts", async () => {
+    const duplicate = jsonError(mapDomainError(new CourseMembershipError("DUPLICATE_MEMBERSHIP", "exists")));
+    expect(duplicate.status).toBe(409);
+    expect((await duplicate.json()).error.businessCode).toBe("DUPLICATE_MEMBERSHIP");
+    const archived = jsonError(mapDomainError(new CourseMembershipError("ARCHIVED", "archived")));
+    expect(archived.status).toBe(409);
+    expect((await archived.json()).error.businessCode).toBeUndefined();
   });
 });

@@ -26,6 +26,7 @@ import { nextSpanHintLevel, requestSpanHint, SPAN_HINT_LABELS } from "./span-hin
 import { spanProblemText } from "./span-problem-text";
 import { readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, spanVectorInput, updateSpanDraftAnswer } from "./span-answer";
 import { studentCopy } from "../student-copy";
+import { userFacingMessage } from "../../../../lib/user-facing-error";
 
 export function SpanPractice(props: { session?: SpanLessonSnapshot; restoredAttempt?: LearningAttempt; restoredHintLevels?: SpanHintLevel[]; courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void }) {
   const scope = spanPracticeScope(props.courseId, props.retestId, props.newEvidenceEventId, props.session?.activityId, props.problemId);
@@ -67,7 +68,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
     if (!attempt || !nextHint || locked.current || hintRestoring || (nextHint === 4 && !record) || (draft.submission && !record)) return;
     locked.current = true; setPending(true); setHintPending(true); setError("");
     try { requireSaved(); acceptHint(await requestSpanHint(attempt, nextHint)); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "提示暂不可读取，原答案保留。"); }
+    catch (reason) { setError(userFacingMessage(reason, "提示暂不可读取，原答案保留。")); }
     finally { locked.current = false; setPending(false); setHintPending(false); }
   }
   function edit(change: Parameters<typeof updateSpanDraftAnswer>[1]) { patch({ fields: { answer: updateSpanDraftAnswer(fields.answer, change) } }); }
@@ -95,7 +96,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
           const selected = await fetch("/api/opening/teaching/span/reserved", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: request.sessionId, sourceId: fields.sourceId, clientKey: request.clientKey, mode: intent.purpose === "overview" ? "overview" : intent.purpose === "challenge" ? "challenge" : "self_study" }) });
           if (!selected.ok) throw new Error("这道题还没准备好，请再试一次。");
           const issued = learningAttemptSchema.parse(await selected.json());
-          if (!issued.spanExercise) throw new Error("检查题规格暂不可读取");
+          if (!issued.spanExercise) throw new Error("这道题暂时没准备好，请再试一次。");
           request.createInput = { sessionId: request.sessionId, clientKey: request.clientKey, spanExercise: { sourceId: fields.sourceId, problemId: issued.spanExercise.id, version: Number(issued.spanExercise.version) } };
           patch({ start: request, fields: { spanProblemId: issued.spanExercise.id, spanVersion: Number(issued.spanExercise.version) } }); requireSaved();
           return issued;
@@ -116,7 +117,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
       setAttempt(result); onAttempt?.(result); setRecord(state.observation); setSealedAnswer(state.originalObservation?.answer ?? state.observation?.answer ?? null);
       patch(current => ({ observationId: state.observation?.id ?? null, fields: restoredPracticeAssistance(current.fields, state.deliveredAssistance) }));
       if (state.observation && belongsToRequested(result)) onRecorded(state.observation);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "练习暂不可恢复，原请求保留。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "练习暂时没打开，请再试一次。")); }
     finally { locked.current = false; setPending(false); }
   }
   async function submit() {
@@ -135,7 +136,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
       if (!mounted.current) return;
       successfulInteractionHaptic();
       setRecord(state.observation); setSealedAnswer(state.originalObservation?.answer ?? state.observation?.answer ?? null); if (belongsToRequested(attempt)) onRecorded(state.observation);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "答案还没提交成功，请再试一次。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "答案还没提交成功，请再试一次。")); }
     finally { locked.current = false; setPending(false); }
   }
   const intentIdentity = JSON.stringify(intent);
@@ -169,8 +170,8 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
         setAttempt(restoredAttempt); onAttempt?.(restoredAttempt); setRecord(state.observation); setSealedAnswer(state.originalObservation?.answer ?? state.observation?.answer ?? null);
         patch(current => ({ observationId: state.observation?.id ?? null, fields: restoredPracticeAssistance(current.fields, state.deliveredAssistance) }));
         if (state.observation) onRecorded(state.observation);
-      }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "原题暂未恢复，请重新读取。"); });
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "原题答案暂未保存。"); }
+      }).catch(reason => { if (active) setError(userFacingMessage(reason, "原题暂未恢复，请重新读取。")); });
+    } catch (reason) { setError(userFacingMessage(reason, "原题答案暂未保存。")); }
     return () => { active = false; };
     // The captured canonical attempt is restored once; its asynchronous callbacks
     // cannot populate a new lesson or a different draft after navigation.
@@ -191,7 +192,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
     // A recovery read must never climb the ladder or infer a level from assistance.
     void Promise.all(restoredHintLevels.map(level => requestSpanHint(attempt, level))).then(values => {
       if (active) values.forEach(acceptHint);
-    }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "已交付提示暂未恢复，请保留原答并重新读取。"); })
+    }).catch(reason => { if (active) setError(userFacingMessage(reason, "之前看过的提示暂时没加载好，你的答案还在，可以刷新后再看。")); })
       .finally(() => { if (active) setHintRestoring(false); });
     return () => { active = false; };
   }, [attempt?.id, restoredAttempt?.id, hintLevelIdentity]);
@@ -206,7 +207,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
     {!attempt ? <div className="space-y-3"><p role="status" className="text-sm text-text-2">{error ? "题目还没准备好，请再试一次。" : studentCopy.prepare}</p>{error ? <button type="button" className={ui.secondary} disabled={!ready || pending || !fields.sourceId} onClick={() => void start()}>{studentCopy.retry}</button> : null}</div> : null}
     {problem && problemText ? <ProblemCard language={intent.language} prompt={problemText.english} translation={problemText.chinese}>
       <LessonFlow phase={hintPending ? "hint" : record ? "feedback" : pending ? "submit" : hints.length ? "hint" : "attempt"}>
-      {diagnostics && attempt.spanValidation ? <p className="text-xs leading-6 text-text-3">{restoredUnverified ? "已恢复原题身份和作答记录；备份不恢复自动评分权威，本题保留为待核对练习。" : attempt.spanValidation.eligible ? "发题时未见本工作区此前发放同题族的记录；实际帮助与提交时资格仍会核对。" : "本题族已有发放记录，继续作为练习；不称作新的未曝光题族检查。"}</p> : null}{problem.transfer ? <p className="text-xs leading-6 text-text-2">这道题的变化：{problem.transfer.changes.join("；")}</p> : null}
+      {diagnostics && attempt.spanValidation ? <p className="text-xs leading-6 text-text-3">{restoredUnverified ? "已恢复这道题和你的作答；从备份恢复的题目不自动评分，可以自己对照答案。" : attempt.spanValidation.eligible ? "发题时未见本工作区此前发放同题族的记录；实际帮助与提交时资格仍会核对。" : "本题族已有发放记录，继续作为练习；不称作新的未曝光题族检查。"}</p> : null}{problem.transfer ? <p className="text-xs leading-6 text-text-2">这道题的变化：{problem.transfer.changes.join("；")}</p> : null}
       <HintLadder delivered={hints.map(hint => ({ id: hint.exposureReceipt.id, label: `${hint.level}. ${SPAN_HINT_LABELS[hint.level]}`, text: hint.text }))} next={nextHint ? { label: SPAN_HINT_LABELS[nextHint], pending: hintPending || hintRestoring, disabled: pending || hintRestoring || (nextHint === 4 && !record) || Boolean(draft.submission && !record), blockedReason: draft.submission && !record ? "先确认原答案已保存，再继续查看提示。" : nextHint === 4 && !record ? "请先保存自己的答案，再查看完整示范。" : undefined, request: () => void requestNextHint() } : undefined} />
       {record ? <FeedbackPanel verdict={record.serverEvaluation?.decision === "correct" ? "correct" : record.serverEvaluation?.decision === "incorrect" ? "incorrect" : "unverified"} title={record.serverEvaluation?.decision === "correct" ? "做对了！" : record.serverEvaluation?.decision === "incorrect" ? "看看这一步" : "还需要核对一下"} evidence={SPAN_FEEDBACK_LABELS[record.serverEvaluation?.reasonCodes[0] ?? ""] ?? "可以到课程学习记录查看详细评价。"}><LearnerStatePanel observation={record} refreshing={trustRefreshing} />{record.serverEvaluation?.evaluatorVersion === "span-exact-v1" && record.serverEvaluation.skills ? <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">{Object.entries(record.serverEvaluation.skills).map(([key, value]) => <div key={key}><dt className="text-text-3">{{ equation: "建立向量等式", coefficients: "求解系数", allCoordinates: "全部坐标检查", noSolutionProof: "说明无解", systemConsistency: "方程组结构", geometry: "几何集合" }[key] ?? key}</dt><dd className="mt-1">{value === "correct" ? "本次步骤核对正确" : value === "incorrect" ? "本次步骤需修正" : "还没填写"}</dd></div>)}</dl> : null}<details><summary className="cursor-pointer text-xs text-text-2">{studentCopy.originalAnswer}</summary><pre className="mt-2 overflow-auto whitespace-pre-wrap break-words text-xs leading-6">{sealedAnswer ?? record.answer}</pre></details>{trustRefreshing ? <p className="text-xs text-warn">作答情况已更新，正在读取最新结果…</p> : diagnostics && record.eligibility ? <LearningEvidenceEligibilityDetails eligibility={record.eligibility} /> : null}<SpanFeedback key={attempt.id} attemptId={attempt.id} /><SpanFeedbackPractice record={record} /><Link href={`/opening/courses/${courseId}#course-learning-records`} className={ui.quiet}>查看记录或修正评价</Link></FeedbackPanel> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); void submit(); }}>
         <fieldset disabled={pending || Boolean(draft.submission)} className="space-y-3"><legend className="mb-2 text-sm font-medium">先写自己的等式，再求系数并逐坐标检查</legend>

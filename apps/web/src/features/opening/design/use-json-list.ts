@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function useJsonList<T>(url: string, key: string, isRow: (value: unknown) => value is T) {
   const [rows, setRows] = useState<T[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState("");
@@ -15,7 +16,7 @@ export function useJsonList<T>(url: string, key: string, isRow: (value: unknown)
         if (!Array.isArray(list) || !list.every(isRow)) throw new Error("服务器返回的数据格式不完整，请重试。");
         if (!controller.signal.aborted) setRows(list);
       } catch (reason) {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "读取失败");
+        if (!controller.signal.aborted) setError(userFacingMessage(reason, "读取失败"));
       } finally { if (!controller.signal.aborted) setLoading(false); }
     })();
     return () => controller.abort();

@@ -104,7 +104,7 @@ describe("decideBlockRender", () => {
       answerRef: { refId: BID, revealState: "hidden" },
     });
     expect(d).toEqual({ ok: false, reason: "answer_hidden" });
-    expect(failSoftReasonLabel("answer_hidden")).toContain("服务端授权");
+    expect(failSoftReasonLabel("answer_hidden")).toBe("解析暂时还不能查看");
   });
 
   it("unknown blockType → unknown_component", () => {

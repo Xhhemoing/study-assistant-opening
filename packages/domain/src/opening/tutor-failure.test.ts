@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PAGE_CITATION_CLARIFY_MESSAGE } from "./tutor-policy";
-import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE } from "./tutor-failure";
+import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, TUTOR_STALE_MESSAGE } from "./tutor-failure";
 
 describe("tutor failure presentation", () => {
   it.each([null, "database password", { message: "SQL /private/config token=secret" }, { code: "__proto__", message: "secret" }, { code: "untrusted-code" }])("never renders unclassified stored diagnostics: %j", error => {
@@ -9,6 +9,15 @@ describe("tutor failure presentation", () => {
   it("uses fixed actionable quota copy rather than the stored message", () => {
     expect(tutorFailureForDisplay("failed", { code: "BUDGET_EXCEEDED", message: "SQL secret" }))
       .toEqual({ code: "BUDGET_EXCEEDED", message: "今日 AI 预算已达上限，请在设置中核对预算，或明天再试。" });
+  });
+  it("points every no-usable-model failure at settings with one plain sentence", () => {
+    for (const code of ["AI_ROUTE_UNAVAILABLE", "AI_MODEL_UNAVAILABLE", "PROVIDER_DISABLED"]) {
+      expect(tutorFailureForDisplay("failed", { code, message: "所选模型暂不可用 secret" })).toEqual({ code, message: "还没有配置可用的 AI 模型，去设置里配置。" });
+    }
+  });
+  it("gives a stale never-started answer a terminal code the client can act on", () => {
+    expect(tutorFailureForDisplay("failed", { code: "TUTOR_JOB_STALE", message: "stored" }))
+      .toEqual({ code: "TUTOR_JOB_STALE", message: TUTOR_STALE_MESSAGE });
   });
   it("retains the controlled clarify action without trusting its stored text", () => {
     expect(tutorFailureForDisplay("failed", { code: "page_not_in_sources", nextAction: "clarify", message: "internal" }))

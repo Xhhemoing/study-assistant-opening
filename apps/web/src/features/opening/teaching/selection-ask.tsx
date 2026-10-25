@@ -5,6 +5,7 @@ import { Layers2, Sparkles } from "lucide-react";
 import { createOpeningCardsClient } from "../cards/cards-client";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
 import { studyConversationHref, studyConversationIdentity } from "../assistant/study-conversation-context";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export const LessonSelectionAskContext = createContext<((text: string) => void) | null>(null);
 
@@ -60,7 +61,7 @@ export function SelectionAsk({ binding, children, onAsk }: { binding: CurrentStu
       setCard({ ...card, state: "saved" });
       window.setTimeout(() => setCard(null), 1400);
     } catch (reason) {
-      setCard({ ...card, state: "error", message: reason instanceof Error ? reason.message : "卡片保存失败" });
+      setCard({ ...card, state: "error", message: userFacingMessage(reason, "卡片保存失败") });
     }
   }
   return <div ref={root} className="min-w-0 space-y-5">

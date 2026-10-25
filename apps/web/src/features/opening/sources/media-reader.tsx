@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { LoadError, secondaryButtonClass } from "../design/ui";
 import { sourceStatusLabel } from "../inbox/upload-state";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type MediaReaderStateKind =
   | "loading"
@@ -94,7 +95,7 @@ export function MediaReader({
       setPayload(result);
     } catch (reason) {
       if (sequence !== requestSequence.current) return;
-      const message = reason instanceof Error ? reason.message : "媒体片段暂时无法读取";
+      const message = userFacingMessage(reason, "媒体片段暂时无法读取");
       if (/503|不可用|CONFIGURATION|not configured/i.test(message)) {
         setUnavailable(true);
         setPayload(null);

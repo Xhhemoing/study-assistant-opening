@@ -29,7 +29,7 @@ export function LearnerShadowComparisonBody({ report }: { report: LearnerShadowC
       <tbody>{report.models.map(model => <tr key={model.modelId} className="border-b border-line"><th scope="row" className="p-2 font-medium">{names[model.modelId]}</th><td className="p-2 tabular-nums">{model.count}</td><td className="p-2 tabular-nums">{score(model.brier)}</td><td className="p-2 tabular-nums">{score(model.logLoss)}</td><td className="p-2 tabular-nums">{model.failedAboveThreshold} / {model.aboveThresholdCount}</td><td className="p-2 tabular-nums">{model.failureRateAboveThreshold === null ? "样本不足" : `${(model.failureRateAboveThreshold * 100).toFixed(1)}%`}</td></tr>)}</tbody>
     </table></div>
     <p>Brier 和 Log loss 越低，表示这组已发生答案上的预测误差越小；少量数据不能证明哪个模型更好。没有对应分母时，指标保留为空，不按零失败率解释。</p>
-    <p>隔离规则：只使用预测截止点之前、同课程与目标的已核验独立记录；训练排除待预测题族。比较使用三个模型共同合格的作答，并排除当前工作区此前已发放的题族、助答、撤回与已失效的依据。</p>
+    <p>隔离规则：只使用预测截止点之前、同课程与目标的已确认独立记录；训练排除待预测题族。比较使用三个模型共同合格的作答，并排除当前工作区此前已发放的题族、助答、撤回与已失效的依据。</p>
     {Object.keys(report.excluded).length ? <p>未纳入：{Object.entries(report.excluded).map(([reason, count]) => `${excludedLabels[reason] ?? "其他不完整记录"} ${count} 次`).join("；")}。</p> : null}
     <p>数据截止：{report.dataAsOf}。{report.cutoff ? `最新已评分预测的截止点：${report.cutoff}。` : "尚无可评分的预答预测。"}</p>
   </div>;
@@ -49,6 +49,6 @@ export function LearnerShadowPanel({ courseId, revision = 0 }: { courseId?: stri
   }, [expanded, courseId, revision]);
   return <details className="border-t border-line pt-3 text-xs text-text-2" onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="cursor-pointer py-1 font-medium">影子预测比较 · 仅实验，未校准</summary>
-    {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取实验回执…</p> : null}
+    {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取…</p> : null}
   </details>;
 }

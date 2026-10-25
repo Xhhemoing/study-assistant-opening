@@ -1,5 +1,6 @@
 import { observationRevisionInputSchema, type LearningObservation, type ObservationHistory, type ObservationRevisionInput } from "@aistudy/contracts";
 import { OpeningApiError } from "../client/api";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type ObservationRevisionDraft = Pick<LearningObservation, "answer" | "outcome" | "assistance" | "courseId" | "skillLabel"> & { requirementKey: string };
 export type ObservationRevisionEditor = {
@@ -43,5 +44,5 @@ export function observationRevisionCommand(input: Omit<ObservationRevisionEditor
 export function observationRevisionFailure(error: unknown) {
   if (error instanceof OpeningApiError && error.status === 409) return { kind: "conflict" as const, message: "记录已被更新。你的输入已保留；请重新载入并查看最新版本，再提交纠正。" };
   if (error instanceof OpeningApiError && (error.status === 403 || error.status === 404)) return { kind: "unavailable" as const, message: "这条记录已不可用，已停止展示。请刷新课程记录。" };
-  return { kind: "error" as const, message: error instanceof Error ? error.message : "保存失败，输入已保留，请重试。" };
+  return { kind: "error" as const, message: userFacingMessage(error, "保存失败，输入已保留，请重试。") };
 }

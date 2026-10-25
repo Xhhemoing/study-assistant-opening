@@ -132,5 +132,16 @@ export async function associateStudyNote(courseId: string, documentId: string): 
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ assetType: "document", assetId: documentId, role: "reference", visibility: "private" }),
   });
-  if (!response.ok) throw new Error("笔记已保存，课程关联未确认。");
+  if (response.ok || await isDuplicateMembership(response)) return;
+  throw new Error("笔记已保存，课程关联未确认。");
+}
+
+/** A 409 for an association that already exists means the note is already linked (已关联). */
+async function isDuplicateMembership(response: Response): Promise<boolean> {
+  if (response.status !== 409) return false;
+  try {
+    const body: unknown = await response.json();
+    const error = body && typeof body === "object" ? (body as { error?: { businessCode?: unknown } }).error : undefined;
+    return error?.businessCode === "DUPLICATE_MEMBERSHIP";
+  } catch { return false; }
 }

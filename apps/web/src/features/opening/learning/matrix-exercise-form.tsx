@@ -9,6 +9,7 @@ import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
 import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity } from "./practice-draft";
 import { raiseAssistanceOnly, isAssistanceAllowed } from "./reference-check";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type Key = MatrixExerciseSpec["exerciseKey"];
 const KEYS: Key[] = ["dimensions", "addition", "scalar", "multiplication"];
@@ -16,9 +17,9 @@ const reasonText: Record<string, string> = {
   ambiguous_input: "答案格式无法识别，请按示例使用数组格式。",
   unsupported_number: "只支持整数或带引号的分数；分母不能为零。",
   resource_limit: "答案超出本题可处理范围。",
-  missing_or_unsupported_spec: "题目规格不可用，可在课程历史中手动核对。",
+  missing_or_unsupported_spec: "这道题暂时不能自动批改，可以在课程历史里自己对照。",
   version_changed: "材料或题目已更新，请重新读取后作答。",
-  spec_identity_mismatch: "题目与当前评价规格不一致，未自动判分。",
+  spec_identity_mismatch: "这道题已更新，这次没有自动批改。",
 };
 
 /** Built-in deterministic questions use the same session/attempt/observation history as ordinary work. */
@@ -85,7 +86,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
         return created;
       });
       await acceptAttempt(next, request.clientKey);
-    } catch (reason) { setRestored(true); setError(reason instanceof Error ? reason.message : "暂时无法恢复练习，答案已保留"); }
+    } catch (reason) { setRestored(true); setError(userFacingMessage(reason, "暂时无法恢复练习，答案已保留")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   async function submit(event: FormEvent) {
@@ -108,7 +109,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
       if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
       if (!state.observation) throw new Error("答案已保存，暂时无法读取结果，请保留答案后重试。");
       setRecord(state.observation); onRecorded();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "保存失败，原答案已锁定，请重试同一次保存"); }
+    } catch (reason) { setError(userFacingMessage(reason, "保存失败，原答案已锁定，请重试同一次保存")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   async function dispute() {
@@ -132,7 +133,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
         setRecord(head);
       }
       setMessage("已记录你的异议，可在课程历史中更正结果。"); onRecorded();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法保存异议，请刷新课程历史核对"); }
+    } catch (reason) { setError(userFacingMessage(reason, "无法保存异议，请刷新课程历史核对")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   function nextQuestion() {

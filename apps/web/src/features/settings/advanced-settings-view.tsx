@@ -129,10 +129,10 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
           <section className="mt-3 grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="export-heading">
             <div>
               <h2 className="text-sm font-medium text-text" id="export-heading">数据导出</h2>
-              <p className="mt-1 text-xs leading-6 text-text-3">下载内容投影或管理原生内容备份。</p>
+              <p className="mt-1 text-xs leading-6 text-text-3">导出内容，或管理完整内容备份。</p>
             </div>
             <div className="space-y-3">
-              <p className="text-sm leading-7 text-text-2">Markdown / Anki 是内容投影；原生备份可恢复笔记、课程、卡片等原生数据，不包含材料原件、助理对话与练习进度。具体范围见导出与备份页。</p>
+              <p className="text-sm leading-7 text-text-2">Markdown / Anki 导出便于在别处使用；原生备份可恢复笔记、课程、卡片等原生数据，不包含材料原件、助理对话与练习进度。具体范围见导出与备份页。</p>
               <Link className={ui.secondary} href={`${basePath}/export`}>打开导出与备份</Link>
             </div>
           </section>

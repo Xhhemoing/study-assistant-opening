@@ -7,6 +7,7 @@ import { ui } from "../../design/ui";
 import { SpanLesson } from "./span-lesson";
 import { spanLessonDetailsSchema, spanLessonRequest, type SpanLessonDetails } from "./span-session-client";
 import { SpanSessionSummary } from "./span-session-summary";
+import { userFacingMessage } from "../../../../lib/user-facing-error";
 
 type Props = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string; initialActivityId?: string };
 const endpoint = "/api/opening/teaching/span/lesson";
@@ -48,7 +49,7 @@ export function SpanLessonSession(props: Props) {
     setError("");
     void spanLessonRequest(query(), spanLessonDetailsSchema).then(value => {
       if (version === requestId.current) { recoveryReady.current = true; setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
-    }).catch(reason => { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "无法恢复本次学习。"); });
+    }).catch(reason => { if (version === requestId.current) setError(userFacingMessage(reason, "无法恢复本次学习。")); });
   }, [query, revision, props.initialActivityId]);
   useEffect(() => {
     if (!recoveryReady.current || !details || details.session || error || props.sourceLoadError || !props.sourceIds.length || autoStarted.current) return;
@@ -74,7 +75,7 @@ export function SpanLessonSession(props: Props) {
         { method: "PATCH", body: JSON.stringify({ expectedRevision: session.revision, intent: session.intent, moveId, status: "active" }) });
       if (version !== requestId.current) return;
       remember(session); setDetails({ session, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
-    } catch (reason) { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "学习暂未开始。"); }
+    } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "学习暂未开始。")); }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
   async function save(intent: StudySessionIntent, moveId: string, status: "active" | "paused" | "completed") {
@@ -87,7 +88,7 @@ export function SpanLessonSession(props: Props) {
       remember(session); setDetails(value => value ? { ...value, session } : value);
       if (status !== "active") { setShowSummary(true); setRevision(value => value + 1); }
       return true;
-    } catch (reason) { if (version === requestId.current) setError(reason instanceof Error ? reason.message : "进度保存未确认。"); return false; }
+    } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "进度保存未确认。")); return false; }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
   const session = details?.session;

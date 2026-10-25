@@ -4,6 +4,7 @@ import type { OpeningAdaptivePrefs } from "@aistudy/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpeningApi } from "../client/api";
 import { inputClass, secondaryButtonClass } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Historical coach preferences stay advisory until this explicit opt-in. */
 export function AutonomySwitcher({ api, onChanged }: {
@@ -26,7 +27,7 @@ export function AutonomySwitcher({ api, onChanged }: {
       setBudget(String(result.prefs.coachBudgetMinutes));
       if (result.invalidStoredPrefs) setError("原有安排偏好无法读取；原数据已保留，请恢复后继续。");
     } catch (reason) {
-      if (request === epoch.current) setError(reason instanceof Error ? reason.message : "安排偏好暂时无法读取，请重试。");
+      if (request === epoch.current) setError(userFacingMessage(reason, "安排偏好暂时无法读取，请重试。"));
     } finally { if (request === epoch.current) setPending(false); }
   }, [api]);
   useEffect(() => { void read(); return () => { epoch.current += 1; }; }, [read]);
@@ -41,7 +42,7 @@ export function AutonomySwitcher({ api, onChanged }: {
       if (request !== epoch.current) return;
       setPrefs(result.prefs); onChanged();
     } catch (reason) {
-      if (request === epoch.current) setError(reason instanceof Error ? reason.message : "安排偏好保存失败，请重试。");
+      if (request === epoch.current) setError(userFacingMessage(reason, "安排偏好保存失败，请重试。"));
     } finally { saving.current = false; if (request === epoch.current) setPending(false); }
   }
 
@@ -57,7 +58,7 @@ export function AutonomySwitcher({ api, onChanged }: {
       if (request !== epoch.current) return;
       setPrefs(result.prefs); onChanged();
     } catch (reason) {
-      if (request === epoch.current) setError(reason instanceof Error ? reason.message : "教练设置保存结果需要核对，请重新读取。");
+      if (request === epoch.current) setError(userFacingMessage(reason, "教练设置保存结果需要核对，请重新读取。"));
     } finally { saving.current = false; if (request === epoch.current) setPending(false); }
   }
 

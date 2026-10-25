@@ -13,9 +13,13 @@ const blankDraft: QuickSetupDraft = {
   ...emptyProviderDraft, ...emptyModelDraft, dailyCapCents: "", confirmBudget: false,
 };
 
+const PRESET_LABELS: Record<QuickSetupPreset, string> = { gemini_free: "Google Gemini", openai_compatible: "" };
+
 /** Presets describe the endpoint and capabilities, never an invented token price. */
 export function applyQuickSetupPreset(draft: QuickSetupDraft, preset: QuickSetupPreset): QuickSetupDraft {
-  const next = { ...blankDraft, label: draft.label, apiKey: draft.apiKey };
+  // A blank or untouched preset name follows the preset; a name the user typed is kept.
+  const label = !draft.label.trim() || Object.values(PRESET_LABELS).includes(draft.label) ? PRESET_LABELS[preset] : draft.label;
+  const next = { ...blankDraft, label, apiKey: draft.apiKey };
   return preset === "gemini_free" ? {
     ...next, baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", modelName: "gemini-2.5-flash",
     supportsVision: true, supportsAudio: true, billing: "free_tier", dailyRequestCap: "200",
@@ -24,11 +28,21 @@ export function applyQuickSetupPreset(draft: QuickSetupDraft, preset: QuickSetup
 
 export const initialQuickSetupDraft = applyQuickSetupPreset(blankDraft, "gemini_free");
 
+/** Shown next to the disabled 一键配置模型 button: name every empty required field at once. */
+export function quickSetupMissingFields(draft: QuickSetupDraft): string[] {
+  return [
+    ...(draft.label.trim() ? [] : ["配置名称"]),
+    ...(draft.modelName.trim() ? [] : ["模型名称"]),
+    ...(draft.apiKey.trim() ? [] : ["API 密钥"]),
+  ];
+}
+
 export function validateQuickSetupDraft(draft: QuickSetupDraft): string | null {
+  const missing = quickSetupMissingFields(draft);
+  if (missing.length) return `还差：${missing.join("、")}。填好后就能一键配置。`;
   const providerIssue = validateProviderDraft(draft);
   if (providerIssue) return providerIssue;
   if (draft.baseUrl.trim().length > 2048) return "接口地址过长（上限 2048 字符）。";
-  if (!draft.apiKey.trim()) return "请填写 API 密钥；密钥只用于加密保存，不会回读。";
   const modelIssue = validateModelDraft(draft);
   if (modelIssue) return modelIssue;
   if (draft.billing === "metered") {

@@ -9,6 +9,7 @@ import { ui } from "../design/ui";
 import { parseOpeningResponse } from "../client/parse-response";
 import { rememberSourceReaderPage, sourceReaderInitialPage } from "./source-reader-position";
 import { SourceVersionDetails } from "./source-version-details";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 const schema = z.object({ sourceId: z.string().uuid(), version: z.number().int().nonnegative(), currentVersion: z.number().int().nonnegative(),
   page: z.number().int().positive().nullable(), pages: z.array(z.number().int().positive().nullable()), pageKind: z.enum(["physical", "section"]),
   readablePages: z.number().int().nonnegative(), characters: z.number().int().nonnegative(), text: z.string().max(20000), truncated: z.boolean() });
@@ -48,7 +49,7 @@ export function SourceContent({ sourceId, version, initialPage, onExplain }: { s
     let active = true;
     setLoading(true); setError(""); setContent(null);
     void loadSourceContent(sourceId, version, page).then(value => { if (active) { setContent(value); rememberSourceReaderPage(sourceId, version, value.page); } })
-      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "读取失败"); })
+      .catch(reason => { if (active) setError(userFacingMessage(reason, "读取失败")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [sourceId, version, page, revision]);
