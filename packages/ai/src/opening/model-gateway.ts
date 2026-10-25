@@ -130,6 +130,11 @@ export function createModelGateway(deps: {
       run: (model, operationId, info) => {
         options.onModel?.(model, info);
         const terms = reservationTerms(model, options.input, options.minReservedCents ?? 1);
+        if (!Number.isSafeInteger(terms.reservedCents) || terms.reservedCents < 0) {
+          // Pricing failed before any reservation or provider call. The explicit
+          // fallback remains eligible under the existing not-sent route rules.
+          throw new OpeningModelRoutingError("模型费用无法安全估算，请检查价格或选择备用模型。");
+        }
         return runBudgetedCall({
           provider: model.provider,
           modelSnapshot: model.modelSnapshot,

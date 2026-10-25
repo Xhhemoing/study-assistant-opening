@@ -290,3 +290,5 @@ export { createOpeningTutorLearnerContextRepository } from "./repositories/openi
 
 export { gradeCardVariant } from "./repositories/opening-card-variant-grade";
 export { createOpeningPhotoRecognitionRepository } from "./repositories/opening-photo-recognition";
+export { loadOpeningRouting } from "./repositories/opening-model-routing";
+export { checkOpeningAutoGradeBudget, readOpeningAutoGradeSkip, type OpeningAutoGradePolicy } from "./repositories/opening-auto-grade-policy";

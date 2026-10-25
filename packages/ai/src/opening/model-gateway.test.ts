@@ -146,6 +146,24 @@ describe("model gateway fallback and free tier", () => {
     expect(isNotSentFailure(new Error("other"))).toBe(false);
   });
 
+  it("rejects overflowing estimates before reserve/send and uses only the explicit fallback", async () => {
+    const primaryComplete = vi.fn(async () => output);
+    const backupComplete = vi.fn(async () => output);
+    const primary = { ...model(primaryComplete), inputCentsPerMillion: 1e308, outputCentsPerMillion: 1e308 };
+    const { calls, repo } = budget();
+    await expect(createModelGateway({ resolve: async () => primary })
+      .call(scope, "practice.grade-text", { budget: repo, input, operationId: "overflow-none" }))
+      .rejects.toBeInstanceOf(OpeningModelRoutingError);
+    expect(calls.reserve).toHaveLength(0);
+    expect(primaryComplete).not.toHaveBeenCalled();
+    await createModelGateway({ resolve: async () => primary, resolveFallback: async () => fallbackModel(backupComplete) })
+      .call(scope, "practice.grade-text", { budget: repo, input, operationId: "overflow-safe" });
+    expect(primaryComplete).not.toHaveBeenCalled();
+    expect(backupComplete).toHaveBeenCalledTimes(1);
+    expect(calls.reserve).toHaveLength(1);
+    expect(calls.reserve[0]).toMatchObject({ requestId: "overflow-safe:fallback", amountCents: 0 });
+  });
+
   it("without a fallback the primary error stands", async () => {
     const { repo } = budget();
     await expect(createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("x"); } })

@@ -1,4 +1,4 @@
-import { learningPreferencesSchema, workspaceDefaultEntrySchema, type LearningPreferences, type Scope, type WorkspaceDefaultEntry } from "@aistudy/contracts";
+import { learningPreferencesSchema, learningPreferencesUpdateSchema, workspaceDefaultEntrySchema, type LearningPreferences, type LearningPreferencesUpdate, type Scope, type WorkspaceDefaultEntry } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 
 export type WorkspacePreferencesErrorCode = "NOT_FOUND" | "VALIDATION";
@@ -24,7 +24,7 @@ export type WorkspacePreferencesRepository = {
     defaultEntry: WorkspaceDefaultEntry,
   ): Promise<WorkspacePreferenceRecord>;
   getLearningPreferences(scope: Scope): Promise<LearningPreferences>;
-  setLearningPreferences(scope: Scope, value: LearningPreferences): Promise<LearningPreferences>;
+  setLearningPreferences(scope: Scope, value: LearningPreferencesUpdate): Promise<LearningPreferences>;
 };
 
 function assertUuid(value: string, field: string): void {
@@ -82,7 +82,7 @@ export function createWorkspacePreferencesRepository(sql: Sql): WorkspacePrefere
     },
 
     async getLearningPreferences(scope) {
-      const rows = await sql`SELECT p.assessment_enabled,p.retest_suggestions_enabled,p.automatic_reminders_enabled
+      const rows = await sql`SELECT p.assessment_enabled,p.retest_suggestions_enabled,p.automatic_reminders_enabled,p.auto_grade_on_save
         FROM workspaces w LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
       if (!rows.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
@@ -90,22 +90,26 @@ export function createWorkspacePreferencesRepository(sql: Sql): WorkspacePrefere
         assessmentEnabled: rows[0]!.assessment_enabled ?? false,
         retestSuggestionsEnabled: rows[0]!.retest_suggestions_enabled ?? false,
         automaticRemindersEnabled: rows[0]!.automatic_reminders_enabled ?? false,
+        autoGradeOnSave: rows[0]!.auto_grade_on_save ?? true,
       });
     },
 
     async setLearningPreferences(scope, value) {
-      const parsed = learningPreferencesSchema.parse(value);
+      const update = learningPreferencesUpdateSchema.parse(value);
       return sql.begin(async (tx) => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
+        const [current] = await tx`SELECT auto_grade_on_save FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
+        const parsed = { ...update, autoGradeOnSave: update.autoGradeOnSave ?? current?.auto_grade_on_save ?? true };
         await tx`INSERT INTO workspace_preferences
-          (workspace_id,assessment_enabled,retest_suggestions_enabled,automatic_reminders_enabled)
-          VALUES (${scope.workspaceId},${parsed.assessmentEnabled},${parsed.retestSuggestionsEnabled},${parsed.automaticRemindersEnabled})
+          (workspace_id,assessment_enabled,retest_suggestions_enabled,automatic_reminders_enabled,auto_grade_on_save)
+          VALUES (${scope.workspaceId},${parsed.assessmentEnabled},${parsed.retestSuggestionsEnabled},${parsed.automaticRemindersEnabled},${parsed.autoGradeOnSave})
           ON CONFLICT(workspace_id) DO UPDATE SET
             assessment_enabled=EXCLUDED.assessment_enabled,
             retest_suggestions_enabled=EXCLUDED.retest_suggestions_enabled,
             automatic_reminders_enabled=EXCLUDED.automatic_reminders_enabled,
+            auto_grade_on_save=EXCLUDED.auto_grade_on_save,
             updated_at=now()`;
         return parsed;
       });

@@ -10,6 +10,7 @@ function effective(row: Record<string, unknown>): LearningPreferences {
     assessmentEnabled: row.account_assessment ?? false,
     retestSuggestionsEnabled: row.account_retest ?? false,
     automaticRemindersEnabled: row.account_reminders ?? false,
+    autoGradeOnSave: row.account_auto_grade ?? true,
   });
   return resolveLearningPreferences(account, {
     assessmentEnabled: row.course_assessment == null ? undefined : row.course_assessment as boolean,
@@ -20,6 +21,7 @@ function effective(row: Record<string, unknown>): LearningPreferences {
 
 async function selectPreferenceRow(sql: LearningSql, scope: Scope, courseId: string) {
   const rows = await sql`SELECT p.assessment_enabled AS account_assessment,
+      p.auto_grade_on_save AS account_auto_grade,
       p.retest_suggestions_enabled AS account_retest,
       p.automatic_reminders_enabled AS account_reminders,
       c.assessment_enabled AS course_assessment,

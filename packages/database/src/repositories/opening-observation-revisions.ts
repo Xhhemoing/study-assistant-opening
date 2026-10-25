@@ -9,7 +9,6 @@ import { qualifyObservationRevision } from "./opening-observation-revision-histo
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
 import { acceptedAiGradingOutcome, corroborateArithmeticGrade } from "@aistudy/domain";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
-import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
@@ -102,7 +101,8 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       outcome: acceptedAiGradingOutcome(checkedProposal), observationId: id, attemptId: previous.attemptId,
       problemId: previous.problemId, itemVersionId: previous.itemVersionId, requirementKey: previous.requirementKey ?? null,
       evaluatorVersion: "ai-rubric-v1", modelLabel: grading.modelLabel, evaluatedAt: new Date(clock!.at as Date).toISOString(),
-      ...(gradingContext?.workSource ? { workSource: gradingContext.workSource } : {}) }) : null;
+      ...(gradingContext?.workSource ? { workSource: { id: gradingContext.workSource.id,
+        version: gradingContext.workSource.version, physicalPage: gradingContext.workSource.physicalPage } } : {}) }) : null;
     const sourceIds = gradingContext?.sourceIds ?? head.source_ids;
     const sourceVersions = gradingContext?.sourceVersions ?? head.source_versions;
     // A photo attached after submission can be graded, but was not sealed as an independent answer at that time.
@@ -129,10 +129,6 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       grading_work_source=${workSource ? tx.json(workSource) : null},
       grading_operation_id=${answerChanged ? `ai-grade:${scope.workspaceId}:${root.id}:${answerRevision}` : String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${headId}`)} WHERE id=${id}`;
     await tx`UPDATE opening_learning_observations SET effective_head_id=${id} WHERE id=${root.id}`;
-    if (answerChanged && head.attempt_id && head.item_version_id && head.problem_id
-      && (replacement?.answer.trim() || workSource)) {
-      await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: String(root.id), answerRevision });
-    }
     const identity = (observation: Pick<LearningObservation, "courseId" | "requirementKey" | "skillLabel">) => ({ courseId: observation.courseId, requirementKey: observation.requirementKey ?? null, skillLabel: observation.skillLabel });
     await reconcileOpeningRetestEvidence(tx, scope, { rootObservationId: String(root.id), previousHeadObservationId: headId, headObservationId: id,
       previousIdentity: identity(previous), currentIdentity: input.revisionKind === "retract" ? null : identity({ courseId, requirementKey, skillLabel }), historyRevision: revision });

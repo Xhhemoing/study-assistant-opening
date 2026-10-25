@@ -45,7 +45,7 @@ import {
   registerRequestSchema,
   searchRequestSchema,
   workspacePreferenceUpdateSchema,
-  learningPreferencesSchema,
+  learningPreferencesUpdateSchema,
   normalizeDocumentTags,
   updateDocumentRelationRequestSchema,
   createPromotionRequestSchema,
@@ -559,7 +559,7 @@ export async function getLearningPreferencesForPrincipal(runtime: AuthRuntime, p
 }
 
 export async function setLearningPreferencesForPrincipal(runtime: AuthRuntime, principal: Principal, body: unknown) {
-  const parsed = learningPreferencesSchema.parse(body);
+  const parsed = learningPreferencesUpdateSchema.parse(body);
   const workspaceId = boundWorkspaceId(principal);
   assertAuthorized(principal, "workspace.preference.update", { type: "workspace", workspaceId });
   return runtime.preferences.setLearningPreferences({ workspaceId, ownerUserId: principal.userId }, parsed);

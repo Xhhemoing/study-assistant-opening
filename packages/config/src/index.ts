@@ -1,4 +1,5 @@
 export const DEFAULT_APP_NAME = "AIstudy" as const;
+export { loadOpeningAutoGradeDailyCap } from "./env";
 
 export function getNodeEnv(
   env: NodeJS.ProcessEnv = process.env,

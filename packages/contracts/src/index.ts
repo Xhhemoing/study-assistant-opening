@@ -38,11 +38,13 @@ export {
   workspacePreferenceUpdateSchema,
   workspacePreferenceResponseSchema,
   learningPreferencesSchema,
+  learningPreferencesUpdateSchema,
   courseLearningPreferencesUpdateSchema,
   type WorkspaceDefaultEntry,
   type WorkspacePreferenceUpdate,
   type WorkspacePreferenceResponse,
   type LearningPreferences,
+  type LearningPreferencesUpdate,
   type CourseLearningPreferencesUpdate,
 } from "./workspace-preferences";
 

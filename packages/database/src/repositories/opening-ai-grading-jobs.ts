@@ -5,6 +5,7 @@ import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "
 import { isOpeningManualGradingRevision, readOpeningAiGradingContext } from "./opening-ai-grading-context";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
+import { checkOpeningAutoGradeBudget, readOpeningAutoGradeSkip, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
 
 const kind = "grade-observation";
 export const openingAiGradingJobKey = (scope: Scope, input: GradeObservationJobPayload) =>
@@ -26,7 +27,7 @@ export async function enqueueOpeningAiGradingInTx(tx: TransactionSql, scope: Sco
   if (created) await publish(tx, scope, String(created.id));
 }
 
-async function readStatus(tx: TransactionSql, scope: Scope, observationId: string): Promise<AiGradingStatus> {
+async function readStatus(tx: TransactionSql, scope: Scope, observationId: string, policy?: OpeningAutoGradePolicy): Promise<AiGradingStatus> {
   const [head] = await tx`SELECT h.*,previous.answer AS previous_answer,COALESCE(root.root_observation_id,root.id) AS root_id,w.privacy_epoch AS current_epoch
     FROM opening_learning_observations o
     JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
@@ -56,7 +57,18 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
     : evaluated && usable ? record.outcome === "unverified" ? "needs_manual" : "graded"
       : canGrade && currentJob && job.state === "running" ? "grading"
         : canGrade && currentJob && job.state === "queued" ? "queued" : "needs_manual";
+  let autoGradeSkipped: AiGradingStatus["autoGradeSkipped"] = !job && canGrade ? input.answerRevision > 1 ? "answer_changed" as const
+    : policy ? await readOpeningAutoGradeSkip(tx, scope, policy) : null : null;
+  if (!job && canGrade && ledger === "unsent" && !autoGradeSkipped && policy) {
+    const context = await readOpeningAiGradingContext(tx, scope, { observationId: String(head.id) }, { readOnly: true });
+    const budget = await checkOpeningAutoGradeBudget(tx, scope, policy, {
+      question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
+      misconceptions: context.misconceptions, workSource: context.workSourceMetadata,
+    });
+    if (!budget.allowed) autoGradeSkipped = budget.reason === "budget_unavailable" ? "budget_unavailable" : "budget";
+  }
   return aiGradingStatusSchema.parse({ rootObservationId: input.rootObservationId, headObservationId: head.id,
+    autoGradeSkipped,
     answerRevision: input.answerRevision, jobId: job?.id ?? null, status,
     retryable: canGrade && ledger === "unsent" && (!job || matchingJob && ["failed", "cancelled", "outcome_unknown"].includes(String(job.state))),
     workSource: head.grading_work_source ?? null });
@@ -65,9 +77,9 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
 export function createOpeningAiGradingJobRepository(sql: Sql) {
   return {
     /** Truly read-only: never reserves budget, creates a job, or changes source versions. */
-    read(scope: Scope, raw: unknown) {
+    read(scope: Scope, raw: unknown, policy?: OpeningAutoGradePolicy) {
       const input = aiGradingInputSchema.parse(raw);
-      return sql.begin("isolation level repeatable read read only", tx => readStatus(tx, scope, input.observationId)) as Promise<AiGradingStatus>;
+      return sql.begin("isolation level repeatable read read only", tx => readStatus(tx, scope, input.observationId, policy)) as Promise<AiGradingStatus>;
     },
     async enqueue(scope: Scope, raw: unknown) {
       const input = aiGradingInputSchema.parse(raw);

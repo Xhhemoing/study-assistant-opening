@@ -4,8 +4,8 @@ const active = { id: "active", title: "代数", slug: "algebra", description: ""
 const archived = { ...active, id: "archived", title: "旧代数", archivedAt: "2026-09-29T00:00:00Z" };
 describe("course state model", () => {
   it("keeps inherited settings distinct from a course restriction", () => {
-    expect(courseRestrictionDraft({ retestSuggestionsEnabled: false })).toEqual({ assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: true });
-    expect(courseRestrictionUpdate({ assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: true })).toEqual({ retestSuggestionsEnabled: false });
+    expect(courseRestrictionDraft({ retestSuggestionsEnabled: false })).toEqual({ autoGradeOnSave: true, assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: true });
+    expect(courseRestrictionUpdate({ autoGradeOnSave: true, assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: true })).toEqual({ retestSuggestionsEnabled: false });
   });
   it("keeps archived courses discoverable without mixing them into the active list", () => {
     expect(filterCourses([active, archived], "", "active")).toEqual([active]);

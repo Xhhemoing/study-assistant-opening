@@ -89,7 +89,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
   }, [canGrade, poller, record.aiEvaluation]);
 
   async function enqueue() {
-    if (inFlight.current || disabled || !status?.retryable) return;
+    if (inFlight.current || disabled || !status?.retryable || status.status === "unknown_cost") return;
     inFlight.current = true;
     try {
       await poller.retry(async isCurrent => {
@@ -110,16 +110,27 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
   const photo = status?.workSource ?? record.aiEvaluation?.workSource;
   const photoHref = photo ? sourceViewerHref(photo.id, photo.version, { page: photo.physicalPage }) : null;
   const unknown = status?.status === "unknown_cost";
-  const completion = !pending && !error && completionAction && canCompleteObservation(record)
+  const skippedMessages = {
+    disabled: "答案已保存，工作区已关闭首次提交自动批改。可手动批改。",
+    no_model: "答案已保存，尚无可用的批改模型。请先在设置中配置模型，再手动批改。",
+    daily_cap: "答案已保存，今日自动批改额度已用完。仍可手动批改，费用受每日 AI 预算约束。",
+    budget: "答案已保存，当前 AI 预算不足以覆盖本次预估。调整预算或模型后可手动批改。",
+    budget_unavailable: "答案已保存，暂时无法可靠估算本次批改费用（例如图片上限未配置）。请调整模型后手动批改。",
+    answer_changed: "答案已修改并保存，不会自动重批。请手动重新批改。",
+  };
+  const skipped = status?.autoGradeSkipped ? skippedMessages[status.autoGradeSkipped] : undefined;
+  const retryLabel = status?.answerRevision && status.answerRevision > 1 ? "重新批改"
+    : status && !status.jobId ? "手动批改" : "重试批改";
+  const completion = !pending && !error && status?.autoGradeSkipped !== "answer_changed" && completionAction && canCompleteObservation(record)
     ? { ...completionAction, disabled: disabled || completionAction.disabled } : undefined;
   const message = error || (unknown ? "批改费用或发送结果尚未确认，不会重复发送。原答案已保存，可以手动改评。"
     : pending ? "答案已保存，正在后台批改；离开页面不会取消。"
-      : status?.status === "needs_manual" ? "原答案已保存，请核对结果或手动改评。" : !status ? "正在读取后台批改状态。" : undefined);
+      : skipped ?? (status?.status === "needs_manual" ? "原答案已保存，请核对结果或手动改评。" : !status ? "正在读取后台批改状态。" : undefined));
   return <div className="space-y-3" aria-busy={pending}>
     {photoHref ? <a className="inline-flex min-h-10 items-center text-xs text-accent underline underline-offset-4" target="_blank" rel="noreferrer" href={photoHref}>查看作答照片</a> : null}
     <AiGradingResult record={record} />
     <StageActionBar stage={error ? "failed" : pending ? "processing" : unknown ? "evaluation-pending" : observationStage(record)} message={message}
-      primary={completion ?? (status?.retryable ? { label: "重试批改", disabled: disabled || sending, onClick: () => void enqueue() }
+      primary={completion ?? (status?.retryable && !unknown ? { label: retryLabel, disabled: disabled || sending, onClick: () => void enqueue() }
         : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>
       {record.aiEvaluation && onDispute ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
     </StageActionBar>

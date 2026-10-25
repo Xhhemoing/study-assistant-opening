@@ -131,10 +131,10 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
                       <input
                         checked={learningPreferences[key]}
                         className="size-6 accent-accent"
-                        disabled={saving || (key !== "assessmentEnabled" && !learningPreferences.assessmentEnabled)}
+                        disabled={saving || (key !== "assessmentEnabled" && key !== "autoGradeOnSave" && !learningPreferences.assessmentEnabled)}
                         onChange={(event) => setLearningPreferences((current) =>
                           key === "assessmentEnabled" && !event.target.checked
-                            ? disabledLearningPreferences
+                            ? { ...disabledLearningPreferences, autoGradeOnSave: current.autoGradeOnSave }
                             : { ...current, [key]: event.target.checked },
                         )}
                         type="checkbox"
@@ -142,6 +142,7 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
                     </label>
                   ))}
                 </div>
+                <p className="text-xs leading-6 text-text-3">首次提交自动批改独立于自动评价；关闭不影响手动批改。改答案后需手动重新批改；无可用模型或达到每日自动额度时只保存答案。</p>
                 <button className={ui.primary} disabled={saving || !ready} onClick={() => void saveLearningPreferences()} type="button">
                   {saving ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <Save aria-hidden="true" size={14} />}
                   保存学习偏好

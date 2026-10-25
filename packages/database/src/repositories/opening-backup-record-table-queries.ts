@@ -98,7 +98,7 @@ export async function readOpeningBackupTableRows(
       o.attempt_id, o.item_version_id, o.requirement_key, o.started_at, o.submitted_at, o.recorded_at,
       o.source_versions, o.reference_check, o.submitted_intent, o.history_revision, o.workspace_history_revision,
       o.root_observation_id,o.revises_observation_id,o.revision_kind,o.revision_reason,o.actor_id,o.effective_head_id,o.server_evaluation,o.ai_evaluation,
-      o.answer_revision,o.grading_work_source,o.grading_operation_id
+      o.answer_revision,o.grading_work_source,o.grading_operation_id,o.auto_grade_enqueued_at
     FROM opening_learning_observations o
     JOIN opening_learning_sessions l ON l.id = o.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     LEFT JOIN LATERAL (

@@ -3,7 +3,6 @@ import {
   createOpeningProvider,
   mergeOpeningCatalog,
   openingModelSnapshot,
-  resolveEffectiveDailyCap,
   resolveFallbackModelForTask,
   resolveModelForTask,
   tutorModelTask,
@@ -15,8 +14,7 @@ import {
 } from "@aistudy/ai";
 import { loadOpeningModelCatalog, parseBooleanEnv } from "@aistudy/config";
 import {
-  createOpeningAiSettingsRepository,
-  createOpeningModelProvidersRepository,
+  loadOpeningRouting,
   type OpeningBudgetRepository,
 } from "@aistudy/database";
 import type { Scope, TutorMode } from "@aistudy/contracts";
@@ -28,28 +26,7 @@ import type { Sql } from "postgres";
  * call; the same selection supplies provider, prices and ledger attribution.
  */
 async function loadRouting(sql: Sql, scope: Scope) {
-  const catalog = loadOpeningModelCatalog();
-  const [preference, custom] = await Promise.all([
-    createOpeningAiSettingsRepository(sql).get(scope),
-    createOpeningModelProvidersRepository(sql).listResolvableModels(scope),
-  ]);
-  if (preference.invalidStoredSettings) throw new OpeningModelRoutingError("已保存的模型设置无效，请到设置重新保存或恢复服务器默认设置。");
-  // Match ai-settings / readiness: effective workspace cap (not env-only) so a
-  // BYOK Lant model is not falsely budget_disabled when env cap is 0.
-  const pricingConfigured =
-    catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0)
-    || custom.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0);
-  const effective = resolveEffectiveDailyCap({
-    envCapCents: catalog.dailyCapCents,
-    workspaceCapCents: preference.settings.dailyCapCents ?? null,
-    confirmed: Boolean(preference.settings.budgetConfirmedAt),
-    pricingConfigured,
-  });
-  const merged = mergeOpeningCatalog(catalog.models, custom, {
-    defaultModelId: catalog.defaultModelId,
-    dailyCapCents: effective.capCents,
-  });
-  return { settings: preference.settings, merged };
+  return loadOpeningRouting(sql, scope, loadOpeningModelCatalog());
 }
 
 type MergedModel = ReturnType<typeof mergeOpeningCatalog>["models"][number];

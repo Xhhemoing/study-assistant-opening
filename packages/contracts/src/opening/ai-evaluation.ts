@@ -67,6 +67,7 @@ export const aiGradingStatusSchema = z.object({
   jobId: uuidSchema.nullable(),
   status: z.enum(["queued", "grading", "graded", "needs_manual", "unknown_cost"]),
   retryable: z.boolean(),
+  autoGradeSkipped: z.enum(["disabled", "no_model", "daily_cap", "budget", "budget_unavailable", "answer_changed"]).nullable().default(null),
   workSource: aiGradingWorkSourceSchema.nullable(),
 }).strict();
 export type AiGradingStatus = z.infer<typeof aiGradingStatusSchema>;

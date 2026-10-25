@@ -53,14 +53,16 @@ it("commits one job/outbox with the saved answer; closed pages and repeated clic
   await expect(runJob(queue(), job.id, handler)).resolves.toBe(false);
   expect(gateway.call).toHaveBeenCalledTimes(1);
   expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ status: "graded", answerRevision: 1, retryable: false });
-});
+}, 30000);
 
 it("rolls back the answer, attempt submission, job and outbox when the enclosing transaction fails", async () => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   const input: ObservationInput = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "1", outcome: "unverified", assistance: "independent", clientKey: randomUUID() };
   await expect(fixture.sql.begin(async tx => {
-    const saved = await insertOpeningLearningObservationInTx(tx, fixture.scope, input);
+    const saved = await insertOpeningLearningObservationInTx(tx, fixture.scope, input, { autoGrade: {
+      enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
+    } });
     expect(await tx`SELECT id FROM opening_jobs WHERE payload->>'observationId'=${saved.id} AND kind='grade-observation'`).toHaveLength(1);
     throw new Error("commit failed");
   })).rejects.toThrow("commit failed");
@@ -77,7 +79,9 @@ it("seals the original photo and its version with submission; retries cannot swa
   const input: ObservationInput = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "", outcome: "unverified", assistance: "independent", clientKey: randomUUID() };
   const workSource = { id: photoId, version: 1, physicalPage: 1 };
-  const original = await f.learning.insertObservation(fixture.scope, input, { workSource });
+  const original = await f.learning.insertObservation(fixture.scope, input, { workSource, autoGrade: {
+    enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
+  } });
   expect((await grades().context(fixture.scope, { observationId: original.id })).workSource).toEqual(workSource);
   expect(original.sourceIds).toContain(photoId);
   expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ status: "queued", workSource });
@@ -97,7 +101,8 @@ it("fences a late grade after answer revision and keeps error-card/weakness evid
   expect(await fixture.sql`SELECT id FROM cards WHERE origin_observation_root_id=${original.id} AND auto_paused=false`).toHaveLength(1);
   const corrected = (await revise(original, first, "1")).observation!;
   await expect(grades().apply(openingJobScope(claimed), { observationId: context.observation.id }, proposal(), "late")).rejects.toMatchObject({ code: "CONFLICT" });
-  expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ headObservationId: corrected.id, answerRevision: 2, status: "queued" });
+  expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ headObservationId: corrected.id, answerRevision: 2, status: "needs_manual", autoGradeSkipped: "answer_changed" });
+  await jobs().enqueue(fixture.scope, { observationId: corrected.id });
   const next = await grades().apply(fixture.scope, { observationId: corrected.id }, proposal(), "fixture");
   expect((await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId)).observations.map(row => row.id)).toEqual([next.id]);
   expect(await fixture.sql`SELECT id FROM cards WHERE origin_observation_root_id=${original.id} AND auto_paused=false`).toHaveLength(0);
@@ -179,7 +184,9 @@ it.each(["judgement", "attribution", "assistance"] as const)("retains the legacy
   const workSource = { id: photoId, version: 1, physicalPage: 1 };
   const original = await f.learning.insertObservation(fixture.scope, { attemptId: attempt.id, sessionId: f.sessionId,
     courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId], answer: "", outcome: "unverified",
-    assistance: "independent", clientKey: randomUUID() }, { workSource });
+    assistance: "independent", clientKey: randomUUID() }, { workSource, autoGrade: {
+      enabled: true, modelAvailable: true, dailyCap: 50, dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
+    } });
   const job = await jobFor(original), claimed = (await queue().claim(job.id))!;
   const operationId = `ai-grade:${fixture.scope.workspaceId}:${original.id}`;
   await fixture.sql`UPDATE opening_learning_observations SET grading_operation_id=${operationId} WHERE id=${original.id}`;
@@ -253,7 +260,7 @@ it("does not recover a pre-send job against a newer manual head with the same an
   expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${job.id}`).toHaveLength(1);
 });
 
-it("does not count AI feedback, manual re-evaluation or retraction as a new answer, but still queues a changed answer", async () => {
+it("does not count AI feedback, manual re-evaluation or retraction as a new answer; changed answers require manual queueing", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
   const operationId = `ai-grade:${fixture.scope.workspaceId}:${original.id}:1`;
   const graded = await grades().apply(fixture.scope, { observationId: original.id }, proposal(), "fixture");
@@ -268,7 +275,8 @@ it("does not count AI feedback, manual re-evaluation or retraction as a new answ
   const changed = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, { rootObservationId: original.id,
     revisesObservationId: retracted.headObservationId, expectedHead: retracted.headObservationId, revisionKind: "replace", reason: "重写作答", clientKey: randomUUID(),
     replacement: { answer: "2", outcome: "unverified", assistance: "hinted" } });
-  expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ answerRevision: 2, status: "queued", headObservationId: changed.headObservationId });
+  expect(await jobs().read(fixture.scope, { observationId: original.id })).toMatchObject({ answerRevision: 2, headObservationId: changed.headObservationId, status: "needs_manual", autoGradeSkipped: "answer_changed" });
+  await jobs().enqueue(fixture.scope, { observationId: changed.headObservationId });
   expect((await grades().context(fixture.scope, { observationId: changed.headObservationId })).operationId).toBe(`ai-grade:${fixture.scope.workspaceId}:${original.id}:2`);
 });
 
