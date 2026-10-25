@@ -160,6 +160,10 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
   );
 }
 
+/** A missing or foreign course is final: show a way back instead of a retry. */
+export const COURSE_NOT_FOUND = "找不到这门课程";
+export const courseReadMissing = (status: number) => status === 404 || status === 400;
+
 export function useCourseBundle(id: string) {
   const [course, setCourse] = useState<CourseSummary | null>(null);
   const [assets, setAssets] = useState<CourseAsset[]>([]);
@@ -173,6 +177,7 @@ export function useCourseBundle(id: string) {
     setError("");
     Promise.all([fetch(`/api/courses/${encodeURIComponent(id)}`, { cache: "no-store" }), fetch(`/api/courses/${encodeURIComponent(id)}/assets`, { cache: "no-store" })])
       .then(async ([courseResponse, assetResponse]) => {
+        if (courseReadMissing(courseResponse.status)) { if (active) setError(COURSE_NOT_FOUND); return; }
         if (!courseResponse.ok || !assetResponse.ok) throw new Error();
         const courseBody = await courseResponse.json() as { course?: CourseSummary };
         const assetBody = await assetResponse.json() as { assets?: CourseAsset[] };
@@ -232,6 +237,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
     return () => window.removeEventListener("hashchange", followLegacyStudyLink);
   }, [id, mode, paths.openingActions, router]);
   if (loading || (course && course.id !== id)) return <LoadingRows label="正在读取课程…" />;
+  if (error === COURSE_NOT_FOUND) return <section className="p-5"><EmptyState title="找不到这门课程" description="课程可能已被删除，或链接不完整。" action={<Link className={ui.primary} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程列表</Link>} /></section>;
   if (error || !course) return <section className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></section>;
   if (paths.openingActions && mode === "sprint") return <CourseSprintMode key={id} course={course} />;
 
