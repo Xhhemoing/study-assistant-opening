@@ -4,6 +4,8 @@ import { PAGE_CITATION_CLARIFY_MESSAGE } from "./tutor-policy";
 export const TUTOR_FAILURE_MESSAGE = "本轮回答未能完成。请先重新读取会话状态，再决定是否重新提问。";
 export const TUTOR_UNKNOWN_MESSAGE = "本轮执行结果尚未确认，费用也待核对；为避免重复调用，未自动重发。";
 export const TUTOR_CANCELLED_MESSAGE = "回答任务已取消。";
+/** Stored with code TUTOR_JOB_STALE when a queued answer was never picked up (no model call was made). */
+export const TUTOR_STALE_MESSAGE = "这次回答长时间没有开始，已停止等待；没有产生调用费用，可以重新提问。";
 
 const knownFailureMessages: Readonly<Record<string, string>> = {
   BUDGET_EXCEEDED: "今日 AI 预算已达上限，请在设置中核对预算，或明天再试。",
@@ -24,6 +26,7 @@ const knownFailureMessages: Readonly<Record<string, string>> = {
   BUDGET_MEDIA_COST_UNBOUNDED: "当前模型未配置可核验的媒体计费上界，请改用文本或先完成材料解析。",
   BUDGET_MEDIA_INPUT_INVALID: "媒体内容编码无效，请重新选择材料。",
   BUDGET_MEDIA_INPUT_TOO_LARGE: "媒体内容超过已配置计费上界适用的大小限制，请缩小材料范围。",
+  TUTOR_JOB_STALE: TUTOR_STALE_MESSAGE,
 };
 
 /** Stored failures are untrusted historical diagnostics, never learner/model text. */
