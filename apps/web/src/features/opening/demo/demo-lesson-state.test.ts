@@ -4,6 +4,7 @@ import { expect, it, vi } from "vitest";
 import { demoLessonReducer, initialDemoLessonState } from "./demo-lesson-state";
 
 vi.mock("next/link", () => ({ default: ({ children, href, prefetch: _prefetch, ...props }: { children: import("react").ReactNode; href: string; prefetch?: boolean }) => createElement("a", { ...props, href }, children) }));
+vi.mock("../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ explorePreview: true }) }));
 import { AiReadinessChecklistView } from "../assistant/ai-readiness";
 
 it("keeps the demo entry alongside settings only when AI is hard-blocked", () => {

@@ -6,7 +6,8 @@ import { DemoLesson } from "./demo-lesson";
 import DemoLearningPage from "../../../app/demo/learning/page";
 
 const router = vi.hoisted(() => ({ replace: vi.fn() }));
-vi.mock("next/navigation", () => ({ useRouter: () => router }));
+vi.mock("next/navigation", () => ({ useRouter: () => router, notFound: () => { throw new Error("NOT_FOUND"); } }));
+vi.mock("@aistudy/config", () => ({ loadFeatureSwitches: () => ({ explorePreview: true }) }));
 
 let host: HTMLDivElement;
 let root: Root;
