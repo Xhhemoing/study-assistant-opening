@@ -54,7 +54,7 @@ export type ReservationTerms = {
  * How one call is reserved and settled. Paid models reserve the estimated token
  * cost (at least the floor); free-tier models reserve zero under their request cap.
  */
-export function reservationTerms(model: ResolvedTaskModel, input: ProviderInput, floorCents = 1): ReservationTerms {
+export function reservationTerms(model: Omit<ResolvedTaskModel, "provider">, input: ProviderInput, floorCents = 1): ReservationTerms {
   if (model.billing === "free_tier") {
     if (!model.dailyRequestCap) {
       throw new OpeningModelRoutingError("免费额度模型缺少每日请求上限，请到设置补全。");

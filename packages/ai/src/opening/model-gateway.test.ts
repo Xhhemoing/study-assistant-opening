@@ -175,6 +175,23 @@ describe("parent interaction through gateway fallback", () => {
   });
 });
 
+describe("provider-free reservation estimation", () => {
+  it("prices the real serialized prompt, output bound, floor and media without constructing a provider", () => {
+    const selected: Omit<ResolvedTaskModel, "provider"> = {
+      modelSnapshot: { id: "estimate", providerId: "p", modelName: "m", inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000 },
+      inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000,
+    };
+    const short = reservationTerms(selected, input);
+    const long = reservationTerms(selected, { ...input, instruction: "reference".repeat(1000), text: "answer".repeat(1000) });
+    expect(long.reservedCents).toBeGreaterThan(short.reservedCents);
+    expect(reservationTerms(selected, { ...input, maxOutputTokens: input.maxOutputTokens + 100 }).reservedCents).toBe(short.reservedCents + 100);
+    expect(reservationTerms(selected, input, 100_000).reservedCents).toBe(100_000);
+    const media = { ...selected, mediaInputTokenUpperBound: 8000, mediaMaxInputBytes: 10000, mediaInputCentsPerMillion: 1_000_000 };
+    expect(reservationTerms(media, { ...input, imageParts: [{ mediaType: "image/png", data: "data:image/png;base64,aGVsbG8=" }] }).reservedCents).toBeGreaterThanOrEqual(short.reservedCents + 8000);
+    expect(reservationTerms({ ...selected, billing: "free_tier", dailyRequestCap: 2 }, input, 100_000)).toMatchObject({ reservedCents: 0, requestCapPerDay: 2 });
+  });
+});
+
 describe("priced transport input bound", () => {
   it("reserves the full transmitted prompt including style and history, and enforces the output cap on wire", async () => {
     const { createOpeningProvider } = await import("./provider");
