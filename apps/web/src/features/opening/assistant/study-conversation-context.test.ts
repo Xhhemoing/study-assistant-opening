@@ -45,5 +45,7 @@ describe("study conversation entry", () => {
     expect(studyContextReturnHref({ sourceId, sourceVersion: 0, page: 3 })).toContain(`source=${sourceId}&version=0&page=3`);
     expect(studyContextReturnHref(context)).toBe(context.returnTo);
     expect(studyContextReturnHref({ ...context, returnTo: "https://evil.example" })).toContain("/opening/library?");
+    expect(studyContextReturnHref({ ...context, returnTo: "/opening/sprint" })).toBe("/opening/sprint");
+    expect(studyContextReturnHref({ ...context, returnTo: "/opening/exam-sprint" })).not.toBe("/opening/exam-sprint");
   });
 });
