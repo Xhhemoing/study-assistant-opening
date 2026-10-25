@@ -170,6 +170,14 @@ describe("course creation feedback", () => {
   });
 
 
+  it("does not render English repository validation messages", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ error: { code: "VALIDATION", message: "Course slug must be lowercase kebab-case" } }, { status: 400 }));
+    await submit();
+    const html = renderToStaticMarkup(renderForm());
+    expect(html).not.toContain("kebab-case");
+    expect(html).toContain("课程信息未通过校验");
+  });
+
   it("lets the learner create a separate course after a restored legacy URL conflicts", async () => {
     unmount(); stored.set(draftKey, JSON.stringify({ title: "高等数学", slug: "calculus", description: "" }));
     mount(); await flush();
