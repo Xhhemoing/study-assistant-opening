@@ -1,5 +1,6 @@
 import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "@aistudy/contracts";
 import { acceptedAiGradingOutcome, checkArithmeticAnswer, corroborateArithmeticGrade } from "@aistudy/domain";
+import { parseModelJson } from "./latex-json";
 
 function ratio(numerator: number, denominator: number) {
   return { numerator, denominator, rate: denominator ? numerator / denominator : null };
@@ -27,7 +28,7 @@ export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
       || result.input.imageEvidenceRef !== test.input.imageEvidenceRef) reason = "case_input_mismatch";
     else {
       let json: unknown;
-      try { json = JSON.parse(result.rawOutput); } catch { reason = "invalid_model_output"; }
+      try { json = parseModelJson(result.rawOutput); } catch { reason = "invalid_model_output"; }
       const proposal = aiGradingProposalSchema.safeParse(json);
       if (!proposal.success) reason = "invalid_model_output";
       else {

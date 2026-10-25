@@ -11,6 +11,7 @@ import { classifyProviderFailure } from "./errors";
 import { renderContext } from "./context";
 import { assertOpeningProviderEndpoint, fetchOpeningProvider, OpeningProviderEndpointError } from "./provider-network";
 import { OpeningProviderStreamError, readOpeningProviderStream, type ProviderTextDelta } from "./provider-stream";
+import { parseModelJson } from "./latex-json";
 export type { ProviderTextDelta } from "./provider-stream";
 
 const answerSchema = providerOutputSchema.pick({ text: true, citedChunkIds: true, candidates: true });
@@ -104,7 +105,7 @@ function parseAnswerContent(raw: string): unknown {
   const stripped = stripMarkdownFences(raw);
   const tryParse = (text: string): unknown | undefined => {
     try {
-      return JSON.parse(text);
+      return parseModelJson(text);
     } catch {
       return undefined;
     }
@@ -133,7 +134,7 @@ function parseJsonObjectContent(raw: string): Record<string, unknown> {
   if (start >= 0 && end > start) attempts.push(stripped.slice(start, end + 1));
   for (const candidate of attempts) {
     try {
-      const parsed: unknown = JSON.parse(candidate);
+      const parsed: unknown = parseModelJson(candidate);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     } catch {
       // try the next candidate
