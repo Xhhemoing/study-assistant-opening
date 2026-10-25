@@ -1,8 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeParserOcr, pdfParserProfile } from "./ocr-health";
+import { probeParserOcr, pdfParserProfile, OCR_PREFLIGHT_TIMEOUT_MS } from "./ocr-health";
 
 const configured = { PARSER_OCR_MODEL_DIR: "/prepared/private-models" } as NodeJS.ProcessEnv;
 describe("Worker OCR measurements", () => {
+  it("uses the configured probe timeout with a 120000ms default and combines lifecycle cancellation", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const controller = new AbortController();
+    const run = vi.fn(async (_argv: string[], signal: AbortSignal) => {
+      controller.abort(new Error("shutdown"));
+      expect(signal.aborted).toBe(true);
+      throw signal.reason;
+    });
+    try {
+      expect(OCR_PREFLIGHT_TIMEOUT_MS).toBe(120000);
+      await probeParserOcr(run, configured, controller.signal);
+      expect(timeout).toHaveBeenLastCalledWith(120000);
+      await probeParserOcr(async () => ({ exitCode: 4, stdout: "" }), { ...configured, PARSER_OCR_PREFLIGHT_TIMEOUT_MS: "240000" });
+      expect(timeout).toHaveBeenLastCalledWith(240000);
+    } finally { timeout.mockRestore(); }
+  });
   it("does not start Python when OCR is not configured", async () => {
     const run = vi.fn();
     expect(await probeParserOcr(run, {} as NodeJS.ProcessEnv)).toMatchObject({ status: "not_configured" });

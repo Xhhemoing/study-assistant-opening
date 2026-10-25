@@ -1,4 +1,5 @@
 import { EnvValidationError } from "./env";
+import { loadWorkerStartupConfig } from "./worker-startup";
 
 /** Local-only defaults; never used when NODE_ENV=production. */
 const DEVELOPMENT_DEFAULTS = {
@@ -30,6 +31,7 @@ export type WorkerEnv = {
  * instead of silently connecting to loopback services with default credentials.
  */
 export function loadWorkerEnv(source: NodeJS.ProcessEnv = process.env): WorkerEnv {
+  loadWorkerStartupConfig(source);
   const nodeEnv = source.NODE_ENV === "production" ? "production" : source.NODE_ENV === "test" ? "test" : "development";
   const issues: string[] = [];
   const workerRole = source.WORKER_ROLE?.trim() || "all";

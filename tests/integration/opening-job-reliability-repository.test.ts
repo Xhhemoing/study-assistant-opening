@@ -110,10 +110,10 @@ describe("durable opening job delivery and execution", () => {
     const { jobs, job } = await seed();
     const claimed = (await jobs.claim(job.id))!;
     expect(claimed.claimToken).toBeTypeOf("string");
-    expect(await jobs.heartbeat(job.id, randomUUID())).toBe(false);
+    expect(await jobs.heartbeat(job.id, randomUUID(), fixture.scope)).toBe(false);
     await fixture.sql`UPDATE opening_jobs SET updated_at = now() - interval '10 minutes' WHERE id = ${job.id}`;
     expect(await jobs.claim(job.id)).toBeNull();
-    expect(await jobs.heartbeat(job.id, claimed.claimToken!)).toBe(true);
+    expect(await jobs.heartbeat(job.id, claimed.claimToken!, fixture.scope)).toBe(true);
     expect(await jobs.recoverExpired()).toBe(0);
     expect(await jobs.finish(job.id, "succeeded", { ok: true }, randomUUID())).toBe(false);
     expect(await jobs.finish(job.id, "succeeded", { ok: true }, claimed.claimToken)).toBe(true);
@@ -155,7 +155,7 @@ describe("durable opening job delivery and execution", () => {
         await tx`SELECT id FROM workspaces WHERE id = ${fixture.scope.workspaceId} FOR UPDATE`;
         pending = track(createOpeningJobRepository(reaper.sql).recoverExpired());
         await waitUntilBlocked(observer.sql, reaper.pid, gate.pid, "job recovery", /FOR UPDATE OF w/);
-        expect(await jobs.heartbeat(job.id, claimed.claimToken!)).toBe(true);
+        expect(await jobs.heartbeat(job.id, claimed.claimToken!, fixture.scope)).toBe(true);
       });
       expect(await pending).toBe(0);
       expect((await jobs.get(fixture.scope, job.id)).state).toBe("running");

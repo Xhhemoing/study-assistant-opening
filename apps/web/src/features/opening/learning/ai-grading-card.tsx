@@ -8,6 +8,7 @@ import { sourceViewerHref } from "../inbox/source-viewer";
 import type { GradingPhotoSelection } from "./ai-grading-photo";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { FeedbackPractice } from "./feedback-practice";
+import { createAiGradingPoll } from "./ai-grading-poll";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "./stage-action-bar";
 
 
@@ -56,53 +57,53 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
   const [status, setStatus] = useState<AiGradingStatus | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const [refresh, setRefresh] = useState(0);
   const inFlight = useRef(false);
-  const mounted = useRef(true);
   const onGradedRef = useRef(onGraded);
   onGradedRef.current = onGraded;
   const canGrade = canGradeObservation(record);
   const pending = sending || status?.status === "queued" || status?.status === "grading";
   useEffect(() => { onPendingChange?.(pending); }, [pending, onPendingChange]);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; onPendingChange?.(false); }; }, [onPendingChange]);
+  useEffect(() => () => { onPendingChange?.(false); }, [onPendingChange]);
+  const poller = useMemo(() => createAiGradingPoll(async isCurrent => {
+    const next = await client.getGradingStatus(record.id);
+    if (!isCurrent()) return null;
+    setStatus(next); setSending(false); setError("");
+    if (next.headObservationId !== record.id) {
+      const history = await client.getObservationHistory(record.id);
+      if (!isCurrent()) return null;
+      const head = history.revisions.find(row => row.id === history.headObservationId);
+      if (head && head.id !== record.id) { onGradedRef.current(head); return null; }
+    }
+    return next.status;
+  }, reason => {
+    setSending(false);
+    setError(`原答案已保存。${reason instanceof Error ? reason.message : "暂时无法读取批改状态。"}`);
+  }), [client, record.id]);
 
-  // Even autoGrade callers only READ. Saving the answer already enqueued its
-  // durable job. Closing this card only stops polling, never the job itself.
+  // Even autoGrade callers only READ. Closing/hidden only stops local polling,
+  // never the durable job. Retain the lock across effect restarts/StrictMode.
   useEffect(() => {
     if (!canGrade && !record.aiEvaluation) return;
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function poll() {
-      try {
-        const next = await client.getGradingStatus(record.id);
-        if (stopped) return;
-        setStatus(next); setError("");
-        if (next.headObservationId !== record.id) {
-          const history = await client.getObservationHistory(record.id);
-          if (stopped) return;
-          const head = history.revisions.find(row => row.id === history.headObservationId);
-          if (head && head.id !== record.id) { onGradedRef.current(head); return; }
-        }
-        if (["queued", "grading", "unknown_cost"].includes(next.status)) timer = setTimeout(() => void poll(), next.status === "unknown_cost" ? 10000 : 2000);
-      } catch (reason) {
-        if (stopped) return;
-        setError(`原答案已保存。${reason instanceof Error ? reason.message : "暂时无法读取批改状态。"}`);
-        timer = setTimeout(() => void poll(), 5000);
-      }
-    }
-    void poll();
-    return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [canGrade, client, record.aiEvaluation, record.id, refresh]);
+    poller.start();
+    return () => poller.stop();
+  }, [canGrade, poller, record.aiEvaluation]);
 
   async function enqueue() {
     if (inFlight.current || disabled || !status?.retryable) return;
-    inFlight.current = true; setSending(true); setError("");
+    inFlight.current = true;
     try {
-      const next = await client.gradeObservation({ observationId: record.id });
-      if (mounted.current) { setStatus(next); setRefresh(value => value + 1); }
-    } catch (reason) {
-      if (mounted.current) setError(`原答案已保存。${reason instanceof Error ? reason.message : "未能加入批改队列。"}`);
-    } finally { inFlight.current = false; if (mounted.current) setSending(false); }
+      await poller.retry(async isCurrent => {
+        setSending(true); setError("");
+        try {
+          const next = await client.gradeObservation({ observationId: record.id });
+          if (isCurrent()) setStatus(next);
+          return true;
+        } catch (reason) {
+          if (isCurrent()) setError(`原答案已保存。${reason instanceof Error ? reason.message : "未能加入批改队列。"}`);
+          return false;
+        } finally { if (isCurrent()) setSending(false); }
+      });
+    } finally { inFlight.current = false; }
   }
 
   if (!canGrade && !record.aiEvaluation) return null;

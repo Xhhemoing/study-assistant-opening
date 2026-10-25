@@ -7,7 +7,7 @@ export type JobRepository = {
   claim(id: string): Promise<OpeningJobRecord | null>;
   /** M02 workspace epoch; implemented by createOpeningJobRepository. Optional only for unit doubles. */
   workspacePrivacyEpoch?(workspaceId: string): Promise<number>;
-  heartbeat?(id: string, claimToken: string): Promise<boolean>;
+  heartbeat?(id: string, claimToken: string, scope: { workspaceId: string; ownerUserId: string }): Promise<boolean>;
   finish(id: string, state: "succeeded" | "failed" | "outcome_unknown", value: unknown, claimToken?: string): Promise<boolean>;
 };
 
@@ -65,7 +65,7 @@ export async function runJob(
   const job = await repository.claim(jobId);
   if (!job || job.state !== "running") return false;
   return withJobHeartbeat(
-    () => repository.heartbeat && job.claimToken ? repository.heartbeat(job.id, job.claimToken) : Promise.resolve(),
+    () => repository.heartbeat && job.claimToken ? repository.heartbeat(job.id, job.claimToken, job) : Promise.resolve(),
     async () => {
       if (!(await workspaceEpochIsCurrent(repository, job))) {
         await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" }, job.claimToken);
@@ -86,5 +86,6 @@ export async function runJob(
         }, job.claimToken);
       }
     },
+    job.kind === "grade-observation" ? 60_000 : 30_000,
   );
 }

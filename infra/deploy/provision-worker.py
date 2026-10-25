@@ -252,6 +252,8 @@ def configure(args):
     runtime = {"HOME": str(cache), "HF_HOME": str(cache / "hf-home"), "HF_HUB_CACHE": str(cache / "hf-home/hub"),
                "HUGGINGFACE_HUB_CACHE": str(cache / "hf-home/hub"), "TRANSFORMERS_CACHE": str(cache / "hf-home/hub"),
                "XDG_CACHE_HOME": str(cache), "TORCH_HOME": str(cache / "torch"), "TMPDIR": "/tmp",
+               "WORKER_READINESS_FILE": str(cache / "worker-ready.json"),
+               "PARSER_PREFLIGHT_CACHE_FILE": str(cache / "parser-preflight-success.json"),
                "PARSER_TEMP_DIR": "/tmp/opening-parser", "PARSER_PYTHON": str(python),
                "PARSER_CWD": str(args.app_dir / "services/parser"), "HF_HUB_OFFLINE": "1"}
     check_env = {**runtime, "PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONIOENCODING": "utf-8", "PYTHONNOUSERSITE": "1"}

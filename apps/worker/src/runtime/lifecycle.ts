@@ -17,11 +17,15 @@ export function createSerialTask(task: () => Promise<unknown>, onError: (error: 
 }
 
 /** Heartbeats stop and drain before the handler releases its DB dependency. */
-export async function withJobHeartbeat<T>(heartbeat: () => Promise<unknown>, handler: () => Promise<T>): Promise<T> {
-  const task = createSerialTask(heartbeat, (error) => {
+export async function withJobHeartbeat<T>(heartbeat: () => Promise<unknown>, handler: () => Promise<T>, intervalMs = 30_000): Promise<T> {
+  const task = createSerialTask(async () => {
+    // A failed CAS means cancellation, a terminal state, or a newer claim.
+    // Stop scheduling without retrying or changing the external call outcome.
+    if (await heartbeat() === false) clearInterval(timer);
+  }, (error) => {
     console.error("job heartbeat failed", error instanceof Error ? error.name : "unknown error");
   });
-  const timer = setInterval(() => { void task.run(); }, 30_000);
+  const timer = setInterval(() => { void task.run(); }, intervalMs);
   timer.unref();
   try {
     return await handler();

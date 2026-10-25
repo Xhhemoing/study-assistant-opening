@@ -218,7 +218,10 @@ printf '{"status":"ok"}'`,
       const parserFailure = join(root, "parser-failure");
       if (childEnvironment.MOCK_FAIL === "parser") writeFileSync(parserFailure, "");
       else rmSync(parserFailure, { force: true });
-      const result = spawnSync("bash", [join(repo, "infra/deploy/deploy-hermes.sh"), action], { cwd: repo, encoding: "utf8", timeout: 15_000, env: childEnvironment });
+      // The production cold-start budget now permits 120 identity probes. The
+      // fixture removes sleeps, but subprocess creation still exceeds 15s on a
+      // shared single-CPU host. Keep a bounded fixture budget and all assertions.
+      const result = spawnSync("bash", [join(repo, "infra/deploy/deploy-hermes.sh"), action], { cwd: repo, encoding: "utf8", timeout: 60_000, env: childEnvironment });
       assert.ifError(result.error);
       assert.doesNotMatch(result.stdout + result.stderr, /secret-never-print/);
       const allLog = readFileSync(log, "utf8");

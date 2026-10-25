@@ -68,6 +68,18 @@ const modelCatalogExample: TemplateLine = {
 export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "NODE_ENV", group: "runtime", doc: "development | test | production.", consumers: [...both, "compose"], kind: "enum", enumValues: ["development", "test", "production"], secret: false, dev: { value: "development" }, docker: { value: "production" } },
   { name: "WORKER_ROLE", group: "runtime", doc: "Worker consumers: all (default), learning (no document/media parsing), or parser (document/media parsing only). all/parser require parser startup checks.", consumers: ["worker"], kind: "enum", enumValues: ["all", "learning", "parser"], secret: false, dev: { value: "all" }, docker: { value: "all" } },
+  ...([
+    ["WORKER_READINESS_FILE", ".tmp/worker-all-ready.json", "Readiness receipt path; default .tmp/worker-<role>-ready.json. Use distinct paths for multiple roles."],
+    ["PARSER_PREFLIGHT_CACHE_FILE", ".tmp/parser-preflight-success.json", "Successful parser check cache; local writable path, not a readiness receipt."],
+  ] as const).map(([name, value, doc]): EnvVarSpec => ({ name, group: "runtime", doc, consumers: ["worker"], kind: "string", secret: false, dev: { value, commented: true }, docker: { value, commented: true } })),
+  ...[
+    ["WORKER_READY_TIMEOUT_MS", 30000, 1000, 300000],
+    ["PARSER_PREFLIGHT_TIMEOUT_MS", 120000, 1000, 600000],
+    ["PARSER_OCR_PREFLIGHT_TIMEOUT_MS", 120000, 1000, 600000],
+    ["PARSER_PREFLIGHT_CACHE_TTL_MS", 3600000, 0, 86400000],
+    ["WORKER_STARTUP_RETRY_INITIAL_MS", 5000, 1000, 300000],
+    ["WORKER_STARTUP_RETRY_MAX_MS", 60000, 1000, 300000],
+  ].map(([name, value, min, max]): EnvVarSpec => ({ name: String(name), group: "runtime", doc: `${name}: milliseconds; default ${value}. Cache TTL 0 disables reuse; retry max must be >= initial.`, consumers: ["worker"], kind: "int", min: Number(min), max: Number(max), secret: false, dev: { value: String(value), commented: true }, docker: { value: String(value), commented: true } })),
   { name: "PUBLIC_BASE_URL", group: "runtime", doc: "Public web origin; cookie-auth Origin checks use it.", consumers: ["web"], kind: "url", secret: false, required: "always", dev: { value: "http://localhost:3000" }, docker: { value: "https://REPLACE_ME.example" } },
 
   { name: "OPENING_POSTGRES_USER", group: "compose", doc: "Compose Postgres user.", consumers: ["compose"], kind: "string", secret: false, docker: { value: "REPLACE_ME_pg_user" } },
