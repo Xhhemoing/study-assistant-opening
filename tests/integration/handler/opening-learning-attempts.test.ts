@@ -12,6 +12,8 @@ import { GET as listTurns } from "../../../apps/web/src/app/api/opening/conversa
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
+import { useTutorModelFixture } from "./tutor-model-fixture";
+useTutorModelFixture();
 let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
 beforeAll(async () => {
   fixture = await createOpeningFixture();
