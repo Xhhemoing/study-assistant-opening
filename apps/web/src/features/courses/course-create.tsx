@@ -25,7 +25,7 @@ function courseCreationError(status: number, body: unknown): string {
     // Repository messages are English ("Course slug must be lowercase kebab-case"); only localized copy passes.
     if (error && typeof error === "object" && "message" in error && typeof error.message === "string" && /[\u4e00-\u9fff]/.test(error.message)) return error.message.trim();
   }
-  return "课程信息未通过校验，请检查填写内容后重试。";
+  return "课程信息还有不完整的地方，请检查后再试。";
 }
 
 export function CourseCreate({ opening = false }: { opening?: boolean }) {

@@ -30,6 +30,13 @@ describe("one-click model setup", () => {
     });
     expect(validateQuickSetupDraft(freeDraft)).toBeNull();
   });
+  it("names every empty required field so the disabled button explains itself", () => {
+    expect(initialQuickSetupDraft.label).toBe("Google Gemini");
+    expect(validateQuickSetupDraft(initialQuickSetupDraft)).toBe("还差：API 密钥。填好后就能一键配置。");
+    expect(validateQuickSetupDraft({ ...initialQuickSetupDraft, label: " ", modelName: "" })).toBe("还差：配置名称、模型名称、API 密钥。填好后就能一键配置。");
+    expect(applyQuickSetupPreset({ ...initialQuickSetupDraft, label: "我的 Gemini" }, "openai_compatible").label).toBe("我的 Gemini");
+    expect(applyQuickSetupPreset(initialQuickSetupDraft, "openai_compatible").label).toBe("");
+  });
   it("requires the user to enter another compatible model and its prices", () => {
     const draft = applyQuickSetupPreset(freeDraft, "openai_compatible");
     expect(draft).toMatchObject({ baseUrl: "https://api.openai.com/v1", modelName: "", billing: "metered", inputCentsPerMillion: "", outputCentsPerMillion: "", confirmBudget: false });

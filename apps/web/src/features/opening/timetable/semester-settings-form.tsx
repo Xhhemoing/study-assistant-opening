@@ -67,7 +67,7 @@ export function validateSemesterDraft(draft: OpeningPlanningSettings): string | 
   const parsed = openingPlanningSettingsSchema.safeParse(draft);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
-    return first?.message ?? "学期设置校验失败。";
+    return first?.message ?? "学期设置有误，请检查后再保存。";
   }
   return null;
 }

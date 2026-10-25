@@ -82,7 +82,7 @@ export function submitCourse(state: PreviewState): PreviewState {
     selectedCourseId: created.id,
     courseDraft: { title: "", term: "" },
     courseError: null,
-    statusNote: "示例课程只存在于这次预览，不会写入课程库。",
+    statusNote: "示例课程只存在于这次预览，不会加入课程库。",
   };
 }
 

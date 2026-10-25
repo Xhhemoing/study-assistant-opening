@@ -212,7 +212,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
               disabled={busy || !preview.parsed.sessions.length}
               onClick={() => void onConfirm()}
             >
-              {busy && state.phase === "saving" ? "正在保存…" : "确认写入课表"}
+              {busy && state.phase === "saving" ? "正在保存…" : "确认加入课表"}
             </button>
             <button type="button" className={secondaryButtonClass} disabled={busy} onClick={onCancel}>
               取消预览

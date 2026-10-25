@@ -85,7 +85,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
 
   function pause(view: ConnectionView) {
     setPausedIds((prev) => new Set(prev).add(view.id));
-    setNotice(`${view.label} 已在本页暂停同步请求；服务端状态仍为「${connectionStateLabel(view.state)}」。`);
+    setNotice(`${view.label} 已在本页暂停同步；连接本身仍为「${connectionStateLabel(view.state)}」。`);
   }
 
   async function revoke(view: ConnectionView) {

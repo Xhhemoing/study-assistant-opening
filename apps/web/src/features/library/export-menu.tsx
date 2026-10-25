@@ -42,7 +42,7 @@ export function ExportMenu({ documentId }: { documentId?: string }) {
         downloadFile(body.ankiTsv, "aistudy-cards.txt", "text/tab-separated-values;charset=utf-8");
       }
     } catch {
-      setError(next === "markdown" ? "暂时无法导出 Markdown，请稍后重试。" : "暂时无法导出 Anki 投影，请稍后重试。");
+      setError(next === "markdown" ? "暂时无法导出 Markdown，请稍后重试。" : "暂时无法导出 Anki，请稍后重试。");
     } finally {
       setPending(null);
     }

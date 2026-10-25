@@ -39,7 +39,7 @@ it.each(["<html>upstream failure</html>", JSON.stringify([{ internalRequirementI
   const client = createOpeningLearningClient(async () => new Response(body, { status: 200 }));
   await expect(client.getSummary(COURSE)).rejects.toMatchObject({
     name: "OpeningResponseError",
-    message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+    message: "暂时读不懂服务器返回的内容。请先刷新看看当前状态，再决定是否重试。",
     cause: { name: "ZodError" },
   });
 });

@@ -11,5 +11,5 @@ it("reads one aggregate with no-store and carries the cancellation signal", asyn
 
 it("does not turn HTTP failures or malformed aggregates into an empty successful list", async () => {
   await expect(readWeakPoints(undefined, vi.fn(async () => Response.json({}, { status: 503 })))).rejects.toThrow("易错点暂时无法读取");
-  await expect(readWeakPoints(undefined, vi.fn(async () => Response.json({ points: [] })))).rejects.toThrow("服务器返回的数据暂时无法核验");
+  await expect(readWeakPoints(undefined, vi.fn(async () => Response.json({ points: [] })))).rejects.toThrow("暂时读不懂服务器返回的内容");
 });

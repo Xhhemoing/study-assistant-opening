@@ -175,7 +175,7 @@ describe("course creation feedback", () => {
     await submit();
     const html = renderToStaticMarkup(renderForm());
     expect(html).not.toContain("kebab-case");
-    expect(html).toContain("课程信息未通过校验");
+    expect(html).toContain("课程信息还有不完整的地方");
   });
 
   it("lets the learner create a separate course after a restored legacy URL conflicts", async () => {

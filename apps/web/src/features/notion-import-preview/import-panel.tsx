@@ -28,6 +28,6 @@ export function ReportCard({ report }: { report: ImportReport }) {
     <h2 className="text-sm font-medium text-zinc-800">解析结果</h2>
     <dl className="mt-2 divide-y divide-zinc-200">{[["页面", report.pages], ["内容块", report.blocks], ["附件", report.attachments]].map(([label, value]) => <div key={label} className="flex justify-between py-2 text-xs"><dt className="text-zinc-500">{label}</dt><dd className="tabular-nums text-zinc-800">{value}</dd></div>)}</dl>
     {report.losses.length ? <ul className="mt-3 space-y-2 border-t border-zinc-200 pt-3">{report.losses.map(loss => <li className="flex items-center justify-between gap-3 text-xs text-amber-800" key={loss.kind}><span className="inline-flex items-center gap-1.5"><TriangleAlert aria-hidden="true" size={12} />{lossLabels[loss.kind] ?? loss.kind}</span><span className="tabular-nums">{loss.count}</span></li>)}</ul> : <p className="mt-3 border-t border-zinc-200 pt-3 text-xs text-emerald-700">解析器未检测到已知格式损失</p>}
-    <p className="mt-3 text-xs leading-6 text-zinc-500">预览不会保留原始 ZIP 或写入知识库，请自行保存原文件。未检测到损失不代表完整保真。</p>
+    <p className="mt-3 text-xs leading-6 text-zinc-500">预览不会保留原始 ZIP，也不会存进知识库，请自行保存原文件。没发现缺失不代表和原文完全一致。</p>
   </section>;
 }

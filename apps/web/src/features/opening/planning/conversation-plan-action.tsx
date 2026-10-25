@@ -46,7 +46,7 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
       if (result.kind === "draft") setDraft(result.draft);
       else if (result.kind === "clarification") { setInspection(result); setError("请补充课程选择和预计时长。"); }
       else setError("今天没有足够的连续空档，任务尚未创建。可以先调整可用时间，再重新读取。");
-    } catch (reason) { setError(userFacingMessage(reason, "草案结果尚未确认，请先重试原请求。")); }
+    } catch (reason) { setError(userFacingMessage(reason, "还不确定计划草稿是否生成，请再试一次。")); }
     finally { setBusy(false); }
   }
   async function accept() {
@@ -59,7 +59,7 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
       onModeChange(false);
       onAccepted({ id: task.id, version: 1, title: task.title, minutes: task.minutes, dueAt: null, priority: 0,
         status: "pending", origin: "agent", ...(task.courseId ? { courseId: task.courseId } : {}) });
-    } catch (reason) { setError(userFacingMessage(reason, "接受结果尚未确认，请先核对或重试原请求。")); }
+    } catch (reason) { setError(userFacingMessage(reason, "还不确定是否已接受，请刷新今日计划看看，或再试一次。")); }
     finally { setBusy(false); }
   }
   async function reject() {

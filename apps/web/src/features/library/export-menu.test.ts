@@ -8,7 +8,7 @@ describe("markdown export menu", () => {
     const html = renderToStaticMarkup(createElement(ExportMenu));
     expect(html).toContain("导出 Markdown");
     expect(html).toContain("导出 Anki");
-    expect(html).toContain("可交换投影");
+    expect(html).toContain("便于在别处使用的导出");
     expect(html).not.toMatch(/无损|lossless/i);
     expect(html).not.toContain("style=");
   });
