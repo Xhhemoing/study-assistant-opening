@@ -517,6 +517,36 @@ export function ResumeCard({
     // Intentionally omit fetchResume identity to avoid request loops.
   }, [activity.id, resumeProp, api]);
 
+  // While the lesson is still being generated, re-read the gate with backoff
+  // (3s → 30s, stop after ~10 min) so the card turns ready on its own instead of
+  // leaving the learner on "正在准备讲解" until they guess to press 重新读取.
+  const jobInFlight = liveResume?.activityId === activity.id && liveResume.gates.job === "in_flight";
+  useEffect(() => {
+    if (!jobInFlight) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 3000;
+    const startedAt = Date.now();
+    const tick = async () => {
+      if (cancelled || !requestScope.active) return;
+      try {
+        const next = await api.getTeachingResume(activity.id);
+        if (cancelled || !requestScope.active) return;
+        setLiveResume(next);
+        onResumeUpdated?.(next);
+        if (next.gates.job !== "in_flight") return;
+      } catch {
+        // transient read failure: keep the current card and retry later
+      }
+      if (cancelled || Date.now() - startedAt > 10 * 60_000) return;
+      delay = Math.min(delay * 2, 30_000);
+      timer = setTimeout(() => { void tick(); }, delay);
+    };
+    timer = setTimeout(() => { void tick(); }, delay);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+    // onResumeUpdated is a notification callback; re-arming on its identity would reset backoff.
+  }, [jobInFlight, activity.id, api, requestScope]);
+
   const handleContinue = useCallback(async () => {
     if (!liveResume) return;
     setContinueBusy(true);
