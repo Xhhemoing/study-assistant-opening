@@ -97,7 +97,7 @@ function PrefsFields({
 }) {
   return (
     <fieldset disabled={busy} className="space-y-3">
-      <legend className="sr-only">介入偏好字段</legend>
+      <legend className="sr-only">提醒偏好</legend>
       <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 text-sm text-text-2">
         <span>安静模式（抑制主动提议；仍回答你的求助）</span>
         <input

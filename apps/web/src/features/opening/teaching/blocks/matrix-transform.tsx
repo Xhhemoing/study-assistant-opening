@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ui } from "../../design/ui";
 
 export const MATRIX_TRANSFORM_HONESTY_COPY =
-  "图示仅按同一参数模型逐步展示；漂亮不等于已核验正确（核验仍属验证层）。";
+  "图示只按同一组参数逐步演示，帮助理解过程，不代表答案一定正确。";
 
 export const MATRIX_TRANSFORM_KEYSHORTCUTS =
   "Space Home ArrowLeft ArrowRight BracketLeft BracketRight";
