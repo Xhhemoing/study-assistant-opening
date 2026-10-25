@@ -152,7 +152,7 @@ describe("daily draft interactions", () => {
     click(button(render(component), "确认")); await settle();
     const failed = render(component);
     expect(preview(failed).selectedKeys).toEqual([]);
-    expect(text(failed)).toContain("network lost");
+    expect(text(failed)).toContain("确认推荐草案失败");
     click(button(failed, "确认")); await settle();
     expect(client.acceptPlan.mock.calls[1]![0]).toEqual(client.acceptPlan.mock.calls[0]![0]);
     expect(client.acceptPlan.mock.calls[1]![0].acceptSuggestedKeys).toEqual([]);
@@ -209,7 +209,7 @@ describe("daily draft interactions", () => {
     click(button(render(component), "刷新草案")); await settle();
     expect(onRefreshSuggestions).toHaveBeenCalledOnce();
     expect(preview(render(component)).selectedKeys).toEqual(["suggestion-a"]);
-    expect(text(render(component))).toContain("refresh unavailable");
+    expect(text(render(component))).toContain("读取新建议失败");
   });
 });
 
@@ -272,7 +272,7 @@ describe("arrangement mode", () => {
     render(component); await settle();
     click(button(render(component), "手工")); await settle();
     expect(button(render(component), "副驾驶").props["aria-pressed"]).toBe(true);
-    expect(text(render(component))).toContain("save unavailable");
+    expect(text(render(component))).toContain("偏好保存失败");
     expect(onChanged).not.toHaveBeenCalled();
   });
 });
