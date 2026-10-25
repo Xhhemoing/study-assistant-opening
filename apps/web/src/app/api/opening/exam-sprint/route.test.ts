@@ -29,7 +29,7 @@ describe("exam sprint HTTP boundary", () => {
     expect(deps.act).toHaveBeenCalledWith(deps.scope, command);
     const exported = await exportData(request());
     expect(deps.export).toHaveBeenCalledWith(deps.scope);
-    expect(exported.headers.get("Content-Disposition")).toBe('attachment; filename="math-i-exam-sprint.json"');
+    expect(exported.headers.get("Content-Disposition")).toBe('attachment; filename="exam-sprint-records.json"');
     deps.authorize.mockRejectedValue(new ApiError("UNAUTHENTICATED", "Sign in", 401));
     for (const response of [await GET(request()), await POST(request(command)), await exportData(request())]) {
       expect(response.status).toBe(401);

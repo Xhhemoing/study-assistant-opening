@@ -8,7 +8,7 @@ import { EmptyState, LoadingRows, LoadError, PageHeader, ui } from "../design/ui
 import { ActiveRun, CompletedRun } from "./active-run";
 import { createExamSprintClient, type ExamSprintIntent } from "./client";
 import { SkillsAndLessons, SprintSettings, WeekPlan } from "./learning-plan";
-import { hasSprintAttemptHelp, modeLabels } from "./labels";
+import { EXAM_SPRINT_EXPORT, hasSprintAttemptHelp, modeLabels } from "./labels";
 import { IntegrationPanel } from "./integration-panel";
 import { BktPanel } from "./bkt-panel";
 import { useConversationObjectHref } from "../assistant/conversation-object-context";
@@ -118,7 +118,7 @@ export function ExamSprintView({ courseId, embedded = false }: { courseId?: stri
   };
   const disabled = busy || uncertain;
   const send = (command: ExamSprintIntent) => { if (courseId && scope !== "match") return; if (command.action === "start") selectTab("practice"); void client.send(command); };
-  return <>{!embedded ? <PageHeader title="考前冲刺" actions={<div className="flex gap-2"><button type="button" className={ui.quiet} disabled={busy} onClick={reloadCurrent}><RefreshCw size={14} aria-hidden="true" />刷新进度</button>{overview ? <a href="/api/opening/exam-sprint/export" className={ui.secondary} download><Download size={14} aria-hidden="true" />导出学习记录</a> : null}</div>} /> : <div className="flex flex-wrap gap-2 py-3"><h2 className="mr-auto py-2 text-base font-semibold">题包训练</h2><button type="button" className={ui.quiet} disabled={busy} onClick={reloadCurrent}>刷新题包记录</button>{overview ? <a href="/api/opening/exam-sprint/export" className={ui.secondary} download>导出学习记录</a> : null}</div>}
+  return <>{!embedded ? <PageHeader title="考前冲刺" actions={<div className="flex gap-2"><button type="button" className={ui.quiet} disabled={busy} onClick={reloadCurrent}><RefreshCw size={14} aria-hidden="true" />刷新进度</button>{overview ? <a href={EXAM_SPRINT_EXPORT.href} className={ui.secondary} download={EXAM_SPRINT_EXPORT.filename} type="application/json"><Download size={14} aria-hidden="true" />导出学习记录</a> : null}</div>} /> : <div className="flex flex-wrap gap-2 py-3"><h2 className="mr-auto py-2 text-base font-semibold">题包训练</h2><button type="button" className={ui.quiet} disabled={busy} onClick={reloadCurrent}>刷新题包记录</button>{overview ? <a href={EXAM_SPRINT_EXPORT.href} className={ui.secondary} download={EXAM_SPRINT_EXPORT.filename} type="application/json">导出学习记录</a> : null}</div>}
     <div className="mx-auto max-w-5xl space-y-5 px-5 py-5 sm:px-7">
       {error ? <div role="alert" className="space-y-3 rounded-xl border border-warn/30 bg-warn-soft p-4"><p className="text-sm leading-6 text-warn">{error}</p><button type="button" className={ui.secondary} disabled={busy} onClick={() => { if (uncertain) void recover(); else reloadCurrent(); }}>{uncertain ? "核对进度并恢复上一操作" : "重新读取进度"}</button>{uncertain ? <p className="text-xs leading-6 text-warn">其他写入暂时暂停。恢复时先核对服务器，再用同一操作标识确认；不要刷新整个页面或重复登记。</p> : null}</div> : null}
       {lessonError ? <p role="alert" className="text-sm text-warn">{lessonError}</p> : null}
