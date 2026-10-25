@@ -3,6 +3,7 @@
 import { openingAdaptivePrefsSchema, sourceRecordSchema, type CourseGoal, type SourceRecord } from "@aistudy/contracts";
 import { useEffect, useState } from "react";
 import { z } from "zod";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type ExamResources = { courses: Array<{ id: string; title: string }>; sources: SourceRecord[]; goals: Record<string, CourseGoal> };
 const coursesSchema = z.object({ courses: z.array(z.object({ id: z.string(), title: z.string() })) });
@@ -28,7 +29,7 @@ export function useExamResources(enabled: boolean) {
       .then(([courses, sources, prefs]) => {
         const next = { courses: coursesSchema.parse(courses).courses, sources: sourcesSchema.parse(sources).filter(source => source.uploadState === "uploaded"), goals: prefsSchema.parse(prefs).prefs.courseGoals };
         if (!controller.signal.aborted) setResources(next);
-      }).catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "课程与资料读取失败。"); })
+      }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "课程与资料读取失败。")); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [enabled, revision]);

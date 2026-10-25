@@ -64,9 +64,9 @@ describe("unknown turn recovery", () => {
 
   it("keeps the unknown outcome and extra charge warning visible after the retry becomes available", () => {
     const html = renderToStaticMarkup(createElement(UnknownTurnNotice, { job, canRetry: true, disabled: false, onRetry: () => undefined }));
-    expect(html).toContain("本轮结果仍未确认");
+    expect(html).toContain("还不确定这次是否答完");
     expect(html).toContain("可能产生额外费用");
-    expect(html).toContain("只把原问题带回输入框");
+    expect(html).toContain("会把问题放回输入框");
     expect(html).not.toContain('disabled=""');
   });
 });

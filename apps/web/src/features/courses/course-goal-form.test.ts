@@ -413,7 +413,9 @@ describe("CourseGoalForm save / clear / validation", () => {
 
     const tree = rerender(api);
     const html = renderToStaticMarkup(tree as ReactElement);
-    expect(html).toContain("prefs unavailable");
+    // Raw English failures are replaced by the localized fallback.
+    expect(html).not.toContain("prefs unavailable");
+    expect(html).toContain("课程目标读取失败，请重试。");
     expect(html).toContain("重试");
     expect(findControl(tree, (el) => el.props.id === "course-goal-target-date")).toBeUndefined();
     expect(

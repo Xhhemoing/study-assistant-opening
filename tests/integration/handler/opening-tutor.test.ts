@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyMigrations, createSqlClient, hashSessionToken } from "@aistudy/database";
 import { GET as getCandidates } from "../../../apps/web/src/app/api/opening/candidates/route";
 import { DELETE as cancelJob, GET as getJob } from "../../../apps/web/src/app/api/opening/jobs/[id]/route";
@@ -9,6 +9,9 @@ import { POST as createConversation } from "../../../apps/web/src/app/api/openin
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
+import { useTutorModelFixture } from "./tutor-model-fixture";
+
+useTutorModelFixture();
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -63,6 +66,40 @@ afterAll(async () => {
 });
 
 describe("opening tutor polling handlers", () => {
+  it("refuses an unconfigured model without saving work, then accepts the same new intent once configured", async () => {
+    const conversationResponse = await createConversation(new Request("http://localhost/api/opening/conversations", {
+      method: "POST", headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ title: "model admission", courseId: null }),
+    }));
+    expect(conversationResponse.status).toBe(201);
+    const conversation = await conversationResponse.json() as { id: string };
+    const body = { conversationId: conversation.id, text: "Explain fractions", sourceIds: [], mode: "explain", privacy: "saved", clientKey: randomUUID() };
+    const submit = () => submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
+    }));
+    vi.stubEnv("OPENING_HANDLER_MODEL_KEY", "");
+    const unavailable = await submit();
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({ error: { code: "AI_MODEL_UNAVAILABLE" } });
+    expect(await sql`SELECT id FROM opening_turns WHERE conversation_id=${conversation.id}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM opening_tutor_jobs WHERE conversation_id=${conversation.id}`).toHaveLength(0);
+    vi.stubEnv("OPENING_HANDLER_MODEL_KEY", "handler-fixture-not-a-real-key");
+    const created = await submit();
+    expect(created.status).toBe(201);
+    const ids = await created.json();
+    expect(ids.replayed).toBe(false);
+    vi.stubEnv("OPENING_HANDLER_MODEL_KEY", "");
+    const replay = await submit();
+    expect(replay.status).toBe(201);
+    await expect(replay.json()).resolves.toEqual({ ...ids, replayed: true });
+    const conflict = await submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST", headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ ...body, text: "A different intent" }),
+    }));
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({ error: { code: "CONFLICT" } });
+  });
+
   it("returns an empty pending candidate list for the owner", async () => {
     const response = await getCandidates(request("/api/opening/candidates"));
     expect(response.status).toBe(200);

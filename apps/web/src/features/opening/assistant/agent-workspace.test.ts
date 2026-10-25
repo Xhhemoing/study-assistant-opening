@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConversationSummary, SystemQueryReceipt } from "@aistudy/contracts";
-import { filterConversations } from "./agent-workspace";
+import { agentStartsFresh, filterConversations } from "./agent-workspace";
 import { querySteps } from "./query-evidence-links";
 
 const row = (id: string, title: string, updatedAt: string, lastTurnPreview: string | null = null): ConversationSummary => ({ id, title, courseId: null, updatedAt, lastTurnPreview });
@@ -11,6 +11,13 @@ describe("agent conversation rail", () => {
     expect(filterConversations(rows, "").map(item => item.id)).toEqual(["b", "a"]);
     expect(filterConversations(rows, "线代").map(item => item.id)).toEqual(["a"]);
     expect(filterConversations(rows, "条件").map(item => item.id)).toEqual(["b"]);
+  });
+});
+
+describe("agent default conversation", () => {
+  it("starts fresh unless a conversation is explicitly requested", () => {
+    expect(agentStartsFresh(null)).toBe(true);
+    expect(agentStartsFresh("11111111-1111-4111-8111-111111111111")).toBe(false);
   });
 });
 

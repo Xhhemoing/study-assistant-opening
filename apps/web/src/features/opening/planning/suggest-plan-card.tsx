@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { OpeningApiError, type OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 import { canAcceptPlan } from "./plan-action";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 function localDateKey(date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -186,7 +187,7 @@ export function SuggestPlanCard({
     try {
       setDraft(await controllers.propose(preset));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "建议计划生成失败");
+      setError(userFacingMessage(reason, "建议计划生成失败"));
     } finally {
       setPending(false);
     }
@@ -204,7 +205,7 @@ export function SuggestPlanCard({
       setError(
         reason instanceof OpeningApiError && reason.status === 409
           ? "计划已变化，请重新生成后再确认；没有重复提交。"
-          : reason instanceof Error ? reason.message : "确认建议计划失败",
+          : userFacingMessage(reason, "确认建议计划失败"),
       );
     } finally {
       setPending(false);
@@ -219,7 +220,7 @@ export function SuggestPlanCard({
       await controllers.reject(draft.id);
       setDraft(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "取消草案失败，请重试。");
+      setError(userFacingMessage(reason, "取消草案失败，请重试。"));
     } finally {
       setPending(false);
     }

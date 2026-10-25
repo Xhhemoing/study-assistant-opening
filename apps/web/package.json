@@ -17,6 +17,7 @@
     "@aistudy/database": "0.0.0",
     "@aistudy/domain": "0.0.0",
     "@aistudy/jingwei": "0.0.0",
+    "@aistudy/senseweave": "0.5.0-rc.1",
     "@aistudy/ui": "^0.0.0",
     "@aws-sdk/client-s3": "3.832.0",
     "@blocknote/core": "^0.52.1",

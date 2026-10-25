@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Fetches same-origin inline bytes and shows plain/markdown text. */
 export function SourceTextPreview({ url }: { url: string }) {
@@ -20,7 +21,7 @@ export function SourceTextPreview({ url }: { url: string }) {
         if (active) setText(value);
       })
       .catch((reason) => {
-        if (active) setError(reason instanceof Error ? reason.message : "预览失败");
+        if (active) setError(userFacingMessage(reason, "预览失败"));
       });
     return () => {
       active = false;

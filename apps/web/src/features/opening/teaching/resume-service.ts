@@ -18,8 +18,10 @@ import {
   listDeliveredHelpByActivity,
   listObservationHeadsByActivity,
   probeLearningSourcesAvailability,
+  reconcileTeachingGenerate,
   sanitizeCheckpointForRestore,
 } from "@aistudy/database";
+import { loadOpeningJobStaleConfig } from "@aistudy/config";
 import {
   assertResumeIndependentOfSummary,
   deriveOpenProblems,
@@ -52,7 +54,11 @@ function mapError(error: unknown): never {
  * V2-14 LearningResume assembler + checkpoint/status facade.
  * Sibling of teaching-content / command services — never calls course summarize.
  */
-export function createOpeningTeachingResumeService(sql: Sql) {
+export function createOpeningTeachingResumeService(
+  sql: Sql,
+  options: { generateStaleMs?: number } = {},
+) {
+  const generateStaleMs = options.generateStaleMs ?? loadOpeningJobStaleConfig().teachingGenerateStaleMs;
   const activities = createOpeningTeachingActivitiesRepository(sql);
   const content = createOpeningTeachingContentRepository(sql);
   const attemptsRepo = createOpeningLearningAttemptRepository(sql);
@@ -79,7 +85,17 @@ export function createOpeningTeachingResumeService(sql: Sql) {
       const activityId = uuidSchema.parse(activityIdRaw);
       try {
         assertResumeIndependentOfSummary();
-        const activity = await assertOwnedActivity(sql, scope, activityId);
+        let activity = await assertOwnedActivity(sql, scope, activityId);
+        if (activity.generateStatus === "queued" || activity.generateStatus === "generating") {
+          // A dead compile job would otherwise keep jobGate=in_flight (正在准备讲解) forever;
+          // a terminal status lets the existing UI offer 重新生成. Never blocks resume.
+          try {
+            const reconciled = await reconcileTeachingGenerate(sql, scope, activityId, { staleMs: generateStaleMs });
+            if (reconciled.changed) activity = await assertOwnedActivity(sql, scope, activityId);
+          } catch {
+            // Reconciliation is best effort; the worker sweep retries it.
+          }
+        }
 
         let clientInit = null as Awaited<ReturnType<typeof content.getClientInit>>;
         try {

@@ -70,7 +70,7 @@ export function createInlineAttemptSubmission(
     const attempt = state.attempt;
     const observation = await client.submitAttempt(attempt.id, { clientKey: captured.submitKey, answer: answer.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report" });
     if (observation.attemptId !== attempt.id || observation.courseId !== attempt.courseId || observation.sessionId !== attempt.sessionId) {
-      throw new Error("保存回执与原作答不一致，原答案和请求已保留，请到课程学习记录核实。");
+      throw new Error("保存结果和你的作答对不上，答案还在，请到课程学习记录看一下。");
     }
     captured.status = "saved";
     state.result = { attemptId: attempt.id, attempt, observation };

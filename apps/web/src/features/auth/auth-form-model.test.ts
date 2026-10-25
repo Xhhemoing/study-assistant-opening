@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loginHrefForReturn, safeAuthReturnPath, validateLoginInput, validateRegisterInput } from "./auth-form-model";
+import { authServerErrorMessage, loginHrefForReturn, safeAuthReturnPath, validateLoginInput, validateRegisterInput } from "./auth-form-model";
 
 describe("auth form validation", () => {
   it("requires a valid email and password for login", () => {
@@ -41,5 +41,18 @@ describe("login return destinations", () => {
       expect(safeAuthReturnPath(value), String(value)).toBeNull();
     }
     expect(loginHrefForReturn("//evil.example")).toBe("/login");
+  });
+});
+
+describe("authServerErrorMessage", () => {
+  it("localizes English server auth errors by code", () => {
+    expect(authServerErrorMessage({ error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } })).toBe("邮箱或密码不正确");
+    expect(authServerErrorMessage({ error: { code: "CONFLICT", message: "Email already registered" } })).toBe("该邮箱已注册，请直接登录");
+    expect(authServerErrorMessage({ error: { code: "VALIDATION", message: "Invalid request body" } })).toBe("请检查填写内容后重试");
+  });
+  it("keeps localized server copy and falls back for unknown English text", () => {
+    expect(authServerErrorMessage({ error: { code: "RATE_LIMITED", message: "尝试次数过多，请稍后重试。" } })).toBe("尝试次数过多，请稍后重试。");
+    expect(authServerErrorMessage({ error: { code: "INTERNAL", message: "boom" } })).toBe("暂时无法完成请求，请稍后重试");
+    expect(authServerErrorMessage(null)).toBe("暂时无法完成请求，请稍后重试");
   });
 });

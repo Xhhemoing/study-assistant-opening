@@ -25,6 +25,7 @@ import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { AutonomySwitcher } from "./autonomy-switcher";
 import { CoachPlanControl } from "./coach-plan-control";
 import { planAcceptFailure } from "./plan-accept-errors";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type SelectionSource = "focus" | "user";
 type Props = {
@@ -132,7 +133,7 @@ export function TodayPlanView({
       plan: (next) => { setPlan(next); setPlanState("ready"); },
       taskError: (reason) => {
         setTasks([]); setLoadState("error"); onClearSelection?.();
-        setError(reason instanceof Error ? reason.message : "任务暂时无法读取");
+        setError(userFacingMessage(reason, "任务暂时无法读取"));
       },
       planError: () => { setPlanState("error"); setPlanWarning("今日安排暂时无法读取，仍可选择任务学习；恢复前暂停生成和确认计划。"); },
     }, options);
@@ -170,7 +171,7 @@ export function TodayPlanView({
       const free = [...(plan.hardBlocks ?? []), ...newFree];
       proposalIntent.current = planProposalIntent(proposalIntent.current, { date, free, baseVersion: plan.acceptedVersion }, () => `today-plan-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`);
       setDraft(await api.proposePlan({ date, free, clientKey: proposalIntent.current.clientKey }));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "计划生成失败"); }
+    } catch (reason) { setError(userFacingMessage(reason, "计划生成失败")); }
     finally { setPending(false); }
   }
   async function accept() {
@@ -184,7 +185,7 @@ export function TodayPlanView({
     if (!draft || pending) return;
     setPending(true); setError("");
     try { await api.rejectPlan(draft.id); setDraft(null); proposalIntent.current = null; }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "计划取消失败，草案已保留，请重试。"); }
+    catch (reason) { setError(userFacingMessage(reason, "计划取消失败，草案已保留，请重试。")); }
     finally { setPending(false); }
   }
   const queueTasks = useMemo((): TodayQueueTask[] => tasks.map((task) => ({

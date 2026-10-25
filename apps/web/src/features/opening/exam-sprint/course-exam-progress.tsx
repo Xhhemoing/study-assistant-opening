@@ -4,6 +4,7 @@ import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useState } from "react";
 import { courseExamOverviewSchema, type CourseExamOverview } from "@aistudy/contracts";
 import { LoadError, ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function CourseExamProgress({ courseId }: { courseId: string }) {
   const [data, setData] = useState<CourseExamOverview | null>(null);
@@ -16,7 +17,7 @@ export function CourseExamProgress({ courseId }: { courseId: string }) {
     fetch(`/api/opening/courses/${encodeURIComponent(courseId)}/exam`, { cache: "no-store", signal: controller.signal })
       .then(async response => { if (!response.ok) throw new Error(`考前练习读取失败（${response.status}）。`); return courseExamOverviewSchema.parse(await response.json()); })
       .then(result => { if (!controller.signal.aborted) setData(result); })
-      .catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "冲刺进度读取失败。"); })
+      .catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "冲刺进度读取失败。")); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [courseId, revision]);

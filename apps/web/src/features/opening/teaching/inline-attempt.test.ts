@@ -135,7 +135,7 @@ describe("inline teaching attempt", () => {
   it("does not unlock tutoring from a different attempt's save receipt", async () => {
     const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt),
       submitAttempt: vi.fn().mockResolvedValue({ ...savedObservation, attemptId: "22222222-2222-4222-8222-222222222222" }) };
-    await expect(createInlineAttemptSubmission(identity, client).submit()).rejects.toThrow("保存回执");
+    await expect(createInlineAttemptSubmission(identity, client).submit()).rejects.toThrow("保存结果和你的作答对不上");
   });
 });
 

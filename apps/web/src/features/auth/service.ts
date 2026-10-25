@@ -325,7 +325,11 @@ export function mapDomainError(error: unknown): ApiError {
     if (error.code === "VALIDATION") {
       return new ApiError("VALIDATION", error.message, 400);
     }
-    if (error.code === "CONFLICT" || error.code === "DUPLICATE_MEMBERSHIP" || error.code === "ARCHIVED") {
+    if (error.code === "DUPLICATE_MEMBERSHIP") {
+      // Clients treat an existing association as success, so name it apart from other conflicts.
+      return Object.assign(new ApiError("CONFLICT", error.message, 409), { businessCode: "DUPLICATE_MEMBERSHIP" });
+    }
+    if (error.code === "CONFLICT" || error.code === "ARCHIVED") {
       return new ApiError("CONFLICT", error.message, 409);
     }
     if (error.code === "INVALID_TRANSITION") {

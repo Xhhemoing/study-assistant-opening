@@ -1,5 +1,5 @@
 import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
-import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay } from "@aistudy/domain";
+import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay, TUTOR_STALE_MESSAGE } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -94,7 +94,19 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
  * redelivery rechecks the DB before executing. The answer and job finish
  * atomically; optional suggestions may be appended after that completion.
  */
-export function createOpeningTutorJobsRepository(sql: Sql) {
+export type OpeningTutorJobsRepositoryOptions = {
+  /**
+   * When set, reads (get / findPendingForConversation) end a job that has been
+   * queued (never claimed, e.g. its queue message was lost or deduplicated) or
+   * running without a heartbeat for this long, so polling clients always reach a
+   * terminal status. The worker sweep (expireStale) covers jobs nobody is polling.
+   */
+  staleMs?: number;
+};
+
+export const TUTOR_INTERRUPTED_MESSAGE = "回答任务已中断，执行结果待确认；为避免重复调用未自动重发。";
+
+export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutorJobsRepositoryOptions = {}) {
   async function markTerminal(input: {
     scope: OpeningScope;
     jobId: string;
@@ -160,6 +172,90 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     });
   }
 
+  /**
+   * End tutor jobs stuck past staleMs. A queued job was never claimed, so no model
+   * call happened: it fails with code TUTOR_JOB_STALE and the client can ask again.
+   * A running job without heartbeat may have spent money: like recoverExpired it
+   * becomes outcome_unknown and is never re-executed. Both writes are CAS-fenced on
+   * updated_at, so a job claimed or heart-beaten meanwhile is left alone.
+   */
+  async function expireStale(input: { staleMs: number; jobId?: string; workspaceId?: string; limit?: number }): Promise<number> {
+    const staleSeconds = Math.max(1, Math.floor(input.staleMs / 1000));
+    const rows = await sql<{ id: string; workspace_id: string; status: string; stale_before: Date }[]>`
+      SELECT id, workspace_id, status, now() - make_interval(secs => ${staleSeconds}) AS stale_before
+      FROM opening_tutor_jobs
+      WHERE status IN ('queued', 'running')
+        AND updated_at < now() - make_interval(secs => ${staleSeconds})
+        AND (${input.jobId ?? null}::uuid IS NULL OR id = ${input.jobId ?? null}::uuid)
+        AND (${input.workspaceId ?? null}::uuid IS NULL OR workspace_id = ${input.workspaceId ?? null}::uuid)
+      ORDER BY updated_at LIMIT ${input.limit ?? 50}`;
+    let expired = 0;
+    for (const row of rows) {
+      const scope = { workspaceId: row.workspace_id, ownerUserId: "" };
+      const ended = row.status === "queued"
+        ? await markTerminal({ scope, jobId: row.id, message: TUTOR_STALE_MESSAGE, status: "failed",
+          detail: { code: "TUTOR_JOB_STALE" }, staleBefore: row.stale_before })
+        : await markTerminal({ scope, jobId: row.id, message: TUTOR_INTERRUPTED_MESSAGE, status: "outcome_unknown",
+          staleBefore: row.stale_before });
+      if (ended) expired += 1;
+    }
+    return expired;
+  }
+
+  async function findPending(scope: OpeningScope, conversationId: string): Promise<{
+    id: string;
+    status: OpeningTutorJobRecord["status"];
+    error: OpeningTutorJobError | null;
+    updatedAt: string;
+  } | null> {
+    const rows = await sql`
+      SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status
+      FROM opening_tutor_jobs j
+      JOIN opening_conversations c ON c.id = j.conversation_id
+      JOIN opening_turns t ON t.id = j.assistant_turn_id
+      WHERE j.conversation_id = ${conversationId}
+        AND j.workspace_id = ${scope.workspaceId}
+        AND c.workspace_id = ${scope.workspaceId}
+        AND c.owner_user_id = ${scope.ownerUserId}
+        AND t.workspace_id = ${scope.workspaceId}
+      ORDER BY j.created_at DESC, j.id DESC
+      LIMIT 1
+    `;
+    if (!rows.length) return null;
+    const row = rows[0] as Record<string, unknown>;
+    // Inspect the latest job before filtering statuses so an older unknown
+    // result cannot resurface after a newer answer has already ended.
+    const active = (row.status === "queued" || row.status === "running") && row.turn_status === "pending";
+    const unknown = row.status === "outcome_unknown"
+      && (row.turn_status === "pending" || row.turn_status === "outcome_unknown");
+    if (!active && !unknown) return null;
+    return {
+      id: row.id as string,
+      status: row.status as OpeningTutorJobRecord["status"],
+      error: tutorFailureForDisplay(row.status, row.error),
+      updatedAt: new Date(row.updated_at as string | Date).toISOString(),
+    };
+  }
+
+  async function getJob(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
+    const rows = await sql`
+      SELECT j.* FROM opening_tutor_jobs j
+      JOIN opening_conversations c ON c.id = j.conversation_id
+      WHERE j.id = ${id}
+        AND j.workspace_id = ${scope.workspaceId}
+        AND c.workspace_id = ${scope.workspaceId}
+        AND c.owner_user_id = ${scope.ownerUserId}
+      LIMIT 1
+    `;
+    return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
+  }
+
+  /** Read-time reconciliation for one job a client is looking at. */
+  async function expireIfStale(scope: OpeningScope, jobId: string, status: string): Promise<boolean> {
+    if (!options.staleMs || (status !== "queued" && status !== "running")) return false;
+    return (await expireStale({ staleMs: options.staleMs, jobId, workspaceId: scope.workspaceId, limit: 1 })) > 0;
+  }
+
   return {
     loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
     loadHistoryContext: (scope: OpeningScope, currentTurnId: string, purpose?: TutorHistoryPurpose) => loadTutorHistoryContext(sql, scope, currentTurnId, purpose),
@@ -189,10 +285,12 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       let recovered = 0;
       for (const row of rows) {
         if (await markTerminal({ scope: { workspaceId: row.workspace_id, ownerUserId: "" }, jobId: row.id,
-          message: "回答任务已中断，执行结果待确认；为避免重复调用未自动重发。", status: "outcome_unknown", staleBefore: row.stale_before as Date })) recovered += 1;
+          message: TUTOR_INTERRUPTED_MESSAGE, status: "outcome_unknown", staleBefore: row.stale_before as Date })) recovered += 1;
       }
       return recovered;
     },
+
+    expireStale,
 
     async findPendingForConversation(
       scope: OpeningScope,
@@ -203,33 +301,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
       error: OpeningTutorJobError | null;
       updatedAt: string;
     } | null> {
-      const rows = await sql`
-        SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status
-        FROM opening_tutor_jobs j
-        JOIN opening_conversations c ON c.id = j.conversation_id
-        JOIN opening_turns t ON t.id = j.assistant_turn_id
-        WHERE j.conversation_id = ${conversationId}
-          AND j.workspace_id = ${scope.workspaceId}
-          AND c.workspace_id = ${scope.workspaceId}
-          AND c.owner_user_id = ${scope.ownerUserId}
-          AND t.workspace_id = ${scope.workspaceId}
-        ORDER BY j.created_at DESC, j.id DESC
-        LIMIT 1
-      `;
-      if (!rows.length) return null;
-      const row = rows[0] as Record<string, unknown>;
-      // Inspect the latest job before filtering statuses so an older unknown
-      // result cannot resurface after a newer answer has already ended.
-      const active = (row.status === "queued" || row.status === "running") && row.turn_status === "pending";
-      const unknown = row.status === "outcome_unknown"
-        && (row.turn_status === "pending" || row.turn_status === "outcome_unknown");
-      if (!active && !unknown) return null;
-      return {
-        id: row.id as string,
-        status: row.status as OpeningTutorJobRecord["status"],
-        error: tutorFailureForDisplay(row.status, row.error),
-        updatedAt: new Date(row.updated_at as string | Date).toISOString(),
-      };
+      const pending = await findPending(scope, conversationId);
+      if (pending && await expireIfStale(scope, pending.id, pending.status)) return findPending(scope, conversationId);
+      return pending;
     },
 
     async cancel(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
@@ -265,16 +339,9 @@ export function createOpeningTutorJobsRepository(sql: Sql) {
     },
 
     async get(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
-      const rows = await sql`
-        SELECT j.* FROM opening_tutor_jobs j
-        JOIN opening_conversations c ON c.id = j.conversation_id
-        WHERE j.id = ${id}
-          AND j.workspace_id = ${scope.workspaceId}
-          AND c.workspace_id = ${scope.workspaceId}
-          AND c.owner_user_id = ${scope.ownerUserId}
-        LIMIT 1
-      `;
-      return rows.length ? mapJob(rows[0] as Record<string, unknown>) : null;
+      const job = await getJob(scope, id);
+      if (job && await expireIfStale(scope, job.id, job.status)) return getJob(scope, id);
+      return job;
     },
 
     /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */

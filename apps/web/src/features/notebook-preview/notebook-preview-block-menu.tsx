@@ -13,7 +13,7 @@ const blockOptions: BlockOption[] = [
   { label: "图片", description: "添加视觉材料", icon: ImageIcon, actionName: "插入图片块", group: "媒体与数据" },
   { label: "视频", description: "嵌入学习资料", icon: Video, actionName: "插入视频块", group: "媒体与数据" },
   { label: "概念", description: "可引用的术语定义", icon: Braces, actionName: "插入概念块", group: "学习闭环" },
-  { label: "来源摘录", description: "保留原文与页码锚点", icon: Link2, actionName: "插入来源摘录块", group: "学习闭环" },
+  { label: "来源摘录", description: "保留原文和页码", icon: Link2, actionName: "插入来源摘录块", group: "学习闭环" },
   { label: "练习", description: "创建独立作答任务", icon: ClipboardCheck, actionName: "插入练习块", group: "学习闭环" },
 ];
 

@@ -10,6 +10,7 @@ import {
   reduceActionDigestCard,
   type ActionDigestCardModel,
 } from "./action-digest-card";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export { digestSurfacesPendingOnly, emptyActionDigest, reduceActionDigestCard };
 export type { ActionDigestCardModel };
@@ -49,7 +50,7 @@ export function ActionDigest({
         if (cancelled) return;
         setModel((prev) => reduceActionDigestCard(prev, {
           type: "load_fail",
-          message: reason instanceof Error ? reason.message : "行动摘要暂时无法读取",
+          message: userFacingMessage(reason, "行动摘要暂时无法读取"),
         }));
       });
     return () => { cancelled = true; };
@@ -82,7 +83,7 @@ export function ActionDigest({
         type: "decide_fail",
         message: reason instanceof OpeningApiError && reason.status === 409
           ? "该建议已处理，请刷新后查看；没有重复提交。"
-          : reason instanceof Error ? reason.message : "更新行动建议失败",
+          : userFacingMessage(reason, "更新行动建议失败"),
       }));
     } finally {
       setPendingId(null);

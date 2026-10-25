@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { z } from "zod";
 import { spanProblemSchema } from "@aistudy/contracts";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
+import { userFacingMessage } from "../../../../lib/user-facing-error";
 const pair = z.tuple([z.string(), z.string()]);
 const schema = z.object({ problem: spanProblemSchema, exposureReceipt: z.object({ id: z.string().uuid() }),
   solution: z.discriminatedUnion("kind", [z.object({ kind: z.literal("unique"), coefficients: pair }), z.object({ kind: z.literal("infinite"), particular: pair, directions: z.array(pair) }), z.object({ kind: z.literal("none") }), z.object({ kind: z.literal("unknown"), reason: z.string() })]) });
@@ -23,7 +24,7 @@ export function useSpanPresentation(courseId: string, sourceId: string | undefin
       pending.set(clientKey, request);
     }
     void request.then(result => { if (active) { setContent(result); void acknowledgeStudyExposure(result.exposureReceipt).catch(() => undefined); } })
-      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "示范暂不可读取"); });
+      .catch(reason => { if (active) setError(userFacingMessage(reason, "示范暂不可读取")); });
     return () => { active = false; };
   }, [courseId, sourceId, kind, sessionId, revision]);
   return { content, error, reload: () => setRevision(value => value + 1) };

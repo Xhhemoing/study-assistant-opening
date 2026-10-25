@@ -10,7 +10,7 @@ export function LearningEvidenceEligibilityDetails({ eligibility, versionApplica
   const content = <>
       <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">
         <dt>本次独立作答</dt><dd>{ELIGIBILITY_VALUE_LABEL[eligibility.independentAttempt]}</dd>
-        <dt>{automatic ? "内置题精确核算" : "有依据的参考核验"}</dt><dd>{ELIGIBILITY_VALUE_LABEL[eligibility.verifiedCorrect]}</dd>
+        <dt>{automatic ? "内置题精确核算" : "有依据的参考核对"}</dt><dd>{ELIGIBILITY_VALUE_LABEL[eligibility.verifiedCorrect]}</dd>
         <dt>适用于当前版本</dt><dd>{ELIGIBILITY_VALUE_LABEL[eligibility.usableForCurrentVersion]}</dd>
         <dt>用于延迟检验</dt><dd>{ELIGIBILITY_VALUE_LABEL[eligibility.usableForDelayedCheck]}</dd>
       </dl>

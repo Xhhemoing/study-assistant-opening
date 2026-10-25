@@ -14,9 +14,9 @@ const eligibility: LearningEvidenceEligibility = {
 
 describe("learning eligibility presentation", () => {
   it("explains an incomplete legacy record without converting its status", () => {
-    expect(eligibilityReasonLabels(eligibility)).toEqual(["缺少尝试、题目或当时版本，待核验"]);
+    expect(eligibilityReasonLabels(eligibility)).toEqual(["缺少作答、题目或当时的内容，暂不确定"]);
     const html = renderToStaticMarkup(createElement(LearningEvidenceEligibilityDetails, { eligibility }));
-    expect(html.match(/待核验/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(html.match(/待确认/g)?.length).toBeGreaterThanOrEqual(4);
     expect(html).toContain("不代表系统客观判分");
   });
   it("distinguishes privacy exclusion from unavailable and changed content", () => {
@@ -26,7 +26,7 @@ describe("learning eligibility presentation", () => {
   });
   it("keeps reference checking scope distinct from system grading", () => {
     const html = renderToStaticMarkup(createElement(LearningEvidenceEligibilityDetails, { eligibility: { ...eligibility, verifiedCorrect: "yes", reasonCodes: ["reference_checked_correct"] } }));
-    expect(html).toContain("有依据的参考核验");
+    expect(html).toContain("有依据的参考核对");
     expect(html).toContain("有记录的参考核对结果为正确");
     expect(html).toContain("不改变原始自报结果");
   });
@@ -46,5 +46,5 @@ describe("learning eligibility presentation", () => {
 it("shows known unavailable source facts even when legacy eligibility remains unknown", () => {
   const html = renderToStaticMarkup(createElement(LearningEvidenceEligibilityDetails, { eligibility, versionApplicability: "unavailable" }));
   expect(html).toContain("来源或历史版本不可用");
-  expect(html).toContain("待核验");
+  expect(html).toContain("待确认");
 });

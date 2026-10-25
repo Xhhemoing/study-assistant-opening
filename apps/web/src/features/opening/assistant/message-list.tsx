@@ -18,6 +18,9 @@ import {
 import { AiSpark, ReplyCard, StreamText, ThinkingText } from "./ai-response";
 import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
+import { SenseWeaveAnswer, SenseWeaveDiagnostics } from "./senseweave-answer";
+import { prepareSenseWeave } from "./senseweave-host";
+import { observeSenseWeave } from "./senseweave-telemetry";
 import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
 import { assistantStarters, type AssistantStarter } from "./assistant-starters";
@@ -51,6 +54,11 @@ type Props = {
   studyMode?: boolean;
   queryAvailable?: boolean;
   onStarter?: (starter: AssistantStarter) => void;
+  /** Saved assistant turn that ended without an answer and may be sent again. */
+  retryTurnId?: string | null;
+  onRetry?: () => void;
+  /** Replaces "正在思考…" while a reply has no text yet (e.g. the slow-wait copy). */
+  pendingLabel?: string;
 };
 /** Shared by the 出处 chips and inline `[k]` links so both open the same place. */
 function citationLink(citation: Citation, sourceNames: Readonly<Record<string, string>>): CitationLink {
@@ -61,8 +69,8 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
-  const { chatArtifacts, chatProse } = useOpeningCapabilities();
+export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, retryTurnId = null, onRetry, pendingLabel, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+  const { chatArtifacts, chatProse, chatSenseWeave, senseWeaveGates } = useOpeningCapabilities();
   const diagnostics = useDiagnosticsEnabled();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -96,7 +104,33 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     if (following.current) showLatest();
     else setUnread(true);
   }, [lastMessage?.id, lastMessage?.text, messages.length]);
-  const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
+  const senseWeaveMode = proseEnabled ? chatSenseWeave : "off";
+  /** Decided once per finished answer (the adapter caches by id and text). */
+  const senseWeave = useMemo(() => {
+    const prepared: Record<string, ReturnType<typeof prepareSenseWeave>> = {};
+    if (senseWeaveMode === "off") return prepared;
+    let question: string | undefined;
+    for (const message of messages) {
+      if (message.role === "user") { question = message.text; continue; }
+      if (message.status && message.status !== "complete" || !message.text) continue;
+      prepared[message.id] = prepareSenseWeave(message, question, senseWeaveGates, studyMode);
+    }
+    return prepared;
+  }, [senseWeaveMode, messages, senseWeaveGates, studyMode]);
+  useEffect(() => {
+    if (senseWeaveMode === "off") return;
+    for (const message of messages) {
+      const prepared = senseWeave[message.id];
+      if (prepared) observeSenseWeave(prepared, message.text.length, senseWeaveGates.version, senseWeaveMode === "on", message.id);
+    }
+  }, [messages, senseWeave, senseWeaveMode, senseWeaveGates]);
+  const artifacts = useMemo(() => {
+    if (!artifactsEnabled) return {};
+    const planned = artifactsForMessages(messages);
+    // The same content is shown once: a SenseWeave component replaces the rules-planner 图解.
+    if (senseWeaveMode === "on") for (const id of Object.keys(planned)) if (senseWeave[id]?.enhanced) delete planned[id];
+    return planned;
+  }, [artifactsEnabled, messages, senseWeaveMode, senseWeave]);
   function selectedTextFor(message: ChatMessageView): SelectedExcerpt | undefined {
     const selection = window.getSelection();
     const element = messageElements.current[message.id];
@@ -113,7 +147,7 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     onCreateCard?.(message, selectedTextFor(message));
   }
   return <div className="relative flex min-h-0 flex-1"><p className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-reply-announcement="true">{announcement}</p><div ref={scrollArea} onScroll={event => { const area = event.currentTarget; following.current = area.scrollHeight - area.scrollTop - area.clientHeight < 80; if (following.current) setUnread(false); }} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-bg px-5 py-6 sm:px-7" role="log" aria-live="off" aria-busy={messages.some(message => message.status === "pending")} aria-label="学习对话">
-    {historyTruncated ? <p className="mb-5 rounded-lg bg-warn-soft px-3.5 py-2.5 text-xs leading-6 text-warn ring-1 ring-warn/20">更早的对话已截断；当前为服务端组装的有界历史。</p> : null}
+    {historyTruncated ? <p className="mb-5 rounded-lg bg-warn-soft px-3.5 py-2.5 text-xs leading-6 text-warn ring-1 ring-warn/20">更早的对话已折叠，这里只显示最近的部分。</p> : null}
     {!messages.length ? <div className={`mx-auto flex w-full max-w-lg flex-1 flex-col justify-center motion-safe:animate-enter ${compact ? "py-4" : "py-12"}`}>
       <span className="mb-4 inline-flex self-start" aria-hidden="true"><AiSpark size={compact ? 28 : 36} /></span>
       <h2 className="font-serif text-xl font-medium leading-7 text-text">想弄懂什么？</h2>
@@ -133,7 +167,7 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
         </ol>
       </details> : null}
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
-        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
+        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? (senseWeaveMode === "on" && senseWeave[message.id]?.enhanced ? <SenseWeaveAnswer prepared={senseWeave[message.id]!} objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} /> : <LearningProse objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} />) : null}{diagnostics && senseWeave[message.id] && senseWeaveMode !== "off" ? <SenseWeaveDiagnostics mode={senseWeaveMode} prepared={senseWeave[message.id]!} /> : null}</div></StreamText></ReplyCard>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}
       {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <Link key={link.href} href={objectHref(link.href)} className="text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{link.label}</Link>)}</nav> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-line/80 bg-surface px-4 py-3 shadow-xs " aria-label="图解" data-message-artifact={message.id}>
@@ -156,9 +190,9 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
           <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-text-2 transition-colors hover:border-line hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
         </span>;
       })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-text-2">一般说明（未引用材料）</p> : null}
-      {message.status === "pending" ? <ThinkingText>{message.text ? "正在回答…" : "正在思考…"}</ThinkingText> : null}
-      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">原请求不会自动重发，费用仍待确认。</p> : null}
-      {message.status === "failed" ? <p className="mt-2 text-xs text-danger">本轮失败，未得到有效回答。</p> : null}
+      {message.status === "pending" ? <ThinkingText>{message.text ? "正在回答…" : pendingLabel ?? "正在思考…"}</ThinkingText> : null}
+      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">不会自动再问一次，这次的用量还在确认。</p> : null}
+      {message.status === "failed" ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><p className="text-danger">这次没有得到回答。</p>{onRetry && retryTurnId === message.id ? <button type="button" className={secondaryButtonClass} disabled={disabled} onClick={onRetry}>重试</button> : null}</div> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-warn">{CLARIFY_FOLLOW_UP}</p> : null}
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onReplyMode={lastAssistant && !disabled && !message.systemQuery ? onReplyMode : undefined} onSave={!directSaveApi && saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
       {directSaveApi && saveAvailability === "available" ? <DirectSnippetSave message={message} api={directSaveApi} objectHref={objectHref} selection={() => selectedTextFor(message)} /> : null}
@@ -196,8 +230,8 @@ function DirectSnippetSave({ message, api, objectHref, selection }: { message: C
   return <div className="mt-2 space-y-2 text-xs leading-6">
     <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "存为笔记"}</button>
     {notice ? <p role="status" className="text-text-2">{notice}</p> : null}
-    {status === "unknown" ? <p role="alert" className="text-warn">保存结果尚未确认，可能已经保存。请先检查笔记列表，本次不会再次写入。</p> : null}
-    {status === "unavailable" ? <p role="alert" className="text-warn">保存回执暂不可读取，已停止写入。请先检查笔记列表。</p> : null}
+    {status === "unknown" ? <p role="alert" className="text-warn">还不确定是否已经存好，可能已经保存。请先看一下笔记列表，这里不会再存第二份。</p> : null}
+    {status === "unavailable" ? <p role="alert" className="text-warn">暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。</p> : null}
     {status === "saved" && documentId ? <Link href={objectHref(libraryNotePath("/opening/library", documentId))} className={secondaryButtonClass}>打开笔记</Link> : status === "unknown" || status === "unavailable" ? <Link href={objectHref("/opening/library?tab=notes")} className={secondaryButtonClass}>检查笔记列表</Link> : null}
   </div>;
 }

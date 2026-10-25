@@ -5,6 +5,7 @@ import { connectionViewSchema } from "@aistudy/contracts";
 import { LoaderCircle, RefreshCw, Send } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { ui } from "../opening/design/ui";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 const stateText: Record<ConnectionView["state"], string> = {
   disabled: "未启用",
@@ -54,7 +55,7 @@ export function DingTalkConnectionsPanel() {
       const views = await listConnections();
       if (!signal?.aborted) setConnections(views.filter(view => view.kind === "dingtalk"));
     } catch (failure) {
-      if (!signal?.aborted) setError(failure instanceof Error ? failure.message : "连接列表暂时无法读取。");
+      if (!signal?.aborted) setError(userFacingMessage(failure, "连接列表暂时无法读取。"));
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
@@ -83,7 +84,7 @@ export function DingTalkConnectionsPanel() {
           : `同步完成：导入 ${result.imported} 条，跳过 ${result.skipped} 条。`);
       await load();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "同步请求失败。");
+      setError(userFacingMessage(failure, "同步请求失败。"));
     } finally {
       setBusyId(null);
     }

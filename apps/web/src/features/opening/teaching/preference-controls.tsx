@@ -1,4 +1,5 @@
 "use client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /**
  * V2-11 Experience — intervention preference controls.
@@ -96,7 +97,7 @@ function PrefsFields({
 }) {
   return (
     <fieldset disabled={busy} className="space-y-3">
-      <legend className="sr-only">介入偏好字段</legend>
+      <legend className="sr-only">提醒偏好</legend>
       <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 text-sm text-text-2">
         <span>安静模式（抑制主动提议；仍回答你的求助）</span>
         <input
@@ -384,7 +385,7 @@ export function PreferenceControls({
         if (!signal?.aborted) receive(interventionSettingsResponseSchema.parse(next));
       } catch (failure) {
         if (!signal?.aborted) {
-          setError(failure instanceof Error ? failure.message : "介入偏好暂时无法读取，请重试。");
+          setError(userFacingMessage(failure, "介入偏好暂时无法读取，请重试。"));
         }
       } finally {
         if (!signal?.aborted) setBusy(false);
@@ -427,7 +428,7 @@ export function PreferenceControls({
         );
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "介入偏好保存失败，请重试。");
+      setError(userFacingMessage(failure, "介入偏好保存失败，请重试。"));
     } finally {
       setBusy(false);
     }

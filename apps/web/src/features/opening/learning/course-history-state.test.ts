@@ -76,7 +76,7 @@ describe("course history paging state", () => {
     const request = vi.fn().mockResolvedValueOnce(page(["private"], "cursor"))
       .mockResolvedValueOnce({ ...page([]), visibilityChanged: true }).mockRejectedValueOnce(new Error("unavailable"));
     const view = setup(request); await view.controller.refresh(); await view.controller.loadMore();
-    expect(view.state()).toMatchObject({ status: "error", observations: [], nextCursor: null, error: "unavailable" });
+    expect(view.state()).toMatchObject({ status: "error", observations: [], nextCursor: null, error: "课程历史暂时无法读取，请刷新后重试。" });
     expect(view.state().notice).toContain("可见性已变化");
     expect(request).toHaveBeenCalledTimes(3);
   });
@@ -85,7 +85,7 @@ describe("course history paging state", () => {
     const request = vi.fn().mockResolvedValueOnce(page(["one"], "cursor")).mockResolvedValueOnce(page(["new"], null, 4));
     const view = setup(request); await view.controller.refresh(); await view.controller.loadMore();
     expect(view.state()).toMatchObject({ status: "error", observations: [], nextCursor: null });
-    expect(view.state().error).toContain("快照已变化");
+    expect(view.state().error).toContain("学习记录有更新");
   });
 
   it("ignores a late prior-page result after explicit refresh", async () => {

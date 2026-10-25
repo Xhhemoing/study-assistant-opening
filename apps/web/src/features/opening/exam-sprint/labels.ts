@@ -8,3 +8,5 @@ export const assistanceLabels: Record<ExamSourceRecord["assistance"], string> = 
 export function formatDuration(seconds: number): string { const total = Math.max(0, Math.floor(seconds)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`; }
 export function practiceModeForDueAt(dueAt: string | null, now = Date.now()): "practice" | "retest" { return dueAt !== null && Date.parse(dueAt) <= now ? "retest" : "practice"; }
 export function hasSprintAttemptHelp(attempt: Pick<ExamAttemptView, "help" | "lessonExposureIds" | "partialExampleExposureIds">): boolean { return attempt.help.length > 0 || (attempt.lessonExposureIds?.length ?? 0) > 0 || (attempt.partialExampleExposureIds?.length ?? 0) > 0; }
+/** Learner-facing export: always a file download, never a raw JSON page. */
+export const EXAM_SPRINT_EXPORT = { href: "/api/opening/exam-sprint/export", filename: "exam-sprint-records.json" } as const;

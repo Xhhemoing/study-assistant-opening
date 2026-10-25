@@ -1,0 +1,25 @@
+import {requireContract, cleanText, CATALOG} from './document.mjs';
+/** Public presentation reasoning is inert metadata, bounded independently of the answer. */
+export function validateDecision(value) {
+  requireContract(value && typeof value === 'object' && !Array.isArray(value), 'DECISION', '决策说明不合法');
+  requireContract(['text', 'enhance', 'suggest', 'authored'].includes(value.state) &&
+    Number.isInteger(value.extraModelCalls) && value.extraModelCalls >= 0 && value.extraModelCalls <= 1,
+    'DECISION', '决策状态或调用数不合法');
+  const list = (items, limit) => {
+    requireContract(Array.isArray(items) && items.length <= limit, 'DECISION', '候选说明超出预算');
+    return items.map(item => {
+      requireContract(item && typeof item.type === 'string' && Object.hasOwn(CATALOG, item.type) &&
+        Array.isArray(item.reasons) && item.reasons.length <= 4, 'DECISION', '候选说明不合法');
+      return {key: cleanText(item.key, 160), type: item.type, reasons: item.reasons.map(r => cleanText(r, 300))};
+    });
+  };
+  requireContract(Array.isArray(value.qualityWarnings) && value.qualityWarnings.length <= 4, 'DECISION', '数据提示超出预算');
+  const semantic = value.semantic;
+  if (semantic !== null) requireContract(semantic && typeof semantic === 'object' &&
+    Number.isInteger(semantic.calls) && semantic.calls >= 0 && semantic.calls <= 1, 'DECISION', '语义复核说明不合法');
+  return {state: value.state, task: cleanText(value.task, 40), reason: cleanText(value.reason, 500),
+    selected: list(value.selected, 8), alternatives: list(value.alternatives, 6),
+    qualityWarnings: value.qualityWarnings.map(s => cleanText(s, 300)), extraModelCalls: value.extraModelCalls,
+    semantic: semantic === null ? null : {status: cleanText(semantic.status, 40), calls: semantic.calls,
+      ...(semantic.reason === undefined ? {} : {reason: cleanText(semantic.reason, 300)})}};
+}

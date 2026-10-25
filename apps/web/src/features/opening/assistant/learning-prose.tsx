@@ -28,16 +28,16 @@ const src = (props: object): SrcAttrs => {
   return start === undefined ? {} : { "data-src-start": start, "data-src-end": end };
 };
 
-function stamp(node: Element) {
+function stamp(node: Element, offset: number) {
   const start = node.position?.start.offset, end = node.position?.end.offset;
-  if (start !== undefined && end !== undefined) Object.assign(node.properties, { dataSrcStart: start, dataSrcEnd: end });
+  if (start !== undefined && end !== undefined) Object.assign(node.properties, { dataSrcStart: start + offset, dataSrcEnd: end + offset });
 }
 
-function stampItems(nodes: ElementContent[]) {
+function stampItems(nodes: ElementContent[], offset: number) {
   for (const node of nodes) {
     if (node.type !== "element") continue;
-    if (node.tagName === "li") stamp(node);
-    stampItems(node.children);
+    if (node.tagName === "li") stamp(node, offset);
+    stampItems(node.children, offset);
   }
 }
 
@@ -78,18 +78,22 @@ export function remarkCitationMarkers(options: { count: number }) {
   return (tree: MdastRoot) => { if (options.count > 0) walk(tree); };
 }
 
-/** Runs before KaTeX: top-level blocks and list items get offsets; display math gets a wrapper KaTeX leaves intact. */
-export function rehypeSourceOffsets() {
+/**
+ * Runs before KaTeX: top-level blocks and list items get offsets; display math gets a wrapper KaTeX leaves intact.
+ * `offset` is where this text starts inside the whole answer (a fragment rendered next to a SenseWeave block).
+ */
+export function rehypeSourceOffsets(options: { offset?: number } = {}) {
+  const offset = options.offset ?? 0;
   return (tree: Root) => {
     tree.children = tree.children.map((node) => {
       if (node.type !== "element") return node;
       if (isDisplayMath(node)) {
         const wrapper: Element = { type: "element", tagName: "div", properties: {}, children: [node], position: node.position };
-        stamp(wrapper);
+        stamp(wrapper, offset);
         return wrapper;
       }
-      stamp(node);
-      stampItems(node.children);
+      stamp(node, offset);
+      stampItems(node.children, offset);
       return node;
     });
   };
@@ -159,11 +163,18 @@ export class PlainTextFallback extends Component<{ text: string; children: React
 
 const CITE_LINK_CLASS = "ml-0.5 rounded font-medium text-accent no-underline hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring";
 const NO_CITATIONS: readonly CitationLink[] = [];
-type LearningProseProps = { text: string; citationLinks?: readonly CitationLink[]; queryEvidenceLinks?: readonly QueryEvidenceLink[]; objectHref?: (href: string) => string };
+type LearningProseProps = {
+  text: string;
+  citationLinks?: readonly CitationLink[];
+  queryEvidenceLinks?: readonly QueryEvidenceLink[];
+  objectHref?: (href: string) => string;
+  /** UTF-16 start of `text` inside the whole answer, so selections map back to the answer's source. */
+  sourceOffset?: number;
+};
 
 /** Citation links are derived by the message list; equivalent links do not require reparsing math. */
 export function sameLearningProseContent(previous: LearningProseProps, next: LearningProseProps): boolean {
-  if (previous.text !== next.text || previous.objectHref !== next.objectHref) return false;
+  if (previous.text !== next.text || previous.objectHref !== next.objectHref || (previous.sourceOffset ?? 0) !== (next.sourceOffset ?? 0)) return false;
   const beforeEvidence = previous.queryEvidenceLinks ?? NO_CITATIONS;
   const afterEvidence = next.queryEvidenceLinks ?? NO_CITATIONS;
   if (beforeEvidence.length !== afterEvidence.length || beforeEvidence.some((link, index) =>
@@ -178,7 +189,7 @@ export function sameLearningProseContent(previous: LearningProseProps, next: Lea
  * Assistant answer body: GFM + math, raw HTML dropped, falls back to the original text on failure.
  * `citationLinks[k-1]` is where an inline `[k]` points; without it markers stay plain text.
  */
-export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS, objectHref }: LearningProseProps) {
+export const LearningProse = memo(function LearningProse({ text, citationLinks = NO_CITATIONS, queryEvidenceLinks = NO_CITATIONS, objectHref, sourceOffset = 0 }: LearningProseProps) {
   const reveal = useContext(ReplyRevealEnabled);
   const approvedHrefs = useMemo(() => new Set(queryEvidenceLinks.map(link => link.href).filter(isQueryEvidenceHref)), [queryEvidenceLinks]);
   const withCitations = useMemo<Components>(() => ({
@@ -197,7 +208,7 @@ export const LearningProse = memo(function LearningProse({ text, citationLinks =
     <div className="font-reading text-[17px] leading-[30px] break-words [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1">
       <Markdown
         remarkPlugins={[remarkGfm, remarkMath, [remarkCitationMarkers, { count: citationLinks.length }]]}
-        rehypePlugins={[rehypeSourceOffsets, [rehypeKatex, KATEX_OPTIONS], ...(reveal ? [rehypeReplyReveal] : [])]}
+        rehypePlugins={[[rehypeSourceOffsets, { offset: sourceOffset }], [rehypeKatex, KATEX_OPTIONS], ...(reveal ? [rehypeReplyReveal] : [])]}
         skipHtml
         urlTransform={(url, key) => key === "href" && approvedHrefs.has(url) ? url : proseUrlTransform(url)}
         components={withCitations}

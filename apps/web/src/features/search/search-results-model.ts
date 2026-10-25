@@ -35,15 +35,6 @@ export function groupSearchHits(hits: SearchHit[]): SearchResultGroup[] {
   });
 }
 
-export function searchHitHref(hit: SearchHit): string {
-  const id = encodeURIComponent(hit.id);
-  if (hit.type === "document") return `/library/${id}`;
-  if (hit.type === "exploration") return `/explore/${id}`;
-  if (hit.type === "card") return `/learn/review?cardId=${id}`;
-  if (hit.type === "course") return `/learn/courses/${id}`;
-  return `/learn/practice/${id}`;
-}
-
 /** Opening shell targets; null when the hit has no Opening surface (exploration / practice). */
 export function openingSearchHitHref(hit: SearchHit): string | null {
   const id = encodeURIComponent(hit.id);

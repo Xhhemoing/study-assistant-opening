@@ -42,7 +42,7 @@ describe("observation correction", () => {
   it("separates conflicts, removed access, and recoverable request errors", () => {
     expect(observationRevisionFailure(new OpeningApiError(409, "head changed", "CONFLICT")).kind).toBe("conflict");
     expect(observationRevisionFailure(new OpeningApiError(404, "unavailable")).kind).toBe("unavailable");
-    expect(observationRevisionFailure(new OpeningApiError(503, "database unavailable"))).toEqual({ kind: "error", message: "database unavailable" });
+    expect(observationRevisionFailure(new OpeningApiError(503, "database unavailable"))).toEqual({ kind: "error", message: "保存失败，输入已保留，请重试。" });
   });
 
   it("keeps tombstones reviewable without presenting them as current evidence", () => {

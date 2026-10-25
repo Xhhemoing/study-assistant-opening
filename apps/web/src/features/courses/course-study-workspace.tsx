@@ -24,6 +24,7 @@ import { assistantEntry } from "../opening/assistant/assistant-entry";
 import { OriginalConversationSlot } from "../opening/assistant/conversation-companion";
 import { StudyNotePanel } from "../opening/teaching/study-context-tools";
 import { MaterialLibrary } from "../opening/library/material-library";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 export function CourseRetestReview({ courseId, task }: { courseId: string; task: CompletedRetestTask }) {
   return <section className="space-y-3 px-5 py-6" aria-labelledby="course-retest-review-heading">
@@ -73,9 +74,9 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
           const restored = await api.getTeachingResume(next.activity.id);
           if (restored.activityId !== next.activity.id) throw new Error("学习断点不匹配，请重新读取。");
           if (active) { setResume(restored); setEntry({ kind: "activity", activity: { ...next.activity, status: restored.status, generateStatus: restored.generateStatus, contentVersion: restored.contentVersion, pathVersion: restored.pathVersion } }); }
-        } catch (reason) { if (active) setResumeError(reason instanceof Error ? reason.message : "学习位置暂时无法读取，请重试。"); }
+        } catch (reason) { if (active) setResumeError(userFacingMessage(reason, "学习位置暂时无法读取，请重试。")); }
       } else if (next.kind === "practice") { setPracticeVisited(true); setPractice(true); }
-    }).catch(reason => { if (active) setEntryError(reason instanceof Error ? reason.message : "学习活动暂时无法读取，请重试。"); })
+    }).catch(reason => { if (active) setEntryError(userFacingMessage(reason, "学习活动暂时无法读取，请重试。")); })
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [activityId, api, archived, course, courseId, revision, sourceIds, sourceLoadError, taskId, retestId, teachingCompileEnabled, teachingEnabled, initialMode, practiceEntryError]);
@@ -93,7 +94,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
   const retest = entry?.kind === "practice" ? entry.task?.retest : null;
   const retestPrefill = retest ? retestPrefillFromProjection(retest) : null;
   const activity = entry?.kind === "activity" ? entry.activity : null;
-  const anchorProblem = historicalAnchorError || (historicalAnchor && resume && (historicalAnchor.contentVersion !== resume.contentVersion || resume.clientInit?.checkpointJson?.currentBlockId !== historicalAnchor.blockId) ? "原笔记对应的单元或内容版本与当前断点不同。原笔记内容仍保留；可返回笔记回顾，或明确选择继续当前断点。" : "");
+  const anchorProblem = historicalAnchorError || (historicalAnchor && resume && (historicalAnchor.contentVersion !== resume.contentVersion || resume.clientInit?.checkpointJson?.currentBlockId !== historicalAnchor.blockId) ? "这条笔记对应的是这节课的旧内容或别的位置。笔记仍保留；可以回到笔记看看，或继续当前位置学习。" : "");
   return <section aria-label="课程学习台" className="flex h-full min-h-0 flex-col bg-surface text-text" data-course-study={courseId}>
     <TopBar label="课程学习顶栏"
       leading={<Link className={v3ui.icon} href={courseHref} aria-label="返回课程"><ArrowLeft aria-hidden="true" size={18} /></Link>}

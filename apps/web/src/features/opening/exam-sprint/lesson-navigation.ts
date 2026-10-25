@@ -13,7 +13,7 @@ export function sprintLessonUnavailableReason(overview: ExamSprintOverview, less
   const lesson = findSprintLesson(overview.pack.lessons, lessonId);
   if (!lesson) return "暂无对应串讲";
   if (overview.activeRun?.mode.startsWith("mock")) return "短模拟交卷后才能阅读串讲";
-  if (!lesson.exposureIdentity || lesson.exposureIdentity.packVersion !== overview.pack.version) return "该题包串讲暂不可用，请核对内容版本";
+  if (!lesson.exposureIdentity || lesson.exposureIdentity.packVersion !== overview.pack.version) return "这个题包的串讲暂时打不开，请稍后再试";
   return null;
 }
 

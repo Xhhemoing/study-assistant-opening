@@ -14,7 +14,6 @@ export function openingNavigation(): OpeningNavigationItem[] {
     { href: "/opening/library", label: "资料", icon: "library", group: "core" },
     { href: "/opening/review", label: "复习", icon: "review", group: "tools" },
     { href: "/opening/sprint", label: "冲刺", icon: "sprint", group: "tools" },
-    { href: "/opening/cards", label: "卡组", icon: "cards", group: "tools" },
     { href: "/opening/search", label: "搜索", icon: "search", group: "tools" },
   ];
 }
@@ -23,10 +22,10 @@ export function navigationIsActive(href: string, pathname: string, search = ""):
   const hrefPath = href.split("?")[0] ?? href;
   const path = pathname.split("?")[0] ?? pathname;
   const params = new URLSearchParams(search || pathname.split("?")[1] || "");
-  // Legacy entries intentionally redirect into these shared pages. Their selected
-  // section still belongs to the original tool, with exactly one active owner.
-  const section = path === "/opening/review" && params.getAll("tab").length === 1 && params.get("tab") === "cards" ? "/opening/cards"
-    : /^\/opening\/courses\/[^/]+\/?$/.test(path) && params.getAll("mode").length === 1 && params.get("mode") === "sprint" ? "/opening/sprint" : null;
+  // Course sprint mode belongs to the sprint tool. Legacy /opening/cards links only
+  // redirect into review, so they are owned by the review entry rather than a nav alias.
+  const section = /^\/opening\/courses\/[^/]+\/?$/.test(path) && params.getAll("mode").length === 1 && params.get("mode") === "sprint" ? "/opening/sprint"
+    : path === "/opening/cards" || path.startsWith("/opening/cards/") ? "/opening/review" : null;
   if (section) return hrefPath === section;
   if (hrefPath === "/opening/today" && ["/opening/assistant", "/opening/suggestions"].some(owner => path === owner || path.startsWith(`${owner}/`))) return true;
   return path === hrefPath || path.startsWith(`${hrefPath}/`);

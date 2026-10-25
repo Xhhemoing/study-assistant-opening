@@ -1,4 +1,5 @@
 "use client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /**
  * V2-12 Experience — block-level teaching commands.
@@ -395,7 +396,7 @@ export function BlockCommands({
           }
         }
       } catch (err) {
-        if (isCurrent()) setError(err instanceof Error ? err.message : "命令失败");
+        if (isCurrent()) setError(userFacingMessage(err, "命令失败"));
       } finally {
         if (isCurrent()) setBusyKind(null);
       }
@@ -427,7 +428,7 @@ export function BlockCommands({
       await onReread();
       if (isCurrent()) setConflict(null);
     } catch (err) {
-      if (isCurrent()) setError(err instanceof Error ? err.message : "重新拉取失败");
+      if (isCurrent()) setError(userFacingMessage(err, "重新拉取失败"));
     } finally {
       if (isCurrent()) setRereadBusy(false);
     }

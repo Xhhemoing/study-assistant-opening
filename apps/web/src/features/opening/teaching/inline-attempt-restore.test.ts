@@ -69,7 +69,7 @@ it("preserves recovered answer when the explicit reference read fails", async ()
   hintApi.request.mockRejectedValueOnce(new Error("reference offline")); render(); await settle();
   const tree = render(); const ladder = findNode(tree, node => node.type === HintLadder)!;
   (ladder.next as { request: () => void }).request(); await settle();
-  expect(text(render())).toContain(saved.observation.answer); expect(text(render())).toContain("reference offline");
+  expect(text(render())).toContain(saved.observation.answer); expect(text(render())).toContain("提示暂不可读取");
   expect(api.getAnswerKey).not.toHaveBeenCalled();
 });
 it("does not present a new answer form after a failed recovery read", async () => {
@@ -80,7 +80,7 @@ it("does not present a new answer form after a failed recovery read", async () =
 it("clears the failed recovery error when retry succeeds", async () => {
   api.getSubmittedAttempt.mockRejectedValueOnce(new Error("offline")); render(); await settle();
   const failed = render();
-  expect(text(failed)).toContain("offline");
+  expect(text(failed)).toContain("无法恢复已保存的作答");
   function findRetry(node: ReactNode): (() => void) | undefined {
     if (Array.isArray(node)) return node.map(findRetry).find(Boolean);
     if (!isValidElement<{ children?: ReactNode; onClick?: () => void }>(node)) return undefined;
@@ -91,7 +91,7 @@ it("clears the failed recovery error when retry succeeds", async () => {
   expect(retry).toBeDefined(); retry!(); render(); await settle();
   const restored = text(render());
   expect(restored).toContain(saved.observation.answer);
-  expect(restored).not.toContain("offline");
+  expect(restored).not.toContain("无法恢复已保存的作答");
   expect(api.getSubmittedAttempt).toHaveBeenCalledTimes(2);
 });
 it("does not restore retracted answers or unlock their reference", async () => {

@@ -50,7 +50,7 @@ it("retains the confirmed image-version anchor when the server rejects an upgrad
     await act(async () => root.render(createElement(LearningAttemptForm, { courseId, initialProblem: { sourceId, sourceVersion: 2, stem: "v2题干" }, onRecorded() {} })));
     expect(api.createAttempt).toHaveBeenCalledOnce();
     expect(api.createAttempt.mock.lastCall![0].contextAnchor).toEqual({ courseId, sourceId, sourceVersion: 2, purpose: "learning_help" });
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("sourceVersion mismatch");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("无法恢复练习，原答案已保留");
     expect(api.submitAttempt).not.toHaveBeenCalled(); expect(api.gradeObservation).not.toHaveBeenCalled();
     const resume = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "继续此练习");
     await act(async () => resume!.click());

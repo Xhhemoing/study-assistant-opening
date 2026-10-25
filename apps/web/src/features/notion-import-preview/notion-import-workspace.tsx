@@ -32,7 +32,7 @@ function AppearancePanel({ fullWidth, onExportReport, onReset, onTextStyleChange
     <fieldset><legend className={`${ui.label} mb-2`}>阅读字体</legend><div className="flex flex-wrap gap-1">{styles.map(style => <button key={style.id} type="button" aria-pressed={textStyle === style.id} className={`${ui.secondary} ${style.className} ${textStyle === style.id ? "border-emerald-300 bg-emerald-50 text-emerald-800" : ""}`} onClick={() => onTextStyleChange(style.id)}>{style.label}</button>)}</div></fieldset>
     <label className="flex items-center justify-between gap-3 text-sm text-zinc-700">宽版阅读<input type="checkbox" checked={fullWidth} onChange={onToggleFullWidth} className="size-4 accent-emerald-700" /></label>
     <div className="flex flex-col items-start gap-2 border-t border-zinc-200 pt-4"><button type="button" className={ui.secondary} onClick={onExportReport}>下载格式损失报告</button><button type="button" className={ui.quiet} onClick={onReset}><Upload size={14} aria-hidden="true" />重新选择 ZIP</button></div>
-    <p className="text-xs leading-6 text-zinc-500">外观设置仅用于本次预览。文件在本地解析，未写入知识库。</p>
+    <p className="text-xs leading-6 text-zinc-500">外观设置只用于这次预览。文件在本机读取，没有存进知识库。</p>
   </div>;
 }
 

@@ -6,6 +6,7 @@ import { secondaryButtonClass } from "../design/ui";
 import { ReviewCard } from "./review-card";
 import { createReviewActions, retainUnconfirmedReviews, type ReviewApi } from "./review-service";
 import { reviewItemKey, reviewItems, type ReviewItem } from "./review-types";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Load only pending retest proposals (no assistant/memory candidates). */
 export async function loadRetestProposals(api: Pick<ReviewApi, "listRetestCandidates" | "listSources">): Promise<ReviewItem[]> {
@@ -38,7 +39,7 @@ export function RetestProposals({ api: supplied, onChanged }: { api?: ReviewApi;
       setState((current) => ({
         ...current,
         kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error",
-        message: error instanceof Error ? error.message : "暂时无法读取补测提议",
+        message: userFacingMessage(error, "暂时无法读取补测提议"),
       }));
     }
   }, [api, baseActions]);

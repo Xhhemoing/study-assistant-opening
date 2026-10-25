@@ -11,6 +11,7 @@ import { createOpeningCardsClient, type OpeningCardsClient } from "./cards-clien
 import { isCardDraftPending, readCardDraftReceipt, setCardDraftPending, subscribeCardDraftReceipt, writeCardDraftReceipt } from "./create-card-dialog-draft";
 import { readSnippetSaveReceipt, saveSnippetWithReceipt, subscribeSnippetSave } from "../assistant/snippet-save-receipt";
 import { createOpeningLearningClient } from "../client/learning-client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type StudyCardDraft = { identity: string; front: string; back: string; sourceLabel: string; courseId?: string; createSource: () => Promise<string> };
 
@@ -96,7 +97,7 @@ export function CreateCardDialog({ draft, initial, studyDraft, api, cards: suppl
         setSourceUnknown(receipt?.status === "unknown");
         if (receipt?.status === "pending") setBusy(true);
         if (receipt?.status === "saved") setSourceDocumentId(receipt.documentId);
-      } catch { setSourceUnknown(true); setError("来源笔记的保存回执暂不可读取，请先检查笔记列表。"); }
+      } catch { setSourceUnknown(true); setError("暂时无法确认来源笔记是否已保存，请先到笔记列表看一下。"); }
     };
     const unsubscribe = subscribeSnippetSave(sourceIdentity, update); update(); return unsubscribe;
   }, [sourceIdentity, draft]);
@@ -171,7 +172,7 @@ export function CreateCardDialog({ draft, initial, studyDraft, api, cards: suppl
       if (err instanceof OpeningApiError) {
         setError(err.message);
       } else {
-        setError(err instanceof Error ? err.message : "制成卡片失败，请重试。");
+        setError(userFacingMessage(err, "制成卡片失败，请重试。"));
       }
     } finally {
       inFlight.current = false;
@@ -217,7 +218,7 @@ export function CreateCardDialog({ draft, initial, studyDraft, api, cards: suppl
             <p>定义与术语用卡片回忆，题目会换一道新变式来复习。</p>
           </div>
           <p className="text-xs leading-6 text-text-2">来源：{studyDraft?.sourceLabel || draft?.title || "当前作答记录"} · 默认卡组：记忆卡片</p>
-          {recovery.blocked ? <p role="alert" className="text-xs leading-6 text-warn">卡片保存回执暂不可读取，已暂停写入。草稿仍可复制，请先检查卡组后再打开。</p> : null}
+          {recovery.blocked ? <p role="alert" className="text-xs leading-6 text-warn">暂时无法确认卡片是否已保存，先不重复保存。草稿可以复制，请到卡组看一下。</p> : null}
           {sourceUnknown ? <p role="alert" className="text-xs leading-6 text-warn">来源笔记的保存结果尚未确认，可能已经保存。请先检查笔记列表；本次不会再创建来源或卡片。</p> : null}
           {retryOnly ? <p role="status" className="text-xs leading-6 text-warn">保存结果尚未确认。草稿内容已锁定，重试会核对同一张卡片，不会另建一张。</p> : null}
           {saved ? (

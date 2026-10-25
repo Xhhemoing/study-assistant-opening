@@ -1,5 +1,5 @@
 import "server-only";
-import { loadEnv } from "@aistudy/config";
+import { loadEnv, loadOpeningJobStaleConfig } from "@aistudy/config";
 import { createOpeningTutorJobsRepository, type OpeningScope, type OpeningTutorJobRecord } from "@aistudy/database";
 import { Redis } from "ioredis";
 import type { Sql } from "postgres";
@@ -137,7 +137,7 @@ export async function createJobStreamResponse(input: {
 export async function openTutorJobStream(
   sql: Sql, scope: OpeningScope, job: OpeningTutorJobRecord, signal: AbortSignal,
 ): Promise<Response> {
-  const jobs = createOpeningTutorJobsRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql, { staleMs: loadOpeningJobStaleConfig().tutorJobStaleMs });
   if (isTerminal(job)) {
     return createJobStreamResponse({ job, signal,
       reader: { read: async () => null, subscribe: async () => async () => undefined },

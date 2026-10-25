@@ -18,6 +18,7 @@ import {
   type CardGradeIdentity,
   type OpeningCardsClient,
 } from "./cards-client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const gradeOptions: Array<{ grade: ReviewGrade; label: string; icon: typeof Check }> = [
   { grade: "again", label: "重来", icon: RotateCcw },
@@ -80,7 +81,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
       }
       setState({
         kind: "error",
-        message: error instanceof Error ? error.message : "暂时无法读取记忆卡片",
+        message: userFacingMessage(error, "暂时无法读取记忆卡片"),
       });
     }
   }, [client]);
@@ -131,7 +132,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     } catch (error) {
       if (queueRequest !== requestId.current) return;
       setGradeError(
-        error instanceof Error ? error.message : "评分保存失败，请保持当前卡片并重试。",
+        userFacingMessage(error, "评分保存失败，请保持当前卡片并重试。"),
       );
     } finally {
       gradeInFlight.current = false;
@@ -145,7 +146,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     if (!current || grading || gradeInFlight.current) return;
     gradeInFlight.current = true; setGrading(true); setGradeError("");
     try { await client.classify(current.card.id, reviewKind); await refresh(); }
-    catch (error) { setGradeError(error instanceof Error ? error.message : "选择未保存，请再试一次。"); }
+    catch (error) { setGradeError(userFacingMessage(error, "选择未保存，请再试一次。")); }
     finally { gradeInFlight.current = false; setGrading(false); }
   }
 

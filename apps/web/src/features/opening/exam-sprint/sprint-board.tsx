@@ -11,6 +11,7 @@ import { planAcceptFailure } from "../planning/plan-accept-errors";
 import { clearSprintCheckpoint, readSprintCheckpoint, resumeSprintAcceptance, saveSprintCheckpoint, sprintAcceptance, type SprintCheckpoint } from "./sprint-checkpoint";
 import { SprintBudgetPreview } from "./sprint-budget-preview";
 import { sprintCandidateBlocks, sprintPlanChanges, sprintTaskHref, sprintTaskTitle, sprintTodayTasks } from "./sprint-plan-model";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type SprintApi = Pick<OpeningApi, "getPlanningSettings" | "getAdaptivePrefs" | "getToday" | "listTasks" | "proposePlan" | "acceptPlan" | "rejectPlan">;
 type SprintData = { plan: TodayPlanRead; tasks: TaskItem[]; goal: CourseGoal | null; timeZone: string };
@@ -66,13 +67,13 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       clearSprintCheckpoint(courseId);
       checkpointRef.current = null; setCheckpoint(null); setRecoveryProblem(""); setError(""); setMessage("");
       setOptions(data.plan.dailyDraft?.status === "draft" ? [data.plan.dailyDraft] : []); setPreviewId(null);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "清除恢复记录失败。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "清除恢复记录失败。")); }
   }
   async function refresh() {
     if (flight.current) return;
     flight.current = true; setBusy(true); setError("");
     try { const next = await read(); if (mounted.current) hydrate(next); }
-    catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "读取失败，请重试。"); }
+    catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "读取失败，请重试。")); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   useEffect(() => {
@@ -96,7 +97,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       remember({ version: 1, courseId, date: data.plan.date, draft, acceptInput: null });
       setOptions(previous => [...previous.filter(item => item.id !== draft.id), draft]);
       setPreviewId(draft.id);
-    } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "未能生成候选，当前安排仍保留。"); }
+    } catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "未能生成候选，当前安排仍保留。")); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   const preview = options.find(option => option.id === previewId) ?? null;
@@ -120,7 +121,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       remember(recovery);
       sent = true;
       const result = await resumeSprintAcceptance(courseId, recovery.date, input, api);
-      if (result.id !== input.draftId || result.date !== recovery.date || result.status !== "accepted" || result.version <= input.expectedBaseVersion) throw new Error("应用回执尚未核实，请保留原请求并重新读取。");
+      if (result.id !== input.draftId || result.date !== recovery.date || result.status !== "accepted" || result.version <= input.expectedBaseVersion) throw new Error("还不确定计划是否已应用，请刷新后再看。");
       applied = true;
       if (!mounted.current) return;
       setMessage("安排已应用，正在刷新任务…");
@@ -131,7 +132,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       hydrate(next); setAdjusting(false); setMessage("安排已应用。");
     } catch (reason) {
       if (!mounted.current) return;
-      setError(applied ? "安排已应用，任务暂未刷新。请重新读取最新计划，并核对原应用请求。" : sent ? `${planAcceptFailure(reason).message} 原计划、候选和应用请求已保留；请重新读取后核对或重试原请求。` : reason instanceof Error ? reason.message : "恢复记录保存失败，尚未发送应用请求。");
+      setError(applied ? "安排已应用，任务暂未刷新。请重新读取最新计划，并核对原应用请求。" : sent ? `${planAcceptFailure(reason).message} 原来的计划没有改动，可以刷新后再试。` : userFacingMessage(reason, "恢复记录保存失败，尚未发送应用请求。"));
       if (applied) { setData(null); setMessage(""); }
     } finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
@@ -163,7 +164,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
             <p className="text-xs text-text-2">候选包含今天所有课程的共同安排。确认应用后才会替换今天的计划。</p>
             <fieldset disabled={busy || pendingApplication || Boolean(recoveryProblem)} className="space-y-2"><legend className="sr-only">候选安排</legend>{options.map((option, index) => <label key={option.id} className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md border border-line p-3 has-[:checked]:border-accent"><input type="radio" name="sprint-option" checked={previewId === option.id} onChange={() => { if (!flight.current && !checkpointRef.current?.acceptInput && !recoveryProblem) {
               try { remember({ version: 1, courseId, date: data.plan.date, draft: option, acceptInput: null }); setPreviewId(option.id); setError(""); }
-              catch (reason) { setError(reason instanceof Error ? reason.message : "候选未能保存，请重试。"); }
+              catch (reason) { setError(userFacingMessage(reason, "候选未能保存，请重试。")); }
             } }} className="accent-accent" /><span className="text-sm">候选 {index + 1} · {sprintCandidateBlocks(option).length} 项安排</span></label>)}</fieldset>
             <button type="button" className={ui.secondary} disabled={busy || pendingApplication || Boolean(recoveryProblem)} onClick={() => void propose()}>{busy ? "正在处理…" : options.length ? "重新生成候选" : "生成候选安排"}</button>
             {preview ? <div className="space-y-3 rounded-md bg-surface-2 p-4">
@@ -175,7 +176,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
               {preview.baseVersion !== data.plan.acceptedVersion ? <p className="text-sm text-warn">{pendingApplication ? "当前计划已变化，请先核对原应用请求。" : "当前计划已变化，请刷新计划后重新生成候选。"}</p> : null}
               <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || pendingApplication || Boolean(recoveryProblem) || preview.baseVersion !== data.plan.acceptedVersion} onClick={() => void apply()}>{busy ? "正在应用…" : "确认应用这个安排"}</button><button type="button" className={ui.quiet} disabled={busy || pendingApplication || Boolean(recoveryProblem)} onClick={() => { if (!flight.current && !checkpointRef.current?.acceptInput) {
                 try { clearSprintCheckpoint(courseId); checkpointRef.current = null; setCheckpoint(null); setPreviewId(null); setError(""); }
-                catch (reason) { setError(reason instanceof Error ? reason.message : "取消预览失败，请重试。"); }
+                catch (reason) { setError(userFacingMessage(reason, "取消预览失败，请重试。")); }
               } }}>取消预览</button></div>
             </div> : null}
             <Link className={ui.quiet} href="/opening/settings/planning">时间与完整学习安排</Link>

@@ -45,7 +45,7 @@ export const FEATURES: Feature[] = [
   { id: "library-new", route: "/opening/library/new", label: "上传资料", icon: "upload", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/editor/new-document" },
   { id: "document", route: "/opening/library/[id]", label: "资料", icon: "library", placement: "none", depth: 2, layout: "reader", parent: "library", source: "features/editor/document-editor（原生文档）/ PDF·照片阅读" },
   { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "tool", depth: 0, layout: "list", source: "features/opening/exam-sprint/sprint-course-chooser" },
-  { id: "cards", route: "/opening/cards", label: "卡组", icon: "cards", placement: "tool", depth: 0, layout: "list", source: "features/opening/review/review-route (legacyCardsHref)" },
+  { id: "cards", route: "/opening/cards", label: "卡组", icon: "cards", placement: "none", depth: 1, layout: "list", parent: "review", source: "features/opening/review/review-route (legacyCardsHref)" },
   { id: "search", route: "/opening/search", label: "搜索", icon: "search", placement: "tool", depth: 0, layout: "list", source: "features/search/search-workspace" },
   { id: "settings", route: "/opening/settings", label: "设置", icon: "settings", placement: "system", depth: 0, layout: "settings", source: "app/(opening)/opening/settings/page" },
   { id: "settings-connections", route: "/opening/settings/connections", label: "连接", icon: "connections", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "features/opening/connections/connection-settings" },

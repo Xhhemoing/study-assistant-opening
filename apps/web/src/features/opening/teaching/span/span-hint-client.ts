@@ -11,9 +11,9 @@ export function nextSpanHintLevel(delivered: ReadonlyArray<Pick<SpanHintResponse
 export async function requestSpanHint(attempt: Pick<LearningAttempt, "id" | "itemVersionId" | "courseId">, level: SpanHintLevel, fetcher: typeof fetch = fetch): Promise<SpanHintResponse> {
   const response = await fetcher("/api/opening/teaching/span/hint", { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify(spanHintRequestSchema.parse({ attemptId: attempt.id, level })) });
-  if (!response.ok) throw new Error("提示尚未确认交付；原答案保留，可重试当前这一级。");
+  if (!response.ok) throw new Error("提示还没加载出来，你的答案还在，可以再点一次。");
   const parsed = spanHintResponseSchema.safeParse(await response.json());
-  if (!parsed.success) throw new Error("提示回执暂无法核实，原答案保留；请重试当前这一级。");
+  if (!parsed.success) throw new Error("提示暂时没加载好，你的答案还在，可以再点一次。");
   const hint = parsed.data;
   const anchor = hint.exposureReceipt.contextAnchor;
   // Full demonstrations reuse the existing solution ledger; older releases have
@@ -24,7 +24,7 @@ export async function requestSpanHint(attempt: Pick<LearningAttempt, "id" | "ite
   if (hint.attemptId !== attempt.id || hint.level !== level || anchor.attemptId !== attempt.id
     || anchor.itemVersionId !== attempt.itemVersionId || anchor.courseId !== attempt.courseId
     || !deliveryKindMatches || !hint.exposureReceipt.releasedAt) {
-    throw new Error("提示回执与当前题目或级别不一致，已停止显示。原答案保留。");
+    throw new Error("这条提示和当前题目对不上，已先隐藏。你的答案还在，可以再点一次。");
   }
   return hint;
 }

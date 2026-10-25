@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { SourceActionResult, SourceImpact, SourceRecord } from "@aistudy/contracts";
 import { ui } from "../design/ui";
 import { createSourceActionsClient, SourceActionsError, type SourceActionsClient } from "./source-actions-client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const client = createSourceActionsClient();
 const danger = `${ui.secondary} border-danger/30 text-danger hover:bg-danger/10`;
@@ -41,7 +42,7 @@ export function SourceActionsPanel({ record, onClose, onChanged, onResult, api =
       setImpact(value);
       if (initialAction) setAction(initialAction);
     }, reason => {
-      if (live) setError(reason instanceof Error ? reason.message : "影响信息读取失败，请重试。");
+      if (live) setError(userFacingMessage(reason, "影响信息读取失败，请重试。"));
     });
     return () => { live = false; };
   }, [api, record.id, attempt, initialAction]);
@@ -56,7 +57,7 @@ export function SourceActionsPanel({ record, onClose, onChanged, onResult, api =
       onClose();
     } catch (reason) {
       if (reason instanceof SourceActionsError && reason.status === 409) { setImpact(null); setAction(null); }
-      setError(reason instanceof Error ? reason.message : "操作暂时未完成，请重试。");
+      setError(userFacingMessage(reason, "操作暂时未完成，请重试。"));
     } finally { setBusy(false); }
   }
 

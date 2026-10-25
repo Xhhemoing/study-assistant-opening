@@ -15,6 +15,7 @@ import { StudyToolsPanel } from "../teaching/study-tools-panel";
 import { StudyContextTools } from "../teaching/study-context-tools";
 import { OriginalConversationSlot } from "../assistant/conversation-companion";
 import { studyConversationIdentity } from "../assistant/study-conversation-context";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint, children }: {
   title: string;
@@ -123,7 +124,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
     if (!onRetry || retrying) return;
     setRetrying(true); setError("");
     try { await onRetry(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "重新解析未能完成，请重试。"); }
+    catch (reason) { setError(userFacingMessage(reason, "重新解析未能完成，请重试。")); }
     finally { setRetrying(false); }
   }
   return <SourceReaderFrame title={latestRecord.name} returnPoint={returnPoint} onClose={onClose} onEscapeKeyDown={event => {

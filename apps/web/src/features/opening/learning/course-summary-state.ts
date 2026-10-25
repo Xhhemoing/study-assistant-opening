@@ -1,5 +1,6 @@
 import type { CourseLearningSummaryInput, CourseLearningSummaryPage, LearningSummaryAggregate } from "@aistudy/contracts";
 import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type CourseSummaryState = {
   status: "idle" | "loading" | "ready" | "loading_more" | "updating" | "error";
@@ -36,7 +37,7 @@ export function createCourseSummaryController(
         const page = await request({ ...input, ...(cursor ? { groupCursor: cursor } : {}) }, signal);
         if (generation !== current || disposed) return;
         if ((revision !== null && revision !== page.snapshotRevision) || (evaluatedAt !== null && evaluatedAt !== page.evaluatedAt)) {
-          throw new Error("学习记录快照已变化，请刷新摘要后继续翻阅。");
+          throw new Error("学习记录有更新，请刷新摘要后再翻阅。");
         }
         revision = page.snapshotRevision; evaluatedAt = page.evaluatedAt;
         if (page.status === "updating") {
@@ -57,7 +58,7 @@ export function createCourseSummaryController(
       if (generation !== current || disposed) return;
       const conflict = error !== null && typeof error === "object" && "status" in error && error.status === 409;
       update({ ...emptyCourseSummary(), status: "error", snapshotKey: current, notice,
-        error: conflict ? "学习记录已变化，请刷新摘要后继续翻阅。" : error instanceof Error ? error.message : "课程摘要暂时无法读取，请手动刷新。" });
+        error: conflict ? "学习记录已变化，请刷新摘要后继续翻阅。" : userFacingMessage(error, "课程摘要暂时无法读取，请手动刷新。") });
     }
   }
   return {

@@ -26,6 +26,7 @@ import { acknowledgeStudyExposure } from "../assistant/study-exposure-ack";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "../learning/stage-action-bar";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
@@ -154,7 +155,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       setChecked(Boolean(saved.observation.referenceCheck));
       onAttemptReady.current?.(blockId, saved.attempt);
     }).catch((reason: unknown) => {
-      if (active) { setRestoreFailed(true); setError(reason instanceof Error ? reason.message : "无法恢复已保存的作答，请重试。"); }
+      if (active) { setRestoreFailed(true); setError(userFacingMessage(reason, "无法恢复已保存的作答，请重试。")); }
     }).finally(() => { if (active) setRestoring(false); });
     return () => { active = false; };
   // initialDraft is the form's fixed restoration checkpoint; edits must not replay recovery.
@@ -170,7 +171,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       const full = released.find(hint => hint.level === 4);
       if (full) setAnswerKey({ answer: full.text, referenceSourceId: full.referenceSourceId });
     }).catch((reason: unknown) => {
-      if (active) setHintRestoreError(reason instanceof Error ? reason.message : "已读提示暂时无法恢复，原答案保留。");
+      if (active) setHintRestoreError(userFacingMessage(reason, "已读提示暂时无法恢复，原答案保留。"));
     }).finally(() => { if (active) setHintRestoring(false); });
     return () => { active = false; };
   }, [ready, restoring, restoreFailed, draftConflict, attempt?.id, context.id, context.courseId, blockId, context.contentVersion, hintRestoreRetry]);
@@ -215,7 +216,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     try {
       const activity = await api.associateTeachingActivityCourse(context.id, { auto: true });
       if (mounted.current && currentScope.current.courseId === context.courseId) context.onCourseAssociated(activity);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "课程关联未确认，请重新读取活动。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "课程关联未确认，请重新读取活动。")); }
     finally { inFlight.current = false; setPending(false); }
   }
 
@@ -227,7 +228,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       const canonical = await preparation.current.prepare();
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
       setAttempt(canonical); context.onAttemptReady?.(blockId, canonical);
-    } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "本题准备结果未确认，重试会沿用同一请求。"); }
+    } catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "这道题还没准备好，再试一次不会重复出题。")); }
     finally { inFlight.current = false; setPending(false); }
   }
   async function readHint(level: TeachingHintLevel) {
@@ -240,7 +241,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       if (hint.level === 4) setAnswerKey({ answer: hint.text, referenceSourceId: hint.referenceSourceId });
       void acknowledgeStudyExposure(hint.exposureReceipt).catch(() => undefined);
     } catch (reason) {
-      if (mounted.current) { setError(reason instanceof Error ? reason.message : "提示暂不可读取，原答案保留。"); if (reason instanceof OpeningApiError && reason.status === 409 && level < 4) setHintUnavailable(true); }
+      if (mounted.current) { setError(userFacingMessage(reason, "提示暂不可读取，原答案保留。")); if (reason instanceof OpeningApiError && reason.status === 409 && level < 4) setHintUnavailable(true); }
     } finally { inFlight.current = false; setPending(false); setHintPending(false); }
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -259,7 +260,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       setAutoGrade(!initialDraft?.submission && !observation.aiEvaluation);
       context.onObservationReady?.(blockId, observation);
       context.onAttemptReady?.(blockId, result.attempt);
-    } catch (reason) { setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : reason instanceof Error ? reason.message : "答案保存未确认，可用相同请求重新确认。"); }
+    } catch (reason) { setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : userFacingMessage(reason, "答案保存未确认，可用相同请求重新确认。")); }
     finally { inFlight.current = false; setPending(false); }
   }
   async function compare(choice: "match" | "mismatch") {

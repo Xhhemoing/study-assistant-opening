@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { z } from "zod";
 import { ui } from "../design/ui";
 import type { ExamIntegrationIntent } from "./client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Display candidates only; bind still checks live source/version/privacy authorization. */
 export async function loadExamSkillNodes(courseId: string, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<KnowledgeNode[]> {
@@ -36,7 +37,7 @@ export function SkillRebinding({ binding, overview, disabled, send }: {
     setLoading(true); setError(null); setNodes(null); setSelected({});
     loadExamSkillNodes(binding.courseId, controller.signal)
       .then(next => { if (!controller.signal.aborted) setNodes(next); })
-      .catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "课程考点读取失败。"); })
+      .catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "课程考点读取失败。")); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [binding.courseId, revision]);

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ConversationSummary } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { LoadingRows, PageHeader, ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function ConversationHistory({ api: apiProp }: { api?: OpeningApi }) {
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
@@ -15,7 +16,7 @@ export function ConversationHistory({ api: apiProp }: { api?: OpeningApi }) {
     let active = true;
     setError("");
     void api.listConversations().then(value => { if (active) setRows(value); })
-      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "对话暂时无法读取。"); });
+      .catch(reason => { if (active) setError(userFacingMessage(reason, "对话暂时无法读取。")); });
     return () => { active = false; };
   }, [api, revision]);
   return <section className="mx-auto w-full max-w-[720px]">

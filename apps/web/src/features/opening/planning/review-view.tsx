@@ -9,6 +9,7 @@ import { ReviewCard } from "./review-card";
 import { reviewItemKey, type ReviewItem, type ReviewOutcome } from "./review-types";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { supportsConversationPlan } from "./conversation-plan-controller";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type ReadState = { kind: "loading" | "ready" | "error" | "loggedOut"; items: ReviewItem[]; message?: string };
 export function ReviewView({ api: supplied, embedded = false, onPendingCountChange, onDecision }: {
@@ -30,7 +31,7 @@ export function ReviewView({ api: supplied, embedded = false, onPendingCountChan
     }
     catch (error) {
       if (request !== requestId.current) return;
-      setState((current) => ({ ...current, kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error", message: error instanceof Error ? error.message : "暂时无法读取建议" }));
+      setState((current) => ({ ...current, kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error", message: userFacingMessage(error, "暂时无法读取建议") }));
     }
   }, [api, actions]);
   useEffect(() => { void refresh(); return () => { requestId.current += 1; }; }, [refresh]);

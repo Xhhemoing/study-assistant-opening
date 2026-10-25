@@ -4,6 +4,7 @@ import type { PlanDraft, PlannedBlock, TaskItem } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
 import { planAcceptFailure } from "./plan-accept-errors";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function replanDiff(before: readonly PlannedBlock[], after: readonly PlannedBlock[]) {
   const key = (block: PlannedBlock) => JSON.stringify([block.taskId, block.start, block.end, block.reason]);
@@ -67,7 +68,7 @@ export function LocalReplanCard({ api, date, acceptedVersion, blocks, tasks, rea
     if (!draft) { hide(); return; }
     action.current = true; setPending(true); const token = key;
     try { await api.rejectPlan(draft.id); if (epoch.current === token) { setDraft(null); hide(); } }
-    catch (failure) { if (epoch.current === token) setError(failure instanceof Error ? failure.message : "取消失败，请重试。"); }
+    catch (failure) { if (epoch.current === token) setError(userFacingMessage(failure, "取消失败，请重试。")); }
     finally { if (epoch.current === token) { action.current = false; setPending(false); } }
   }
   async function reread() {
@@ -79,7 +80,7 @@ export function LocalReplanCard({ api, date, acceptedVersion, blocks, tasks, rea
       setDraft(null); setError(""); setNotice("");
       proposalKey.current = null; acceptKey.current = null;
     } catch (failure) {
-      if (epoch.current === token) setError(failure instanceof Error ? failure.message : "读取失败，请稍后重试。");
+      if (epoch.current === token) setError(userFacingMessage(failure, "读取失败，请稍后重试。"));
     } finally { if (epoch.current === token) { action.current = false; setPending(false); } }
   }
   if (!reason || hidden) return null;

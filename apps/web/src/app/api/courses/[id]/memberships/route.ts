@@ -1,4 +1,4 @@
-﻿import {
+import {
   addMembershipForPrincipal,
   removeMembershipForPrincipal,
   jsonError,
@@ -6,6 +6,7 @@
   requirePrincipal,
 } from "../../../../../features/auth/service";
 import { getAuthRuntime } from "../../../../../server/runtime";
+import { addMembershipBodySchema, courseIdParamSchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema } from "../../../../../features/courses/server/course-request-schemas";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -16,8 +17,8 @@ export async function POST(
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
-    const { id } = await context.params;
-    const body = await request.json();
+    const id = parseCourseRequest(courseIdParamSchema, (await context.params).id);
+    const body = parseCourseRequest(addMembershipBodySchema, await readCourseJson(request));
     const membership = await addMembershipForPrincipal(
       runtime,
       principal,
@@ -37,8 +38,8 @@ export async function DELETE(
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
-    const { id } = await context.params;
-    const body = await request.json();
+    const id = parseCourseRequest(courseIdParamSchema, (await context.params).id);
+    const body = parseCourseRequest(removeMembershipBodySchema, await readCourseJson(request));
     await removeMembershipForPrincipal(runtime, principal, id, body);
     return new Response(null, { status: 204 });
   } catch (error) {

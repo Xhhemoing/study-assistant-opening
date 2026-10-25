@@ -1,4 +1,5 @@
 "use client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /**
  * V2-14 Experience — LearningResume resume-card.
@@ -298,10 +299,10 @@ export function ResumeCardView({
           <p data-resume-thought-train="true">分支 {thought.branchDepth} · 命令日志 {thought.commandLogCount} · 跳过 {thought.skippedCount}<span className="block break-all">当前块：{thought.currentBlockId ?? "无"}</span></p>
           <div data-resume-open-problems="true">未解决问题：{resume.openProblems.length}<ul>{resume.openProblems.map(p => <li key={`${p.problemId}-${p.reason}`} className="break-all">{p.problemId} · {p.reason}</li>)}</ul></div>
           <div className="flex flex-wrap gap-1.5">
-            {serverDrafts.map(d => <span key={`server-${d.blockId}`} className={`${ui.badge} ${tone.success}`} data-draft-chip="server" data-draft-block-id={d.blockId}>服务端 · {d.blockId}</span>)}
+            {serverDrafts.map(d => <span key={`server-${d.blockId}`} className={`${ui.badge} ${tone.success}`} data-draft-chip="server" data-draft-block-id={d.blockId}>已保存 · {d.blockId}</span>)}
             {localUnsent.map(d => <span key={`unsent-${d.blockId}`} className={`${ui.badge} ${tone.warning}`} data-draft-chip="unsent" data-draft-block-id={d.blockId}>未发送 · {d.blockId}</span>)}
           </div>
-          <p>服务端草稿为权威；本地未发送草稿仅缓冲至同步成功，冲突时并排展示，禁止静默覆盖。</p>
+          <p>以已保存的草稿为准；这台设备上未发送的草稿会保留到保存成功，有冲突时并排显示，不会自动覆盖。</p>
           {conflict?.message ? <p>{conflict.message}</p> : null}
           {conflict?.lostBlockIds?.length ? <p className="break-all">失效块：{conflict.lostBlockIds.join(", ")}</p> : null}
           {resume.continuableActions.length ? <div className="flex flex-wrap gap-1.5" data-resume-continuable="true">{resume.continuableActions.map(action => <span key={action} className={`${ui.badge} ${tone.neutral}`} data-continuable-action={action}>{continuableActionLabel(action)}</span>)}</div> : null}
@@ -469,7 +470,7 @@ export function ResumeCard({
     } catch (err) {
       if (!requestScope.active) return null;
       setLoadState("error");
-      setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
+      setLoadError(userFacingMessage(err, "读取学习位置失败"));
       return null;
     }
   }, [activity.id, api, applyResume, requestScope]);
@@ -507,7 +508,7 @@ export function ResumeCard({
       .catch((err) => {
         if (cancelled) return;
         setLoadState("error");
-        setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
+        setLoadError(userFacingMessage(err, "读取学习位置失败"));
       });
     return () => {
       cancelled = true;
@@ -515,6 +516,36 @@ export function ResumeCard({
     // Fetch only when activity identity changes and no prefetched resume.
     // Intentionally omit fetchResume identity to avoid request loops.
   }, [activity.id, resumeProp, api]);
+
+  // While the lesson is still being generated, re-read the gate with backoff
+  // (3s → 30s, stop after ~10 min) so the card turns ready on its own instead of
+  // leaving the learner on "正在准备讲解" until they guess to press 重新读取.
+  const jobInFlight = liveResume?.activityId === activity.id && liveResume.gates.job === "in_flight";
+  useEffect(() => {
+    if (!jobInFlight) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 3000;
+    const startedAt = Date.now();
+    const tick = async () => {
+      if (cancelled || !requestScope.active) return;
+      try {
+        const next = await api.getTeachingResume(activity.id);
+        if (cancelled || !requestScope.active) return;
+        setLiveResume(next);
+        onResumeUpdated?.(next);
+        if (next.gates.job !== "in_flight") return;
+      } catch {
+        // transient read failure: keep the current card and retry later
+      }
+      if (cancelled || Date.now() - startedAt > 10 * 60_000) return;
+      delay = Math.min(delay * 2, 30_000);
+      timer = setTimeout(() => { void tick(); }, delay);
+    };
+    timer = setTimeout(() => { void tick(); }, delay);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+    // onResumeUpdated is a notification callback; re-arming on its identity would reset backoff.
+  }, [jobInFlight, activity.id, api, requestScope]);
 
   const handleContinue = useCallback(async () => {
     if (!liveResume) return;
@@ -540,7 +571,7 @@ export function ResumeCard({
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "暂停失败");
+      if (requestScope.active) setStatusError(userFacingMessage(err, "暂停失败"));
     } finally {
       if (requestScope.active) setPauseBusy(false);
     }
@@ -559,7 +590,7 @@ export function ResumeCard({
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "恢复失败");
+      if (requestScope.active) setStatusError(userFacingMessage(err, "恢复失败"));
     } finally {
       if (requestScope.active) setPauseBusy(false);
     }
@@ -587,7 +618,7 @@ export function ResumeCard({
           kind: "draft_anchor_lost",
           lostBlockIds: lost,
           message:
-            "部分草稿锚点在服务端已失效。请并排对照后手动处理；禁止强制覆盖。",
+            "有些草稿对应的段落已经更新，请对照后手动处理，不会自动覆盖。",
         });
         await fetchResume();
         return;
@@ -608,8 +639,8 @@ export function ResumeCard({
         kind: "version_conflict",
         message:
           err instanceof Error
-            ? `${err.message} — 已禁止静默覆盖；请对照服务端与本地未发送草稿。`
-            : "版本冲突；请对照服务端与本地未发送草稿，禁止强制覆盖。",
+            ? `${err.message} — 不会自动覆盖；请对照已保存的草稿和未发送的草稿。`
+            : "草稿和已保存的内容不一致，请对照后处理，不会自动覆盖。",
       });
       await fetchResume();
     } finally {

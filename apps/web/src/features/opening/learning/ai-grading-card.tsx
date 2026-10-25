@@ -10,6 +10,7 @@ import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { FeedbackPractice } from "./feedback-practice";
 import { createAiGradingPoll } from "./ai-grading-poll";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "./stage-action-bar";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 
 export const aiOutcomeLabels = { correct: "正确", incorrect: "需改进", unverified: "暂不能判断" } as const;
@@ -77,7 +78,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
     return next.status;
   }, reason => {
     setSending(false);
-    setError(`原答案已保存。${reason instanceof Error ? reason.message : "暂时无法读取批改状态。"}`);
+    setError(`原答案已保存。${userFacingMessage(reason, "暂时无法读取批改状态。")}`);
   }), [client, record.id]);
 
   // Even autoGrade callers only READ. Closing/hidden only stops local polling,
@@ -99,7 +100,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
           if (isCurrent()) setStatus(next);
           return true;
         } catch (reason) {
-          if (isCurrent()) setError(`原答案已保存。${reason instanceof Error ? reason.message : "未能加入批改队列。"}`);
+          if (isCurrent()) setError(`原答案已保存。${userFacingMessage(reason, "未能加入批改队列。")}`);
           return false;
         } finally { if (isCurrent()) setSending(false); }
       });

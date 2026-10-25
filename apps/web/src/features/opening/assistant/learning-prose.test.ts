@@ -25,6 +25,15 @@ describe("LearningProse", () => {
     expect(html).toMatch(/<pre[^>]*overflow-x-auto[^>]*><code class="language-ts">const x = 1;/);
   });
 
+  it("shifts source offsets by sourceOffset for a fragment of a longer answer", () => {
+    const answer = "开头一段。\n\n- a\n- b";
+    const offset = answer.indexOf("- a");
+    const html = renderToStaticMarkup(createElement(LearningProse, { text: answer.slice(offset), sourceOffset: offset }));
+    const stamped = [...html.matchAll(/<(\w+)[^>]*?data-src-start="(\d+)" data-src-end="(\d+)"/g)]
+      .map(([, tag, start, end]) => [tag, answer.slice(Number(start), Number(end))]);
+    expect(stamped).toEqual([["ul", "- a\n- b"], ["li", "- a"], ["li", "- b"]]);
+  });
+
   it("stamps Markdown source offsets on top-level blocks and list items only", () => {
     const text = "段落 **粗** [链](https://e.com)\n\n- a\n- b\n\n| x |\n|---|\n| 1 |\n\n---\n\n$$\nx\n$$";
     const html = render(text);

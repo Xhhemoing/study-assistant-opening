@@ -5,6 +5,7 @@
  */
 import { z } from "zod";
 import { CAPABILITIES_PROTOCOL_VERSION } from "./build-config.mjs";
+import { senseWeaveGatesSchema, SENSEWEAVE_INITIAL_GATES } from "./senseweave";
 
 export { CAPABILITIES_PROTOCOL_VERSION } from "./build-config.mjs";
 
@@ -17,6 +18,10 @@ export const openingCapabilitiesSchema = z.object({
   chatArtifacts: z.boolean(),
   /** UI-only: render answers as Markdown + math (LearningProse) instead of plain text. */
   chatProse: z.boolean(),
+  /** UI-only: SenseWeave fragments inside chat answers. shadow = decide and count only, UI unchanged. */
+  chatSenseWeave: z.enum(["off", "shadow", "on"]),
+  /** Versioned preset × component allowlist; clients intersect it with runtime capabilities. */
+  senseWeaveGates: senseWeaveGatesSchema.default(SENSEWEAVE_INITIAL_GATES),
   /** Self-registration; /api/auth/register re-checks the same switch. */
   registrationOpen: z.boolean(),
   /** Learning-signal daily drafts, autonomy modes and suggested tasks; routes re-check. */
@@ -42,6 +47,8 @@ export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   matrixTransformInteractive: false,
   chatArtifacts: false,
   chatProse: false,
+  chatSenseWeave: "off",
+  senseWeaveGates: SENSEWEAVE_INITIAL_GATES,
   registrationOpen: false,
   adaptivePlanning: false,
   planAgent: false,

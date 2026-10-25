@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CoachPlanAcceptance, PlanDraft } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { secondaryButtonClass } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type CoachApi = Pick<OpeningApi, "getAdaptivePrefs" | "getCoachAcceptance" | "acceptCoachPlan" | "undoCoachPlan">;
 export function CoachPlanControl({ date, draft, api, onChanged, settingsRevision = 0 }: {
@@ -40,7 +41,7 @@ export function CoachPlanControl({ date, draft, api, onChanged, settingsRevision
         }
       }
     } catch (reason) {
-      if (request === epoch.current) setError(reason instanceof Error ? reason.message : "教练安排结果需要核对，请重新读取。");
+      if (request === epoch.current) setError(userFacingMessage(reason, "教练安排结果需要核对，请重新读取。"));
     } finally { if (request === epoch.current) setPending(false); }
   }, [api, date]);
 
@@ -60,7 +61,7 @@ export function CoachPlanControl({ date, draft, api, onChanged, settingsRevision
       setConfirmUndo(false); setSummary({ ...summary, undone: true, undoAvailable: false });
       await changedRef.current();
     } catch (reason) {
-      if (request === epoch.current) { setConfirmUndo(false); setError(reason instanceof Error ? reason.message : "撤销结果需要核对，请重新读取。"); }
+      if (request === epoch.current) { setConfirmUndo(false); setError(userFacingMessage(reason, "撤销结果需要核对，请重新读取。")); }
     } finally { busy.current = false; if (request === epoch.current) setPending(false); }
   }
 

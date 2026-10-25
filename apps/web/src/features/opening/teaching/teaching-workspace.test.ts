@@ -311,8 +311,9 @@ describe("TeachingWorkspace", () => {
       }),
     );
     expect(html).toContain('data-teaching-needs-check="true"');
-    expect(html).toContain("主讲内容需要核查");
-    expect(html).toContain('role="status"');
+    expect(html).toContain("这节内容还在核对引用，可以先学");
+    expect(html).toContain('role="note"');
+    expect(html).not.toContain("需要核查");
   });
 
   it("non-workspace continue entry without needs_check omits 待核对 marker", () => {
@@ -425,7 +426,7 @@ describe("TeachingContinueEntry", () => {
     );
     expect(html).toContain('data-teaching-continue-entry="workspace"');
     expect(html).toContain('data-teaching-needs-check="true"');
-    expect(html).toContain("主讲内容需要核查");
+    expect(html).toContain("这节内容还在核对引用，可以先学");
   });
 
   it("starts on resume-card (not ConversationResume)", () => {

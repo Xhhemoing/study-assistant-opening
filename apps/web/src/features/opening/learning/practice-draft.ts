@@ -5,6 +5,7 @@ import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { raiseAssistanceOnly, type DeliveredAssistance } from "./reference-check";
 import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPracticeDraftCollection, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeFields } from "./practice-draft-storage";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 export * from "./practice-draft-storage";
 
 type Client = ReturnType<typeof createOpeningLearningClient>;
@@ -54,7 +55,7 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
       setCollection(stored ?? initializePracticeDraft(fallback));
       setStorageWarning(practiceDraftHasUnsavedStorage(scope));
       setLoadError(""); setReady(true);
-    } catch (reason) { setLoadError(reason instanceof Error ? reason.message : "无法读取练习草稿"); setReady(false); }
+    } catch (reason) { setLoadError(userFacingMessage(reason, "无法读取练习草稿")); setReady(false); }
   }, [scope, fallback, loadRevision]);
   const draft = collection.drafts.find(value => value.id === collection.activeId)!;
   const patch = useCallback((change: DraftPatch | ((current: PracticeDraft) => DraftPatch)) => {
@@ -68,7 +69,7 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   function select(target: PracticeDraft | string): boolean {
     if (!ready) return false;
     try { setCollection(switchPracticeDraft(scope, draft.id, target, browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
-    catch (reason) { setSwitchError(reason instanceof Error ? reason.message : "草稿未切换，原答案已保留"); return false; }
+    catch (reason) { setSwitchError(userFacingMessage(reason, "草稿未切换，原答案已保留")); return false; }
   }
   return { draft, drafts: collection.drafts, patch, ready, storageWarning, loadError, switchError,
     requireSaved: () => assertPracticeDraftSaved(scope),

@@ -53,6 +53,14 @@ describe("teaching content helpers (T1/T6/T7 unit)", () => {
     expect(JSON.stringify(blocks)).not.toContain("SECRET");
   });
 
+  it("repairs LaTeX the pre-parseModelJson compiler decoded into control characters", () => {
+    const stored = JSON.parse('{"text":"$a\\times b = \\frac{1}{2}$\\n下一行"}') as { text: string };
+    const blocks = redactBlocksForClientInit(blockOrder.slice(0, 1), [
+      { id: blockTeach, type: "text", position: 0, content: stored },
+    ]);
+    expect(blocks[0]?.content).toEqual({ text: "$a\\times b = \\frac{1}{2}$\n下一行" });
+  });
+
   it("T7 sanitizeCheckpointForRestore does not dump unrevealed answers", () => {
     const cleaned = sanitizeCheckpointForRestore({
       drafts: [{ blockId: blockTeach, contentVersion: 1, draftText: "mine" }],

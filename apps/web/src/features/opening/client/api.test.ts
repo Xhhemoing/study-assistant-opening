@@ -186,7 +186,7 @@ describe("openingApi (RU-07 client)", () => {
 
       await expect(api.getJob(U)).rejects.toMatchObject({
         name: "OpeningResponseError",
-        message: "服务器返回的数据暂时无法核验。请先重新读取当前状态，再决定是否重试。",
+        message: "暂时读不懂服务器返回的内容。请先刷新看看当前状态，再决定是否重试。",
         cause: { name: "ZodError", issues: [{ code: "unrecognized_keys", keys: ["extra"] }] },
       });
     });

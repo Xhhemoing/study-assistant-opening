@@ -96,7 +96,7 @@ describe("exam sprint lesson confirmation", () => {
     expect(recovered).not.toBeNull();
     expect(confirmedSprintLesson(recovered!, request)).toBeNull();
     expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET"]);
-    expect(client.getSnapshot()).toMatchObject({ uncertain: false, error: expect.stringContaining("已读取最新进度") });
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, error: expect.stringContaining("题包内容刚更新过") });
     const fresh = prepareSprintLesson(recovered!, lesson.id);
     await client.send(fresh ?? { action: "configure", examDate: null, dailyMinutes: 60 });
     expect(fetcher).toHaveBeenCalledTimes(3);

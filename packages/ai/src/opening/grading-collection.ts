@@ -2,6 +2,7 @@ import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluat
 import { buildAnswerGradingInput } from "./answer-grading";
 import { createOpeningProvider, OpeningProviderError, type OpeningFetch } from "./provider";
 import { fetchOpeningProvider } from "./provider-network";
+import { parseModelJson } from "./latex-json";
 
 type CaseStatus = "not_started" | "valid_output" | "invalid_model_output" | "provider_error" | "photo_not_supported" | "request_limit_reached";
 type CaseCollection = {
@@ -21,7 +22,7 @@ export type GradingCollectionOptions = {
 };
 
 function isGradingJson(text: string): boolean {
-  try { return aiGradingProposalSchema.safeParse(JSON.parse(text)).success; }
+  try { return aiGradingProposalSchema.safeParse(parseModelJson(text)).success; }
   catch { return false; }
 }
 

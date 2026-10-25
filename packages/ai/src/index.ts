@@ -171,3 +171,4 @@ export * from "./opening/assistant-proposal-agent";
 export * from "./opening/material-retrieval-evaluation";
 export * from "./opening/embedding";
 export * from "./opening/hybrid-retrieval";
+export * from "./opening/latex-json";

@@ -9,6 +9,7 @@ import { AssistantView } from "./assistant-view";
 import { ConversationSurface } from "./conversation-companion";
 import type { AssistantEntry } from "./assistant-entry";
 import type { StudyConversationContext } from "./study-conversation-context";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const contextFields = ["courseId", "activityId", "blockId", "contentVersion", "attemptId", "itemVersionId", "kcMappingVersion", "sourceId", "sourceVersion", "page", "chunkId"] as const;
 const mismatchMessage = "本次提问与原题的作答记录不一致，请返回原题重新打开。";
@@ -38,7 +39,7 @@ export function AssistantSession({ entry, embedded = true }: { entry: AssistantE
       if (!active) return;
       if (value.attempt.id !== attemptId) { setError({ selectionKey, message: mismatchMessage }); return; }
       setRestored({ selectionKey, attempt: value.attempt });
-    }).catch(reason => { if (active) setError({ selectionKey, message: reason instanceof Error ? reason.message : "无法读取本次作答，请重试。" }); });
+    }).catch(reason => { if (active) setError({ selectionKey, message: userFacingMessage(reason, "无法读取本次作答，请重试。") }); });
     return () => { active = false; };
   }, [attemptId, client, entry.error, entry.learningAttempt, selectionKey, revision]);
 
