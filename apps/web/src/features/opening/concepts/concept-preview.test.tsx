@@ -24,6 +24,11 @@ function available(): Extract<ConceptPreviewResponse, { status: "available" }> {
 let container: HTMLDivElement, root: Root;
 const load = vi.fn<ConceptPreviewLoader>(), onContinue = vi.fn();
 const handle = createRef<ConceptPreviewHandle>();
+function loadCall(index: number) {
+  const call = load.mock.calls[index];
+  if (!call) throw new Error(`Expected preview request ${index + 1}`);
+  return call;
+}
 type Props = Parameters<typeof ConceptPreview>[0];
 beforeEach(() => {
   vi.resetAllMocks(); load.mockResolvedValue(available());
@@ -41,7 +46,7 @@ it("requests only explicitly, preserves pointer selection, renders safe prose/fo
   const event = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
   button("查看概念").dispatchEvent(event); expect(event.defaultPrevented).toBe(true);
   await click("查看概念");
-  expect(load).toHaveBeenCalledTimes(1); expect(load.mock.calls[0][0]).toMatchObject({ sourceId: id, sourceVersion: 2, page: 3, term: "向量空间", selection: { text: "向量空间" } });
+  expect(load).toHaveBeenCalledTimes(1); expect(loadCall(0)[0]).toMatchObject({ sourceId: id, sourceVersion: 2, page: 3, term: "向量空间", selection: { text: "向量空间" } });
   expect(container.querySelector(".katex")).not.toBeNull(); expect(container.querySelector("script")).toBeNull();
   expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
   expect(container.querySelector("[data-preview-citation]")?.textContent).toBe("来源：线性代数 · v2 · 第 3 页");
@@ -66,7 +71,7 @@ it("ignores superseded and closed requests even if the loader does not honor abo
   await render({ selection: { ...selection, text: "另一段" } }); await click("查看概念");
   await act(async () => next.resolve({ status: "unavailable", reason: "新的结果" }));
   await act(async () => old.resolve(available())); expect(container.textContent).toContain("新的结果"); expect(container.querySelector("[data-preview-citation]")).toBeNull();
-  expect(load.mock.calls[0][1].aborted).toBe(true);
+  expect(loadCall(0)[1].aborted).toBe(true);
   const late = deferred(); load.mockReturnValueOnce(late.promise); await click("查看概念");
   await act(async () => { expect(handle.current?.close()).toBe(true); });
   await act(async () => late.resolve(available())); expect(container.querySelector('[aria-label="概念预览"]')).toBeNull();
@@ -96,8 +101,8 @@ it("translates restricted reasons without claiming closed-book mode", async () =
 });
 it("retries one logical intent with the same key, but reopening has a fresh delivery key", async () => {
   load.mockRejectedValueOnce(new Error("网络断开")); await render(); await click("查看概念"); expect(container.querySelector('[role="alert"]')?.textContent).toContain("网络断开");
-  await click("重试预览"); expect(load.mock.calls[1][0]).toEqual(load.mock.calls[0][0]);
-  await click("关闭概念预览"); await click("查看概念"); expect(load.mock.calls[2][0].clientKey).not.toBe(load.mock.calls[0][0].clientKey);
+  await click("重试预览"); expect(loadCall(1)[0]).toEqual(loadCall(0)[0]);
+  await click("关闭概念预览"); await click("查看概念"); expect(loadCall(2)[0].clientKey).not.toBe(loadCall(0)[0].clientKey);
 });
 it("drops previous authority synchronously without cache or auto-request", async () => {
   await render(); await click("查看概念"); await render({ bindingKey: "new-identity" });

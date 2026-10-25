@@ -26,7 +26,15 @@
 
 C repository 依赖 PR-B 的 `materialPageRole`、`readMaterialManifest`、source/version manifest 与 revision 字段，以及 B 的 study-context/实际 exposure 隔离链。接口以 `dd92c69d` 为参照，本次未复制/修改 B 文件。database public index **只增加** concept repository export，不删除/替换 B exports。主代理须先整合 B，再做 C API/DB/类型验收；单独 A+C 不可当成可发布构建，flag OFF 也不能消除静态依赖。
 
-## 本地实际检查
+## 2026-10-25 收尾验证（优先于下方早期记录）
+
+- 当前 C 分支已经接入 B 的精确提交 `f2043303`，没有复制 B 文件或更改其迁移；相对 B 的差异仍仅为 Explore 1–2A 与其验证。默认 OFF 与阶段 3–4 冻结不变。
+- 首批定向 unit：20 文件 227 项，224 通过、3 失败；失败集中在旧 `SelectionAsk` 手工 hook 夹具把所有 `useContext` 返回 null。生产 capabilities 有非空 CLOSED 默认，修复测试为明确 OFF，不改产品空值语义。修后原失败文件与 ON/OFF 相邻课堂预览 2 文件 10 项通过；独立 demo 3 文件 10 项通过（批次重叠，不求和）。
+- 原生隔离 PG：`opening-concept-preview.test.ts` 11 项通过，含 unset/OFF 无 exposure、ON 跨 owner 不披露、固定版本/manifest/原题保护、单连接不死锁及回放冲突；旧客户端 ON→OFF 拒绝另由 route 单元覆盖。
+- Config、Database 类型通过。Web 初次类型发现新增测试中 7 处 mock-call 数组可能为空，修为显式存在校验或仍会断言失败的可选读取；2 文件 19 项复查、最终完整 Web 类型与三文件 lint 均通过，不使用 any/ts-ignore 或排除文件。
+- 环境示例一致性通过。上述为非浏览器行为/SQL/语义类型证据，不是浏览器、真实模型或部署验收。准备推送本切片和 draft PR，完整 CI 仍需精确新 head；未合并/部署。
+
+## 本地实际检查（早期历史）
 
 - `git diff --check` 通过；env examples 重新从 registry 生成，`node --import tsx scripts/env-examples.ts --check` 通过。
 - 轻量 unit：env 19、LearningProse 概念 11、demo route 4 通过；reader 5、课堂片段 6、readiness 17 通过。仅为定向单元，不代表 API/SQL/类型/浏览器验收。

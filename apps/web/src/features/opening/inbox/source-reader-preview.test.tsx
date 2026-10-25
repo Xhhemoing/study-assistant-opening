@@ -65,7 +65,7 @@ it("reader explicitly loads then hands frozen source/version/page to existing un
   api.preview.mockResolvedValue(available());
   await render({ latestRecord: { ...record, name: "线性代数（新名称）" } }); await select(); expect(api.preview).not.toHaveBeenCalled();
   button("查看概念").focus(); await click("查看概念");
-  expect(api.preview.mock.calls[0][0]).toMatchObject({ sourceId: id, sourceVersion: 2, page: 3, selection: { text: "向量空间" } });
+  expect(api.preview.mock.calls[0]?.[0]).toMatchObject({ sourceId: id, sourceVersion: 2, page: 3, selection: { text: "向量空间" } });
   expect(document.querySelector("[data-preview-citation]")?.textContent).toBe("来源：线性代数（新名称） · v2 · 第 3 页");
   await act(async () => { window.getSelection()?.removeAllRanges(); document.dispatchEvent(new Event("selectionchange")); });
   await click("继续问");

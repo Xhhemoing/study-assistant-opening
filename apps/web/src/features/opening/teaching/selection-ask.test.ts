@@ -1,6 +1,9 @@
 import { isValidElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
+// The isolated hook harness returns null for other contexts; capabilities have a
+// non-null, closed default in production and must preserve the existing ask path.
+vi.mock("../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ explorePreview: false }) }));
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, effects: [] as Array<() => void> }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useContext: () => null,
