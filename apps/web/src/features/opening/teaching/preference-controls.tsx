@@ -1,5 +1,5 @@
-import { userFacingMessage } from "../../../lib/user-facing-error";
 "use client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /**
  * V2-11 Experience — intervention preference controls.
