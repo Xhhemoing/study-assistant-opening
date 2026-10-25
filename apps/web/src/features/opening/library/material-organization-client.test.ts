@@ -17,7 +17,7 @@ describe("material organization client", () => {
     const api = createMaterialOrganizationClient(fetcher);
     const result = await api.addToCourse(course, [source, source, other], "reference");
     expect(result.succeeded).toEqual([source]);
-    expect(result.failed.map(item => item.id)).toEqual([other]);
+    expect(result.failed).toEqual([{ id: other, message: "课程或材料已不存在，请刷新后重试" }]);
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({ assetType: "source", role: "reference", visibility: "private" });
     fetcher.mockClear();
