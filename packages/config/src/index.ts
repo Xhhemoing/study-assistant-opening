@@ -35,3 +35,4 @@ export {
 } from "./server-config";
 export { ENV_TEMPLATE_FILES, renderEnvTemplate, type EnvTemplateTarget } from "./env-template";
 export { loadWorkerStartupConfig } from "./worker-startup";
+export { loadOpeningJobStaleConfig, type OpeningJobStaleConfig } from "./opening-job-stale";

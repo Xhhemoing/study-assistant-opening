@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
+import { repairDecodedLatexInJson } from "@aistudy/ai";
 import { teachingHintResponseSchema, teachingPartialHintsSchema, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
@@ -53,7 +54,9 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
     const [revision] = await tx`SELECT blocks FROM library_revisions WHERE workspace_id=${scope.workspaceId}
       AND document_id=${spec.document_id} AND revision_number=${spec.revision_number}`;
     if (!revision) throw learningError("NOT_FOUND", "teaching revision not found");
-    body = (revision.blocks as Array<{ id: string; content: Record<string, unknown> }>).find(row => row.id === following.blockId)?.content;
+    const stored = (revision.blocks as Array<{ id: string; content: Record<string, unknown> }>).find(row => row.id === following.blockId)?.content;
+    // Append-only revision: repair pre-parseModelJson decoded LaTeX at read time.
+    body = stored ? repairDecodedLatexInJson(stored).value : undefined;
   }
   const answer = body && [body.text, body.markdown, body.answer, body.solution].find((value): value is string => typeof value === "string" && Boolean(value.trim()));
   const ownCitations = new Set(Array.isArray(body?.citedChunkIds) ? body.citedChunkIds.filter((id): id is string => typeof id === "string") : []);

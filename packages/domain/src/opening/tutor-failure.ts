@@ -6,6 +6,8 @@ export const TUTOR_UNKNOWN_MESSAGE = "还不确定这次是否答完，用量也
 export const TUTOR_CANCELLED_MESSAGE = "已停止这次回答。";
 /** No usable tutor model (missing key, removed or unavailable route) — the one fix is in settings. */
 export const TUTOR_MODEL_SETUP_MESSAGE = "还没有配置可用的 AI 模型，去设置里配置。";
+/** Stored with code TUTOR_JOB_STALE when a queued answer was never picked up (no model call was made). */
+export const TUTOR_STALE_MESSAGE = "这次回答一直没开始，已经停下了，没有产生费用。可以再问一次。";
 
 const knownFailureMessages: Readonly<Record<string, string>> = {
   BUDGET_EXCEEDED: "今日 AI 预算已达上限，请在设置中核对预算，或明天再试。",
@@ -27,6 +29,7 @@ const knownFailureMessages: Readonly<Record<string, string>> = {
   BUDGET_MEDIA_COST_UNBOUNDED: "当前模型还没设置图片/音频的用量上限，请改用文字提问，或等材料处理完成。",
   BUDGET_MEDIA_INPUT_INVALID: "这份图片或音频读不出来，请重新选择材料。",
   BUDGET_MEDIA_INPUT_TOO_LARGE: "图片或音频太大了，请缩小材料范围。",
+  TUTOR_JOB_STALE: TUTOR_STALE_MESSAGE,
 };
 
 /** Stored failures are untrusted historical diagnostics, never learner/model text. */

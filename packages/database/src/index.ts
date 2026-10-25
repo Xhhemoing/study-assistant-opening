@@ -150,6 +150,20 @@ export {
   ensureCourseContinueActivity,
   type OpeningTeachingActivitiesRepository,
 } from "./repositories/opening-teaching-activities";
+export {
+  repairOpeningLatexEscapes,
+  type LatexRepairOptions,
+  type LatexRepairReport,
+  type LatexRepairTableReport,
+} from "./repositories/opening-latex-escape-repair";
+export {
+  decideTeachingGenerateReconcile,
+  reconcileStaleTeachingGenerations,
+  reconcileTeachingGenerate,
+  type TeachingGenerateReconcileDecision,
+  type TeachingGenerateReconcileInput,
+  type TeachingGenerateReconcileResult,
+} from "./repositories/opening-teaching-generate-reconcile";
 export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
 
 export {

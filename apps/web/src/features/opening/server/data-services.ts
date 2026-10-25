@@ -37,6 +37,7 @@ import {
   setCourseLearningPreferences,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
+import { loadOpeningJobStaleConfig } from "@aistudy/config";
 import { createOpeningReminderService } from "../planning/reminder-service";
 
 type Tail<F> = F extends (sql: Sql, ...rest: infer R) => infer O ? (...rest: R) => O : never;
@@ -70,7 +71,8 @@ type Job = NonNullable<Awaited<ReturnType<ReturnType<typeof createOpeningTutorJo
 
 /** Tutor job polling/cancel. Cancellation never claims provider termination. */
 export function getTutorJobService(sql: Sql) {
-  const repo = createOpeningTutorJobsRepository(sql);
+  // Reads end a job whose queue message was lost, so polling reaches a terminal status.
+  const repo = createOpeningTutorJobsRepository(sql, { staleMs: loadOpeningJobStaleConfig().tutorJobStaleMs });
   return {
     get: (scope: Scope, id: string) => repo.get(scope, id),
     findPendingForConversation: (scope: Scope, conversationId: string) =>
