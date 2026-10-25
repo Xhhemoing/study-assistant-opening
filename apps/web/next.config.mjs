@@ -15,6 +15,11 @@ const useLocalPreview = !useOpeningE2e && process.env.AISTUDY_WEB_PREVIEW === "1
 const nextConfig = {
   // Keep loopback redirects on the request host so host-only auth cookies survive.
   skipMiddlewareUrlNormalize: true,
+  // Staging PUTs carry raw PDF bytes (product limit: 50 MiB). Next's default
+  // 10 MiB middleware clone silently truncates them before stream validation.
+  // This is a transport ceiling, not admission: tickets/ownership and streaming
+  // byte/hash/MIME checks still enforce the per-upload product limits.
+  experimental: { middlewareClientMaxBodySize: "50mb" },
   env: { AISTUDY_BUILD_CONFIG_DIGEST: buildConfigDigest },
   ...(useOpeningE2e ? {
     distDir: ".next-opening-e2e",
