@@ -2,7 +2,7 @@ import { ArrowUpRight } from "lucide-react";
 import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
 import type { SearchHit } from "@aistudy/domain";
 import { EmptyState } from "../opening/design/ui";
-import { groupSearchHits, searchHitHref } from "./search-results-model";
+import { groupSearchHits, openingSearchHitHref } from "./search-results-model";
 
 export function SearchResults({ query, hits }: { query: string; hits: SearchHit[] }) {
   if (!query.trim()) {
@@ -27,12 +27,10 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
               <span className="text-xs text-text-3">{group.hits.length} 条</span>
             </div>
             <ul className="divide-y divide-line border-y border-line">
-              {group.hits.map((hit) => (
-                <li key={`${hit.type}-${hit.id}`}>
-                  <Link
-                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-bg focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
-                    href={searchHitHref(hit)}
-                  >
+              {group.hits.map((hit) => {
+                const href = openingSearchHitHref(hit);
+                const body = (
+                    <>
                     <span className="min-w-0 space-y-1">
                       <span className="block truncate text-sm font-medium text-text group-hover:text-accent">
                         {hit.title}
@@ -49,10 +47,18 @@ export function SearchResults({ query, hits }: { query: string; hits: SearchHit[
                         </span>
                       ) : null}
                     </span>
-                    <ArrowUpRight aria-hidden="true" className="mt-0.5 shrink-0 text-text-3 group-hover:text-accent" size={16} />
-                  </Link>
+                    {href ? <ArrowUpRight aria-hidden="true" className="mt-0.5 shrink-0 text-text-3 group-hover:text-accent" size={16} /> : null}
+                    </>
+                );
+                return (
+                <li key={`${hit.type}-${hit.id}`}>
+                  {href ? <Link
+                    className="group flex items-start justify-between gap-4 px-3 py-3 transition-colors duration-150 motion-reduce:transition-none hover:bg-bg focus-visible:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
+                    href={href}
+                  >{body}</Link> : <div className="flex items-start justify-between gap-4 px-3 py-3">{body}</div>}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           </section>
         );

@@ -64,7 +64,7 @@ describe("command palette keyboard model", () => {
       "/opening/assistant",
       "/opening/library?tab=notes",
       "/opening/courses",
-      "/opening/cards",
+      "/opening/review?tab=cards",
       "/opening/review",
       "/opening/sprint",
       "/opening/suggestions",
