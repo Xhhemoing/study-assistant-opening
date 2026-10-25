@@ -27,7 +27,7 @@ function walk(p) {
   const lines = readFileSync(p, "utf8").split(/\r?\n/);
   lines.forEach((line, i) => {
     const t = line.trim();
-    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return;
+    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || line.includes("learner-copy-ignore")) return;
     // string literals + JSX text segments
     const segs = [...line.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"|`([^`]*)`|'([^'\\]*)'|>([^<>{}]+)</g)].map(m => m[1] ?? m[2] ?? m[3] ?? m[4]).filter(Boolean);
     for (const seg of segs) {

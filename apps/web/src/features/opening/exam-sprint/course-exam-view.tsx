@@ -40,9 +40,9 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
         setSourceId(saved.sourceId); setQuestionCount(saved.questionCount);
         setFirstPage(saved.firstPage?.toString() ?? ""); setLastPage(saved.lastPage?.toString() ?? "");
         try { await readResponse(await fetch(endpoint, { cache: "no-store" })); }
-        catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "原组卷结果尚未核实，请重试读取。")); }
+        catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "还没拿到组卷结果，请稍后刷新。")); }
       } catch (reason) {
-        if (mounted.current) { setRecoveryBlocked(true); setError(userFacingMessage(reason, "原请求恢复失败。")); }
+        if (mounted.current) { setRecoveryBlocked(true); setError(userFacingMessage(reason, "没能恢复刚才的操作，请再试一次。")); }
       } finally { if (mounted.current) setRecovering(false); }
     }
     void restore();

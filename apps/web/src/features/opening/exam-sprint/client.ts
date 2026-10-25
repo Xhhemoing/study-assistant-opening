@@ -75,7 +75,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         publish(result);
         if (command.lessonRequest && result.overview && !isCurrentSprintLessonRequest(result.overview, command.lessonRequest)) {
           pending = null;
-          publish({ uncertain: false, error: "已读取最新进度，原串讲请求的训练或内容版本已变更，请重新选择串讲。" });
+          publish({ uncertain: false, error: "题包内容刚更新过，请重新选择串讲。" });
           return result;
         }
       }

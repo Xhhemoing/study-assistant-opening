@@ -83,6 +83,6 @@ describe("budget response boundary", () => {
     const request = vi.fn().mockResolvedValueOnce(Response.json({ secret: "do not display" }, { status: 500 })).mockResolvedValueOnce(Response.json({ courseId }));
     const signal = new AbortController().signal;
     await expect(readSprintBudget(courseId, signal, request)).rejects.toThrow("当前正式安排没有改变");
-    await expect(readSprintBudget(courseId, signal, request)).rejects.toThrow("无法核验");
+    await expect(readSprintBudget(courseId, signal, request)).rejects.toThrow("暂时读不懂");
   });
 });

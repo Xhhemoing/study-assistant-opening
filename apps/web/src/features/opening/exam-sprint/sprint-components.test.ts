@@ -45,7 +45,7 @@ describe("exam sprint UI boundaries", () => {
   it.each(["legacy_untracked_source", "unverifiable_source"] as const)("explains %s as unknown evidence without calling it help", kind => {
     const covered = { ...attempt, independent: false, exposureCoverage: { kind, packSourceId: "11111111-1111-4111-8111-111111111111", sourceVersion: 2 } };
     const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: covered, disabled: false, send: () => undefined }));
-    expect(html).toContain("早期资料曝光无法核验，当前不计独立证据");
+    expect(html).toContain("这道题之前可能见过材料，这次不单独计分");
     expect(html).not.toContain("含帮助");
     expect(html).not.toContain("未见题族独立作答");
     expect(hasSprintAttemptHelp(covered)).toBe(false);
@@ -87,7 +87,7 @@ describe("exam sprint UI boundaries", () => {
     const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: partial, disabled: false, send: () => undefined }));
     expect(html).toContain("含帮助，不计独立正确");
     expect(html).not.toContain("未见题族独立作答");
-    expect(html).not.toContain("早期资料曝光无法核验");
+    expect(html).not.toContain("这道题之前可能见过材料");
   });
 
   it("offers an exact lesson button and stable original-question target after a mock is submitted", () => {

@@ -9,7 +9,7 @@ import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const statuses: Record<SprintBudgetResponse["status"], string> = {
   ready: "只读预估，尚未应用", needs_goal: "请先设置课程考试日期和时间预算。",
-  needs_settings: "请先在时间设置中保存每天可用窗口。", invalid_settings: "保存的目标或时间设置无法核验，请检查后重试。",
+  needs_settings: "请先在时间设置中保存每天可用窗口。", invalid_settings: "目标或时间设置好像不对，请检查后再试。",
   deadline_reached: "目标日期已到，不再把待办自动塞进考试当天。请先调整目标。",
 };
 const reasons: Record<string, string> = {

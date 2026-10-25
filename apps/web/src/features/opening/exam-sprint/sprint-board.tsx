@@ -121,7 +121,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       remember(recovery);
       sent = true;
       const result = await resumeSprintAcceptance(courseId, recovery.date, input, api);
-      if (result.id !== input.draftId || result.date !== recovery.date || result.status !== "accepted" || result.version <= input.expectedBaseVersion) throw new Error("应用回执尚未核实，请保留原请求并重新读取。");
+      if (result.id !== input.draftId || result.date !== recovery.date || result.status !== "accepted" || result.version <= input.expectedBaseVersion) throw new Error("还不确定计划是否已应用，请刷新后再看。");
       applied = true;
       if (!mounted.current) return;
       setMessage("安排已应用，正在刷新任务…");
@@ -132,7 +132,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
       hydrate(next); setAdjusting(false); setMessage("安排已应用。");
     } catch (reason) {
       if (!mounted.current) return;
-      setError(applied ? "安排已应用，任务暂未刷新。请重新读取最新计划，并核对原应用请求。" : sent ? `${planAcceptFailure(reason).message} 原计划、候选和应用请求已保留；请重新读取后核对或重试原请求。` : userFacingMessage(reason, "恢复记录保存失败，尚未发送应用请求。"));
+      setError(applied ? "安排已应用，任务暂未刷新。请重新读取最新计划，并核对原应用请求。" : sent ? `${planAcceptFailure(reason).message} 原来的计划没有改动，可以刷新后再试。` : userFacingMessage(reason, "恢复记录保存失败，尚未发送应用请求。"));
       if (applied) { setData(null); setMessage(""); }
     } finally { flight.current = false; if (mounted.current) setBusy(false); }
   }

@@ -19,7 +19,7 @@ describe("sprint lesson navigation", () => {
     expect(prepareSprintLesson(data, "missing")).toBeNull();
     data.pack.lessons[0]!.exposureIdentity = null;
     expect(prepareSprintLesson(data, lesson.id)).toBeNull();
-    expect(sprintLessonUnavailableReason(data, lesson.id)).toContain("版本");
+    expect(sprintLessonUnavailableReason(data, lesson.id)).toContain("暂时打不开");
     data.activeRun = { id: "mock-1", mode: "mock-a", questionIds: [], startedAt: data.state.startedAt, deadlineAt: null, completedAt: null };
     expect(prepareSprintLesson(data, lesson.id)).toBeNull();
     expect(sprintLessonUnavailableReason(data, lesson.id)).toContain("交卷");
