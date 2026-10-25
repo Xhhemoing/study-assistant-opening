@@ -10,7 +10,7 @@
  * untouched. Commands that collide with a valid escape letter (t f b n r u) are
  * only treated as LaTeX when the whole word is a known command.
  */
-const COLLIDING_LATEX = new Set([
+const COLLIDING_LATEX: ReadonlySet<string> = new Set([
   // \t
   "times", "tau", "theta", "tan", "tanh", "text", "textbf", "textit", "textrm", "tfrac", "tilde", "to", "top", "triangle", "therefore", "tag",
   // \f
@@ -24,6 +24,12 @@ const COLLIDING_LATEX = new Set([
   // \u
   "underline", "underbrace", "cup", "uparrow", "Uparrow", "upsilon",
 ]);
+
+/**
+ * LaTeX command names (without the backslash) whose first letter is also a JSON
+ * escape letter. Shared with the stored-data repair below and its maintenance script.
+ */
+export const LATEX_COMMANDS_COLLIDING_WITH_JSON_ESCAPES: ReadonlySet<string> = COLLIDING_LATEX;
 
 const VALID_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t", "u"]);
 
@@ -59,4 +65,76 @@ export function escapeLatexInJsonStrings(text: string): string {
 /** JSON.parse that keeps single-backslash LaTeX intact. */
 export function parseModelJson(text: string): unknown {
   return JSON.parse(escapeLatexInJsonStrings(text));
+}
+
+/** Control character JSON.parse produced from "\\<letter>" -> that letter. */
+const DECODED_ESCAPE_LETTER: Readonly<Record<string, string>> = {
+  "\t": "t", "\f": "f", "\b": "b", "\n": "n", "\r": "r",
+};
+
+/**
+ * Undo LaTeX that a plain JSON.parse already decoded before parseModelJson existed:
+ * TAB+"imes" -> "\\times", FF+"rac" -> "\\frac", BS+"eta" -> "\\beta",
+ * LF+"eq" -> "\\neq", CR+"ight" -> "\\right".
+ *
+ * Only a control character followed by the rest of a whole known command word is
+ * rewritten. Inside $...$ / $$...$$ every known command is repaired. Outside math a
+ * real line break or tab before ordinary text is plausible, so LF/TAB are repaired only
+ * when at least two letters follow and the result is not a likely English word on a new
+ * line ("\\neq", "\\times", "\\nabla" yes; "\\ne" ("e.g."), "\\nu", "\\to", "\\tan" ("an"),
+ * "\\top", "\\tag", "\\nmid" ("mid") no). FF/BS/CR never precede letters in real text.
+ * Text stored before parseModelJson existed could not contain an invalid JSON escape
+ * (JSON.parse threw on "\\cdot", "\\(", "\\$"), so "$" is the only math delimiter.
+ */
+const PROSE_LOOKALIKE_COMMANDS: ReadonlySet<string> = new Set(["tan", "top", "tag", "nmid"]);
+
+export function repairDecodedLatexEscapes(text: string): { text: string; repairs: number } {
+  if (!/[\t\f\b\n\r]/.test(text)) return { text, repairs: 0 };
+  let out = "";
+  let repairs = 0;
+  let inlineMath = false;
+  let displayMath = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch === "$") {
+      if (text[i + 1] === "$") { displayMath = !displayMath; out += "$$"; i += 1; continue; }
+      if (!displayMath) inlineMath = !inlineMath;
+      out += ch;
+      continue;
+    }
+    const letter = DECODED_ESCAPE_LETTER[ch];
+    if (letter) {
+      const rest = /^[A-Za-z]+/.exec(text.slice(i + 1))?.[0] ?? "";
+      const command = letter + rest;
+      const inMath = inlineMath || displayMath;
+      const proseSafe = (ch !== "\n" && ch !== "\t") || (rest.length >= 2 && !PROSE_LOOKALIKE_COMMANDS.has(command));
+      if (rest && COLLIDING_LATEX.has(command) && (inMath || proseSafe)) {
+        out += "\\" + command;
+        i += rest.length;
+        repairs += 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return { text: out, repairs };
+}
+
+/** Apply repairDecodedLatexEscapes to every string value (never to object keys). */
+export function repairDecodedLatexInJson<T>(value: T): { value: T; repairs: number } {
+  let repairs = 0;
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") {
+      const repaired = repairDecodedLatexEscapes(node);
+      repairs += repaired.repairs;
+      return repaired.text;
+    }
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node as Record<string, unknown>).map(([key, item]) => [key, walk(item)]));
+    }
+    return node;
+  };
+  const next = walk(value) as T;
+  return { value: repairs ? next : value, repairs };
 }

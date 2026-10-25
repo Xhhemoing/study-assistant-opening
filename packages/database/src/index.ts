@@ -150,6 +150,12 @@ export {
   ensureCourseContinueActivity,
   type OpeningTeachingActivitiesRepository,
 } from "./repositories/opening-teaching-activities";
+export {
+  repairOpeningLatexEscapes,
+  type LatexRepairOptions,
+  type LatexRepairReport,
+  type LatexRepairTableReport,
+} from "./repositories/opening-latex-escape-repair";
 export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
 
 export {

@@ -21,6 +21,7 @@ import type {
   TeachingVerificationStatus,
 } from "@aistudy/contracts";
 import { mergeCheckpointResumePatch } from "@aistudy/domain";
+import { repairDecodedLatexInJson } from "@aistudy/ai";
 import { readOpeningTeachingAnswerKey } from "./opening-teaching-hints";
 import { mapLearningAttempt } from "./opening-learning-attempts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
@@ -170,7 +171,9 @@ export function redactBlocksForClientInit(
       position: ref.position,
       blockType,
       role,
-      content: body?.content ?? null,
+      // Revisions are append-only; LaTeX decoded by the pre-parseModelJson compiler
+      // (TAB+"imes" for \times ...) is repaired on the way out instead of in place.
+      content: body?.content ? repairDecodedLatexInJson(body.content).value : null,
     };
   });
 }
