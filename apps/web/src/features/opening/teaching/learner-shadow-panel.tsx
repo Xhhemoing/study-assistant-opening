@@ -49,6 +49,6 @@ export function LearnerShadowPanel({ courseId, revision = 0 }: { courseId?: stri
   }, [expanded, courseId, revision]);
   return <details className="border-t border-line pt-3 text-xs text-text-2" onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary className="cursor-pointer py-1 font-medium">影子预测比较 · 仅实验，未校准</summary>
-    {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取实验回执…</p> : null}
+    {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取…</p> : null}
   </details>;
 }

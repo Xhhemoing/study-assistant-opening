@@ -9,6 +9,7 @@ import { buttonClass, inputClass, secondaryButtonClass, textareaClass, ui } from
 import { type SnippetDraft, type SnippetSaveResult } from "./save-snippet";
 import { readSnippetSaveReceipt, saveSnippetWithReceipt, snippetSaveIdentity, startAnotherSnippetSave, subscribeSnippetSave } from "./snippet-save-receipt";
 import { libraryNotePath } from "../../editor/library-paths";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type Props = { draft: SnippetDraft; api: Pick<OpeningApi, "createSnippet">; onClose: () => void };
 
@@ -33,7 +34,7 @@ export function SaveSnippetDialog({ draft, api, onClose }: Props) {
         setBusy(receipt?.status === "pending");
         if (receipt?.status === "saved") setResult({ kind: "saved", documentId: receipt.documentId });
         if (receipt?.status === "unknown") setResult({ kind: "unknown" });
-      } catch { setStorageError("保存回执暂不可读取，已停止写入。请先检查笔记列表。"); }
+      } catch { setStorageError("暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。"); }
     };
     const unsubscribe = subscribeSnippetSave(identity, update); update(); return unsubscribe;
   }, [identity]);
@@ -56,7 +57,7 @@ export function SaveSnippetDialog({ draft, api, onClose }: Props) {
     setBusy(true);
     setResult(null);
     try { setResult(await saveSnippetWithReceipt(identity, input, value => api.createSnippet(value))); }
-    catch (reason) { setStorageError(reason instanceof Error ? reason.message : "无法保留保存请求，尚未发送。"); }
+    catch (reason) { setStorageError(userFacingMessage(reason, "无法保留保存请求，尚未发送。")); }
     finally { setBusy(false); }
   }
 
@@ -69,7 +70,7 @@ export function SaveSnippetDialog({ draft, api, onClose }: Props) {
         <button type="button" className={ui.icon} aria-label="关闭保存片段" disabled={busy} onClick={onClose}><X size={16} aria-hidden /></button>
       </header>
       <div className="space-y-4 px-5 py-4">
-        {recovery.blocked || storageError ? <p role="alert" className="text-xs text-warn">{storageError || "保存回执暂不可读取，已停止写入。请先检查笔记列表。"}</p> : null}
+        {recovery.blocked || storageError ? <p role="alert" className="text-xs text-warn">{storageError || "暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。"}</p> : null}
         {draft.notice ? <p role="status" className="rounded-md border border-warn/25 bg-warn-soft px-3 py-2 text-xs leading-6 text-warn">{draft.notice}</p> : null}
         <div id={descriptionId} className="space-y-1 text-xs leading-6 text-text-2">
           <p>保存为关联笔记；原材料的隐私限制继续适用。</p>
