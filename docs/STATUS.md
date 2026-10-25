@@ -20,7 +20,8 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
-| PDF staging >10MiB 修复（2026-10-25） | Hermes | `fix/deployed-upload-20261025` | Next middleware 请求体克隆上限与既有 PDF 50MiB 额度对齐；隔离真实 HTTP 已复现旧 10MiB 截断并验证 11MiB（定长/分块）、50MiB 上传及 Origin/身份/超额拒绝；4 文件46项定向测试与 Web 类型检查通过。未部署，线上真实资料与用户浏览器待验。 |
+| OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
+
 | A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
 | R-04 首次提交自动批改（2026-10-25） | Hermes | `feat/sprint-a1-autograde-policy-20261024` | 已补独立工作区开关、旧客户端保留OFF、锁内重读与统一日界、仅自动来源计数、入队前只读预算估算、明确跳过原因及手动重批。0097原样保留已推送文件（非生产发布证明），0098在新隔离库连续98迁移校验通过。最终策略PG17项、最新路由/UI39项、Worker18项及相关类型通过；照片/PDF严格身份写回与状态/备份4项定向通过，旧备份失败已定向修复，批次不相加。S3兼容隔离恢复4项通过不代表生产MinIO。完整新head CI、用户浏览器与真实模型待验；未合并部署。 |
 | UI v5 整合与部署（2026-10-23） | Hermes | [#112](https://github.com/Xhhemoing/study-assistant-opening/pull/112) · `feat/ui-v5` | 整合最新正式分支学习可靠性与v5动效/材质/导航/分栏/助理全页，保留会话和作答恢复；具体CI与部署状态以PR和服务器发布记录为准。用户浏览器与真实模型待验收。 |
