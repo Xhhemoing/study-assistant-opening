@@ -112,6 +112,7 @@ const RESTORE_GUARANTEES: OpeningRestoreApplyGuarantees = {
 export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_ORDER)[number], readonly string[]> = {
   workspace_preferences: [
     "workspace_id", "default_entry", "ai_settings", "planning_settings", "adaptive_planning", "intervention_settings",
+    "auto_grade_on_save",
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
   ],
@@ -215,7 +216,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "source_versions", "reference_check", "submitted_intent", "history_revision", "workspace_history_revision",
     "root_observation_id", "revises_observation_id", "revision_kind", "revision_reason", "actor_id",
     "effective_head_id", "server_evaluation", "ai_evaluation",
-    "answer_revision", "grading_work_source", "grading_operation_id",
+    "answer_revision", "grading_work_source", "grading_operation_id", "auto_grade_enqueued_at",
   ],
   opening_skill_evidence: [
     "id", "workspace_id", "owner_user_id", "course_id", "node_id", "observation_id", "dimension", "created_at",

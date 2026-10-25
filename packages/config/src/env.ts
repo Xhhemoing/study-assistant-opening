@@ -29,7 +29,16 @@ export function loadOpeningUploadQuota(source: NodeJS.ProcessEnv = process.env):
   return { maxBytes: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_BYTES, maxObjects: parsed.data.OPENING_UPLOAD_MAX_WORKSPACE_OBJECTS };
 }
 
+const autoGradeCapSchema = z.string().trim().regex(/^\d+$/).default("50").transform(Number).pipe(z.number().int().min(0).max(10000));
+/** Independent save-time request count, not a monetary budget. */
+export function loadOpeningAutoGradeDailyCap(source: NodeJS.ProcessEnv = process.env): number {
+  const result = autoGradeCapSchema.safeParse(source.OPENING_AUTO_GRADE_DAILY_CAP);
+  if (!result.success) throw new EnvValidationError(["OPENING_AUTO_GRADE_DAILY_CAP: expected integer 0–10000"]);
+  return result.data;
+}
+
 const envSchema = z.object({
+  OPENING_AUTO_GRADE_DAILY_CAP: autoGradeCapSchema,
   ...openingUploadQuotaFields,
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),

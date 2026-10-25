@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createOpeningAttemptService } from "./attempt-service";
+vi.mock("./auto-grade-policy", () => ({ resolveAutoGradePolicy: async () => ({ enabled: true, modelAvailable: true, dailyCap: 50 }) }));
 
 const NODE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
 const COURSE = "00000000-0000-4000-8000-0000000000c1";
@@ -78,7 +79,7 @@ describe("attempt submit retest SkillEvidence enrichment", () => {
         assistance: "independent",
         skillLabel: "chain rule",
       }),
-      { workSource: undefined },
+      { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined },
     );
   });
 });

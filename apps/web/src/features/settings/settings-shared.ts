@@ -16,12 +16,14 @@ export const guidanceModes: Array<{ value: GuidanceMode; label: string }> = [
 ];
 
 export const disabledLearningPreferences: LearningPreferences = {
+  autoGradeOnSave: true,
   assessmentEnabled: false,
   retestSuggestionsEnabled: false,
   automaticRemindersEnabled: false,
 };
 
 export const learningSwitches: Array<{ key: keyof LearningPreferences; label: string }> = [
+  { key: "autoGradeOnSave", label: "首次提交自动批改（工作区）" },
   { key: "assessmentEnabled", label: "自动评价" },
   { key: "retestSuggestionsEnabled", label: "补测建议" },
   { key: "automaticRemindersEnabled", label: "自动学习提醒" },

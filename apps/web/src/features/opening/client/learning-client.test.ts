@@ -64,7 +64,7 @@ const ISO = "2026-09-28T10:00:00.000Z";
 
 it("reads grading status without enqueueing and validates the asynchronous enqueue response", async () => {
   const status = { rootObservationId: OBSERVATION, headObservationId: OBSERVATION, answerRevision: 1,
-    jobId: ATTEMPT, status: "queued", retryable: false, workSource: null };
+    jobId: ATTEMPT, status: "queued", retryable: false, autoGradeSkipped: null, workSource: null };
   const transport = vi.fn(async () => Response.json(status, { status: 202 }));
   const client = createOpeningLearningClient(transport);
   expect(await client.getGradingStatus(OBSERVATION)).toEqual(status);

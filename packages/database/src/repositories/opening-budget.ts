@@ -10,7 +10,7 @@ import {
   resolveBudgetTimeZone,
   resolveEffectiveDailyCap,
 } from "@aistudy/ai";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export type OpeningBudgetErrorCode = "CONFLICT" | "NOT_FOUND" | "BUDGET_EXCEEDED" | "BUDGET_INVALID_RESERVE" | "REQUEST_CAP_EXCEEDED" | "PARENT_BUDGET_EXCEEDED" | "PARENT_BUDGET_CALL_LIMIT" | "PARENT_BUDGET_OUTCOME_UNKNOWN" | "PARENT_BUDGET_BLOCKED";
@@ -228,21 +228,112 @@ function readWorkspaceBudget(aiSettings: unknown): {
   return { workspaceCapCents, confirmed };
 }
 
-export function createOpeningBudgetRepository(
-  sql: Sql,
-  options: OpeningBudgetRepositoryOptions = { envCapCents: 0 },
-): OpeningBudgetRepository {
+type BudgetSql = Sql | TransactionSql;
+export type OpeningBudgetCheckInput = Pick<ReserveInput, "amountCents" | "modelSnapshot" | "requestCapPerDay">;
+export type OpeningBudgetAvailability = {
+  allowed: boolean;
+  reason: "budget" | "request_cap" | null;
+  requiredCents: number;
+  availableCents: number;
+  localDay: string;
+};
+
+function validateBudgetOptions(options: OpeningBudgetRepositoryOptions) {
   if (!Number.isSafeInteger(options.envCapCents) || options.envCapCents < 0) {
     throw new Error("invalid daily budget cap");
   }
-  const fallbackTimeZone = resolveBudgetTimeZone(options.timeZone);
-  const onReconcileAlert = options.onReconcileAlert;
   const unknownAgeMs = options.unknownAgeMs ?? OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS;
   if (!Number.isSafeInteger(unknownAgeMs) || unknownAgeMs <= 0) {
     throw new Error("invalid unknown reservation age");
   }
-  const ceilingCents = options.ceilingCents ?? OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS;
-  const pricingConfigured = options.pricingConfigured ?? true;
+  return { unknownAgeMs };
+}
+
+function validateBudgetInput(input: OpeningBudgetCheckInput) {
+  const requestCap = input.requestCapPerDay;
+  const zeroCost = input.amountCents === 0;
+  if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 0) {
+    throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "amount must be a positive integer");
+  }
+  if (requestCap !== undefined && (!Number.isSafeInteger(requestCap) || requestCap <= 0)) {
+    throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "request cap must be a positive integer");
+  }
+  const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
+  if (zeroCost && (requestCap === undefined || modelSnapshot === null)) {
+    throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "zero-cost reservation requires a model and a request cap");
+  }
+  return { requestCap, zeroCost, modelSnapshot };
+}
+
+async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBudgetRepositoryOptions) {
+  const prefs = await tx`
+    SELECT ai_settings, planning_settings FROM workspace_preferences WHERE workspace_id = ${workspaceId}
+  `;
+  const { workspaceCapCents, confirmed } = readWorkspaceBudget(prefs[0]?.ai_settings ?? null);
+  const effective = resolveEffectiveDailyCap({
+    envCapCents: options.envCapCents,
+    workspaceCapCents,
+    confirmed,
+    pricingConfigured: options.pricingConfigured ?? true,
+    ceilingCents: options.ceilingCents ?? OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
+  });
+  const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
+  const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? options.timeZone));
+  return { capCents: effective.capCents, budgetDay };
+}
+
+// One ledger predicate for admission and atomic reserve. Unknown rows remain reserved.
+function chargedBudgetRows(tx: BudgetSql, workspaceId: string, day: ReturnType<typeof resolveBudgetLocalDay>) {
+  return tx`workspace_id=${workspaceId} AND (
+    state='reserved' OR
+    (state='completed' AND created_at >= ${day.dayStart} AND created_at < ${day.nextDayStart})
+  )`;
+}
+
+async function requestCapReached(tx: BudgetSql, workspaceId: string,
+  day: ReturnType<typeof resolveBudgetLocalDay>, modelSnapshot: OpeningModelSnapshot | null, requestCap: number | undefined) {
+  if (requestCap === undefined || modelSnapshot === null) return false;
+  const [used] = await tx`
+    SELECT count(*)::int AS n FROM opening_budget_reservations
+    WHERE workspace_id=${workspaceId} AND state <> 'released'
+      AND model_snapshot->>'id' = ${modelSnapshot.id}
+      AND created_at >= ${day.dayStart} AND created_at < ${day.nextDayStart}
+  `;
+  return Number(used?.n ?? 0) >= requestCap;
+}
+
+/**
+ * Advisory, read-only admission check on the supplied connection/transaction.
+ * Does not reserve, lock, reconcile TTL rows or guarantee later execution. Old
+ * reserved rows may conservatively reject where reserve's TTL reconcile would
+ * move them to completed on an earlier day. Atomic reserve remains mandatory.
+ */
+export async function checkOpeningBudgetAvailable(
+  sqlOrTx: BudgetSql,
+  scope: OpeningScope,
+  input: OpeningBudgetCheckInput,
+  options: OpeningBudgetRepositoryOptions = { envCapCents: 0 },
+): Promise<OpeningBudgetAvailability> {
+  validateBudgetOptions(options);
+  const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
+  const owners = await sqlOrTx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
+  const { capCents, budgetDay } = await capAndDay(sqlOrTx, scope.workspaceId, options);
+  const [usage] = await sqlOrTx`SELECT COALESCE(sum(amount_cents), 0) AS cents
+    FROM opening_budget_reservations WHERE ${chargedBudgetRows(sqlOrTx, scope.workspaceId, budgetDay)}`;
+  const availableCents = Math.max(0, capCents - Number(usage?.cents ?? 0));
+  const reason = await requestCapReached(sqlOrTx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)
+    ? "request_cap" : !zeroCost && input.amountCents > availableCents ? "budget" : null;
+  return { allowed: reason === null, reason, requiredCents: input.amountCents, availableCents, localDay: budgetDay.localDate };
+}
+
+export function createOpeningBudgetRepository(
+  sql: Sql,
+  options: OpeningBudgetRepositoryOptions = { envCapCents: 0 },
+): OpeningBudgetRepository {
+  const { unknownAgeMs } = validateBudgetOptions(options);
+  const budgetOptions = options;
+  const onReconcileAlert = options.onReconcileAlert;
 
   // Least privilege: every post-reserve mutation/read is bound to the caller's
   // owned workspace. A foreign or unowned row is indistinguishable from absent.
@@ -274,24 +365,7 @@ export function createOpeningBudgetRepository(
     }
     return mapReservation(rows[0] as Record<string, unknown>);
   };
-  // Effective cap + local budget day for a workspace (same rules as reserve).
-  const capAndDay = async (tx: Sql, workspaceId: string) => {
-    const prefs = await tx`
-      SELECT ai_settings, planning_settings FROM workspace_preferences WHERE workspace_id = ${workspaceId}
-    `;
-    const { workspaceCapCents, confirmed } = readWorkspaceBudget(prefs[0]?.ai_settings ?? null);
-    const effective = resolveEffectiveDailyCap({
-      envCapCents: options.envCapCents,
-      workspaceCapCents,
-      confirmed,
-      pricingConfigured,
-      ceilingCents,
-    });
-    // TZ01: local budget day; prefer workspace planning_settings.timeZone.
-    const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
-    const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? fallbackTimeZone));
-    return { capCents: effective.capCents, budgetDay };
-  };
+
   const byId = async (scope: OpeningScope, reservationId: string): Promise<BudgetReservationRecord> => {
     const rows = await sql`
       SELECT * FROM opening_budget_reservations WHERE id = ${reservationId} AND ${inScope(scope)}
@@ -308,19 +382,7 @@ export function createOpeningBudgetRepository(
         try { assertParentInteractionBudget(input.parentBudget); }
         catch { throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "invalid parent interaction budget"); }
       }
-      const requestCap = input.requestCapPerDay;
-      const zeroCost = input.amountCents === 0;
-      if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 0) {
-        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "amount must be a positive integer");
-      }
-      if (requestCap !== undefined && (!Number.isSafeInteger(requestCap) || requestCap <= 0)) {
-        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "request cap must be a positive integer");
-      }
-      const modelSnapshot = input.modelSnapshot ? openingModelSnapshotSchema.parse(input.modelSnapshot) : null;
-      // A zero-cost call is only legitimate for a free-tier model with a request cap.
-      if (zeroCost && (requestCap === undefined || modelSnapshot === null)) {
-        throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "zero-cost reservation requires a model and a request cap");
-      }
+      const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
       try {
       return await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -348,7 +410,7 @@ export function createOpeningBudgetRepository(
           ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
 
-        const { capCents, budgetDay } = await capAndDay(tx as unknown as Sql, scope.workspaceId);
+        const { capCents, budgetDay } = await capAndDay(tx, scope.workspaceId, options);
 
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
         const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
@@ -410,16 +472,8 @@ export function createOpeningBudgetRepository(
           }
         }
 
-        if (requestCap !== undefined && modelSnapshot) {
-          const [used] = await tx`
-            SELECT count(*)::int AS n FROM opening_budget_reservations
-            WHERE workspace_id=${scope.workspaceId} AND state <> 'released'
-              AND model_snapshot->>'id' = ${modelSnapshot.id}
-              AND created_at >= ${budgetDay.dayStart} AND created_at < ${budgetDay.nextDayStart}
-          `;
-          if (Number(used?.n ?? 0) >= requestCap) {
-            throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
-          }
+        if (await requestCapReached(tx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)) {
+          throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
         }
 
         // Count all current reserved rows plus completed spend on the local day
@@ -430,11 +484,7 @@ export function createOpeningBudgetRepository(
           SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${input.parentBudget?.id ?? null}
           WHERE ${zeroCost} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
-            WHERE workspace_id=${scope.workspaceId} AND (
-              state='reserved' OR
-              (state='completed' AND created_at >= ${budgetDay.dayStart}
-                AND created_at < ${budgetDay.nextDayStart})
-            )
+            WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
           ), 0) <= ${capCents}
           RETURNING *
         `;
@@ -549,7 +599,7 @@ export function createOpeningBudgetRepository(
         // A late receipt is real spend that bypassed the reserve-time cap
         // check. If it pushes local-day usage over the cap, record an audited
         // cap_overrun event and raise the alert hook: never silent.
-        const { capCents, budgetDay } = await capAndDay(tx as unknown as Sql, row.workspaceId);
+        const { capCents, budgetDay } = await capAndDay(tx, row.workspaceId, budgetOptions);
         const usage = await tx`
           SELECT COALESCE(sum(amount_cents), 0)::int AS used FROM opening_budget_reservations
           WHERE workspace_id = ${row.workspaceId} AND (

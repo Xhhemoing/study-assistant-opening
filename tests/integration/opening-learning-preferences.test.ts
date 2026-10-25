@@ -35,14 +35,14 @@ describe("opening learning preferences", () => {
 
   it("defaults to disabled without an explicit choice and keeps default entry separate", async () => {
     const preferences = createWorkspacePreferencesRepository(fixture.sql);
-    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({
+    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false,
     });
     await preferences.setLearningPreferences(fixture.scope, {
       assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true,
     });
     expect(await preferences.getDefaultEntry(fixture.scope.workspaceId)).toBeNull();
-    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({
+    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true,
     });
   });
@@ -60,17 +60,47 @@ describe("opening learning preferences", () => {
     expect((await readLearningPreferences(fixture.sql, fixture.scope, courseId)).retestSuggestionsEnabled).toBe(false);
     await setCourseLearningPreferences(fixture.sql, fixture.scope, courseId,
       { automaticRemindersEnabled: false });
-    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({
+    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: false,
     });
     await fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
-    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({
+    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false,
     });
     await fixture.sql`UPDATE courses SET archived_at=NULL WHERE id=${courseId}`;
-    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({
+    expect(await readLearningPreferences(fixture.sql, fixture.scope, courseId)).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: false,
     });
+  });
+
+  it("persists workspace auto grading OFF through authenticated updates and course changes", async () => {
+    const headers = { cookie: fixture.cookie, "content-type": "application/json" };
+    // PUT replaces the full preference document; do not invent PATCH semantics.
+    for (const learningPreferences of [
+      { autoGradeOnSave: false, assessmentEnabled: true, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      { autoGradeOnSave: false, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      { autoGradeOnSave: false, assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false },
+    ]) {
+      const response = await putWorkspacePreferences(new Request("http://localhost/api/workspace/preferences", {
+        method: "PUT", headers, body: JSON.stringify({ learningPreferences }),
+      }));
+      expect(response.status).toBe(200);
+      const read = await getWorkspacePreferences(new Request("http://localhost/api/workspace/preferences", { headers }));
+      expect((await read.json()).learningPreferences.autoGradeOnSave).toBe(false);
+    }
+    await setCourseLearningPreferences(fixture.sql, fixture.scope, courseId, { assessmentEnabled: false });
+    expect((await readLearningPreferences(fixture.sql, fixture.scope, courseId)).autoGradeOnSave).toBe(false);
+    // Old HTTP clients send all original fields, but know nothing of the new switch.
+    const legacy = { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true };
+    const response = await putWorkspacePreferences(new Request("http://localhost/api/workspace/preferences", {
+      method: "PUT", headers, body: JSON.stringify({ learningPreferences: legacy }),
+    }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).learningPreferences).toEqual({ ...legacy, autoGradeOnSave: false });
+    const reread = await getWorkspacePreferences(new Request("http://localhost/api/workspace/preferences", { headers }));
+    expect((await reread.json()).learningPreferences).toEqual({ ...legacy, autoGradeOnSave: false });
+    const preferences = createWorkspacePreferencesRepository(fixture.sql);
+    await preferences.setLearningPreferences(fixture.scope, { ...await preferences.getLearningPreferences(fixture.scope), autoGradeOnSave: true });
   });
 
   it("serializes a consumer lock with a later account shutdown", async () => {
@@ -105,14 +135,14 @@ describe("opening learning preferences", () => {
     }));
     expect(account.status).toBe(200);
     expect((await (await getWorkspacePreferences(new Request("http://localhost/api/workspace/preferences", { headers }))).json()).learningPreferences)
-      .toEqual({ assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true });
+      .toEqual({ autoGradeOnSave: true, assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: true });
 
     const courseContext = { params: Promise.resolve({ id: courseId }) };
     const course = await putCoursePreferences(new Request(`http://localhost/api/opening/courses/${courseId}/preferences`, {
       method: "PUT", headers, body: JSON.stringify({ assessmentEnabled: false }),
     }), courseContext);
     expect(course.status).toBe(200);
-    expect((await course.json()).learningPreferences).toEqual({
+    expect((await course.json()).learningPreferences).toEqual({ autoGradeOnSave: true,
       assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false,
     });
     const foreign = await getCoursePreferences(new Request(`http://localhost/api/opening/courses/${otherCourseId}/preferences`, { headers }),

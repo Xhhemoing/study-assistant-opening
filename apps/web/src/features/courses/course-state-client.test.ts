@@ -18,7 +18,7 @@ describe("course state client", () => {
   it("sends an explicit inherit choice without opting the account into anything", async () => {
     const preferences = { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false };
     const fetcher = vi.fn(async () => Response.json({ learningPreferences: preferences }));
-    expect(await createCourseStateClient(fetcher).savePreferences(id, { assessmentEnabled: true })).toEqual(preferences);
+    expect(await createCourseStateClient(fetcher).savePreferences(id, { assessmentEnabled: true })).toEqual({ ...preferences, autoGradeOnSave: true });
     expect(fetcher).toHaveBeenCalledWith(`/api/opening/courses/${id}/preferences`, expect.objectContaining({ method: "PUT", body: '{"assessmentEnabled":true}' }));
   });
   it("reports a failed mutation instead of treating it as success", async () => {

@@ -54,7 +54,7 @@ export type ReservationTerms = {
  * How one call is reserved and settled. Paid models reserve the estimated token
  * cost (at least the floor); free-tier models reserve zero under their request cap.
  */
-export function reservationTerms(model: ResolvedTaskModel, input: ProviderInput, floorCents = 1): ReservationTerms {
+export function reservationTerms(model: Omit<ResolvedTaskModel, "provider">, input: ProviderInput, floorCents = 1): ReservationTerms {
   if (model.billing === "free_tier") {
     if (!model.dailyRequestCap) {
       throw new OpeningModelRoutingError("免费额度模型缺少每日请求上限，请到设置补全。");
@@ -130,6 +130,11 @@ export function createModelGateway(deps: {
       run: (model, operationId, info) => {
         options.onModel?.(model, info);
         const terms = reservationTerms(model, options.input, options.minReservedCents ?? 1);
+        if (!Number.isSafeInteger(terms.reservedCents) || terms.reservedCents < 0) {
+          // Pricing failed before any reservation or provider call. The explicit
+          // fallback remains eligible under the existing not-sent route rules.
+          throw new OpeningModelRoutingError("模型费用无法安全估算，请检查价格或选择备用模型。");
+        }
         return runBudgetedCall({
           provider: model.provider,
           modelSnapshot: model.modelSnapshot,

@@ -13,7 +13,9 @@ export async function learningAttemptFixture(fixture: OpeningFixture) {
   const submit = (attempt: Attempt, extra = {}) => learning.insertObservation(fixture.scope, {
     attemptId: attempt.id, sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId], problemId: attempt.problemId,
     answer: "1", outcome: "correct", assistance: "independent", clientKey: randomUUID(), ...extra,
-  });
+  }, { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50,
+    primaryModel: { modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture", inputCentsPerMillion: 0, outputCentsPerMillion: 0 }, inputCentsPerMillion: 0, outputCentsPerMillion: 0, billing: "free_tier", dailyRequestCap: 10000 },
+    dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000) } });
   const help = async (attempt: Attempt, level: "hinted" | "revealed" = "hinted") => {
     const conversation = await rows.conversation(), turnId = await rows.turn(conversation, [sourceId]);
     await fixture.sql`UPDATE opening_turns SET learning_session_id=${session.id},attempt_id=${attempt.id} WHERE id=${turnId}`;

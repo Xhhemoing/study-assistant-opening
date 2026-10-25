@@ -39,7 +39,7 @@ describe("course lifecycle through authenticated routes", () => {
     await setCourseLearningPreferences(f.sql, f.scope, course.id, { retestSuggestionsEnabled: false });
     const response = await courseRoute.GET(request(`/api/courses/${course.id}`), context(course.id));
     expect((await response.json()).course.learningPreferenceOverrides).toEqual({ retestSuggestionsEnabled: false });
-    expect(await readLearningPreferences(f.sql, f.scope, course.id)).toEqual({ assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+    expect(await readLearningPreferences(f.sql, f.scope, course.id)).toEqual({ autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
   });
 
   it("archives and restores without losing facts, tasks, sources or replaying queued suggestions", async () => {
@@ -61,7 +61,7 @@ describe("course lifecycle through authenticated routes", () => {
     expect(archived.status).toBe(200);
     const archivedAt = (await archived.json()).course.archivedAt;
     expect(archivedAt).toEqual(expect.any(String));
-    expect(await readLearningPreferences(f.sql, f.scope, learning.courseId)).toEqual({ assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+    expect(await readLearningPreferences(f.sql, f.scope, learning.courseId)).toEqual({ autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
     const repeated = await patch(request(`/api/courses/${learning.courseId}`, "PATCH", { archived: true }), context(learning.courseId));
     expect((await repeated.json()).course.archivedAt).toBe(archivedAt);
     const restored = await patch(request(`/api/courses/${learning.courseId}`, "PATCH", { archived: false }), context(learning.courseId));

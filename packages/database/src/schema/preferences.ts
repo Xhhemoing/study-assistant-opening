@@ -17,6 +17,7 @@ export const workspacePreferences = pgTable("workspace_preferences", {
     quietMode: false,
   }),
   assessmentEnabled: boolean("assessment_enabled"),
+  autoGradeOnSave: boolean("auto_grade_on_save"),
   retestSuggestionsEnabled: boolean("retest_suggestions_enabled"),
   automaticRemindersEnabled: boolean("automatic_reminders_enabled"),
   retestSuggestionsEnabledAt: timestamp("retest_suggestions_enabled_at", { withTimezone: true }),
