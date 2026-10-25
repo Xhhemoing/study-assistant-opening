@@ -77,10 +77,11 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
     ["WORKER_READY_TIMEOUT_MS", 30000, 1000, 300000],
     ["PARSER_PREFLIGHT_TIMEOUT_MS", 120000, 1000, 600000],
     ["PARSER_OCR_PREFLIGHT_TIMEOUT_MS", 120000, 1000, 600000],
+    ["PARSER_OCR_SEGMENT_TIMEOUT_SECONDS", 240, 1, 900],
     ["PARSER_PREFLIGHT_CACHE_TTL_MS", 3600000, 0, 86400000],
     ["WORKER_STARTUP_RETRY_INITIAL_MS", 5000, 1000, 300000],
     ["WORKER_STARTUP_RETRY_MAX_MS", 60000, 1000, 300000],
-  ].map(([name, value, min, max]): EnvVarSpec => ({ name: String(name), group: "runtime", doc: `${name}: milliseconds; default ${value}. Cache TTL 0 disables reuse; retry max must be >= initial.`, consumers: ["worker"], kind: "int", min: Number(min), max: Number(max), secret: false, dev: { value: String(value), commented: true }, docker: { value: String(value), commented: true } })),
+  ].map(([name, value, min, max]): EnvVarSpec => ({ name: String(name), group: "runtime", doc: `${name}: ${String(name).endsWith("_SECONDS") ? "seconds" : "milliseconds"}; default ${value}. Cache TTL 0 disables reuse; retry max must be >= initial.`, consumers: ["worker"], kind: "int", min: Number(min), max: Number(max), secret: false, dev: { value: String(value), commented: true }, docker: { value: String(value), commented: true } })),
   { name: "PUBLIC_BASE_URL", group: "runtime", doc: "Public web origin; cookie-auth Origin checks use it.", consumers: ["web"], kind: "url", secret: false, required: "always", dev: { value: "http://localhost:3000" }, docker: { value: "https://REPLACE_ME.example" } },
 
   { name: "OPENING_POSTGRES_USER", group: "compose", doc: "Compose Postgres user.", consumers: ["compose"], kind: "string", secret: false, docker: { value: "REPLACE_ME_pg_user" } },

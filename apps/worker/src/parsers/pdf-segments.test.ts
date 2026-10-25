@@ -120,6 +120,12 @@ describe("bounded resumable PDF parser", () => {
     expect([...d.data.values()].map(s => s.state === "failed" ? s.errorCode : s.state)).toEqual(["timeout", "ready"]);
   });
 
+  it("passes the configured OCR segment deadline to the parser", async () => {
+    const d = setup(1);
+    await parsePdfSegments({ ...d.input, timeoutSeconds: 900 });
+    expect(d.input.runner).toHaveBeenLastCalledWith(expect.arrayContaining(["--timeout-seconds", "900"]), expect.any(AbortSignal));
+  });
+
   it("polls execution serially and fails closed on revoked lease/privacy or unavailable DB", async () => {
     let calls = 0;
     const execution = await watchPdfExecution(async () => {

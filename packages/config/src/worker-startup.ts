@@ -20,6 +20,8 @@ export function loadWorkerStartupConfig(source: NodeJS.ProcessEnv = process.env)
     readyTimeoutMs: integer("WORKER_READY_TIMEOUT_MS", 30_000, 1_000, 300_000),
     parserTimeoutMs: integer("PARSER_PREFLIGHT_TIMEOUT_MS", 120_000, 1_000, 600_000),
     ocrTimeoutMs: integer("PARSER_OCR_PREFLIGHT_TIMEOUT_MS", 120_000, 1_000, 600_000),
+    // Keep the per-segment OCR fence below the existing 15-minute outer budget.
+    ocrSegmentTimeoutSeconds: integer("PARSER_OCR_SEGMENT_TIMEOUT_SECONDS", 240, 1, 900),
     parserCacheFile: source.PARSER_PREFLIGHT_CACHE_FILE?.trim() || ".tmp/parser-preflight-success.json",
     parserCacheTtlMs: integer("PARSER_PREFLIGHT_CACHE_TTL_MS", 3_600_000, 0, 86_400_000),
     initialMs, maxMs,

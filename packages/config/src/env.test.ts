@@ -19,6 +19,10 @@ it("strictly validates startup budgets, cache TTL, and bounded backoff", () => {
   expect(loadWorkerStartupConfig({}).parserTimeoutMs).toBe(120000);
   expect(loadWorkerStartupConfig({}).ocrTimeoutMs).toBe(120000);
   expect(loadWorkerStartupConfig({ PARSER_OCR_PREFLIGHT_TIMEOUT_MS: "240000" }).ocrTimeoutMs).toBe(240000);
+  expect(loadWorkerStartupConfig({ PARSER_OCR_SEGMENT_TIMEOUT_SECONDS: "900" }).ocrSegmentTimeoutSeconds).toBe(900);
+  for (const value of ["0", "-1", "1.5", "10tail", "901"]) {
+    expect(() => loadWorkerStartupConfig({ PARSER_OCR_SEGMENT_TIMEOUT_SECONDS: value })).toThrow(EnvValidationError);
+  }
   for (const value of ["0", "-1", "1.5", "10tail", "600001"]) {
     expect(() => loadWorkerEnv({ PARSER_OCR_PREFLIGHT_TIMEOUT_MS: value })).toThrow(EnvValidationError);
   }
