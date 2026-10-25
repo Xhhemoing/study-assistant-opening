@@ -16,6 +16,14 @@ export function filterConversations(rows: readonly ConversationSummary[], query:
     .filter(row => !needle || row.title.toLocaleLowerCase().includes(needle) || (row.lastTurnPreview ?? "").toLocaleLowerCase().includes(needle));
 }
 
+/**
+ * The full agent page opens a new conversation unless ?conversation= names one; it never
+ * silently resumes the most recent (possibly failed) conversation. The rail keeps history.
+ */
+export function agentStartsFresh(selectedId: string | null): boolean {
+  return selectedId === null;
+}
+
 /** 地址里的 ?conversation= 与当前会话同步（不新增历史记录、不触发路由刷新） */
 function syncConversationUrl(id: string | null) {
   const url = new URL(window.location.href);
@@ -87,7 +95,7 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
       </section>
       <div className="relative flex min-w-0 flex-1 flex-col">
         {!railOpen ? <button type="button" className={`${ui.iconSm} absolute left-2 top-2 z-30 hidden lg:inline-grid`} aria-label="展开会话列表" onClick={() => setRailOpen(true)}><PanelLeftOpen size={15} aria-hidden="true" /></button> : null}
-        <AssistantView key={selection.key} agent initialConversationId={selection.id} startFresh={selection.id === null && selection.key > 0}
+        <AssistantView key={selection.key} agent initialConversationId={selection.id} startFresh={agentStartsFresh(selection.id)}
           initialTitle="助理" onConversationChange={onConversationChange} />
       </div>
     </div>
