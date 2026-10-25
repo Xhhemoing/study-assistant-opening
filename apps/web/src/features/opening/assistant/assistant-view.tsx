@@ -1112,14 +1112,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       {startScreen && start ? <StartSuggestions {...start} objectHref={objectHref} onExample={setPrompt} /> : null}
     </div>
     {agent ? <section aria-label="产出与待确认" className="hidden w-(--layout-companion) shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg/60 px-4 py-3 xl:flex">
-      <section aria-labelledby="agent-proposals-heading" className="space-y-2">
+      <div className="space-y-2">
         <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">学习建议</h2>
         {privacy === "saved" && !loading ? <ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
-      </section>
-      <section aria-labelledby="agent-memory-heading" className="space-y-2 border-t border-line pt-3">
+      </div>
+      <div className="space-y-2 border-t border-line pt-3">
         <h2 id="agent-memory-heading" className="text-meta font-medium text-text-2">AI 记忆</h2>
         <MemoryPanel api={api} />
-      </section>
+      </div>
     </section> : null}
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
