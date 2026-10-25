@@ -109,7 +109,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectH
   const field = "w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm focus-visible:outline-accent";
   const needsObservation = kind === "propose_card" || kind === "flag_dispute";
   return <section aria-label="学习建议" className="space-y-3 pt-3">
-    <p className="text-xs leading-5 text-text-2">先检查并修改建议，接受后才更新学习安排、笔记或偏好。</p>
+    <p className="text-xs leading-5 text-text-2">这些是根据对话给出的建议，你点了接受才会生效。</p>
     {message ? <p role="status" className="text-sm text-warn">{message}</p> : null}
     <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => { void refresh().catch(error => setMessage(String(error))); }}>重新读取建议</button>
     {sourceTurnId ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void propose(); }}>
