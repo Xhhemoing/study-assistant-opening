@@ -288,7 +288,9 @@ describe("teaching inline attempts and answer gates", () => {
       await waitUntilBlocked(f.sql, writer.pid, holder.pid, "answer waits at barrier", order === "end-first" ? /opening_teaching_activities/ : /INSERT INTO opening_learning_observations/);
       if (order === "submit-first") {
         completing = track(createOpeningTeachingActivitiesRepository(completer.sql).setStatus(f.scope, seeded.activity.id, { status: "completed" }));
-        await waitUntilBlocked(f.sql, completer.pid, writer.pid, "completion waits for saved answer", /opening_teaching_activities/);
+        // Automatic admission holds the workspace row before the activity row;
+        // completion must wait on that earlier owner lock until submission commits.
+        await waitUntilBlocked(f.sql, completer.pid, writer.pid, "completion waits for saved answer", /SELECT id FROM workspaces WHERE id\s*=\s*\$1 AND owner_user_id\s*=\s*\$2 FOR SHARE/);
       }
       release();
       if (order === "end-first") await expect(writing).rejects.toMatchObject({ code: "CONFLICT" });

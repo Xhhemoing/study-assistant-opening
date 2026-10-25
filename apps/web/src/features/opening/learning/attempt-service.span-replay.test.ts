@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+vi.mock("./auto-grade-policy", () => ({ resolveAutoGradePolicy: async () => ({ enabled: true, modelAvailable: true, dailyCap: 50 }) }));
 const mocks = vi.hoisted(() => ({ access: vi.fn(), exposures: vi.fn(), insert: vi.fn(), spanLesson: vi.fn(), sql: vi.fn(), knowledge: vi.fn() }));
 vi.mock("@aistudy/database", () => ({
   createOpeningLearningAttemptRepository: () => ({ assertAccess: mocks.access }),
@@ -19,14 +20,14 @@ beforeEach(() => {
 it("keeps a dedicated span lesson's submitted assistance stable as later help increases", async () => {
   const service = createOpeningAttemptService(mocks.sql as unknown as Sql);
   await service.submit(scope, id, body);
-  expect(mocks.insert).toHaveBeenLastCalledWith(scope, expect.objectContaining({ assistance: "hinted", answer: "original" }), { submittedAssistance: "independent" });
+  expect(mocks.insert).toHaveBeenLastCalledWith(scope, expect.objectContaining({ assistance: "hinted", answer: "original" }), { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined, submittedAssistance: "independent" });
   mocks.exposures.mockResolvedValue(["hinted", "revealed"]);
   expect(await service.submit(scope, id, body)).toMatchObject({ id, assistance: "hinted" });
-  expect(mocks.insert).toHaveBeenLastCalledWith(scope, expect.objectContaining({ assistance: "revealed", answer: "original" }), { submittedAssistance: "independent" });
+  expect(mocks.insert).toHaveBeenLastCalledWith(scope, expect.objectContaining({ assistance: "revealed", answer: "original" }), { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined, submittedAssistance: "independent" });
   expect(mocks.knowledge).not.toHaveBeenCalled();
 });
 it("leaves the pre-existing normalized request semantics unchanged for legacy span sessions", async () => {
   mocks.spanLesson.mockResolvedValue(null);
   await createOpeningAttemptService(mocks.sql as unknown as Sql).submit(scope, id, body);
-  expect(mocks.insert).toHaveBeenCalledWith(scope, expect.objectContaining({ assistance: "hinted" }), { workSource: undefined });
+  expect(mocks.insert).toHaveBeenCalledWith(scope, expect.objectContaining({ assistance: "hinted" }), { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined });
 });

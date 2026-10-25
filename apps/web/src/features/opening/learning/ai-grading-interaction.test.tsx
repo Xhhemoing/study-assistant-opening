@@ -23,7 +23,7 @@ const evaluation: AiEvaluation = { observationId: record.id, attemptId: record.a
 const graded: LearningObservation = { ...record, id: "77777777-7777-4777-8777-777777777777", rootObservationId: record.id,
   verdictSource: "ai_graded", outcome: "correct", aiEvaluation: evaluation };
 const status = (patch: Partial<AiGradingStatus> = {}): AiGradingStatus => ({ rootObservationId: record.id, headObservationId: record.id,
-  answerRevision: 1, jobId: "11111111-1111-4111-8111-111111111111", status: "needs_manual", retryable: true, workSource: null, ...patch });
+  answerRevision: 1, jobId: "11111111-1111-4111-8111-111111111111", status: "needs_manual", retryable: true, autoGradeSkipped: null, workSource: null, ...patch });
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (error: Error) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 let container: HTMLDivElement, root: Root;
@@ -76,6 +76,45 @@ it("unknown cost exposes manual correction, never a retry that could resend", as
   api.getGradingStatus.mockResolvedValue(status({ status: "unknown_cost", retryable: false }));
   await renderCard({ onDispute: vi.fn() }); expect(container.textContent).toContain("不会重复发送");
   expect(container.textContent).not.toContain("重试批改"); await click("修改这一步"); expect(api.gradeObservation).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["disabled", "工作区已关闭", "手动批改"],
+  ["no_model", "尚无可用的批改模型", "手动批改"],
+  ["daily_cap", "今日自动批改额度已用完", "手动批改"],
+  ["budget", "预算不足以覆盖本次预估", "手动批改"],
+  ["budget_unavailable", "无法可靠估算本次批改费用", "手动批改"],
+  ["answer_changed", "不会自动重批", "重新批改"],
+] as const)("explains %s without auto POST and offers explicit manual grading", async (reason, message, label) => {
+  const revision = reason === "answer_changed" ? 2 : 1;
+  api.getGradingStatus.mockResolvedValue(status({ jobId: null, answerRevision: revision, autoGradeSkipped: reason }));
+  await renderCard(); expect(container.textContent).toContain(message);
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  api.gradeObservation.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await click(label); expect(api.gradeObservation).toHaveBeenCalledExactlyOnceWith({ observationId: record.id });
+});
+
+it("keeps regrading reachable when a corrected answer could otherwise complete the activity", async () => {
+  api.getGradingStatus.mockResolvedValue(status({ jobId: null, answerRevision: 2, autoGradeSkipped: "answer_changed" }));
+  const complete = vi.fn();
+  await renderCard({ record: { ...record, revisionKind: "replace", outcome: "incorrect" }, completionAction: { label: "继续练习", onClick: complete } });
+  expect(container.textContent).toContain("重新批改");
+  api.gradeObservation.mockResolvedValue(status({ status: "queued", retryable: false }));
+  await click("重新批改"); expect(api.gradeObservation).toHaveBeenCalledTimes(1); expect(complete).not.toHaveBeenCalled();
+});
+
+it("offers manual grading for an ungraded saved answer even without a skip reason", async () => {
+  api.getGradingStatus.mockResolvedValue(status({ jobId: null }));
+  await renderCard(); expect(container.textContent).toContain("手动批改");
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+});
+
+it.each(["answer_changed", "budget", "budget_unavailable"] as const)("unknown cost overrides a stale retry flag and %s skip reason", async reason => {
+  api.getGradingStatus.mockResolvedValue(status({ status: "unknown_cost", retryable: true, autoGradeSkipped: reason, answerRevision: 2 }));
+  await renderCard(); expect(container.textContent).toContain("不会重复发送");
+  expect(container.textContent).not.toContain("重新批改");
+  expect(container.textContent).not.toContain("手动批改");
+  expect(api.gradeObservation).not.toHaveBeenCalled();
 });
 
 it("ignores a stale poll/history response after switching to another answer", async () => {

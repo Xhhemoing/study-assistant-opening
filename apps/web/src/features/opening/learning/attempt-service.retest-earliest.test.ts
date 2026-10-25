@@ -10,6 +10,7 @@ const SOURCE = "00000000-0000-4000-8000-0000000000f1";
 const insertObservationMock = vi.fn(async (_scope: unknown, input: unknown) => input);
 const sqlRowsMock = vi.fn();
 
+vi.mock("./auto-grade-policy", () => ({ resolveAutoGradePolicy: async () => ({ enabled: true, modelAvailable: true, dailyCap: 50 }) }));
 vi.mock("@aistudy/database", () => ({
   createOpeningLearningAttemptRepository: () => ({
     create: vi.fn(),
@@ -117,7 +118,7 @@ describe("attempt submit retest earliest gate (DL11)", () => {
     expect(insertObservationMock).toHaveBeenCalledWith(
       scope,
       expect.objectContaining({ retestId: RETEST, answer: "42" }),
-      { workSource: undefined },
+      { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined },
     );
   });
 

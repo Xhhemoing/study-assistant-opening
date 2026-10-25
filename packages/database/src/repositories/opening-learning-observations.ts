@@ -1,4 +1,5 @@
 import { syncOpeningAutomaticErrorCard } from "./opening-auto-error-cards";
+import { readOpeningAutoGradeSkip, readOpeningAutoGradeAdmissionTime, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -15,17 +16,21 @@ import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluatio
 import type { AiGradingWorkSource } from "@aistudy/contracts";
 import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
+import { checkOpeningAutoGradeBudget } from "./opening-auto-grade-policy";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
-  opts: { workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
 export async function insertOpeningLearningObservationInTx(tx: TransactionSql, scope: Scope, input: ObservationInput,
-  opts: { workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   await lockWorkspaceLearningHistory(tx, scope);
+  // Preserve history -> workspace order; serialize with preference updates
+  // before lockLearningSession acquires the owner's shared lock.
+  if (opts.autoGrade) await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
   const session = await lockLearningSession(tx, scope, input.sessionId);
   if (session.course_id !== input.courseId || session.skill_label !== input.skillLabel) throw learningError("VALIDATION", "observation does not match its session course and skill");
   if (input.sourceIds.some((id) => !(session.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "observation source is outside the session");
@@ -176,8 +181,20 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     await tx`UPDATE opening_learning_observations SET source_ids=${context.sourceIds},source_versions=${tx.json(context.sourceVersions)} WHERE id=${id}`;
     Object.assign(rows[0], { source_ids: context.sourceIds, source_versions: context.sourceVersions });
   }
-  if (!controlledEvaluation && attempt && problemId && itemVersionId && (input.answer.trim() || opts.workSource)) {
-    await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: id, answerRevision: 1 });
+  if (opts.autoGrade && !controlledEvaluation && attempt && problemId && itemVersionId && (input.answer.trim() || opts.workSource)) {
+    const admissionAt = await readOpeningAutoGradeAdmissionTime(tx);
+    const skip = await readOpeningAutoGradeSkip(tx, scope, opts.autoGrade, admissionAt);
+    if (!skip) {
+      const context = await readOpeningAiGradingContext(tx, scope, { observationId: id });
+      const budget = await checkOpeningAutoGradeBudget(tx, scope, opts.autoGrade, {
+        question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
+        misconceptions: context.misconceptions, workSource: context.workSourceMetadata,
+      });
+      if (budget.allowed) {
+        await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: id, answerRevision: 1 });
+        await tx`UPDATE opening_learning_observations SET auto_grade_enqueued_at=${admissionAt} WHERE id=${id}`;
+      }
+    }
   }
   if (retestActivity) {
     // Lock the activity before its task. Task status updates and direct

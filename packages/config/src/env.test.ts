@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { loadEnv, loadOpeningUploadQuota, EnvValidationError } from "./env";
+import { loadEnv, loadOpeningUploadQuota, loadOpeningAutoGradeDailyCap, EnvValidationError } from "./env";
 import { loadOpeningTutorConfig } from "./opening-model";
 import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
 import { loadWorkerStartupConfig } from "./worker-startup";
+
+it("defaults auto grading to 50 and rejects malformed or out-of-range caps", () => {
+  expect(loadOpeningAutoGradeDailyCap({})).toBe(50);
+  expect(loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: "0" })).toBe(0);
+  expect(loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: "10000" })).toBe(10000);
+  for (const value of ["", "-1", "1.5", "50oops", "10001", "Infinity"]) {
+    expect(() => loadOpeningAutoGradeDailyCap({ OPENING_AUTO_GRADE_DAILY_CAP: value })).toThrow(EnvValidationError);
+  }
+});
 
 it("strictly validates startup budgets, cache TTL, and bounded backoff", () => {
   expect(loadWorkerStartupConfig({}).parserTimeoutMs).toBe(120000);

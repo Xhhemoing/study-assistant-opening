@@ -8,6 +8,8 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
 }));
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
+vi.mock("../../../../packages/database/src/repositories/opening-ai-settings", () => ({ createOpeningAiSettingsRepository: () => ({ get: mocks.get }) }));
+vi.mock("../../../../packages/database/src/repositories/opening-model-providers", () => ({ createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }) }));
 import { probeDbModel, resolveTaskModel, resolveTutorModel } from "./model-gateway";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };

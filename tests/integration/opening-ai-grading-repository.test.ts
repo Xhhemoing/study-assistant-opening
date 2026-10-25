@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { AiGradingInput, AiGradingProposal, LearningObservation } from "@aistudy/contracts";
-import { createOpeningAiGradingRepository, readOpeningCourseEvidence } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, readOpeningBackupRecords, readOpeningCourseEvidence } from "@aistudy/database";
 import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/repositories/opening-backup-evaluation";
 import { nextLearningStep } from "@aistudy/domain";
 import { reviseOpeningLearningObservation, readOpeningObservationHistory } from "../../packages/database/src/repositories/opening-observation-revisions";
@@ -135,8 +135,19 @@ it("binds an owned photo to the evaluation, keeps its transcription separate and
     eligibility: { verifiedCorrect: "yes", independentAttempt: "unknown" } });
   expect(graded.sourceIds).toContain(photoId);
   expect(graded.sourceVersions?.[photoId]).toBe(1);
+  const identity = { id: photoId, version: 1, physicalPage: 1 };
+  expect(graded.aiEvaluation?.workSource).toEqual(identity);
+  const jobs = createOpeningAiGradingJobRepository(fixture.sql);
+  expect((await jobs.read(fixture.scope, { observationId: original.id })).workSource).toEqual(identity);
   const corrected = await correct(original, graded);
   expect(corrected.observation?.verdictSource).toBe("self_report");
+  expect((await jobs.read(fixture.scope, { observationId: original.id })).workSource).toEqual(identity);
+  const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
+  expect(history.revisions.find(row => row.id === graded.id)?.aiEvaluation?.workSource).toEqual(identity);
+  const backup = await readOpeningBackupRecords(fixture.sql, fixture.scope);
+  for (const id of [graded.id, corrected.observation!.id]) {
+    expect(backup.tables.opening_learning_observations.find(row => row.id === id)?.grading_work_source).toEqual(identity);
+  }
   await expect(repository().context(fixture.scope, { observationId: original.id, ...input })).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(repository().context(fixture.scope, { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
   await fixture.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${fixture.scope.workspaceId},${photoId})`;
@@ -165,6 +176,12 @@ it("uses a ready PDF page from its original file without requiring a pre-rendere
   const input = { observationId: original.id, workSourceId: pdfId, workSourceVersion: 1, physicalPage: 1 };
   expect((await repository().context(fixture.scope, input)).workSource).toEqual({ id: pdfId, version: 1, physicalPage: 1 });
   await expect(repository().context(fixture.scope, { ...input, physicalPage: 2 })).rejects.toMatchObject({ code: "CONFLICT" });
+  const graded = await grade(original, proposal(), input);
+  const identity = { id: pdfId, version: 1, physicalPage: 1 };
+  expect(graded.aiEvaluation?.workSource).toEqual(identity);
+  const status = await createOpeningAiGradingJobRepository(fixture.sql).read(fixture.scope, { observationId: original.id });
+  expect(status.status).toBe("graded");
+  expect(status.workSource).toEqual(identity);
 });
 
 it("does not count an answer edited after AI feedback as an independent first attempt", async () => {

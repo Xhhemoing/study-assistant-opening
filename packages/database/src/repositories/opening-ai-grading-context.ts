@@ -13,6 +13,7 @@ export interface OpeningAiGradingContext {
   sourceIds: string[];
   sourceVersions: Record<string, number>;
   workSource: { id: string; version: number; physicalPage: number } | null;
+  workSourceMetadata: { mime: string; bytes: number } | null;
   existing: LearningObservation | null;
   answerRevision: number;
   operationId: string;
@@ -27,10 +28,10 @@ export const isOpeningManualGradingRevision = (row: Record<string, unknown>) =>
   row.revision_kind === "replace" && row.ai_evaluation == null && row.answer === row.previous_answer;
 
 /** Resolve only the sealed answer and its captured question; never accept a client grading context. */
-export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Scope, raw: AiGradingInput): Promise<OpeningAiGradingContext> {
+export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Scope, raw: AiGradingInput, options: { readOnly?: boolean } = {}): Promise<OpeningAiGradingContext> {
   let input = aiGradingInputSchema.parse(raw);
-  await lockLearningOwner(tx, scope);
-  const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL FOR SHARE`;
+  if (!options.readOnly) await lockLearningOwner(tx, scope);
+  const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL ${options.readOnly ? tx`` : tx`FOR SHARE`}`;
   if (!owner) throw learningError("NOT_FOUND", "workspace owner unavailable");
   const [row] = await tx`SELECT o.*,previous.answer AS previous_answer,COALESCE(root.effective_head_id,root.id) AS current_head_id
     FROM opening_learning_observations o
@@ -79,7 +80,7 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   if (!learningObservationSchema.shape.sourceIds.safeParse(sourceIds).success) {
     throw learningError("VALIDATION", "本次练习关联材料过多，请新建练习后再附作答照片");
   }
-  const sources = await admitLearningSources(tx, scope, sourceIds.filter(id => id !== input.workSourceId));
+  const sources = await admitLearningSources(tx, scope, sourceIds.filter(id => id !== input.workSourceId), { recordVersions: !options.readOnly, readOnly: options.readOnly });
   const sourceVersions: Record<string, number> = {};
   for (const source of sources) {
     const id = String(source.id), version = Number(source.version);
@@ -87,7 +88,9 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
     if (captured == null || captured !== version) throw learningError("CONFLICT", "材料已更新，请选择当前版本重新作答");
     sourceVersions[id] = version;
   }
-  const workSource = input.workSourceId ? { id: input.workSourceId, version: input.workSourceVersion!, physicalPage: input.physicalPage! } : null;
+  let workSourceMetadata: OpeningAiGradingContext["workSourceMetadata"] = null;
+  const workSource: OpeningAiGradingContext["workSource"] = input.workSourceId
+    ? { id: input.workSourceId, version: input.workSourceVersion!, physicalPage: input.physicalPage! } : null;
   if (workSource) {
     // Classroom items have no synthetic material source. Their attempt sealed the original
     // teaching materials; a later student photo is added only to observation provenance.
@@ -96,8 +99,9 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
     const [photo] = await tx`SELECT id,mime,version,bytes,sha256,parse_state FROM opening_sources s
       WHERE s.id=${workSource.id} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-      FOR SHARE`;
+      ${options.readOnly ? tx`` : tx`FOR SHARE`}`;
     if (!photo || Number(photo.version) !== workSource.version) throw learningError("CONFLICT", "作答材料已更新或不可读取，请刷新后重试");
+    workSourceMetadata = { mime: String(photo.mime), bytes: Number(photo.bytes) };
     const image = ["image/jpeg", "image/png", "image/webp"].includes(String(photo.mime));
     if (image) {
       if (workSource.physicalPage !== 1) throw learningError("VALIDATION", "单张照片的页码应为1");
@@ -106,7 +110,7 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
         AND source_version=${workSource.version} AND page=${workSource.physicalPage} LIMIT 1`;
       if (!page) throw learningError("CONFLICT", "作答 PDF 的这一页尚不可读取");
     } else throw learningError("VALIDATION", "请选择 JPG、PNG、WebP 或已读取的 PDF 作答材料");
-    await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    if (!options.readOnly) await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
       VALUES(${workSource.id},${workSource.version},${scope.workspaceId},${photo.bytes},${photo.sha256},'available')
       ON CONFLICT(source_id,version) DO NOTHING`;
     sourceVersions[workSource.id] = workSource.version;
@@ -121,6 +125,6 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   return { observation, stem: teaching?.stem ?? item.stem_snapshot,
     misconceptions: teaching?.misconceptions ?? [],
     referenceText: [teaching?.referenceText, ...chunks.map(chunk => String(chunk.text ?? ""))].filter(Boolean).join("\n\n").slice(0, 16000),
-    sourceIds, sourceVersions, workSource, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
+    sourceIds, sourceVersions, workSource, workSourceMetadata, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
     answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`) };
 }

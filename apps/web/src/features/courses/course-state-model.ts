@@ -3,6 +3,7 @@ import type { CourseSummary } from "./course-model";
 
 export function courseRestrictionDraft(overrides: CourseLearningPreferencesUpdate = {}): LearningPreferences {
   return {
+    autoGradeOnSave: true,
     assessmentEnabled: overrides.assessmentEnabled !== false,
     retestSuggestionsEnabled: overrides.retestSuggestionsEnabled !== false,
     automaticRemindersEnabled: overrides.automaticRemindersEnabled !== false,

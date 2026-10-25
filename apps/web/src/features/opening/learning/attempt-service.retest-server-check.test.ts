@@ -16,6 +16,7 @@ const insertObservation = vi.fn(async (_scope: unknown, input: unknown) => input
 const exposures = vi.fn(async (): Promise<string[]> => []);
 const retestRows = vi.fn((): unknown[] => []);
 
+vi.mock("./auto-grade-policy", () => ({ resolveAutoGradePolicy: async () => ({ enabled: true, modelAvailable: true, dailyCap: 50 }) }));
 vi.mock("@aistudy/database", () => ({
   createOpeningLearningAttemptRepository: () => ({
     create: vi.fn(),
@@ -43,7 +44,7 @@ describe("attempt submit: server-side retest timing + independence (PR-B §4.1)"
     retestRows.mockReturnValue([{ not_before_at: hourAgo(), recommended_at: hourAgo(), scheduled_start_at: null }]);
     const { createOpeningAttemptService } = await import("./attempt-service");
     await createOpeningAttemptService(sql).submit(scope, ATTEMPT, { ...body, retestId: RETEST });
-    expect(insertObservation).toHaveBeenCalledWith(scope, expect.objectContaining({ retestId: RETEST, assistance: "independent", nodeId: NODE }), { workSource: undefined });
+    expect(insertObservation).toHaveBeenCalledWith(scope, expect.objectContaining({ retestId: RETEST, assistance: "independent", nodeId: NODE }), { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50 }, workSource: undefined });
   });
 
   it("client claims independent but a hint was delivered: stored as hinted, no skill evidence", async () => {

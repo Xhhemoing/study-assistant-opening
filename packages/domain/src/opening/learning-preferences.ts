@@ -7,6 +7,7 @@ export function resolveLearningPreferences(
 ): LearningPreferences {
   const assessmentEnabled = !archived && account.assessmentEnabled && course.assessmentEnabled !== false;
   return {
+    autoGradeOnSave: account.autoGradeOnSave,
     assessmentEnabled,
     retestSuggestionsEnabled: assessmentEnabled && account.retestSuggestionsEnabled && course.retestSuggestionsEnabled !== false,
     automaticRemindersEnabled: assessmentEnabled && account.automaticRemindersEnabled && course.automaticRemindersEnabled !== false,

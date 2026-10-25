@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, expect, it } from "vitest";
 import type { AiGradingProposal, LearningObservation } from "@aistudy/contracts";
 import { createOpeningAiGradingRepository, executeOpeningRestoreApply, readOpeningBackupRecords,
-  readOpeningObservationHistory, readOpeningRestoreNamespaceCounts, reviseOpeningLearningObservation } from "@aistudy/database";
+  readLearningPreferences, readOpeningObservationHistory, readOpeningRestoreNamespaceCounts, reviseOpeningLearningObservation } from "@aistudy/database";
 import { OPENING_RESTORE_APPLY_ORDER, type OpeningBackup } from "@aistudy/domain";
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { createBackupFixture, type BackupFixture } from "./opening-backup-records-fixture";
@@ -20,7 +20,7 @@ afterAll(async () => {
 }, 30_000);
 const proposal: AiGradingProposal = { outcome: "correct", confidence: .95, questionMatch: true,
   feedback: "逐项核对了保存的作答照片。", criteria: [{ label: "计算", verdict: "correct", feedback: "步骤完整。" }] };
-const metadataColumns = ["answer_revision", "grading_work_source", "grading_operation_id"] as const;
+const metadataColumns = ["answer_revision", "grading_work_source", "grading_operation_id", "auto_grade_enqueued_at"] as const;
 const paidTables = ["opening_jobs", "opening_outbox", "opening_budget_reservations", "opening_parent_interaction_budgets"] as const;
 const legacyKey = (f: BackupFixture, id: string) => `ai-grade:${f.scope.workspaceId}:${id}`;
 
@@ -33,7 +33,13 @@ async function seed(photoAtSubmission = true) {
   const original = await f.learning.insertObservation(fixture.scope, {
     attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "1", outcome: "unverified", assistance: "independent", clientKey: randomUUID(),
-  }, photoAtSubmission ? { workSource: photo } : {});
+  }, { ...(photoAtSubmission ? { workSource: photo } : {}), autoGrade: {
+    enabled: true, modelAvailable: true, dailyCap: 50,
+    primaryModel: { modelSnapshot: { id: "backup", providerId: "fixture", modelName: "fixture", inputCentsPerMillion: 0, outputCentsPerMillion: 0,
+      mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 104857600, mediaInputCentsPerMillion: 0 },
+      inputCentsPerMillion: 0, outputCentsPerMillion: 0, billing: "free_tier", dailyRequestCap: 10000 },
+    dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
+  } });
   return { fixture, f, original, photo };
 }
 async function revise(fixture: BackupFixture, root: LearningObservation, previous: LearningObservation, answer: string) {
@@ -83,7 +89,7 @@ async function apply(fixture: BackupFixture, backup: OpeningBackup) {
 }
 async function readRows(fixture: BackupFixture) {
   return fixture.sql`SELECT id,root_observation_id,revises_observation_id,effective_head_id,revision_kind,answer,source_ids,source_versions,
-    answer_revision,grading_work_source,grading_operation_id,ai_evaluation,server_evaluation,verdict_source,outcome,evidence_verdict
+    answer_revision,grading_work_source,grading_operation_id,auto_grade_enqueued_at,ai_evaluation,server_evaluation,verdict_source,outcome,evidence_verdict
     FROM opening_learning_observations WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
 }
 async function reserveUnknown(fixture: BackupFixture, requestId: string) {
@@ -97,6 +103,8 @@ async function ledgerRows(fixture: BackupFixture) {
 it.each(["revision", "legacy"] as const)("round-trips real grading columns and manual inheritance (%s key) without restoring paid execution", async kind => {
   const { fixture, f, original, photo } = await seed();
   const { sql, scope } = fixture, grades = createOpeningAiGradingRepository(sql);
+  await sql`INSERT INTO workspace_preferences(workspace_id,auto_grade_on_save) VALUES(${scope.workspaceId},false)
+    ON CONFLICT(workspace_id) DO UPDATE SET auto_grade_on_save=false`;
   const originalKey = legacyKey(fixture, original.id) + (kind === "revision" ? ":1" : "");
   // The legacy variant represents a migrated 0083 observation with an existing
   // row-based reservation key, not a new key synthesized in the archive.
@@ -105,6 +113,7 @@ it.each(["revision", "legacy"] as const)("round-trips real grading columns and m
   const manual = await revise(fixture, original, graded, graded.answer);
   const changed = await revise(fixture, original, manual, "2");
   const changedKey = `${legacyKey(fixture, original.id)}:2`;
+  await createOpeningAiGradingJobRepository(sql).enqueue(scope, { observationId: changed.id });
   expect(await sql`SELECT id FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND kind='grade-observation'`).toHaveLength(2);
   await reserveUnknown(fixture, `${changedKey}:fallback`);
   await sql`INSERT INTO opening_budget_reservations(workspace_id,purpose,amount_cents,request_id,state)
@@ -112,6 +121,10 @@ it.each(["revision", "legacy"] as const)("round-trips real grading columns and m
 
   const { records, backup } = await exportRecords(fixture);
   const exported = records.tables.opening_learning_observations;
+  expect(records.tables.workspace_preferences[0]).toMatchObject({ auto_grade_on_save: false });
+  expect(exported.find(row => row.id === original.id)?.auto_grade_enqueued_at).not.toBeNull();
+  expect(exported.find(row => row.id === changed.id)?.auto_grade_enqueued_at).toBeNull();
+  if (kind === "legacy") delete (backup.tables.workspace_preferences[0] as Record<string, unknown>).auto_grade_on_save;
   expect(exported).toHaveLength(4);
   for (const id of [original.id, graded.id, manual.id]) expect(exported.find(row => row.id === id))
     .toMatchObject({ answer_revision: 1, grading_work_source: photo, grading_operation_id: originalKey });
@@ -127,6 +140,9 @@ it.each(["revision", "legacy"] as const)("round-trips real grading columns and m
       ${sql.json({ observationId: changed.id, rootObservationId: original.id, answerRevision: 2 })})`;
   const result = await apply(fixture, backup);
   expect(result, JSON.stringify(result)).toMatchObject({ ok: true, code: "APPLY_OK", pendingJobsCancelled: 1 });
+  expect(await sql`SELECT auto_grade_on_save FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ auto_grade_on_save: kind === "legacy" ? null : false }]);
+  expect((await readLearningPreferences(sql, scope, f.courseId)).autoGradeOnSave).toBe(kind === "legacy");
 
   const restored = await readRows(fixture);
   expect(restored).toHaveLength(exported.length);

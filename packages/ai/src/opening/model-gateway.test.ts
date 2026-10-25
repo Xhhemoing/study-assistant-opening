@@ -146,6 +146,24 @@ describe("model gateway fallback and free tier", () => {
     expect(isNotSentFailure(new Error("other"))).toBe(false);
   });
 
+  it("rejects overflowing estimates before reserve/send and uses only the explicit fallback", async () => {
+    const primaryComplete = vi.fn(async () => output);
+    const backupComplete = vi.fn(async () => output);
+    const primary = { ...model(primaryComplete), inputCentsPerMillion: 1e308, outputCentsPerMillion: 1e308 };
+    const { calls, repo } = budget();
+    await expect(createModelGateway({ resolve: async () => primary })
+      .call(scope, "practice.grade-text", { budget: repo, input, operationId: "overflow-none" }))
+      .rejects.toBeInstanceOf(OpeningModelRoutingError);
+    expect(calls.reserve).toHaveLength(0);
+    expect(primaryComplete).not.toHaveBeenCalled();
+    await createModelGateway({ resolve: async () => primary, resolveFallback: async () => fallbackModel(backupComplete) })
+      .call(scope, "practice.grade-text", { budget: repo, input, operationId: "overflow-safe" });
+    expect(primaryComplete).not.toHaveBeenCalled();
+    expect(backupComplete).toHaveBeenCalledTimes(1);
+    expect(calls.reserve).toHaveLength(1);
+    expect(calls.reserve[0]).toMatchObject({ requestId: "overflow-safe:fallback", amountCents: 0 });
+  });
+
   it("without a fallback the primary error stands", async () => {
     const { repo } = budget();
     await expect(createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("x"); } })
@@ -172,6 +190,23 @@ describe("parent interaction through gateway fallback", () => {
     await gateway.call(scope, "tutor.explain", { budget: repo, input, operationId: "round:2", parentBudget });
     expect(calls.reserve.map(r => r.parentBudget)).toEqual([parentBudget, parentBudget, parentBudget, parentBudget]);
     expect(calls.reserve.map(r => r.requestId)).toEqual(["round:1", "round:1:fallback", "round:2", "round:2:fallback"]);
+  });
+});
+
+describe("provider-free reservation estimation", () => {
+  it("prices the real serialized prompt, output bound, floor and media without constructing a provider", () => {
+    const selected: Omit<ResolvedTaskModel, "provider"> = {
+      modelSnapshot: { id: "estimate", providerId: "p", modelName: "m", inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000 },
+      inputCentsPerMillion: 1_000_000, outputCentsPerMillion: 1_000_000,
+    };
+    const short = reservationTerms(selected, input);
+    const long = reservationTerms(selected, { ...input, instruction: "reference".repeat(1000), text: "answer".repeat(1000) });
+    expect(long.reservedCents).toBeGreaterThan(short.reservedCents);
+    expect(reservationTerms(selected, { ...input, maxOutputTokens: input.maxOutputTokens + 100 }).reservedCents).toBe(short.reservedCents + 100);
+    expect(reservationTerms(selected, input, 100_000).reservedCents).toBe(100_000);
+    const media = { ...selected, mediaInputTokenUpperBound: 8000, mediaMaxInputBytes: 10000, mediaInputCentsPerMillion: 1_000_000 };
+    expect(reservationTerms(media, { ...input, imageParts: [{ mediaType: "image/png", data: "data:image/png;base64,aGVsbG8=" }] }).reservedCents).toBeGreaterThanOrEqual(short.reservedCents + 8000);
+    expect(reservationTerms({ ...selected, billing: "free_tier", dailyRequestCap: 2 }, input, 100_000)).toMatchObject({ reservedCents: 0, requestCapPerDay: 2 });
   });
 });
 

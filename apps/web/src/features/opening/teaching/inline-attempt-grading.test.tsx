@@ -41,7 +41,7 @@ context.completionAction = { label: "下一题", onClick: vi.fn() };
 const initialDraft = { prompt: "1/2 + 1/2 = ?", skillLabel: record.skillLabel, answer: record.answer };
 const gradingStatus = (patch: Partial<AiGradingStatus> = {}): AiGradingStatus => ({
   rootObservationId: record.id, headObservationId: record.id, answerRevision: 1,
-  jobId: blockId, status: "needs_manual", retryable: true, workSource: null, ...patch,
+  jobId: blockId, status: "needs_manual", retryable: true, autoGradeSkipped: null, workSource: null, ...patch,
 });
 
 let container: HTMLDivElement, root: Root, head: LearningObservation;

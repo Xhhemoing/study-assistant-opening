@@ -105,7 +105,7 @@ describe("workspace preferences handler", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       defaultEntry: null,
-      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      learningPreferences: { autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
     });
   });
 
@@ -118,7 +118,7 @@ describe("workspace preferences handler", () => {
     const current = await GET(requestWithCookie(user.cookie));
     await expect(current.json()).resolves.toEqual({
       defaultEntry: "explore",
-      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      learningPreferences: { autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
     });
   });
 
@@ -135,12 +135,12 @@ describe("workspace preferences handler", () => {
     const ownerCurrent = await GET(requestWithCookie(owner.cookie));
     await expect(ownerCurrent.json()).resolves.toEqual({
       defaultEntry: "library",
-      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      learningPreferences: { autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
     });
     const otherCurrent = await GET(requestWithCookie(other.cookie));
     await expect(otherCurrent.json()).resolves.toEqual({
       defaultEntry: null,
-      learningPreferences: { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
+      learningPreferences: { autoGradeOnSave: true, assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false },
     });
   });
 
