@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { collectSnapshot, exactCi, renderSnapshot, validateStatus } from "../../scripts/status.mjs";
+
+test("the current project board stays bounded; history belongs in the archive", async () => {
+  const text = await readFile(new URL("../../docs/STATUS.md", import.meta.url), "utf8");
+  assert(validateStatus(text).activeRows <= 6);
+});
 
 const sha = "a".repeat(40), other = "b".repeat(40);
 test("CI state requires this exact head and the CI workflow", () => {
