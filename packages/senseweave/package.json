@@ -1,0 +1,19 @@
+{
+  "name": "@aistudy/senseweave",
+  "private": true,
+  "version": "0.5.0-rc.1",
+  "description": "Vendored SenseWeave Runtime (GPL-3.0-only, upstream Xhhemoing/SenseWeave-Runtime). Do not edit vendor/; update from upstream.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./host": {
+      "types": "./vendor/packages/runtime/host.d.mts",
+      "default": "./vendor/packages/runtime/host.mjs"
+    },
+    "./block": {
+      "types": "./vendor/packages/browser/block.d.mts",
+      "default": "./vendor/packages/browser/block.mjs"
+    }
+  }
+}

@@ -150,6 +150,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check SenseWeave vendor integrity
+        run: node scripts/check-senseweave-vendor.mjs
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:

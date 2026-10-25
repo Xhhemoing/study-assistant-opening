@@ -18,6 +18,9 @@ import {
 import { AiSpark, ReplyCard, StreamText, ThinkingText } from "./ai-response";
 import { MessageActions } from "./message-actions";
 import { LearningProse, type CitationLink } from "./learning-prose";
+import { SenseWeaveAnswer, SenseWeaveDiagnostics } from "./senseweave-answer";
+import { prepareSenseWeave } from "./senseweave-host";
+import { observeSenseWeave } from "./senseweave-telemetry";
 import { isQueryEvidenceHref } from "./query-evidence-links";
 import { selectedSourceFor } from "./selection-source";
 import { assistantStarters, type AssistantStarter } from "./assistant-starters";
@@ -67,7 +70,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
 }
 
 export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, retryTurnId = null, onRetry, pendingLabel, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
-  const { chatArtifacts, chatProse } = useOpeningCapabilities();
+  const { chatArtifacts, chatProse, chatSenseWeave, senseWeaveGates } = useOpeningCapabilities();
   const diagnostics = useDiagnosticsEnabled();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
   const proseEnabled = proseEnabledProp ?? chatProse;
@@ -101,7 +104,33 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
     if (following.current) showLatest();
     else setUnread(true);
   }, [lastMessage?.id, lastMessage?.text, messages.length]);
-  const artifacts = useMemo(() => (artifactsEnabled ? artifactsForMessages(messages) : {}), [artifactsEnabled, messages]);
+  const senseWeaveMode = proseEnabled ? chatSenseWeave : "off";
+  /** Decided once per finished answer (the adapter caches by id and text). */
+  const senseWeave = useMemo(() => {
+    const prepared: Record<string, ReturnType<typeof prepareSenseWeave>> = {};
+    if (senseWeaveMode === "off") return prepared;
+    let question: string | undefined;
+    for (const message of messages) {
+      if (message.role === "user") { question = message.text; continue; }
+      if (message.status && message.status !== "complete" || !message.text) continue;
+      prepared[message.id] = prepareSenseWeave(message, question, senseWeaveGates, studyMode);
+    }
+    return prepared;
+  }, [senseWeaveMode, messages, senseWeaveGates, studyMode]);
+  useEffect(() => {
+    if (senseWeaveMode === "off") return;
+    for (const message of messages) {
+      const prepared = senseWeave[message.id];
+      if (prepared) observeSenseWeave(prepared, message.text.length, senseWeaveGates.version, senseWeaveMode === "on", message.id);
+    }
+  }, [messages, senseWeave, senseWeaveMode, senseWeaveGates]);
+  const artifacts = useMemo(() => {
+    if (!artifactsEnabled) return {};
+    const planned = artifactsForMessages(messages);
+    // The same content is shown once: a SenseWeave component replaces the rules-planner 图解.
+    if (senseWeaveMode === "on") for (const id of Object.keys(planned)) if (senseWeave[id]?.enhanced) delete planned[id];
+    return planned;
+  }, [artifactsEnabled, messages, senseWeaveMode, senseWeave]);
   function selectedTextFor(message: ChatMessageView): SelectedExcerpt | undefined {
     const selection = window.getSelection();
     const element = messageElements.current[message.id];
@@ -138,7 +167,7 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
         </ol>
       </details> : null}
       {message.status === "outcome_unknown" ? <p className="text-sm leading-7 text-text">这次回答未能确认是否生成成功。</p> : message.role === "assistant" && proseEnabled
-        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? <LearningProse objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} /> : null}</div></StreamText></ReplyCard>
+        ? <ReplyCard><StreamText busy={message.status === "pending"} reveal={message.status === "complete" && pendingReplies.current.has(message.id) && !message.streamed && !streamedReplies.current.has(message.id)}><div ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className="text-text">{message.text ? (senseWeaveMode === "on" && senseWeave[message.id]?.enhanced ? <SenseWeaveAnswer prepared={senseWeave[message.id]!} objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} /> : <LearningProse objectHref={objectHref} text={message.text} citationLinks={(message.citations ?? []).map(citation => { const link = citationLink(citation, sourceNames); return { ...link, href: objectHref(link.href) }; })} queryEvidenceLinks={message.queryEvidenceLinks} />) : null}{diagnostics && senseWeave[message.id] && senseWeaveMode !== "off" ? <SenseWeaveDiagnostics mode={senseWeaveMode} prepared={senseWeave[message.id]!} /> : null}</div></StreamText></ReplyCard>
         : <p ref={(element) => { if (element) messageElements.current[message.id] = element; else delete messageElements.current[message.id]; }} className={`whitespace-pre-wrap break-words leading-7 ${message.role === "user" ? "text-[15px] text-text" : "text-[15px] text-text"}`}>{message.text}</p>}
       {message.role === "assistant" && message.status !== "outcome_unknown" && !proseEnabled && message.queryEvidenceLinks?.some(link => isQueryEvidenceHref(link.href)) ? <nav aria-label="查询证据" className="mt-3 flex flex-wrap gap-2 text-sm">{message.queryEvidenceLinks.filter(link => isQueryEvidenceHref(link.href)).map(link => <Link key={link.href} href={objectHref(link.href)} className="text-accent underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{link.label}</Link>)}</nav> : null}
       {artifacts[message.id] ? <section className="mt-3 rounded-xl border border-line/80 bg-surface px-4 py-3 shadow-xs " aria-label="图解" data-message-artifact={message.id}>

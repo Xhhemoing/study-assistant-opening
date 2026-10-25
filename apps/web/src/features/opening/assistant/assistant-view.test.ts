@@ -65,6 +65,12 @@ describe("AssistantView pending job discovery", () => {
 });
 
 describe("AssistantView ephemeral cancellation", () => {
+  it("retains the trusted request mode on the completed ephemeral answer", () => {
+    const messages = appendEphemeralResponseIfActive([], {
+      clientKey: "mode-check", text: "请比较", mode: "hint", output: { requestId: "response", text: "下一步提示" },
+    }, new AbortController().signal);
+    expect(messages.at(-1)?.mode).toBe("hint");
+  });
   it("does not append a late provider response after cancellation", () => {
     const controller = new AbortController();
     controller.abort();

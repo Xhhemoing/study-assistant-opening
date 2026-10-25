@@ -1,0 +1,10 @@
+{
+  "version": "sw-gates-v0-20261024",
+  "presets": {
+    "hint": ["prose", "callout", "details"],
+    "explain": ["prose", "callout", "steps", "diagram", "table", "details"],
+    "review": ["prose", "callout", "compare", "table", "checklist", "details"],
+    "plan": ["prose", "checklist", "timeline", "steps"],
+    "data": ["prose", "table", "chart", "plot"]
+  }
+}

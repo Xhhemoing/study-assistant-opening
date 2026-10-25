@@ -15,6 +15,8 @@ export default tseslint.config(
       "**/test-results/**",
       "package-lock.json",
       "spikes/**",
+      // Vendored upstream runtime; changes go upstream (packages/senseweave/README.md).
+      "packages/senseweave/vendor/**",
       "apps/web/next-env.d.ts",
       // Agent/CI/tooling metadata directories are not project source.
       ".agents/**",

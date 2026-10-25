@@ -36,6 +36,7 @@ const nextConfig = {
     "@aistudy/database",
     "@aistudy/ai",
     "@aistudy/jingwei",
+    "@aistudy/senseweave",
   ],
   output: useOpeningE2e || useLocalPreview ? undefined : "standalone",
   outputFileTracingIncludes: {

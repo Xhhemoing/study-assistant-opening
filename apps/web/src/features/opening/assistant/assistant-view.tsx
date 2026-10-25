@@ -202,6 +202,7 @@ export function appendEphemeralResponseIfActive(
     text: string;
     /** Selected materials for this turn — drives hadMaterialContext / general badge. */
     sourceIds?: readonly string[];
+    mode?: ChatMessageView["mode"];
     streamed?: boolean;
     output: {
       requestId: string | null;
@@ -226,6 +227,7 @@ export function appendEphemeralResponseIfActive(
       citations,
       citationLabels: citations.map((citation) => citation.label),
       status: "complete",
+      mode: input.mode,
       origin: "ephemeral",
       provenanceId: input.output.provenanceId ?? null,
       systemQuery: Boolean(input.output.systemQuery),
@@ -855,6 +857,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         setEphemeralMessages((current) => appendEphemeralResponseIfActive(current, {
           clientKey: input.clientKey,
           text: submittedText,
+          mode: input.mode,
           sourceIds: turnSourceIds,
           streamed: receivedDelta,
           output,
