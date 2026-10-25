@@ -29,7 +29,7 @@ describe("course learning records", () => {
     expect(html).toContain("fractions");
     expect(html).toContain("参考核对记录");
     expect(html).toContain("本次独立作答");
-    expect(html).toContain("有依据的参考核验");
+    expect(html).toContain("有依据的参考核对");
     expect(html).toContain("已保存的观察");
     expect(html).toContain("刷新历史");
     expect(html).not.toContain("<details");
@@ -48,13 +48,13 @@ describe("course learning records", () => {
     expect(comparedSummary[0]?.evidenceEligibility[0]?.eligibility.verifiedCorrect).toBe("unknown");
     expect(html).toContain("证据来源：自报");
     expect(html).toContain("学习者自对照参考，尚未经独立评分");
-    expect(html).toContain("待核验");
+    expect(html).toContain("待确认");
     expect(html).not.toContain("最近观察到独立完成");
   });
 
   it("keeps missing qualification information pending even when a summary exists", () => {
     const html = renderToStaticMarkup(createElement(CourseLearningRecords, { ...props, state: "ready", summary: summary.map((item) => ({ ...item, evidenceEligibility: [] })) }));
-    expect(html).toContain("资格信息尚未提供，保留待核验");
+    expect(html).toContain("资格信息尚未提供，先保留");
   });
 
   it("reports empty evidence only after a successful read", () => {
@@ -80,8 +80,8 @@ it("shows the latest result and an actionable next step before historical eviden
   expect(result).toContain("换一道题独立完成，继续确认");
   expect(result).toContain('study?mode=practice&amp;skillLabel=fractions&amp;requirementKey=requirement-1');
   expect(result).not.toContain("核验错误");
-  expect(html).toContain("更早的记录中有 2 条核验错误");
-  expect(html).toContain("1 条记录尚未核验");
+  expect(html).toContain("更早的记录中有 2 条核对错误");
+  expect(html).toContain("1 条记录尚未确认");
   expect(html).not.toContain(" open=");
 });
 

@@ -154,7 +154,7 @@ describe("MessageList", () => {
     const html = renderToStaticMarkup(createElement(MessageList, {
       messages: [{ id: "turn-f", role: "assistant", text: "provider rejected the request", citationLabels: [], status: "failed" }],
     }));
-    expect(html).toContain("本轮失败，未得到有效回答。");
+    expect(html).toContain("这次没有得到回答。");
     expect(html).not.toContain(CLARIFY_FOLLOW_UP);
   });
 
@@ -178,7 +178,7 @@ describe("MessageList", () => {
     const html = renderToStaticMarkup(createElement(MessageList, { messages }));
     expect(html).toContain(`>${refusal}<`);
     expect(html).toContain(CLARIFY_FOLLOW_UP);
-    expect(html).not.toContain("本轮失败");
+    expect(html).not.toContain("这次没有得到回答");
     expect(html).not.toContain("text-red-700");
   });
 
@@ -194,8 +194,8 @@ describe("MessageList", () => {
     }));
 
     expect(html).toContain("这次回答未能确认是否生成成功");
-    expect(html).toContain("原请求不会自动重发，费用仍待确认");
-    expect(html).not.toContain("本轮失败");
+    expect(html).toContain("不会自动再问一次，这次的用量还在确认");
+    expect(html).not.toContain("这次没有得到回答");
   });
 
   it("opens the cited source version instead of the unlabeled latest file", () => {

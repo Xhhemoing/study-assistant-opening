@@ -17,9 +17,9 @@ const reasonText: Record<string, string> = {
   ambiguous_input: "答案格式无法识别，请按示例使用数组格式。",
   unsupported_number: "只支持整数或带引号的分数；分母不能为零。",
   resource_limit: "答案超出本题可处理范围。",
-  missing_or_unsupported_spec: "题目规格不可用，可在课程历史中手动核对。",
+  missing_or_unsupported_spec: "这道题暂时不能自动批改，可以在课程历史里自己对照。",
   version_changed: "材料或题目已更新，请重新读取后作答。",
-  spec_identity_mismatch: "题目与当前评价规格不一致，未自动判分。",
+  spec_identity_mismatch: "这道题已更新，这次没有自动批改。",
 };
 
 /** Built-in deterministic questions use the same session/attempt/observation history as ordinary work. */

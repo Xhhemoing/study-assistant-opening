@@ -25,3 +25,10 @@ describe("formatTurnError learner copy", () => {
     expect(formatTurnError(new TypeError("Failed to fetch"))).toBe("发送失败，请重试。");
   });
 });
+
+describe("formatTurnError when no model can answer", () => {
+  it.each(["AI_MODEL_UNAVAILABLE", "PROVIDER_DISABLED"])("sends %s to settings with one plain sentence", code => {
+    expect(formatTurnError(new OpeningApiError(409, "所选模型暂不可用，请检查设置中的密钥、价格和预算状态；不会自动切换供应商。", code)))
+      .toBe("还没有配置可用的 AI 模型，去设置里配置。");
+  });
+});

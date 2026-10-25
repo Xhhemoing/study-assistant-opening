@@ -3,7 +3,7 @@
 import { openingAiSettingsResponseSchema, type OpeningAiSettingsResponse } from "@aistudy/contracts";
 import { Check, LoaderCircle, WandSparkles } from "lucide-react";
 import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { ProviderMediaBudgetFields } from "./provider-media-budget-fields";
 import { ui } from "../opening/design/ui";
 import { availabilityLabels, effectiveTaskRoutes } from "./ai-settings-model";
@@ -19,6 +19,7 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, advanced =
   onChange: (draft: QuickSetupDraft) => void; onPreset: (preset: QuickSetupPreset) => void; onSubmit: () => void;
 }) {
   const problem = validateQuickSetupDraft(draft);
+  const reasonId = useId();
   const free = draft.billing === "free_tier";
   const pricingFields = <div className="space-y-3">
     <div className="grid gap-3 sm:grid-cols-2">
@@ -48,7 +49,7 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, advanced =
         <input className={ui.input} maxLength={2048} type="url" value={draft.baseUrl} onChange={event => onChange({ ...draft, baseUrl: event.target.value })} /></label>
       <label className="block space-y-1.5"><span className={ui.label}>API 密钥</span>
         <input autoComplete="new-password" className={ui.input} maxLength={4096} type="password" value={draft.apiKey} onChange={event => onChange({ ...draft, apiKey: event.target.value })} />
-        <span className="block text-xs leading-6 text-text-3">只写入并加密保存；成功后清空此输入，不保存到浏览器存储。</span></label>
+        <span className="block text-xs leading-6 text-text-3">密钥会加密保存，保存后这里会清空，不会留在浏览器里。</span></label>
       <div className="flex flex-wrap gap-x-5 gap-y-1">
         <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="checkbox" checked={draft.supportsVision} onChange={event => onChange({ ...draft, supportsVision: event.target.checked })} />支持视觉</label>
         <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="checkbox" checked={draft.supportsAudio} onChange={event => onChange({ ...draft, supportsAudio: event.target.checked })} />支持音频输入</label>
@@ -76,8 +77,8 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, advanced =
       </>}
     </fieldset>
     <p className="text-xs leading-6 text-text-3">保存后，各项 AI 功能默认使用这个模型。</p>
-    {locked ? <p className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p className="text-xs leading-6 text-warn" role="status">{problem}</p> : null}
-    <button className={ui.primary} disabled={busy || (!locked && problem !== null)} type="submit">
+    {locked ? <p id={reasonId} className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p id={reasonId} className="text-sm leading-6 text-warn" role="status">{problem}</p> : null}
+    <button className={ui.primary} disabled={busy || (!locked && problem !== null)} aria-describedby={locked || problem ? reasonId : undefined} type="submit">
       {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <WandSparkles aria-hidden="true" size={14} />}{locked ? "确认上次配置结果" : "一键配置模型"}
     </button>
   </form>;

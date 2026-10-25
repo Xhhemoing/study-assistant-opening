@@ -45,7 +45,7 @@ export function InlineExplain({ context, content, heading = "补充解释", init
   }
   function makeCard() {
     setCard({ identity, courseId: context.courseId, front: `如何理解${context.label || "这段讲解"}？`, back: content,
-      sourceLabel: `${context.label || "当前讲解"}${context.sourceVersion !== undefined ? ` · v${context.sourceVersion}` : ""}${context.page ? ` · 第 ${context.page} 页` : ""}`,
+      sourceLabel: `${context.label || "当前讲解"}${typeof context.sourceVersion === "number" ? ` · v${context.sourceVersion}` : ""}${context.page ? ` · 第 ${context.page} 页` : ""}`,
       createSource: async () => {
         const result = await save();
         if (result.status !== "saved" || !result.documentId) throw new Error(result.status === "editing" ? "来源笔记保存失败，内容已保留，请重试。" : "来源笔记的保存结果尚未确认，请检查笔记列表后继续。草稿内容已保留。");

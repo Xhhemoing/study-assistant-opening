@@ -51,7 +51,7 @@ export function LearnerStateCard({ courseId, revision = 0, proactive = false }: 
     {proactive && selected ? <Link className={ui.secondary} href={`/opening/courses/${selected.courseId}/study`}>继续学习</Link> : null}
     <p className="text-xs leading-6 text-text-2">更新于 {new Date(state.dataAsOf).toLocaleString("zh-CN")}</p>
     {diagnostics ? <details className="space-y-2 border-t border-line pt-3 text-xs leading-6 text-text-2" aria-label="学习证据诊断"><summary className="cursor-pointer font-medium">开发者诊断</summary>
-      <p className="text-xs leading-6 text-text-2">每项按最近作答的有效证据归入一类；数学提示 1–3 级均按使用提示记录。已查看本题解法、核验有误或真实复测到期时显示待复测，不表示已自动新增任务。这不是全课程单元覆盖率或掌握率。</p>
+      <p className="text-xs leading-6 text-text-2">每项按最近作答的有效证据归入一类；数学提示 1–3 级均按使用提示记录。已查看本题解法、复核有误或真实复测到期时显示待复测，不表示已自动新增任务。这不是全课程单元覆盖率或掌握率。</p>
       {state.display.unscopedObservations > 0 ? <p className="text-xs leading-6 text-text-2">另有 {state.display.unscopedObservations} 条记录缺少稳定的学习要求关联，未并入计数。</p> : null}
     {selected ? <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">{([["independent", "独立表现"], ["retention", "保持"], ["transfer", "迁移"], ["help", "帮助后表现"]] as const).map(([key, label]) => <div key={key}><dt className="text-text-2">{label}</dt><dd className="mt-1 font-medium">{selected.views[key] > 0 ? `${selected.views[key]} 条可查看记录` : "尚无可用证据"}</dd></div>)}</dl> : null}
     {selected?.gaps.includes("retention_intervening_exposure_not_established") ? <p className="text-xs leading-6 text-text-2">这是延迟检查表现的视角；期间复习与站外帮助尚未完整核实，不表示未复习保持。</p> : null}

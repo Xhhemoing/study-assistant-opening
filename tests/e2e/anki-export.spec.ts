@@ -30,7 +30,7 @@ test("exports cards as an Anki projection with a visible loss report", async ({ 
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toMatch(/\.txt$/);
     await expect(page.getByRole("status")).toContainText("损失报告");
-    await expect(page.getByText("Anki 只是可交换投影，不是完整备份。")).toBeVisible();
+    await expect(page.getByText("Anki 只是便于在别处使用的导出，不是完整备份。")).toBeVisible();
     await expect(page.getByText("无损")).toHaveCount(0);
   } finally {
     await context.close();

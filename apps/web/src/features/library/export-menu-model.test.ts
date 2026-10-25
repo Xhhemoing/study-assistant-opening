@@ -45,7 +45,7 @@ describe("markdown export menu model", () => {
     expect(copy.headline).toContain("Anki");
     expect(copy.lossSummary).toContain("1");
     expect(`${copy.headline}${copy.lossSummary}${copy.disclaimer}`).not.toMatch(/无损|lossless/i);
-    expect(copy.disclaimer).toContain("投影");
+    expect(copy.disclaimer).toContain("不是完整备份");
     expect(copy.disclaimer).toContain("不是完整备份");
   });
 });

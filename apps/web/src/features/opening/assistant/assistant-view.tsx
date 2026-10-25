@@ -9,7 +9,7 @@ import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
-import { formatTurnError, pageForSubmit } from "./turn-errors";
+import { MODEL_SETUP_HREF, formatTurnError, pageForSubmit } from "./turn-errors";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
 import { LoadingRows, secondaryButtonClass } from "../design/ui";
@@ -29,7 +29,7 @@ import {
   uniqueCappedSourceIds,
 } from "./course-source-selection";
 import { AiReadinessChecklist } from "./ai-readiness";
-import { inferComposerIntent, type ThinTutorAction } from "@aistudy/domain";
+import { inferComposerIntent, TUTOR_MODEL_SETUP_MESSAGE, type ThinTutorAction } from "@aistudy/domain";
 import { tutorActionIntent, type TutorActionIntent } from "../learning/tutor-action-intents";
 import { nodeIdForSkillLabel } from "../learning/knowledge-node-lookup";
 import { turnsWithKnownOutcome, unknownTurnQuestion, unknownTurnRecovery } from "./unknown-turn-recovery";
@@ -48,6 +48,7 @@ import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 import { useJobStream, type FirstTextTiming } from "./use-job-stream";
+import { TURN_WAIT_COPY, failedTurnRetry, useTurnWaitPhase, type FailedTurnRetry } from "./turn-wait";
 import { TopBar, TopBarTools } from "../v3/shell/top-bar";
 import { ui as v3ui } from "../v3/ui/controls";
 import { StartSuggestions, type StartConfiguration } from "../start/start-composer";
@@ -91,16 +92,16 @@ export type AssistantViewProps = {
 type Props = AssistantViewProps;
 
 export function jobStatusHint(job: JobStatusResponse): string {
-  if (job.status === "queued") return "回答任务已排队。";
-  if (job.status === "running") return "回答任务生成中。";
+  if (job.status === "queued") return "已收到问题，马上开始…";
+  if (job.status === "running") return "正在思考…";
   if (job.status === "failed") {
     // LAB-U01: a page refusal (nextAction clarify) is a Clarify follow-up, not a failure.
     if (terminalTurnStatusForJobError(job.error) === "clarify") return job.error?.message ?? CLARIFY_FOLLOW_UP;
-    return `回答任务失败：${job.error?.message ?? "服务未提供失败原因"}`;
+    return job.error?.message ? `这次没有得到回答：${job.error.message}` : "这次没有得到回答，可以再试一次。";
   }
-  if (job.status === "cancelled") return "回答任务已取消。";
+  if (job.status === "cancelled") return "已停止这次回答。";
   if (job.status === "outcome_unknown") {
-    return "回答结果状态未知，原请求不会自动重发。请查看回答恢复提示。";
+    return "还不确定这次是否答完，不会自动再问一次。";
   }
   return "";
 }
@@ -636,12 +637,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         // The latest conversation job may already be newer than this poll result.
         await refreshConversation(conversationId, signal, true);
       },
-      onError: (pollError) => {
-        setPendingHint(
-          `回答状态暂时无法读取，正在重试：${
-            userFacingMessage(pollError, "未知错误")
-          }`,
-        );
+      onError: () => {
+        setPendingHint("网络有点慢，正在重新查看回答进度…");
       },
     });
     poller.start();
@@ -659,6 +656,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     ? { messages: messagesForChatBranch(savedDisplay.messages, [...ephemeralMessages, ...ephemeralPendingMessages], privacy), historyTruncated: false }
     : savedDisplay, [privacy, savedDisplay, ephemeralMessages, ephemeralPendingMessages]);
   const showingPendingReply = display.messages.some(message => message.role === "assistant" && message.status === "pending");
+  const firstTextShown = display.messages.some(message => message.role === "assistant" && message.status === "pending" && Boolean(message.text.trim()));
+  const waitPhase = useTurnWaitPhase(pending && !firstTextShown, activeJobId ?? "local");
+  const retryTarget = privacy === "saved" ? failedTurnRetry(recoveredTurns) : null;
+  /** Assistant turn whose stalled job was cancelled by 重试; resent once its failure is read back. */
+  const [queuedRetry, setQueuedRetry] = useState<string | null>(null);
   useEffect(() => {
     onRetainStateChange?.({ pending: pending || loading || uploadPending,
       volatile: privacy === "ephemeral" || sourceSelection !== null || contextEdited
@@ -707,17 +709,54 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       void api.cancelJob(jobId).then((job) => {
         setActiveJobId(null);
         setPending(false);
-        setPendingHint(jobStatusHint(job) || "已停止回答。",);
+        setPendingHint(jobStatusHint(job) || "已停止这次回答。");
         if (conversationId) void refreshConversation(conversationId);
       }).catch((cancelError) => {
-        setPendingHint(`取消请求未确认：${userFacingMessage(cancelError, "服务暂时不可用")}`);
+        setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
       });
       return;
     }
     if (privacy === "ephemeral") submissionLock.current = null;
     setPending(false);
-    setPendingHint("本轮已取消；不保存模式的内容不会写入对话。",);
+    setPendingHint("已停止。这是临时对话，内容不会保存。");
   }
+
+  /** Same question, retry key derived from the failed turn: the server replays rather than charging twice. */
+  function retryFailedTurn(target: FailedTurnRetry | null = retryTarget): void {
+    if (!target) return;
+    void handleSubmit({ text: target.text, mode: target.mode, privacy: "saved", clientKey: target.clientKey }, { preserveDraft: true });
+  }
+  const retryFailedTurnRef = useRef(retryFailedTurn);
+  retryFailedTurnRef.current = retryFailedTurn;
+
+  /** Stalled before any text: stop the job first; only a confirmed stop (cancelled/failed) is resent. */
+  async function retryStalledTurn(): Promise<void> {
+    const jobId = activeJobId;
+    const id = conversationId;
+    if (!jobId || !id) return;
+    const last = recoveredTurns.at(-1);
+    cancelJobStream();
+    try {
+      const job = await api.cancelJob(jobId);
+      setActiveJobId(null);
+      setPending(false);
+      if ((job.status === "cancelled" || job.status === "failed") && last?.role === "assistant") {
+        setPendingHint("");
+        setQueuedRetry(last.id);
+      } else setPendingHint(jobStatusHint(job));
+      await refreshConversation(id);
+    } catch (cancelError) {
+      setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
+    }
+  }
+  useEffect(() => {
+    if (!queuedRetry || pending || loading || recoveryRequired) return;
+    const last = recoveredTurns.at(-1);
+    if (last?.id === queuedRetry && last.status === "pending") return; // refreshed turns not read yet
+    setQueuedRetry(null);
+    const target = failedTurnRetry(recoveredTurns);
+    if (target?.assistantTurnId === queuedRetry) retryFailedTurnRef.current(target);
+  }, [queuedRetry, pending, loading, recoveryRequired, recoveredTurns]);
 
   async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
     // Composer and reply actions share the same preflight/send boundary.
@@ -852,7 +891,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;
-      setPendingHint("回答任务已提交，等待状态更新。");
+      setPendingHint("已发送，正在准备回答…");
       abortRef.current = null;
       preserveEntrySelection.current = false;
       if (!options?.preserveDraft) setDraft("");
@@ -1015,14 +1054,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         </TopBarTools>} /> : null}
       {!start && !embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
       {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
-        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>语言支持由服务端约束，不包含列式或解题步骤。</span></label> : null}
+        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>只做翻译和术语解释，不给列式或解题步骤。</span></label> : null}
         <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : studyContext.sourceId ? "指定材料" : "已绑定的课程")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
-        <p>{studyContext.activityId || studyContext.fragment ? "背景将在你发送时作为文字附上；资料依据仍以回答中的真实引用为准。" : studyContext.sourceId ? "已指定参考材料和位置；回答中的实际引用用于核对依据。" : "继续先前绑定的课程提问；导航不会自动更换这段对话的课程。"}</p>
+        <p>{studyContext.activityId || studyContext.fragment ? "发送时会附上你正在看的内容，方便理解你的问题。" : studyContext.sourceId ? "会参考你指定的材料和位置。" : "继续在这门课里提问。"}</p>
         {returnHref && !embedded ? <a href={returnHref} className="text-accent underline">返回原内容</a> : null}
         {studyContext.fragment ? <p className="line-clamp-3 whitespace-pre-wrap border-l-2 border-line-strong pl-2">{studyContext.fragment}</p> : null}
         {diagnostics ? <dl aria-label="提问背景诊断" className="break-all">
           {studyContext.courseId ? <><dt>课程</dt><dd>{studyContext.courseId}</dd></> : null}
-          {studyContext.activityId ? <><dt>活动 / 内容版本</dt><dd>{studyContext.activityId} / {studyContext.contentVersion ?? "未指定"}</dd></> : null}
+          {studyContext.activityId ? <><dt>活动 / 版本</dt><dd>{studyContext.activityId} / {studyContext.contentVersion ?? "未指定"}</dd></> : null}
           {studyContext.blockId ? <><dt>学习单元</dt><dd>{studyContext.blockId}</dd></> : null}
           {studyContext.sourceId ? <><dt>材料 / 版本</dt><dd>{studyContext.sourceId} / {studyContext.sourceVersion ?? "提交时当前版本"}</dd></> : null}
         </dl> : null}
@@ -1033,15 +1072,21 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         <p className="font-medium">临时对话从这里开始</p><p>本轮不接续已保存历史；只使用本标签页的临时消息、当前输入和所选背景。刷新后不会恢复。</p>
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
-      {startScreen ? loading ? <p role="status" className="mb-2 text-xs text-text-3">正在读取提问背景…</p> : null : loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={inset} objectHref={objectHref} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown || interactionDisabled} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onReplyMode={prepareReplyMode} onSaveSnippet={saveSnippet} directSaveApi={embedded && studyContext ? api : undefined} onCreateCard={createCard} />}
-      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (showingPendingReply ? null : <div className="mx-5 mb-2 py-2"><ThinkingText>{pendingHint || "正在思考…"}</ThinkingText></div>) : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
+      {startScreen ? loading ? <p role="status" className="mb-2 text-xs text-text-3">正在读取提问背景…</p> : null : loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={inset} objectHref={objectHref} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown || interactionDisabled} retryTurnId={retryTarget?.assistantTurnId ?? null} onRetry={() => retryFailedTurn()} pendingLabel={waitPhase === "normal" ? undefined : TURN_WAIT_COPY.slow} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onReplyMode={prepareReplyMode} onSaveSnippet={saveSnippet} directSaveApi={embedded && studyContext ? api : undefined} onCreateCard={createCard} />}
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (waitPhase === "stalled" ? <section aria-label="回答较慢" className="mx-5 mb-2 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs leading-6 text-warn">
+        <p role="status">{privacy === "saved" && activeJobId ? TURN_WAIT_COPY.stalled : TURN_WAIT_COPY.stalledEphemeral}</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {privacy === "saved" && activeJobId ? <button type="button" className={secondaryButtonClass} onClick={() => void retryStalledTurn()}>重试</button> : null}
+          <button type="button" className={secondaryButtonClass} onClick={cancelCurrentTurn}>取消</button>
+        </div>
+      </section> : showingPendingReply ? null : <div className="mx-5 mb-2 py-2"><ThinkingText>{waitPhase === "slow" ? TURN_WAIT_COPY.slow : pendingHint || "正在思考…"}</ThinkingText></div>) : pendingHint ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{pendingHint}</p> : null}
       {autoSelectNotice ? (
         <div role="status" className="mx-5 mb-2 flex items-start justify-between gap-2 border border-accent/30 bg-accent-soft px-3 py-2 text-xs leading-5 text-accent">
           <p className="min-w-0 flex-1">{autoSelectNotice}</p>
           <button type="button" className="min-h-6 min-w-6 shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
         </div>
       ) : null}
-      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
+      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">
@@ -1065,7 +1110,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     </div>
     {agent ? <section aria-label="产出与待确认" className="hidden w-(--layout-companion) shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg/60 px-4 py-3 xl:flex">
       <section aria-labelledby="agent-proposals-heading" className="space-y-2">
-        <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">待你确认</h2>
+        <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">学习建议</h2>
         {privacy === "saved" && !loading ? <ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
       </section>
       <section aria-labelledby="agent-memory-heading" className="space-y-2 border-t border-line pt-3">

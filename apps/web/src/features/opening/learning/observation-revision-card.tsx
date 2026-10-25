@@ -18,7 +18,9 @@ function outcomeLabel(record: LearningObservation): string {
   return record.serverEvaluation ? record.serverEvaluation.decision === "correct" ? "自动核算正确"
     : record.serverEvaluation.decision === "incorrect" ? "自动核算有误" : "自动核算拒判" : outcomeLabels[record.outcome];
 }
-const helpLabels = { independent: "自报独立", hinted: "使用过提示", revealed: "看过讲解", unknown: "帮助情况未知" };
+const helpLabels = { independent: "自报独立", hinted: "使用过提示", revealed: "看过讲解", unknown: null };
+/** Unknown help is not news to the learner; say nothing rather than "未知". */
+const helpSuffix = (assistance: keyof typeof helpLabels) => helpLabels[assistance] ? ` · ${helpLabels[assistance]}` : "";
 const buttonClass = "border-b border-line px-2 py-2 text-sm text-text disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring";
 
 type HistoryPanel = { history: ObservationHistory | null; open: boolean };
@@ -144,7 +146,7 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
   return <article className="space-y-3 rounded-lg border border-line p-4">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h4 className="text-sm font-medium text-text">{current.skillLabel}</h4>
-      <span className="text-xs text-text-3">{current.revisionKind === "retract" ? "已撤回" : `${outcomeLabel(current)} · ${helpLabels[current.assistance]}`}</span>
+      <span className="text-xs text-text-3">{current.revisionKind === "retract" ? "已撤回" : `${outcomeLabel(current)}${helpSuffix(current.assistance)}`}</span>
     </div>
     <p className="text-xs font-medium text-text-2">我的解答 · 原答案</p>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
@@ -158,7 +160,7 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     </div>
     {historyOpen && history ? <ol className="space-y-3 border-l border-line pl-4" aria-label="观察修订历史">{history.revisions.map((item, index) => <li key={item.id} className="space-y-1 text-xs text-text-3">
       <p className="font-medium text-text">第 {index + 1} 次记录 · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前记录" : " · 历史记录（不重复计数）"}</p>
-      <p>{item.skillLabel} · {outcomeLabel(item)} · {helpLabels[item.assistance]}{diagnostics && item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
+      <p>{item.skillLabel} · {outcomeLabel(item)}{helpSuffix(item.assistance)}{diagnostics && item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>
       <p className="whitespace-pre-wrap break-words">{item.answer || "（未填写回答）"}</p>
       {item.revisionReason ? <p className="whitespace-pre-wrap break-words">原因：{item.revisionReason}</p> : null}
       <p>记录时间：{new Date(item.recordedAt ?? item.occurredAt).toLocaleString("zh-CN")}</p>

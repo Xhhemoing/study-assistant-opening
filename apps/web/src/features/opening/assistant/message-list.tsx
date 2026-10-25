@@ -51,6 +51,11 @@ type Props = {
   studyMode?: boolean;
   queryAvailable?: boolean;
   onStarter?: (starter: AssistantStarter) => void;
+  /** Saved assistant turn that ended without an answer and may be sent again. */
+  retryTurnId?: string | null;
+  onRetry?: () => void;
+  /** Replaces "正在思考…" while a reply has no text yet (e.g. the slow-wait copy). */
+  pendingLabel?: string;
 };
 /** Shared by the 出处 chips and inline `[k]` links so both open the same place. */
 function citationLink(citation: Citation, sourceNames: Readonly<Record<string, string>>): CitationLink {
@@ -61,7 +66,7 @@ function citationLink(citation: Citation, sourceNames: Readonly<Record<string, s
   };
 }
 
-export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
+export const MessageList = memo(function MessageList({ messages, objectHref = href => href, compact = false, historyTruncated, currentVersions = {}, sourceNames = {}, onPrompt, onReplyMode, onSaveSnippet, directSaveApi, onCreateCard, disabled = false, studyMode = false, queryAvailable = false, onStarter, retryTurnId = null, onRetry, pendingLabel, artifactsEnabled: artifactsEnabledProp, proseEnabled: proseEnabledProp }: Props) {
   const { chatArtifacts, chatProse } = useOpeningCapabilities();
   const diagnostics = useDiagnosticsEnabled();
   const artifactsEnabled = artifactsEnabledProp ?? chatArtifacts;
@@ -156,9 +161,9 @@ export const MessageList = memo(function MessageList({ messages, objectHref = hr
           <a className="inline-flex min-h-8 items-center gap-1 rounded-lg border border-transparent px-1.5 text-text-2 transition-colors hover:border-line hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={downloadHref} title="下载原件" aria-label={`下载 ${chipLabel}`}><Download size={12} aria-hidden /><span className="sr-only">下载</span></a>
         </span>;
       })}</div> : showsGeneralMaterialBadge(message) ? <p className="mt-3 text-xs text-text-2">一般说明（未引用材料）</p> : null}
-      {message.status === "pending" ? <ThinkingText>{message.text ? "正在回答…" : "正在思考…"}</ThinkingText> : null}
-      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">原请求不会自动重发，费用仍待确认。</p> : null}
-      {message.status === "failed" ? <p className="mt-2 text-xs text-danger">本轮失败，未得到有效回答。</p> : null}
+      {message.status === "pending" ? <ThinkingText>{message.text ? "正在回答…" : pendingLabel ?? "正在思考…"}</ThinkingText> : null}
+      {message.status === "outcome_unknown" ? <p className="mt-2 text-xs text-warn">不会自动再问一次，这次的用量还在确认。</p> : null}
+      {message.status === "failed" ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><p className="text-danger">这次没有得到回答。</p>{onRetry && retryTurnId === message.id ? <button type="button" className={secondaryButtonClass} disabled={disabled} onClick={onRetry}>重试</button> : null}</div> : null}
       {message.status === "clarify" ? <p role="note" className="mt-2 text-xs text-warn">{CLARIFY_FOLLOW_UP}</p> : null}
       {lastAssistant || saveAvailability !== "hidden" ? <MessageActions text={message.text} onPrompt={lastAssistant && !disabled ? onPrompt : undefined} onReplyMode={lastAssistant && !disabled && !message.systemQuery ? onReplyMode : undefined} onSave={!directSaveApi && saveAvailability === "available" && onSaveSnippet ? () => saveSnippet(message) : undefined} onCreateCard={saveAvailability === "available" && onCreateCard ? () => createCard(message) : undefined} missingProvenance={saveAvailability === "missing_provenance"} querySaveUnsupported={saveAvailability === "query_not_supported"} /> : null}
       {directSaveApi && saveAvailability === "available" ? <DirectSnippetSave message={message} api={directSaveApi} objectHref={objectHref} selection={() => selectedTextFor(message)} /> : null}
@@ -196,7 +201,7 @@ function DirectSnippetSave({ message, api, objectHref, selection }: { message: C
   return <div className="mt-2 space-y-2 text-xs leading-6">
     <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "存为笔记"}</button>
     {notice ? <p role="status" className="text-text-2">{notice}</p> : null}
-    {status === "unknown" ? <p role="alert" className="text-warn">保存结果尚未确认，可能已经保存。请先检查笔记列表，本次不会再次写入。</p> : null}
+    {status === "unknown" ? <p role="alert" className="text-warn">还不确定是否已经存好，可能已经保存。请先看一下笔记列表，这里不会再存第二份。</p> : null}
     {status === "unavailable" ? <p role="alert" className="text-warn">暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。</p> : null}
     {status === "saved" && documentId ? <Link href={objectHref(libraryNotePath("/opening/library", documentId))} className={secondaryButtonClass}>打开笔记</Link> : status === "unknown" || status === "unavailable" ? <Link href={objectHref("/opening/library?tab=notes")} className={secondaryButtonClass}>检查笔记列表</Link> : null}
   </div>;

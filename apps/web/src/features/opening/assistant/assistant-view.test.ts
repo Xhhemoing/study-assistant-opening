@@ -32,7 +32,7 @@ describe("AssistantView pending job discovery", () => {
       kind: "active",
       activeJobId: JOB_ID,
       pending: true,
-      hint: "回答任务已排队。",
+      hint: "已收到问题，马上开始…",
     });
   });
 
@@ -59,7 +59,7 @@ describe("AssistantView pending job discovery", () => {
     })).toEqual({
       kind: "unknown",
       pending: false,
-      hint: "回答结果状态未知，原请求不会自动重发。请查看回答恢复提示。",
+      hint: "还不确定这次是否答完，不会自动再问一次。",
     });
   });
 });
@@ -187,7 +187,7 @@ describe("AssistantView job polling", () => {
         error: { message: "provider timeout" },
         updatedAt: ISO,
       }),
-    ).toContain("原请求不会自动重发");
+    ).toContain("不会自动再问一次");
     expect(
       jobStatusHint({
         id: JOB_ID,
@@ -195,7 +195,7 @@ describe("AssistantView job polling", () => {
         error: { message: "provider rejected" },
         updatedAt: ISO,
       }),
-    ).toContain("失败");
+    ).toContain("没有得到回答");
   });
 });
 
@@ -362,7 +362,7 @@ describe("Package C effectiveSourceIds UI helpers", () => {
 
 describe("LAB-U01 jobStatusHint clarify", () => {
   // failed + nextAction clarify is the page refusal; shown as the Clarify message
-  // with no "回答任务失败：" prefix. The response is parsed through the real contract.
+  // with no "这次没有得到回答：" prefix. The response is parsed through the real contract.
   it("shows a page refusal (failed + nextAction clarify) as Clarify without the failure prefix", () => {
     const hint = jobStatusHint(jobStatusResponseSchema.parse({
       id: JOB_ID,
@@ -371,10 +371,10 @@ describe("LAB-U01 jobStatusHint clarify", () => {
       updatedAt: ISO,
     }));
     expect(hint).toBe(PAGE_CITATION_CLARIFY_MESSAGE);
-    expect(hint).not.toContain("回答任务失败");
+    expect(hint).not.toContain("这次没有得到回答");
     expect(jobStatusHint({
       id: JOB_ID, status: "failed", error: { message: "unknown strategy template: x", code: "unknown_strategy_template" }, updatedAt: ISO,
-    })).toBe("回答任务失败：unknown strategy template: x");
+    })).toBe("这次没有得到回答：unknown strategy template: x");
   });
 });
 

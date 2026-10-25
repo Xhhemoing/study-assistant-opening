@@ -299,10 +299,10 @@ export function ResumeCardView({
           <p data-resume-thought-train="true">分支 {thought.branchDepth} · 命令日志 {thought.commandLogCount} · 跳过 {thought.skippedCount}<span className="block break-all">当前块：{thought.currentBlockId ?? "无"}</span></p>
           <div data-resume-open-problems="true">未解决问题：{resume.openProblems.length}<ul>{resume.openProblems.map(p => <li key={`${p.problemId}-${p.reason}`} className="break-all">{p.problemId} · {p.reason}</li>)}</ul></div>
           <div className="flex flex-wrap gap-1.5">
-            {serverDrafts.map(d => <span key={`server-${d.blockId}`} className={`${ui.badge} ${tone.success}`} data-draft-chip="server" data-draft-block-id={d.blockId}>服务端 · {d.blockId}</span>)}
+            {serverDrafts.map(d => <span key={`server-${d.blockId}`} className={`${ui.badge} ${tone.success}`} data-draft-chip="server" data-draft-block-id={d.blockId}>已保存 · {d.blockId}</span>)}
             {localUnsent.map(d => <span key={`unsent-${d.blockId}`} className={`${ui.badge} ${tone.warning}`} data-draft-chip="unsent" data-draft-block-id={d.blockId}>未发送 · {d.blockId}</span>)}
           </div>
-          <p>服务端草稿为权威；本地未发送草稿仅缓冲至同步成功，冲突时并排展示，禁止静默覆盖。</p>
+          <p>以已保存的草稿为准；这台设备上未发送的草稿会保留到保存成功，有冲突时并排显示，不会自动覆盖。</p>
           {conflict?.message ? <p>{conflict.message}</p> : null}
           {conflict?.lostBlockIds?.length ? <p className="break-all">失效块：{conflict.lostBlockIds.join(", ")}</p> : null}
           {resume.continuableActions.length ? <div className="flex flex-wrap gap-1.5" data-resume-continuable="true">{resume.continuableActions.map(action => <span key={action} className={`${ui.badge} ${tone.neutral}`} data-continuable-action={action}>{continuableActionLabel(action)}</span>)}</div> : null}
@@ -618,7 +618,7 @@ export function ResumeCard({
           kind: "draft_anchor_lost",
           lostBlockIds: lost,
           message:
-            "部分草稿锚点在服务端已失效。请并排对照后手动处理；禁止强制覆盖。",
+            "有些草稿对应的段落已经更新，请对照后手动处理，不会自动覆盖。",
         });
         await fetchResume();
         return;
@@ -639,8 +639,8 @@ export function ResumeCard({
         kind: "version_conflict",
         message:
           err instanceof Error
-            ? `${err.message} — 已禁止静默覆盖；请对照服务端与本地未发送草稿。`
-            : "版本冲突；请对照服务端与本地未发送草稿，禁止强制覆盖。",
+            ? `${err.message} — 不会自动覆盖；请对照已保存的草稿和未发送的草稿。`
+            : "草稿和已保存的内容不一致，请对照后处理，不会自动覆盖。",
       });
       await fetchResume();
     } finally {

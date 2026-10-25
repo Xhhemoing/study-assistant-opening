@@ -188,9 +188,9 @@ export function failSoftReasonLabel(reason: FailSoftReason): string {
     case "illegal_action":
       return "含有未授权动作，已跳过该块";
     case "unknown_schema_version":
-      return "教学内容版本不受支持";
+      return "这部分内容暂时无法显示";
     case "answer_hidden":
-      return "解析尚未解锁（需服务端授权后查看）";
+      return "解析暂时还不能查看";
     default:
       return "该块暂时无法展示";
   }
