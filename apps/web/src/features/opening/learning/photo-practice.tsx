@@ -17,6 +17,7 @@ import { studyConversationHref } from "../assistant/study-conversation-context";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
 import { PhotoRecognitionEditor } from "./photo-recognition-editor";
 import { useWorkspaceLayout } from "../shell/workspace-layout-context";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const draftSchema = z.object({ sourceVersion: z.number().int().nonnegative(), stem: z.string().max(2000), confirmed: z.boolean() }).strict();
 const storageKey = (sourceId: string) => `study:photo-practice:v1:${sourceId}`;
@@ -88,13 +89,13 @@ function PhotoPracticeContent({ sourceId, conversationId, conversationError }: P
           if (!parsed.success) throw new Error("保存的题干暂时无法读取，请重新确认题干。");
           stored = parsed.data; setStem(stored.stem);
         }
-      } catch (reason) { setError(reason instanceof Error ? reason.message : "题干未恢复，请重新确认。"); return; }
+      } catch (reason) { setError(userFacingMessage(reason, "题干未恢复，请重新确认。")); return; }
       if (stored && stored.sourceVersion !== actual.version) throw new Error("题图已更新，之前的题干已保留。请核对当前题图，再确认开始。");
       if (stored?.confirmed && stored.stem.trim()) {
         const result = await runPracticeRequest(`photo-practice:${sourceId}:v${actual.version}`, () => preparePhotoPractice({ sourceId, sourceVersion: actual.version }));
         if (active) setPrepared(result);
       }
-    })().catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "无法读取题图，请重试。"); })
+    })().catch(reason => { if (active) setError(userFacingMessage(reason, "无法读取题图，请重试。")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [sourceId, revision]);
@@ -106,7 +107,7 @@ function PhotoPracticeContent({ sourceId, conversationId, conversationError }: P
     try {
       const result = await runPracticeRequest(`photo-practice:${sourceId}:v${source.version}`, () => preparePhotoPractice({ sourceId, sourceVersion: source.version }));
       setPrepared(result);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法开始作答，题干已保留。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "暂时无法开始作答，题干已保留。")); }
     finally { setPending(false); }
   }
 

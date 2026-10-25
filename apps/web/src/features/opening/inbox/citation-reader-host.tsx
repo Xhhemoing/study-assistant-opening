@@ -8,6 +8,7 @@ import { ui } from "../design/ui";
 import { captureReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { SourceReader, SourceReaderFrame } from "./source-reader";
 import { parseSourceViewerSearchParams, type SourceViewerTarget } from "./source-viewer";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type CitationClick = {
   href: string;
@@ -81,7 +82,7 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
     void loadCitationReaderRecord(api, request.target).then(value => {
       if (current === sequence.current) setRecord(value);
     }).catch(reason => {
-      if (current === sequence.current) setError(reason instanceof Error ? reason.message : "材料暂时无法读取。");
+      if (current === sequence.current) setError(userFacingMessage(reason, "材料暂时无法读取。"));
     });
     return () => { sequence.current++; };
   }, [api, request, revision]);

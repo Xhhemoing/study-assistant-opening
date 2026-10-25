@@ -6,6 +6,7 @@ import type { AssistantProposalCreate, AssistantProposalRecord, AssistantProposa
 import type { OpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { buttonClass, secondaryButtonClass } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const labels: Record<AssistantProposalTool["name"], string> = {
   propose_teaching_move: "安排一次讲解", propose_plan_change: "调整学习计划", propose_card: "整理成卡片",
@@ -63,7 +64,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectH
     const facts = courseId ? await learning.listObservations(courseId) : [];
     if (current === generation.current) { setRows(proposals); setObservations(facts); }
   }, [api, courseId, learning]);
-  useEffect(() => { void refresh().catch(error => setMessage(error instanceof Error ? error.message : "建议暂时无法读取")); return () => { generation.current++; }; }, [refresh, refreshKey, sourceTurnId]);
+  useEffect(() => { void refresh().catch(error => setMessage(userFacingMessage(error, "建议暂时无法读取"))); return () => { generation.current++; }; }, [refresh, refreshKey, sourceTurnId]);
 
   async function propose() {
     if (!sourceTurnId) return;
@@ -94,7 +95,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectH
       pending.current = null;
       setMessage("建议已准备好，请检查内容后接受。");
       await refresh();
-    } catch (error) { setMessage(error instanceof Error ? error.message : "暂时无法确认建议是否已保存；重新读取后可重试同一内容。"); }
+    } catch (error) { setMessage(userFacingMessage(error, "暂时无法确认建议是否已保存；重新读取后可重试同一内容。")); }
     finally { setBusy(false); }
   }
   async function decide(row: AssistantProposalRecord, action: "accept" | "reject") {
@@ -102,7 +103,7 @@ export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectH
     try {
       await api.decideAssistantProposal(row.id, { expectedVersion: row.version, action, clientKey: `proposal-decision:${row.id}:${row.version}:${action}` });
       await refresh();
-    } catch (error) { setMessage(error instanceof Error ? error.message : "结果未确认，请重新读取后再操作。"); }
+    } catch (error) { setMessage(userFacingMessage(error, "结果未确认，请重新读取后再操作。")); }
     finally { setBusy(false); }
   }
   const field = "w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm focus-visible:outline-accent";

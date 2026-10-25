@@ -4,6 +4,7 @@ import {
   type ObservationRevisionInput,
 } from "@aistudy/contracts";
 import { OpeningApiError } from "../client/api";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export const SELF_COMPARE_REASON = "对照参考核对";
 export const SELF_COMPARE_METHOD_PREFIX = "learner_self_compare";
@@ -126,6 +127,6 @@ export function referenceCheckFailure(error: unknown): {
   }
   return {
     kind: "error",
-    message: error instanceof Error ? error.message : "对照参考核对失败，答案未改动，请重试。",
+    message: userFacingMessage(error, "对照参考核对失败，答案未改动，请重试。"),
   };
 }

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createOpeningApi } from "../client/api";
 import { ui } from "../v3/ui/controls";
 import { AssistantView } from "./assistant-view";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** 会话列表按最近更新排序，可按标题和最后一句过滤 */
 export function filterConversations(rows: readonly ConversationSummary[], query: string): ConversationSummary[] {
@@ -38,7 +39,7 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
 
   const refresh = useCallback(async () => {
     try { setRows(await api.listConversations()); setListError(""); }
-    catch (reason) { setListError(reason instanceof Error ? reason.message : "会话列表暂时无法读取"); setRows(value => value ?? []); }
+    catch (reason) { setListError(userFacingMessage(reason, "会话列表暂时无法读取")); setRows(value => value ?? []); }
   }, [api]);
   useEffect(() => { void refresh(); }, [refresh]);
 

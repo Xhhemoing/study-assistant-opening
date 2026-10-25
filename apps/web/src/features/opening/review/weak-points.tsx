@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { EmptyState, LoadError, LoadingRows, ui } from "../design/ui";
 import { errorCauses, practiceHref, retestQueueHref, readCauses, writeCauses, weakPointStateLabels, type ErrorCause, type WeakPoint } from "./weak-points-model";
 import { readWeakPoints } from "./weak-points-client";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type LoadState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; points: WeakPoint[]; incomplete: boolean };
 
@@ -21,7 +22,7 @@ export function WeakPoints() {
     const controller = new AbortController();
     setState({ kind: "loading" });
     void readWeakPoints(controller.signal).then(result => { if (!controller.signal.aborted) setState({ kind: "ready", ...result }); })
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setState({ kind: "error", message: reason instanceof Error ? reason.message : "易错点暂时无法读取" }); });
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setState({ kind: "error", message: userFacingMessage(reason, "易错点暂时无法读取") }); });
     return () => controller.abort();
   }, [revision]);
 

@@ -9,6 +9,7 @@ import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
 import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity } from "./practice-draft";
 import { raiseAssistanceOnly, isAssistanceAllowed } from "./reference-check";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type Key = MatrixExerciseSpec["exerciseKey"];
 const KEYS: Key[] = ["dimensions", "addition", "scalar", "multiplication"];
@@ -85,7 +86,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
         return created;
       });
       await acceptAttempt(next, request.clientKey);
-    } catch (reason) { setRestored(true); setError(reason instanceof Error ? reason.message : "暂时无法恢复练习，答案已保留"); }
+    } catch (reason) { setRestored(true); setError(userFacingMessage(reason, "暂时无法恢复练习，答案已保留")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   async function submit(event: FormEvent) {
@@ -108,7 +109,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
       if (readPracticeDraft(scope, null, draft.id)?.attemptId !== submission.attemptId) { onRecorded(); return; }
       if (!state.observation) throw new Error("答案已保存，暂时无法读取结果，请保留答案后重试。");
       setRecord(state.observation); onRecorded();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "保存失败，原答案已锁定，请重试同一次保存"); }
+    } catch (reason) { setError(userFacingMessage(reason, "保存失败，原答案已锁定，请重试同一次保存")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   async function dispute() {
@@ -132,7 +133,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
         setRecord(head);
       }
       setMessage("已记录你的异议，可在课程历史中更正结果。"); onRecorded();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法保存异议，请刷新课程历史核对"); }
+    } catch (reason) { setError(userFacingMessage(reason, "无法保存异议，请刷新课程历史核对")); }
     finally { pendingRef.current = false; setPending(false); }
   }
   function nextQuestion() {

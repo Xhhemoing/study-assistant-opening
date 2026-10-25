@@ -13,6 +13,7 @@ import {
   providerDraftFromView, providerRequestBody, validateModelDraft, validateProviderDraft,
   type ProviderDraft, type ProviderModelDraft,
 } from "./provider-settings-model";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { cache: "no-store", ...init });
@@ -182,7 +183,7 @@ export function ProviderSettingsPanel() {
     try {
       const parsed = openingProviderConfigResponseSchema.parse(await requestJson("/api/opening/model-providers", { signal }));
       if (!signal?.aborted) { setData(parsed); setNotice(""); }
-    } catch (failure) { if (!signal?.aborted) setError(failure instanceof Error ? failure.message : "服务商配置暂时无法读取，请重试。"); }
+    } catch (failure) { if (!signal?.aborted) setError(userFacingMessage(failure, "服务商配置暂时无法读取，请重试。")); }
     finally { if (!signal?.aborted) setBusy(false); }
   }, []);
   useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort(); }, [load]);
@@ -190,7 +191,7 @@ export function ProviderSettingsPanel() {
     if (busy) return;
     setBusy(true); setError(""); setNotice("");
     try { setNotice(await action()); await load(); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : "操作失败，请重试。"); }
+    catch (failure) { setError(userFacingMessage(failure, "操作失败，请重试。")); }
     finally { setBusy(false); }
   }
   const jsonInit = (method: string, body: unknown): RequestInit => ({

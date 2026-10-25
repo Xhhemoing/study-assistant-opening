@@ -15,6 +15,7 @@ import type { LearningSummary } from "@aistudy/contracts";
 import type { LearningSummaryAggregate } from "@aistudy/contracts";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { LearningEvidenceEligibility } from "@aistudy/contracts";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const STATUS_LABEL: Record<LearningSummary["status"], string> = {
   unobserved: "尚无观察",
@@ -73,7 +74,7 @@ export function CourseLearningView({ courseId, retest: retestProp = null }: { co
     }).catch((reason: unknown) => {
       if (!active) return;
       setRetest(null);
-      setRetestNotice(reason instanceof Error ? reason.message : "无法读取补测预填");
+      setRetestNotice(userFacingMessage(reason, "无法读取补测预填"));
     });
     return () => { active = false; };
   }, [courseId, retestProp]);

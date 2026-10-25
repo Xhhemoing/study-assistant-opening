@@ -27,6 +27,7 @@ import { CourseSpaceHeader } from "./course-space";
 import { LibraryDocumentList } from "../workspace/library-document-list";
 import { LearnerStateCard } from "../opening/teaching/learner-state-card";
 import { useDiagnosticsEnabled } from "../opening/settings/appearance-preferences";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 function revealCourseMaterials() {
   let node: HTMLElement | null = document.getElementById("course-assets");
@@ -65,7 +66,7 @@ export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { cou
     try {
       await createCourseStateClient().removeAsset(courseId, selected);
       onRemoved(selected.id); setSelected(null);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "移出课程失败，请重试。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "移出课程失败，请重试。")); }
     finally { setBusy(false); }
   }
   return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>

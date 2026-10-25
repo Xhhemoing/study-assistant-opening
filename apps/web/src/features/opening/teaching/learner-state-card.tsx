@@ -7,6 +7,7 @@ import { countValidLearnerObservations } from "@aistudy/domain";
 import { LoadError, ui } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { LearnerShadowPanel } from "./learner-shadow-panel";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 const viewSchema = z.object({ independent: z.number(), retention: z.number(), transfer: z.number(), help: z.number() });
 const readSchema = z.object({ stateVersion: z.string(), dataAsOf: z.string().datetime(),
   features: z.array(z.object({ observationId: z.string(), courseId: z.string().uuid(),
@@ -31,7 +32,7 @@ export function LearnerStateCard({ courseId, revision = 0, proactive = false }: 
     void fetch(`/api/opening/learner-state${courseId ? `?courseId=${encodeURIComponent(courseId)}` : ""}`, { signal: controller.signal, cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("当前学习状态暂时无法读取");
       const result = readSchema.parse(await response.json()); if (!controller.signal.aborted) setState(result);
-    }).catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "状态不可用"); });
+    }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "状态不可用")); });
     return () => controller.abort();
   }, [courseId, revision, retry]);
   if (error) return diagnostics ? <LoadError message={error} onRetry={() => setRetry(value => value + 1)} /> : null;

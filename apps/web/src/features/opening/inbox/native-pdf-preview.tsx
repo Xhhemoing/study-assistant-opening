@@ -5,6 +5,7 @@ import type { PDFDocumentProxy, RenderTask, TextLayer } from "pdfjs-dist";
 import { ui } from "../design/ui";
 import { loadPdfRuntime, type PdfRuntime } from "./native-pdf-runtime";
 import { rememberSourceReaderPage } from "./source-reader-position";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function pdfPreviewLocation(href: string): { url: string; page: number } {
   const [url, fragment] = href.split("#");
@@ -44,7 +45,7 @@ export function NativePdfPreview({ href, name, fillHeight = false, sourceId, ver
       if (!active) return;
       if (pdfPreviewLocation(href).page > document.numPages) throw new Error("引用页码已失效，请重新选择页码。");
       setLoaded({ document, runtime });
-    }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "PDF 暂不可读取，请重试或打开原件。"); })
+    }).catch(reason => { if (active) setError(userFacingMessage(reason, "PDF 暂不可读取，请重试或打开原件。")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; if (task) void task.destroy(); };
   }, [href, revision]);
@@ -62,7 +63,7 @@ export function NativePdfPreview({ href, name, fillHeight = false, sourceId, ver
     let active = true;
     setPageWidth(0);
     void loaded.document.getPage(page).then(value => { if (active) setPageWidth(value.getViewport({ scale: 1 }).width); })
-      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "此页暂不可读取。"); });
+      .catch(reason => { if (active) setError(userFacingMessage(reason, "此页暂不可读取。")); });
     return () => { active = false; };
   }, [loaded, page]);
   const scale = pageWidth && width ? pdfPageScale(width, pageWidth, zoom) : 0;
@@ -92,7 +93,7 @@ export function NativePdfPreview({ href, name, fillHeight = false, sourceId, ver
       await Promise.all([renderTask.promise, textLayer.render()]);
       if (!active) return;
       if (sourceId && version !== undefined) rememberSourceReaderPage(sourceId, version, page);
-    }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : "PDF 绘制失败，原件仍可打开。"); })
+    }).catch(reason => { if (active) setError(userFacingMessage(reason, "PDF 绘制失败，原件仍可打开。")); })
       .finally(() => { if (active) setRendering(false); });
     return () => { active = false; renderTask?.cancel(); textLayer?.cancel(); text.replaceChildren(); };
   }, [loaded, page, scale, sourceId, version]);

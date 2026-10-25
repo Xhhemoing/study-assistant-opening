@@ -5,6 +5,7 @@ import type { TeachingActivity } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { ui } from "../design/ui";
 import { ActivitySummaryCard } from "./activity-summary-card";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 /** Ending is separate from task completion. Only the summary's explicit action writes a task. */
 export async function endTeachingActivity(api: Pick<OpeningApi, "getTeachingActivity" | "patchTeachingActivityStatus">, activityId: string) {
@@ -28,14 +29,14 @@ export function ActivityEndControl({ activity, api, onActivityUpdated }: {
     if (!window.confirm("结束后本节不能再作答，学习记录会保留；之后可以随时开始新的一节。确定结束？")) return;
     inFlight.current = true; setPending(true); setError("");
     try { onActivityUpdated(await endTeachingActivity(api, activity.id)); }
-    catch (reason) { setUncertain(true); setError(reason instanceof Error ? reason.message : "结束状态尚未确认，请重新读取。"); }
+    catch (reason) { setUncertain(true); setError(userFacingMessage(reason, "结束状态尚未确认，请重新读取。")); }
     finally { inFlight.current = false; setPending(false); }
   }
   async function reread() {
     if (inFlight.current) return;
     inFlight.current = true; setPending(true); setError("");
     try { onActivityUpdated(await api.getTeachingActivity(activity.id)); setUncertain(false); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取学习状态"); }
+    catch (reason) { setError(userFacingMessage(reason, "无法读取学习状态")); }
     finally { inFlight.current = false; setPending(false); }
   }
   if (activity.status === "completed") return <ActivitySummaryCard activityId={activity.id} api={api} />;

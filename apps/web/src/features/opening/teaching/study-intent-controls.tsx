@@ -5,6 +5,7 @@ import { z } from "zod";
 import { studyIntentEventSchema, studySessionIntentSchema, type LearningAttempt, type StudyIntentChange, type StudyIntentEvent, type StudySessionIntent } from "@aistudy/contracts";
 import { ui } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 const resultSchema = z.object({ event: studyIntentEventSchema, currentEvent: studyIntentEventSchema, currentIntent: studySessionIntentSchema, currentVersion: z.number().int().positive(),
   move: z.object({ id: z.string(), presentation: z.object({ instructions: z.string() }), studentAction: z.string() }) });
 export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: Pick<LearningAttempt, "sessionId" | "courseId"> & { id?: string }; desiredIntent?: StudySessionIntent;
@@ -29,7 +30,7 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
       if (!response.ok) throw new Error("学习意图暂不可读取");
       const result = z.object({ event: studyIntentEventSchema.nullable() }).parse(await response.json());
       if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); lastPreference.current = JSON.stringify(result.event.intent); onAppliedRef.current?.(result.event.intent, "continue"); }
-    }).catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "意图暂不可读取"); });
+    }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "意图暂不可读取")); });
     return () => controller.abort();
   }, [attempt.sessionId]);
   const apply = useCallback(async (change: StudyIntentChange) => {
@@ -60,7 +61,7 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
         }
       }
       confirmed = true; unresolved.current = null; keys.current.delete(identity);
-    } catch (reason) { unresolved.current = identity; setError(reason instanceof Error ? reason.message : "意图保存未确认"); }
+    } catch (reason) { unresolved.current = identity; setError(userFacingMessage(reason, "意图保存未确认")); }
     finally {
       busy.current = false; setPending(false);
       if (confirmed) {

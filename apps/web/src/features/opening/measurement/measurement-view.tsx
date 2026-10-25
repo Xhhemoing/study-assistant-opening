@@ -9,6 +9,7 @@ import { MeasurementAttemptCard, type MeasurementAction } from "./attempt-card";
 import { createMeasurementClient, type MeasurementCourse } from "./client";
 import { activeMeasurementAttempt, measurementCanContinue, measurementDate } from "./measurement-model";
 import { MeasurementReportPanel } from "./report-panel";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const api = createMeasurementClient();
 
@@ -46,7 +47,7 @@ export function MeasurementView() {
     setOverview(null);
     setConsent(false);
     void api.read(courseId).then(value => { if (current) { setOverview(value); if (value.trial) setCourseId(value.trial.courseId); } }).catch(cause => {
-      if (current) setError(cause instanceof Error ? cause.message : "测试记录暂时无法读取。");
+      if (current) setError(userFacingMessage(cause, "测试记录暂时无法读取。"));
     }).finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
   }, [courseId]);
@@ -66,7 +67,7 @@ export function MeasurementView() {
       if (value.trial) setCourseId(value.trial.courseId);
       setClock(Date.now());
     }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "测试记录暂时无法读取。"); }
+    catch (cause) { setError(userFacingMessage(cause, "测试记录暂时无法读取。")); }
     finally { setBusy(false); }
   }
 
@@ -83,7 +84,7 @@ export function MeasurementView() {
       setClock(Date.now());
       setNotice(success);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "操作未完成，请重试或重新读取。原始记录仍会保留。");
+      setError(userFacingMessage(cause, "操作未完成，请重试或重新读取。原始记录仍会保留。"));
     } finally { setBusy(false); }
   }
 

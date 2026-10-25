@@ -8,6 +8,7 @@ import { createOpeningApi } from "../opening/client/api";
 import { LoadError, ui } from "../opening/design/ui";
 import { createMaterialOrganizationClient, type OrganizationResult } from "../opening/library/material-organization-client";
 import type { CourseAsset } from "./course-model";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 export type MaterialRole = "core" | "optional" | "reference";
 
@@ -80,7 +81,7 @@ export function CourseAddMaterials({
       if (next.succeeded.length) onAdded();
       if (!next.failed.length) setOpen(false);
     } catch (reason) {
-      setActionError(reason instanceof Error ? reason.message : "挂接失败，请重试。");
+      setActionError(userFacingMessage(reason, "挂接失败，请重试。"));
     } finally {
       setBusy(false);
     }

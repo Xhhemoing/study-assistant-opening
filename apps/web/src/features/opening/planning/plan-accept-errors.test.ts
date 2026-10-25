@@ -23,7 +23,7 @@ describe("planAcceptFailure", () => {
   it("does not interpret a reason outside a plan-accept conflict", () => {
     expect(planAcceptFailure(new OpeningApiError(503, "服务暂时不可用", "UNAVAILABLE", "stale_version")))
       .toEqual({ message: "服务暂时不可用", reread: false });
-    expect(planAcceptFailure(new TypeError("network lost"))).toEqual({ message: "network lost", reread: false });
+    expect(planAcceptFailure(new TypeError("network lost"))).toEqual({ message: "确认推荐草案失败", reread: false });
     expect(planAcceptFailure(null)).toEqual({ message: "确认推荐草案失败", reread: false });
   });
 });

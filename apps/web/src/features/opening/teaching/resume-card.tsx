@@ -1,3 +1,4 @@
+import { userFacingMessage } from "../../../lib/user-facing-error";
 "use client";
 
 /**
@@ -469,7 +470,7 @@ export function ResumeCard({
     } catch (err) {
       if (!requestScope.active) return null;
       setLoadState("error");
-      setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
+      setLoadError(userFacingMessage(err, "读取学习位置失败"));
       return null;
     }
   }, [activity.id, api, applyResume, requestScope]);
@@ -507,7 +508,7 @@ export function ResumeCard({
       .catch((err) => {
         if (cancelled) return;
         setLoadState("error");
-        setLoadError(err instanceof Error ? err.message : "读取学习位置失败");
+        setLoadError(userFacingMessage(err, "读取学习位置失败"));
       });
     return () => {
       cancelled = true;
@@ -540,7 +541,7 @@ export function ResumeCard({
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "暂停失败");
+      if (requestScope.active) setStatusError(userFacingMessage(err, "暂停失败"));
     } finally {
       if (requestScope.active) setPauseBusy(false);
     }
@@ -559,7 +560,7 @@ export function ResumeCard({
       onActivityUpdated?.(updated);
       await fetchResume();
     } catch (err) {
-      if (requestScope.active) setStatusError(err instanceof Error ? err.message : "恢复失败");
+      if (requestScope.active) setStatusError(userFacingMessage(err, "恢复失败"));
     } finally {
       if (requestScope.active) setPauseBusy(false);
     }

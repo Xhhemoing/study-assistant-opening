@@ -12,6 +12,7 @@ import { ui } from "../opening/design/ui";
 import { runSeedTodayPlan } from "../opening/planning/seed-today-plan";
 import { courseStudyActivities, courseStudyHref, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 import { useCourseStudy } from "./use-course-study";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 const CourseStudyContext = createContext<ReturnType<typeof useCourseStudy> | null>(null);
 
@@ -88,7 +89,7 @@ export function CourseStudyActions({
         navigate: (href) => router.push(href),
       });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "设为今日计划失败，请重试。");
+      setError(userFacingMessage(reason, "设为今日计划失败，请重试。"));
     } finally {
       setBusy(false);
     }

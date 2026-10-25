@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ui } from "../opening/design/ui";
 import { availabilityLabels, effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode, transcriptionModelProblem, tutorRouteLabels } from "./ai-settings-model";
 import { TaskRoutesSection } from "./task-routes-section";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 function ModelSelect({ label, models, supplier, value, fallback, onChange }: {
   label: string; models: OpeningModelSummary[]; supplier: string; value: string | null; fallback: string;
@@ -103,7 +104,7 @@ export function AiSettingsPanel() {
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body.error?.message === "string" ? body.error.message : "模型设置暂时无法读取，请重试。");
       if (!signal?.aborted) receive(openingAiSettingsResponseSchema.parse(body));
-    } catch (failure) { if (!signal?.aborted) setError(failure instanceof Error ? failure.message : "模型设置暂时无法读取，请重试。"); }
+    } catch (failure) { if (!signal?.aborted) setError(userFacingMessage(failure, "模型设置暂时无法读取，请重试。")); }
     finally { if (!signal?.aborted) setBusy(false); }
   }, []);
   useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort(); }, [load]);
@@ -116,7 +117,7 @@ export function AiSettingsPanel() {
       if (!response.ok) throw new Error(typeof body.error?.message === "string" ? body.error.message : "模型设置保存失败，请重试。");
       receive(openingAiSettingsResponseSchema.parse(body));
       setNotice(value ? "模型设置已保存。后续请求将按以上规则选择模型。" : "已恢复服务器默认设置，请确认下方模型可用状态。");
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "模型设置保存失败，请重试。"); }
+    } catch (failure) { setError(userFacingMessage(failure, "模型设置保存失败，请重试。")); }
     finally { setBusy(false); }
   }
   return <section className="grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="ai-settings-heading">

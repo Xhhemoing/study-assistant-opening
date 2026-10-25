@@ -34,7 +34,7 @@ describe("real review task aggregation", () => {
   });
   it("does not turn a failed source into an empty queue or hide the successful source", async () => {
     const result = await loadReviewSources({ listCards: async () => { throw new Error("cards offline"); }, listTasks: async () => ({ tasks: [retest("r")] }) });
-    expect(result.cards).toEqual({ kind: "error", message: "cards offline" });
+    expect(result.cards).toEqual({ kind: "error", message: "读取失败，请重试。" });
     expect(result.tasks).toEqual({ kind: "ready", value: [retest("r")] });
     const reverse = await loadReviewSources({ listCards: async () => [], listTasks: async () => { throw new Error("tasks offline"); } });
     expect(reverse.cards).toEqual({ kind: "ready", value: [] });

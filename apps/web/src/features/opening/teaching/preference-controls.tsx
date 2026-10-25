@@ -1,3 +1,4 @@
+import { userFacingMessage } from "../../../lib/user-facing-error";
 "use client";
 
 /**
@@ -384,7 +385,7 @@ export function PreferenceControls({
         if (!signal?.aborted) receive(interventionSettingsResponseSchema.parse(next));
       } catch (failure) {
         if (!signal?.aborted) {
-          setError(failure instanceof Error ? failure.message : "介入偏好暂时无法读取，请重试。");
+          setError(userFacingMessage(failure, "介入偏好暂时无法读取，请重试。"));
         }
       } finally {
         if (!signal?.aborted) setBusy(false);
@@ -427,7 +428,7 @@ export function PreferenceControls({
         );
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "介入偏好保存失败，请重试。");
+      setError(userFacingMessage(failure, "介入偏好保存失败，请重试。"));
     } finally {
       setBusy(false);
     }

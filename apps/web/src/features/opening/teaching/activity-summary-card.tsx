@@ -6,6 +6,7 @@ import { createOpeningApi, type OpeningApi } from "../client/api";
 import { TaskQueueRefreshContext, TaskStatusControl } from "../planning/task-status-control";
 import { createTeachingActivityClient } from "./activity-client";
 import { ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function ActivitySummaryContent({ summary, task, api, onReread }: {
   summary: TeachingActivitySummary;
@@ -55,7 +56,7 @@ export function ActivitySummaryCard({ activityId, api: apiProp }: { activityId: 
       // summary with the previous activity's task while the second read waits.
       if (current()) setSnapshot({ activityId, summary, task });
     } catch (reason) {
-      if (current()) setFailure({ activityId, message: reason instanceof Error ? reason.message : "无法读取学习小结" });
+      if (current()) setFailure({ activityId, message: userFacingMessage(reason, "无法读取学习小结") });
     }
   }, [activityId, api, client]);
   useEffect(() => { void load(); return () => { request.current++; }; }, [load]);

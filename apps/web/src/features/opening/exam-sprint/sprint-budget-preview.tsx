@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { createSessionFetch } from "../../auth/session-expiry";
 import { parseOpeningResponse } from "../client/parse-response";
 import { ui } from "../design/ui";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 const statuses: Record<SprintBudgetResponse["status"], string> = {
   ready: "只读预估，尚未应用", needs_goal: "请先设置课程考试日期和时间预算。",
@@ -48,7 +49,7 @@ export function SprintBudgetPreview({ courseId, load = readSprintBudget }: {
       const result = await load(courseId, controller.signal);
       if (pending.current === controller && !controller.signal.aborted) setData(result);
     } catch (reason) {
-      if (!controller.signal.aborted && pending.current === controller) setError(reason instanceof Error ? reason.message : "预估暂时不可用。");
+      if (!controller.signal.aborted && pending.current === controller) setError(userFacingMessage(reason, "预估暂时不可用。"));
     } finally {
       if (pending.current === controller) { pending.current = null; setBusy(false); }
     }

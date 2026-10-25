@@ -53,6 +53,6 @@ it("renders canvas and selectable text in the same viewport and refits only auto
 it("shows an actionable failure and keeps the original available instead of displaying a sample", async () => {
   pdf.getDocument.mockReturnValue({ promise: Promise.reject(new Error("download denied")), destroy: pdf.destroy });
   await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/source?version=2#page=3", name: "lesson" })));
-  expect(host.textContent).toContain("download denied"); expect(host.textContent).toContain("重试");
+  expect(host.textContent).not.toContain("download denied"); expect(host.textContent).toContain("PDF 暂不可读取"); expect(host.textContent).toContain("重试");
   expect(host.querySelector('a')?.getAttribute("href")).toBe("/api/source?version=2");
 });

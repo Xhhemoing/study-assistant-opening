@@ -11,6 +11,7 @@ import {
   isConnectionUnavailable,
   shouldClearSecretAfterSubmit,
 } from "./connection-status";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 function mintKey(prefix: string): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return `${prefix}-${crypto.randomUUID()}`;
@@ -37,7 +38,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
   const load = useCallback(async () => {
     setLoading(true); setError("");
     try { setRows(await api.listConnections()); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "连接列表暂时无法读取"); }
+    catch (reason) { setError(userFacingMessage(reason, "连接列表暂时无法读取")); }
     finally { setLoading(false); }
   }, [api]);
 
@@ -56,7 +57,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
       };
       await api.createImapConnection(input);
       setImap(emptyImap); setNotice("已创建邮箱连接（尚未授权，不代表已自动同步）。"); await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "创建连接失败"); }
+    } catch (reason) { setError(userFacingMessage(reason, "创建连接失败")); }
     finally { setBusyId(null); }
   }
 
@@ -67,7 +68,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
       await api.putConnectionCredential(view.id, { secret, clientKey: mintKey("cred") });
       if (shouldClearSecretAfterSubmit(true)) { setSecret(""); setSecretForId(null); }
       setNotice("凭据已安全提交，表单已清空；页面不会回显邮箱密码。"); await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "凭据提交失败"); }
+    } catch (reason) { setError(userFacingMessage(reason, "凭据提交失败")); }
     finally { setBusyId(null); }
   }
 
@@ -78,7 +79,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
       await api.syncConnection(view.id, { clientKey: mintKey("sync") });
       setNotice("已排队同步。"); await load();
     } catch (reason) {
-      setError(reason instanceof OpeningApiError ? reason.message : reason instanceof Error ? reason.message : "同步失败");
+      setError(reason instanceof OpeningApiError ? reason.message : userFacingMessage(reason, "同步失败"));
     } finally { setBusyId(null); }
   }
 
@@ -93,7 +94,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
     try {
       await api.revokeConnection(view.id, { expectedVersion: view.version, clientKey: mintKey("revoke") });
       setNotice("连接已撤销，凭据已删除。"); await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "撤销失败"); }
+    } catch (reason) { setError(userFacingMessage(reason, "撤销失败")); }
     finally { setBusyId(null); }
   }
 
@@ -103,7 +104,7 @@ export function ConnectionSettings({ api: supplied }: { api?: OpeningApi }) {
     try {
       await api.importEmailManual(file);
       setNotice("手工导入已完成（标记为手工，不是自动邮箱同步）。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "手工导入失败"); }
+    } catch (reason) { setError(userFacingMessage(reason, "手工导入失败")); }
     finally { setManualBusy(false); }
   }
 

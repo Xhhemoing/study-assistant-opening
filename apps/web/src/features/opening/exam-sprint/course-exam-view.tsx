@@ -6,6 +6,7 @@ import { courseExamOverviewSchema, type CourseExamInput, type CourseExamOverview
 import { useConversationObjectHref } from "../assistant/conversation-object-context";
 import { ContentBlock, ContentGrid, PageHeader, ui } from "../design/ui";
 import { createCourseExamCheckpointStore } from "./course-exam-checkpoint";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
   const objectHref = useConversationObjectHref();
@@ -39,9 +40,9 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
         setSourceId(saved.sourceId); setQuestionCount(saved.questionCount);
         setFirstPage(saved.firstPage?.toString() ?? ""); setLastPage(saved.lastPage?.toString() ?? "");
         try { await readResponse(await fetch(endpoint, { cache: "no-store" })); }
-        catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "原组卷结果尚未核实，请重试读取。"); }
+        catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "原组卷结果尚未核实，请重试读取。")); }
       } catch (reason) {
-        if (mounted.current) { setRecoveryBlocked(true); setError(reason instanceof Error ? reason.message : "原请求恢复失败。"); }
+        if (mounted.current) { setRecoveryBlocked(true); setError(userFacingMessage(reason, "原请求恢复失败。")); }
       } finally { if (mounted.current) setRecovering(false); }
     }
     void restore();
@@ -53,7 +54,7 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
     flight.current = true;
     setBusy(true); setError("");
     try { await readResponse(await fetch(endpoint, { cache: "no-store" })); }
-    catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "读取失败，请重试。"); }
+    catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "读取失败，请重试。")); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   async function generate() {
@@ -65,12 +66,12 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
         ...(firstPage ? { firstPage: Number(firstPage) } : {}), ...(lastPage ? { lastPage: Number(lastPage) } : {}) };
       store.write(input); pending.current = input;
       await readResponse(await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(pending.current) }));
-    } catch (reason) { if (mounted.current) setError(reason instanceof Error ? reason.message : "组卷尚未完成，请刷新查看。"); }
+    } catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "组卷尚未完成，请刷新查看。")); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   function startAnother() {
     try { store.clear(); pending.current = null; setRecoveryBlocked(false); setError("已准备另开一份；再次组卷会重新调用模型。"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "尚未另开一份。"); }
+    catch (reason) { setError(userFacingMessage(reason, "尚未另开一份。")); }
   }
   const locked = busy || recovering || recoveryBlocked || Boolean(pending.current);
   return <main className="w-full min-w-0">

@@ -52,6 +52,7 @@ import { TopBar, TopBarTools } from "../v3/shell/top-bar";
 import { ui as v3ui } from "../v3/ui/controls";
 import { StartSuggestions, type StartConfiguration } from "../start/start-composer";
 import { StartUploads } from "../start/start-uploads";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export { createJobPoller } from "./job-poller";
 
@@ -513,7 +514,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       });
       setTutorActions(result);
     } catch (err) {
-      setTutorActionError(err instanceof Error ? err.message : "无法读取推荐动作");
+      setTutorActionError(userFacingMessage(err, "无法读取推荐动作"));
     }
   }, [api, learningAttempt]);
 
@@ -609,7 +610,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "加载失败");
+          setError(userFacingMessage(err, "加载失败"));
           setRecoveryRequired(true);
         }
       } finally { if (!cancelled) setLoading(false); }
@@ -638,7 +639,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       onError: (pollError) => {
         setPendingHint(
           `回答状态暂时无法读取，正在重试：${
-            pollError instanceof Error ? pollError.message : "未知错误"
+            userFacingMessage(pollError, "未知错误")
           }`,
         );
       },
@@ -706,10 +707,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       void api.cancelJob(jobId).then((job) => {
         setActiveJobId(null);
         setPending(false);
-        setPendingHint(jobStatusHint(job) || "回答任务已取消；服务端不会继续写入结果。",);
+        setPendingHint(jobStatusHint(job) || "已停止回答。",);
         if (conversationId) void refreshConversation(conversationId);
       }).catch((cancelError) => {
-        setPendingHint(`取消请求未确认：${cancelError instanceof Error ? cancelError.message : "服务暂时不可用"}`);
+        setPendingHint(`取消请求未确认：${userFacingMessage(cancelError, "服务暂时不可用")}`);
       });
       return;
     }
@@ -755,7 +756,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     try {
       page = querySystem ? undefined : pageForSubmit(currentPage);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "页码无效");
+      setError(userFacingMessage(err, "页码无效"));
       return { accepted: false };
     }
 
@@ -931,7 +932,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       setPendingHint(`已接受 ${accepted.length} 个到期重测任务；到今日任务队列开始。`);
     } catch (err) {
-      setTutorActionError(err instanceof Error ? err.message : "无法接受到期重测");
+      setTutorActionError(userFacingMessage(err, "无法接受到期重测"));
     }
   }
 

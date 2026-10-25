@@ -52,6 +52,7 @@ import { SelectionAsk } from "./selection-ask";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type TeachingToolsContext = {
   activity: TeachingActivity;
@@ -354,7 +355,7 @@ export function TeachingWorkspace({
       await reread();
     } catch (err) {
       setRereadError(
-        err instanceof Error ? err.message : "重新拉取失败",
+        userFacingMessage(err, "重新拉取失败"),
       );
       throw err;
     }
@@ -374,7 +375,7 @@ export function TeachingWorkspace({
         setPanel(null);
         requestAnimationFrame(() => contentRef.current?.querySelector<HTMLElement>('[data-study-unit-current="true"] h3')?.focus({ preventScroll: true }));
       });
-    } catch (error) { setPositionError(error instanceof Error ? error.message : "学习位置保存未确认，请重新读取后继续。"); }
+    } catch (error) { setPositionError(userFacingMessage(error, "学习位置保存未确认，请重新读取后继续。")); }
     finally { positionInFlight.current = false; setPositionBusy(false); }
   }, [api, markSnapshot, schemaOk]);
 
@@ -678,7 +679,7 @@ export function TeachingContinueEntry({
       await openWorkspaceFromResume(fresh);
     } catch (err) {
       setWaitBusy(false);
-      setWaitError(err instanceof Error ? err.message : "无法刷新断点；不会伪造讲义。");
+      setWaitError(userFacingMessage(err, "无法刷新断点；不会伪造讲义。"));
     }
   }, [activity.id, api, openWorkspaceFromResume]);
 
@@ -691,7 +692,7 @@ export function TeachingContinueEntry({
       onActivityUpdated?.(next);
       setLiveResume(await api.getTeachingResume(activity.id));
     } catch (err) {
-      setWaitError(err instanceof Error ? err.message : "无法开始生成主讲内容。");
+      setWaitError(userFacingMessage(err, "无法开始生成主讲内容。"));
     } finally {
       setWaitBusy(false);
     }

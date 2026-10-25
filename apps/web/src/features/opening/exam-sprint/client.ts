@@ -1,6 +1,7 @@
 import { examSprintCommandSchema, examBindInputSchema, examSourceMappingInputSchema, examPaperInputSchema, examWorkReviewInputSchema, type ExamSprintCommand, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamBindInput, type ExamSourceMappingInput, type ExamPaperInput, type ExamWorkReview, type ExamWorkReviewInput } from "@aistudy/contracts";
 import { overviewSchema, integrationSchema, forecastSchema, reviewSchema } from "./client-schemas";
 import { isCurrentSprintLessonRequest } from "./lesson-navigation";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type WithoutKey<T> = T extends unknown ? Omit<T, "clientKey"> : never;
 export type ExamSprintIntent = WithoutKey<ExamSprintCommand>;
@@ -23,7 +24,7 @@ function errorMessage(body: unknown, status: number): string {
 }
 export function createExamSprintClientKey(): string { return crypto.randomUUID(); }
 const uncertainMessage = "上一操作的保存结果尚未确认。请恢复该操作后继续，以免重复记录。";
-const describeError = (error: unknown) => error instanceof Error ? error.message : "连接失败，请稍后重试。";
+const describeError = (error: unknown) => userFacingMessage(error, "连接失败，请稍后重试。");
 
 /** All sprint and integration mutations share one lock and one replay envelope. */
 export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFactory?: () => string } = {}) {

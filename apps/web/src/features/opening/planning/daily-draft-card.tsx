@@ -9,6 +9,7 @@ import { runSeedTodayPlan } from "./seed-today-plan";
 import { planAcceptFailure } from "./plan-accept-errors";
 import { AdaptiveDraftPreview } from "./adaptive-draft-preview";
 import { normalizeSuggestedSelection, reconcileSuggestedSelection, selectableSuggestedKeys } from "./daily-draft-selection";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type DailyDraftSkippedReason = "accepted" | "rejected" | "no_settings";
 
@@ -209,7 +210,7 @@ export function DailyDraftCard({
       onChanged?.();
     } catch (reason) {
       if (!isCurrent(token)) return;
-      setSeedError(reason instanceof Error ? reason.message : "用默认作息生成本日计划失败，请重试。");
+      setSeedError(userFacingMessage(reason, "用默认作息生成本日计划失败，请重试。"));
     } finally {
       finishAction(token);
     }
@@ -286,7 +287,7 @@ export function DailyDraftCard({
       if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, {
         type: "action_fail",
-        message: reason instanceof Error ? reason.message : "拒绝草案失败，草案已保留，请重试。",
+        message: userFacingMessage(reason, "拒绝草案失败，草案已保留，请重试。"),
       }));
     } finally {
       finishAction(token);
@@ -306,7 +307,7 @@ export function DailyDraftCard({
       if (!isCurrent(token)) return;
       setModel((prev) => reduceDailyDraftCard(prev, {
         type: "action_fail",
-        message: reason instanceof Error ? reason.message : "重新提议失败，原草案已保留。",
+        message: userFacingMessage(reason, "重新提议失败，原草案已保留。"),
       }));
     } finally {
       finishAction(token);
@@ -340,7 +341,7 @@ export function DailyDraftCard({
     if (!token) return;
     try { await refresh(); if (isCurrent(token)) setFeedbackBlocked(false); }
     catch (reason) {
-      if (isCurrent(token)) setModel((prev) => reduceDailyDraftCard(prev, { type: "action_fail", message: reason instanceof Error ? reason.message : "读取新建议失败，原草案已保留。" }));
+      if (isCurrent(token)) setModel((prev) => reduceDailyDraftCard(prev, { type: "action_fail", message: userFacingMessage(reason, "读取新建议失败，原草案已保留。") }));
     } finally { finishAction(token); }
   }
 

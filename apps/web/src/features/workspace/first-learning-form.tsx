@@ -6,6 +6,7 @@ import { z } from "zod";
 import { ui } from "../opening/design/ui";
 import { FirstLearningMaterials } from "./first-learning-materials";
 import { emptyFirstLearningDraft, readFirstLearningDraft, saveFirstLearningDraft, submitFirstLearningDraft, type FirstLearningDraft } from "./first-learning-draft";
+import { userFacingMessage } from "../../lib/user-facing-error";
 
 export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; onStarted: (href: string) => void }) {
   const [draft, setDraft] = useState<FirstLearningDraft | null>(null);
@@ -36,7 +37,7 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
       // Keep the confirmed intent until the next page opens; even a stalled navigation can safely resume it.
       onStarted(result.href);
     } catch (cause) {
-      setError(cause instanceof z.ZodError ? "请检查主题、目标日期和每日学习时间。" : cause instanceof Error ? cause.message : "暂时无法开始，请保留内容后重试。");
+      setError(cause instanceof z.ZodError ? "请检查主题、目标日期和每日学习时间。" : userFacingMessage(cause, "暂时无法开始，请保留内容后重试。"));
       locked.current = false; setBusy(false);
     }
   }

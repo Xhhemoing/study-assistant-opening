@@ -21,6 +21,7 @@ import {
 import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label-options";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeFields, type PracticeStart } from "./practice-draft";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 
 function readPracticeSkillPrefill(): string {
@@ -112,7 +113,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     let active = true;
     void createOpeningApi().listSources().then((rows) => {
       if (active) setSources(rows.filter((source) => source.uploadState === "uploaded"));
-    }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "无法读取练习材料"); });
+    }).catch((reason: unknown) => { if (active) setError(userFacingMessage(reason, "无法读取练习材料")); });
     return () => { active = false; };
   }, []);
 
@@ -204,7 +205,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
         return created;
       });
       await acceptAttempt(next, request.clientKey);
-    } catch (reason) { setRestored(true); setError(reason instanceof Error ? reason.message : "无法恢复练习，原答案已保留"); }
+    } catch (reason) { setRestored(true); setError(userFacingMessage(reason, "无法恢复练习，原答案已保留")); }
     finally { pendingRef.current = false; setPending(false); }
   }
 
@@ -251,7 +252,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       const next = await runPracticeRequest(`${scope}:start:${request.clientKey}`, () => client.createAttempt(request.createInput!));
       patch({ attemptId: next.id });
       await acceptAttempt(next, request.clientKey);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法重新开始本题，原答案已保留"); }
+    } catch (reason) { setError(userFacingMessage(reason, "暂时无法重新开始本题，原答案已保留")); }
     finally { pendingRef.current = false; setPending(false); }
   }
 
@@ -261,7 +262,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
 
   async function refreshSources() {
     try { setSources((await createOpeningApi().listSources()).filter(source => source.uploadState === "uploaded")); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "文件暂时无法读取，请重试。"); }
+    catch (reason) { setError(userFacingMessage(reason, "文件暂时无法读取，请重试。")); }
   }
 
   if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;

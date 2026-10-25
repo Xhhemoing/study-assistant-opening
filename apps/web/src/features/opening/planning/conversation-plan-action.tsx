@@ -4,6 +4,7 @@ import { TransitionLink as Link } from "../v3/motion/view-transition";
 import type { ConversationPlanInspection, PlanDraft, TaskItem } from "@aistudy/contracts";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { createConversationPlanController, type ConversationPlanApi } from "./conversation-plan-controller";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type Props = {
   candidateId: string;
@@ -29,7 +30,7 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
       const result = await api.inspectConversationPlan(candidateId);
       setInspection(result); setMinutes(result.candidate.minutes === null ? "" : String(result.candidate.minutes));
       if (result.candidate.minutes !== null && result.candidate.minutes > 240) setError("该建议超过240分钟，请先拆成较短任务后安排。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法读取对话建议。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "暂时无法读取对话建议。")); }
     finally { setBusy(false); }
   }
   function close() { setOpen(false); onModeChange(false); setInspection(null); setDraft(null); setCourse(""); setError(""); }
@@ -45,7 +46,7 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
       if (result.kind === "draft") setDraft(result.draft);
       else if (result.kind === "clarification") { setInspection(result); setError("请补充课程选择和预计时长。"); }
       else setError("今天没有足够的连续空档，任务尚未创建。可以先调整可用时间，再重新读取。");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "草案结果尚未确认，请先重试原请求。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "草案结果尚未确认，请先重试原请求。")); }
     finally { setBusy(false); }
   }
   async function accept() {
@@ -58,14 +59,14 @@ export function ConversationPlanAction({ candidateId, expectedVersion, api, disa
       onModeChange(false);
       onAccepted({ id: task.id, version: 1, title: task.title, minutes: task.minutes, dueAt: null, priority: 0,
         status: "pending", origin: "agent", ...(task.courseId ? { courseId: task.courseId } : {}) });
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "接受结果尚未确认，请先核对或重试原请求。"); }
+    } catch (reason) { setError(userFacingMessage(reason, "接受结果尚未确认，请先核对或重试原请求。")); }
     finally { setBusy(false); }
   }
   async function reject() {
     if (!draft || busy || unknownAcceptance) return;
     setBusy(true); setError("");
     try { await api.rejectPlan(draft.id); close(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法关闭草案，请重试。"); }
+    catch (reason) { setError(userFacingMessage(reason, "暂时无法关闭草案，请重试。")); }
     finally { setBusy(false); }
   }
   if (!open) return <button type="button" className={secondaryButtonClass} disabled={disabled || busy} onClick={() => void load()}>安排到今日计划</button>;

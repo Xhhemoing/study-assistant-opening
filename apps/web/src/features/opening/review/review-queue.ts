@@ -1,5 +1,6 @@
 import type { ReviewQueueItem, TaskItem } from "@aistudy/contracts";
 import { courseStudyHref } from "../../courses/course-study-model";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type ReviewTask = { task: TaskItem; kind: "retest" | "reinforcement"; href: string | null; availableAt: string | null };
 export type ReviewTaskGroups = { ready: ReviewTask[]; upcoming: ReviewTask[]; unavailable: ReviewTask[] };
@@ -30,7 +31,7 @@ export type ReviewSources = { cards: SourceResult<ReviewQueueItem[]>; tasks: Sou
 /** A failure in one source must not masquerade as an empty/completed queue. */
 export async function loadReviewSources(client: { listCards: () => Promise<ReviewQueueItem[]>; listTasks: () => Promise<{ tasks: TaskItem[] }> }): Promise<ReviewSources> {
   const [cards, tasks] = await Promise.allSettled([client.listCards(), client.listTasks()]);
-  const failure = (reason: unknown) => ({ kind: "error" as const, message: reason instanceof Error ? reason.message : "读取失败，请重试。" });
+  const failure = (reason: unknown) => ({ kind: "error" as const, message: userFacingMessage(reason, "读取失败，请重试。") });
   return {
     cards: cards.status === "fulfilled" ? { kind: "ready", value: cards.value } : failure(cards.reason),
     tasks: tasks.status === "fulfilled" ? { kind: "ready", value: tasks.value.tasks } : failure(tasks.reason),
