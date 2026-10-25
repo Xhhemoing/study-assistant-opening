@@ -59,7 +59,7 @@ describe("production V3 shell business wiring", () => {
     ["/opening/today", "", "/opening/today"],
     ["/opening/agent", "", "/opening/agent"],
     ["/opening/review", "", "/opening/review"],
-    ["/opening/review", "tab=cards", "/opening/cards"],
+    ["/opening/review", "tab=cards", "/opening/review"],
     ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
     ["/opening/assistant", "", "/opening/today"],
     ["/opening/settings/export", "", "/opening/settings"],

@@ -13,12 +13,12 @@ describe("workspace navigation", () => {
     for (const pathname of ["/opening/review", "/opening/cards/session", "/opening/sprint", "/opening/search", "/opening/courses/id/study", "/opening/assistant", "/opening/suggestions"]) {
       const active = openingNavigation().filter(item => navigationIsActive(item.href, pathname));
       expect(active).toHaveLength(1);
-      const expected = pathname.startsWith("/opening/assistant") || pathname.startsWith("/opening/suggestions") ? "/opening/today" : pathname.startsWith("/opening/cards") ? "/opening/cards" : pathname.startsWith("/opening/courses") ? "/opening/courses" : pathname;
+      const expected = pathname.startsWith("/opening/assistant") || pathname.startsWith("/opening/suggestions") ? "/opening/today" : pathname.startsWith("/opening/cards") ? "/opening/review" : pathname.startsWith("/opening/courses") ? "/opening/courses" : pathname;
       expect(active[0]?.href).toBe(expected);
     }
   });
   it.each([
-    ["/opening/review", "tab=cards", "/opening/cards"],
+    ["/opening/review", "tab=cards", "/opening/review"],
     ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
     ["/opening/review", "tab=session", "/opening/review"],
     ["/opening/courses/course-a/study", "mode=sprint", "/opening/courses"],
@@ -27,11 +27,16 @@ describe("workspace navigation", () => {
   ])("keeps one owner after a shared-page redirect: %s?%s", (pathname, search, expected) => {
     expect(openingNavigation().filter(item => navigationIsActive(item.href, pathname, search)).map(item => item.href)).toEqual([expected]);
   });
+  it("has no alias entries that only redirect to another destination", () => {
+    const hrefs = openingNavigation().map(item => item.href);
+    expect(hrefs).not.toContain("/opening/cards");
+    expect(new Set(hrefs).size).toBe(hrefs.length);
+  });
   it("keeps course detail active inside Opening", () => {
     expect(navigationIsActive("/opening/courses", "/opening/courses/123")).toBe(true);
     expect(navigationIsActive("/opening/courses", "/learn/courses/123")).toBe(false);
-    expect(navigationIsActive("/opening/cards", "/opening/cardsx")).toBe(false);
-    expect(navigationIsActive("/opening/cards", "/opening/cards")).toBe(true);
+    expect(navigationIsActive("/opening/review", "/opening/cardsx")).toBe(false);
+    expect(navigationIsActive("/opening/review", "/opening/cards")).toBe(true);
     expect(navigationIsActive("/opening/review", "/opening/review/x")).toBe(true);
     expect(navigationIsActive("/opening/settings/connections", "/opening/settings/connections")).toBe(true);
   });
