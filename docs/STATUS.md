@@ -21,6 +21,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| WP0.6 灰度验收准备（2026-10-25） | Codex + 文档实现/独立复核 | `docs/wp0.6-senseweave-acceptance` | [beta文档](plans/2026-10-24-senseweave-beta.md)补五类各两道固定非个人题、精确数字核对点和全部待执行记录；区分忠实呈现与原文答案正确，匿名统计不代替逐题核对。已核接口/门控/匿名与会话隔离及十题计算，文档diff检查通过。仅准备完成：真实本人/QA身份、私有配置、仅Web安全重启、账号capabilities与十题模型/浏览器均未执行；保持shadow，不把配置或合成样本当实际通过。未新增代码/配置/运行检查，review后先推分支。 |
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
 
 | A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
