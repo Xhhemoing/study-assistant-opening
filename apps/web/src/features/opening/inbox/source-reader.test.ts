@@ -15,7 +15,7 @@ const originalConversation = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: (props: { conversationId: string; className?: string }) => {
   originalConversation.render(props); return createElement("input", { "data-original-conversation": props.conversationId, defaultValue: "原对话草稿" });
 } }));
-vi.mock("./native-pdf-runtime", () => ({ loadPdfRuntime: async () => { throw new Error("PDF test transport unavailable"); } }));
+vi.mock("./native-pdf-runtime", () => ({ createPdfWorker: vi.fn(), loadPdfRuntime: async () => { throw new Error("PDF test transport unavailable"); } }));
 vi.mock("./source-content", () => ({ SourceContent: () => createElement("section", { "aria-label": "解析正文" }, "提取文字") }));
 const record = { id: "11111111-1111-4111-8111-111111111111", name: "讲义.pdf", mime: "application/pdf", version: 2, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
 let host: HTMLDivElement;

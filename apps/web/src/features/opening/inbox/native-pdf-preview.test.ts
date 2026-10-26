@@ -3,8 +3,9 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NativePdfPreview, pdfPageScale, pdfPreviewLocation } from "./native-pdf-preview";
-const pdf = vi.hoisted(() => ({ render: vi.fn(), text: vi.fn(), destroy: vi.fn(), getDocument: vi.fn(), cancel: vi.fn() }));
-vi.mock("./native-pdf-runtime", () => ({ loadPdfRuntime: async () => ({
+const pdf = vi.hoisted(() => ({ render: vi.fn(), text: vi.fn(), destroy: vi.fn(), getDocument: vi.fn(), cancel: vi.fn(),
+  createWorker: vi.fn(), workers: [] as Array<{ worker: object; destroy: ReturnType<typeof vi.fn> }> }));
+vi.mock("./native-pdf-runtime", () => ({ createPdfWorker: pdf.createWorker, loadPdfRuntime: async () => ({
   getDocument: pdf.getDocument,
   TextLayer: class {
     constructor(options: unknown) { pdf.text(options); }
@@ -15,6 +16,9 @@ vi.mock("./native-pdf-runtime", () => ({ loadPdfRuntime: async () => ({
 let host: HTMLDivElement, root: Root, resize: ResizeObserverCallback;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  pdf.workers.length = 0;
+  pdf.createWorker.mockImplementation(() => { const owned = { worker: {}, destroy: vi.fn() }; pdf.workers.push(owned); return owned; });
+  pdf.destroy.mockResolvedValue(undefined);
   vi.stubGlobal("ResizeObserver", class { constructor(callback: ResizeObserverCallback) { resize = callback; } observe() {} disconnect() {} });
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({} as CanvasRenderingContext2D);
   pdf.render.mockImplementation(() => ({ promise: Promise.resolve(), cancel: pdf.cancel }));
@@ -35,7 +39,7 @@ it("renders canvas and selectable text in the same viewport and refits only auto
   await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/source?version=2#page=3", name: "lesson", sourceId: "source", version: 2, fillHeight: true })));
   await width(624);
   expect(host.querySelectorAll("canvas")).toHaveLength(1); expect(host.querySelector("iframe")).toBeNull();
-  expect(pdf.getDocument).toHaveBeenCalledWith(expect.objectContaining({ url: "/api/source?version=2", withCredentials: true, cMapPacked: true, useWorkerFetch: true,
+  expect(pdf.getDocument).toHaveBeenCalledWith(expect.objectContaining({ url: "/api/source?version=2", withCredentials: true, worker: pdf.workers[0]!.worker, cMapPacked: true, useWorkerFetch: true,
     cMapUrl: expect.stringContaining("/5.4.624/cmaps/"), standardFontDataUrl: expect.stringContaining("/5.4.624/standard_fonts/"),
     wasmUrl: expect.stringContaining("/5.4.624/wasm/"), iccUrl: expect.stringContaining("/5.4.624/iccs/") }));
   expect(pdf.render.mock.lastCall![0].viewport).toBe(pdf.text.mock.lastCall![0].viewport);
@@ -55,4 +59,47 @@ it("shows an actionable failure and keeps the original available instead of disp
   await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/source?version=2#page=3", name: "lesson" })));
   expect(host.textContent).not.toContain("download denied"); expect(host.textContent).toContain("PDF 暂不可读取"); expect(host.textContent).toContain("重试");
   expect(host.querySelector('a')?.getAttribute("href")).toBe("/api/source?version=2");
+});
+
+it.each(["resolve", "reject"])("uses a new worker while the previous href's task destruction is pending and later %s", async outcome => {
+  let finishDestroy!: () => void, finishLoad!: (value: unknown) => void;
+  const destroyOld = vi.fn(() => new Promise<void>((resolve, reject) => { finishDestroy = outcome === "resolve" ? resolve : () => reject(new Error("transport cleanup failed")); }));
+  pdf.getDocument.mockReturnValueOnce({ promise: new Promise(resolve => { finishLoad = resolve; }), destroy: destroyOld });
+  await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/old-source", name: "old" })));
+  const oldWorker = pdf.workers[0]!;
+  await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/new-source", name: "new" })));
+  const newWorker = pdf.workers[1]!;
+  expect(newWorker.worker).not.toBe(oldWorker.worker);
+  expect(pdf.getDocument.mock.calls[1]![0].worker).toBe(newWorker.worker);
+  expect(destroyOld).toHaveBeenCalledOnce();
+  expect(oldWorker.destroy).not.toHaveBeenCalled();
+  await act(async () => { finishLoad({ numPages: 1 }); finishDestroy(); });
+  expect(oldWorker.destroy).toHaveBeenCalledOnce();
+  expect(newWorker.destroy).not.toHaveBeenCalled();
+  expect(host.querySelector('input[aria-label="PDF 页码"]')?.getAttribute("max")).toBe("9");
+  expect(host.querySelector("canvas")?.getAttribute("aria-label")).toBe("new · 第 1 页");
+});
+
+it("retries a failed document with an independent worker before old cleanup completes", async () => {
+  let finishDestroy!: () => void;
+  const destroyOld = vi.fn(() => new Promise<void>(resolve => { finishDestroy = resolve; }));
+  pdf.getDocument.mockReturnValueOnce({ promise: Promise.reject(new Error("read failed")), destroy: destroyOld });
+  await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/source", name: "lesson" })));
+  expect(destroyOld).toHaveBeenCalledOnce();
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "重试")!.click());
+  expect(pdf.workers).toHaveLength(2);
+  expect(pdf.workers[1]!.worker).not.toBe(pdf.workers[0]!.worker);
+  expect(pdf.workers[0]!.destroy).not.toHaveBeenCalled();
+  await act(async () => finishDestroy());
+  expect(pdf.workers[0]!.destroy).toHaveBeenCalledOnce();
+  expect(pdf.workers[1]!.destroy).not.toHaveBeenCalled();
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("releases the owned worker if getDocument throws before returning a task", async () => {
+  pdf.getDocument.mockImplementationOnce(() => { throw new Error("document construction failed"); });
+  await act(async () => root.render(createElement(NativePdfPreview, { href: "/api/source", name: "lesson" })));
+  expect(pdf.workers[0]!.destroy).toHaveBeenCalledOnce();
+  expect(pdf.destroy).not.toHaveBeenCalled();
+  expect(host.querySelector('[role="alert"]')).not.toBeNull();
 });

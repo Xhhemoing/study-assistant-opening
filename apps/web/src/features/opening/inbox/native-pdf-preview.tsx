@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask, TextLayer } from "pdfjs-dist";
 import { ui } from "../design/ui";
-import { loadPdfRuntime, type PdfRuntime } from "./native-pdf-runtime";
+import { createPdfWorker, loadPdfRuntime, type PdfRuntime } from "./native-pdf-runtime";
 import { rememberSourceReaderPage } from "./source-reader-position";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -34,20 +34,27 @@ export function NativePdfPreview({ href, name, fillHeight = false, sourceId, ver
   useEffect(() => {
     let active = true;
     let task: ReturnType<PdfRuntime["getDocument"]> | undefined;
+    let ownedWorker: ReturnType<typeof createPdfWorker> | undefined;
+    let disposal: Promise<void> | undefined;
+    const dispose = () => disposal ??= (async () => {
+      try { await task?.destroy(); }
+      finally { ownedWorker?.destroy(); }
+    })().catch(() => { /* Teardown failures still release this load's worker and must not escape cleanup. */ });
     setLoaded(null); setError(""); setLoading(true); setPage(pdfPreviewLocation(href).page); setPageWidth(0);
     void loadPdfRuntime().then(async runtime => {
       if (!active) return;
+      ownedWorker = createPdfWorker(runtime);
       const assets = new URL("/api/opening/pdfjs-assets/5.4.624/", window.location.origin).href;
-      task = runtime.getDocument({ url: pdfPreviewLocation(href).url, withCredentials: true,
+      task = runtime.getDocument({ url: pdfPreviewLocation(href).url, withCredentials: true, worker: ownedWorker.worker,
         cMapUrl: `${assets}cmaps/`, cMapPacked: true, standardFontDataUrl: `${assets}standard_fonts/`,
         wasmUrl: `${assets}wasm/`, iccUrl: `${assets}iccs/`, useWorkerFetch: true });
       const document = await task.promise;
       if (!active) return;
       if (pdfPreviewLocation(href).page > document.numPages) throw new Error("引用页码已失效，请重新选择页码。");
       setLoaded({ document, runtime });
-    }).catch(reason => { if (active) setError(userFacingMessage(reason, "PDF 暂不可读取，请重试或打开原件。")); })
+    }).catch(reason => { void dispose(); if (active) setError(userFacingMessage(reason, "PDF 暂不可读取，请重试或打开原件。")); })
       .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; if (task) void task.destroy(); };
+    return () => { active = false; void dispose(); };
   }, [href, revision]);
   useEffect(() => {
     const element = container.current;

@@ -6,9 +6,9 @@
 | --- | --- |
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
-| 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134)，代码候选 `69ed75a8`；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
-| 候选检查 | `7c38102b` 的 [集中 CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40360315734) 失败于固定颜色规则及 Worker 流程旧工具状态假设；本批已修复，待 #134 当前 head 重新验证。`69ed75a8` 的 41 项局部回归不替代完整 CI |
-| 当前工作 | 编辑器/搜索统一现有主题变量；Worker E2E 仅在辅助区关闭时展开，并断言可见。依据 CI trace 修复，保留原流程断言与超时；并发工作流/图谱脚本修改未纳入本次提交 |
+| 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 当前 head；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
+| 候选检查 | 本批 PDF 生命周期实现经独立静态复审无阻断，回归源码已维护但未执行本地测试/类型/lint/构建/浏览器；完整验证以 #134 当前 head 的 Checks 为准。`69ed75a8` 的 41 项局部回归不替代完整 CI |
+| 当前工作 | 每次 PDF 加载独立持有 worker；任务清理完成后释放自有资源，避免旧销毁与新加载复用端口。切换、重试及原件回退保留；并发工作流文档未纳入本次提交 |
 
 ## 本轮开放 PR
 
@@ -26,7 +26,7 @@
 - 按用户最新要求跳过后续小阶段测试，连续开发后集中验证与 review；既有测试及 CI 不禁用。本批 41 项测试在该指令到达前已结束。
 - [旧 API 观察](operations/legacy-api-observation.md)已实现但未部署，连续 30 天日志窗口尚未开始，不删除接口。
 - [开关盘点](operations/feature-switch-inventory.md)控制输入 22→19；仅源代码变更，未修改线上配置。
-- CI artifact 另有 PDF 预览失败字样，原件下载为 200，底层原因尚未核实；不是此次隐藏 OCR 标签超时的原因，不据此宣称 PDF 预览正常。
+- 原 CI 的 PDF 预览失败是否源于该竞态尚未证实；当前只确认并修复独立的 worker 复用生命周期缺陷，真实显示结果待整合验证。
 
 <details>
 <summary>延期 PR 与恢复入口（9 项，均关闭但未合并）</summary>
