@@ -103,7 +103,11 @@ export function QuickSetupResult({ data, basePath = "/settings", advanced = fals
   </div>;
 }
 
-export function QuickSetupPanel({ onConfigured, basePath = "/settings", advanced = false }: { onConfigured?: (data: OpeningAiSettingsResponse) => void; basePath?: string; advanced?: boolean }) {
+export function QuickSetupPanel({ onConfigured, basePath = "/settings", advanced = false, mutationBlocked = false, acquireMutation, onMutationSettled }: {
+  onConfigured?: (data: OpeningAiSettingsResponse) => void; basePath?: string; advanced?: boolean;
+  mutationBlocked?: boolean; acquireMutation?: (confirming: boolean) => boolean;
+  onMutationSettled?: (outcome: "success" | "rejected" | "unknown") => void;
+}) {
   const [draft, setDraft] = useState(initialQuickSetupDraft);
   const [preset, setPreset] = useState<QuickSetupPreset>("gemini_free");
   const [busy, setBusy] = useState(false);
@@ -112,18 +116,22 @@ export function QuickSetupPanel({ onConfigured, basePath = "/settings", advanced
   const [submission, setSubmission] = useState(initialQuickSetupSubmission);
   const submitting = useRef(false);
   async function submit() {
-    if (submitting.current || (!submission.payload && validateQuickSetupDraft(draft))) return;
+    if (submitting.current || mutationBlocked || (!submission.payload && validateQuickSetupDraft(draft))) return;
+    if (acquireMutation && !acquireMutation(submission.uncertain)) return;
     submitting.current = true;
     const attempt = beginQuickSetupSubmission(submission, draft, submission.clientKey ?? crypto.randomUUID());
     setSubmission(attempt);
     setBusy(true); setError("");
     let configured: OpeningAiSettingsResponse | null = null;
+    let outcome: "success" | "rejected" | "unknown" = "unknown";
     try {
       const response = await fetch("/api/opening/model-providers/quick-setup", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(attempt.payload),
       });
       if (!response.ok) {
-        const rejected = isDefiniteQuickSetupRejection(response.status);
+        // A rejected confirmation does not prove the earlier unknown request did not commit.
+        const rejected = !submission.uncertain && isDefiniteQuickSetupRejection(response.status);
+        outcome = rejected ? "rejected" : "unknown";
         setSubmission(finishQuickSetupSubmission(attempt, rejected ? "rejected" : "unknown"));
         setError(rejected ? "一键配置未保存，请检查名称、价格、每日额度和密钥配置后重试。" : "暂时无法确认配置结果，请确认上次配置结果。");
         return;
@@ -132,18 +140,20 @@ export function QuickSetupPanel({ onConfigured, basePath = "/settings", advanced
       const data = openingAiSettingsResponseSchema.parse(body);
       setResult(data); setDraft(current => ({ ...current, apiKey: "" }));
       setSubmission(finishQuickSetupSubmission(attempt, "success"));
+      outcome = "success";
       configured = data;
     } catch {
       setSubmission(finishQuickSetupSubmission(attempt, "unknown"));
       setError("暂时无法确认配置结果，请确认上次配置结果；原始配置和请求标识会保留，避免重复创建。");
     }
-    finally { submitting.current = false; setBusy(false); }
+    finally { submitting.current = false; setBusy(false); onMutationSettled?.(outcome); }
     if (configured) onConfigured?.(configured);
   }
   return <section id="quick-model-setup" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="quick-model-setup-heading">
     <div><h2 id="quick-model-setup-heading" className="text-sm font-medium text-text">一键配置 AI 模型</h2><p className="mt-1 text-xs leading-6 text-text-3">填写一次，用同一个模型辅导、主讲和处理材料。</p></div>
     <div className="min-w-0 space-y-3">
-      <QuickSetupForm draft={draft} preset={preset} busy={busy} locked={submission.uncertain} advanced={advanced} onChange={value => { setDraft(value); setError(""); }} onPreset={value => { setPreset(value); setDraft(current => applyQuickSetupPreset(current, value)); setError(""); }} onSubmit={() => void submit()} />
+      <QuickSetupForm draft={draft} preset={preset} busy={busy || mutationBlocked} locked={submission.uncertain} advanced={advanced} onChange={value => { setDraft(value); setError(""); }} onPreset={value => { setPreset(value); setDraft(current => applyQuickSetupPreset(current, value)); setError(""); }} onSubmit={() => void submit()} />
+      {mutationBlocked ? <p className="text-xs leading-6 text-warn" role="status">模型设置正在保存或结果尚未确认，暂不能一键配置。</p> : null}
       {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}
       {result ? <QuickSetupResult data={result} basePath={basePath} advanced={advanced} /> : null}
     </div>

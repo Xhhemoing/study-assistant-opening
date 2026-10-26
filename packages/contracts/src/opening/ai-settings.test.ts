@@ -4,11 +4,25 @@ import {
   OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS,
   openingAiSettingsSchema,
   openingAiSettingsResponseSchema,
+  openingAiDailyUsageSchema,
   openingDailyQuotaSchema,
   openingModelSnapshotSchema,
   modelTaskKeySchema,
 } from "./ai-settings";
 describe("AI routing settings boundary", () => {
+  it("distinguishes measured zero daily spend from unavailable usage and rejects invalid money", () => {
+    const usage = { localDate: "2026-10-26", timeZone: "Asia/Shanghai", spentCents: 0, reservedCents: 12 };
+    expect(openingAiDailyUsageSchema.parse(usage)).toEqual(usage);
+    for (const spentCents of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(openingAiDailyUsageSchema.safeParse({ ...usage, spentCents }).success).toBe(false);
+    }
+    expect(openingAiDailyUsageSchema.safeParse({ ...usage, reservedCents: -1 }).success).toBe(false);
+    const response = { models: [], defaultModelId: null, dailyCapCents: 0, envCapCents: 0, personalCeilingCents: 2000, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false };
+    expect(openingAiSettingsResponseSchema.parse({ ...response, dailyUsage: usage }).dailyUsage).toEqual(usage);
+    expect(openingAiSettingsResponseSchema.parse({ ...response, dailyUsage: null }).dailyUsage).toBeNull();
+    expect(openingAiSettingsResponseSchema.parse(response)).not.toHaveProperty("dailyUsage");
+    expect(openingAiSettingsSchema.safeParse({ ...DEFAULT_OPENING_AI_SETTINGS, dailyUsage: usage }).success).toBe(false);
+  });
   it("accepts optional server-owned daily quota metadata without reinterpreting legacy zero or null", () => {
     const response = { models: [], defaultModelId: null, dailyCapCents: 0, envCapCents: 0, personalCeilingCents: 2000, settings: { ...DEFAULT_OPENING_AI_SETTINGS, dailyCapCents: null }, saved: false, invalidStoredSettings: false };
     expect(openingAiSettingsResponseSchema.parse(response)).not.toHaveProperty("dailyQuota");

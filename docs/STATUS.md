@@ -6,9 +6,9 @@
 | --- | --- |
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | Web / Worker 目录标识 `189546c7`；2026-10-26 只读健康检查为 ok，但接口未返回 commit，不等于完整发布验收 |
-| 最新候选 | [WP0–WP2.3 集成分支](https://github.com/Xhhemoing/study-assistant-opening/tree/integrate/wp0-wp2-remediation)（本文件所属提交）；WP0.6/0.8 含待执行准备，尚未合并/部署 |
-| 候选检查 | 定向单元/工具测试、Web/E2E 类型、改动 lint、边界/契约/文案检查、Web 构建通过；12 组实际 HTTP 跳转及 2 项 Origin 拒绝通过，独立只读复审无剩余阻断 |
-| 当前工作 | 集成已补齐助理恢复、按需建议栏、AI 记忆入口、文案与旧冲刺链接；保留收件箱及三页设置，不提前执行缺少前置合入的 WP2.4 |
+| 最新候选 | [WP1.5 默认体验补齐](https://github.com/Xhhemoing/study-assistant-opening/tree/fix/wp1.5-default-experience)（本文件所属提交），基于 [WP0–WP2.3 集成 c91c865c](https://github.com/Xhhemoing/study-assistant-opening/tree/c91c865cbe4141c2fa1a9e5c5f55cf0dc34fc505)；尚未合并/部署 |
+| 候选检查 | WP1.5：数据库 7 项、鉴权接口 12 项、相关单元分组 67/35/13 项通过；Web/Contracts/Database 类型、改动 lint、边界/契约/文案检查、最终 Web 构建通过，独立只读复审无剩余阻断。旧 HTTP 跳转证据只适用于 c91c865c |
+| 当前工作 | 默认模型与真实日用量摘要、自定义模型折叠、首次就绪提示；修复配置并发和未结算费用误报。继续保留收件箱及三页设置，不提前执行缺少前置合入的 WP2.4 |
 
 ## 本轮开放 PR
 
@@ -23,6 +23,8 @@
 - WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；合并前仍需最新主干与 WP0.8 验证。
 - [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
 - 测试期每日不限额已实现；运行环境启用及真实模型调用待验证，尚未修改线上配置。
+- 模型配置互斥限当前页面实例；普通保存结果未知时需确认服务器请求已结束后重新打开，不能从一次 GET 推断保存完成。跨标签页写入仍遵循现有服务器行为。
+- 下个可开发项是 WP1.1“全部课程”的考前冲刺菜单：复用已有课程目标，仅明确考试模式且有日期时显示；不扩课程 API，不把普通截止日期当考试。
 - [旧 API 观察](operations/legacy-api-observation.md)已实现但未部署，连续 30 天日志窗口尚未开始，不删除接口。
 - [开关盘点](operations/feature-switch-inventory.md)控制输入 22→19；仅源代码变更，未修改线上配置。
 

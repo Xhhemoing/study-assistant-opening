@@ -36,6 +36,7 @@ async function buildItems(
   });
   const keyed = merged.models.filter(m => m.availability !== "missing_key" && m.availability !== "vault_disabled");
   const available = merged.models.filter(m => m.availability === "available");
+  const freeAvailable = available.some(m => m.billing === "free_tier");
   const vision = merged.models.some(m => m.supportsVision && m.availability === "available");
 
   // TZ01: same local budget day as ledger reserve (planning TZ → domain bounds).
@@ -67,6 +68,7 @@ async function buildItems(
   const reconciledUnknown = Number(reconciledRows[0]?.n ?? 0);
 
   let workerOk = true;
+  let workerUnknown = false;
   let workerDetail = "worker 积压正常";
   try {
     const backlog = await sql`
@@ -84,6 +86,7 @@ async function buildItems(
       : `有积压：超时 outbox ${stalePending}，超时 queued ${staleQueued}，失败 outbox ${failedOutbox}`;
   } catch {
     workerOk = false;
+    workerUnknown = true;
     workerDetail = "无法读取 worker 积压";
   }
 
@@ -94,7 +97,8 @@ async function buildItems(
 
   return buildAiReadinessItems({
     keyedModelCount: keyed.length,
-    pricingConfigured,
+    // Free models satisfy readiness, but must not authorize a paid cap above.
+    pricingConfigured: pricingConfigured || freeAvailable,
     effectiveCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode,
     usedCents,
     remainingCents: remaining,
@@ -104,7 +108,18 @@ async function buildItems(
     workerOk,
     workerDetail,
     availableModelCount: available.length,
-  }).map(item => item.key === "parser_ocr" ? ocrItem : item);
+  }).map(item => {
+    if (item.key === "parser_ocr") return ocrItem;
+    if (item.key === "worker_backlog" && workerUnknown) return { ...item, status: "unknown" as const };
+    if (item.key === "default_pricing" && freeAvailable && !pricingConfigured) return {
+      ...item, detail: "免费额度模型可用，无需配置按量单价。", fixHint: "免费额度仍受供应商每日请求数限制。",
+    };
+    if (item.key === "daily_budget" && freeAvailable && catalog.dailyQuotaMode !== "unlimited" && effective.capCents <= 0) return {
+      ...item, ok: true, detail: "免费额度模型可用，按供应商每日请求数限制使用；按量计费额度未开启。",
+      fixHint: "如需使用按量计费模型，请在高级设置开启并确认每日额度。",
+    };
+    return item;
+  });
 }
 
 export async function GET(request: Request): Promise<Response> {

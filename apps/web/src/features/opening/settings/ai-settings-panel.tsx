@@ -2,11 +2,14 @@
 
 import { openingAiSettingsResponseSchema, type OpeningAiSettings, type OpeningAiSettingsResponse, type OpeningModelSummary } from "@aistudy/contracts";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ui } from "../design/ui";
 import { availabilityLabels, effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, switchRoutingMode, transcriptionModelProblem, tutorRouteLabels } from "./ai-settings-model";
 import { TaskRoutesSection } from "./task-routes-section";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { AiSettingsOverview } from "./ai-settings-overview";
+import { QuickSetupPanel } from "./quick-setup-panel";
+import { ProviderSettingsPanel } from "./provider-settings-panel";
 
 function ModelSelect({ label, models, supplier, value, fallback, onChange }: {
   label: string; models: OpeningModelSummary[]; supplier: string; value: string | null; fallback: string;
@@ -43,7 +46,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
     <fieldset disabled={busy} className="space-y-4">
       <legend className="sr-only">模型路由方式</legend>
       <div className="flex flex-wrap gap-4">{[{ value: "manual" as const, label: "手动选择" }, { value: "automatic" as const, label: "按辅导模式自动选择" }].map(option => <label key={option.value} className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="radio" name="ai-routing-mode" checked={draft.mode === option.value} onChange={() => onChange(switchRoutingMode(draft, option.value, data.defaultModelId))} />{option.label}</label>)}</div>
-      {data.dailyQuota?.mode === "unlimited" ? <section id="daily-budget" className="scroll-mt-6 rounded-lg border border-line bg-surface-2 p-3" aria-label="每日 AI 用量"><p className="text-sm text-text">测试期每日不限额</p><p className="mt-1 text-xs leading-6 text-text-3">使用服务器默认模型即可开始；单次交互仍有费用与调用次数上限。供应商自己的限流仍可能生效。</p></section> : <section id="daily-budget" data-advanced-section="daily-budget" className="scroll-mt-6 space-y-2 rounded-lg border border-line bg-surface-2 p-3" aria-labelledby="daily-budget-heading">
+      {data.dailyQuota?.mode === "unlimited" ? <section className="rounded-lg border border-line bg-surface-2 p-3" aria-label="每日 AI 用量"><p className="text-sm text-text">测试期每日不限额</p><p className="mt-1 text-xs leading-6 text-text-3">单次交互仍有费用与调用次数上限，供应商自己的限流仍可能生效。</p></section> : <section data-advanced-section="daily-budget" className="space-y-2 rounded-lg border border-line bg-surface-2 p-3" aria-labelledby="daily-budget-heading">
         <h3 id="daily-budget-heading" className="text-sm font-medium text-text">开启并确认每日额度</h3>
         <p className="text-xs leading-6 text-text-2">环境上限为 0 时：填写每日额度（分）→ 点「确认开启每日额度」→ 再点下方「保存模型设置」。环境上限 &gt; 0 时可在此调低（不超过运维上限）。</p>
         {data.dailyCapCents === 0 ? <p className="rounded-md border border-warn/30 bg-warn-soft px-2.5 py-1.5 text-xs leading-6 text-warn" role="status">当前有效日额度为 0，AI 辅导不可用。请设置额度并确认后保存。</p> : null}
@@ -85,49 +88,104 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
       {selected.map(model => <p className="break-words text-xs leading-6 text-text-3" key={model.id}>{model.label}（{model.modelName}）：输入 {model.inputCentsPerMillion}、输出 {model.outputCentsPerMillion} 分 / 百万 token。</p>)}
     </div>
 
-    <div className="space-y-1 text-xs leading-6 text-text-3"><p>支持文本模型；标记为“视觉”的模型可分析指定 PDF 页图像。价格由服务器或本工作区配置；所有供应商须换算为同一记账币种，不自动换汇。工作区共享日上限当前为 {data.dailyCapCents} 分（按用户本地日，默认 Asia/Shanghai），切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。所选模型不可用时会停止；只有你为该用途明确指定了备用模型，且主模型请求确定没有发出时，才会改用备用模型。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>服务器目录模型由管理员维护；本工作区自建的供应商与模型可在下方「自定义供应商与密钥」中配置，保存后立即生效，无需重启服务。</p><p>设置中的原生备份暂不包含模型选择、路由与自定义供应商配置，请在迁移服务器前另行记录。</p></div>
+    <div className="space-y-1 text-xs leading-6 text-text-3"><p>支持文本模型；标记为“视觉”的模型可分析指定 PDF 页图像。价格由服务器或本工作区配置；所有供应商须换算为同一记账币种，不自动换汇。{data.dailyQuota?.mode === "unlimited" ? "测试期每日不限额；单次交互和供应商限制仍保留。" : `工作区共享日上限当前为 ${data.dailyQuota?.mode === "limited" ? data.dailyQuota.capCents : data.dailyCapCents} 分。`}切换模型不会重置已用额度。</p><p>自动模式只执行以上明确映射，不判断问题难度。所选模型不可用时会停止；只有你为该用途明确指定了备用模型，且主模型请求确定没有发出时，才会改用备用模型。保存后供后续选型使用；已开始的请求继续使用原模型。</p><p>服务器目录模型由管理员维护；本工作区自建的供应商与模型可在下方「自定义供应商与密钥」中配置，保存后立即生效，无需重启服务。</p><p>设置中的原生备份暂不包含模型选择、路由与自定义供应商配置，请在迁移服务器前另行记录。</p></div>
     <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={busy || stale || brokenTaskRoute || transcriptionProblem !== null || routes.some(route => route.problem !== null) || (!dirty && data.saved && !data.invalidStoredSettings)} onClick={onSave}>{busy ? <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}保存模型设置</button><button type="button" className={ui.secondary} disabled={busy || (!data.saved && !dirty)} onClick={onReset}>恢复服务器默认设置</button></div>
   </div>;
 }
 
-export function AiSettingsPanel() {
+export function AiSettingsPanel({ basePath = "/opening/settings" }: { basePath?: string } = {}) {
   const [data, setData] = useState<OpeningAiSettingsResponse | null>(null);
   const [draft, setDraft] = useState<OpeningAiSettings | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const receive = (next: OpeningAiSettingsResponse) => { setData(next); setDraft(next.settings); };
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const [modelRevision, setModelRevision] = useState(0);
+  const [mutationOwner, setMutationOwner] = useState<"settings" | "quick-setup" | null>(null);
+  // State disables controls; the ref also excludes opposite writes in the same render.
+  const mutation = useRef<typeof mutationOwner>(null);
+  const generation = useRef(0);
+  const activeRead = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  const invalidate = useCallback(() => {
+    activeRead.current?.abort(); activeRead.current = null;
+    return ++generation.current;
+  }, []);
+  const receive = useCallback((next: OpeningAiSettingsResponse) => { setData(next); setDraft(next.settings); }, []);
+  const load = useCallback(async () => {
+    if (mutation.current) return;
+    const request = invalidate();
+    const controller = new AbortController();
+    activeRead.current = controller;
     setBusy(true); setError(""); setNotice("");
     try {
-      const response = await fetch("/api/opening/ai-settings", { cache: "no-store", signal });
+      const response = await fetch("/api/opening/ai-settings", { cache: "no-store", signal: controller.signal });
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body.error?.message === "string" ? body.error.message : "模型设置暂时无法读取，请重试。");
-      if (!signal?.aborted) receive(openingAiSettingsResponseSchema.parse(body));
-    } catch (failure) { if (!signal?.aborted) setError(userFacingMessage(failure, "模型设置暂时无法读取，请重试。")); }
-    finally { if (!signal?.aborted) setBusy(false); }
-  }, []);
-  useEffect(() => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort(); }, [load]);
+      if (request === generation.current) receive(openingAiSettingsResponseSchema.parse(body));
+    } catch (failure) { if (request === generation.current) setError(userFacingMessage(failure, "模型设置暂时无法读取，请重试。")); }
+    finally {
+      if (request === generation.current) setBusy(false);
+      if (activeRead.current === controller) activeRead.current = null;
+    }
+  }, [invalidate, receive]);
+  useEffect(() => {
+    mounted.current = true; void load();
+    return () => { mounted.current = false; invalidate(); };
+  }, [load, invalidate]);
   async function save(value: OpeningAiSettings | null) {
-    if (busy) return;
+    if (busy || mutation.current) return;
+    mutation.current = "settings"; setMutationOwner("settings");
+    const request = invalidate();
     setBusy(true); setError(""); setNotice("");
+    let settled = false;
     try {
       const response = await fetch("/api/opening/ai-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+      // A success response is sent only after the write finishes. These rejections occur before it.
+      settled = response.ok || [400, 401, 403, 413, 422].includes(response.status);
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body.error?.message === "string" ? body.error.message : "模型设置保存失败，请重试。");
+      if (request !== generation.current) return;
       receive(openingAiSettingsResponseSchema.parse(body));
-      setNotice(value ? "模型设置已保存。后续请求将按以上规则选择模型。" : "已恢复服务器默认设置，请确认下方模型可用状态。");
-    } catch (failure) { setError(userFacingMessage(failure, "模型设置保存失败，请重试。")); }
-    finally { setBusy(false); }
+      setNotice(value ? "模型设置已保存。后续请求将按以上规则选择模型。" : "已恢复服务器默认设置，请确认当前模型可用状态。");
+    } catch (failure) {
+      if (request === generation.current) setError(settled
+        ? userFacingMessage(failure, "模型设置结果无法读取，请重新读取后再操作。")
+        : "保存结果尚未确认，已暂停更改模型设置。请联系管理员确认上次请求已结束后，再重新打开设置页读取；不要直接重试或切换配置。");
+    } finally {
+      if (settled) { mutation.current = null; if (mounted.current) setMutationOwner(null); }
+      if (request === generation.current) setBusy(false);
+    }
   }
   return <section className="grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="ai-settings-heading">
-    <div><h2 id="ai-settings-heading" className="text-sm font-medium text-text">AI 模型与供应商</h2><p className="mt-1 text-xs leading-6 text-text-3">设置助理、资料辅导和临时对话使用的模型。</p></div>
+    <div><h2 id="ai-settings-heading" className="text-sm font-medium text-text">AI 模型与用量</h2><p className="mt-1 text-xs leading-6 text-text-3">查看当前模型和费用，需要时再调整自己的模型。</p></div>
     <div className="min-w-0 space-y-3">
       {error ? <p role="alert" className="text-sm leading-6 text-danger">{error}</p> : null}
+      {error && data ? <p className="text-xs leading-6 text-text-3">以下为上次读取结果；当前状态待重新确认。</p> : null}
       {busy && !data ? <p className="text-sm text-text-3" role="status">正在读取模型设置…</p> : null}
-      {data && draft ? <AiSettingsForm data={data} draft={draft} busy={busy} onChange={value => { setDraft(value); setNotice(""); }} onSave={() => void save(draft)} onReset={() => void save(null)} /> : null}
-      <button type="button" className={ui.quiet} disabled={busy} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" />重新读取模型设置</button>
+      {data ? <AiSettingsOverview data={data} /> : null}
+      <button type="button" className={ui.quiet} disabled={busy || mutationOwner !== null} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" />重新读取模型设置</button>
       {notice ? <p role="status" className="text-sm leading-6 text-accent">{notice}</p> : null}
+      <details className="border-t border-line pt-3" aria-labelledby="own-models-heading">
+        <summary id="own-models-heading" className="min-h-11 cursor-pointer py-2 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">使用自己的模型</summary>
+        <div className="space-y-6 pt-3">
+          <QuickSetupPanel basePath={basePath} advanced mutationBlocked={mutationOwner === "settings"} acquireMutation={confirming => {
+            if (mutation.current && !(mutation.current === "quick-setup" && confirming)) return false;
+            mutation.current = "quick-setup"; setMutationOwner("quick-setup");
+            invalidate(); setBusy(false); setError(""); setNotice("");
+            return true;
+          }} onMutationSettled={outcome => {
+            if (outcome !== "unknown" && mutation.current === "quick-setup") {
+              mutation.current = null; if (mounted.current) setMutationOwner(null);
+            }
+          }} onConfigured={next => {
+            if (!mounted.current) return;
+            invalidate(); receive(next); setBusy(false); setError(""); setNotice("");
+            setModelRevision(current => current + 1);
+          }} />
+          {data && draft ? <AiSettingsForm data={data} draft={draft} busy={busy || mutationOwner !== null} onChange={value => { setDraft(value); setNotice(""); }} onSave={() => void save(draft)} onReset={() => void save(null)} /> : null}
+          <ProviderSettingsPanel key={modelRevision} />
+        </div>
+      </details>
     </div>
   </section>;
 }

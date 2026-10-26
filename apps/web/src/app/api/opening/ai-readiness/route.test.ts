@@ -47,13 +47,14 @@ const model = {
 };
 const scope = { workspaceId: "w", ownerUserId: "u" };
 
-function createSqlMock() {
+function createSqlMock(backlog: { stale_pending: number; stale_queued: number; failed_outbox: number } | Error = { stale_pending: 0, stale_queued: 0, failed_outbox: 0 }) {
   return async (strings: TemplateStringsArray, ..._values: unknown[]) => {
     const q = strings.join("?");
     if (q.includes("sum(amount_cents)")) return [{ used: 0 }];
     if (q.includes("24 hours")) return [{ n: 0 }];
     if (q.includes("stale_pending") || q.includes("opening_outbox")) {
-      return [{ stale_pending: 0, stale_queued: 0, failed_outbox: 0 }];
+      if (backlog instanceof Error) throw backlog;
+      return [backlog];
     }
     return [];
   };
@@ -79,6 +80,40 @@ beforeEach(() => {
 });
 
 describe("AI readiness HTTP boundary", () => {
+  it("marks unreadable worker backlog as unknown, not a confirmed hard failure", async () => {
+    mocks.scope.mockResolvedValue({ sql: createSqlMock(new Error("connection interrupted")), scope });
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.find((item: { key: string }) => item.key === "worker_backlog")).toMatchObject({ ok: false, severity: "hard", status: "unknown" });
+  });
+
+  it("keeps an actually measured worker backlog as a hard failure", async () => {
+    mocks.scope.mockResolvedValue({ sql: createSqlMock({ stale_pending: 2, stale_queued: 1, failed_outbox: 0 }), scope });
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    const worker = body.items.find((item: { key: string }) => item.key === "worker_backlog");
+    expect(worker).toMatchObject({ ok: false, severity: "hard", detail: expect.stringContaining("超时 outbox 2") });
+    expect(worker.status).not.toBe("unknown");
+  });
+
+  it.each(["limited", "unlimited"])("accepts an available free-only catalog with %s daily quota", async dailyQuotaMode => {
+    mocks.catalog.mockReturnValue({ models: [{ ...model, billing: "free_tier", dailyRequestCap: 200, inputCentsPerMillion: 0, outputCentsPerMillion: 0 }], defaultModelId: "one", dailyCapCents: 0, dailyQuotaMode });
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.filter((item: { severity: string; ok: boolean }) => item.severity === "hard" && !item.ok)).toEqual([]);
+  });
+
+  it("does not use free-tier readiness pricing to authorize a paid daily cap", async () => {
+    mocks.catalog.mockReturnValue({ models: [{ ...model, billing: "free_tier", dailyRequestCap: 200, inputCentsPerMillion: 0, outputCentsPerMillion: 0 }], defaultModelId: "one", dailyCapCents: 0, dailyQuotaMode: "limited" });
+    mocks.getSettings.mockResolvedValue({ settings: { ...DEFAULT_OPENING_AI_SETTINGS, dailyCapCents: 200, budgetConfirmedAt: new Date().toISOString() }, saved: true, invalidStoredSettings: false });
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.find((item: { key: string }) => item.key === "daily_budget")).toMatchObject({ ok: true, detail: expect.stringContaining("按量计费额度未开启") });
+  });
+
+  it("does not treat an unconfigured free request cap as ready", async () => {
+    mocks.catalog.mockReturnValue({ models: [{ ...model, billing: "free_tier", dailyRequestCap: null, inputCentsPerMillion: 0, outputCentsPerMillion: 0 }], defaultModelId: "one", dailyCapCents: 0, dailyQuotaMode: "unlimited" });
+    const body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();
+    expect(body.items.find((item: { key: string }) => item.key === "available_model")).toMatchObject({ ok: false, severity: "hard" });
+    expect(body.items.find((item: { key: string }) => item.key === "default_pricing")).toMatchObject({ ok: false, severity: "hard" });
+  });
+
   it("reads Worker measurements even without Web OCR config and never trusts Web config alone", async () => {
     mocks.readParserHealth.mockResolvedValue({ status: "ready", checkedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), missingFiles: [] });
     let body = await (await GET(new Request("http://localhost/api/opening/ai-readiness"))).json();

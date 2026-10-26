@@ -16,7 +16,7 @@ import {
   type Scope,
 } from "@aistudy/contracts";
 import { loadOpeningModelCatalog } from "@aistudy/config";
-import { createOpeningAiSettingsRepository, createOpeningModelProvidersRepository } from "@aistudy/database";
+import { createOpeningAiSettingsRepository, createOpeningModelProvidersRepository, OpeningBudgetError, readOpeningDailyBudgetUsage } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
 
@@ -104,9 +104,14 @@ export function validateBudgetFields(settings: OpeningAiSettings, envCapCents: n
 
 export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiSettingsResponse> {
   const catalog = loadOpeningModelCatalog();
-  const [preference, custom] = await Promise.all([
+  const [preference, custom, dailyUsage] = await Promise.all([
     createOpeningAiSettingsRepository(sql).get(scope),
     createOpeningModelProvidersRepository(sql).listResolvableModels(scope),
+    // A display-only usage failure must not disable configuration repair or imply zero spend.
+    readOpeningDailyBudgetUsage(sql, scope).catch(error => {
+      if (error instanceof OpeningBudgetError) throw error;
+      return null;
+    }),
   ]);
   // Include workspace BYOK pricing so Lant-only workspaces are not treated as unpriced.
   const pricingConfigured = catalogPricingConfigured([...catalog.models, ...custom]);
@@ -120,6 +125,7 @@ export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiS
     defaultModelId: merged.defaultModelId,
     dailyCapCents: effective.capCents,
     dailyQuota: catalog.dailyQuotaMode === "unlimited" ? { mode: "unlimited" } : { mode: "limited", capCents: effective.capCents },
+    dailyUsage,
     envCapCents: catalog.dailyCapCents,
     personalCeilingCents: OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
     models: merged.models.map(toSummary),

@@ -83,12 +83,23 @@ export const openingModelSummarySchema = openingModelSnapshotBaseSchema.extend({
   source: z.enum(["server", "workspace"]).optional(),
 }).refine(validMediaPricing, "Incomplete media pricing");
 export type OpeningModelSummary = z.infer<typeof openingModelSummarySchema>;
+/** Local budget day spend, with outstanding holds and estimates kept distinct. */
+export const openingAiDailyUsageSchema = z.object({
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  timeZone: z.string().min(1).max(100),
+  spentCents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  /** Includes earlier-day reservations and estimates still awaiting actual settlement. */
+  reservedCents: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type OpeningAiDailyUsage = z.infer<typeof openingAiDailyUsageSchema>;
 export const openingAiSettingsResponseSchema = z.object({
   models: z.array(openingModelSummarySchema).max(32),
   defaultModelId: modelId.nullable(),
   /** Effective daily cap after resolveEffectiveDailyCap. */
   dailyCapCents: z.number().int().nonnegative(),
   dailyQuota: openingDailyQuotaSchema.optional(),
+  /** null or absent means unknown; only a measured zero may be shown as zero. */
+  dailyUsage: openingAiDailyUsageSchema.nullable().optional(),
   /** Env/ops ceiling the UI may not exceed when env cap > 0; otherwise personal ceiling. */
   envCapCents: z.number().int().nonnegative(),
   personalCeilingCents: z.number().int().nonnegative(),

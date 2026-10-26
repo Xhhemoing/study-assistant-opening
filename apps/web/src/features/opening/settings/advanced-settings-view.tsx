@@ -7,8 +7,6 @@ import { useCallback, useEffect, useState } from "react";
 import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings/guidance-mode-picker";
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { AiSettingsPanel } from "./ai-settings-panel";
-import { ProviderSettingsPanel } from "./provider-settings-panel";
-import { QuickSetupPanel } from "./quick-setup-panel";
 import { createOpeningApi } from "../client/api";
 import { LoopMetricsPanel } from "../planning/loop-metrics-panel";
 import { PlanFeedbackPanel } from "../planning/plan-feedback-panel";
@@ -20,7 +18,6 @@ import {
 } from "./settings-shared";
 
 export function AdvancedSettingsView({ basePath = "/settings", embedded = false }: { basePath?: string; embedded?: boolean } = {}) {
-  const [modelRevision, setModelRevision] = useState(0);
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
     mode: defaultGuidanceMode(),
@@ -71,9 +68,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
         action={<Link className={ui.quiet} href={basePath}><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
       /> : null}
       <div className={embedded ? "space-y-6" : "mx-auto max-w-4xl space-y-6 px-5 py-5"}>
-        <QuickSetupPanel basePath={basePath} advanced onConfigured={() => setModelRevision(current => current + 1)} />
-        <AiSettingsPanel key={`ai-${modelRevision}`} />
-        <ProviderSettingsPanel key={`providers-${modelRevision}`} />
+        <AiSettingsPanel basePath={basePath} />
         {basePath === "/opening/settings" ? <><PlanFeedbackPanel /><LoopMetricsPanel api={createOpeningApi()} /></> : null}
         {error ? (
           <div className="flex flex-wrap items-center gap-3 rounded-md border border-danger bg-surface p-3" role="alert">

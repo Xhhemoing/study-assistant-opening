@@ -1,6 +1,6 @@
 import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { randomUUID } from "node:crypto";
-import { openingModelSnapshotSchema, type OpeningModelSnapshot } from "@aistudy/contracts";
+import { openingAiDailyUsageSchema, openingModelSnapshotSchema, type OpeningAiDailyUsage, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS,
@@ -336,6 +336,28 @@ export async function checkOpeningBudgetAvailable(
     ? "request_cap" : unlimited && input.amountCents > options.parentCapCents! ? "parent_budget"
       : !zeroCost && availableCents !== null && input.amountCents > availableCents ? "budget" : null;
   return { allowed: reason === null, reason, requiredCents: input.amountCents, availableCents, dailyQuotaMode: unlimited ? "unlimited" : "limited", localDay: budgetDay.localDate };
+}
+
+/** Read-only display snapshot; never reserves, settles or reconciles a pending charge. */
+export async function readOpeningDailyBudgetUsage(sql: Sql, scope: OpeningScope, now = new Date()): Promise<OpeningAiDailyUsage> {
+  return sql.begin("isolation level repeatable read read only", async tx => {
+    const [owner] = await tx`SELECT p.planning_settings FROM workspaces w
+      LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
+      WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
+    if (!owner) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
+    const day = resolveBudgetLocalDay(now, resolveBudgetTimeZone(readPlanningTimeZone(owner.planning_settings)));
+    // TTL reconciliation and media upper bounds are estimates, even when their
+    // ledger state is completed. Keep all such holds visible across local days.
+    const pending = tx`(state='reserved' OR (state='completed' AND
+      (pending_reconcile_cents > 0 OR settlement_cost_basis IS NOT DISTINCT FROM 'media_usage_upper_bound')))`;
+    const [usage] = await tx`SELECT
+      COALESCE(sum(amount_cents) FILTER (WHERE state='completed' AND NOT ${pending}
+        AND created_at >= ${day.dayStart} AND created_at < ${day.nextDayStart}),0) AS spent,
+      COALESCE(sum(amount_cents) FILTER (WHERE ${pending}),0) AS reserved
+      FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
+    return openingAiDailyUsageSchema.parse({ localDate: day.localDate, timeZone: day.timeZone,
+      spentCents: Number(usage?.spent), reservedCents: Number(usage?.reserved) });
+  });
 }
 
 export function createOpeningBudgetRepository(
