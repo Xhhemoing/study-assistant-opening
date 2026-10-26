@@ -4,7 +4,7 @@ import type { LearningPreferences } from "@aistudy/contracts";
 import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SemesterSettingsForm } from "../opening/timetable/semester-settings-form";
 import { TimetableImport } from "../opening/timetable/timetable-import";
 import {
@@ -16,10 +16,13 @@ import {
 import { PreferenceControls } from "../opening/teaching/preference-controls";
 import { QuickSetupPanel } from "./quick-setup-panel";
 import { AppearanceSettings } from "../opening/settings/appearance-settings";
+import { MemoryPanel } from "../opening/assistant/memory-panel";
+import { createOpeningApi } from "../opening/client/api";
 
 const navLinkClass = "inline-flex min-h-9 shrink-0 items-center whitespace-nowrap rounded-ctl px-3 text-ui text-text-2 hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent lg:min-h-8";
 
 export function SettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
+  const memoryApi = useMemo(() => createOpeningApi(), []);
   const [learningPreferences, setLearningPreferences] = useState<LearningPreferences>(disabledLearningPreferences);
   const [loading, setLoading] = useState(true);
   const [ready, setReady] = useState(false);
@@ -73,6 +76,7 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
           <a className={navLinkClass} href="#planning">排程</a>
           <a className={navLinkClass} href="#preferences">学习偏好</a>
           <a className={navLinkClass} href="#intervention">介入偏好</a>
+          <a className={navLinkClass} href="#memory">记忆管理</a>
           <Link className={navLinkClass} href="/opening/settings/learning-test">学习测试</Link>
           <Link className={navLinkClass} href={`${basePath}/advanced`}>高级</Link>
           <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>每日 AI 用量</Link>
@@ -171,6 +175,10 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
           <div className="min-w-0">
             <PreferenceControls scope="global" />
           </div>
+        </section>
+
+        <section id="memory" aria-label="AI 记忆设置" className="scroll-mt-6 border-b border-line pb-6">
+          <MemoryPanel api={memoryApi} />
         </section>
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">

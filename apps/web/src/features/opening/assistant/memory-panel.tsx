@@ -95,7 +95,7 @@ export function MemoryPanel({ api }: { api: OpeningApi }) {
         <span className="text-xs text-text-2">记下的内容由你决定是否保留</span>
       </div>
       {message ? <div className="space-y-2"><p className="text-xs leading-5 text-danger" role="alert">{message}</p><button type="button" className={secondaryButtonClass} disabled={loading || Boolean(busyId)} onClick={() => { setLoading(true); setMessage(""); void refresh().catch((error) => setMessage(userFacingMessage(error, "记忆暂时无法读取"))).finally(() => setLoading(false)); }}>重新读取记忆</button></div> : null}
-      {loading ? <p role="status" className="text-xs text-text-2">正在读取记忆…</p> : !message && !candidates.length && !memories.length ? <p className="text-xs leading-5 text-text-2">暂无已确认记忆或待确认记忆。</p> : null}
+      {loading ? <p role="status" className="text-xs text-text-2">正在读取记忆…</p> : !message && !candidates.length && !memories.length ? <p className="text-xs leading-5 text-text-2">还没有保存的学习记忆。</p> : null}
       {memories.length > 0 ? (
         <div className="mt-3 space-y-2">
           <p className="text-xs font-medium text-text-2">已确认记忆</p>

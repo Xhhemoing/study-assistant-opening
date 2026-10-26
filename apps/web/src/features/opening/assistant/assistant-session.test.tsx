@@ -37,6 +37,22 @@ async function flush() { for (let i = 0; i < 20; i += 1) await Promise.resolve()
 beforeEach(() => { hooks.slots.length = 0; hooks.cursor = 0; hooks.effects.length = 0; hooks.read.mockReset().mockResolvedValue(response()); });
 
 describe("assistant canonical attempt restoration", () => {
+  it("forwards restored, created and cleared conversation reports to its owner", () => {
+    const onConversationChange = vi.fn();
+    const result = AssistantSession({ entry: { key: "ordinary", label: "自由提问", fresh: false, conversation: null }, onConversationChange }) as ReactElement<{ onConversationChange?: (id: string | null) => void }>;
+    result.props.onConversationChange?.(id);
+    result.props.onConversationChange?.(other);
+    result.props.onConversationChange?.(null);
+    expect(onConversationChange.mock.calls).toEqual([[id], [other], [null]]);
+  });
+  it("keeps the canonical attempt and original conversation when opening the agent page", () => {
+    const result = AssistantSession({ entry: { ...entry, conversation: other, learningAttempt: attempt }, embedded: false, agent: true }) as ReactElement<{ agent?: boolean; resumeBoundConversation?: boolean; initialConversationId?: string; learningAttempt?: LearningAttempt }>;
+    expect(result.type).toBe(AssistantView);
+    expect(result.props.agent).toBe(true);
+    expect(result.props.resumeBoundConversation).toBe(true);
+    expect(result.props.initialConversationId).toBe(other);
+    expect(result.props.learningAttempt).toEqual(attempt);
+  });
   it("loads a real attempt, fills canonical pins, and restores it again after the drawer unmounts", async () => {
     expect(render().props.children.type).toBe(LoadingRows);
     const cleanups = runEffects();

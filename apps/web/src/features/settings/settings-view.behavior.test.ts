@@ -11,6 +11,7 @@ vi.mock("react", async (importOriginal) => ({
     return [hooks.values[index], (next: unknown) => { hooks.values[index] = typeof next === "function" ? next(hooks.values[index]) : next; }];
   },
   useCallback: (callback: unknown) => callback,
+  useMemo: <T,>(factory: () => T) => factory(),
   useEffect: (effect: () => void) => { hooks.effects.push(effect); },
 }));
 vi.mock("../opening/timetable/semester-settings-form", () => ({ SemesterSettingsForm: () => null }));
