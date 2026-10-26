@@ -90,7 +90,7 @@ describe("TimetableImport", () => {
     const put = vi.fn(async (sessions: WeekSession[]) => sessions);
     const html = renderToStaticMarkup(createElement(TimetableImport, { put }));
     expect(html).toContain("导入课表");
-    expect(html).toContain("确认后才写入课表");
+    expect(html).toContain("确认后才保存到课表");
     expect(html).toContain("原始文件不会上传");
     expect(put).not.toHaveBeenCalled();
   });

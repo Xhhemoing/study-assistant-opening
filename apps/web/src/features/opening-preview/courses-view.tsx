@@ -35,7 +35,7 @@ export function CoursesView(props: {
       <section className="max-w-2xl">
         <QuietButton onClick={props.onBack}>返回课程</QuietButton>
         <h2 className="mt-4 text-base font-semibold">{selected.title}</h2>
-        <p className="mt-1 text-sm text-zinc-600">{selected.term} · 示例课程，不会写入课程库</p>
+        <p className="mt-1 text-sm text-zinc-600">{selected.term} · 示例课程，不会保存到你的课程中</p>
         <div className="mt-4"><PrimaryButton onClick={props.onLaunch}>用这门课开始提问</PrimaryButton></div>
         <h3 className="mt-6 text-sm font-semibold">这门课的对话</h3>
         {talks.length === 0 ? <p className="mt-2 text-sm text-zinc-600">还没有挂在这门课上的对话。</p> : (

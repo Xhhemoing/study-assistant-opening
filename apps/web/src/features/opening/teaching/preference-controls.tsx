@@ -109,7 +109,7 @@ function PrefsFields({
         />
       </label>
       <p id={`${idPrefix}-quiet-help`} className="text-xs leading-5 text-text-3">
-        安静 / 关闭主动介入不会把「你主动求助」当成打断；系统仍应回答。不按停留时间推断卡住，也不会在提示后自动展开完整解答，也没有「每 N 分钟必问」控件。
+        安静模式下，你主动提出的问题仍会得到回应。不会因为你停留较久就打断你，看过提示后，也由你决定是否查看完整解答。
       </p>
       <label className="block space-y-1.5">
         <span className={ui.label}>主动程度</span>
@@ -195,7 +195,7 @@ function PrefsFields({
   );
 }
 
-function EffectiveSummary({ data }: { data: InterventionSettingsResponse }) {
+function EffectiveSummary({ data, scope }: { data: InterventionSettingsResponse; scope: PreferenceControlsViewProps["scope"] }) {
   const layer = winningLayer(data);
   const e = data.effective;
   return (
@@ -204,11 +204,10 @@ function EffectiveSummary({ data }: { data: InterventionSettingsResponse }) {
       data-intervention-effective="true"
       data-winning-layer={layer}
     >
-      <h3 className="text-xs font-medium text-text">当前生效（已合并）</h3>
-      <p className="text-xs leading-5 text-text-2">
-        优先层：<strong>{winningLayerLabel(layer)}</strong>
-        {" · "}顺序：本课临时 &gt; 课程 &gt; 全局
-      </p>
+      <h3 className="text-xs font-medium text-text">正在使用的偏好</h3>
+      <p className="text-xs leading-5 text-text-2">{scope === "global"
+        ? "这里的设置对所有课程生效，在某节课里单独调整只影响那节课。"
+        : "这里的调整只影响当前这节课，其他课程保持原来的偏好。"}</p>
       <dl className="space-y-1 text-xs leading-6 text-text-2">
         <div className="flex flex-wrap justify-between gap-x-4">
           <dt className="text-text-3">安静模式</dt>
@@ -274,8 +273,8 @@ export function PreferenceControlsView({
     scope === "session" ? "本课临时介入偏好" : "教学介入偏好";
   const description =
     scope === "session"
-      ? "仅覆盖当前教学活动；关闭或重置后恢复课程/全局。与永久设置分开保存。"
-      : "控制主动提示程度与深度。可随时查看生效层、重置。求助不等于打断。";
+      ? "只影响这节课；清除后恢复你为课程或所有课程保存的偏好。"
+      : "调整主动提示的频率和讲解深度。你可以随时恢复默认；主动求助不会增加打扰。";
 
   return (
     <div
@@ -300,7 +299,7 @@ export function PreferenceControlsView({
         </p>
       ) : null}
 
-      <EffectiveSummary data={data} />
+      <EffectiveSummary data={data} scope={scope} />
       <PrefsFields
         draft={draft}
         busy={busy}
@@ -334,10 +333,6 @@ export function PreferenceControlsView({
           {notice}
         </p>
       ) : null}
-
-      <span className="sr-only" data-no-nag-interval="true" data-no-dwell-stuck="true">
-        无每 N 分钟必问控件；无停留时间卡住推断。
-      </span>
     </div>
   );
 }
@@ -457,9 +452,6 @@ export function PreferenceControls({
         <p className="text-sm text-text-3" role="status">
           正在读取介入偏好…
         </p>
-        <span className="sr-only" data-no-nag-interval="true" data-no-dwell-stuck="true">
-          无每 N 分钟必问控件；无停留时间卡住推断。
-        </span>
       </div>
     );
   }

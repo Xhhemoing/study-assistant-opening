@@ -44,7 +44,7 @@ export function createCourseSummaryController(
           const progressed = previousPending === null || page.pendingProjectionCount < previousPending;
           update({ ...emptyCourseSummary(), status: "updating", snapshotKey: current, snapshotRevision: revision, evaluatedAt,
             pendingProjectionCount: page.pendingProjectionCount,
-            notice: !progressed || !page.nextCursor ? "资格更新暂未推进，请手动刷新摘要。" : "正在更新当前页的证据资格，完成后再显示结论。" });
+            notice: !progressed || !page.nextCursor ? "学习记录核对暂未完成，请手动刷新摘要。" : "正在核对当前页的学习记录，完成后再显示结果。" });
           if (!progressed || !page.nextCursor) return;
           previousPending = page.pendingProjectionCount; cursor = page.nextCursor;
           continue;
@@ -64,7 +64,7 @@ export function createCourseSummaryController(
   return {
     start() {
       disposed = false; unsubscribe?.();
-      unsubscribe = subscribeOpeningPrivacyChange(() => { void load(false, "记录可见性已变化，旧摘要与代表资格已清空。"); });
+      unsubscribe = subscribeOpeningPrivacyChange(() => { void load(false, "记录可见范围已变化，旧摘要与相关判断已清空。"); });
       return load(false);
     },
     refresh: () => load(false), loadMore: () => load(true),
