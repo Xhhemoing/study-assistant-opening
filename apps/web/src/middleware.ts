@@ -1,3 +1,4 @@
+import { sprintCourseId } from "./features/opening/exam-sprint/sprint-course-route";
 import { NextResponse, type NextRequest } from "next/server";
 import {
   isAllowedCookieAuthOrigin,
@@ -38,6 +39,16 @@ export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string)
 
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
+  const legacySprint = /^\/opening\/courses\/([^/]+)(?:\/study)?\/?$/.exec(pathname);
+  const sprintId = legacySprint ? sprintCourseId({ courseId: legacySprint[1] }) : null;
+  if ((request.method === "GET" || request.method === "HEAD") && sprintId
+    && request.nextUrl.searchParams.getAll("mode").length === 1 && request.nextUrl.searchParams.get("mode") === "sprint") {
+    const target = request.nextUrl.clone();
+    target.pathname = "/opening/sprint";
+    target.searchParams.delete("mode");
+    target.searchParams.set("courseId", sprintId);
+    return NextResponse.redirect(target, 308);
+  }
   const legacyRedirect = legacyOpeningRedirectPath(pathname);
   // Production isolates mock pages without requiring OPENING_RELEASE=1.
   // /learn/courses* stays reachable by product decision (see access-middleware.test.ts).

@@ -145,3 +145,33 @@ describe("cookie-auth base URL configuration", () => {
   });
 });
 
+
+const sprintCourse = "11111111-1111-4111-8111-111111111111";
+describe("legacy sprint compatibility", () => {
+  it.each([["", "GET"], ["/study", "GET"], ["", "HEAD"], ["/study", "HEAD"]])("permanently redirects the old course%s entry via %s without losing query context", (suffix, method) => {
+    const request = new NextRequest(`${publicBase}/opening/courses/${sprintCourse}${suffix}?mode=sprint&conversation=kept&filter=a&filter=b&courseId=old`, { method });
+    const response = middleware(request);
+    expect(response.status).toBe(308);
+    const target = new URL(response.headers.get("location")!);
+    expect(target.pathname).toBe("/opening/sprint");
+    expect(target.searchParams.get("courseId")).toBe(sprintCourse);
+    expect(target.searchParams.get("conversation")).toBe("kept");
+    expect(target.searchParams.getAll("filter")).toEqual(["a", "b"]);
+    expect(target.searchParams.has("mode")).toBe(false);
+    expect(middleware(new NextRequest(target)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each([
+    `/opening/courses/${sprintCourse}/study?mode=practice`,
+    `/opening/courses/${sprintCourse}/study?mode=sprint&mode=practice`,
+    "/opening/courses/not-a-course/study?mode=sprint",
+    `/opening/courses/${sprintCourse}/exam?mode=sprint`,
+  ])("keeps other or ambiguous course entries unchanged: %s", path => {
+    expect(middleware(pageRequest(path)).headers.get("x-middleware-next")).toBe("1");
+  });
+});
+it.each(["POST", "PUT"])("does not redirect a %s sent to a legacy sprint page", method => {
+  const response = middleware(new NextRequest(`${publicBase}/opening/courses/${sprintCourse}/study?mode=sprint`, { method }));
+  expect(response.headers.get("location")).toBeNull();
+  expect(response.headers.get("x-middleware-next")).toBe("1");
+});
