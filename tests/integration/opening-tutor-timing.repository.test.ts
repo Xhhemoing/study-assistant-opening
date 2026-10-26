@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { createOpeningConversationRepository, createOpeningTutorJobsRepository, recordOpeningTutorTiming } from "@aistudy/database";
+import { createOpeningConversationRepository, createOpeningTutorJobsRepository, createSqlClient, recordOpeningTutorTiming } from "@aistudy/database";
+import { assertOpeningTestDatabase } from "@aistudy/config";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import type { Sql } from "postgres";
 
@@ -55,14 +56,19 @@ it("limits a slow statement within the real timing transaction", async () => {
 
 it("releases locks when a timing client stalls between SQL statements", async () => {
   const input = await timingTarget();
-  let resume!: () => void, ownerHeld!: () => void;
+  const timingSql = createSqlClient(assertOpeningTestDatabase(
+    process.env.OPENING_TEST_DATABASE_URL ?? "", process.env.OPENING_TEST_DB,
+  ).toString(), { max: 1 });
+  let resume!: () => void, ownerHeld!: () => void, bodyExited!: () => void;
   const wait = new Promise<void>(resolve => { resume = resolve; }), acquired = new Promise<void>(resolve => { ownerHeld = resolve; });
-  const delayed = { begin: (body: (tx: Sql) => Promise<unknown>) => fixture.sql.begin(async tx => {
+  const bodyFinished = new Promise<void>(resolve => { bodyExited = resolve; });
+  const delayed = { begin: (body: (tx: Sql) => Promise<unknown>) => timingSql.begin(async tx => {
     const proxy = new Proxy(tx, { apply: async (target, receiver, args) => {
       if (String(args[0]).includes("WITH current_execution")) { ownerHeld(); await wait; }
       return Reflect.apply(target, receiver, args);
     } });
-    return body(proxy as unknown as Sql);
+    try { return await body(proxy as unknown as Sql); }
+    finally { bodyExited(); }
   }) } as unknown as Sql;
   const recording = recordOpeningTutorTiming(delayed, fixture.scope, input).then(value => ({ value }), error => ({ error }));
   try {
@@ -73,9 +79,14 @@ it("releases locks when a timing client stalls between SQL statements", async ()
       await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE`;
     });
     expect(performance.now() - businessStarted).toBeLessThan(1000);
-    resume();
-    expect(await recording).toHaveProperty("error");
-  } finally { resume(); await recording; }
+    expect(await recording).toMatchObject({ error: { code: "CONNECTION_CLOSED" } });
+  } finally {
+    // postgres.js rejects begin on idle close before its parked callback exits.
+    // Terminate this isolated client before resuming so both its late query and
+    // automatic rollback reject normally instead of writing to a closed socket.
+    try { await timingSql.end({ timeout: 0 }); }
+    finally { resume(); await bodyFinished; await recording; }
+  }
 });
 
 it("claims one durable execution and rejects duplicate, unrelated and expired timing writes", async () => {
