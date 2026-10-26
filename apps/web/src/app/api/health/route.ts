@@ -1,3 +1,4 @@
+import { buildInfo } from "../../../server/build-info";
 import { loadEnv } from "@aistudy/config";
 import { buildHealthResponse } from "../../../server/health";
 import {
@@ -21,7 +22,7 @@ export async function GET(): Promise<Response> {
         storage: { status: "down", errorCode: "config" },
       },
     });
-    return Response.json({ status: body.status }, { status: 503, headers: { "Cache-Control": "no-store" } });
+    return Response.json({ status: body.status, ...buildInfo() }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 
   const [database, redis, storage] = await Promise.all([
@@ -36,5 +37,5 @@ export async function GET(): Promise<Response> {
   });
 
   const httpStatus = body.status === "ok" ? 200 : 503;
-  return Response.json({ status: body.status }, { status: httpStatus, headers: { "Cache-Control": "no-store" } });
+  return Response.json({ status: body.status, ...buildInfo() }, { status: httpStatus, headers: { "Cache-Control": "no-store" } });
 }

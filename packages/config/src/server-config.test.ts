@@ -68,8 +68,9 @@ describe("env templates (single definition)", () => {
     };
     for (const dir of ["apps/web/src", "apps/worker/src", "packages"]) walk(path.join(repoRoot, dir));
     const known = new Set(ENV_REGISTRY.map((s) => s.name));
-    // AISTUDY_BUILD_CONFIG_DIGEST is injected by next.config `env` at build, never set by operators.
-    const ignored = new Set(["NEXT_RUNTIME", "CI", "AISTUDY_BUILD_CONFIG_DIGEST"]);
+    // These Next build literals describe the artifact, not operator runtime settings.
+    // The release script supplies COMMIT; next.config pins it with the build timestamp.
+    const ignored = new Set(["NEXT_RUNTIME", "CI", "AISTUDY_BUILD_CONFIG_DIGEST", "AISTUDY_COMMIT", "AISTUDY_BUILT_AT"]);
     expect([...names].filter((n) => !known.has(n) && !ignored.has(n)).sort()).toEqual([]);
   });
 });

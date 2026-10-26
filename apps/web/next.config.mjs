@@ -20,7 +20,11 @@ const nextConfig = {
   // This is a transport ceiling, not admission: tickets/ownership and streaming
   // byte/hash/MIME checks still enforce the per-upload product limits.
   experimental: { middlewareClientMaxBodySize: "50mb" },
-  env: { AISTUDY_BUILD_CONFIG_DIGEST: buildConfigDigest },
+  env: {
+    AISTUDY_BUILD_CONFIG_DIGEST: buildConfigDigest,
+    AISTUDY_COMMIT: process.env.AISTUDY_COMMIT ?? "",
+    AISTUDY_BUILT_AT: new Date().toISOString(),
+  },
   ...(useOpeningE2e ? {
     distDir: ".next-opening-e2e",
     typescript: { tsconfigPath: "tsconfig.opening-e2e.json" },

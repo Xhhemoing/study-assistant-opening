@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { requirePrincipal, runReadinessProbes, runtime } = vi.hoisted(() => ({
   requirePrincipal: vi.fn(),
@@ -15,6 +15,8 @@ vi.mock("../../../../../../../scripts/opening-readiness-probes.mjs", () => ({ ru
 import { GET } from "./route";
 
 beforeEach(() => {
+  vi.stubEnv("AISTUDY_COMMIT", "189546c71095820f550bff754836f36e7fa17933");
+  vi.stubEnv("AISTUDY_BUILT_AT", "2026-10-25T20:00:00.000Z");
   vi.resetAllMocks();
   runReadinessProbes.mockResolvedValue({ database: { ok: true }, redis: { ok: true }, storage: { ok: true }, workerBacklog: { ok: true } });
 });
@@ -23,7 +25,7 @@ describe("Opening health visibility", () => {
   it("serves uncached liveness without authentication or dependency probes", async () => {
     const response = await GET(new Request("http://localhost/api/opening/health"));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "ok" });
+    expect(await response.json()).toEqual({ status: "ok", commit: "189546c7", builtAt: "2026-10-25T20:00:00.000Z" });
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(requirePrincipal).not.toHaveBeenCalled();
     expect(runReadinessProbes).not.toHaveBeenCalled();
@@ -48,3 +50,5 @@ describe("Opening health visibility", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
+
+afterEach(() => vi.unstubAllEnvs());
