@@ -8,15 +8,28 @@ describe("start suggestions from existing records", () => {
   });
   it("offers at most a resume, real due count and nearest unarchived exam", () => {
     const suggestions = startSuggestions({ state: { kind: "ready", continueItem: { conversationId: "chat", title: "向量张成", currentPage: 3 }, courses: { status: "ready", items: [
-      { id: "later", title: "微积分", archivedAt: null, targetDate: "2026-12-02" },
-      { id: "archived", title: "旧考试", archivedAt: "2026-10-01", targetDate: "2026-10-23" },
-      { id: "past", title: "过去考试", archivedAt: null, targetDate: "2026-10-01" },
-      { id: "next", title: "线性代数", archivedAt: null, targetDate: "2026-11-02" },
+      { id: "later", title: "微积分", archivedAt: null, targetDate: "2026-12-02", learningMode: "exam" },
+      { id: "archived", title: "旧考试", archivedAt: "2026-10-01", targetDate: "2026-10-23", learningMode: "exam" },
+      { id: "past", title: "过去考试", archivedAt: null, targetDate: "2026-10-01", learningMode: "exam" },
+      { id: "next", title: "线性代数", archivedAt: null, targetDate: "2026-11-02", learningMode: "exam" },
     ] } }, reviewCount: 9, today: "2026-10-22" });
     expect(suggestions).toEqual([
       { id: "conversation:chat", label: "继续：向量张成", meta: "第 3 页", href: "/opening/assistant?conversation=chat" },
       { id: "review", label: "复习 9 项", href: "/opening/review" },
       { id: "exam:next", label: "线性代数 · 2026-11-02 考试", meta: "冲刺", href: "/opening/sprint?courseId=next" },
+    ]);
+  });
+  it.each(["auto", "understand", undefined] as const)("does not call a %s deadline an exam even inside the adaptive exam window", learningMode => {
+    expect(startSuggestions({ state: { kind: "ready", courses: { status: "ready", items: [
+      { id: "deadline", title: "完成阅读", archivedAt: null, targetDate: "2026-10-23", learningMode },
+    ] } }, today: "2026-10-22" })).toEqual([]);
+  });
+  it("ignores an earlier ordinary deadline when selecting an explicit exam", () => {
+    expect(startSuggestions({ state: { kind: "ready", courses: { status: "ready", items: [
+      { id: "deadline", title: "阅读截止", archivedAt: null, targetDate: "2026-10-23", learningMode: "auto" },
+      { id: "exam", title: "期中考试", archivedAt: null, targetDate: "2026-10-24", learningMode: "exam" },
+    ] } }, today: "2026-10-22" })).toEqual([
+      { id: "exam:exam", label: "期中考试 · 2026-10-24 考试", meta: "冲刺", href: "/opening/sprint?courseId=exam" },
     ]);
   });
   it("points a saved activity to its explicit study route without creating another activity", () => {

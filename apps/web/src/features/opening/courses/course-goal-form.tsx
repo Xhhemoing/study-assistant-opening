@@ -276,7 +276,7 @@ export function CourseGoalForm({
             </label>
           </div>
           <p className="text-xs leading-6 text-text-3">
-            {learningMode === "auto" ? "目标或未完成阶段成果进入最后7天时，优先短讲解和练习；其他时间侧重理解与迁移。"
+            {learningMode === "auto" ? "目标或未完成阶段成果进入最后14天时，优先短讲解和练习；其他时间侧重理解与迁移。"
               : learningMode === "exam" ? "优先练习与必要补课，减少无关扩展；仍保留独立作答与复测记录。"
                 : "侧重理解、方法解释与迁移；遇到阻塞时先补必要前置，再回到原任务。"}
           </p>
