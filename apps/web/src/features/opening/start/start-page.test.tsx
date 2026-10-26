@@ -97,6 +97,17 @@ it("restores a follow-up draft under the created conversation after refresh", as
   expect(api.submitTurn).toHaveBeenCalledOnce();
 });
 
+it("restores an empty saved conversation before any failed turn has been observed", async () => {
+  const api = apiFixture(false);
+  vi.mocked(api.listTurns).mockResolvedValue([]);
+  await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId} />));
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(false);
+  await edit("空对话里的第一问"); await send();
+  expect(api.submitTurn).toHaveBeenCalledOnce();
+  expect(vi.mocked(api.submitTurn).mock.lastCall?.[0].conversationId).toBe(conversationId);
+  expect(api.createConversation).not.toHaveBeenCalled();
+});
+
 it("publishes a created conversation before a failed send so refresh preserves the unsent question", async () => {
   const api = apiFixture(false);
   vi.mocked(api.submitTurn).mockRejectedValueOnce(new Error("发送未确认"));

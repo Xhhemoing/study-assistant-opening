@@ -25,7 +25,7 @@
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
-| WP0.2 失败对话恢复（2026-10-25） | Codex + 实现/独立复审 | `fix/wp0.2-failed-conversation` | 普通失败/主动停止分别显示重试/重新回答；抽屉按最后提交活动/消息年龄超过10分钟且终态失败隐式新开，显式历史保留。保护pending、unknown、草稿/不可读存储、上传和题目背景，修复空scope覆盖草稿及双击取消。8文件116项回归后，最后草稿修复另有2文件39项近测通过（重叠不求和）；最终Web类型/lint、关键反例主线程复查及独审通过。测试mock this隐式any曾失败，已补类型复查通过。完整CI、浏览器、合并部署仍待。 |
+| WP0.2 失败对话恢复（2026-10-25） | Codex + 实现/独立复审 | [#131](https://github.com/Xhhemoing/study-assistant-opening/pull/131) · `fix/wp0.2-failed-conversation` | 失败/停止可重试；隐式旧失败对话按10分钟新开，保护pending/unknown、草稿/不可读存储、上传及题目，显式历史保留。定向回归、Web类型与lint通过。首轮CI独立Worker/PDF成功，主作业3项开始页回归失败；已定位空turns时undefined相等导致null.at，补一行非空判断，新增回归先红后三文件60项及Web类型/lint通过，原3失败断言保留通过，独审无阻断。原116/39项为前阶段且重叠，不作为新head完整验收；最终head CI、浏览器、合并部署待。 |
 
 | A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
 | R-04 首次提交自动批改（2026-10-25） | Hermes | `feat/sprint-a1-autograde-policy-20261024` | 已补独立工作区开关、旧客户端保留OFF、锁内重读与统一日界、仅自动来源计数、入队前只读预算估算、明确跳过原因及手动重批。0097原样保留已推送文件（非生产发布证明），0098在新隔离库连续98迁移校验通过。最终策略PG17项、最新路由/UI39项、Worker18项及相关类型通过；照片/PDF严格身份写回与状态/备份4项定向通过，旧备份失败已定向修复，批次不相加。S3兼容隔离恢复4项通过不代表生产MinIO。完整新head CI、用户浏览器与真实模型待验；未合并部署。 |

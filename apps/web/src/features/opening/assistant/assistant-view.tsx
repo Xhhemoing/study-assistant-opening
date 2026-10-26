@@ -556,7 +556,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       // Summary updatedAt is the last submitted activity, not a server termination time.
       // A terminal transition observed here supplies a later lower bound for long jobs.
       const activityAt = Math.max(Date.parse(implicitLastActivityAt ?? ""), Date.parse(last?.createdAt ?? ""),
-        observedFailure.current?.id === last?.id ? observedFailure.current!.at : 0);
+        observedFailure.current && observedFailure.current.id === last?.id ? observedFailure.current.at : 0);
       if (implicitLastActivityAt && last?.role === "assistant" && last.status === "failed"
         && discovery.kind === "ready" && !discovery.job && Date.now() - activityAt > 10 * 60 * 1000
         && !retainForImplicitResume.current && !submissionLock.current && !localRecoveryActive.current
