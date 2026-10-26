@@ -20,9 +20,6 @@ vi.mock("../teaching/preference-controls", () => ({
 vi.mock("./ai-settings-panel", () => ({
   AiSettingsPanel: () => createElement("div", { "data-testid": "ai" }),
 }));
-vi.mock("./provider-settings-panel", () => ({
-  ProviderSettingsPanel: () => createElement("div", { "data-testid": "provider" }),
-}));
 vi.mock("./diagnostics-panel", () => ({
   DiagnosticsPanel: () => createElement("div", { "data-testid": "diagnostics" }),
 }));
@@ -52,7 +49,6 @@ describe("settings page split structure", () => {
     expect(html).toContain('href="/settings"');
     expect(html).toContain("返回设置");
     expect(html).toContain('data-testid="ai"');
-    expect(html).toContain('data-testid="provider"');
     expect(html).toContain('data-advanced-fold="entry-explore"');
     expect(html).toContain('data-advanced-fold="export"');
     expect(html).toContain('data-advanced-fold="danger"');

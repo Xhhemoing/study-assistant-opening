@@ -3,13 +3,14 @@
 import { LoadingRows, PageHeading, ui } from "../design/ui";
 import { ArrowLeft, LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { GuidanceModePicker, type GuidanceModeDraft } from "../guidance-settings/guidance-mode-picker";
 import { defaultGuidanceMode } from "../guidance-settings/guidance-mode-model";
 import { AiSettingsPanel } from "./ai-settings-panel";
 import { createOpeningApi } from "../client/api";
 import { LoopMetricsPanel } from "../planning/loop-metrics-panel";
 import { PlanFeedbackPanel } from "../planning/plan-feedback-panel";
+import { useSettingsAnchorReveal } from "./use-settings-anchor-reveal";
 import {
   fetchWorkspacePreferences,
   putWorkspacePreferences,
@@ -18,6 +19,8 @@ import {
 } from "./settings-shared";
 
 export function AdvancedSettingsView({ basePath = "/settings", embedded = false }: { basePath?: string; embedded?: boolean } = {}) {
+  const container = useRef<HTMLDivElement>(null);
+  useSettingsAnchorReveal(container);
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
     mode: defaultGuidanceMode(),
@@ -61,7 +64,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
   }
 
   return (
-    <div className="min-w-0 bg-bg text-text">
+    <div ref={container} className="min-w-0 bg-bg text-text">
       {!embedded ? <PageHeading
         title="高级设置"
         description="每日额度与 AI 模型、默认入口、计划自主权、导出与备份。学习闭环相关项在主设置页。"
@@ -117,7 +120,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
             ) : null}
           </div>
         </details>
-        <details className="group border-b border-line pb-4" data-advanced-fold="export">
+        <details id="export" className="group scroll-mt-6 border-b border-line pb-4" data-advanced-fold="export">
           <summary className="min-h-11 cursor-pointer list-none py-2 text-sm font-medium text-text marker:content-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
             <span className="inline-flex items-center gap-2">导出与备份<span className="text-xs font-normal text-text-3 group-open:hidden">（已折叠）</span></span>
           </summary>
@@ -146,7 +149,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
             </p>
           </section>
         </details>
-        <details className="group border-b border-line pb-4" data-advanced-fold="developer">
+        <details id="developer" className="group scroll-mt-6 border-b border-line pb-4" data-advanced-fold="developer">
           <summary className="min-h-11 cursor-pointer list-none py-2 text-sm font-medium text-text marker:content-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
             <span className="inline-flex items-center gap-2">开发者<span className="text-xs font-normal text-text-3 group-open:hidden">（已折叠）</span></span>
           </summary>

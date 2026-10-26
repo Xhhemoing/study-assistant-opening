@@ -5,10 +5,10 @@
 | 项目 | 当前状态 |
 | --- | --- |
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
-| 线上进程 | Web / Worker 目录标识 `189546c7`；2026-10-26 只读健康检查为 ok，但接口未返回 commit，不等于完整发布验收 |
-| 最新候选 | [WP1.1 考试日期语义修正](https://github.com/Xhhemoing/study-assistant-opening/tree/fix/wp1.1-exam-date-semantics)（本文件所属提交），基于 [课程菜单 311c7f3c](https://github.com/Xhhemoing/study-assistant-opening/tree/311c7f3c0cd7e02599342cc80d2103e6314eae7b)，包含 WP1.5 d32b6419；尚未合并/部署 |
-| 候选检查 | 本轮定向回归 25 项、Web 类型、改动 lint 与文案检查通过，独立只读复审无阻断；未跑本轮完整构建。课程菜单检查见 311c7f3c，WP1.5 构建/数据库/接口证据见 d32b6419，旧 HTTP 跳转证据仅适用于 c91c865c |
-| 当前工作 | 全部课程考试菜单已补齐；开始页建议也只采用明确考试日期，普通截止日期不冒充考试。课程目标提示改为实际策略的 14 天，未改变策略本身 |
+| 线上进程 | 2026-10-26 本轮只读 health 为 ok；仍未返回 commit / builtAt，实际运行提交未核实，不等于发布验收 |
+| 最新候选 | [WP1.4 旧设置锚点修复](https://github.com/Xhhemoing/study-assistant-opening/tree/fix/wp1.4-settings-anchor-reveal)（本文件所属提交），基于 [WP1.1 6b6c063b](https://github.com/Xhhemoing/study-assistant-opening/tree/6b6c063bc4c15673a615eb80a1fba4e8f8e8984d)，包含 WP1.5 d32b6419；尚未合并/部署 |
+| 候选检查 | 本轮设置回归 13 项、Web 类型、改动 lint、边界/契约/文案检查通过，独立只读复审无阻断；未跑本轮完整构建。此前检查保留在 6b6c063b / 311c7f3c / d32b6419，旧 HTTP 跳转证据仅适用于 c91c865c |
+| 当前工作 | 旧导出/开发者书签可定位并展开；自定义模型与异步用量锚点也可到达，默认折叠和手动关闭保留。旧分支单元导航修复在独立工作区进行中 |
 
 ## 本轮开放 PR
 
@@ -24,6 +24,7 @@
 - [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
 - 测试期每日不限额已实现；运行环境启用及真实模型调用待验证，尚未修改线上配置。
 - 模型配置互斥限当前页面实例；普通保存结果未知时需确认服务器请求已结束后重新打开，不能从一次 GET 推断保存完成。跨标签页写入仍遵循现有服务器行为。
+- WP1.2/1.3 定向核对发现剩余路径：旧分支单元导航、选中文字保存，以及仍可进入的 span/matrix 课程控件统一；不把主生成讲义的实现推导成所有课程已完成。
 - [旧 API 观察](operations/legacy-api-observation.md)已实现但未部署，连续 30 天日志窗口尚未开始，不删除接口。
 - [开关盘点](operations/feature-switch-inventory.md)控制输入 22→19；仅源代码变更，未修改线上配置。
 
