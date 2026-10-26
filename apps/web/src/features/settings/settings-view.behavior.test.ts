@@ -22,7 +22,7 @@ vi.mock("./settings-shared", async (importOriginal) => ({
   putWorkspacePreferences: vi.fn(),
 }));
 
-import { SettingsView } from "./settings-view";
+import { LearningSettingsSection as SettingsView } from "./settings-view";
 import { fetchWorkspacePreferences, putWorkspacePreferences } from "./settings-shared";
 
 type Element = ReactElement<Record<string, unknown>>;

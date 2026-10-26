@@ -3,7 +3,7 @@ import { act, createElement, useEffect, useState, useSyncExternalStore } from "r
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_SPLIT_PANES, SplitControls, SplitView, toggleSplitPane, visibleSplitPanes } from "./split-view";
-import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN, clampNavWidth, normalizeLayoutPref } from "../shell/use-layout-pref";
+import { normalizeLayoutPref } from "../shell/use-layout-pref";
 import type { LayoutPref } from "../shell/use-layout-pref";
 import { StudyToolsPanel } from "../../teaching/study-tools-panel";
 
@@ -222,13 +222,10 @@ describe("one persistent tool surface", () => {
 });
 
 describe("layout preference", () => {
-  it("clamps nav width and repairs stored values", () => {
-    expect(clampNavWidth(100)).toBe(NAV_WIDTH_MIN);
-    expect(clampNavWidth(999)).toBe(NAV_WIDTH_MAX);
-    expect(clampNavWidth(Number.NaN)).toBe(NAV_WIDTH_DEFAULT);
+  it("ignores obsolete appearance and width settings while repairing split values", () => {
     const pref = normalizeLayoutPref({ skin: "neon" as never, navWidth: 9000, split: ["assistant", "assistant", "bogus" as never, "notes", "sources"], splitLayouts: { ok: { main: 70, assistant: 30 }, bad: { main: 400 } } });
     expect(pref.skin).toBe("frost");
-    expect(pref.navWidth).toBe(NAV_WIDTH_MAX);
+    expect(pref.navWidth).toBe(208);
     expect(pref.split).toEqual(["assistant", "notes"]);
     expect(Object.keys(pref.splitLayouts)).toEqual(["ok"]);
   });

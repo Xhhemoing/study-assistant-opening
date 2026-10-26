@@ -34,32 +34,18 @@ import { SettingsView } from "./settings-view";
 import { AdvancedSettingsView } from "./advanced-settings-view";
 
 describe("settings page split structure", () => {
-  it("keeps loop anchors on main and links advanced elsewhere", () => {
+  it("keeps three real setting pages and puts only appearance on the default page", () => {
     const html = renderToStaticMarkup(createElement(SettingsView));
-    expect(html).toContain('href="#connections"');
-    expect(html).toContain('href="#planning"');
-    expect(html).toContain('href="#preferences"');
-    expect(html).toContain('href="#intervention"');
-    expect(html).toContain('id="connections"');
-    expect(html).toContain('id="planning"');
-    expect(html).toContain('id="preferences"');
-    expect(html).toContain('id="intervention"');
-    expect(html).toContain('data-testid="intervention-prefs"');
-    expect(html).toContain('href="/opening/settings/connections"');
-    expect(html).toContain('href="/opening/settings/learning-test"');
-    expect(html).toContain("打开学习测试");
-    expect(html).toContain("打开连接设置");
-    expect(html).not.toContain('data-testid="dingtalk"');
-    expect(html).toContain('data-testid="semester"');
-    expect(html).toContain('data-testid="timetable"');
-    expect(html).toContain('href="/settings/advanced"');
-    expect(html).toContain('href="/settings/advanced#daily-budget"');
-    expect(html).toContain("每日 AI 用量");
-    expect(html).toContain("AI 模型与每日额度");
-    expect(html).not.toContain("data-advanced-section");
-    expect(html).not.toContain("更多 / 高级");
+    for (const href of ["/settings", "/settings/learning", "/settings/ai"]) expect(html).toContain(`href="${href}"`);
+    expect(html).toContain("外观"); expect(html).toContain("学习"); expect(html).toContain("AI 与数据");
+    expect(html).not.toContain('id="preferences"');
+    expect(html).not.toContain('id="quick-model-setup"');
+    const learning = renderToStaticMarkup(createElement(SettingsView, { section: "learning" }));
+    expect(learning).toContain('id="preferences"');
+    expect(learning).toContain('data-testid="intervention-prefs"');
+    expect(learning).toContain('data-testid="semester"');
+    expect(learning).toContain('data-testid="timetable"');
   });
-
   it("renders advanced page with back link, AI panels, and collapsed folds", () => {
     const html = renderToStaticMarkup(createElement(AdvancedSettingsView));
     expect(html).toContain("高级设置");
@@ -84,8 +70,8 @@ describe("settings page split structure", () => {
 
   it("keeps advanced settings links inside the Opening shell when reused there", () => {
     const html = renderToStaticMarkup(createElement(SettingsView, { basePath: "/opening/settings" }));
-    expect(html).toContain('href="/opening/settings/advanced"');
-    expect(html).toContain('href="/opening/settings/advanced#daily-budget"');
+    expect(html).toContain('href="/opening/settings/learning"');
+    expect(html).toContain('href="/opening/settings/ai"');
     expect(html).not.toContain('href="/settings/advanced');
   });
 });

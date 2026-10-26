@@ -19,7 +19,7 @@ import {
   type WorkspaceEntry,
 } from "./settings-shared";
 
-export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
+export function AdvancedSettingsView({ basePath = "/settings", embedded = false }: { basePath?: string; embedded?: boolean } = {}) {
   const [modelRevision, setModelRevision] = useState(0);
   const [defaultEntry, setDefaultEntry] = useState<WorkspaceEntry | null>(null);
   const [autonomyDraft, setAutonomyDraft] = useState<GuidanceModeDraft>(() => ({
@@ -65,12 +65,12 @@ export function AdvancedSettingsView({ basePath = "/settings" }: { basePath?: st
 
   return (
     <div className="min-w-0 bg-bg text-text">
-      <PageHeading
+      {!embedded ? <PageHeading
         title="高级设置"
         description="每日额度与 AI 模型、默认入口、计划自主权、导出与备份。学习闭环相关项在主设置页。"
         action={<Link className={ui.quiet} href={basePath}><ArrowLeft aria-hidden="true" size={14} />返回设置</Link>}
-      />
-      <div className="mx-auto max-w-4xl space-y-6 px-5 py-5">
+      /> : null}
+      <div className={embedded ? "space-y-6" : "mx-auto max-w-4xl space-y-6 px-5 py-5"}>
         <QuickSetupPanel basePath={basePath} advanced onConfigured={() => setModelRevision(current => current + 1)} />
         <AiSettingsPanel key={`ai-${modelRevision}`} />
         <ProviderSettingsPanel key={`providers-${modelRevision}`} />

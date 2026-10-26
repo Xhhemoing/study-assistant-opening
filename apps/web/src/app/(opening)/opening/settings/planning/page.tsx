@@ -1,8 +1,6 @@
-import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { TodayDashboard } from "@/features/opening/planning/today-dashboard";
-import { loadTodayPage } from "@/features/opening/planning/load-today-page";
+import { permanentRedirect } from "next/navigation";
+import { settingsRedirectQuery } from "../../../../../features/settings/settings-route-target";
 
-export default async function PlanningPage({ searchParams }: { searchParams: Promise<{ task?: string }> }) {
-  const [{ task }, data] = await Promise.all([searchParams, loadTodayPage()]);
-  return <TodayDashboard {...data} planning focusTaskId={task} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
+export default async function PlanningPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  permanentRedirect(`/opening/settings/learning${settingsRedirectQuery(await searchParams, { planning: "1" })}`);
 }

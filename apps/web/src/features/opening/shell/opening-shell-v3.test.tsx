@@ -55,6 +55,15 @@ async function render(children: ReactNode = <PageHeader title="学习" />) {
 function desktopNavigation() { return host.querySelector('nav[aria-label="学习工作台导航"]')!; }
 
 describe("production V3 shell business wiring", () => {
+  it("retains navigation collapse without exposing width adjustment", async () => {
+    await render();
+    expect(host.querySelector('[aria-label="调整导航宽度"]')).toBeNull();
+    expect(document.documentElement.style.getPropertyValue("--layout-nav")).toBe("");
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="收起导航"]')!.click());
+    expect(host.querySelector('nav[data-compact="true"]')).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="展开导航"]')!.click());
+    expect(host.querySelector('nav[data-compact="false"]')).not.toBeNull();
+  });
   it.each([
     ["/opening/today", "", "/opening/today"],
     ["/opening/agent", "", "/opening/today"],

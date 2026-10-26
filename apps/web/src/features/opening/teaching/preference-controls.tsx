@@ -36,6 +36,7 @@ export type PreferenceControlsProps = {
   /** CAS token for session overlay writes (activity updatedAt). */
   expectedUpdatedAt?: string | null;
   compact?: boolean;
+  simplified?: boolean;
   api?: OpeningApi;
 };
 
@@ -84,17 +85,35 @@ function patchFromDraft(draft: InterventionPrefs): InterventionPrefsPatch {
   };
 }
 
+type InterventionLevel = "quiet" | "balanced" | "active";
+export function interventionLevel(draft: InterventionPrefs): InterventionLevel {
+  return draft.quietMode || draft.proactivity === "off" ? "quiet" : draft.proactivity === "high" ? "active" : "balanced";
+}
+export function withInterventionLevel(draft: InterventionPrefs, level: InterventionLevel): InterventionPrefs {
+  return { ...draft, quietMode: level === "quiet", proactivity: level === "quiet" ? "off" : level === "active" ? "high" : "balanced" };
+}
+
 function PrefsFields({
   draft,
   busy,
   idPrefix,
   onChange,
+  simplified = false,
 }: {
   draft: InterventionPrefs;
   busy: boolean;
   idPrefix: string;
   onChange: (next: InterventionPrefs) => void;
+  simplified?: boolean;
 }) {
+  if (simplified) return <fieldset disabled={busy} className="space-y-3">
+    <label className="block space-y-2"><span className={ui.label}>主动提醒</span>
+      <select className={ui.input} value={interventionLevel(draft)} onChange={event => onChange(withInterventionLevel(draft, event.target.value as InterventionLevel))}>
+        <option value="quiet">安静</option><option value="balanced">适中</option><option value="active">积极</option>
+      </select>
+    </label>
+    <p className="text-xs leading-6 text-text-3">安静模式减少主动提醒，你主动提问时仍会回答。原有讲解深度和提醒时机保留。</p>
+  </fieldset>;
   return (
     <fieldset disabled={busy} className="space-y-3">
       <legend className="sr-only">提醒偏好</legend>
@@ -244,6 +263,7 @@ function EffectiveSummary({ data }: { data: InterventionSettingsResponse }) {
 export type PreferenceControlsViewProps = {
   scope: PreferenceControlsScope;
   compact?: boolean;
+  simplified?: boolean;
   data: InterventionSettingsResponse;
   draft: InterventionPrefs;
   busy: boolean;
@@ -259,6 +279,7 @@ export type PreferenceControlsViewProps = {
 export function PreferenceControlsView({
   scope,
   compact = false,
+  simplified = false,
   data,
   draft,
   busy,
@@ -300,8 +321,9 @@ export function PreferenceControlsView({
         </p>
       ) : null}
 
-      <EffectiveSummary data={data} />
+      {simplified ? <details><summary className="min-h-11 cursor-pointer py-2 text-xs text-text-2">当前生效设置与来源</summary><EffectiveSummary data={data} /></details> : <EffectiveSummary data={data} />}
       <PrefsFields
+        simplified={simplified}
         draft={draft}
         busy={busy}
         idPrefix={idPrefix}
@@ -348,6 +370,7 @@ export function PreferenceControls({
   activityId = null,
   expectedUpdatedAt = null,
   compact = false,
+  simplified = false,
   api: suppliedApi,
 }: PreferenceControlsProps) {
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
@@ -487,6 +510,7 @@ export function PreferenceControls({
     <PreferenceControlsView
       scope={scope}
       compact={compact}
+      simplified={simplified}
       data={data}
       draft={draft}
       busy={busy}

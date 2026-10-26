@@ -2,7 +2,6 @@
 
 import { ui } from "../design/ui";
 import { useAppearancePreferences, type AppearancePreferences } from "./appearance-preferences";
-import { UiStyleSettings } from "../../settings/ui-style-settings";
 
 export function AppearanceSettings() {
   const { preferences, hydrated, persistenceError, updatePreferences } = useAppearancePreferences();
@@ -38,13 +37,20 @@ export function AppearanceSettings() {
           </select>
         </label>
       </div>
-      <UiStyleSettings />
       <p className="rounded-lg bg-surface-2 px-4 py-3 font-reading text-read text-text">阅读预览：先理解一个概念，再用自己的话说清楚。</p>
-      <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-lg text-sm text-text focus-within:ring-2 focus-within:ring-accent">
-        <span>诊断模式<span className="mt-1 block text-xs leading-6 text-text-3">显示学习过程的 ID、版本、资格与请求诊断；不改变学习评价。</span></span>
-        <input className="size-6 shrink-0 accent-accent" type="checkbox" checked={preferences.diagnostics} disabled={!hydrated} onChange={event => updatePreferences({ diagnostics: event.target.checked })} />
-      </label>
       {persistenceError ? <p className="text-sm text-warn" role="status">浏览器暂时无法保存外观设置。更改仅在当前页面生效，刷新后可能恢复默认。</p> : null}
     </div>
+  </section>;
+}
+
+/** Kept separate from appearance so the AI diagnostics page can reuse the existing preference. */
+export function DiagnosticsSettings() {
+  const { preferences, hydrated, persistenceError, updatePreferences } = useAppearancePreferences();
+  return <section aria-label="诊断设置" className="space-y-2">
+    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-lg text-sm text-text focus-within:ring-2 focus-within:ring-accent">
+      <span>诊断模式<span className="mt-1 block text-xs leading-6 text-text-3">显示学习过程的 ID、版本、资格与请求诊断；不改变学习评价。</span></span>
+      <input className="size-6 shrink-0 accent-accent" type="checkbox" checked={preferences.diagnostics} disabled={!hydrated} onChange={event => updatePreferences({ diagnostics: event.target.checked })} />
+    </label>
+    {persistenceError ? <p className="text-sm text-warn" role="status">浏览器暂时无法保存诊断设置。更改仅在当前页面生效。</p> : null}
   </section>;
 }

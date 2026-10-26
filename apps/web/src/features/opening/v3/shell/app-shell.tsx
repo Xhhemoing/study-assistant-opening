@@ -1,12 +1,12 @@
 "use client";
 import { usePathname } from "next/navigation";
-import { Suspense, createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { MessageSquare, MoreHorizontal, PanelLeft, Search } from "lucide-react";
 import { TransitionLink, ViewTransitionBoundary } from "../motion/view-transition";
 import { Sheet } from "../ui/sheet";
 import { NAV_CORE, NAV_SYSTEM, NAV_TOOLS, activeNavId, featureHref, type Feature } from "./features";
 import { FEATURE_ICONS } from "./icons";
-import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN, clampNavWidth, useLayoutPref } from "./use-layout-pref";
+import { useLayoutPref } from "./use-layout-pref";
 import { HeaderToolsSlot } from "./header-tools-slot";
 import { ui } from "../ui/controls";
 
@@ -54,7 +54,7 @@ type AppShellProps = {
  * T1 壳层：导航、布局偏好、页面过渡边界。不请求业务数据、不判定掌握度。
  * 外观：根节点带 data-ui="v3" 与皮肤/密度/圆角（tailwind.css 外观层解释，换样式只改那里）。
  * 导航铺在柔和背景上，主区是一张圆角内容页；手机底栏为悬浮玻璃胶囊。
- * 动效：导航宽度 232↔72 过渡；激活底块带 view-transition-name，在入口间滑动；主区参与页面过渡。
+ * 动效：导航展开与收起过渡；激活底块带 view-transition-name，在入口间滑动；主区参与页面过渡。
  */
 export function AppShell({ children, counts = {}, recent = [], navExtra, account, banner, hideNav = false, mobileMenuExtra = null, nav, mobileTrailing, onOpenSearch }: AppShellProps) {
   const pathname = usePathname() ?? "";
@@ -65,26 +65,18 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
   // 外观属性同时写到 <html>：Radix 弹层、抽屉渲染在 body 下，也要读到外观层变量
   useEffect(() => {
     const root = document.documentElement;
-    root.dataset.ui = "v3"; root.dataset.skin = pref.skin; root.dataset.density = pref.density; root.dataset.corner = pref.corner;
+    root.dataset.ui = "v3"; root.dataset.skin = "frost"; root.dataset.density = "compact"; root.dataset.corner = "round";
     return () => { delete root.dataset.ui; delete root.dataset.skin; delete root.dataset.density; delete root.dataset.corner; };
-  }, [pref.skin, pref.density, pref.corner]);
-  // 导航宽度是用户拖出来的连续值：写成根元素上的 CSS 变量，导航仍用 w-(--layout-nav)
-  const [dragWidth, setDragWidth] = useState<number | null>(null);
-  const navWidth = dragWidth ?? pref.navWidth;
-  useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty("--layout-nav", `${navWidth}px`);
-    return () => { root.style.removeProperty("--layout-nav"); };
-  }, [navWidth]);
+  }, []);
 
   return (
     <InShell.Provider value={true}><MobileMenuExtra.Provider value={{ content: mobileMenuExtra, openSearch: onOpenSearch, footerAccount: Boolean(mobileTrailing) }}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
-    <div data-app-shell data-focus={hideNav} data-nav-dragging={dragWidth !== null} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="group/workspace flex h-dvh text-text app-backdrop">
+    <div data-app-shell data-focus={hideNav} data-ui="v3" data-skin="frost" data-density="compact" data-corner="round" className="group/workspace flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
 
       <nav id="app-nav" aria-label={nav?.label ?? "主导航"} data-compact={compact} hidden={hideNav}
-        className="relative hidden w-(--layout-nav) shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
+        className="relative hidden w-[208px] shrink-0 flex-col overflow-hidden py-3 transition-[width] duration-(--duration-state) ease-standard [view-transition-name:app-nav] data-[compact=true]:w-(--layout-nav-compact) md:flex">
         <button type="button" onClick={() => setPref({ nav: compact ? "expanded" : "compact" })}
           aria-label={compact ? "展开导航" : "收起导航"} aria-expanded={!compact}
           className={`${ui.icon} mx-2.5 mb-2`}>
@@ -112,7 +104,6 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           {recent.length > 0 && <TransitionLink href={featureHref("assistant")} className="block whitespace-nowrap px-3 py-2 text-meta text-text-2 hover:text-text">全部对话</TransitionLink>}
         </section>
         <div className="mt-auto"><NavGroup items={nav?.system ?? NAV_SYSTEM} isActive={isActive} compact={compact} counts={counts} />{account ? <div className="mt-1 px-1.5">{account}</div> : null}</div>
-        {!compact ? <NavResizer width={navWidth} onDrag={setDragWidth} onCommit={width => { setDragWidth(null); setPref({ navWidth: width }); }} /> : null}
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -206,33 +197,6 @@ function MobileHeaderToolsInner({ recent = [] }: { recent?: RecentThread[] }) {
         ))}</ul>}
         {extra ? <div className="mt-2 border-t border-line pt-2" onClickCapture={() => setOpen(false)}>{extra}</div> : null}
       </Sheet>
-    </div>
-  );
-}
-
-/**
- * 导航宽度分隔条（WAI-ARIA window splitter）：拖动、←/→（Shift 加大步长）、Home/End、双击恢复默认。
- * 只在桌面展开态出现；收起为图标栏用顶部按钮。
- */
-function NavResizer({ width, onDrag, onCommit }: { width: number; onDrag: (width: number | null) => void; onCommit: (width: number) => void }) {
-  const start = useRef<{ x: number; width: number; pointerId: number } | null>(null);
-  return (
-    <div role="separator" aria-orientation="vertical" aria-label="调整导航宽度" aria-controls="app-nav" tabIndex={0}
-      aria-valuenow={width} aria-valuemin={NAV_WIDTH_MIN} aria-valuemax={NAV_WIDTH_MAX} aria-valuetext={`${width} 像素`}
-      title="拖动调整宽度，双击恢复默认"
-      className="group absolute inset-y-0 right-0 z-10 w-2 cursor-col-resize touch-none outline-none"
-      onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); start.current = { x: event.clientX, width, pointerId: event.pointerId }; onDrag(width); }}
-      onPointerMove={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; onDrag(clampNavWidth(from.width + event.clientX - from.x)); }}
-      onPointerUp={event => { const from = start.current; if (!from || from.pointerId !== event.pointerId) return; start.current = null; onCommit(clampNavWidth(from.width + event.clientX - from.x)); }}
-      onPointerCancel={() => { start.current = null; onDrag(null); }}
-      onDoubleClick={() => onCommit(NAV_WIDTH_DEFAULT)}
-      onKeyDown={event => {
-        const step = event.shiftKey ? 24 : 8;
-        const next = event.key === "ArrowLeft" ? width - step : event.key === "ArrowRight" ? width + step : event.key === "Home" ? NAV_WIDTH_MIN : event.key === "End" ? NAV_WIDTH_MAX : event.key === "Enter" ? NAV_WIDTH_DEFAULT : null;
-        if (next === null) return;
-        event.preventDefault(); onCommit(clampNavWidth(next));
-      }}>
-      <span aria-hidden="true" className="absolute inset-y-3 left-1/2 w-px -translate-x-1/2 rounded-pill bg-transparent transition-colors duration-(--duration-micro) group-hover:bg-line-strong group-focus-visible:bg-accent group-active:bg-accent" />
     </div>
   );
 }

@@ -77,10 +77,10 @@ export function QuickSetupForm({ draft, preset, busy, locked = false, advanced =
       </>}
     </fieldset>
     <p className="text-xs leading-6 text-text-3">保存后，各项 AI 功能默认使用这个模型。</p>
-    {locked ? <p id={reasonId} className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p id={reasonId} className="text-sm leading-6 text-warn" role="status">{problem}</p> : null}
     <button className={ui.primary} disabled={busy || (!locked && problem !== null)} aria-describedby={locked || problem ? reasonId : undefined} type="submit">
       {busy ? <LoaderCircle aria-hidden="true" className="animate-spin motion-reduce:animate-none" size={14} /> : <WandSparkles aria-hidden="true" size={14} />}{locked ? "确认上次配置结果" : "一键配置模型"}
     </button>
+    {locked ? <p id={reasonId} className="text-xs leading-6 text-warn" role="status">上次配置结果尚未确认，表单已锁定。确认会使用上次原始配置和请求标识，不会创建第二份配置。</p> : problem ? <p id={reasonId} className="text-sm leading-6 text-warn" role="status">{!draft.apiKey.trim() ? "填入 API 密钥后可用" : problem}</p> : null}
   </form>;
 }
 

@@ -8,9 +8,19 @@ vi.mock("../opening/timetable/semester-settings-form", () => ({ SemesterSettings
 vi.mock("../opening/timetable/timetable-import", () => ({ TimetableImport: () => null }));
 vi.mock("../opening/teaching/preference-controls", () => ({ PreferenceControls: () => null }));
 vi.mock("./quick-setup-panel", () => ({ QuickSetupPanel: () => null }));
-vi.mock("../opening/settings/appearance-settings", () => ({ AppearanceSettings: () => null }));
+vi.mock("../opening/settings/appearance-settings", () => ({ AppearanceSettings: () => null, DiagnosticsSettings: () => null }));
 vi.mock("../opening/v3/motion/view-transition", () => ({ TransitionLink: "a" }));
-import { SettingsView } from "./settings-view";
+import { LearningSettingsSection as SettingsView, SettingsView as SettingsPage } from "./settings-view";
+
+it("does not load workspace preferences from the appearance page", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+  const host = document.createElement("div"), root = createRoot(host);
+  try {
+    await act(async () => root.render(<SettingsPage basePath="/opening/settings" />));
+    expect(fetcher).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); vi.unstubAllGlobals(); }
+});
 
 it("persists OFF across assessment shutdown, other preference changes and reload; auto grading remains independently editable", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });

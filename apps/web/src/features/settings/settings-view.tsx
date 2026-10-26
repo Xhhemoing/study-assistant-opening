@@ -1,25 +1,45 @@
 "use client";
 
 import type { LearningPreferences } from "@aistudy/contracts";
-import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
+import { LoadingRows, PageHeading, ui } from "../opening/design/ui";
 import { TransitionLink as Link } from "../opening/v3/motion/view-transition";
-import { useCallback, useEffect, useState } from "react";
 import { SemesterSettingsForm } from "../opening/timetable/semester-settings-form";
 import { TimetableImport } from "../opening/timetable/timetable-import";
-import {
-  disabledLearningPreferences,
-  fetchWorkspacePreferences,
-  learningSwitches,
-  putWorkspacePreferences,
-} from "./settings-shared";
 import { PreferenceControls } from "../opening/teaching/preference-controls";
-import { QuickSetupPanel } from "./quick-setup-panel";
-import { AppearanceSettings } from "../opening/settings/appearance-settings";
+import { AppearanceSettings, DiagnosticsSettings } from "../opening/settings/appearance-settings";
+import { AdvancedSettingsView } from "./advanced-settings-view";
+import { disabledLearningPreferences, fetchWorkspacePreferences, learningSwitches, putWorkspacePreferences } from "./settings-shared";
+import { SettingsHashRedirect } from "./settings-hash-redirect";
 
-const navLinkClass = "inline-flex min-h-9 shrink-0 items-center whitespace-nowrap rounded-ctl px-3 text-ui text-text-2 hover:bg-surface-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent lg:min-h-8";
+export type SettingsSection = "appearance" | "learning" | "ai";
+const sections = [{ id: "appearance", label: "外观", suffix: "" }, { id: "learning", label: "学习", suffix: "/learning" }, { id: "ai", label: "AI 与数据", suffix: "/ai" }] as const;
 
-export function SettingsView({ basePath = "/settings" }: { basePath?: string } = {}) {
+export function SettingsView({ basePath = "/settings", section = "appearance", planning }: { basePath?: string; section?: SettingsSection; planning?: ReactNode } = {}) {
+  return <div className="min-w-0 bg-bg">
+    <PageHeading title="设置" />
+    <SettingsHashRedirect basePath={basePath} />
+    <div className="mx-auto max-w-[1040px] px-5 py-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)] lg:items-start lg:gap-10">
+      <nav aria-label="设置分区" className="mb-5 flex gap-1 overflow-x-auto lg:flex-col">
+        {sections.map(item => <Link key={item.id} href={`${basePath}${item.suffix}`} aria-current={section === item.id ? "page" : undefined}
+          className={`inline-flex min-h-11 shrink-0 items-center rounded-ctl px-3 text-sm focus-visible:ring-2 focus-visible:ring-accent ${section === item.id ? "bg-accent-soft text-accent" : "text-text-2 hover:bg-surface-2"}`}>{item.label}</Link>)}
+      </nav>
+      <div className="min-w-0 space-y-6">
+        {section === "appearance" ? <AppearanceSettings /> : section === "learning" ? <LearningSettingsSection planning={planning} /> : <>
+          <section id="connections" className="flex flex-wrap items-center gap-3 rounded-lg border border-line p-4">
+            <Link className={ui.secondary} href={`${basePath}/connections`}>连接管理</Link>
+            <Link className={ui.secondary} href={`${basePath}/export`}>导出数据</Link>
+            <a className={ui.quiet} href="#daily-budget">每日用量</a>
+          </section>
+          <DiagnosticsSettings />
+          <AdvancedSettingsView basePath={basePath} embedded />
+        </>}
+      </div>
+    </div>
+  </div>;
+}
+export function LearningSettingsSection({ planning }: { planning?: ReactNode } = {}) {
   const [learningPreferences, setLearningPreferences] = useState<LearningPreferences>(disabledLearningPreferences);
   const [loading, setLoading] = useState(true);
   const [ready, setReady] = useState(false);
@@ -62,51 +82,7 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
     }
   }
 
-  return (
-    <div className="min-w-0 bg-bg">
-      <PageHeading title="设置" />
-      <div className="mx-auto max-w-[1040px] px-5 py-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)] lg:items-start lg:gap-10">
-        <nav aria-label="设置分区" className="sticky top-[var(--topbar-h,52px)] z-10 -mx-5 mb-4 flex gap-1 overflow-x-auto bg-bg/90 px-5 py-2 backdrop-blur [scrollbar-width:none] lg:mx-0 lg:mb-0 lg:flex-col lg:bg-transparent lg:px-0 lg:py-0 lg:backdrop-blur-none">
-          <a className={navLinkClass} href="#appearance">外观与阅读</a>
-          <a className={navLinkClass} href="#quick-model-setup">AI 快速配置</a>
-          <a className={navLinkClass} href="#connections">连接</a>
-          <a className={navLinkClass} href="#planning">排程</a>
-          <a className={navLinkClass} href="#preferences">学习偏好</a>
-          <a className={navLinkClass} href="#intervention">介入偏好</a>
-          <Link className={navLinkClass} href="/opening/settings/learning-test">学习测试</Link>
-          <Link className={navLinkClass} href={`${basePath}/advanced`}>高级</Link>
-          <Link className={navLinkClass} href={`${basePath}/advanced#daily-budget`}>每日 AI 用量</Link>
-        </nav>
-        <div className="min-w-0 space-y-6">
-
-        <AppearanceSettings />
-
-        <QuickSetupPanel basePath={basePath} />
-
-        <section id="connections" className="scroll-mt-6 border-b border-line pb-6" aria-labelledby="opening-connections-heading">
-          <div className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]">
-            <div>
-              <h2 className="text-sm font-medium text-text" id="opening-connections-heading">数据连接</h2>
-              <p className="mt-1 text-xs leading-6 text-text-3">邮箱与钉钉授权、暂停、撤销与手工导入请在连接页管理。</p>
-            </div>
-            <div>
-              <Link className={ui.secondary} href="/opening/settings/connections">打开连接设置</Link>
-            </div>
-          </div>
-        </section>
-
-        <section id="planning" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-planning-heading">
-          <div>
-            <h2 className="text-sm font-medium text-text" id="opening-planning-heading">开学排程</h2>
-            <p className="mt-1 text-xs leading-6 text-text-3">导入课表并确认学期设置后，可在学习安排里调整可用时间和任务。</p>
-          </div>
-          <div className="space-y-8">
-            <Link className={ui.secondary} href="/opening/settings/planning">打开学习安排</Link>
-            <SemesterSettingsForm />
-            <TimetableImport />
-          </div>
-        </section>
-
+  return <div className="space-y-6">
         <section id="preferences" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="learning-preferences-heading">
           <div>
             <h2 className="text-sm font-medium text-text" id="learning-preferences-heading">学习偏好</h2>
@@ -166,24 +142,25 @@ export function SettingsView({ basePath = "/settings" }: { basePath?: string } =
         <section id="intervention" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="intervention-preferences-heading">
           <div>
             <h2 className="text-sm font-medium text-text" id="intervention-preferences-heading">教学介入偏好</h2>
-            <p className="mt-1 text-xs leading-6 text-text-3">主动提示程度与安静模式。嵌在现有设置中，不是第二套设置产品。本课临时覆盖请在教学工作台调整。</p>
+            <p className="mt-1 text-xs leading-6 text-text-3">选择主动提醒的程度；你主动提问时始终可以获得帮助。</p>
           </div>
           <div className="min-w-0">
-            <PreferenceControls scope="global" />
+            <PreferenceControls scope="global" simplified />
           </div>
         </section>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <p className="text-xs leading-6 text-text-3">AI 模型与每日额度、默认入口、指导模式、计划自主权、导出与诊断等在高级设置。</p>
-          <div className="flex flex-wrap gap-2">
-            <Link className={ui.secondary} href={`${basePath}/advanced#daily-budget`}>AI 模型与每日额度</Link>
-            <Link className={ui.secondary} href={`${basePath}/advanced`}>打开高级设置</Link>
+        <section id="planning" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="opening-planning-heading">
+          <div>
+            <h2 className="text-sm font-medium text-text" id="opening-planning-heading">开学排程</h2>
+            <p className="mt-1 text-xs leading-6 text-text-3">导入课表并确认学期设置后，可在学习安排里调整可用时间和任务。</p>
           </div>
-        </div>
+          <div className="space-y-8">
+            {planning ?? <Link className={ui.secondary} href="/opening/settings/learning?planning=1#planning">调整学习安排</Link>}
+            <SemesterSettingsForm />
+            <TimetableImport />
+          </div>
+        </section>
 
-        {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
-        </div>
-      </div>
-    </div>
-  );
+    {notice ? <p className="text-sm text-accent" role="status">{notice}</p> : null}
+  </div>;
 }
