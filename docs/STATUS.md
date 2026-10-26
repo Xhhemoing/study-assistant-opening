@@ -7,8 +7,8 @@
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
 | 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 当前 head；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
-| 候选检查 | `4d31ffe8` 远端 Worker/PDF、Lint、类型、单元/契约/流水线及技术验证测试通过；集成 1527 项断言通过、1 项跳过，但存在 1 个驱动未捕获异常，整体失败。后续 handler/浏览器/构建未到达，本批修正待 CI |
-| 当前工作 | 超时用例改用独立客户端，在真实断连后先关闭客户端、再恢复并等待暂停回调退出；保留锁释放、归属和幂等断言。新账户冒烟与 PDF 复验步骤同步交付，本批未运行本地或浏览器测试 |
+| 候选检查 | `d74d6f95` 远端 Worker/PDF、Lint、类型、单元/契约及集成测试通过；handler 298 项通过、1 项旧灰度断言失败，浏览器及构建未到达。完整 CI 未通过 |
+| 当前工作 | 将退役百分比的 handler 用例同步为显式 API/UI 能力预期，保留三路由授权一致性、总开关及匿名拒绝断言。本批仅维护回归，未运行本地小阶段测试；新账户冒烟和 PDF 切换/重试仍待用户验收 |
 
 ## 本轮开放 PR
 
