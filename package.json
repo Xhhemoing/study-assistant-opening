@@ -23,6 +23,7 @@
     "test:integration": "node scripts/run-heavy.mjs vitest run --project integration",
     "test:handler": "node scripts/run-heavy.mjs vitest run --project handler",
     "test:browser": "node scripts/run-heavy.mjs playwright test",
+    "test:browser:smoke": "node scripts/run-heavy.mjs playwright test --config playwright.opening-smoke.config.mts",
     "build": "node scripts/run-heavy.mjs npm run build -w @aistudy/worker && node scripts/run-heavy.mjs npm run build -w @aistudy/web",
     "compose:up": "docker compose -f infra/docker/compose.yml up -d",
     "compose:down": "docker compose -f infra/docker/compose.yml down",

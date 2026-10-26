@@ -21,6 +21,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| WP0.8 五步冒烟（2026-10-25） | Codex + 只读调查/独立复审 | `test/wp0.8-opening-smoke`，基于WP0.1的d02943ea | 新增用户专用完整栈spec/config/npm入口：真实注册首启90秒正文、课内批改、AI首字/完成、刷新原位置/答案/批改、health与菜单短SHA对照。无seed/业务mock/服务启动/重置；现有CI用例保留，仅新增spec走独立入口。E2E类型、4文件lint、环境示例与diff检查通过；独审两项P2（空正文占位假通过、完整/短SHA误比）已修并复核。浏览器未运行、无截图或实测时延；完整栈注册/新账户默认模型/自动批改仍须实际验收，失败不skip。按最多两项当前整改PR先推分支，CI/合并部署待；[人工清单与运行前提](quality/2026-10-06-opening-browser-acceptance-checklist.md)。 |
 | WP0.1 版本可见（2026-10-25） | Codex + 独立只读评审 | [#130](https://github.com/Xhhemoing/study-assistant-opening/pull/130) · `fix/wp0.1-release-version` | 补health commit/builtAt、账户菜单版本与部署构建SHA；保留503、详情鉴权和no-store。17项近测、Web类型/lint/边界/文案通过。首轮CI部署模拟和独立Worker/PDF作业通过，主作业因构建元数据未分类失败；已补构建常量例外，配置/环境/元数据48项回归及Config类型/lint通过，独审无阻断。Windows模板换行曾使本地复查失败，仅规范本地干净模板后通过，无模板内容改动。线上已核对189546c7/0099、占位标题0、LaTeX预演0；最终head完整CI、standalone制品、合并部署与用户浏览器仍待。 |
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
 
