@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SourceRecord } from "@aistudy/contracts";
 import { sourceStatusLabel } from "../inbox/upload-state";
 import type { OpeningApi } from "../client/api";
@@ -24,6 +24,8 @@ type Props = {
   /** When set, successful uploads are attached to this course once (Package D). */
   courseId?: string | null;
   courseRole?: CourseRole;
+  /** Keep an enclosing session while uploads or publication still need attention. */
+  onRetainStateChange?: (retain: boolean) => void;
 };
 
 function savedSourceIds(rows: UploadQueueItem[]): string[] {
@@ -38,7 +40,7 @@ export function uploadStripItemStatus(item: UploadQueueItem, sources: readonly S
   return current ? sourceStatusLabel(current) : "原件已保存，处理状态待核实";
 }
 
-export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId = null, courseRole = "reference" }: Props) {
+export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId = null, courseRole = "reference", onRetainStateChange }: Props) {
   const [items, setItems] = useState<UploadQueueItem[]>([]);
   const [notice, setNotice] = useState("");
   const [working, setWorking] = useState(false);
@@ -57,6 +59,10 @@ export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId 
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
   const busy = disabled || working || items.some((item) => item.state === "idle" || item.state === "uploading");
+  useEffect(() => {
+    onRetainStateChange?.(working || items.some(item => item.state !== "saved") || pendingPublication.current.size > 0);
+  }, [working, items, onRetainStateChange]);
+  useEffect(() => () => onRetainStateChange?.(false), [onRetainStateChange]);
 
   async function attachSaved(rows: UploadQueueItem[]) {
     if (!courseId) return;

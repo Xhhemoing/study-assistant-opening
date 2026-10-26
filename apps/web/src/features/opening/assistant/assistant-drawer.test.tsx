@@ -11,10 +11,10 @@ const query = new URLSearchParams();
 let bound: (CurrentStudyContext & { pathname: string }) | null = null;
 vi.mock("./current-study-context", () => ({ useCurrentStudyContext: () => bound }));
 vi.mock("next/navigation", () => ({ usePathname: () => pathname, useSearchParams: () => query }));
-vi.mock("./assistant-view", () => ({ AssistantView: ({ studyContext, studyContextError }: { studyContext?: { fragment?: string }; studyContextError?: string }) => {
+vi.mock("./assistant-view", () => ({ AssistantView: ({ studyContext, studyContextError, implicitResumeVersion }: { studyContext?: { fragment?: string }; studyContextError?: string; implicitResumeVersion?: number }) => {
   const [draft, setDraft] = useState("");
   if (studyContextError) return <p role="alert">{studyContextError}</p>;
-  return <><p>{studyContext?.fragment ?? "自由交流"}</p><button data-draft type="button" onClick={() => setDraft(value => value + "保留")}>{draft || "空草稿"}</button></>;
+  return <><p>{studyContext?.fragment ?? "自由交流"}</p><button data-draft data-resume-version={implicitResumeVersion} type="button" onClick={() => setDraft(value => value + "保留")}>{draft || "空草稿"}</button></>;
 } }));
 import { AssistantDrawer } from "./assistant-drawer";
 
@@ -40,6 +40,7 @@ describe("global assistant drawer lifetime", () => {
   it("retains the same draft after closing and navigation, with no hidden dialog in the document", async () => {
     await render();
     await act(async () => openAssistantDrawer());
+    expect(document.querySelector("[data-draft]")?.getAttribute("data-resume-version")).toBe("1");
     await click(document.querySelector("[data-draft]"));
     await click(document.querySelector('[aria-label="关闭抽屉"]'));
     await settle();
@@ -48,6 +49,7 @@ describe("global assistant drawer lifetime", () => {
     await render();
     await act(async () => openAssistantDrawer());
     expect(document.querySelector("[data-draft]")?.textContent).toBe("保留");
+    expect(document.querySelector("[data-draft]")?.getAttribute("data-resume-version")).toBe("2");
   });
   it("keeps different selected contexts and their drafts when switching questions", async () => {
     await render();
@@ -88,7 +90,14 @@ describe("global assistant drawer lifetime", () => {
     expect(dialog?.textContent).toContain("第二步");
     expect(document.querySelector('[aria-label="切换本次提问"]')).toBeNull();
   });
-  it("leaves ordinary assistant history links to normal navigation", async () => {
+  it("checks implicit course recovery but leaves explicitly selected history alone", async () => {
+    await render();
+    await act(async () => openAssistantDrawer("/opening/assistant?courseId=11111111-1111-4111-8111-111111111111"));
+    expect(document.querySelector("[data-draft]")?.getAttribute("data-resume-version")).toBe("1");
+    await act(async () => openAssistantDrawer("/opening/assistant?conversation=11111111-1111-4111-8111-111111111111"));
+    const active = Array.from(document.querySelectorAll("[data-draft]")).find(button => !button.closest("[inert]"));
+    expect(active?.getAttribute("data-resume-version")).toBeNull();
+  });  it("leaves ordinary assistant history links to normal navigation", async () => {
     await render();
     const link = document.createElement("a"); link.href = "/opening/assistant?conversation=saved"; host.appendChild(link);
     let intercepted = true;

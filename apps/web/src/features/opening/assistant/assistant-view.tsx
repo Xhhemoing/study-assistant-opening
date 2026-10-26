@@ -70,6 +70,8 @@ export type AssistantViewProps = {
   onConversationReady?: (id: string) => void;
   api?: OpeningApi;
   initialConversationId?: string | null;
+  /** Drawer toolbar opens only: re-check implicit recovery without remounting drafts. */
+  implicitResumeVersion?: number;
   /** Course page / shell query binding (Package B) — not only learningAttempt. */
   initialCourseId?: string | null;
   learningAttempt?: LearningAttempt;
@@ -299,7 +301,7 @@ export function AssistantView(props: Props) {
     startFresh={session ? true : props.startFresh}
     onNew={() => setSession(value => ({ identity, count: assistantSessionIndex(value, identity) + 1 }))} />;
 }
-function AssistantWorkspace({ api: apiProp, initialConversationId = null, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
+function AssistantWorkspace({ api: apiProp, initialConversationId = null, implicitResumeVersion, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false, agent = false, onConversationChange,
   start, onConversationReady, companion = false, objectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
   const mounted = useRef(true);
@@ -351,7 +353,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   draftRef.current = draft;
   const [aiBlocked, setAiBlocked] = useState(true);
   const [pending, setPending] = useState(false);
-  const [uploadPending, setUploadPending] = useState(false);
+  const [composerUploadPending, setUploadPending] = useState(false);
+  const [contextUploadPending, setContextUploadPending] = useState(false);
+  const uploadPending = composerUploadPending || contextUploadPending;
+  /** A stalled retry waits for the confirmed cancelled turn before resending. */
+  const [queuedRetry, setQueuedRetry] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
   const [reload, setReload] = useState(0);
@@ -367,6 +373,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const [firstTextTiming, setFirstTextTiming] = useState<FirstTextTiming | null>(null);
   const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId, firstTextTiming);
   const draftStore = useMemo(() => createQuestionDraftStore(), []);
+  const observedTurns = useRef<readonly TurnRecord[]>([]);
+  const observedFailure = useRef<{ id: string; at: number } | null>(null);
+  const implicitFresh = useRef(false);
+  const retainForImplicitResume = useRef(false);
+  retainForImplicitResume.current = privacy !== "saved" || Boolean(draft.trim()) || uploadPending || pending || Boolean(queuedRetry)
+    || sourceSelection !== null || contextEdited || Boolean(learningAttempt || studyContext?.activityId || studyContext?.attemptId);
   const [draftUnavailable, setDraftUnavailable] = useState(false);
   const draftScopeFor = (id: string | null) => `${assistantContextScope(studyContext)}:${initialCourseId ?? ""}:${id ?? ""}:${[...initialSourceIds].sort().join(",")}:${initialPage ?? ""}:${learningAttempt?.id ?? ""}`;
   const draftScope = draftScopeFor(learningAttempt ? initialConversationId : conversationId ?? initialConversationId);
@@ -386,7 +398,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   useEffect(() => {
     if (previousDraftScope.current === draftScope) return;
     if (privacy === "saved") {
-      draftStore.write(draftScope, draftRef.current);
+      // An implicitly selected history may already own a draft. Do not replace it
+      // with the empty start editor before the restoration effect gets to read it.
+      const saved = !draftEdited.current && !draftRef.current.trim() ? draftStore.read(draftScope) : null;
+      // A failed read leaves both scopes unknown. Even if writes still work,
+      // neither overwrite the target nor remove the previous scope automatically.
+      if (saved === null && draftStore.unavailable) { setDraftUnavailable(true); return; }
+      if (saved !== null) { setDraftState(saved); draftRef.current = saved; branchDrafts.current.saved = saved; }
+      else draftStore.write(draftScope, draftRef.current);
       if (isActiveConversation?.() !== false) draftStore.remove(previousDraftScope.current);
     }
     previousDraftScope.current = draftScope;
@@ -429,6 +448,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const unknownRecovery = unknownTurnRecovery(unknownJob, recoveryNow);
   const waitingForUnknown = unknownRecovery !== null && !unknownRecovery.canRetry;
   const recoveredTurns = useMemo(() => turnsWithKnownOutcome(turns, unknownJob), [turns, unknownJob]);
+  const localRecoveryActive = useRef(false);
+  localRecoveryActive.current = pending || Boolean(queuedRetry || unknownJob);
   const retryQuestion = unknownTurnQuestion(recoveredTurns);
 
   useEffect(() => () => {
@@ -522,10 +543,30 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   }, [api, learningAttempt]);
 
   const refreshConversation = useCallback(
-    async (id: string, signal?: AbortSignal, retryOnUnavailable = false) => {
+    async (id: string, signal?: AbortSignal, retryOnUnavailable = false, implicitLastActivityAt?: string) => {
       const snapshot = await conversationReader.read(id, signal);
       if (!snapshot) return false;
       const { resume: nextResume, turns: nextTurns, pending: discovery } = snapshot;
+      const last = nextTurns.at(-1);
+      const previous = observedTurns.current.at(-1);
+      if (last?.status === "failed" && last.id === previous?.id && previous.status === "pending") {
+        observedFailure.current = { id: last.id, at: Date.now() };
+      }
+      observedTurns.current = nextTurns;
+      // Summary updatedAt is the last submitted activity, not a server termination time.
+      // A terminal transition observed here supplies a later lower bound for long jobs.
+      const activityAt = Math.max(Date.parse(implicitLastActivityAt ?? ""), Date.parse(last?.createdAt ?? ""),
+        observedFailure.current?.id === last?.id ? observedFailure.current!.at : 0);
+      if (implicitLastActivityAt && last?.role === "assistant" && last.status === "failed"
+        && discovery.kind === "ready" && !discovery.job && Date.now() - activityAt > 10 * 60 * 1000
+        && !retainForImplicitResume.current && !submissionLock.current && !localRecoveryActive.current
+        && !draftStore.read(draftScopeFor(id))?.trim() && !draftStore.unavailable) {
+        implicitFresh.current = true;
+        setConversationId(null); setResume(null); setTurns([]); setActiveJobId(null); setPending(false);
+        setUnknownJob(null); setPendingHint(""); setRecoveryRequired(false);
+        setSelectedSourceIds(initialSourceIds); setCurrentPage(initialPage == null ? "" : String(initialPage));
+        return false;
+      }
       if ((learningAttempt && nextResume.courseId !== learningAttempt.courseId)
         || (initialCourseId && !learningAttempt && nextResume.courseId !== initialCourseId)) {
         setConversationId(null); setResume(null); setTurns([]);
@@ -578,7 +619,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       }
       return true;
     },
-    [conversationReader, initialCourseId, initialSourceIds, initialPage, learningAttempt, setConversationId],
+    [conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, setConversationId],
   );
 
 
@@ -597,8 +638,19 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         }
         // Creating the first conversation updates this ref without restarting initialization.
         const currentId = conversationIdRef.current;
+        const implicitRecovery = implicitResumeVersion !== undefined && !initialConversationId && !startFresh
+          && !learningAttempt && !studyContext?.activityId && !studyContext?.attemptId && !initialSourceIds.length;
+        if (implicitRecovery && currentId) {
+          // Local submit/preflight may not have reached the server yet. Preserve
+          // its identity and polling rather than applying an older server snapshot.
+          if (submissionLock.current || localRecoveryActive.current) return;
+          const listed = await api.listConversations();
+          if (!cancelled) await refreshConversation(currentId, controller.signal, false, listed.find(row => row.id === currentId)?.updatedAt);
+          return;
+        }
         if (currentId && await refreshConversation(currentId, controller.signal)) return;
         if (cancelled) return;
+        if (implicitRecovery && implicitFresh.current) return;
         if ((startFresh || (studyContext?.activityId || studyContext?.attemptId) || initialSourceIds.length > 0) && !learningAttempt) return;
         // Practice conversations are associated with turns server-side, but the
         // summary/resume contract does not expose that association. Starting a
@@ -608,7 +660,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
         const listed = await api.listConversations();
         if (cancelled) return;
         const selected = conversationForAssistant(listed, initialConversationId, learningAttempt?.courseId ?? initialCourseId ?? undefined);
-        if (selected && await refreshConversation(selected.id, controller.signal) && !cancelled) {
+        if (selected && await refreshConversation(selected.id, controller.signal, false, implicitRecovery ? selected.updatedAt : undefined) && !cancelled) {
           setConversationId(selected.id);
         }
       } catch (err) {
@@ -622,7 +674,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       cancelled = true;
       controller.abort();
     };
-  }, [api, initialConversationId, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, initialSourceIds.length]);
+  }, [api, initialConversationId, implicitResumeVersion, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, studyContext?.attemptId, initialSourceIds.length]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -661,8 +713,6 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   const firstTextShown = display.messages.some(message => message.role === "assistant" && message.status === "pending" && Boolean(message.text.trim()));
   const waitPhase = useTurnWaitPhase(pending && !firstTextShown, activeJobId ?? "local");
   const retryTarget = privacy === "saved" ? failedTurnRetry(recoveredTurns) : null;
-  /** Assistant turn whose stalled job was cancelled by 重试; resent once its failure is read back. */
-  const [queuedRetry, setQueuedRetry] = useState<string | null>(null);
   useEffect(() => {
     onRetainStateChange?.({ pending: pending || loading || uploadPending,
       volatile: privacy === "ephemeral" || sourceSelection !== null || contextEdited
@@ -701,21 +751,24 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
     } finally { onConversationCreateStateChange?.(false); }
   }
 
+  const turnStopLock = useRef(false);
   function cancelCurrentTurn(): void {
+    if (activeJobId && turnStopLock.current) return;
     cancelJobStream();
     abortRef.current?.abort();
     abortRef.current = null;
     setEphemeralPendingMessages([]);
     const jobId = activeJobId;
     if (jobId) {
+      turnStopLock.current = true;
       void api.cancelJob(jobId).then((job) => {
         setActiveJobId(null);
         setPending(false);
         setPendingHint(jobStatusHint(job) || "已停止这次回答。");
-        if (conversationId) void refreshConversation(conversationId);
+        if (conversationId) return refreshConversation(conversationId);
       }).catch((cancelError) => {
         setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
-      });
+      }).finally(() => { turnStopLock.current = false; });
       return;
     }
     if (privacy === "ephemeral") submissionLock.current = null;
@@ -735,7 +788,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
   async function retryStalledTurn(): Promise<void> {
     const jobId = activeJobId;
     const id = conversationId;
-    if (!jobId || !id) return;
+    if (!jobId || !id || turnStopLock.current) return;
+    turnStopLock.current = true;
     const last = recoveredTurns.at(-1);
     cancelJobStream();
     try {
@@ -749,7 +803,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       await refreshConversation(id);
     } catch (cancelError) {
       setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
-    }
+    } finally { turnStopLock.current = false; }
   }
   useEffect(() => {
     if (!queuedRetry || pending || loading || recoveryRequired) return;
@@ -1127,7 +1181,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, initia
       <p className="mb-4 text-xs leading-6 text-text-2">{assistantContextHint(selectedSourceIds)}</p>
       {sourceRefreshError ? <div className="mb-3 space-y-2 text-xs text-warn"><p role="status">材料状态暂时无法读取；已保留上次状态，会继续核实，尚未标记为解析完成。</p><button type="button" className={secondaryButtonClass} onClick={() => { if (sourceRefresh.current) sourceRefresh.current.retry(); else void refreshSources().catch(() => setSourceRefreshError(true)); }}>重新读取材料状态</button></div> : null}
       {!learningAttempt && !studyContext?.sourceId ? <label className="mb-4 block space-y-2 text-xs text-text"><span>资料使用方式</span><select aria-label="资料使用方式" className="min-h-10 w-full rounded border border-text-3 bg-surface px-2" value={materialMode} disabled={pending || loading || interactionDisabled} onChange={event => { const mode = event.target.value as typeof materialMode; setSourceSelection(mode); if (mode !== "selected") setCurrentPage(""); }}><option value="auto">自动参考本课资料</option><option value="selected">仅用所选资料</option><option value="none">不用资料</option></select><p>{materialMode === "auto" ? (boundCourseId ? "自动查找本课程可读资料；回答后列出实际引用。" : "未绑定课程，不会自动补入课程资料。") : materialMode === "selected" ? "只检索你选择的资料；尚未选择时不能发送。" : "本轮不检索资料。已有对话文字仍可能包含先前讨论的内容。"}</p></label> : null}
-      <UploadStrip sources={sources} api={api} onUploaded={handleUploaded} disabled={pending || loading || recoveryRequired || interactionDisabled} courseId={boundCourseId} />
+      <UploadStrip sources={sources} api={api} onUploaded={handleUploaded} onRetainStateChange={setContextUploadPending} disabled={pending || loading || recoveryRequired || interactionDisabled} courseId={boundCourseId} />
       {organizationError && boundCourseId ? <p role="status" className="mb-3 text-xs text-warn">课程资料关系暂时无法读取，不能据此判断本课没有资料。<button type="button" className={secondaryButtonClass} onClick={() => void refreshOrganization()}>重新读取</button></p> : null}
       <SourcePageControls
         sources={learningAttempt ? sources.filter((source) => learningAttempt.sourceIds.includes(source.id)) : sources}

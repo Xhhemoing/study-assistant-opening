@@ -23,7 +23,7 @@ function boundAttemptContext(selected: StudyConversationContext | undefined, att
   return { ...selected, ...bound, purpose: selected?.purpose ?? "learning_help" };
 }
 
-export function AssistantSession({ entry, embedded = true }: { entry: AssistantEntry & { learningAttempt?: LearningAttempt }; embedded?: boolean }) {
+export function AssistantSession({ entry, embedded = true, implicitResumeVersion }: { entry: AssistantEntry & { learningAttempt?: LearningAttempt }; embedded?: boolean; implicitResumeVersion?: number }) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const [restored, setRestored] = useState<{ selectionKey: string; attempt: LearningAttempt } | null>(null);
   const [error, setError] = useState<{ selectionKey: string; message: string } | null>(null);
@@ -52,5 +52,5 @@ export function AssistantSession({ entry, embedded = true }: { entry: AssistantE
   }
   if ((attemptId || attempt) && (entry.error || !attempt || contextError)) return <div className="p-4">{entry.error || contextError ? <LoadError message={entry.error || contextError} onRetry={() => setRevision(value => value + 1)} /> : <LoadingRows label="正在准备本题提问…" />}</div>;
   if (!embedded && !attempt && !context && !entry.error) return <ConversationSurface initialConversationId={entry.conversation} startFresh={entry.fresh} />;
-  return <AssistantView embedded={embedded} learningAttempt={attempt} initialConversationId={entry.conversation} initialCourseId={context?.courseId ?? null} {...(context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : {})} startFresh={entry.fresh} studyContext={context} studyContextError={entry.error} />;
+  return <AssistantView embedded={embedded} learningAttempt={attempt} initialConversationId={entry.conversation} implicitResumeVersion={implicitResumeVersion} initialCourseId={context?.courseId ?? null} {...(context?.sourceId ? materialAnalysisEntry(context.sourceId, context.page === undefined ? undefined : String(context.page)) : {})} startFresh={entry.fresh} studyContext={context} studyContextError={entry.error} />;
 }
