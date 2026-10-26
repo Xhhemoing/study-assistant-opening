@@ -3,6 +3,22 @@ import { loadOpeningModelCatalog } from "./opening-model-catalog";
 const entry = { id: "fast", label: "Fast", providerId: "p", providerLabel: "Provider", modelName: "opaque-model", baseUrl: "https://provider.example/v1", apiKeyEnv: "PROVIDER_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20 };
 const env = { OPENING_MODEL_CATALOG: JSON.stringify([entry]), OPENING_MODEL_DAILY_CAP_CENTS: "100", PROVIDER_KEY: "private-key" };
 describe("server model catalog", () => {
+  it("keeps daily limits as the default and requires a finite parent cap in either mode", () => {
+    expect(loadOpeningModelCatalog(env)).toMatchObject({ dailyQuotaMode: "limited", parentCapCents: 2000 });
+    for (const mode of ["limited", "unlimited"]) {
+      for (const parent of ["0", "-1", "1.5", "Infinity", "2147483648"]) {
+        expect(() => loadOpeningModelCatalog({ ...env, OPENING_MODEL_DAILY_QUOTA_MODE: mode, OPENING_MODEL_PARENT_CAP_CENTS: parent })).toThrow(/配置无效/);
+      }
+    }
+    expect(() => loadOpeningModelCatalog({ ...env, OPENING_MODEL_DAILY_QUOTA_MODE: "unbounded" })).toThrow(/配置无效/);
+  });
+  it("allows explicit unlimited daily quota without weakening keys, pricing or parent limits", () => {
+    const unlimited = { ...env, OPENING_MODEL_DAILY_QUOTA_MODE: "unlimited", OPENING_MODEL_DAILY_CAP_CENTS: "0", OPENING_MODEL_PARENT_CAP_CENTS: "25" };
+    expect(loadOpeningModelCatalog(unlimited)).toMatchObject({ dailyQuotaMode: "unlimited", dailyCapCents: 0, parentCapCents: 25, defaultModelId: "fast", models: [{ availability: "available" }] });
+    expect(loadOpeningModelCatalog({ ...unlimited, PROVIDER_KEY: "" }).models[0]?.availability).toBe("missing_key");
+    expect(loadOpeningModelCatalog({ ...unlimited, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, inputCentsPerMillion: 0 }]) }).models[0]?.availability).toBe("pricing_missing");
+    expect(loadOpeningModelCatalog({ ...unlimited, OPENING_MODEL_DAILY_QUOTA_MODE: "limited" }).models[0]?.availability).toBe("budget_disabled");
+  });
   it("requires a complete media cost bound and preserves it without inferring one", () => {
     const media = { mediaInputTokenUpperBound: 100_000, mediaMaxInputBytes: 5_000_000, mediaInputCentsPerMillion: 30 };
     const catalog = (extra: Record<string, unknown>) => loadOpeningModelCatalog({ ...env, OPENING_MODEL_CATALOG: JSON.stringify([{ ...entry, supportsVision: true, ...extra }]) });

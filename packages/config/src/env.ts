@@ -96,6 +96,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     openingModel: catalog ? {
       baseUrl: defaultModel?.baseUrl ?? "https://api.openai.com/v1", apiKey: defaultModel?.apiKey ?? "",
       name: defaultModel?.modelName ?? "unconfigured", dailyCapCents: catalog.dailyCapCents,
+      dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents,
       inputCentsPerMillion: defaultModel?.inputCentsPerMillion ?? 0,
       outputCentsPerMillion: defaultModel?.outputCentsPerMillion ?? 0,
     } : loadOpeningModel(source),

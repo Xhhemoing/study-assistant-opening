@@ -23,7 +23,8 @@ export async function probeModel(sql: Sql, scope: Scope, ids: { id: string; mode
   // Verify ownership before the gateway, without constructing a provider here.
   const models = await createOpeningModelProvidersRepository(sql).listModels(scope);
   if (!models.some(model => model.id === ids.modelId && model.providerId === ids.id)) throw new ApiError("NOT_FOUND", "模型不存在。", 404);
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: loadOpeningModelCatalog().dailyCapCents });
+  const catalog = loadOpeningModelCatalog();
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents, dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents });
   // The ledger request id is unique across all workspaces, so scope it here.
   try {
     const output = await probeDbModel(sql, scope, ids.id, ids.modelId, {

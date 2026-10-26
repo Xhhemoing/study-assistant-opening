@@ -43,7 +43,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
     <fieldset disabled={busy} className="space-y-4">
       <legend className="sr-only">模型路由方式</legend>
       <div className="flex flex-wrap gap-4">{[{ value: "manual" as const, label: "手动选择" }, { value: "automatic" as const, label: "按辅导模式自动选择" }].map(option => <label key={option.value} className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-text-2"><input className="size-4 accent-accent" type="radio" name="ai-routing-mode" checked={draft.mode === option.value} onChange={() => onChange(switchRoutingMode(draft, option.value, data.defaultModelId))} />{option.label}</label>)}</div>
-      <section id="daily-budget" data-advanced-section="daily-budget" className="scroll-mt-6 space-y-2 rounded-lg border border-line bg-surface-2 p-3" aria-labelledby="daily-budget-heading">
+      {data.dailyQuota?.mode === "unlimited" ? <section id="daily-budget" className="scroll-mt-6 rounded-lg border border-line bg-surface-2 p-3" aria-label="每日 AI 用量"><p className="text-sm text-text">测试期每日不限额</p><p className="mt-1 text-xs leading-6 text-text-3">使用服务器默认模型即可开始；单次交互仍有费用与调用次数上限。供应商自己的限流仍可能生效。</p></section> : <section id="daily-budget" data-advanced-section="daily-budget" className="scroll-mt-6 space-y-2 rounded-lg border border-line bg-surface-2 p-3" aria-labelledby="daily-budget-heading">
         <h3 id="daily-budget-heading" className="text-sm font-medium text-text">开启并确认每日额度</h3>
         <p className="text-xs leading-6 text-text-2">环境上限为 0 时：填写每日额度（分）→ 点「确认开启每日额度」→ 再点下方「保存模型设置」。环境上限 &gt; 0 时可在此调低（不超过运维上限）。</p>
         {data.dailyCapCents === 0 ? <p className="rounded-md border border-warn/30 bg-warn-soft px-2.5 py-1.5 text-xs leading-6 text-warn" role="status">当前有效日额度为 0，AI 辅导不可用。请设置额度并确认后保存。</p> : null}
@@ -66,7 +66,7 @@ export function AiSettingsForm({ data, draft, busy, onChange, onSave, onReset }:
           }}>确认开启每日额度</button>
         ) : null}
         {draft.budgetConfirmedAt ? <p className="text-xs text-accent">已确认于 {draft.budgetConfirmedAt}</p> : null}
-      </section>
+      </section>}
       <label className="block space-y-1.5"><span className={ui.label}>按供应商筛选可选模型</span><select className={ui.input} value={supplier} onChange={event => setSupplier(event.target.value)}><option value="">全部供应商</option>{suppliers.map(([id, label]) => <option value={id} key={id}>{label}</option>)}</select></label>
       <ModelSelect label={draft.mode === "manual" ? "所有辅导模式使用的模型" : "默认模型"} models={data.models} supplier={supplier} value={draft.mode === "manual" ? draft.manualModelId : draft.defaultModelId} fallback={draft.mode === "manual" ? "请选择明确的模型" : `跟随服务器默认${defaultModel ? `（${defaultModel.label}）` : "（尚未配置）"}`} onChange={id => onChange(draft.mode === "manual" ? { ...draft, manualModelId: id } : { ...draft, defaultModelId: id })} />
       {draft.mode === "automatic" ? <div className="grid gap-3 sm:grid-cols-2">{tutorRouteLabels.map(({ mode, label }) => <ModelSelect key={mode} label={label} models={data.models} supplier={supplier} value={draft.routes[mode]} fallback="使用默认模型" onChange={id => onChange({ ...draft, routes: { ...draft.routes, [mode]: id } })} />)}</div> : null}

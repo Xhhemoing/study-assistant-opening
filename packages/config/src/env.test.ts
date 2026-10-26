@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, loadOpeningUploadQuota, loadOpeningAutoGradeDailyCap, EnvValidationError } from "./env";
-import { loadOpeningTutorConfig } from "./opening-model";
+import { loadOpeningModel, loadOpeningTutorConfig } from "./opening-model";
 import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
@@ -138,6 +138,19 @@ describe("loadEnv", () => {
     expect(loadEnv(paid).openingModel.dailyCapCents).toBe(100);
     for (const invalid of [{ OPENING_MODEL_DAILY_CAP_CENTS: "NaN" }, { OPENING_MODEL_DAILY_CAP_CENTS: "-1" }, { OPENING_MODEL_INPUT_CENTS_PER_MILLION: "0" }, { OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "" }]) {
       expect(() => loadEnv({ ...paid, ...invalid })).toThrow();
+    }
+  });
+
+  it("exposes quota mode and parent cap consistently for legacy and catalog startup", () => {
+    expect(loadEnv(valid).openingModel).toMatchObject({ dailyQuotaMode: "limited", parentCapCents: 2000, dailyCapCents: 0 });
+    const source = { ...valid, OPENING_MODEL_API_KEY: "test-key", OPENING_MODEL_DAILY_QUOTA_MODE: "unlimited", OPENING_MODEL_PARENT_CAP_CENTS: "2147483647", OPENING_MODEL_INPUT_CENTS_PER_MILLION: "10", OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "20" };
+    expect(loadOpeningModel(source)).toMatchObject({ dailyQuotaMode: "unlimited", parentCapCents: 2147483647, dailyCapCents: 0 });
+    expect(loadEnv(source).openingModel).toMatchObject({ dailyQuotaMode: "unlimited", parentCapCents: 2147483647 });
+    expect(loadEnv({ ...source, OPENING_MODEL_CATALOG: "[]" }).openingModel).toMatchObject({ dailyQuotaMode: "unlimited", parentCapCents: 2147483647 });
+    for (const patch of [{ OPENING_MODEL_DAILY_QUOTA_MODE: "" }, { OPENING_MODEL_DAILY_QUOTA_MODE: "invalid" },
+      ...["", "0", "-1", "1.2", "Infinity", "2147483648"].map(OPENING_MODEL_PARENT_CAP_CENTS => ({ OPENING_MODEL_PARENT_CAP_CENTS })),
+      { OPENING_MODEL_INPUT_CENTS_PER_MILLION: "0" }, { OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: "0" }]) {
+      expect(() => loadEnv({ ...source, ...patch })).toThrow();
     }
   });
 

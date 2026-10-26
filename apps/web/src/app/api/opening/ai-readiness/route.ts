@@ -32,7 +32,7 @@ async function buildItems(
   });
   const merged = mergeOpeningCatalog(catalog.models, custom, {
     defaultModelId: catalog.defaultModelId,
-    dailyCapCents: effective.capCents,
+    dailyCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode,
   });
   const keyed = merged.models.filter(m => m.availability !== "missing_key" && m.availability !== "vault_disabled");
   const available = merged.models.filter(m => m.availability === "available");
@@ -44,7 +44,7 @@ async function buildItems(
     resolveBudgetTimeZone(planning.settings?.timeZone),
   );
   const spendRows = await sql`
-    SELECT COALESCE(sum(amount_cents), 0)::int AS used
+    SELECT COALESCE(sum(amount_cents), 0) AS used
     FROM opening_budget_reservations
     WHERE workspace_id = ${scope.workspaceId}
       AND (
@@ -95,7 +95,7 @@ async function buildItems(
   return buildAiReadinessItems({
     keyedModelCount: keyed.length,
     pricingConfigured,
-    effectiveCapCents: effective.capCents,
+    effectiveCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode,
     usedCents,
     remainingCents: remaining,
     reconciledUnknownCount: reconciledUnknown,

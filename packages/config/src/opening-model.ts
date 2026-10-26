@@ -4,13 +4,15 @@ export const openingModelFields = {
   OPENING_MODEL_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   OPENING_MODEL_API_KEY: z.string().default(""),
   OPENING_MODEL_NAME: z.string().min(1).default("gpt-4o-mini"),
+  OPENING_MODEL_DAILY_QUOTA_MODE: z.enum(["limited", "unlimited"]).default("limited"),
+  OPENING_MODEL_PARENT_CAP_CENTS: z.coerce.number().int().positive().max(2_147_483_647).default(2000),
   OPENING_MODEL_DAILY_CAP_CENTS: z.coerce.number().int().nonnegative().max(2_147_483_647).default(0),
   OPENING_MODEL_INPUT_CENTS_PER_MILLION: z.coerce.number().finite().nonnegative().default(0),
   OPENING_MODEL_OUTPUT_CENTS_PER_MILLION: z.coerce.number().finite().nonnegative().default(0),
 };
 
 export const openingModelSchema = z.object(openingModelFields).superRefine((value, ctx) => {
-  if (value.OPENING_MODEL_API_KEY && value.OPENING_MODEL_DAILY_CAP_CENTS > 0) {
+  if (value.OPENING_MODEL_API_KEY && (value.OPENING_MODEL_DAILY_QUOTA_MODE === "unlimited" || value.OPENING_MODEL_DAILY_CAP_CENTS > 0)) {
     for (const key of ["OPENING_MODEL_INPUT_CENTS_PER_MILLION", "OPENING_MODEL_OUTPUT_CENTS_PER_MILLION"] as const) {
       if (value[key] <= 0) ctx.addIssue({ code: "custom", path: [key], message: "enabled model requires positive configured pricing" });
     }
@@ -22,6 +24,8 @@ export function loadOpeningModel(source: NodeJS.ProcessEnv = process.env) {
   return {
     baseUrl: value.OPENING_MODEL_BASE_URL, apiKey: value.OPENING_MODEL_API_KEY,
     name: value.OPENING_MODEL_NAME, dailyCapCents: value.OPENING_MODEL_DAILY_CAP_CENTS,
+    dailyQuotaMode: value.OPENING_MODEL_DAILY_QUOTA_MODE,
+    parentCapCents: value.OPENING_MODEL_PARENT_CAP_CENTS,
     inputCentsPerMillion: value.OPENING_MODEL_INPUT_CENTS_PER_MILLION,
     outputCentsPerMillion: value.OPENING_MODEL_OUTPUT_CENTS_PER_MILLION,
   };

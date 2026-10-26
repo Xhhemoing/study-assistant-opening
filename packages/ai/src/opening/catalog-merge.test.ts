@@ -15,6 +15,14 @@ const custom = (over: Partial<WorkspaceCatalogModel> = {}): WorkspaceCatalogMode
 });
 
 describe("mergeOpeningCatalog", () => {
+  it("keeps the server default usable under unlimited mode without removing key or pricing checks", () => {
+    const input = { defaultModelId: "server", dailyCapCents: 0, dailyQuotaMode: "unlimited" as const };
+    const merged = mergeOpeningCatalog([{ ...server, availability: "budget_disabled" }], [], input);
+    expect(merged.defaultModelId).toBe("server");
+    expect(merged.models[0]?.availability).toBe("available");
+    expect(mergeOpeningCatalog([{ ...server, apiKey: "", availability: "missing_key" }], [], input).models[0]?.availability).toBe("missing_key");
+    expect(mergeOpeningCatalog([{ ...server, inputCentsPerMillion: 0, availability: "pricing_missing" }], [], input).models[0]?.availability).toBe("pricing_missing");
+  });
   it("appends workspace models with availability mirroring env semantics", () => {
     const merged = mergeOpeningCatalog([server], [custom()], { defaultModelId: "server", dailyCapCents: 100 });
     expect(merged.models.map(model => model.id)).toEqual(["server", "11111111-1111-4111-8111-111111111111"]);

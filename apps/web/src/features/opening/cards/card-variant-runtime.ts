@@ -8,7 +8,7 @@ import { createCardVariantService } from "./card-variant-service";
 
 export function getCardVariantService(sql: Sql) {
   const catalog = loadOpeningModelCatalog();
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents,
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents, dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents,
     pricingConfigured: catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0) });
   return createCardVariantService({ repository: createOpeningCardVariantRepository(sql), gateway: createDbModelGateway(sql),
     budget: scope => scopeBudget(budget, scope) });

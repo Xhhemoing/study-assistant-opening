@@ -3,10 +3,24 @@ import {
   DEFAULT_OPENING_AI_SETTINGS,
   OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS,
   openingAiSettingsSchema,
+  openingAiSettingsResponseSchema,
+  openingDailyQuotaSchema,
   openingModelSnapshotSchema,
   modelTaskKeySchema,
 } from "./ai-settings";
 describe("AI routing settings boundary", () => {
+  it("accepts optional server-owned daily quota metadata without reinterpreting legacy zero or null", () => {
+    const response = { models: [], defaultModelId: null, dailyCapCents: 0, envCapCents: 0, personalCeilingCents: 2000, settings: { ...DEFAULT_OPENING_AI_SETTINGS, dailyCapCents: null }, saved: false, invalidStoredSettings: false };
+    expect(openingAiSettingsResponseSchema.parse(response)).not.toHaveProperty("dailyQuota");
+    for (const dailyQuota of [{ mode: "limited", capCents: 0 }, { mode: "limited", capCents: 2_147_483_647 }, { mode: "unlimited" }]) {
+      expect(openingDailyQuotaSchema.parse(dailyQuota)).toEqual(dailyQuota);
+      expect(openingAiSettingsResponseSchema.parse({ ...response, dailyQuota })).toMatchObject({ dailyQuota, dailyCapCents: 0, settings: { dailyCapCents: null } });
+      expect(openingAiSettingsSchema.safeParse({ ...DEFAULT_OPENING_AI_SETTINGS, dailyQuota }).success).toBe(false);
+    }
+  });
+  it.each([{ mode: "unlimited", capCents: 0 }, { mode: "limited" }, { mode: "limited", capCents: -1 }, { mode: "limited", capCents: Infinity }, { mode: "limited", capCents: 1.5 }, { mode: "limited", capCents: 2_147_483_648 }, { mode: "other" }])("rejects ambiguous or unbounded finite daily quota %j", quota => {
+    expect(openingDailyQuotaSchema.safeParse(quota).success).toBe(false);
+  });
   it.each(["practice.grade-photo", "tutor.think_together", "group2.task-v2", `${"a".repeat(32)}.${"b".repeat(32)}`])("accepts stable task key %s in persisted routes", key => {
     expect(modelTaskKeySchema.parse(key)).toBe(key);
     const taskRoutes = { [key]: { primary: "custom-1", fallback: null } };

@@ -217,7 +217,7 @@ export async function main(): Promise<void> {
   });
   // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
   // and counts completed spend via resolveBudgetLocalDay half-open bounds.
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0) || openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, dailyQuotaMode: openingModel.dailyQuotaMode, parentCapCents: openingModel.parentCapCents, pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0) || openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const indexSource = createIndexSourceHandler({ repository: createOpeningSourceEmbeddingsRepository(sql),
     config: embeddingConfig, budget: scope => scopeBudget(budget, scope) });
   const models = createDbModelGateway(sql);

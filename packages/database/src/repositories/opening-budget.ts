@@ -142,6 +142,10 @@ export type OpeningBudgetRepository = {
 export type OpeningBudgetRepositoryOptions = {
   /** Deployment env daily cap (OPENING_MODEL_DAILY_CAP_CENTS). */
   envCapCents: number;
+  /** Explicit server policy; zero and null caps keep their original limited-mode meaning. */
+  dailyQuotaMode?: "limited" | "unlimited";
+  /** A finite ceiling still binds each parent interaction when the daily quota is unlimited. */
+  parentCapCents?: number;
   /** True when the default/catalog model has positive pricing configured. */
   pricingConfigured?: boolean;
   ceilingCents?: number;
@@ -232,15 +236,20 @@ type BudgetSql = Sql | TransactionSql;
 export type OpeningBudgetCheckInput = Pick<ReserveInput, "amountCents" | "modelSnapshot" | "requestCapPerDay">;
 export type OpeningBudgetAvailability = {
   allowed: boolean;
-  reason: "budget" | "request_cap" | null;
+  reason: "budget" | "request_cap" | "parent_budget" | null;
   requiredCents: number;
-  availableCents: number;
+  availableCents: number | null;
+  dailyQuotaMode: "limited" | "unlimited";
   localDay: string;
 };
 
 function validateBudgetOptions(options: OpeningBudgetRepositoryOptions) {
   if (!Number.isSafeInteger(options.envCapCents) || options.envCapCents < 0) {
     throw new Error("invalid daily budget cap");
+  }
+  if (options.dailyQuotaMode !== undefined && options.dailyQuotaMode !== "limited" && options.dailyQuotaMode !== "unlimited") throw new Error("invalid daily quota mode");
+  if (options.dailyQuotaMode === "unlimited" && (!Number.isSafeInteger(options.parentCapCents) || options.parentCapCents! <= 0 || options.parentCapCents! > 2_147_483_647)) {
+    throw new Error("unlimited daily quota requires a finite parent budget");
   }
   const unknownAgeMs = options.unknownAgeMs ?? OPENING_BUDGET_UNKNOWN_RECONCILE_TTL_MS;
   if (!Number.isSafeInteger(unknownAgeMs) || unknownAgeMs <= 0) {
@@ -279,7 +288,8 @@ async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBud
   });
   const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
   const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? options.timeZone));
-  return { capCents: effective.capCents, budgetDay };
+  const unlimited = options.dailyQuotaMode === "unlimited";
+  return { capCents: effective.capCents, budgetDay, unlimited, parentCapCents: unlimited ? options.parentCapCents! : effective.capCents };
 }
 
 // One ledger predicate for admission and atomic reserve. Unknown rows remain reserved.
@@ -318,13 +328,14 @@ export async function checkOpeningBudgetAvailable(
   const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
   const owners = await sqlOrTx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-  const { capCents, budgetDay } = await capAndDay(sqlOrTx, scope.workspaceId, options);
+  const { capCents, budgetDay, unlimited } = await capAndDay(sqlOrTx, scope.workspaceId, options);
   const [usage] = await sqlOrTx`SELECT COALESCE(sum(amount_cents), 0) AS cents
     FROM opening_budget_reservations WHERE ${chargedBudgetRows(sqlOrTx, scope.workspaceId, budgetDay)}`;
-  const availableCents = Math.max(0, capCents - Number(usage?.cents ?? 0));
+  const availableCents = unlimited ? null : Math.max(0, capCents - Number(usage?.cents ?? 0));
   const reason = await requestCapReached(sqlOrTx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)
-    ? "request_cap" : !zeroCost && input.amountCents > availableCents ? "budget" : null;
-  return { allowed: reason === null, reason, requiredCents: input.amountCents, availableCents, localDay: budgetDay.localDate };
+    ? "request_cap" : unlimited && input.amountCents > options.parentCapCents! ? "parent_budget"
+      : !zeroCost && availableCents !== null && input.amountCents > availableCents ? "budget" : null;
+  return { allowed: reason === null, reason, requiredCents: input.amountCents, availableCents, dailyQuotaMode: unlimited ? "unlimited" : "limited", localDay: budgetDay.localDate };
 }
 
 export function createOpeningBudgetRepository(
@@ -378,8 +389,9 @@ export function createOpeningBudgetRepository(
 
   return {
     async reserve(scope, input) {
-      if (input.parentBudget) {
-        try { assertParentInteractionBudget(input.parentBudget); }
+      let parentBudget = input.parentBudget ?? (options.dailyQuotaMode === "unlimited" ? { id: input.requestId } : undefined);
+      if (parentBudget) {
+        try { assertParentInteractionBudget(parentBudget); }
         catch { throw new OpeningBudgetError("BUDGET_INVALID_RESERVE", "invalid parent interaction budget"); }
       }
       const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
@@ -410,16 +422,19 @@ export function createOpeningBudgetRepository(
           ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
 
-        const { capCents, budgetDay } = await capAndDay(tx, scope.workspaceId, options);
+        const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options);
 
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
         const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
+        // An operator switching back to a finite day must not invalidate an already
+        // recorded implicit parent's replay. This never moves a request to a new parent.
+        if (!parentBudget && existingRow?.parentInteractionId === input.requestId) parentBudget = { id: input.requestId };
         if (existingRow) {
           // Original amounts survive settlement. An old, unparented reservation
           // may be adopted once below; an attributed request can never move parents.
           const originalAmount = existingRow.reservedAmountCents ?? (existingRow.state === "reserved" ? existingRow.amountCents : null);
           if (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
-            || (existingRow.parentInteractionId !== null && existingRow.parentInteractionId !== (input.parentBudget?.id ?? null))
+            || (existingRow.parentInteractionId !== null && existingRow.parentInteractionId !== (parentBudget?.id ?? null))
             || (originalAmount !== null && originalAmount !== input.amountCents)
             || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
@@ -427,22 +442,22 @@ export function createOpeningBudgetRepository(
         }
         // An existing attributed key always replays, including a frozen/unknown
         // parent: replay never authorizes a second provider request.
-        if (existingRow && (!input.parentBudget || existingRow.parentInteractionId !== null)) {
+        if (existingRow && (!parentBudget || existingRow.parentInteractionId !== null)) {
           return mapReservation(existing[0] as Record<string, unknown>, true);
         }
 
-        if (input.parentBudget) {
-          const parent = input.parentBudget;
+        if (parentBudget) {
+          const parent = parentBudget;
           await tx`
             INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
-            VALUES (${scope.workspaceId}, ${parent.id}, ${Math.min(parent.budgetCents ?? capCents, capCents)},
+            VALUES (${scope.workspaceId}, ${parent.id}, ${Math.min(parent.budgetCents ?? parentCapCents, parentCapCents)},
               ${parent.maxProviderCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS})
             ON CONFLICT (workspace_id, id) DO NOTHING
           `;
           const [pinned] = await tx`SELECT * FROM opening_parent_interaction_budgets
             WHERE workspace_id = ${scope.workspaceId} AND id = ${parent.id}`;
           // Retries may omit a tighter limit but cannot silently enlarge or replace it.
-          if ((parent.budgetCents !== undefined && Math.min(parent.budgetCents, capCents) !== Number(pinned!.budget_cents))
+          if ((parent.budgetCents !== undefined && Math.min(parent.budgetCents, parentCapCents) !== Number(pinned!.budget_cents))
             || (parent.maxProviderCalls !== undefined && parent.maxProviderCalls !== Number(pinned!.max_provider_calls))) {
             throw new OpeningBudgetError("CONFLICT", "parent interaction limits already pinned");
           }
@@ -461,7 +476,7 @@ export function createOpeningBudgetRepository(
             if (Number(usage!.unknown_calls) > 0) throw new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending");
             if (Number(usage!.calls) >= Number(pinned!.max_provider_calls)) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
             // All settled spend + outstanding reservations + next conservative bound.
-            if (Number(usage!.cents) + input.amountCents > Number(pinned!.budget_cents)) {
+            if (Number(usage!.cents) + input.amountCents > Math.min(Number(pinned!.budget_cents), parentCapCents)) {
               throw new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded");
             }
           }
@@ -481,8 +496,8 @@ export function createOpeningBudgetRepository(
         // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
         const rows = await tx`
           INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${input.parentBudget?.id ?? null}
-          WHERE ${zeroCost} OR ${input.amountCents} + COALESCE((
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}
+          WHERE ${zeroCost || unlimited} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
           ), 0) <= ${capCents}
@@ -599,16 +614,16 @@ export function createOpeningBudgetRepository(
         // A late receipt is real spend that bypassed the reserve-time cap
         // check. If it pushes local-day usage over the cap, record an audited
         // cap_overrun event and raise the alert hook: never silent.
-        const { capCents, budgetDay } = await capAndDay(tx, row.workspaceId, budgetOptions);
+        const { capCents, budgetDay, unlimited } = await capAndDay(tx, row.workspaceId, budgetOptions);
         const usage = await tx`
-          SELECT COALESCE(sum(amount_cents), 0)::int AS used FROM opening_budget_reservations
+          SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
           WHERE workspace_id = ${row.workspaceId} AND (
             state = 'reserved' OR
             (state = 'completed' AND created_at >= ${budgetDay.dayStart} AND created_at < ${budgetDay.nextDayStart})
           )
         `;
         const usageAfter = Number(usage[0]?.used ?? 0);
-        if (usageAfter > capCents) {
+        if (!unlimited && usageAfter > capCents) {
           const overrun = await tx`
             INSERT INTO opening_budget_reconcile_events
               (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents)

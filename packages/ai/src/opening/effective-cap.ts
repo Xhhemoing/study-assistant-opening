@@ -1,3 +1,5 @@
+import type { OpeningDailyQuota } from "@aistudy/contracts";
+
 /** Built-in personal ceiling when env cap is 0 and the owner confirms a workspace cap (cents). */
 export const OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS = 2000;
 
@@ -45,4 +47,11 @@ export function resolveEffectiveDailyCap(input: ResolveEffectiveDailyCapInput): 
     return { capCents: 0, source: "disabled" };
   }
   return { capCents: Math.min(workspace, ceiling), source: "workspace" };
+}
+
+/** Server-owned mode is separate from legacy numeric cap values and workspace preferences. */
+export function resolveOpeningDailyQuota(input: ResolveEffectiveDailyCapInput & { mode?: OpeningDailyQuota["mode"] }): OpeningDailyQuota {
+  const effective = resolveEffectiveDailyCap(input);
+  if (input.mode === "unlimited") return { mode: "unlimited" };
+  return { mode: "limited", capCents: effective.capCents };
 }

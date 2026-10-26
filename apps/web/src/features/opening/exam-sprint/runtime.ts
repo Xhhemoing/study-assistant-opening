@@ -19,7 +19,8 @@ export const getExamIntegrationService = (sql: Sql) => {
 };
 export const getExamForecastService = (sql: Sql) => createOpeningExamForecastRepository(sql, EXAM_SPRINT_PACK);
 export const getExamReviewService = (sql: Sql) => {
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: loadOpeningModelCatalog().dailyCapCents });
+  const catalog = loadOpeningModelCatalog();
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents, dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents });
   return createExamPhotoReviewService({ repository: createOpeningExamReviewsRepository(sql), gateway: createDbModelGateway(sql),
     budget: scope => scopeBudget(budget, scope), images: createSourcePageImages(sql, openingPageStorage()) });
 };

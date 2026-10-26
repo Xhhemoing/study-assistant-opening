@@ -45,7 +45,7 @@ export async function resolveAutoGradePolicy(sql: Sql, scope: Scope, photo = fal
       }
       if (!(error instanceof OpeningModelRoutingError) || !fallbackModel) throw error;
     }
-    budgetOptions = { envCapCents: catalog.dailyCapCents, pricingConfigured: Boolean(embedding && embedding.inputCentsPerMillion > 0) || catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0) };
+    budgetOptions = { envCapCents: catalog.dailyCapCents, dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents, pricingConfigured: Boolean(embedding && embedding.inputCentsPerMillion > 0) || catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0) };
     modelAvailable = true;
   } catch (error) {
     if (!(error instanceof OpeningModelRoutingError)) throw error;

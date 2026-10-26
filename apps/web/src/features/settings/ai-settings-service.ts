@@ -32,7 +32,7 @@ export async function loadMergedCatalog(sql: Sql, scope: Scope, effectiveCapCent
   const custom = await createOpeningModelProvidersRepository(sql).listResolvableModels(scope);
   return mergeOpeningCatalog(catalog.models, custom, {
     defaultModelId: catalog.defaultModelId,
-    dailyCapCents: effectiveCapCents,
+    dailyCapCents: effectiveCapCents, dailyQuotaMode: catalog.dailyQuotaMode,
   });
 }
 
@@ -113,12 +113,13 @@ export async function readAiSettings(sql: Sql, scope: Scope): Promise<OpeningAiS
   const effective = resolveCapFromSettings(catalog.dailyCapCents, preference.settings, pricingConfigured);
   const merged = mergeOpeningCatalog(catalog.models, custom, {
     defaultModelId: catalog.defaultModelId,
-    dailyCapCents: effective.capCents,
+    dailyCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode,
   });
   return {
     ...preference,
     defaultModelId: merged.defaultModelId,
     dailyCapCents: effective.capCents,
+    dailyQuota: catalog.dailyQuotaMode === "unlimited" ? { mode: "unlimited" } : { mode: "limited", capCents: effective.capCents },
     envCapCents: catalog.dailyCapCents,
     personalCeilingCents: OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
     models: merged.models.map(toSummary),
@@ -133,11 +134,11 @@ export async function saveAiSettings(sql: Sql, scope: Scope, input: unknown): Pr
   if (parsed.data) {
     const custom = await createOpeningModelProvidersRepository(sql).listResolvableModels(scope);
     const pricingConfigured = catalogPricingConfigured([...catalog.models, ...custom]);
-    validateBudgetFields(parsed.data, catalog.dailyCapCents, pricingConfigured);
+    if (catalog.dailyQuotaMode !== "unlimited") validateBudgetFields(parsed.data, catalog.dailyCapCents, pricingConfigured);
     const effective = resolveCapFromSettings(catalog.dailyCapCents, parsed.data, pricingConfigured);
     const merged = mergeOpeningCatalog(catalog.models, custom, {
       defaultModelId: catalog.defaultModelId,
-      dailyCapCents: effective.capCents,
+      dailyCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode,
     });
     const settings = parsed.data;
     const taskRoutes = Object.entries(settings.taskRoutes ?? {});

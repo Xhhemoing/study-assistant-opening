@@ -53,6 +53,8 @@ export function loadOpeningModelCatalog(source: NodeJS.ProcessEnv = process.env)
     const directory = source.OPENING_MODEL_CATALOG?.trim();
     const legacy = directory ? null : loadOpeningModel(source);
     const dailyCapCents = openingModelFields.OPENING_MODEL_DAILY_CAP_CENTS.parse(source.OPENING_MODEL_DAILY_CAP_CENTS);
+    const dailyQuotaMode = openingModelFields.OPENING_MODEL_DAILY_QUOTA_MODE.parse(source.OPENING_MODEL_DAILY_QUOTA_MODE);
+    const parentCapCents = openingModelFields.OPENING_MODEL_PARENT_CAP_CENTS.parse(source.OPENING_MODEL_PARENT_CAP_CENTS);
     const entries = directory
       ? catalogSchema.parse(JSON.parse(directory))
       : [{ id: "default", label: legacy!.name, providerId: "default", providerLabel: "默认供应商", modelName: legacy!.name,
@@ -62,13 +64,13 @@ export function loadOpeningModelCatalog(source: NodeJS.ProcessEnv = process.env)
       const apiKey = source[apiKeyEnv]?.trim() ?? "";
       const availability = !apiKey ? "missing_key" as const
         : entry.billing === "free_tier" ? "available" as const
-        : dailyCapCents <= 0 ? "budget_disabled" as const
+        : dailyQuotaMode === "limited" && dailyCapCents <= 0 ? "budget_disabled" as const
         : entry.inputCentsPerMillion <= 0 || entry.outputCentsPerMillion <= 0 ? "pricing_missing" as const : "available" as const;
       return { ...entry, apiKey, availability };
     });
     const defaultModelId = source.OPENING_MODEL_DEFAULT_ID?.trim() || models[0]?.id || null;
     if (defaultModelId && !models.some(model => model.id === defaultModelId)) throw new OpeningModelConfigurationError();
-    return { models, defaultModelId, dailyCapCents };
+    return { models, defaultModelId, dailyCapCents, dailyQuotaMode, parentCapCents };
   } catch {
     // Never attach raw environment JSON, endpoint credentials, or secret values.
     throw new OpeningModelConfigurationError();

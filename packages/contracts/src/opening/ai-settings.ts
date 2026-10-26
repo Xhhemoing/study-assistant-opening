@@ -9,6 +9,12 @@ const modelId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
  * else <= OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS (2000).
  */
 export const OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS = 2_147_483_647;
+/** Server-owned daily quota metadata, never an input to workspace settings writes. */
+export const openingDailyQuotaSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("limited"), capCents: z.number().int().nonnegative().max(OPENING_AI_SETTINGS_DAILY_CAP_SCHEMA_MAX_CENTS) }).strict(),
+  z.object({ mode: z.literal("unlimited") }).strict(),
+]);
+export type OpeningDailyQuota = z.infer<typeof openingDailyQuotaSchema>;
 /** Two lowercase identifiers, each 1–32 characters, allowing digits, underscores and hyphens after the first letter. Registry: @aistudy/ai MODEL_TASKS. */
 export const modelTaskKeySchema = z.string().regex(/^[a-z][a-z0-9_-]{0,31}\.[a-z][a-z0-9_-]{0,31}$/);
 export const openingAiSettingsSchema = z.object({
@@ -82,6 +88,7 @@ export const openingAiSettingsResponseSchema = z.object({
   defaultModelId: modelId.nullable(),
   /** Effective daily cap after resolveEffectiveDailyCap. */
   dailyCapCents: z.number().int().nonnegative(),
+  dailyQuota: openingDailyQuotaSchema.optional(),
   /** Env/ops ceiling the UI may not exceed when env cap > 0; otherwise personal ceiling. */
   envCapCents: z.number().int().nonnegative(),
   personalCeilingCents: z.number().int().nonnegative(),

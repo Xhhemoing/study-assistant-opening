@@ -39,6 +39,7 @@ export type AiReadinessFacts = {
   keyedModelCount: number;
   pricingConfigured: boolean;
   effectiveCapCents: number;
+  dailyQuotaMode?: "limited" | "unlimited";
   usedCents: number;
   remainingCents: number;
   reconciledUnknownCount: number;
@@ -80,8 +81,8 @@ export function buildAiReadinessItems(facts: AiReadinessFacts): AiReadinessItem[
     ),
     item(
       "daily_budget",
-      facts.effectiveCapCents > 0,
-      facts.effectiveCapCents > 0
+      facts.dailyQuotaMode === "unlimited" || facts.effectiveCapCents > 0,
+      facts.dailyQuotaMode === "unlimited" ? `测试期每日不限额，今日已用 ${facts.usedCents} 分；单次交互仍有上限。` : facts.effectiveCapCents > 0
         ? `有效日额度 ${facts.effectiveCapCents} 分，今日已用 ${facts.usedCents}，剩余 ${facts.remainingCents}`
         : "日额度未开启（有效额度为 0）",
       "在高级设置 /settings/advanced →「开启并确认每日额度」中设置额度并确认后保存。",
@@ -116,7 +117,7 @@ export function buildAiReadinessItems(facts: AiReadinessFacts): AiReadinessItem[
       facts.availableModelCount > 0
         ? `${facts.availableModelCount} 个模型当前可用`
         : "当前没有可用模型",
-      "同时满足密钥、定价与日额度 > 0 后，模型才会显示为可用。到高级设置 /settings/advanced 开启并确认每日额度。",
+      facts.dailyQuotaMode === "unlimited" ? "模型需要可用密钥和定价。请到 AI 与数据设置检查。" : "同时满足密钥、定价与日额度 > 0 后，模型才会显示为可用。到高级设置 /settings/advanced 开启并确认每日额度。",
     ),
   ];
 }

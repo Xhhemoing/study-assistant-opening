@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsSchema, type OpeningAiSettingsResponse } from "@aistudy/contracts";
 import { effectiveModelRoutes, effectiveTaskRoutes, hasRemovedActiveModel, modelOptions, setTaskRoute, switchRoutingMode, transcriptionModelProblem } from "./ai-settings-model";
 import { AiSettingsForm } from "./ai-settings-panel";
+
+it("shows the server's unlimited daily policy without a personal budget confirmation", () => {
+  const unlimited = { ...data, dailyQuota: { mode: "unlimited" as const } };
+  const html = renderToStaticMarkup(createElement(AiSettingsForm, { data: unlimited, draft: unlimited.settings, busy: false, onChange() {}, onSave() {}, onReset() {} }));
+  expect(html).toContain("测试期每日不限额");
+  expect(html).not.toContain("确认开启每日额度");
+  expect(html).not.toContain("开启并确认每日额度");
+});
 const data: OpeningAiSettingsResponse = {
   defaultModelId: "a", dailyCapCents: 200, envCapCents: 200, personalCeilingCents: 2000, settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false,
   models: [{ id: "a", providerId: "one", providerLabel: "One", label: "Model A", modelName: "a", inputCentsPerMillion: 10, outputCentsPerMillion: 20, availability: "available" },

@@ -20,12 +20,13 @@ function availabilityFor(
     dailyRequestCap?: number | null | undefined;
   },
   dailyCapCents: number,
+  dailyQuotaMode: "limited" | "unlimited" = "limited",
 ): OpeningModelSummary["availability"] {
   if (input.vaultConfigBroken) return "vault_disabled";
   if (!input.apiKey) return "missing_key";
   // Free tier: no spend, bounded by its own request cap instead of the cents cap.
   if (input.billing === "free_tier") return input.dailyRequestCap ? "available" : "pricing_missing";
-  if (dailyCapCents <= 0) return "budget_disabled";
+  if (dailyQuotaMode !== "unlimited" && dailyCapCents <= 0) return "budget_disabled";
   if (input.inputCentsPerMillion <= 0 || input.outputCentsPerMillion <= 0) return "pricing_missing";
   return "available";
 }
@@ -35,6 +36,7 @@ function availabilityFor(
 function serverAvailabilityWithEffectiveCap(
   model: OpeningModelSummary & { apiKey: string; vaultConfigBroken?: boolean | undefined },
   dailyCapCents: number,
+  dailyQuotaMode: "limited" | "unlimited" = "limited",
 ): OpeningModelSummary["availability"] {
   if (
     model.availability === "missing_key" ||
@@ -43,7 +45,7 @@ function serverAvailabilityWithEffectiveCap(
   ) {
     return model.availability;
   }
-  return availabilityFor(model, dailyCapCents);
+  return availabilityFor(model, dailyCapCents, dailyQuotaMode);
 }
 
 type MergedCatalogEntry = OpeningModelSummary & { baseUrl: string; apiKey: string };
@@ -87,13 +89,13 @@ export function resolveMergedDefaultModelId(
 export function mergeOpeningCatalog(
   serverModels: Array<OpeningModelSummary & { baseUrl: string; apiKey: string }>,
   workspaceModels: WorkspaceCatalogModel[],
-  input: { defaultModelId: string | null; dailyCapCents: number },
+  input: { defaultModelId: string | null; dailyCapCents: number; dailyQuotaMode?: "limited" | "unlimited" },
 ): { models: Array<OpeningModelSummary & { baseUrl: string; apiKey: string }>; defaultModelId: string | null; dailyCapCents: number } {
   const capacity = Math.max(0, 32 - serverModels.length);
   const serverIds = new Set(serverModels.map(model => model.id));
   const servers = serverModels.map(model => ({
     ...model,
-    availability: serverAvailabilityWithEffectiveCap(model, input.dailyCapCents),
+    availability: serverAvailabilityWithEffectiveCap(model, input.dailyCapCents, input.dailyQuotaMode),
     source: model.source ?? ("server" as const),
   }));
   const custom = workspaceModels
@@ -103,7 +105,7 @@ export function mergeOpeningCatalog(
     .map(model => ({
     id: model.id, providerId: model.providerId, providerLabel: model.providerLabel,
     label: model.label, modelName: model.modelName,
-    availability: availabilityFor(model, input.dailyCapCents),
+    availability: availabilityFor(model, input.dailyCapCents, input.dailyQuotaMode),
     supportsVision: model.supportsVision,
     supportsAudio: model.supportsAudio ?? false,
     billing: model.billing ?? "metered",
