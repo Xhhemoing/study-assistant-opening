@@ -141,7 +141,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
       <div>
         <h3 className="text-sm font-medium text-text" id="timetable-import-heading">导入课表</h3>
         <p className="mt-1 text-xs leading-6 text-text-3">
-          在本地读取 xlsx 并预览。确认后才写入课表；原始文件不会上传到对象存储。
+          在本地读取 xlsx 并预览。确认后才保存到课表；原始文件不会上传到对象存储。
         </p>
       </div>
       <label className="block space-y-1.5">

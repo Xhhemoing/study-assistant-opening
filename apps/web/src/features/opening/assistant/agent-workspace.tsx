@@ -2,11 +2,15 @@
 
 import type { ConversationSummary } from "@aistudy/contracts";
 import { PanelLeftClose, PanelLeftOpen, Plus, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { createOpeningApi } from "../client/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui } from "../v3/ui/controls";
 import { AssistantView } from "./assistant-view";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { LoadError, LoadingRows } from "../design/ui";
+import { AssistantSession } from "./assistant-session";
+import { resolveBoundConversationContext } from "./bound-conversation";
+import type { StudyConversationContext } from "./study-conversation-context";
 
 /** 会话列表按最近更新排序，可按标题和最后一句过滤 */
 export function filterConversations(rows: readonly ConversationSummary[], query: string): ConversationSummary[] {
@@ -25,8 +29,9 @@ export function agentStartsFresh(selectedId: string | null): boolean {
 }
 
 /** 地址里的 ?conversation= 与当前会话同步（不新增历史记录、不触发路由刷新） */
-function syncConversationUrl(id: string | null) {
+function syncConversationUrl(id: string | null, clearContext = false) {
   const url = new URL(window.location.href);
+  if (clearContext) url.search = "";
   if (id) url.searchParams.set("conversation", id); else url.searchParams.delete("conversation");
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
@@ -35,14 +40,17 @@ function syncConversationUrl(id: string | null) {
  * Agent 全页（导航「助理」）：左 会话列表，中 对话（回答前查了哪些记录以步骤行显示），右 待确认的产出与 AI 记忆。
  * 不新增后台能力：对话、只读查询工具、需确认的写入提案都沿用既有接口；页面里的「问 AI」仍是右侧抽屉快问。
  */
-export function AgentWorkspace({ initialConversationId = null }: { initialConversationId?: string | null }) {
+type Selection = { id: string | null; key: number; context?: StudyConversationContext; error?: string };
+
+export function AgentWorkspace({ initialConversationId = null, initialContext, initialContextError }: { initialConversationId?: string | null; initialContext?: StudyConversationContext; initialContextError?: string }) {
   const api = useMemo(() => createOpeningApi(), []);
   const [rows, setRows] = useState<ConversationSummary[] | null>(null);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useState("");
   const [railOpen, setRailOpen] = useState(true);
   // key 变化才重挂对话：选择会话 / 新建对话。对话内部新建出的会话只同步列表与地址，不重挂。
-  const [selection, setSelection] = useState<{ id: string | null; key: number }>({ id: initialConversationId, key: 0 });
+  const [selection, setSelection] = useState<Selection>({ id: initialConversationId, key: 0, context: initialContext, error: initialContextError });
+  const selectionRef = useRef(selection);
   const [current, setCurrent] = useState<string | null>(initialConversationId);
 
   const refresh = useCallback(async () => {
@@ -52,15 +60,18 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
   useEffect(() => { void refresh(); }, [refresh]);
 
   const select = (id: string | null) => {
-    setSelection(value => ({ id, key: value.key + 1 }));
+    const next = { id, key: selectionRef.current.key + 1 };
+    selectionRef.current = next;
+    setSelection(next);
     setCurrent(id);
-    syncConversationUrl(id);
+    syncConversationUrl(id, true);
   };
-  const onConversationChange = useCallback((id: string | null) => {
+  const onConversationChange = (id: string | null) => {
+    if (selectionRef.current.key !== selection.key) return;
     setCurrent(id);
     syncConversationUrl(id);
     if (id) void refresh();
-  }, [refresh]);
+  };
 
   const visible = filterConversations(rows ?? [], query);
 
@@ -95,9 +106,33 @@ export function AgentWorkspace({ initialConversationId = null }: { initialConver
       </section>
       <div className="relative flex min-w-0 flex-1 flex-col">
         {!railOpen ? <button type="button" className={`${ui.iconSm} absolute left-2 top-2 z-30 hidden lg:inline-grid`} aria-label="展开会话列表" onClick={() => setRailOpen(true)}><PanelLeftOpen size={15} aria-hidden="true" /></button> : null}
-        <AssistantView key={selection.key} agent initialConversationId={selection.id} startFresh={agentStartsFresh(selection.id)}
-          initialTitle="助理" onConversationChange={onConversationChange} />
+        {selection.id || selection.context || selection.error ? <OwnedAgentSession key={selection.key} selection={selection} api={api} onConversationChange={onConversationChange} />
+          : <AssistantView key={selection.key} agent startFresh initialTitle="助理" onConversationChange={onConversationChange} />}
       </div>
     </div>
   );
+}
+
+/** Resolve the owned history before mounting a composer; AssistantView rechecks its own snapshot. */
+function OwnedAgentSession({ selection, api, onConversationChange }: { selection: Selection; api: OpeningApi; onConversationChange: (id: string | null) => void }) {
+  const [result, setResult] = useState<ReturnType<typeof resolveBoundConversationContext> | null>(null);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    if (!selection.id || selection.error) return;
+    const controller = new AbortController();
+    setResult(null);
+    void api.listTurns(selection.id, controller.signal).then(turns => {
+      if (controller.signal.aborted) return;
+      setResult(turns.some(turn => turn.conversationId !== selection.id)
+        ? { error: "读取到的对话与所选历史不一致，请重新读取。" }
+        : resolveBoundConversationContext(turns, selection.context));
+    }).catch(reason => {
+      if (!controller.signal.aborted) setResult({ error: userFacingMessage(reason, "对话背景暂时无法读取，请重试。") });
+    });
+    return () => controller.abort();
+  }, [api, selection.id, selection.context, selection.error, revision]);
+  const error = selection.error ?? result?.error;
+  if (error) return <div className="p-5"><LoadError message={error} onRetry={() => setRevision(value => value + 1)} /></div>;
+  if (selection.id && !result) return <div className="p-5"><LoadingRows label="正在恢复对话背景…" /></div>;
+  return <AssistantSession agent embedded={false} entry={{ key: selection.id ?? "new", label: "助理", conversation: selection.id, context: result?.context ?? selection.context, fresh: !selection.id }} onConversationChange={onConversationChange} />;
 }

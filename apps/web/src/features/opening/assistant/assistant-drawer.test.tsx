@@ -9,10 +9,12 @@ import { openAssistantDrawer } from "./assistant-entry";
 let pathname = "/opening/today";
 const query = new URLSearchParams();
 let bound: (CurrentStudyContext & { pathname: string }) | null = null;
+const reports = vi.hoisted(() => new Map<string, ((id: string | null) => void) | undefined>());
 vi.mock("./current-study-context", () => ({ useCurrentStudyContext: () => bound }));
 vi.mock("next/navigation", () => ({ usePathname: () => pathname, useSearchParams: () => query }));
-vi.mock("./assistant-view", () => ({ AssistantView: ({ studyContext, studyContextError, implicitResumeVersion, promptRequest, startFresh }: { studyContext?: { fragment?: string }; studyContextError?: string; implicitResumeVersion?: number; startFresh?: boolean; promptRequest?: { id: string; text: string } }) => {
+vi.mock("./assistant-view", () => ({ AssistantView: ({ studyContext, studyContextError, implicitResumeVersion, promptRequest, startFresh, initialConversationId, onConversationChange }: { studyContext?: { fragment?: string }; studyContextError?: string; implicitResumeVersion?: number; startFresh?: boolean; promptRequest?: { id: string; text: string }; initialConversationId?: string | null; onConversationChange?: (id: string | null) => void }) => {
   const [draft, setDraft] = useState("");
+  reports.set(studyContext?.fragment ?? initialConversationId ?? "ordinary", onConversationChange);
   if (studyContextError) return <p role="alert">{studyContextError}</p>;
   return <><p data-prompt={promptRequest?.id} data-fresh={String(startFresh)}>{promptRequest?.text}</p><p>{studyContext?.fragment ?? "自由交流"}</p><button data-draft data-resume-version={implicitResumeVersion} type="button" onClick={() => setDraft(value => value + "保留")}>{draft || "空草稿"}</button></>;
 } }));
@@ -24,6 +26,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   pathname = "/opening/today";
   bound = null;
+  reports.clear();
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -37,6 +40,57 @@ async function render() { await act(async () => root.render(<AssistantDrawer />)
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); }
 
 describe("global assistant drawer lifetime", () => {
+  const idA = "11111111-1111-4111-8111-111111111111";
+  const idB = "22222222-2222-4222-8222-222222222222";
+  const fullPageHref = () => document.querySelector('[aria-label="在助理全页中打开"]')?.getAttribute("href");
+  it("tracks restored, newly created and cleared conversation reports from its session", async () => {
+    await render();
+    await act(async () => openAssistantDrawer());
+    expect(fullPageHref()).toBe("/opening/agent");
+    await act(async () => reports.get("ordinary")?.(idA));
+    expect(fullPageHref()).toBe(`/opening/agent?conversation=${idA}`);
+    await act(async () => reports.get("ordinary")?.(idB));
+    expect(fullPageHref()).toBe(`/opening/agent?conversation=${idB}`);
+    await act(async () => reports.get("ordinary")?.(null));
+    expect(fullPageHref()).toBe("/opening/agent");
+  });
+  it("starts with an explicit conversation identity before any session callback", async () => {
+    await render();
+    await act(async () => openAssistantDrawer(`/opening/assistant?conversation=${idA}`));
+    expect(fullPageHref()).toBe(`/opening/agent?conversation=${idA}`);
+    await act(async () => reports.get(idA)?.(null));
+    expect(fullPageHref()).toBe("/opening/agent");
+  });
+  it("keeps a late background session report from replacing the active session link", async () => {
+    await render();
+    await act(async () => openAssistantDrawer(`/opening/assistant?conversation=${idA}`));
+    const reportA = reports.get(idA);
+    await act(async () => openAssistantDrawer(`/opening/assistant?conversation=${idB}`));
+    await act(async () => reports.get(idB)?.(idB));
+    await act(async () => reportA?.(idA));
+    expect(fullPageHref()).toBe(`/opening/agent?conversation=${idB}`);
+    const select = document.querySelector<HTMLSelectElement>('[aria-label="切换本次提问"]')!;
+    await act(async () => { select.value = select.options[0]!.value; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(fullPageHref()).toBe(`/opening/agent?conversation=${idA}`);
+  });
+  it("does not put an invalid conversation id in the full-page link", async () => {
+    await render();
+    await act(async () => openAssistantDrawer("/opening/assistant?conversation=invalid"));
+    expect(fullPageHref()).toBe("/opening/agent");
+  });
+  it("carries the exact study context alongside the current conversation into the full page", async () => {
+    await render();
+    await act(async () => openAssistantDrawer(`/opening/assistant?courseId=${idA}&activityId=${idA}&blockId=${idB}&contentVersion=2&label=本题&returnTo=%2Fopening%2Ftoday`));
+    await act(async () => reports.get("ordinary")?.(idA));
+    const target = new URL(fullPageHref()!, "https://study.invalid");
+    expect(target.pathname).toBe("/opening/agent");
+    expect(Object.fromEntries(target.searchParams)).toEqual({ courseId: idA, activityId: idA, blockId: idB, contentVersion: "2", label: "本题", returnTo: "/opening/today", conversation: idA });
+  });
+  it("keeps a blocked context blocked at the full-page entry", async () => {
+    await render();
+    await act(async () => openAssistantDrawer("/opening/assistant?attemptId=invalid"));
+    expect(new URL(fullPageHref()!, "https://study.invalid").searchParams.get("contextError")).toBe("1");
+  });
   it("retains the same draft after closing and navigation, with no hidden dialog in the document", async () => {
     await render();
     await act(async () => openAssistantDrawer());

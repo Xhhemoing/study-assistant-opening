@@ -212,16 +212,16 @@ describe("exam sprint UI boundaries", () => {
       overview.currentAttempt = { ...attempt, answer: null, answeredAt: null, feedback: null };
       const html = renderToStaticMarkup(createElement(ActiveRun, { overview, disabled: false, send() {} }));
       expect(html).toContain("卡住了就看提示");
-      expect(html).not.toMatch(/不计独立|题族|曝光|资格/);
+      expect(html).not.toMatch(/不计独立|题族|曝光|记录的使用条件变化|资格/);
       overview.activeRun = null; overview.state.runs[0]!.completedAt = "2026-10-21T00:00:00Z";
-      expect(renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send() {} }))).not.toMatch(/不计独立|题族|曝光|资格/);
+      expect(renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send() {} }))).not.toMatch(/不计独立|题族|曝光|记录的使用条件变化|资格/);
     } finally { diagnostics.enabled = true; }
   });
 
   it("distinguishes repeated question-family evidence from using help", () => {
     const repeated = { ...attempt, independent: false };
     const html = renderToStaticMarkup(createElement(AttemptFeedback, { attempt: repeated, disabled: false, send: () => undefined }));
-    expect(html).toContain("当前不计新增独立证据（重复、帮助或资格变化）");
+    expect(html).toContain("本次暂不计入新的独立作答依据（重复练习、使用过帮助或记录的使用条件变化）");
     expect(html).not.toContain("含帮助");
   });
 

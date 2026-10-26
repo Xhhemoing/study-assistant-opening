@@ -5,6 +5,7 @@ it("maps old fragments to their owning page while preserving query values", () =
   expect(settingsHashTarget("/opening/settings", "#planning", "?task=a&tag=1&tag=2")).toBe("/opening/settings/learning?task=a&tag=1&tag=2&planning=1#planning");
   expect(settingsHashTarget("/opening/settings", "#preferences")).toBe("/opening/settings/learning#preferences");
   expect(settingsHashTarget("/opening/settings", "#daily-budget", "?task=a")).toBe("/opening/settings/ai?task=a#daily-budget");
+  expect(settingsHashTarget("/opening/settings", "#memory", "?tag=1&tag=2")).toBe("/opening/settings/ai?tag=1&tag=2#memory");
   expect(settingsHashTarget("/opening/settings", "#appearance")).toBeNull();
   expect(settingsHashTarget("/opening/settings", "#https://external.test")).toBeNull();
   expect(settingsHashTarget("/opening/settings", "#constructor")).toBeNull();

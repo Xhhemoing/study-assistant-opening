@@ -1,6 +1,6 @@
 const sections: Record<string, "learning" | "ai"> = {
   planning: "learning", preferences: "learning", intervention: "learning",
-  "quick-model-setup": "ai", connections: "ai", "daily-budget": "ai", export: "ai", developer: "ai",
+  "quick-model-setup": "ai", connections: "ai", "daily-budget": "ai", export: "ai", developer: "ai", memory: "ai",
 };
 
 export function settingsHashTarget(basePath: string, hash: string, search = ""): string | null {

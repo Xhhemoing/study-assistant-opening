@@ -54,7 +54,7 @@ describe("course learning records", () => {
 
   it("keeps missing qualification information pending even when a summary exists", () => {
     const html = renderToStaticMarkup(createElement(CourseLearningRecords, { ...props, state: "ready", summary: summary.map((item) => ({ ...item, evidenceEligibility: [] })) }));
-    expect(html).toContain("资格信息尚未提供，先保留");
+    expect(html).toContain("学习记录的使用条件尚未提供，先保留");
   });
 
   it("reports empty evidence only after a successful read", () => {
@@ -65,9 +65,9 @@ describe("course learning records", () => {
 });
 
 it("offers an explicit refresh after projection repair stops without progress", () => {
-  const state = { ...emptyCourseSummary(), status: "updating" as const, pendingProjectionCount: 4, notice: "资格更新暂未推进，请手动刷新摘要。" };
+  const state = { ...emptyCourseSummary(), status: "updating" as const, pendingProjectionCount: 4, notice: "学习记录核对暂未完成，请手动刷新摘要。" };
   const html = renderToStaticMarkup(createElement(CourseSummaryNotice, { state, onRefresh: () => undefined }));
-  expect(html).toContain("资格更新暂未推进，请手动刷新摘要");
+  expect(html).toContain("学习记录核对暂未完成，请手动刷新摘要");
   expect(html).toContain("刷新摘要");
 });
 
@@ -146,7 +146,7 @@ it("keeps source authority visible but hides identifiers and eligibility diagnos
   expect(html).toContain("已保存的观察");
   expect(html).not.toContain(observationId);
   expect(html).not.toContain("学习证据诊断");
-  expect(html).not.toContain("资格与原因");
+  expect(html).not.toContain("学习记录的使用条件与原因");
   expect(html).not.toContain("<details");
 });
 

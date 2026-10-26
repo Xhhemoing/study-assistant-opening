@@ -199,3 +199,52 @@ describe("legacy API observation does not change request handling", () => {
   });
 });
 
+const sprintCourse = "11111111-1111-4111-8111-111111111111";
+describe("legacy sprint compatibility", () => {
+  it.each([["", "GET"], ["/study", "GET"], ["", "HEAD"], ["/study", "HEAD"]])("permanently redirects the old course%s entry via %s without losing query context", (suffix, method) => {
+    const input = new NextRequest(`${publicBase}/opening/courses/${sprintCourse}${suffix}?mode=sprint&conversation=kept&filter=a&filter=b&courseId=old`, { method });
+    const response = middleware(input);
+    expect(response.status).toBe(308);
+    const target = new URL(response.headers.get("location")!);
+    expect(target.pathname).toBe("/opening/sprint");
+    expect(target.searchParams.get("courseId")).toBe(sprintCourse);
+    expect(target.searchParams.get("conversation")).toBe("kept");
+    expect(target.searchParams.getAll("filter")).toEqual(["a", "b"]);
+    expect(target.searchParams.has("mode")).toBe(false);
+    expect(middleware(new NextRequest(target)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each(["http://127.0.0.1:3000", "http://[::1]:3000"])("keeps the request authority through both legacy sprint redirects: %s", origin => {
+    vi.stubEnv("__NEXT_NO_MIDDLEWARE_URL_NORMALIZE", "1");
+    const first = middleware(new NextRequest(`${origin}/learn/courses/${sprintCourse}/study?mode=sprint&conversation=kept&filter=a&filter=b`));
+    expect(first.status).toBe(308);
+    const course = new URL(first.headers.get("location")!);
+    expect(course.origin).toBe(origin);
+    expect(course.pathname).toBe(`/opening/courses/${sprintCourse}/study`);
+    const second = middleware(new NextRequest(course));
+    expect(second.status).toBe(308);
+    const canonical = new URL(second.headers.get("location")!);
+    expect(canonical.origin).toBe(origin);
+    expect(canonical.pathname).toBe("/opening/sprint");
+    expect(canonical.searchParams.get("courseId")).toBe(sprintCourse);
+    expect(canonical.searchParams.get("conversation")).toBe("kept");
+    expect(canonical.searchParams.getAll("filter")).toEqual(["a", "b"]);
+    expect(middleware(new NextRequest(canonical)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each([
+    `/opening/courses/${sprintCourse}/study?mode=practice`,
+    `/opening/courses/${sprintCourse}/study?mode=sprint&mode=practice`,
+    "/opening/courses/not-a-course/study?mode=sprint",
+    `/opening/courses/${sprintCourse}/exam?mode=sprint`,
+  ])("keeps other or ambiguous course entries unchanged: %s", pathname => {
+    expect(middleware(pageRequest(pathname)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each(["POST", "PUT"])("does not redirect a %s sent to a legacy sprint page", method => {
+    const response = middleware(new NextRequest(`${publicBase}/opening/courses/${sprintCourse}/study?mode=sprint`, { method }));
+    expect(response.headers.get("location")).toBeNull();
+    expect(response.headers.get("x-middleware-next")).toBe("1");
+  });
+});
+

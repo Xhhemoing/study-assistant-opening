@@ -53,7 +53,7 @@ const REASON_LABELS: Record<string, string> = {
   delayed_check_too_early: "本次开始时间早于延迟检验要求",
   delayed_prior_answer_policy_unknown: "延迟检验对既往答案曝光的要求不明",
   delayed_requires_unseen_problem: "延迟检验要求未见答案的新题",
-  delayed_prerequisite_not_met: "尚未满足延迟检验的前置资格",
+  delayed_prerequisite_not_met: "尚未满足延迟检验的前置条件",
   delayed_prerequisite_unknown: "还不确定是否满足延迟复查的条件",
 };
 

@@ -7,10 +7,10 @@ import { secondaryButtonClass } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export function memorySourceSummary(sourceTurnIds: string[], sourceIds?: string[]): string {
-  const turns = `来源轮次：${sourceTurnIds.length ? sourceTurnIds.join("、") : "无"}`;
+  const turns = `来源消息：${sourceTurnIds.length} 条`;
   return sourceIds === undefined
     ? turns
-    : `${turns} · 关联材料：${sourceIds.length ? sourceIds.join("、") : "无"}`;
+    : `${turns} · 关联资料：${sourceIds.length} 份`;
 }
 
 export function formatMemoryTime(value: string): string {

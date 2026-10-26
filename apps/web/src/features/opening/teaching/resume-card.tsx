@@ -206,7 +206,7 @@ export function ResumeCardView({
           role="status"
           data-teaching-needs-check="true"
         >
-          主讲内容待核对：内容已发布，来源校验尚未完成。
+          主讲内容待核对：内容已发布，资料引用仍待核对。
         </div>
       ) : null}
 

@@ -41,7 +41,7 @@ export function CourseHistoryPageView({ state, onMore, onRefresh, onChanged }: {
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="text-xs leading-5 text-text-3">{state.snapshotRevision !== null
-        ? `${diagnostics ? `固定快照版本 ${state.snapshotRevision} · ` : ""}已加载 ${state.observations.length} / ${state.totalCount} 条当前可见记录`
+        ? `${diagnostics ? `本次读取版本 ${state.snapshotRevision} · ` : ""}已加载 ${state.observations.length} / ${state.totalCount} 条当前可见记录`
         : "历史尚未读取"}。新作答与修订请刷新查看。</p>
       <button type="button" className={secondaryButtonClass} disabled={state.status === "loading"} onClick={onRefresh}>刷新历史</button>
     </div>

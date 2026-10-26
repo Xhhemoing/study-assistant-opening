@@ -5,6 +5,7 @@ const env = buildOpeningE2eEnvironment();
 Object.assign(process.env, env);
 export default defineConfig({
   testDir: "./tests/e2e", testMatch: "opening-*.spec.ts",
+  testIgnore: "**/opening-smoke.spec.ts", // New-account acceptance uses its own full-stack environment.
   fullyParallel: false, workers: 1, timeout: 180_000,
   expect: { timeout: 15_000 },
   outputDir: "test-results/opening-isolated",

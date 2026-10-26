@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAllowedCookieAuthOrigin } from "./features/opening/access-policy";
 import { recordLegacyApiRequest } from "./features/opening/legacy-api-observation";
+import { sprintCourseId } from "./features/opening/exam-sprint/sprint-course-route";
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -42,6 +43,16 @@ export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string)
 export function middleware(request: NextRequest) {
   recordLegacyApiRequest(request, { publicBaseUrl: process.env.PUBLIC_BASE_URL, build: process.env.AISTUDY_COMMIT });
   const pathname = request.nextUrl.pathname;
+  const legacySprint = /^\/opening\/courses\/([^/]+)(?:\/study)?\/?$/.exec(pathname);
+  const sprintId = legacySprint ? sprintCourseId({ courseId: legacySprint[1] }) : null;
+  if ((request.method === "GET" || request.method === "HEAD") && sprintId
+    && request.nextUrl.searchParams.getAll("mode").length === 1 && request.nextUrl.searchParams.get("mode") === "sprint") {
+    const target = new URL(request.url);
+    target.pathname = "/opening/sprint";
+    target.searchParams.delete("mode");
+    target.searchParams.set("courseId", sprintId);
+    return NextResponse.redirect(target, 308);
+  }
   const legacyRule = LEGACY_OPENING_REDIRECTS.find(candidate => candidate.test(pathname));
   // Retired pages have no UI module left, so old bookmarks resolve in every environment.
   if (legacyRule) {

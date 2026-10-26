@@ -137,6 +137,14 @@ npm run test:handler
 npm run build
 ```
 
+The separate user-run `npm run test:browser:smoke` checks the WP0.8 fresh-account
+journey against an already running full stack. It requires `E2E_BASE_URL` and
+the intended full merged `AISTUDY_COMMIT`; it does not start services, reset data,
+seed an owner, or mock business APIs. The new spec is excluded from the two
+existing isolated configurations, whose existing checks remain unchanged.
+See the [five-step manual checklist](../quality/2026-10-06-opening-browser-acceptance-checklist.md#wp08-新账户五步冒烟2026-10-25待用户运行).
+Its browser execution and screenshots remain pending until the user runs it.
+
 Local browser E2E is performed by the user with `npm run test:browser` and needs
 Playwright Chromium plus an isolated E2E database whose name ends in `_e2e`.
 The existing CI browser step remains required. Neither a scoped check nor a

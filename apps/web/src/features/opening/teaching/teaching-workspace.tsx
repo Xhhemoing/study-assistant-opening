@@ -496,7 +496,7 @@ export function TeachingWorkspace({
     { id: "materials", label: "资料", content: <>{previousToolsAction}{legacyPanels.find(item => item.id === "materials")?.content}
       {diagnostics ? <details className="mt-4 space-y-2 text-xs leading-6 text-text-3"><summary className="cursor-pointer">诊断信息</summary>
         <p>阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
-        <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p><p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
+        <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p>{/* learner-copy-ignore: version metadata appears only inside explicitly enabled diagnostics */}<p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
         <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
         <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
       </details> : null}</> },
@@ -543,7 +543,7 @@ export function TeachingWorkspace({
     {liveActivity.generateStatus === "needs_check" ? <p className="mb-4 text-xs leading-6 text-text-3" role="note" data-teaching-needs-check="true">这节内容还在核对引用，可以先学。</p> : null}
     {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>{studentCopy.lessonUpdated}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>继续学习</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}：{workspaceConflict.message}</p></details> : null}</div> : null}
     {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-danger" role="alert"><p>{studentCopy.lessonRetry}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>{studentCopy.retry}</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{rereadError ?? positionError}</p></details> : null}</div> : null}
-    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
+    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary>{/* learner-copy-ignore: unsupported schema details appear only inside explicitly enabled diagnostics */}<p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
     <div className="min-h-0 flex-1 pb-4"><StudyToolsPanel showToolbar={false} fillHeight preferContentOnNarrowEntry={originalConversationId !== null} contentClassName="px-4 sm:px-8" toolbarClassName="px-4 sm:px-8" panels={panels} activePanel={panel} onPanelChange={changePanel} suspended={focusMode}>
       <ContentGrid><div ref={contentRef} className="min-w-0 space-y-6 pb-4" data-teaching-blocks="true" data-lesson-shortcuts="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
         {schemaOk ? units.map(unit => {

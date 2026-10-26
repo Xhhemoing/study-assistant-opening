@@ -69,7 +69,7 @@ describe("intervention decision context helpers", () => {
 });
 
 describe("PreferenceControlsView", () => {
-  it("shows effective layer, session≠permanent banner, reset, and forbids nag/dwell UI", () => {
+  it("shows effective preferences, explains the editing scope, and excludes nag/dwell controls", () => {
     const data: InterventionSettingsResponse = {
       ...baseResponse(),
       sessionOverride: { quietMode: true },
@@ -91,15 +91,13 @@ describe("PreferenceControlsView", () => {
     expect(html).toContain('data-winning-layer="session"');
     expect(html).toContain("data-session-temp-banner");
     expect(html).toContain("不会写回全局或课程永久设置");
-    expect(html).toContain("本课临时覆盖（优先）");
+    expect(html).toContain("这里的设置对所有课程生效");
     expect(html).toContain("安静模式");
     expect(html).toContain("保存介入偏好");
     expect(html).toContain("重置为默认");
-    expect(html).toContain("求助不等于打断");
+    expect(html).toContain("你主动提出的问题仍会得到回应");
     expect(html).not.toContain('data-intervention-typing="true"');
     expect(html).not.toContain('data-intervention-reject="true"');
-    expect(html).toContain('data-no-nag-interval="true"');
-    expect(html).toContain('data-no-dwell-stuck="true"');
     expect(html).not.toContain("appendDecision");
     expect(html).not.toMatch(/\bmustAskEvery\b|\bintervalMinutes\b|\bdwellStuck\b/);
     expect(html).not.toMatch(/type="number"[^>]*nag|nag-interval-input/);
@@ -123,7 +121,7 @@ describe("PreferenceControlsView", () => {
     expect(html).toContain('data-intervention-scope="session"');
     expect(html).toContain("保存本课临时");
     expect(html).toContain("清除本课临时");
-    expect(html).toContain("与永久设置分开保存");
+    expect(html).toContain("这里的调整只影响当前这节课");
     expect(html).not.toContain("我正在输入");
   });
 });
@@ -150,6 +148,5 @@ describe("PreferenceControls container", () => {
     expect(html).toContain('data-preference-controls="true"');
     expect(html).toContain("正在读取介入偏好");
     expect(html).not.toContain("data-decision-persist-gap");
-    expect(html).toContain('data-no-nag-interval="true"');
   });
 });

@@ -5,6 +5,7 @@ const e2eDatabaseUrl = process.env.E2E_DATABASE_URL ?? "postgres://aistudy:aistu
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  testIgnore: "**/opening-smoke.spec.ts", // Dedicated user-run full-stack acceptance config.
   fullyParallel: false,
   workers: 1,
   timeout: 90_000,

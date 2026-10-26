@@ -8,6 +8,7 @@
   "include": [
     "playwright.config.ts",
     "playwright.opening.config.mts",
+    "playwright.opening-smoke.config.mts",
     "playwright.opening-restart.config.mts",
     "scripts/db-reset-e2e.ts",
     "tests/e2e/**/*.ts",

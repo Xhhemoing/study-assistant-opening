@@ -6,8 +6,9 @@
 | --- | --- |
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | Web / Worker 目录标识 `189546c7`；2026-10-26 只读健康检查为 ok，但接口未返回 commit，不等于完整发布验收 |
-| 最新已推候选 | [WP1.1–WP2.3 整改分支链](https://github.com/Xhhemoing/study-assistant-opening/tree/refactor/wp2.3-feature-switches) @ `fd157787`；尚未合并/部署 |
-| 当前工作 | WP2.5 收口：开放 PR 仅余以下 2 项；不提前执行缺少前置合入的 WP2.4 |
+| 最新候选 | [WP0–WP2.3 集成分支](https://github.com/Xhhemoing/study-assistant-opening/tree/integrate/wp0-wp2-remediation)（本文件所属提交）；WP0.6/0.8 含待执行准备，尚未合并/部署 |
+| 候选检查 | 定向单元/工具测试、Web/E2E 类型、改动 lint、边界/契约/文案检查、Web 构建通过；12 组实际 HTTP 跳转及 2 项 Origin 拒绝通过，独立只读复审无剩余阻断 |
+| 当前工作 | 集成已补齐助理恢复、按需建议栏、AI 记忆入口、文案与旧冲刺链接；保留收件箱及三页设置，不提前执行缺少前置合入的 WP2.4 |
 
 ## 本轮开放 PR
 
@@ -20,7 +21,7 @@
 
 - 始终最多 2 个开放功能 PR；#119 已由主干覆盖而关闭，已合并的 `release/opening-final-20261025` 已删除，其提交仍在主干。下列 9 项仅延期，保留分支及原 PR，不算完成。
 - WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；合并前仍需最新主干与 WP0.8 验证。
-- 浏览器/视觉/E2E 由用户验收；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP测试推导。
+- [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
 - 测试期每日不限额已实现；运行环境启用及真实模型调用待验证，尚未修改线上配置。
 - [旧 API 观察](operations/legacy-api-observation.md)已实现但未部署，连续 30 天日志窗口尚未开始，不删除接口。
 - [开关盘点](operations/feature-switch-inventory.md)控制输入 22→19；仅源代码变更，未修改线上配置。

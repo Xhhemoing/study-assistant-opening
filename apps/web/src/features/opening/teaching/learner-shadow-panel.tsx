@@ -15,13 +15,13 @@ export const learnerShadowComparisonSchema = z.object({ mode: z.literal("shadow"
 export type LearnerShadowComparison = z.infer<typeof learnerShadowComparisonSchema>;
 const names = { "classical-bkt": "经典 BKT", pfa: "PFA", "smoothed-frequency": "平滑历史正确率" };
 const excludedLabels: Record<string, string> = { missing_family_or_target: "缺少正式题族或目标", family_previously_seen: "此题族此前已发放",
-  pending_or_retracted: "尚未作答或已撤回", outcome_ineligible: "表现资格不足", prediction_not_before_answer: "预测未早于答案",
+  pending_or_retracted: "尚未作答或已撤回", outcome_ineligible: "作答不满足比较条件", prediction_not_before_answer: "预测未早于答案",
   invalidated_history: "预测依据已修订或失效" };
 const score = (value: number | null) => value === null ? "样本不足" : value.toFixed(3);
 
 export function LearnerShadowComparisonBody({ report }: { report: LearnerShadowComparison }) {
   return <div className="space-y-3 pt-3 text-xs leading-6 text-text-2">
-    <p>仅实验，三个模型均未校准。这里只比较作答前保存的预测，不用于调整学习安排、判断掌握或签发证据资格。</p>
+    <p>仅实验，三个模型均未校准。这里只比较作答前保存的预测，不用于调整学习安排、判断掌握或决定哪些作答可计入学习结果。</p>
     <p>可比较样本：{report.count} 次，覆盖 {report.families.length} 个题族。预先设置的“可独立推进”预测阈值为 {(report.advanceThreshold * 100).toFixed(0)}%；此阈值不是经验证的学习能力界线。</p>
     <div className="overflow-x-auto"><table className="w-full min-w-[36rem] border-collapse text-left">
       <caption className="sr-only">未校准模型在同一组保留作答上的实验比较</caption>
@@ -42,13 +42,13 @@ export function LearnerShadowPanel({ courseId, revision = 0 }: { courseId?: stri
     const controller = new AbortController();
     setReport(null); setError("");
     void fetch(`/api/opening/learning/shadow-comparison${courseId ? `?courseId=${encodeURIComponent(courseId)}` : ""}`, { cache: "no-store", signal: controller.signal })
-      .then(async response => { if (!response.ok) throw new Error("影子实验比较暂时无法读取"); return learnerShadowComparisonSchema.parse(await response.json()); })
+      .then(async response => { if (!response.ok) throw new Error("预测对照实验暂时无法读取"); return learnerShadowComparisonSchema.parse(await response.json()); })
       .then(value => { if (!controller.signal.aborted) setReport(value); })
-      .catch(() => { if (!controller.signal.aborted) setError("影子实验比较暂时无法读取"); });
+      .catch(() => { if (!controller.signal.aborted) setError("预测对照实验暂时无法读取"); });
     return () => controller.abort();
   }, [expanded, courseId, revision]);
   return <details className="border-t border-line pt-3 text-xs text-text-2" onToggle={event => setExpanded(event.currentTarget.open)}>
-    <summary className="cursor-pointer py-1 font-medium">影子预测比较 · 仅实验，未校准</summary>
+    <summary className="cursor-pointer py-1 font-medium">预测对照 · 仅实验，未校准</summary>
     {error ? <p role="status" className="pt-3 leading-6">{error}；未将读取失败当成没有样本。</p> : report ? <LearnerShadowComparisonBody report={report} /> : expanded ? <p role="status" className="pt-3">正在读取…</p> : null}
   </details>;
 }

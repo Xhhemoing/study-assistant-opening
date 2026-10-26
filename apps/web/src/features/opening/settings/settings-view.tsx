@@ -1,7 +1,7 @@
 "use client";
 
 import type { LearningPreferences } from "@aistudy/contracts";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { LoaderCircle, RefreshCw, Save } from "lucide-react";
 import { LoadingRows, PageHeading, ui } from "../design/ui";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
@@ -12,11 +12,14 @@ import { AppearanceSettings, DiagnosticsSettings } from "./appearance-settings";
 import { AdvancedSettingsView } from "./advanced-settings-view";
 import { disabledLearningPreferences, fetchWorkspacePreferences, learningSwitches, putWorkspacePreferences } from "./settings-shared";
 import { SettingsHashRedirect } from "./settings-hash-redirect";
+import { createOpeningApi } from "../client/api";
+import { MemoryPanel } from "../assistant/memory-panel";
 
 export type SettingsSection = "appearance" | "learning" | "ai";
 const sections = [{ id: "appearance", label: "外观", suffix: "" }, { id: "learning", label: "学习", suffix: "/learning" }, { id: "ai", label: "AI 与数据", suffix: "/ai" }] as const;
 
 export function SettingsView({ basePath = "/settings", section = "appearance", planning }: { basePath?: string; section?: SettingsSection; planning?: ReactNode } = {}) {
+  const memoryApi = useMemo(() => createOpeningApi(), []);
   return <div className="min-w-0 bg-bg">
     <PageHeading title="设置" />
     <SettingsHashRedirect basePath={basePath} />
@@ -33,6 +36,9 @@ export function SettingsView({ basePath = "/settings", section = "appearance", p
             <a className={ui.quiet} href="#daily-budget">每日用量</a>
           </section>
           <DiagnosticsSettings />
+          <section id="memory" aria-label="AI 记忆设置" className="scroll-mt-6 border-b border-line pb-6">
+            <MemoryPanel api={memoryApi} />
+          </section>
           <AdvancedSettingsView basePath={basePath} embedded />
         </>}
       </div>
