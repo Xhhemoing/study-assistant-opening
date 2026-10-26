@@ -256,6 +256,24 @@ it("restores the saved conversation draft before deciding whether an old failure
   } finally { store.remove(scope); clearIdentity(); }
 });
 
+it("keeps a new Today prompt separate from a stored conversation draft and sends nothing automatically", async () => {
+  const store = createQuestionDraftStore();
+  const scope = `${assistantContextScope(undefined)}::${conversationId}:::`;
+  store.write(scope, "原会话尚未发送的草稿");
+  const { api } = resumableApi("failed");
+  api.submitTurn = vi.fn<OpeningApi["submitTurn"]>();
+  api.createConversation = vi.fn<OpeningApi["createConversation"]>();
+  await act(async () => root.render(<AssistantView api={api} embedded startFresh promptRequest={{ id: "today-1", text: "独立新问题" }} />));
+  await advance(0);
+  expect(host.querySelector("textarea")?.value).toBe("独立新问题");
+  expect(store.read(scope)).toBe("原会话尚未发送的草稿");
+  expect(api.listConversations).not.toHaveBeenCalled();
+  expect(api.resumeConversation).not.toHaveBeenCalled();
+  expect(api.listTurns).not.toHaveBeenCalled();
+  expect(api.submitTurn).not.toHaveBeenCalled();
+  expect(api.createConversation).not.toHaveBeenCalled();
+  store.remove(scope);
+});
 it("retains an unsubmitted upload and its failed conversation on reopening", async () => {
   vi.setSystemTime(new Date(at));
   const { api } = resumableApi("failed");

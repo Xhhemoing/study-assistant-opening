@@ -248,7 +248,7 @@ describe("course study focus layout", () => {
 describe("shared-page navigation", () => {
   it.each([
     ["/opening/review", "tab=cards", "/opening/review"],
-    ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
+    ["/opening/courses/course-a", "mode=sprint", "/opening/today"],
   ])("reads the current query at %s", (path, query, expected) => {
     pathname = path; search = query;
     const html = renderShell();

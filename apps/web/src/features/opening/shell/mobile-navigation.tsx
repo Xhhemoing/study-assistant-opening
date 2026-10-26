@@ -5,7 +5,7 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 import { openingNavigationIcons } from "./navigation-icons";
 
 export function OpeningMobileNavigation({ pathname, search = "", dueCount }: { pathname: string; search?: string; pendingCount?: number | null; dueCount?: number | null }) {
-  return <nav aria-label="学习工作台导航（移动端）" className="grid grid-cols-4 gap-1 px-2">
+  return <nav aria-label="学习工作台导航（移动端）" className="grid grid-cols-3 gap-1 px-2">
     {openingNavigation().filter(item => item.group === "core").map(item => {
       const Icon = openingNavigationIcons[item.icon];
       const active = navigationIsActive(item.href, pathname, search);

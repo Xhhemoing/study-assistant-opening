@@ -29,7 +29,8 @@ import { TaskLearningActionContext } from "./task-row-actions";
 import { ReviewView } from "./review-view";
 import { useNextStepMetrics } from "./use-next-step-metrics";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
-import { ASSISTANT_OPEN_EVENT } from "../assistant/assistant-entry";
+import { openAssistantDrawer } from "../assistant/assistant-entry";
+import { TodayCourseList } from "./today-course-list";
 import { Sparkles } from "lucide-react";
 import { finishedTodayActivity } from "./today-finished";
 import { userFacingMessage } from "../../../lib/user-facing-error";
@@ -48,14 +49,24 @@ export function friendlyTodayLabel(date: Date, timeZone?: string): string {
   }
 }
 
-/** 开始页的 AI 入口：一处输入框外观的按钮，打开学习助手。 */
+/** 用户在学习页起草，继续到助手确认后发送。 */
 export function TodayAskBar() {
-  const open = () => window.dispatchEvent(new CustomEvent(ASSISTANT_OPEN_EVENT, { detail: "/opening/assistant" }));
+  const [draft, setDraft] = useState("");
+  const composing = useRef(false);
   return <div className="px-4 pb-2 sm:px-5" data-today-ask="true">
-    <div className="flex items-center gap-2 rounded-panel border border-line bg-surface p-1.5 px-4 shadow-[0_1px_2px_rgb(0_0_0/.04)]">
+    <form className="flex flex-wrap items-center gap-2 rounded-panel border border-line bg-surface px-3 py-2" onSubmit={event => {
+      event.preventDefault();
+      const text = draft.trim();
+      if (!text || composing.current) return;
+      openAssistantDrawer("/opening/assistant", text);
+      setDraft("");
+    }}>
       <Sparkles aria-hidden="true" size={16} className="shrink-0 text-ai-2" />
-      <button type="button" onClick={open} className="min-h-10 min-w-0 flex-1 truncate text-left text-ui text-text-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">问 AI：概念、题目或资料里的任何一段</button>
-    </div>
+      <input aria-label="向 AI 提问" placeholder="问 AI：概念、题目或资料里的任何一段" value={draft} onChange={event => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
+        if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+      }} className="min-h-10 min-w-0 flex-1 bg-transparent text-ui text-text placeholder:text-text-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
+      <button type="submit" className={ui.secondary} disabled={!draft.trim()}>继续提问</button>
+    </form>
   </div>;
 }
 
@@ -361,7 +372,7 @@ export function TodayDashboard({
     <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
     <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />
   </details>;
-  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
+  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
@@ -408,6 +419,7 @@ export function TodayDashboard({
           ) : null}
         </div> : ctaError ? <p role="alert" className="px-5 pt-3 text-sm text-danger">{ctaError}</p> : null}
         {!planning ? <TodayProgress api={api} timeZone={timeZone} reloadToken={reloadToken} /> : null}
+        {!planning && state.courses?.status === "ready" ? <TodayCourseList courses={state.courses.items} /> : null}
         <div className="flex min-h-0 flex-1 flex-col">
           <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
             {planning ? <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起任务列表" : "查看任务列表"}</button> : <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>}

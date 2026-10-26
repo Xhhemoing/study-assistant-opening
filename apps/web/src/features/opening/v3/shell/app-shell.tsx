@@ -23,7 +23,7 @@ export type ShellNav = {
 };
 
 /** 手机「更多」抽屉底部的全局项（问 AI、账户），由 AppShell 提供给每页的 MobileHeaderTools */
-const MobileMenuExtra = createContext<ReactNode>(null);
+const MobileMenuExtra = createContext<{ content: ReactNode; openSearch?: () => void; footerAccount?: boolean }>({ content: null });
 /** 只有在壳层内才渲染手机工具（独立渲染/测试时没有路由与导航，不输出） */
 const InShell = createContext(false);
 
@@ -78,7 +78,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
   }, [navWidth]);
 
   return (
-    <InShell.Provider value={true}><MobileMenuExtra.Provider value={mobileMenuExtra}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
+    <InShell.Provider value={true}><MobileMenuExtra.Provider value={{ content: mobileMenuExtra, openSearch: onOpenSearch, footerAccount: Boolean(mobileTrailing) }}><HeaderToolsSlot.Provider value={<MobileHeaderTools recent={recent} />}>
     <div data-app-shell data-focus={hideNav} data-nav-dragging={dragWidth !== null} data-ui="v3" data-skin={pref.skin} data-density={pref.density} data-corner={pref.corner} className="group/workspace flex h-dvh text-text app-backdrop">
       <Suspense><ViewTransitionBoundary /></Suspense>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-ctl focus:bg-surface focus:px-3 focus:py-2">跳到主要内容</a>
@@ -186,7 +186,8 @@ export function MobileHeaderTools(props: { recent?: RecentThread[] }) {
 
 function MobileHeaderToolsInner({ recent = [] }: { recent?: RecentThread[] }) {
   const [open, setOpen] = useState(false);
-  const extra = useContext(MobileMenuExtra);
+  const { content: extra, openSearch, footerAccount } = useContext(MobileMenuExtra);
+  if (extra && openSearch) return <div className="flex items-center gap-1 md:hidden"><button type="button" aria-label="打开全局搜索" className={ui.icon} onClick={openSearch}><Search size={18} aria-hidden="true" /></button>{footerAccount ? null : extra}</div>;
   return (
     <div className="flex items-center gap-1 md:hidden">
       <TransitionLink href={featureHref("search")} aria-label="搜索" className={ui.icon}><Search size={18} aria-hidden="true" /></TransitionLink>

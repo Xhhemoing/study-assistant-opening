@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FEATURES, activeNavId, featureHref, navDirection, resolveFeature } from "./features";
+import { FEATURES, NAV_CORE, NAV_TOOLS, activeNavId, featureHref, navDirection, resolveFeature } from "./features";
 
 describe("UI v3 feature registry", () => {
   it("resolves static segments before dynamic ones", () => {
@@ -14,9 +14,17 @@ describe("UI v3 feature registry", () => {
 
   it("highlights exactly one navigation entry per path", () => {
     expect(activeNavId("/opening/assistant")).toBe("today");
-    expect(activeNavId("/opening/courses/abc/study")).toBe("courses");
+    expect(activeNavId("/opening/courses/abc/study")).toBe("today");
+    expect(activeNavId("/opening/agent")).toBe("today");
+    expect(activeNavId("/opening/sprint")).toBe("today");
+    expect(activeNavId("/opening/search")).toBe("library");
     expect(activeNavId("/opening/settings/export")).toBe("settings");
     expect(activeNavId("/login")).toBeNull();
+  });
+
+  it("derives only three primary destinations and no duplicate tools", () => {
+    expect(NAV_CORE.map(item => [item.route, item.label])).toEqual([["/opening/today", "学习"], ["/opening/review", "复习"], ["/opening/library", "资料"]]);
+    expect(NAV_TOOLS).toEqual([]);
   });
 
   it("derives transition direction from depth", () => {

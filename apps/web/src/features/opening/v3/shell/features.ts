@@ -27,11 +27,11 @@ export type Feature = {
 };
 
 export const FEATURES: Feature[] = [
-  { id: "today", route: "/opening/today", label: "开始", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/planning/today-dashboard" },
+  { id: "today", route: "/opening/today", label: "学习", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/planning/today-dashboard" },
   { id: "suggestions", route: "/opening/suggestions", label: "建议", icon: "start", placement: "none", depth: 0, layout: "redirect", parent: "today", source: "app/(opening)/opening/suggestions → /opening/today" },
-  { id: "agent", route: "/opening/agent", label: "助理", icon: "assistant", placement: "none", depth: 0, layout: "workspace", source: "features/opening/assistant/agent-workspace" },
+  { id: "agent", route: "/opening/agent", label: "助理", icon: "assistant", placement: "none", depth: 1, layout: "workspace", parent: "today", source: "features/opening/assistant/agent-workspace" },
   { id: "assistant", route: "/opening/assistant", label: "对话", icon: "assistant", placement: "none", depth: 1, layout: "thread", parent: "today", source: "features/opening/assistant/assistant-entry" },
-  { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/courses/page" },
+  { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "none", depth: 1, layout: "list", parent: "today", source: "app/(opening)/opening/courses/page" },
   { id: "course-new", route: "/opening/courses/new", label: "新建课程", icon: "add", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/courses/course-create" },
   { id: "course", route: "/opening/courses/[id]", label: "课程空间", icon: "courses", placement: "none", depth: 1, layout: "course", parent: "courses", source: "features/courses/course-detail" },
   { id: "course-exam", route: "/opening/courses/[id]/exam", label: "考试", icon: "exam", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/opening/exam-sprint/course-exam-view" },
@@ -44,9 +44,9 @@ export const FEATURES: Feature[] = [
   { id: "library", route: "/opening/library", label: "资料", icon: "library", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/library/page" },
   { id: "library-new", route: "/opening/library/new", label: "上传资料", icon: "upload", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/editor/new-document" },
   { id: "document", route: "/opening/library/[id]", label: "资料", icon: "library", placement: "none", depth: 2, layout: "reader", parent: "library", source: "features/editor/document-editor（原生文档）/ PDF·照片阅读" },
-  { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "tool", depth: 0, layout: "list", source: "features/opening/exam-sprint/sprint-course-chooser" },
+  { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "none", depth: 1, layout: "list", parent: "today", source: "features/opening/exam-sprint/sprint-course-chooser" },
   { id: "cards", route: "/opening/cards", label: "卡组", icon: "cards", placement: "none", depth: 1, layout: "list", parent: "review", source: "features/opening/review/review-route (legacyCardsHref)" },
-  { id: "search", route: "/opening/search", label: "搜索", icon: "search", placement: "tool", depth: 0, layout: "list", source: "features/search/search-workspace" },
+  { id: "search", route: "/opening/search", label: "搜索", icon: "search", placement: "none", depth: 1, layout: "list", parent: "library", source: "features/search/search-workspace" },
   { id: "settings", route: "/opening/settings", label: "设置", icon: "settings", placement: "system", depth: 0, layout: "settings", source: "app/(opening)/opening/settings/page" },
   { id: "settings-connections", route: "/opening/settings/connections", label: "连接", icon: "connections", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "features/opening/connections/connection-settings" },
   { id: "settings-export", route: "/opening/settings/export", label: "导出", icon: "export", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "app/(opening)/opening/settings/export/page" },

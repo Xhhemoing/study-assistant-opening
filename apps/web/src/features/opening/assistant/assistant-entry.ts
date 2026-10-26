@@ -1,6 +1,8 @@
 import { parseStudyConversationContext, studyConversationIdentity, type StudyConversationContext, type StudyConversationQuery } from "./study-conversation-context";
 
-export type AssistantEntry = { key: string; label: string; context?: StudyConversationContext; error?: string; conversation: string | null; fresh: boolean };
+export type AssistantPromptRequest = { id: string; text: string };
+export type AssistantOpenRequest = { href: string; promptRequest: AssistantPromptRequest };
+export type AssistantEntry = { promptRequest?: AssistantPromptRequest; key: string; label: string; context?: StudyConversationContext; error?: string; conversation: string | null; fresh: boolean };
 export const isStudySurface = (pathname: string) => /^\/opening\/courses\/[^/]+\/study(?:\/|$)/.test(pathname);
 export function sameStudyItem(left?: StudyConversationContext, right?: StudyConversationContext): boolean {
   if (!left || !right) return false;
@@ -38,6 +40,8 @@ export function assistantRedirect(query: Record<string, string | string[] | unde
 }
 
 export const ASSISTANT_OPEN_EVENT = "aistudy:open-assistant";
-export function openAssistantDrawer(href = "/opening/assistant"): void {
-  window.dispatchEvent(new CustomEvent(ASSISTANT_OPEN_EVENT, { detail: href }));
+export function openAssistantDrawer(href = "/opening/assistant", text?: string): void {
+  const prompt = text?.trim();
+  const detail: string | AssistantOpenRequest = prompt ? { href, promptRequest: { id: crypto.randomUUID(), text: prompt } } : href;
+  window.dispatchEvent(new CustomEvent(ASSISTANT_OPEN_EVENT, { detail }));
 }

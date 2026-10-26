@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { OpeningApi } from "../client/api";
 import type { TodayResumeState } from "./today-read";
 
+const { openAssistant } = vi.hoisted(() => ({ openAssistant: vi.fn() }));
+vi.mock("../assistant/assistant-entry", async () => ({ ...await vi.importActual("../assistant/assistant-entry"), openAssistantDrawer: openAssistant }));
 vi.mock("./today-progress", () => ({ TodayProgress: () => <div aria-label="今天的进度"><a href="/opening/review">复习</a></div> }));
 vi.mock("./today-view", async () => {
   const actual = await vi.importActual<typeof import("./today-view")>("./today-view");
@@ -26,7 +28,7 @@ function makeApi() {
     createTask: vi.fn(), discardCandidate: vi.fn(), acceptRetest: vi.fn(), decideMemoryCandidate: vi.fn() };
 }
 const roots: ReturnType<typeof createRoot>[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await act(async () => root.unmount()); document.body.innerHTML = ""; window.history.replaceState(null, "", "/"); vi.unstubAllGlobals(); });
+afterEach(async () => { for (const root of roots.splice(0)) await act(async () => root.unmount()); document.body.innerHTML = ""; window.history.replaceState(null, "", "/"); vi.unstubAllGlobals(); openAssistant.mockClear(); });
 async function render(api: ReturnType<typeof makeApi>, extra: Partial<Parameters<typeof TodayDashboard>[0]> = {}) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const host = document.createElement("div"); host.className = "group/workspace"; host.dataset.focus = "false"; document.body.append(host);
@@ -64,11 +66,41 @@ it("keeps one next action without mounting planning or suggestion requests on To
   expect(host.querySelector('a[href="/opening/settings/planning"]')).not.toBeNull();
 });
 
-it.each(["first-course", "no-courses"])("keeps the default %s main area within eight controls in the rendered tree", async scenario => {
-  const api = makeApi(); api.listTeachingActivities.mockResolvedValue([{ ...activity, courseId: "course" }]);
-  const host = await render(api, scenario === "no-courses" ? { state: { kind: "empty", courses: { status: "ready", items: [] } } } : {});
-  expect(visibleControls(host).length).toBeGreaterThan(0);
-  expect(visibleControls(host).length).toBeLessThanOrEqual(8);
+it("shows every existing course and the full course destination within learning", async () => {
+  const host = await render(makeApi(), { state: { ...state, courses: { status: "ready", items: [
+    { id: "course", title: "线性代数", archivedAt: null },
+    { id: "old-course", title: "大学物理", archivedAt: "2026-10-01" },
+  ] } } });
+  const courses = host.querySelector('[aria-label="我的课程"]');
+  expect(courses?.querySelector('a[href="/opening/courses/course"]')?.textContent).toContain("线性代数");
+  expect(courses?.querySelector('a[href="/opening/courses/old-course"]')?.textContent).toContain("已归档");
+  expect(courses?.querySelector('a[href="/opening/courses"]')?.textContent).toBe("全部课程");
+});
+
+it.each([false, true])("offers a real AI draft input even with no courses (%s), without sending a model request", async noCourses => {
+  const host = await render(makeApi(), noCourses ? { state: { kind: "empty", courses: { status: "ready", items: [] } } } : {});
+  const input = host.querySelector<HTMLInputElement>('input[aria-label="向 AI 提问"]');
+  expect(input).not.toBeNull();
+  const form = input!.closest("form")!;
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  expect(submit.textContent).toBe("继续提问");
+  expect(submit.disabled).toBe(true);
+  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(openAssistant).not.toHaveBeenCalled();
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "  解释矩阵的秩  ");
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(openAssistant).not.toHaveBeenCalled();
+  await act(async () => {
+    input!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  expect(openAssistant).not.toHaveBeenCalled();
+  await act(async () => input!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true })));
+  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(openAssistant).toHaveBeenCalledExactlyOnceWith("/opening/assistant", "解释矩阵的秩");
+  expect(input!.value).toBe("");
 });
 
 it("opens a task deep link and keeps review discoverable even with no course", async () => {

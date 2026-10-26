@@ -17,40 +17,23 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe("every-page more menu", () => {
-  it("makes tools, full history, settings and theme available after opening once", async () => {
+  it("keeps account destinations without repeating the three navigation items", async () => {
     await act(async () => root.render(<OpeningAccountMenu userLabel="学生" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
     const trigger = host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!;
     await act(async () => trigger.click());
     const dialog = document.querySelector('[role="dialog"]');
-    for (const href of ["/opening/sprint", "/opening/review", "/opening/search", "/opening/assistant", "/opening/settings"]) {
+    for (const href of ["/opening/assistant", "/opening/settings/planning", "/opening/settings", "/opening/settings/export"]) {
       expect(dialog?.querySelector(`a[href="${href}"]`)).not.toBeNull();
+    }
+    for (const href of ["/opening/today", "/opening/review", "/opening/library", "/opening/sprint", "/opening/search"]) {
+      expect(dialog?.querySelector(`a[href="${href}"]`)).toBeNull();
     }
     expect(dialog?.querySelector("select")?.textContent).toContain("跟随系统");
     await act(async () => (dialog?.querySelector('[aria-label="关闭抽屉"]') as HTMLButtonElement).click());
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
-  it.each(["/opening/sprint", "/opening/cards/session", "/opening/search"])("highlights only the matching tool for %s", async pathname => {
-    await act(async () => root.render(<OpeningAccountMenu pathname={pathname} userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
-    const selected = document.querySelectorAll('[role="dialog"] a[aria-current="page"]');
-    expect(selected).toHaveLength(1);
-    expect(selected[0]?.getAttribute("href")).toBe(pathname.startsWith("/opening/cards/") ? "/opening/review" : pathname);
-  });
-
-  it.each([
-    ["/opening/review", "tab=cards", "/opening/review"],
-    ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
-  ])("highlights the redirected tool at %s", async (pathname, search, expected) => {
-    await act(async () => root.render(<OpeningAccountMenu pathname={pathname} search={search} userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
-    const selected = document.querySelectorAll('[role="dialog"] a[aria-current="page"]');
-    expect(selected).toHaveLength(1);
-    expect(selected[0]?.getAttribute("href")).toBe(expected);
-  });
-
 });
-
 it("loads the running release version only when the account menu opens", async () => {
   await act(async () => root.render(<OpeningAccountMenu userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
   expect(fetch).not.toHaveBeenCalled();
