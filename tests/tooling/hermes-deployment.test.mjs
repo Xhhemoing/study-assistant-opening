@@ -134,6 +134,7 @@ exec /bin/cp "$@"`,
 printf 'npm %s\\n' "$*" >> "$MOCK_LOG"
 if [[ "$1" == ci && "\${MOCK_FAIL:-}" == install ]]; then exit 17; fi
 if [[ "$1 $2" == 'run build' ]]; then
+ printf 'build-commit=%s\\n' "\${AISTUDY_COMMIT:-missing}" >> "$MOCK_LOG"
  [[ "\${MOCK_FAIL:-}" != build ]] || exit 18
  mkdir -p apps/web/.next/static apps/web/.next/standalone/apps/web
  printf asset > apps/web/.next/static/asset.js
@@ -817,4 +818,11 @@ test("an activation rename failure cleans only its own temporary pointer and sti
   assert.match(result.log, /systemctl restart aistudy-web.service/);
   assert.equal(readFileSync(join(f.systemd, "aistudy-web.service.d/50-aistudy-release.conf"), "utf8"), "old-web-override\n");
   assert(!readdirSync(f.root).some(name => name.startsWith("current.next.")));
+});
+
+test("release build receives the exact verified commit", t => {
+  const f = fixture(t);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.log, new RegExp(`build-commit=${f.sha}`));
 });

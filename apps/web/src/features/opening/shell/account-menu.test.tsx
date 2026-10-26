@@ -10,10 +10,11 @@ import { OpeningAccountMenu } from "./account-menu";
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ commit: "189546c7", builtAt: "2026-10-25T20:00:00.000Z" })));
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 describe("every-page more menu", () => {
   it("makes tools, full history, settings and theme available after opening once", async () => {
@@ -48,4 +49,24 @@ describe("every-page more menu", () => {
     expect(selected[0]?.getAttribute("href")).toBe(expected);
   });
 
+});
+
+it("loads the running release version only when the account menu opens", async () => {
+  await act(async () => root.render(<OpeningAccountMenu userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
+  expect(fetch).not.toHaveBeenCalled();
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
+  expect(fetch).toHaveBeenCalledWith("/api/opening/health", expect.objectContaining({ cache: "no-store" }));
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("版本 189546c7");
+  expect(document.querySelector("time")?.dateTime).toBe("2026-10-25T20:00:00.000Z");
+});
+
+it("keeps account actions available if version lookup fails and retries on reopening", async () => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("offline"));
+  await act(async () => root.render(<OpeningAccountMenu userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("版本暂不可用");
+  expect(document.querySelector('a[href="/opening/settings"]')).not.toBeNull();
+  await act(async () => (document.querySelector('[aria-label="关闭抽屉"]') as HTMLButtonElement).click());
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain("版本 189546c7");
 });

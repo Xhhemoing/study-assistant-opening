@@ -21,6 +21,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| WP0.1 版本可见（2026-10-25） | Codex + 独立只读评审 | `fix/wp0.1-release-version` | 基于正式主干189546c7补两个health的commit/builtAt、账户菜单版本与部署构建SHA传入；保留503、详情鉴权和no-store。17项定向单元、Web类型、变更lint、287客户端边界及学生文案严格扫描通过；独立评审未发现阻断。线上已核对189546c7与0099，旧占位标题0、LaTeX只读预演待修复0；版本代码尚未合并/部署，部署模拟受本机无WSL、远端SSH传输重置阻塞，交既有CI执行；standalone制品、完整CI与用户浏览器待验。 |
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
 
 | A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
