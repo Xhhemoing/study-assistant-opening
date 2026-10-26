@@ -156,8 +156,19 @@ describe("MessageList", () => {
     }));
     expect(html).toContain("这次没有得到回答。");
     expect(html).not.toContain(CLARIFY_FOLLOW_UP);
+    expect(html).not.toContain("provider rejected the request");
   });
 
+  it("renders a user cancellation once, with a neutral restart action", () => {
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      messages: [{ id: "turn-stop", role: "assistant", text: "已停止这次回答。", citationLabels: [], status: "failed" }],
+      retryTurnId: "turn-stop", onRetry: () => undefined,
+    }));
+    expect(html).toContain("已停止。");
+    expect(html).toContain("重新回答");
+    expect(html).not.toContain("已停止这次回答。");
+    expect(html).not.toContain("这次没有得到回答。");
+  });
   // LAB-U01: after a reload a `clarify` turn comes back through the real client +
   // contract parse and renders as a Clarify follow-up, without the red failure line.
   it("renders a reloaded clarify turn as a Clarify follow-up, parsed through the real turn contract", async () => {

@@ -14,6 +14,9 @@
 
 ## 进行中
 
+- 2026-10-25 整改按附件工作包顺序执行：WP0.1 版本显示见 [#130](https://github.com/Xhhemoing/study-assistant-opening/pull/130)，完整CI以精确head为准；WP0.2失败/停止对话恢复已完成实现与独立复审，待完整CI与用户验收。浏览器与真实使用仍由用户验收，不把未验证项记为通过。
+- 本轮用户决定：采用“学习/复习/资料”三项导航、主题/字体/减少动效三项外观、旧 `/learn/courses*` 跳转 `/opening/courses*`；测试期间每日用户额度设为无限（WP1.5待实现）。默认模型优先复用既有服务端路由；其余授权/未知费用对账边界保留。
+
 - 2026-10-24 当前开发：[A1 后续修复计划](plans/2026-10-24-study-a1-follow-up.md)。#115 精确 head CI 与合并提交 push CI 均成功；A1 运行修复已提交推送 `91c2f717`，尚未合并/发布，最新 head CI 单列核对。下方旧记录保留历史时点，不能作为当前状态。
 - A1：`fix/sprint-a1-runtime-20261024` 保留既有 Worker 就绪候选，继续 OCR 健康容错、批改心跳围栏、轮询退避与文档脱敏；针对性回归、Config/Database/Worker/Web 类型、变更 lint 与环境示例检查通过；自动批改默认策略/上限待确认。真实批改准确率和用户浏览器待验。
 - B 答案隔离已有 #116，C 默认关闭候选与类型门禁优化分别保留在独立开发分支及未提交改动中；本轮不混入 A1，Explore 3–4 继续冻结。
@@ -23,6 +26,7 @@
 |---|---|---|---|
 | WP0.1 版本可见（2026-10-25） | Codex + 独立只读评审 | [#130](https://github.com/Xhhemoing/study-assistant-opening/pull/130) · `fix/wp0.1-release-version` | 补health commit/builtAt、账户菜单版本与部署构建SHA；保留503、详情鉴权和no-store。17项近测、Web类型/lint/边界/文案通过。首轮CI部署模拟和独立Worker/PDF作业通过，主作业因构建元数据未分类失败；已补构建常量例外，配置/环境/元数据48项回归及Config类型/lint通过，独审无阻断。Windows模板换行曾使本地复查失败，仅规范本地干净模板后通过，无模板内容改动。线上已核对189546c7/0099、占位标题0、LaTeX预演0；最终head完整CI、standalone制品、合并部署与用户浏览器仍待。 |
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
+| WP0.2 失败对话恢复（2026-10-25） | Codex + 实现/独立复审 | [#131](https://github.com/Xhhemoing/study-assistant-opening/pull/131) · `fix/wp0.2-failed-conversation` | 失败/停止可重试；隐式旧失败对话按10分钟新开，保护pending/unknown、草稿/不可读存储、上传及题目，显式历史保留。定向回归、Web类型与lint通过。首轮CI独立Worker/PDF成功，主作业3项开始页回归失败；已定位空turns时undefined相等导致null.at，补一行非空判断，新增回归先红后三文件60项及Web类型/lint通过，原3失败断言保留通过，独审无阻断。原116/39项为前阶段且重叠，不作为新head完整验收；最终head CI、浏览器、合并部署待。 |
 
 | A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
 | R-04 首次提交自动批改（2026-10-25） | Hermes | `feat/sprint-a1-autograde-policy-20261024` | 已补独立工作区开关、旧客户端保留OFF、锁内重读与统一日界、仅自动来源计数、入队前只读预算估算、明确跳过原因及手动重批。0097原样保留已推送文件（非生产发布证明），0098在新隔离库连续98迁移校验通过。最终策略PG17项、最新路由/UI39项、Worker18项及相关类型通过；照片/PDF严格身份写回与状态/备份4项定向通过，旧备份失败已定向修复，批次不相加。S3兼容隔离恢复4项通过不代表生产MinIO。完整新head CI、用户浏览器与真实模型待验；未合并部署。 |
