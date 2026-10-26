@@ -1,18 +1,21 @@
 "use client";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { studyIntentEventSchema, studySessionIntentSchema, type LearningAttempt, type StudyIntentChange, type StudyIntentEvent, type StudySessionIntent } from "@aistudy/contracts";
 import { ui } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { userFacingMessage } from "../../../lib/user-facing-error";
-import { ExplanationActions } from "./explanation-actions";
+import { ExplanationActions, explanationActionPrompt } from "./explanation-actions";
+import { LessonSelectionAskContext } from "./selection-ask";
 const resultSchema = z.object({ event: studyIntentEventSchema, currentEvent: studyIntentEventSchema, currentIntent: studySessionIntentSchema, currentVersion: z.number().int().positive(),
   move: z.object({ id: z.string(), presentation: z.object({ instructions: z.string() }), studentAction: z.string() }) });
 export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: Pick<LearningAttempt, "sessionId" | "courseId"> & { id?: string }; desiredIntent?: StudySessionIntent;
   onApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"], newEvidenceEventId?: string) => void }) {
   const diagnostics = useDiagnosticsEnabled();
+  const askExplanation = useContext(LessonSelectionAskContext);
   const [pending, setPending] = useState(false), [error, setError] = useState("");
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [receipt, setReceipt] = useState<z.infer<typeof resultSchema> | null>(null);
   const [knownEvent, setKnownEvent] = useState<StudyIntentEvent | null>(null);
   const onAppliedRef = useRef(onApplied); onAppliedRef.current = onApplied;
@@ -77,11 +80,14 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
     lastPreference.current = desiredKey;
     void apply({ kind: "preference", intent: desiredIntent });
   }, [desiredIntent, desiredKey, apply]);
-  return <section className="space-y-3 rounded-lg border border-line p-3" aria-label="调整本次学习">
-    <ExplanationActions availableActions={["confused", "faster", "deeper"]} disabled={pending || Boolean(unresolved.current)} onAction={action => {
+  return <section className="group/intent space-y-3" aria-label="调整本次学习">
+    <button type="button" className={ui.quiet} aria-expanded={actionsOpen} onClick={() => setActionsOpen(value => !value)}>讲解帮助</button>
+    <div className={actionsOpen ? "flex" : "hidden group-hover/intent:flex group-focus-within/intent:flex"}>
+    <ExplanationActions availableActions={askExplanation ? undefined : ["confused", "faster", "deeper"]} disabled={pending || Boolean(unresolved.current)} onAction={action => {
+      if (action === "example") { askExplanation?.(explanationActionPrompt(action)); return; }
       if (action === "confused") void apply({ kind: "signal", signal: "confused" });
       else void apply({ kind: "explicit_request", text: action === "faster" ? "快一点，直接给关键步骤" : "慢一点，完整讲解，一步一步等我" });
-    }} />
+    }} /></div>
     <details><summary className="cursor-pointer text-xs text-text-2">调整讲解和练习</summary><div className="mt-3 space-y-3">
     <div className="flex flex-wrap gap-2">{([ ["too_easy", "太简单"], ["guessed", "我是猜的"], ["copied_answer", "这次参考了答案"] ] as const).map(([signal, label]) => <button key={signal} type="button" className={ui.quiet} disabled={pending || Boolean(unresolved.current)} onClick={() => void apply({ kind: "signal", signal })}>{label}</button>)}</div>
     </div></details>

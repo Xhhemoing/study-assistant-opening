@@ -1,8 +1,6 @@
 "use client";
 
 import { TransitionLink as Link } from "../../v3/motion/view-transition";
-import { Focus, Maximize2 } from "lucide-react";
-import { useWorkspaceLayout } from "../../shell/workspace-layout-context";
 import { conversationObjectHref } from "../../assistant/conversation-links";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { LearningAttempt, LearningObservation, SpanHintLevel, SpanTeachingMode, StudySessionIntent, SpanLessonSnapshot } from "@aistudy/contracts";
@@ -40,7 +38,6 @@ export function stepLabels(moves: readonly { presentation: { kind: string } }[])
 
 export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, originalConversationId }: SpanLessonProps) {
   const diagnostics = useDiagnosticsEnabled();
-  const { focusMode, toggleFocusMode } = useWorkspaceLayout();
   const lessonRoot = useRef<HTMLElement>(null);
   const [intent, setIntent] = useState(initialIntent ?? defaultIntent);
   const [mode, setMode] = useState<SpanTeachingMode>(spanModeForIntent(initialIntent ?? defaultIntent));
@@ -80,8 +77,8 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
     previous: step > 0 && !delayedRetestId ? () => void goToStep(step - 1) : undefined,
     next: step < moves.length - 1 && (isPresentation || complete) ? () => void goToStep(step + 1) : undefined,
   });
-  return <section ref={lessonRoot} data-lesson-shortcuts="true" className="flex h-full min-h-0 flex-col overflow-hidden bg-surface text-text"><header className="flex flex-wrap items-center gap-3 border-b border-line px-5 py-3"><Link className={ui.quiet} href={conversationObjectHref(`/opening/courses/${courseId}`, originalConversationId)}>返回课程</Link><h1 className="text-sm font-semibold">线性组合与 span</h1><button type="button" className={ui.quiet} aria-label={focusMode ? "退出专注学习" : "专注学习"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}{focusMode ? "退出专注学习" : "专注学习"}</button></header>
-    <div className="min-h-0 flex-1"><LessonCompanionWorkspace originalConversationId={originalConversationId} binding={assistantContext} outline={<nav aria-label="span 学习目录" className="space-y-1">{moves.map((move, index) => <button key={move.id} type="button" className={`${ui.quiet} w-full justify-start whitespace-normal text-left`} aria-current={step === index ? "step" : undefined} disabled={Boolean(delayedRetestId)} onClick={() => void goToStep(index)}>{index + 1}. {move.presentation.instructions}</button>)}</nav>}>
+  return <section ref={lessonRoot} data-lesson-shortcuts="true" className="flex h-full min-h-0 flex-col overflow-hidden bg-surface text-text">
+    <LessonCompanionWorkspace title="线性组合与 span" returnHref={conversationObjectHref(`/opening/courses/${courseId}`, originalConversationId)} progress={{ current: step + 1, total: moves.length }} originalConversationId={originalConversationId} binding={assistantContext} outline={<nav aria-label="span 学习目录" className="space-y-1">{moves.map((move, index) => <button key={move.id} type="button" className={`${ui.quiet} w-full justify-start whitespace-normal text-left`} aria-current={step === index ? "step" : undefined} disabled={Boolean(delayedRetestId)} onClick={() => void goToStep(index)}>{index + 1}. {stepLabels(moves)[index]}</button>)}</nav>}>
     <ContentGrid className="space-y-6 px-5 py-6 sm:px-8"><p className="sr-only">{delayedRetestId ? "复习：试试你还记得怎样解这道题。" : modeProcess[mode]}</p>
       <h2 className="text-title font-semibold">如何知道一个向量能不能由另外两个向量组成？</h2>
       <LearnerStateCard courseId={courseId} revision={Object.keys(records).length + intentRevision} proactive />
@@ -107,7 +104,6 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
       }} /> : null}
       {intent.selfReportedFatigue === "high" || intent.timeBudgetMinutes < 10 ? <p role="status" className="text-xs leading-6 text-text-2">这次先完成一个短步骤即可，你已写下的答案会保留。</p> : null}
       {intent.language !== "zh" ? <p className="text-sm leading-7">Span = all linear combinations（所有线性组合）; coefficient = 系数; consistent system = 相容方程组。Language support translates the question; it does not solve it. 深入英文解释可在本题提问中选择语言支持。</p> : null}
-      <nav hidden={Boolean(delayedRetestId)} aria-label="span 教学步骤" aria-keyshortcuts="ArrowLeft ArrowRight" title="← / → 切换步骤" className="flex flex-wrap gap-2">{stepLabels(moves).map((label, index) => <button key={moves[index]?.id ?? index} type="button" className={step === index ? ui.secondary : ui.quiet} aria-current={step === index ? "step" : undefined} onClick={() => void goToStep(index)}>{index + 1}. {label}</button>)}</nav>
       <ContentBlock width={isPresentation ? "wide" : "prose"}><section className="space-y-4"><h2 className="text-lg font-semibold">{current.presentation.instructions}</h2><p className="text-sm leading-7">{current.studentAction}</p><SelectionAsk binding={assistantContext}>
         {isPresentation ? <>
           {mode === "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : <SpanWorkedExample courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} fast={intent.pace === "fast"} />}
@@ -120,6 +116,6 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
       {diagnostics ? <details className="text-xs leading-6 text-text-3"><summary className="cursor-pointer">本步骤期待观察什么</summary><p>{current.expectedObservation}</p><p>继续或停止：{current.continuation.stopWhen}</p><p>覆盖知识点：{current.targetKnowledgeComponents.join("、")}</p></details> : null}
       <div className="flex flex-wrap gap-3 border-t border-line pt-4">{step > 0 && !delayedRetestId ? <button type="button" className={ui.quiet} onClick={() => void goToStep(step - 1)}>回看上一步</button> : null}{step < moves.length - 1 ? <button type="button" className={ui.primary} disabled={!isPresentation && !complete} onClick={() => void goToStep(step + 1)}>{isPresentation ? "开始补全新题" : successful ? "本步骤通过，进入下一道新题" : complete ? "继续下一道新题" : "提交本题后继续"}</button> : <Link className={ui.secondary} href={conversationObjectHref(`/opening/courses/${courseId}#course-learning-records`, originalConversationId)}>回到课程记录，安排后续复测</Link>}</div>
       {session ? <div className="flex flex-wrap gap-3 border-t border-line pt-4"><button type="button" className={ui.secondary} disabled={savingProgress} onClick={() => void onProgress?.(intent, current.id, "paused")}>暂停并保存</button><button type="button" className={ui.secondary} disabled={savingProgress} onClick={() => void onProgress?.(intent, current.id, "completed")}>结束并看小结</button><button type="button" className={ui.quiet} disabled={savingProgress} onClick={onSummary}>查看本次小结</button><p role="status" className="w-full text-xs text-text-3">{savingProgress ? "正在保存本次步骤…" : "暂停或结束时会保存学习进度；未提交的答案保留在当前浏览器标签页。"}</p></div> : null}
-    </ContentGrid></LessonCompanionWorkspace></div>
+    </ContentGrid></LessonCompanionWorkspace>
   </section>;
 }

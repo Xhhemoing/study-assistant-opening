@@ -1,6 +1,8 @@
 import { isValidElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
+// Save lifecycle and transport are exercised with the real component in selection-ask-save.test.tsx.
+vi.mock("./selection-note-save", () => ({ SelectionNoteSave: () => null }));
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, effects: [] as Array<() => void> }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useContext: () => null,
