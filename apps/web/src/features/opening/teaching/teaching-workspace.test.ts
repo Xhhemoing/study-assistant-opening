@@ -131,6 +131,131 @@ it("shows technical diagnostics only when the appearance preference is enabled",
   expect(render()).toContain("活动标识：");
 });
 
+async function withNavigationWorkspace(api: Partial<OpeningApi>, checkpoint: Record<string, unknown>, run: (host: HTMLDivElement, leave: () => Promise<void>) => Promise<void>) {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(TeachingWorkspace, { activity: activityReady,
+      clientInit: clientInit({ checkpointJson: checkpoint }), contextualTools: createElement("p", {}, "当前追问"), api: api as OpeningApi })));
+    await run(host, async () => { await act(async () => root.render(null)); });
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+}
+function navigateToQuestion(host: HTMLDivElement) {
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "2. 练习 2")!.click();
+}
+const currentUnitId = (host: HTMLDivElement) => host.querySelector('[data-study-unit-current="true"]')?.getAttribute("data-study-unit");
+
+it("returns legacy branches before navigating once, then keeps the selected unit when tools close", async () => {
+  let releaseReturn!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { releaseReturn = resolve; }));
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{ resumeBlockId: BID }] }, async host => {
+      await act(async () => { navigateToQuestion(host); navigateToQuestion(host); });
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+      expect(currentUnitId(host)).toBe(BID);
+      await act(async () => releaseReturn({ ok: true, kind: "return", contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [] } }));
+      expect(postTeachingCheckpoint).toHaveBeenCalledExactlyOnceWith(AID, { expectedVersion: 1, currentBlockId: BID2 });
+      expect(currentUnitId(host)).toBe(BID2);
+      expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("2");
+      const tools = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "工具")!;
+      await act(async () => tools().click());
+      await act(async () => tools().click());
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(currentUnitId(host)).toBe(BID2);
+    });
+});
+
+it.each(["conflict", "network"])("does not save the selected target after a legacy return %s", async failure => {
+  const postTeachingCommand = vi.fn(async () => {
+    if (failure === "network") throw new Error("回主线结果尚未确认");
+    return { ok: false, conflict: "stale_path_version", message: "位置已变化" };
+  });
+  const postTeachingCheckpoint = vi.fn();
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{ resumeBlockId: BID }] }, async host => {
+      await act(async () => navigateToQuestion(host));
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+      expect(currentUnitId(host)).toBe(BID);
+      if (failure === "network") expect(host.querySelector('[role="alert"] button')).not.toBeNull();
+      else expect(host.querySelector('[data-workspace-command-conflict="stale_path_version"]')).not.toBeNull();
+    });
+});
+
+it("passes each confirmed return version to the next return before saving the target", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } })
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 3, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}, {}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand.mock.calls.map(call => call[1].expectedPathVersion)).toEqual([1, 2]);
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+    expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("3");
+  });
+});
+
+it("keeps ordinary navigation free of return commands", async () => {
+  const postTeachingCommand = vi.fn();
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand).not.toHaveBeenCalled();
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("keeps a partially confirmed return and retries only the remaining branch", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } })
+    .mockResolvedValueOnce({ ok: false, conflict: "stale_path_version", message: "位置已变化" })
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 3, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}, {}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+    expect(currentUnitId(host)).toBe(BID);
+    expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("2");
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand.mock.calls.map(call => call[1].expectedPathVersion)).toEqual([1, 2, 2]);
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("does not select the target if its checkpoint fails after a confirmed return", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValue({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn().mockRejectedValueOnce(new Error("位置保存未确认"))
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } });
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(currentUnitId(host)).toBe(BID);
+    expect(host.querySelector('[role="alert"] button')).not.toBeNull();
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+    expect(postTeachingCheckpoint).toHaveBeenCalledTimes(2);
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("does not save a navigation target after leaving during a legacy return", async () => {
+  let release!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { release = resolve; }));
+  const postTeachingCheckpoint = vi.fn();
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{}, {}] }, async (host, leave) => {
+      await act(async () => navigateToQuestion(host));
+      await leave();
+      await act(async () => release({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } }));
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+    });
+});
+
 describe("asynchronous teaching position updates", () => {
   const initial: TeachingWorkspacePositionSnapshot = { activityId: AID, contentVersion: 3, pathVersion: 2, epoch: 1 };
   it.each([

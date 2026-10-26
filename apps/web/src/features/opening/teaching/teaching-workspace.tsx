@@ -223,8 +223,8 @@ export function TeachingWorkspace({
     return () => { mounted.current = false; markSnapshot(); };
   }, [markSnapshot]);
 
-  const commandApi = useMemo<OpeningApi>(() => ({ ...api, async postTeachingCommand(id, input) {
-    if (positionInFlight.current || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
+  const sendCommand = useCallback(async (id: string, input: Parameters<OpeningApi["postTeachingCommand"]>[1], ownsNavigation = false) => {
+    if ((positionInFlight.current && !ownsNavigation) || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
     const latest = positionSnapshot.current;
     if (id !== latest.activityId || input.expectedVersion !== latest.contentVersion || (input.expectedPathVersion != null && input.expectedPathVersion !== latest.pathVersion)) throw new Error("学习内容已切换，请重新读取当前内容后再操作。");
     commandInFlight.current = true;
@@ -232,7 +232,8 @@ export function TeachingWorkspace({
     commandSnapshot.current = { ...positionSnapshot.current };
     try { return await api.postTeachingCommand(id, input); }
     finally { commandInFlight.current = false; }
-  } }), [api, markSnapshot]);
+  }, [api, markSnapshot]);
+  const commandApi = useMemo<OpeningApi>(() => ({ ...api, postTeachingCommand: (id, input) => sendCommand(id, input) }), [api, sendCommand]);
 
   // Sync when parent passes a new activity/init identity (e.g. today dashboard reload).
   useEffect(() => {
@@ -381,8 +382,26 @@ export function TeachingWorkspace({
     if (positionInFlight.current || !schemaOk) return;
     if (commandInFlight.current) { setPositionError("学习操作仍在保存，请稍后切换单元。"); return; }
     positionInFlight.current = true; setPositionBusy(true); setPositionError(null);
-    const started = { ...positionSnapshot.current };
+    let started = { ...positionSnapshot.current };
     try {
+      let checkpoint = liveInit.checkpointJson;
+      if (!isBranchStackEmpty(checkpoint)) {
+        // Hold the navigation lock while unwinding; no target cursor is saved until every return is confirmed.
+        await returnToMainline({ api: { ...api, postTeachingCommand: (id, input) => sendCommand(id, input, true) },
+          activityId: started.activityId, contentVersion: started.contentVersion, pathVersion: started.pathVersion, checkpoint,
+          isCurrent: () => mounted.current && (sameWorkspaceSnapshot(started, positionSnapshot.current)
+            || Boolean(commandSnapshot.current && sameWorkspaceSnapshot(commandSnapshot.current, positionSnapshot.current))),
+          accept: result => {
+            const commandStarted = commandSnapshot.current;
+            const current = Boolean(commandStarted && sameWorkspaceSnapshot(commandStarted, positionSnapshot.current)
+              && result.contentVersion >= commandStarted.contentVersion && result.pathVersion >= commandStarted.pathVersion);
+            applySuccess(result);
+            if (current) { checkpoint = result.checkpointJson; started = { ...positionSnapshot.current }; }
+            return current;
+          }, onConflict: handleConflict });
+        if (!isBranchStackEmpty(checkpoint)) throw new Error("原学习位置尚未确认，请重新读取后再切换单元。");
+      }
+      if (!mounted.current || !sameWorkspaceSnapshot(started, positionSnapshot.current)) return;
       await saveCurrentTeachingUnitPosition(api, started, () => positionSnapshot.current, unit.questionBlockId ?? unit.id, result => {
         markSnapshot({ contentVersion: result.contentVersion });
         setLiveInit(previous => ({ ...previous, contentVersion: result.contentVersion, checkpointJson: result.checkpointJson }));
@@ -391,9 +410,9 @@ export function TeachingWorkspace({
         setPanel(null);
         requestAnimationFrame(() => contentRef.current?.querySelector<HTMLElement>('[data-study-unit-current="true"] h3')?.focus({ preventScroll: true }));
       });
-    } catch (error) { setPositionError(userFacingMessage(error, "学习位置保存未确认，请重新读取后继续。")); }
-    finally { positionInFlight.current = false; setPositionBusy(false); }
-  }, [api, markSnapshot, schemaOk]);
+    } catch (error) { if (mounted.current) setPositionError(userFacingMessage(error, "学习位置保存未确认，请重新读取后继续。")); }
+    finally { positionInFlight.current = false; if (mounted.current) setPositionBusy(false); }
+  }, [api, markSnapshot, schemaOk, liveInit.checkpointJson, sendCommand, applySuccess, handleConflict]);
 
   const updateLiveActivity = useCallback((next: TeachingActivity) => {
     markSnapshot({ activityId: next.id, contentVersion: next.contentVersion, pathVersion: next.pathVersion });
