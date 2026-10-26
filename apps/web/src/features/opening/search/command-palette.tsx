@@ -86,7 +86,7 @@ export function CommandPalette({ open, onOpen, onClose }: { open: boolean; onOpe
     setActiveIndex((current) => getNextPaletteIndex(current, action, options.length));
   }
   if (!open) return null;
-  return <dialog ref={dialogRef} aria-labelledby="command-palette-title" aria-modal="true" role="dialog" className="fixed inset-x-4 bottom-auto top-[10dvh] m-0 mx-auto max-h-[80dvh] w-[calc(100%_-_2rem)] max-w-2xl overflow-hidden rounded-panel glass [--glass-bg:var(--glass-bg-strong)] p-0 text-text shadow-zinc-950/15 outline-none backdrop:bg-zinc-950/30" onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => {
+  return <dialog ref={dialogRef} aria-labelledby="command-palette-title" aria-modal="true" role="dialog" className="fixed inset-x-4 bottom-auto top-[10dvh] m-0 mx-auto max-h-[80dvh] w-[calc(100%_-_2rem)] max-w-2xl overflow-hidden rounded-panel glass [--glass-bg:var(--glass-bg-strong)] p-0 text-text shadow-ink/15 outline-none backdrop:bg-ink/30" onCancel={(event) => { event.preventDefault(); onClose(); }} onClick={(event) => {
     if (event.target !== event.currentTarget) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) onClose();

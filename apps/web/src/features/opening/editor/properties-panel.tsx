@@ -60,10 +60,10 @@ export function PropertiesPanel({ documentId }: { documentId: string }) {
         {tags?.length === 0 ? <span className="text-xs text-text-3">还没有标签</span> : null}
       </div>
       <form className="flex gap-2" onSubmit={submitTag}>
-        <label className="min-w-0 flex-1"><span className="sr-only">新增标签</span><input className="w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-text-3 focus:border-emerald-700 disabled:opacity-50" disabled={pending} value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入标签" /></label>
+        <label className="min-w-0 flex-1"><span className="sr-only">新增标签</span><input className="w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-text-3 focus:border-focus-ring disabled:opacity-50" disabled={pending} value={input} onChange={(event) => setInput(event.target.value)} placeholder="输入标签" /></label>
         <button className="inline-grid size-10 shrink-0 place-items-center rounded-md border border-line text-text-3 hover:bg-bg hover:text-text disabled:opacity-40" type="submit" disabled={!input.trim() || pending || tags === null} aria-label="添加标签" title="添加标签"><Plus aria-hidden="true" size={16} /></button>
       </form>
-      {error ? <div className="mt-2 flex items-center gap-2" role="alert"><p className="text-xs text-danger">{error}</p><button aria-label="重试读取标签" className="inline-grid size-8 place-items-center rounded-md border border-line text-text-3 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={reload} title="重试读取标签" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
+      {error ? <div className="mt-2 flex items-center gap-2" role="alert"><p className="text-xs text-danger">{error}</p><button aria-label="重试读取标签" className="inline-grid size-8 place-items-center rounded-md border border-line text-text-3 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={reload} title="重试读取标签" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
     </section>
   );
 }

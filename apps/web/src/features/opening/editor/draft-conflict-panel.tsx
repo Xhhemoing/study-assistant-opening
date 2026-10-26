@@ -39,7 +39,7 @@ export function DraftConflictPanel({
     : reason === "stale-base"
       ? "本地草稿基于较早的服务器版本，期间笔记已被更新。"
       : "保存时服务器已有更新版本。";
-  return <section role="alert" aria-label="保存冲突" data-draft-conflict={reason} className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+  return <section role="alert" aria-label="保存冲突" data-draft-conflict={reason} className="mb-4 rounded-md border border-warn/30 bg-warn-soft p-3 text-sm text-warn">
     <p className="font-medium">本地修改尚未保存，也不会被自动覆盖或删除。</p>
     <p className="mt-1 text-xs leading-5">{why}请选择处理方式：</p>
     <div className="mt-2 flex flex-wrap gap-2">
@@ -51,8 +51,8 @@ export function DraftConflictPanel({
     </div>
     {savedAsNewHref ? <p className="mt-2 text-xs" role="status">已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
     {diff ? <div className="mt-3 grid gap-2 sm:grid-cols-2" data-draft-diff="true">
-      <div className="rounded border border-amber-200 bg-white p-2"><p className="text-xs text-zinc-500">本地草稿（基于 v{diff.local.baseRevisionNumber ?? "?"}）</p><p className="font-medium">{diff.local.title}</p><pre className="mt-1 whitespace-pre-wrap text-xs">{diff.local.text}</pre></div>
-      <div className="rounded border border-amber-200 bg-white p-2"><p className="text-xs text-zinc-500">服务器最新（v{diff.server.revisionNumber ?? "?"}）</p><p className="font-medium">{diff.server.title}</p><pre className="mt-1 whitespace-pre-wrap text-xs">{diff.server.text}</pre></div>
+      <div className="rounded border border-warn/30 bg-surface p-2"><p className="text-xs text-text-3">本地草稿（基于 v{diff.local.baseRevisionNumber ?? "?"}）</p><p className="font-medium">{diff.local.title}</p><pre className="mt-1 whitespace-pre-wrap text-xs">{diff.local.text}</pre></div>
+      <div className="rounded border border-warn/30 bg-surface p-2"><p className="text-xs text-text-3">服务器最新（v{diff.server.revisionNumber ?? "?"}）</p><p className="font-medium">{diff.server.title}</p><pre className="mt-1 whitespace-pre-wrap text-xs">{diff.server.text}</pre></div>
     </div> : null}
   </section>;
 }

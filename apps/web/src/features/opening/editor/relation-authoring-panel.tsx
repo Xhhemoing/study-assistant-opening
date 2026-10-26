@@ -107,7 +107,7 @@ export function RelationAuthoringPanel({ documentId, basePath = DEFAULT_LIBRARY_
     <section className="border-b border-line pb-4" aria-labelledby="document-relations-title">
       <div className="mb-3 flex items-center gap-2"><Link2 aria-hidden="true" className="text-accent" size={16} /><h2 className="text-sm font-semibold text-text" id="document-relations-title">关联笔记</h2></div>
       {state.status === "loading" ? <p className="mb-3 text-xs text-text-3" role="status">正在读取关联...</p> : null}
-      {state.status === "error" ? <div className="mb-3 flex items-center gap-2" role="alert"><p className="text-xs text-danger">{state.message}</p><button aria-label="重试读取关联" className="inline-grid size-8 place-items-center rounded-md border border-line text-text-3 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" onClick={reload} title="重试读取关联" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
+      {state.status === "error" ? <div className="mb-3 flex items-center gap-2" role="alert"><p className="text-xs text-danger">{state.message}</p><button aria-label="重试读取关联" className="inline-grid size-8 place-items-center rounded-md border border-line text-text-3 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={reload} title="重试读取关联" type="button"><RefreshCw aria-hidden="true" size={14} /></button></div> : null}
       {state.status === "ready" && state.relations.length === 0 ? <p className="mb-3 text-xs text-text-3">还没有从这篇笔记发出的关联</p> : null}
       {state.status === "ready" && state.relations.length > 0 ? <ul className="mb-3 grid gap-2">{state.relations.map((relation) => {
         const label = targetLabel(relation);
