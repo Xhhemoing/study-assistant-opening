@@ -18,6 +18,36 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 const flush = () => vi.advanceTimersByTimeAsync(0);
 
+it("treats invalid observation metadata as a legacy stream without dropping its answer text", async () => {
+  const source = channel(), onReply = vi.fn();
+  const stream = createJobStream({ jobId, conversationId, fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(source.response), onReply });
+  stream.start();
+  source.event("snapshot", { sequence: 0, text: "首段", executionId: "invalid" });
+  await flush();
+  expect(onReply).toHaveBeenLastCalledWith({ jobId, conversationId, assistantTurnId, text: "首段" });
+  source.event("delta", { sequence: 1, text: "继续", executionId: "invalid" });
+  await flush();
+  expect(onReply).toHaveBeenLastCalledWith({ jobId, conversationId, assistantTurnId, text: "首段继续" });
+  stream.cancel();
+});
+
+it("replaces old execution text and sequence only after a new full snapshot", async () => {
+  const source = channel(), onReply = vi.fn();
+  const oldExecution = "44444444-4444-4444-8444-444444444444", newExecution = "55555555-5555-4555-8555-555555555555";
+  const stream = createJobStream({ jobId, conversationId, fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(source.response), onReply });
+  stream.start();
+  source.event("snapshot", { sequence: 10, text: "旧执行", executionId: oldExecution });
+  await flush();
+  source.event("snapshot", { sequence: 1, text: "新执行", executionId: newExecution });
+  source.event("delta", { sequence: 2, text: "的新文本", executionId: newExecution });
+  await flush();
+  expect(onReply).toHaveBeenLastCalledWith({ jobId, conversationId, assistantTurnId, text: "新执行的新文本", executionId: newExecution });
+  source.event("delta", { sequence: 3, text: "过期内容", executionId: oldExecution });
+  await flush();
+  expect(onReply).toHaveBeenLastCalledWith({ jobId, conversationId, assistantTurnId, text: "新执行的新文本", executionId: newExecution });
+  stream.cancel();
+});
+
 it("renders provider deltas before completion, restores cache on reconnect, and does not duplicate replayed deltas", async () => {
   const first = channel(), second = channel();
   const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(first.response).mockResolvedValueOnce(second.response);

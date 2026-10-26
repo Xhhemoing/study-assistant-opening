@@ -33,6 +33,7 @@ export async function createJobStreamResponse(input: {
   let firstSnapshot = true;
   let sentText = "";
   let sentSequence = 0;
+  let sentExecutionId: string | undefined;
 
   const close = () => {
     if (closed) return;
@@ -72,10 +73,11 @@ export async function createJobStreamResponse(input: {
         if (!job) { close(); break; }
         if (isTerminal(job)) { terminal(job); break; }
         if (snapshot?.text && job.status !== "running") break;
-        const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId };
+        const executionId = snapshot?.text ? snapshot.executionId : undefined;
+        const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, ...(executionId ? { executionId } : {}) };
         const text = snapshot?.text ?? "";
         const sequence = snapshot?.sequence ?? 0;
-        if (firstSnapshot || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
+        if (firstSnapshot || executionId !== sentExecutionId || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
           send("snapshot", { ...identity, text, sequence }, sequence);
           firstSnapshot = false;
         } else if (sequence > sentSequence && text.length > sentText.length) {
@@ -83,6 +85,7 @@ export async function createJobStreamResponse(input: {
         }
         sentText = text;
         sentSequence = sequence;
+        sentExecutionId = executionId;
       } while (pending && !closed);
     } catch {
       // The normal job endpoint remains the recovery path. In particular,

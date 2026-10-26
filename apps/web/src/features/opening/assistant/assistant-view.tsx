@@ -371,6 +371,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const submissionLock = useRef<symbol | null>(null);
   const submitClocks = useRef(new Map<string, number>());
   const [firstTextTiming, setFirstTextTiming] = useState<FirstTextTiming | null>(null);
+  const [waitRequestKey, setWaitRequestKey] = useState<string | null>(null);
   const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId, firstTextTiming);
   const draftStore = useMemo(() => createQuestionDraftStore(), []);
   const observedTurns = useRef<readonly TurnRecord[]>([]);
@@ -711,7 +712,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     : savedDisplay, [privacy, savedDisplay, ephemeralMessages, ephemeralPendingMessages]);
   const showingPendingReply = display.messages.some(message => message.role === "assistant" && message.status === "pending");
   const firstTextShown = display.messages.some(message => message.role === "assistant" && message.status === "pending" && Boolean(message.text.trim()));
-  const waitPhase = useTurnWaitPhase(pending && !firstTextShown, activeJobId ?? "local");
+  const waitPhase = useTurnWaitPhase(pending && !firstTextShown, waitRequestKey ?? activeJobId ?? "local");
   const retryTarget = privacy === "saved" ? failedTurnRetry(recoveredTurns) : null;
   useEffect(() => {
     onRetainStateChange?.({ pending: pending || loading || uploadPending,
@@ -864,6 +865,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     submitClocks.current.set(input.clientKey, submittedAt);
     if (submitClocks.current.size > 32) submitClocks.current.delete(submitClocks.current.keys().next().value!);
     setFirstTextTiming(null);
+    setWaitRequestKey(input.clientKey);
     setPending(true);
     let jobSubmitted = false;
     const abortController = new AbortController();

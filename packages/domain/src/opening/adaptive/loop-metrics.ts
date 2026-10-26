@@ -12,7 +12,8 @@ export type LoopMetricsInput = {
   coach?: { accepted: number; undone: number };
   replans?: { created: number; accepted: number; rejected: number };
   evaluations?: { recorded: number; abstained: number };
-  experience?: { firstTextMedianMs: number | null; firstTextSamples: number; shown: number; started: number };
+  experience?: { firstTextMedianMs: number | null; firstTextP90Ms?: number | null; firstTextSamples: number; shown: number; started: number };
+  tutorTiming?: Record<"queue" | "model" | "redis", { samples: number; p50Ms: number | null; p90Ms: number | null }>;
 };
 
 function ratio(id: string, label: string, numerator: number, denominator: number, denominatorLabel: string,
@@ -42,6 +43,23 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
     value: timing?.firstTextSamples ? timing.firstTextMedianMs : null, numerator: null, denominator: null,
     sampleSize: timing?.firstTextSamples ?? 0, denominatorLabel: "本标签页点击发送到首次非空流式正文显示，包含网络与排队；不含刷新恢复、临时对话与未采集请求",
     dataStatus: timing?.firstTextSamples ? "available" : "not_collected", excludedReasonCounts: {} }];
+  const duration = (id: string, label: string, value: number | null | undefined, samples: number | undefined, denominatorLabel: string): LoopMetric => ({
+    id, label, unit: "milliseconds", value: samples ? value ?? null : null, numerator: null, denominator: null,
+    sampleSize: samples ?? 0, denominatorLabel, excludedReasonCounts: {},
+    dataStatus: samples === undefined ? "not_collected" : samples === 0 ? "no_samples" : value == null ? "unknown" : "available",
+  });
+  runtime.push(duration("experience.first_text_p90", "首次正文显示时间（P90）", timing?.firstTextP90Ms,
+    timing?.firstTextP90Ms === undefined ? undefined : timing.firstTextSamples,
+    "本标签页发送至首个非空正文的单调时钟耗时；不以客户端墙钟减服务器时间"));
+  for (const [stage, label, denominator] of [
+    ["queue", "入队到领取", "同一执行的任务创建至领取；两端均为数据库时钟"],
+    ["model", "领取后等待模型首文本", "同一Worker内，从领取返回到首个非空文本片段的单调时钟耗时"],
+    ["redis", "首文本到流发布确认", "同一Worker内，从首文本到Redis确认首次发布的单调时钟耗时"],
+  ] as const) {
+    const distribution = input.tutorTiming?.[stage];
+    runtime.push(duration(`tutor.${stage}_p50`, `${label}（P50）`, distribution?.p50Ms, distribution?.samples, denominator),
+      duration(`tutor.${stage}_p90`, `${label}（P90）`, distribution?.p90Ms, distribution?.samples, denominator));
+  }
   for (const kind of [...new Set(input.jobs.map(row => row.kind))].sort()) {
     const states = Object.fromEntries(input.jobs.filter(row => row.kind === kind).map(row => [row.state, row.count]));
     const total = Object.values(states).reduce((sum, n) => sum + n, 0);
@@ -168,5 +186,6 @@ export function buildLoopMetricsReport(input: LoopMetricsInput): LoopMetricsRepo
       "学习者自对照保留为自报记录，不进入已核验正确比例；合格错误也属于独立核对覆盖。",
       "等待时间只描述已返回样本，并列出右删失人数；不将未返回当作零分钟或答错。",
       "操作、生成建议与账面费用均为描述性记录，不构成掌握度、总体评分或教学收益证据。",
-      "任务反馈仅覆盖新增事件入口；更早的操作历史未知，补测自动完成不计入手动标记次数。"] });
+      "任务反馈仅覆盖新增事件入口；更早的操作历史未知，补测自动完成不计入手动标记次数。",
+      "首文本是流接口可观测片段，不是tokenizer内部时刻。缺失阶段不填零；真实模型一周样本用于性能验收，当前报告不证明模型质量。"] });
 }

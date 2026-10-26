@@ -5,7 +5,7 @@ import { loadOpeningJobStaleConfig, loadWorkerStartupConfig } from "@aistudy/con
 import { assertConsumersActive, consumersReady, createWorkerReadiness, type ReadyConsumer } from "./runtime/worker-readiness";
 import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
-import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository,
+import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, recordOpeningTutorTiming,
   createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository } from "@aistudy/database";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
@@ -281,6 +281,8 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    timing: { record: (scope, input) => recordOpeningTutorTiming(sql, scope, input) },
+    onTimingUnavailable: reportError,
     retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),
     learnerContext: createOpeningTutorLearnerContextRepository(sql),
     stream: createTutorStreamWriter(producer),

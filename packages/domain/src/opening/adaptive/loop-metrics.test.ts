@@ -18,6 +18,16 @@ export const metricsInput = (): LoopMetricsInput => ({
 const metric = (input: LoopMetricsInput, group: "runtime" | "learning" | "burden", id: string) =>
   buildLoopMetricsReport(input).groups[group].find(row => row.id === id)!;
 
+it("reports P50/P90 of observed tutor stages without inventing missing intervals", () => {
+  const input = metricsInput();
+  input.experience = { firstTextSamples: 4, firstTextMedianMs: 2300, firstTextP90Ms: 5800, shown: 0, started: 0 };
+  input.tutorTiming = { queue: { samples: 4, p50Ms: 120, p90Ms: 450 }, model: { samples: 3, p50Ms: 1700, p90Ms: 4200 }, redis: { samples: 0, p50Ms: null, p90Ms: null } };
+  expect(metric(input, "runtime", "experience.first_text_p90")).toMatchObject({ value: 5800, sampleSize: 4 });
+  expect(metric(input, "runtime", "tutor.queue_p90")).toMatchObject({ value: 450, sampleSize: 4 });
+  expect(metric(input, "runtime", "tutor.model_p50")).toMatchObject({ value: 1700, sampleSize: 3 });
+  expect(metric(input, "runtime", "tutor.redis_p90")).toMatchObject({ value: null, sampleSize: 0, dataStatus: "no_samples" });
+});
+
 it("keeps all three groups separate and represents missing collection and empty samples with null", () => {
   const report = buildLoopMetricsReport(metricsInput());
   expect(Object.keys(report.groups)).toEqual(["runtime", "learning", "burden"]);

@@ -4,11 +4,44 @@ import { createOpeningPlansRepository } from "@aistudy/database";
 import { readOpeningLoopMetrics } from "../../packages/database/src/repositories/opening-loop-metrics";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { matrixAttemptFixture } from "./opening-matrix-attempt-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
+import { recordOpeningLearningExperience } from "@aistudy/database";
 
 let fixture: OpeningFixture;
 beforeEach(async () => { fixture = await createOpeningFixture(); });
 afterEach(async () => { await fixture?.close(); });
 const now = new Date("2026-10-16T16:00:00.000Z");
+
+it("reports a week of first-render and stage percentiles without mixing machine clocks or filling missing stages", async () => {
+  const { sql, scope } = fixture;
+  const rows = backupRows(sql, scope), conversation = await rows.conversation();
+  const queue = [100, 200, 300, 900], model = [50, 150, 250, 850], redis = [1, 2, null, 4], total = [1000, 2000, 3000, 9000];
+  const createdAt = new Date(now.getTime() - 60_000), recordedAt = new Date(now.getTime() - 1);
+  for (let index = 0; index < total.length; index++) {
+    const user = await rows.turn(conversation, []), assistant = await rows.turn(conversation, []), job = randomUUID(), clientKey = randomUUID(), executionId = randomUUID();
+    await sql`UPDATE opening_turns SET role='user',client_key=${clientKey} WHERE id=${user}`;
+    await sql`INSERT INTO opening_tutor_jobs(id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status,mode,created_at)
+      VALUES(${job},${scope.workspaceId},${conversation},${user},${assistant},'running','explain',${createdAt})`;
+    for (const [kind, duration, observed] of [
+      ["tutor_claimed", null, new Date(createdAt.getTime() + queue[index]!)],
+      ["tutor_first_text", model[index]!, new Date("2040-01-01T00:00:00Z")],
+      ["tutor_first_chunk", redis[index] ?? null, new Date("2040-01-01T00:00:01Z")],
+    ] as const) {
+      if (kind === "tutor_first_chunk" && duration === null) continue;
+      await sql`INSERT INTO opening_learning_experience_events(workspace_id,owner_user_id,event_key,kind,target_type,target_id,local_day,execution_id,observed_at,recorded_at,duration_ms)
+        VALUES(${scope.workspaceId},${scope.ownerUserId},${`${kind}:${job}:${executionId}`},${kind},'job',${job},'2026-10-16',${executionId},${observed},${recordedAt},${duration})`;
+    }
+    await recordOpeningLearningExperience(sql, scope, { kind: "first_text", jobId: job, clientKey, executionId, observedAt: "2000-01-01T00:00:00Z", durationMs: total[index]! }, recordedAt);
+  }
+  const report = await readOpeningLoopMetrics(sql, scope, { now, days: 7 });
+  const metric = (id: string) => report.groups.runtime.find(row => row.id === id)!;
+  expect(metric("experience.first_text")).toMatchObject({ value: 2500, sampleSize: 4 });
+  expect(metric("experience.first_text_p90").value).toBeCloseTo(7200);
+  expect(metric("tutor.queue_p90").value).toBeCloseTo(720);
+  expect(metric("tutor.model_p50")).toMatchObject({ value: 200, sampleSize: 4 });
+  expect(metric("tutor.redis_p90")).toMatchObject({ sampleSize: 3 });
+  expect(metric("tutor.redis_p90").value).toBeCloseTo(3.6);
+});
 
 it("hand-counts creation cohorts, separates zero-cost TTL from actual receipts and does not reconcile on GET", async () => {
   const { sql, scope, otherScope } = fixture;

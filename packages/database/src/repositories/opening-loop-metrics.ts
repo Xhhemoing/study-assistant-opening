@@ -103,9 +103,36 @@ export async function readOpeningLoopMetrics(sql: Sql, scope: Scope, options: { 
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND origin='planner'
         AND client_key=ANY(${[...generated.keys()]}::text[]) AND created_at<${now}` : [];
     const [timing] = await tx`SELECT count(*)::int AS samples,
-      percentile_cont(0.5) WITHIN GROUP(ORDER BY duration_ms) AS median
+      percentile_cont(0.5) WITHIN GROUP(ORDER BY duration_ms) AS median,
+      percentile_cont(0.9) WITHIN GROUP(ORDER BY duration_ms) AS p90
       FROM opening_learning_experience_events WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND kind='first_text' AND recorded_at>=${from} AND recorded_at<${now}`;
+    const [stages] = await tx`WITH executions AS (
+      SELECT e.target_id, e.execution_id,
+        max(e.observed_at) FILTER(WHERE e.kind='tutor_claimed') AS claimed_at,
+        max(e.duration_ms) FILTER(WHERE e.kind='tutor_first_text') AS model_ms,
+        max(e.duration_ms) FILTER(WHERE e.kind='tutor_first_chunk') AS redis_ms
+      FROM opening_learning_experience_events e
+      WHERE e.workspace_id=${scope.workspaceId} AND e.owner_user_id=${scope.ownerUserId}
+        AND e.execution_id IS NOT NULL AND e.recorded_at>=${from} AND e.recorded_at<${now}
+        AND e.kind IN ('tutor_claimed','tutor_first_text','tutor_first_chunk')
+      GROUP BY e.target_id,e.execution_id
+    ), durations AS (
+      SELECT extract(epoch FROM (e.claimed_at-j.created_at))*1000 AS queue_ms,e.model_ms,e.redis_ms
+      FROM executions e JOIN opening_tutor_jobs j ON j.id=e.target_id AND j.workspace_id=${scope.workspaceId}
+    ) SELECT
+      count(queue_ms) FILTER(WHERE queue_ms>=0)::int AS queue_samples,
+      percentile_cont(0.5) WITHIN GROUP(ORDER BY queue_ms) FILTER(WHERE queue_ms>=0) AS queue_p50,
+      percentile_cont(0.9) WITHIN GROUP(ORDER BY queue_ms) FILTER(WHERE queue_ms>=0) AS queue_p90,
+      count(model_ms)::int AS model_samples,
+      percentile_cont(0.5) WITHIN GROUP(ORDER BY model_ms) AS model_p50,
+      percentile_cont(0.9) WITHIN GROUP(ORDER BY model_ms) AS model_p90,
+      count(redis_ms)::int AS redis_samples,
+      percentile_cont(0.5) WITHIN GROUP(ORDER BY redis_ms) AS redis_p50,
+      percentile_cont(0.9) WITHIN GROUP(ORDER BY redis_ms) AS redis_p90 FROM durations`;
+    const distribution = (key: "queue" | "model" | "redis") => ({ samples: Number(stages?.[`${key}_samples`] ?? 0),
+      p50Ms: stages?.[`${key}_p50`] == null ? null : Number(stages[`${key}_p50`]),
+      p90Ms: stages?.[`${key}_p90`] == null ? null : Number(stages[`${key}_p90`]) });
     const [experience] = await tx`SELECT count(*)::int AS shown,
       count(*) FILTER(WHERE EXISTS(SELECT 1 FROM opening_learning_experience_events accepted
         WHERE accepted.workspace_id=shown.workspace_id AND accepted.owner_user_id=shown.owner_user_id
@@ -118,7 +145,9 @@ export async function readOpeningLoopMetrics(sql: Sql, scope: Scope, options: { 
       budget: budget.map(row => ({ category: row.category as LoopMetricsInput["budget"][number]["category"], count: Number(row.n), cents: Number(row.cents) })),
       observations, learningComplete, privacyExcludedCount, feedback,
       experience: { firstTextSamples: Number(timing?.samples ?? 0), firstTextMedianMs: timing?.median == null ? null : Number(timing.median),
+        firstTextP90Ms: timing?.p90 == null ? null : Number(timing.p90),
         shown: Number(experience?.shown ?? 0), started: Number(experience?.started ?? 0) },
+      tutorTiming: { queue: distribution("queue"), model: distribution("model"), redis: distribution("redis") },
       suggestions: { complete: suggestionsComplete, generated: generated.size, accepted: accepted.length,
         minutes: [...generated.values()].reduce((sum, n) => sum + n, 0) },
       suggestionFeedback: suggestionFeedback.map(row => ({ reason: row.reason == null ? "missing" : String(row.reason), count: Number(row.n) })),

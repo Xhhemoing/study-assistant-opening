@@ -36,3 +36,20 @@ it("binds first displayed text timing to its real job and submitted client key, 
   const [stored] = await f.sql`SELECT * FROM opening_learning_experience_events WHERE target_id=${job}`;
   expect(stored).not.toHaveProperty("client_key"); expect(stored).not.toHaveProperty("text");
 });
+
+it("accepts client wall-clock metadata only for a claimed execution of the same owned job", async () => {
+  const rows = backupRows(f.sql, f.scope), conversation = await rows.conversation();
+  const user = await rows.turn(conversation, []), assistant = await rows.turn(conversation, []), job = randomUUID(), clientKey = randomUUID(), executionId = randomUUID();
+  await f.sql`UPDATE opening_turns SET role='user',client_key=${clientKey} WHERE id=${user}`;
+  await f.sql`INSERT INTO opening_tutor_jobs(id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status,mode)
+    VALUES(${job},${f.scope.workspaceId},${conversation},${user},${assistant},'running','explain')`;
+  const input = { kind: "first_text", jobId: job, clientKey, durationMs: 1200, executionId, observedAt: now.toISOString() } as const;
+  await expect(recordOpeningLearningExperience(f.sql, f.scope, input, now)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await f.sql`INSERT INTO opening_learning_experience_events(workspace_id,owner_user_id,event_key,kind,target_type,target_id,local_day,execution_id,observed_at,recorded_at)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${`tutor_claimed:${job}:${executionId}`},'tutor_claimed','job',${job},'2026-10-21',${executionId},${now},${now})`;
+  await expect(recordOpeningLearningExperience(f.sql, f.otherScope, input, now)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await recordOpeningLearningExperience(f.sql, f.scope, input, now)).toEqual({ recorded: true });
+  const [stored] = await f.sql`SELECT execution_id, observed_at, duration_ms FROM opening_learning_experience_events WHERE target_id=${job} AND kind='first_text'`;
+  expect(stored).toMatchObject({ execution_id: executionId, duration_ms: 1200 });
+  expect(new Date(stored.observed_at).toISOString()).toBe(now.toISOString());
+});

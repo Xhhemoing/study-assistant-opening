@@ -39,6 +39,15 @@ function setup() {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("authorized tutor job event stream", () => {
+  it("exposes only the observation execution id after authorizing streamed text", async () => {
+    const deps = setup();
+    deps.read.mockResolvedValue({ ...snapshot("text", 1), executionId: "10000000-0000-4000-8000-000000000001" });
+    const reader = (await deps.open()).body!.getReader();
+    const first = await readEvent(reader);
+    expect(first?.data.executionId).toBe("10000000-0000-4000-8000-000000000001");
+    expect(first?.data).not.toHaveProperty("claimToken");
+    await reader.cancel();
+  });
   it("subscribes first, releases help before the first bytes, and reconnects with a full snapshot", async () => {
     const deps = setup();
     let release: (() => void) | undefined;

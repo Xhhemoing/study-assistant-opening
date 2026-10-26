@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, it, expect, vi } from "vitest";
 import { useJobStream, type FirstTextTiming } from "./use-job-stream";
-const mocks = vi.hoisted(() => ({ record: vi.fn(), reply: null as null | ((reply: { jobId: string; conversationId: string; assistantTurnId: string; text: string }) => void) }));
+const mocks = vi.hoisted(() => ({ record: vi.fn(), reply: null as null | ((reply: { jobId: string; conversationId: string; assistantTurnId: string; text: string; executionId?: string }) => void) }));
 vi.mock("../client/learning-experience", () => ({ recordLearningExperience: mocks.record }));
 vi.mock("./job-stream", () => ({ createJobStream: (options: { onReply: typeof mocks.reply }) => {
   mocks.reply = options.onReply; return { start() {}, cancel() {} };
@@ -21,16 +21,23 @@ beforeEach(() => {
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.restoreAllMocks(); });
-const delta = (text: string) => act(async () => { mocks.reply!({ jobId: "job", conversationId: "conversation", assistantTurnId: "turn", text }); });
+const executionId = "11111111-1111-4111-8111-111111111111";
+const delta = (text: string) => act(async () => { mocks.reply!({ jobId: "job", conversationId: "conversation", assistantTurnId: "turn", text, executionId }); });
 it("records after committed nonempty text and the next frame, once per job", async () => {
   await act(async () => root.render(<Harness />));
   await delta(" "); await act(async () => vi.advanceTimersByTimeAsync(20)); expect(mocks.record).not.toHaveBeenCalled();
   await delta("第一行"); expect(host.textContent).toBe("第一行"); expect(mocks.record).not.toHaveBeenCalled();
   await delta("第一行和后续字"); await act(async () => vi.advanceTimersByTimeAsync(20));
-  expect(mocks.record).toHaveBeenCalledExactlyOnceWith({ kind: "first_text", jobId: "job", clientKey: "submit-key", durationMs: 2300 });
+  expect(mocks.record).toHaveBeenCalledExactlyOnceWith({ kind: "first_text", jobId: "job", clientKey: "submit-key", durationMs: 2300, executionId, observedAt: expect.any(String) });
   await delta("更多正文"); await act(async () => vi.advanceTimersByTimeAsync(20)); expect(mocks.record).toHaveBeenCalledTimes(1);
 });
 it.each([null, { ...timing, jobId: "previous" }])("does not invent a submission clock for restored or unrelated jobs", async sample => {
   await act(async () => root.render(<Harness sample={sample} />)); await delta("恢复的文字");
   await act(async () => vi.advanceTimersByTimeAsync(20)); expect(mocks.record).not.toHaveBeenCalled();
+});
+it("keeps the old observation shape when an older server has no execution identity", async () => {
+  await act(async () => root.render(<Harness />));
+  await act(async () => mocks.reply!({ jobId: "job", conversationId: "conversation", assistantTurnId: "turn", text: "旧服务端回答" }));
+  await act(async () => vi.advanceTimersByTimeAsync(20));
+  expect(mocks.record).toHaveBeenCalledExactlyOnceWith({ kind: "first_text", jobId: "job", clientKey: "submit-key", durationMs: 2300 });
 });

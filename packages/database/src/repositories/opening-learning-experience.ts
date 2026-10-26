@@ -21,6 +21,11 @@ export async function recordOpeningLearningExperience(sql: Sql, scope: Scope, ra
         WHERE j.id=${targetId} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
           AND u.client_key=${input.clientKey} AND u.role='user'`;
       found = rows.length > 0;
+      if (found && input.executionId) {
+        found = (await tx`SELECT 1 FROM opening_learning_experience_events WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND target_id=${targetId} AND target_type='job'
+          AND kind='tutor_claimed' AND execution_id=${input.executionId}`).length > 0;
+      }
     } else if (targetType === "course") {
       found = (await tx`SELECT id FROM courses WHERE id=${targetId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`).length > 0;
     } else if (targetType === "activity") {
@@ -36,8 +41,9 @@ export async function recordOpeningLearningExperience(sql: Sql, scope: Scope, ra
       if (!shown.length) return { recorded: false };
     }
     const key = input.kind === "first_text" ? `first_text:${targetId}` : `${input.kind}:${suffix}`;
-    const rows = await tx`INSERT INTO opening_learning_experience_events(workspace_id,owner_user_id,event_key,kind,target_type,target_id,local_day,duration_ms,recorded_at)
-      VALUES(${scope.workspaceId},${scope.ownerUserId},${key},${input.kind},${targetType},${targetId},${day},${input.kind === "first_text" ? input.durationMs : null},${now})
+    const rows = await tx`INSERT INTO opening_learning_experience_events(workspace_id,owner_user_id,event_key,kind,target_type,target_id,local_day,duration_ms,recorded_at,execution_id,observed_at)
+      VALUES(${scope.workspaceId},${scope.ownerUserId},${key},${input.kind},${targetType},${targetId},${day},${input.kind === "first_text" ? input.durationMs : null},${now},
+        ${input.kind === "first_text" ? input.executionId ?? null : null},${input.kind === "first_text" && input.observedAt ? new Date(input.observedAt) : null})
       ON CONFLICT(workspace_id,owner_user_id,event_key) DO NOTHING RETURNING id`;
     return { recorded: rows.length > 0 };
   });
