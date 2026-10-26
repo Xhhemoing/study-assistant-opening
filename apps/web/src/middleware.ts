@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isAllowedCookieAuthOrigin } from "./features/opening/access-policy";
+import { recordLegacyApiRequest } from "./features/opening/legacy-api-observation";
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -39,6 +40,7 @@ export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string)
 }
 
 export function middleware(request: NextRequest) {
+  recordLegacyApiRequest(request, { publicBaseUrl: process.env.PUBLIC_BASE_URL, build: process.env.AISTUDY_COMMIT });
   const pathname = request.nextUrl.pathname;
   const legacyRule = LEGACY_OPENING_REDIRECTS.find(candidate => candidate.test(pathname));
   // Retired pages have no UI module left, so old bookmarks resolve in every environment.

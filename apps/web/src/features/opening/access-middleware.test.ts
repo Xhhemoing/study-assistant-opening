@@ -169,3 +169,33 @@ describe("cookie-auth base URL configuration", () => {
   });
 });
 
+describe("legacy API observation does not change request handling", () => {
+  beforeEach(() => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_BASE_URL", publicBase);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  it("records a blocked request without logging credentials or consuming its body", () => {
+    const input = new NextRequest(`${publicBase}/api/practice/private-id?token=secret`, {
+      method: "POST", body: "private answer", headers: { origin: "https://foreign.example", cookie: "session=secret" },
+    });
+    expect(middleware(input).status).toBe(403);
+    expect(input.bodyUsed).toBe(false);
+    expect(console.info).toHaveBeenCalledOnce();
+    const event = JSON.parse(vi.mocked(console.info).mock.calls[0]![0] as string);
+    expect(event).toMatchObject({ event: "deprecated_api_request", route: "/api/practice/[id]", method: "POST" });
+    expect(JSON.stringify(event)).not.toMatch(/private|secret|foreign/);
+  });
+
+  it("keeps a same-origin request and active routes unchanged when logging fails", () => {
+    vi.mocked(console.info).mockImplementation(() => { throw new Error("stdout unavailable"); });
+    const input = new NextRequest(`${publicBase}/api/explorations`, { method: "POST", headers: { origin: publicBase } });
+    expect(middleware(input).headers.get("x-middleware-next")).toBe("1");
+    vi.mocked(console.info).mockClear();
+    expect(middleware(new NextRequest(`${publicBase}/api/courses`, { method: "POST", headers: { origin: publicBase } })).headers.get("x-middleware-next")).toBe("1");
+    expect(console.info).not.toHaveBeenCalled();
+  });
+});
+
