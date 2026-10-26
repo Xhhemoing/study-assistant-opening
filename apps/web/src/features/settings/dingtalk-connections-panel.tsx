@@ -93,7 +93,7 @@ export function DingTalkConnectionsPanel() {
   return <section aria-labelledby="dingtalk-connections-heading" className="grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]">
     <div>
       <h2 className="text-sm font-medium text-text" id="dingtalk-connections-heading">钉钉连接</h2>
-      <p className="mt-1 text-xs leading-6 text-text-3">只处理组织授权的回调事件；不推断历史群聊读取权限。</p>
+      <p className="mt-1 text-xs leading-6 text-text-3">只处理组织授权的回调事件；不包含历史群聊读取权限。</p>
     </div>
     <div className="space-y-3">
       {error ? <p className="text-sm leading-6 text-danger" role="alert">{error}</p> : null}

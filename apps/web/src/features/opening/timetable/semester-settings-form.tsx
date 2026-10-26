@@ -220,7 +220,7 @@ export function SemesterSettingsForm() {
       <div>
         <h3 className="text-sm font-medium text-text" id="semester-settings-heading">学期与可用时间</h3>
         <p className="mt-1 text-xs leading-6 text-text-3">
-          第一周周一、节次时间与每日窗口保存在服务端，供按建议排程推导空闲时间。默认每日 07:30–22:30，午餐 12:00–13:00，晚餐 17:30–18:30，睡眠 23:00–07:00。
+          第一周周一、节次时间与每日窗口保存在账户中，用于根据课表安排可用时间。默认每日 07:30–22:30，午餐 12:00–13:00，晚餐 17:30–18:30，睡眠 23:00–07:00。
         </p>
       </div>
       {data?.invalidStoredSettings ? (

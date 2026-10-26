@@ -260,7 +260,7 @@ export function BlockCommandsBarView({
               </summary>
               <p className="mt-1">{conflict.message}</p>
               <p className="mt-1 tabular-nums">
-                服务端版本
+                当前内容
                 {conflict.currentContentVersion != null
                   ? ` content=${conflict.currentContentVersion}`
                   : ""}

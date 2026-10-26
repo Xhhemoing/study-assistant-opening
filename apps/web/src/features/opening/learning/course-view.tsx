@@ -143,16 +143,16 @@ function SummaryGroup({ group, courseId }: { group: LearningSummaryAggregate; co
     <p className="text-xs leading-6 text-text-3">评分来源：{sourceLabels}</p>
     <EvidenceCautions evidence={group.representatives} />
     {diagnostics ? <section className="text-xs text-text-3" aria-label="学习证据诊断">
-      <h4 className="py-1 font-medium">来源、资格与核对计数</h4>
+      <h4 className="py-1 font-medium">来源、学习记录的使用条件与核对计数</h4>
       <dl className="grid gap-1 py-2 leading-5 sm:grid-cols-2">
-        <div><dt className="inline">近期可比较证据：</dt><dd className="inline">{conclusion.recentComparableEvidence.qualifiedCount} / {conclusion.recentComparableEvidence.evidenceCount} 条符合资格</dd></div>
+        <div><dt className="inline">近期可比较证据：</dt><dd className="inline">{conclusion.recentComparableEvidence.qualifiedCount} / {conclusion.recentComparableEvidence.evidenceCount} 条可计入比较</dd></div>
         <div><dt className="inline">更早的独立核对正确：</dt><dd className="inline">{conclusion.historicalSuccess.count} 条</dd></div>
         <div><dt className="inline">适用性：</dt><dd className="inline">精确 {group.applicabilityCounts.exact} · 等价 {group.applicabilityCounts.equivalent_confirmed} · 需重新核对 {group.applicabilityCounts.changed_needs_check} · 版本未知 {group.applicabilityCounts.version_unknown} · 不可用 {group.applicabilityCounts.unavailable}</dd></div>
         <div><dt className="inline">核对活动：</dt><dd className="inline">已接受 {group.openChecks.acceptedCount} · 进行中 {group.openChecks.inProgressCount} · 到期 {group.openChecks.dueCount}</dd></div>
       </dl>
       <p className="py-1 leading-5">评分来源：{sourceLabels} · {group.representatives.length ? `${group.representatives.length} 条代表证据` : "无代表证据"}</p>
       {group.representatives.map((representative, index) => <div key={representative.observationId} className="py-1"><span className="break-all">代表观察 {index + 1} · 观察 ID：{representative.observationId} · 记录时间：<time dateTime={new Date(representative.attemptAt).toISOString()}>{formatEvidenceTime(representative.attemptAt)}</time></span><LearningEvidenceEligibilityDetails expanded eligibility={representative.eligibility} versionApplicability={representative.versionApplicability} /></div>)}
-      {!group.representatives.length ? <p className="py-1">资格信息尚未提供，先保留。</p> : null}
+      {!group.representatives.length ? <p className="py-1">学习记录的使用条件尚未提供，先保留。</p> : null}
     </section> : null}
   </li>;
 }
@@ -162,7 +162,7 @@ export function CourseSummaryNotice({ state, onRefresh }: { state: CourseSummary
   if (!state.notice) return null;
   const stalled = state.status === "updating" && state.notice.includes("手动刷新");
   return <div className="flex flex-wrap items-center gap-3" role="status">
-    <p className="text-xs leading-6 text-warn">{diagnostics ? state.notice : state.status !== "updating" ? state.notice.replace("代表资格", "相关依据") : stalled ? "学习记录核对暂未完成，请手动刷新。" : "学习记录正在核对，完成后会更新这里的结果。"}</p>
+    <p className="text-xs leading-6 text-warn">{diagnostics ? state.notice : state.status !== "updating" ? state.notice.replace("相关判断", "相关依据") : stalled ? "学习记录核对暂未完成，请手动刷新。" : "学习记录正在核对，完成后会更新这里的结果。"}</p>
     {stalled ? <button type="button" className={secondaryButtonClass} onClick={onRefresh}>刷新摘要</button> : null}
   </div>;
 }
@@ -214,12 +214,12 @@ export function CourseLearningRecords({ courseId, state, error, summary, onReloa
               <p className="w-full text-xs leading-6 text-text-2">{nextStep(item)} <a href={focusedPracticeHref(item.courseId ?? courseId, item.skillLabel, item.requirementKey)} className="font-medium text-accent underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent">继续独立练习</a></p>
               <p className="w-full text-xs leading-6 text-text-3">证据来源：{item.evidenceSources?.map(source => SOURCE_LABEL[source] ?? source).join("、") || "无"}</p>
               <EvidenceCautions evidence={item.evidenceEligibility ?? []} />
-              {diagnostics ? <section className="w-full text-xs text-text-3" aria-label="学习证据诊断"><h4 className="py-1 font-medium">来源与资格</h4>
+              {diagnostics ? <section className="w-full text-xs text-text-3" aria-label="学习证据诊断"><h4 className="py-1 font-medium">来源与学习记录的使用条件</h4>
                 {item.recentPerformance ? <p className="py-2 leading-5">近期结果依据最近的 {item.recentPerformance.evidenceCount ?? item.recentPerformance.evidenceIds.length} 条原始作答；纠正记录不增加练习次数。</p> : null}
                 {item.historicalIncorrectCount !== undefined && item.unverifiedCount !== undefined ? <p className="py-2 leading-5">更早的记录中有 {item.historicalIncorrectCount} 条核对错误；当前共 {item.unverifiedCount} 条记录尚未确认。历史仍可查看。</p> : null}
                 <p className="break-all py-2 leading-5">证据来源：{item.evidenceSources?.map((source) => SOURCE_LABEL[source] ?? source).join("、") || "无"} · {item.evidenceIds.length ? `${item.evidenceIds.length} 条代表证据` : "无"} · 观察 ID：{item.evidenceIds.join("、") || "无"} · 记录时间：{item.lastObservedAt ? <time dateTime={item.lastObservedAt}>{formatEvidenceTime(item.lastObservedAt)}</time> : "未知"}</p>
                 {item.evidenceEligibility?.map(({ observationId, eligibility, versionApplicability }, index) => <div key={observationId} className="py-1"><span className="break-all text-xs text-text-3">{item.recentPerformance?.evidenceIds.includes(observationId) ? "最近代表观察" : "代表观察"} {index + 1} · 观察 ID：{observationId}</span><LearningEvidenceEligibilityDetails expanded eligibility={eligibility} versionApplicability={versionApplicability} /></div>)}
-                {!item.evidenceEligibility?.length ? <p className="text-xs text-text-3">资格信息尚未提供，先保留。</p> : null}
+                {!item.evidenceEligibility?.length ? <p className="text-xs text-text-3">学习记录的使用条件尚未提供，先保留。</p> : null}
               </section> : null}
             </li>
           ))}

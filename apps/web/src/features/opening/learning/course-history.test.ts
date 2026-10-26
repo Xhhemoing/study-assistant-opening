@@ -15,7 +15,7 @@ const ready: CourseHistoryState = { ...emptyCourseHistory(), status: "ready", sn
 describe("course history presentation", () => {
   it("shows fixed revision, loaded/visible totals and manual paging while retaining revision actions", () => {
     const html = renderToStaticMarkup(createElement(CourseHistoryPageView, { ...handlers, state: ready }));
-    expect(html).toContain("固定快照版本 7 · 已加载 1 / 51 条当前可见记录");
+    expect(html).toContain("本次读取版本 7 · 已加载 1 / 51 条当前可见记录");
     expect(html).toContain("新作答与修订请刷新查看");
     expect(html).toContain("继续加载（每页 50 条）");
     expect(html).toContain("刷新历史");
@@ -49,6 +49,6 @@ describe("course history presentation", () => {
     expect(html).toContain("继续加载（每页 50 条）");
     expect(html).toContain("纠正记录");
     expect(html).toContain("撤回记录");
-    expect(html).not.toContain("固定快照版本");
+    expect(html).not.toContain("本次读取版本");
   });
 });
