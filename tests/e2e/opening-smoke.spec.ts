@@ -91,8 +91,10 @@ test("new account completes the five-step Opening smoke journey", async ({ page 
     });
 
     await test.step("ask AI and record visible first text and completion times", async () => {
-      await workspace.getByRole("button", { name: "工具", exact: true }).click();
+      const openTools = workspace.getByRole("button", { name: "工具", exact: true });
+      if (await openTools.getAttribute("aria-expanded") === "false") await openTools.click();
       const tools = workspace.getByRole("dialog", { name: "学习辅助区", exact: true });
+      await expect(tools).toBeVisible();
       await tools.getByRole("tab", { name: "对话", exact: true }).click();
       const chat = tools.getByRole("tabpanel", { name: "对话", exact: true });
       await chat.getByRole("button", { name: "打开此处提问", exact: true }).click();
@@ -134,7 +136,7 @@ test("new account completes the five-step Opening smoke journey", async ({ page 
       await page.reload();
       await expect(page).toHaveURL(url);
       await expect(workspace).toHaveAttribute("data-content-version", version!);
-      // Opening the content tab changes presentation only; it must not move the saved checkpoint.
+      // Closing the tools changes presentation only; it must not move the saved checkpoint.
       const closeTools = page.getByRole("button", { name: "关闭学习工具", exact: true });
       if (await closeTools.isVisible()) await closeTools.click();
       await expect(workspace.locator("[data-current-block-id]")).toHaveAttribute("data-current-block-id", block!);

@@ -7,8 +7,8 @@
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
 | 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 当前 head；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
-| 候选检查 | `11432a7b` 远端 Worker/PDF 流程通过，综合检查未结束；本批 5 份回归同步经独立只读复审无阻断，未运行本地测试/类型/lint/构建/浏览器。完整验证以 #134 当前 head 的 Checks 为准 |
-| 当前工作 | 一次性同步集中 CI 的 6 条旧路由/界面断言，保留课程及对话身份、换题清空旧作答和设置来源保护；PDF 独立 worker 生命周期修复已推送，并发工作流文档保留在本地 |
+| 候选检查 | `4d31ffe8` 远端 Worker/PDF、Lint、类型、单元/契约/流水线及技术验证测试通过；综合任务仍在执行集成测试，完整 CI 未结束。用户浏览器验收仍待完成 |
+| 当前工作 | 新账户冒烟脚本已按工具展开状态操作，并补齐 PDF 切换、重开与失败回退的用户复验步骤；本批维护先保存在本地分支，等待既有 CI 结束后推送，避免取消已有检查。本轮未运行本地或浏览器测试 |
 
 ## 本轮开放 PR
 
