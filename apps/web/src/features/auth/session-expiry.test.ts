@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningApi, OpeningApiError } from "../opening/client/api";
 import { createOpeningLearningClient } from "../opening/client/learning-client";
 import { createOpeningCardsClient } from "../opening/cards/cards-client";
-import { createCourseStateClient } from "../courses/course-state-client";
+import { createCourseStateClient } from "../opening/courses/course-state-client";
 import { createSourceActionsClient } from "../opening/inbox/source-actions-client";
 import { createMeasurementClient } from "../opening/measurement/client";
 import { clearSessionExpiry, createSessionFetch, installSessionFetch, subscribeToSessionExpiry } from "./session-expiry";

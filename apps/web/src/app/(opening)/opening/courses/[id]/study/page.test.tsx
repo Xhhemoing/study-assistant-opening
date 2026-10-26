@@ -3,9 +3,9 @@ const mocks=vi.hoisted(()=>({context:vi.fn(),span:vi.fn(),redirect:vi.fn(),heade
 vi.mock('next/headers',()=>({headers:mocks.headers}));
 vi.mock('next/navigation',()=>({redirect:mocks.redirect,notFound:()=>{throw new Error('not found');}}));
 vi.mock('@aistudy/ai',()=>({isTeachingCompilerEnabled:()=>true}));
-vi.mock('../../../../../../features/courses/server/course-study-context',()=>({loadCourseStudyContext:mocks.context}));
-vi.mock('../../../../../../features/courses/server/course-span-resume',()=>({loadCourseSpanResume:mocks.span}));
-vi.mock('../../../../../../features/courses/course-study-workspace',()=>({CourseStudyWorkspace:()=>null}));
+vi.mock('../../../../../../features/opening/courses/server/course-study-context',()=>({loadCourseStudyContext:mocks.context}));
+vi.mock('../../../../../../features/opening/courses/server/course-span-resume',()=>({loadCourseSpanResume:mocks.span}));
+vi.mock('../../../../../../features/opening/courses/course-study-workspace',()=>({CourseStudyWorkspace:()=>null}));
 import CourseStudyPage from './page';
 const course='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',activity='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',task='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 beforeEach(()=>{vi.clearAllMocks();mocks.headers.mockResolvedValue(new Headers());mocks.context.mockResolvedValue({teachingEnabled:true,sourceIds:[],timeZone:'UTC'});mocks.span.mockResolvedValue({courseId:course,activityId:activity});mocks.redirect.mockImplementation(()=>{throw new Error('REDIRECT');});});

@@ -1,13 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
-import {
-  isAllowedCookieAuthOrigin,
-  shouldRedirectLegacyMockPages,
-} from "./features/opening/access-policy";
+import { isAllowedCookieAuthOrigin } from "./features/opening/access-policy";
 
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /** Legacy mock-backed experiences must not masquerade as official entries. */
-const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (pathname: string) => string }[] = [
+const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (pathname: string) => string; permanent?: boolean }[] = [
+  { test: p => p === "/learn/courses" || p.startsWith("/learn/courses/"), target: p => `/opening${p.slice("/learn".length)}`, permanent: true },
+  { test: p => p === "/library" || p.startsWith("/library/"), target: p => `/opening${p}`, permanent: true },
+  { test: p => p === "/settings" || p.startsWith("/settings/"), target: p => `/opening${p}`, permanent: true },
+  { test: p => p === "/search", target: () => "/opening/search", permanent: true },
+  { test: p => p === "/ui-preview" || p.startsWith("/ui-preview/"), target: () => "/opening/today", permanent: true },
   { test: (p) => p === "/learn", target: () => "/opening/today" },
   {
     test: (p) => p === "/learn/review" || p.startsWith("/learn/review/"),
@@ -38,13 +40,14 @@ export function cookieAuthBaseUrl(env: NodeJS.ProcessEnv, requestOrigin: string)
 
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-  const legacyRedirect = legacyOpeningRedirectPath(pathname);
-  // Production isolates mock pages without requiring OPENING_RELEASE=1.
-  // /learn/courses* stays reachable by product decision (see access-middleware.test.ts).
-  if (shouldRedirectLegacyMockPages() && legacyRedirect) {
-    const target = request.nextUrl.clone();
-    target.pathname = legacyRedirect;
-    return NextResponse.redirect(target);
+  const legacyRule = LEGACY_OPENING_REDIRECTS.find(candidate => candidate.test(pathname));
+  // Retired pages have no UI module left, so old bookmarks resolve in every environment.
+  if (legacyRule) {
+    // nextUrl folds 127.0.0.1 / ::1 into localhost even with URL normalization
+    // disabled. Preserve the raw request authority so host-only cookies survive.
+    const target = new URL(request.url);
+    target.pathname = legacyRule.target(pathname);
+    return NextResponse.redirect(target, legacyRule.permanent ? 308 : 307);
   }
   if (!UNSAFE_METHODS.has(request.method)) {
     return NextResponse.next();

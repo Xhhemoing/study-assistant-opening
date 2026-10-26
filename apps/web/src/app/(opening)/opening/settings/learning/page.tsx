@@ -1,5 +1,5 @@
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { SettingsView } from "@/features/settings/settings-view";
+import { SettingsView } from "@/features/opening/settings/settings-view";
 import { TodayDashboard } from "@/features/opening/planning/today-dashboard";
 import { loadTodayPage } from "@/features/opening/planning/load-today-page";
 

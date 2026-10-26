@@ -1,6 +1,6 @@
 import { ConversationObjectFrame } from "../../../../../features/opening/assistant/conversation-object-frame";
 import { validConversationId } from "../../../../../features/opening/assistant/conversation-links";
-import { CourseDetail } from "../../../../../features/courses/course-detail";
+import { CourseDetail } from "../../../../../features/opening/courses/course-detail";
 
 type Props = { params: Promise<{ id: string }>; searchParams: Promise<{ mode?: string; conversation?: string | string[] }> };
 

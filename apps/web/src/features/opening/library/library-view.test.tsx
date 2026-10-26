@@ -13,9 +13,9 @@ vi.mock("./material-library", () => ({
     return createElement("div", { "data-materials": true }, "材料队列", state.empty ? createElement("button", { onClick: onUploadRequested }, "上传材料") : null);
   },
 }));
-vi.mock("../../workspace/library-document-list", () => ({ LibraryDocumentList: () => createElement("div", null, "我的笔记") }));
+vi.mock("./library-document-list", () => ({ LibraryDocumentList: () => createElement("div", null, "我的笔记") }));
 vi.mock("../teaching/learner-state-card", () => ({ LearnerStateCard: () => null }));
-vi.mock("../../courses/course-note", () => ({ CourseNotes: () => null }));
+vi.mock("../courses/course-note", () => ({ CourseNotes: () => null }));
 import { LibraryView } from "./library-view";
 
 let container: HTMLDivElement;

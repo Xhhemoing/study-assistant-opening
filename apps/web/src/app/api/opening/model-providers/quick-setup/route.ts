@@ -1,7 +1,7 @@
 import { jsonError, mapDomainError } from "../../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../../features/opening/request-body";
-import { quickSetupModel } from "../../../../../features/settings/quick-setup-service";
+import { quickSetupModel } from "../../../../../features/opening/settings/quick-setup-service";
 
 export async function POST(request: Request) {
   let response: Response;

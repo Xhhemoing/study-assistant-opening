@@ -46,7 +46,7 @@ it("does not pass a malformed conversation into the course's continuation links"
 
 it("carries only an explicit note conversation while preserving the document identity and permission-owning editor", async () => {
   const noteId = "33333333-3333-4333-8333-333333333333";
-  const { DocumentEditor } = await import("../../editor/document-editor");
+  const { DocumentEditor } = await import("../editor/document-editor");
   const known = frame(await NotePage({ params: Promise.resolve({ id: noteId }), searchParams: Promise.resolve({ conversation }) }));
   expect(known.props.conversation).toBe(conversation);
   expect(known.props.children.type).toBe(DocumentEditor);

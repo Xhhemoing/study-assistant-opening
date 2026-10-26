@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { NewDocument } from "../../../../../features/editor/new-document";
-import { CourseNote } from "../../../../../features/courses/course-note";
+import { NewDocument } from "../../../../../features/opening/editor/new-document";
+import { CourseNote } from "../../../../../features/opening/courses/course-note";
 
 export default async function OpeningNewNotePage({ searchParams }: { searchParams: Promise<{ courseId?: string }> }) {
   const query = await searchParams;

@@ -5,9 +5,9 @@ import { BookOpen, CreditCard, GraduationCap, HelpCircle, LoaderCircle, X } from
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { PromotionCandidate } from "@aistudy/contracts";
-import { createEditorApi } from "../editor/editor-api";
+import { createEditorApi } from "../opening/editor/editor-api";
 import { useStudyProvider } from "../../lib/data/react";
-import { coursePath } from "../courses/course-model";
+import { coursePath } from "../opening/courses/course-model";
 import { buildCandidateNoteBlocks, candidateCourseDraft, candidateKindLabel, pendingCandidates } from "./candidate-panel-model";
 
 type CandidateAction = "note" | "card" | "question" | "course";

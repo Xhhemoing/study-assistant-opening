@@ -5,8 +5,8 @@ vi.mock("next/navigation", () => ({ redirect: mocks.redirect, notFound: mocks.no
 vi.mock("@aistudy/ai", () => ({ isTeachingCompilerEnabled: () => true }));
 vi.mock("@aistudy/database", () => ({ createOpeningSpanSessionRepository: () => ({ get: mocks.get }) }));
 vi.mock("../../../../../../features/opening/runtime", () => ({ requireOpeningScope: mocks.scope }));
-vi.mock("../../../../../../features/courses/server/course-study-context", () => ({ loadCourseStudyContext: mocks.context }));
-vi.mock("../../../../../../features/courses/course-study-workspace", () => ({ CourseStudyWorkspace: "course-study-workspace" }));
+vi.mock("../../../../../../features/opening/courses/server/course-study-context", () => ({ loadCourseStudyContext: mocks.context }));
+vi.mock("../../../../../../features/opening/courses/course-study-workspace", () => ({ CourseStudyWorkspace: "course-study-workspace" }));
 import CourseStudyPage from "./page";
 const courseId = "11111111-1111-4111-8111-111111111111", activityId = "22222222-2222-4222-8222-222222222222", retestId = "33333333-3333-4333-8333-333333333333";
 const scope = { workspaceId: courseId, ownerUserId: activityId }, sql = {};

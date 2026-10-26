@@ -1,5 +1,5 @@
 import type { PromotionCandidate } from "@aistudy/contracts";
-import { normalizeCourseSlug } from "../courses/course-model";
+import { normalizeCourseSlug } from "../opening/courses/course-model";
 
 const KIND_LABELS: Record<PromotionCandidate["kind"], string> = {
   note: "笔记候选",

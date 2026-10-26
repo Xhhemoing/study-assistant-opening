@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { createBlockId } from "../../editor/local-draft";
-import { EditorApiError, type CreateDocumentInput, type EditorApi } from "../../editor/editor-api";
+import { createBlockId } from "../editor/local-draft";
+import { EditorApiError, type CreateDocumentInput, type EditorApi } from "../editor/editor-api";
 import { sourceViewerHref } from "../inbox/source-viewer";
 import { legacyStudyConversationIdentity, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 

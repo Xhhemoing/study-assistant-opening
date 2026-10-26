@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { CourseSprintMode } from "../../courses/course-sprint-mode";
+import { CourseSprintMode } from "../courses/course-sprint-mode";
 import { sprintCourseHref, sprintCourseScope } from "./sprint-course-route";
 
 const id = "11111111-1111-4111-8111-111111111111";

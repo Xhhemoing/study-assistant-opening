@@ -16,7 +16,7 @@ vi.mock("../v3/motion/view-transition", () => ({
   ViewTransitionBoundary: () => null,
   runViewTransition: (update: () => void) => update(),
 }));
-vi.mock("../../search/command-palette", () => ({ CommandPalette: ({ open }: { open: boolean }) => open ? <div role="dialog">全局搜索已打开</div> : null }));
+vi.mock("../search/command-palette", () => ({ CommandPalette: ({ open }: { open: boolean }) => open ? <div role="dialog">全局搜索已打开</div> : null }));
 vi.mock("../assistant/assistant-drawer", () => ({ AssistantDrawer: () => null }));
 vi.mock("../assistant/assistant-view", () => ({ AssistantView: () => {
   useEffect(() => { data.chatMounts(); }, []);

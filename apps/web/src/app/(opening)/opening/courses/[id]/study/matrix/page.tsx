@@ -1,6 +1,6 @@
 import { headers } from "next/headers";
-import { CourseMatrixLesson } from "../../../../../../../features/courses/course-matrix-lesson";
-import { loadCourseStudyContext } from "../../../../../../../features/courses/server/course-study-context";
+import { CourseMatrixLesson } from "../../../../../../../features/opening/courses/course-matrix-lesson";
+import { loadCourseStudyContext } from "../../../../../../../features/opening/courses/server/course-study-context";
 
 export default async function MatrixLessonPage({ params, searchParams = Promise.resolve({}) }: { params: Promise<{ id: string }>; searchParams?: Promise<{ conversation?: string }> }) {
   const { id } = await params;

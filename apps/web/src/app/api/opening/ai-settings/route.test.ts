@@ -11,7 +11,7 @@ vi.mock("@aistudy/database", async importOriginal => ({
 }));
 import { ApiError } from "../../../../features/auth/service";
 import { GET, PUT } from "./route";
-import { switchRoutingMode } from "../../../../features/settings/ai-settings-model";
+import { switchRoutingMode } from "../../../../features/opening/settings/ai-settings-model";
 const model = { id: "one", providerId: "p", providerLabel: "P", modelName: "opaque", label: "One", baseUrl: "https://private-endpoint.example", apiKey: "never-return-me", inputCentsPerMillion: 10, outputCentsPerMillion: 20, availability: "available" as const };
 const scope = { workspaceId: "w", ownerUserId: "u" };
 const put = (body: unknown) => new Request("http://localhost/api/opening/ai-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

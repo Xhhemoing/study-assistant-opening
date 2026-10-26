@@ -30,7 +30,7 @@ import type { OpeningApi } from "../client/api";
 import { prepareSnippetDraft, type SnippetSaveResult } from "./save-snippet";
 import { readSnippetSaveReceipt, saveSnippetWithReceipt, subscribeSnippetSave } from "./snippet-save-receipt";
 import { secondaryButtonClass } from "../design/ui";
-import { libraryNotePath } from "../../editor/library-paths";
+import { libraryNotePath } from "../editor/library-paths";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";

@@ -3,8 +3,8 @@
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useId, useMemo, useState } from "react";
 import type { LearningAttempt } from "@aistudy/contracts";
-import { createEditorApi } from "../../editor/editor-api";
-import { libraryNotePath } from "../../editor/library-paths";
+import { createEditorApi } from "../editor/editor-api";
+import { libraryNotePath } from "../editor/library-paths";
 import { AssistantView } from "../assistant/assistant-view";
 import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 import { textareaClass, ui } from "../design/ui";

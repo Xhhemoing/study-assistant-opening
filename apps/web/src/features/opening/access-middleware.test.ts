@@ -56,19 +56,43 @@ describe("opening same-origin middleware", () => {
     expect(response.headers.get("x-middleware-next")).toBe("1");
   });
 
-  it("keeps legacy course links outside the Opening redirect", () => {
-    // PRODUCT DECISION: /learn/courses* stays reachable so existing course deep
-    // links are not broken. Mock was stripped from that page instead of redirecting.
+  it("permanently redirects legacy course deep links and preserves repeated filters", () => {
     vi.stubEnv("OPENING_RELEASE", "1");
-    const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
-    expect(response.status).toBe(200);
+    const response = middleware(pageRequest("/learn/courses/course-1?tab=goals&tag=one&tag=two"));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/courses/course-1?tab=goals&tag=one&tag=two`);
   });
 
-  it("keeps legacy course links outside production mock redirects too", () => {
-    vi.stubEnv("NODE_ENV", "production");
+  it.each(["production", "development"])("keeps course aliases permanent in %s without the release flag", environment => {
+    vi.stubEnv("NODE_ENV", environment);
     vi.stubEnv("OPENING_RELEASE", "0");
     const response = middleware(pageRequest("/learn/courses/course-1"));
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/courses/course-1`);
+  });
+
+  it.each(["127.0.0.1", "[::1]", "localhost"])("preserves the request host %s when NextURL normalizes loopback names", host => {
+    vi.stubEnv("__NEXT_NO_MIDDLEWARE_URL_NORMALIZE", "1");
+    const response = middleware(new NextRequest(`http://${host}:3107/learn/courses/course-1?tag=a&tag=b`));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`http://${host}:3107/opening/courses/course-1?tag=a&tag=b`);
+  });
+
+  it.each([
+    ["/learn/courses", "/opening/courses"],
+    ["/learn/courses/new", "/opening/courses/new"],
+    ["/library/new", "/opening/library/new"],
+    ["/library/source-1", "/opening/library/source-1"],
+    ["/search", "/opening/search"],
+    ["/settings/advanced", "/opening/settings/advanced"],
+    ["/settings/export", "/opening/settings/export"],
+    ["/ui-preview", "/opening/today"],
+    ["/ui-preview/opening", "/opening/today"],
+  ])("preserves a retired page alias %s before removing its page module", (from, target) => {
+    vi.stubEnv("NODE_ENV", "development"); vi.stubEnv("OPENING_RELEASE", "0");
+    const response = middleware(pageRequest(`${from}?tag=a&tag=b&version=0&returnTo=%2Fopening%2Ftoday`));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}${target}?tag=a&tag=b&version=0&returnTo=%2Fopening%2Ftoday`);
   });
 
   it.each([
@@ -111,12 +135,12 @@ describe("opening same-origin middleware", () => {
     }
   });
 
-  it("does not redirect mock legacy pages in development without OPENING_RELEASE", () => {
+  it("keeps retired mock URLs redirecting in development after their pages are removed", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("OPENING_RELEASE", "0");
     const response = middleware(pageRequest("/learn/goals"));
-    expect(response.status).toBe(200);
-    expect(response.headers.get("x-middleware-next")).toBe("1");
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/today`);
   });
 });
 

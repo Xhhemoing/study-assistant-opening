@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createEditorApi } from "../../editor/editor-api";
+import { createEditorApi } from "../editor/editor-api";
 import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 import { CreateCardDialog, type StudyCardDraft } from "../cards/create-card-dialog";
 import { ui } from "../design/ui";

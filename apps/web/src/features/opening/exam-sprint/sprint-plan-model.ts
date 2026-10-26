@@ -1,5 +1,5 @@
 import type { PlanDraft, PlannedBlock, TaskItem } from "@aistudy/contracts";
-import { courseStudyHref, courseStudyTasks } from "../../courses/course-study-model";
+import { courseStudyHref, courseStudyTasks } from "../courses/course-study-model";
 import { selectableSuggestedKeys } from "../planning/daily-draft-selection";
 
 export function sprintTaskHref(task: TaskItem): string {

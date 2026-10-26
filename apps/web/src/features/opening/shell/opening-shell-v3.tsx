@@ -3,7 +3,7 @@
 import { Minimize2 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
-import { CommandPalette } from "../../search/command-palette";
+import { CommandPalette } from "../search/command-palette";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { ConversationCompanionProvider } from "../assistant/conversation-companion";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";

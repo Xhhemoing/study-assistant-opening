@@ -3,8 +3,8 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { taskItemSchema, type Scope, type TaskItem, type TeachingActivityCreateInput, type TeachingLearnerFocus } from "@aistudy/contracts";
 import { createOpeningFirstLearningRepository, createOpeningPlansRepository, createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
-import { openCourseStudy } from "../../apps/web/src/features/courses/course-study-entry";
-import { courseStudyStandaloneActivity, parseCourseStudyPracticeEntry } from "../../apps/web/src/features/courses/course-study-query";
+import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
+import { courseStudyStandaloneActivity, parseCourseStudyPracticeEntry } from "../../apps/web/src/features/opening/courses/course-study-query";
 import { sprintTaskHref } from "../../apps/web/src/features/opening/exam-sprint/sprint-plan-model";
 import { buildStartLearningCreateInput } from "../../apps/web/src/features/opening/teaching/today-activity";
 

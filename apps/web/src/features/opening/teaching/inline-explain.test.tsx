@@ -2,10 +2,10 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
-import { EditorApiError } from "../../editor/editor-api";
+import { EditorApiError } from "../editor/editor-api";
 import { InlineExplain } from "./inline-explain";
 const createDocument = vi.hoisted(() => vi.fn());
-vi.mock("../../editor/editor-api", async importOriginal => ({ ...await importOriginal<typeof import("../../editor/editor-api")>(), createEditorApi: () => ({ createDocument }) }));
+vi.mock("../editor/editor-api", async importOriginal => ({ ...await importOriginal<typeof import("../editor/editor-api")>(), createEditorApi: () => ({ createDocument }) }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => ({ listRevisionCourses: async () => [] }) }));
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
 it("directly saves the displayed explanation, retains it after rejection, and reports the actual successful retry", async () => {

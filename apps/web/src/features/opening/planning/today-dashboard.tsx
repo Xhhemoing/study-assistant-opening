@@ -11,7 +11,7 @@ import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
 import type { StudyTask } from "./study-task";
-import { CourseStudyContextTools } from "../../courses/course-study-context-tools";
+import { CourseStudyContextTools } from "../courses/course-study-context-tools";
 import { TodayLearningContext } from "./today-overview";
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 import {
