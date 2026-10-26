@@ -9,7 +9,6 @@ import {
   loadFeatureSwitches,
   loadServerConfig,
   resolveCapabilities,
-  rolloutBucket,
 } from "./server-config";
 import { acceptCapabilitiesResponse, CLOSED_CAPABILITIES, computeBuildConfigDigest } from "./public";
 
@@ -82,7 +81,7 @@ describe("startup validation", () => {
     expect(issuesOf(() => loadServerConfig(env, "web")).join("\n")).toMatch(/DATABASE_URL/);
   });
 
-  it.each(["OPENING_TEACHING_LOOP", "OPENING_RELEASE", "OPENING_MATRIX_TRANSFORM_INTERACTIVE"])("invalid boolean %s fails", (name) => {
+  it.each(["OPENING_TEACHING_LOOP", "OPENING_RELEASE"])("invalid boolean %s fails", (name) => {
     const issues = issuesOf(() => loadServerConfig({ ...devEnv(), [name]: "enabled" }, "web"));
     expect(issues).toContain(`${name}: invalid boolean "enabled" (use 1/0/true/false)`);
   });
@@ -97,10 +96,12 @@ describe("startup validation", () => {
     expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP: "0" })).join()).toMatch(/OPENING_TEACHING_WORKSPACE=1 .* requires OPENING_TEACHING_LOOP=1/);
   });
 
-  it("missing dependency: rollout without API, and rollout out of range", () => {
-    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "50", OPENING_TEACHING_LOOP: "0" })).join()).toMatch(/ROLLOUT_PERCENT is set/);
-    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "101" })).join()).toMatch(/0-100/);
-    expect(issuesOf(() => loadFeatureSwitches({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "12.5" })).join()).toMatch(/0-100/);
+  it("ignores retired server controls at startup without changing fixed public capabilities", () => {
+    const config = loadServerConfig({ ...devEnv(), OPENING_TEACHING_LOOP: "0",
+      OPENING_MATRIX_TRANSFORM_INTERACTIVE: "invalid", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "101", OPENING_PLAN_AGENT: "invalid" }, "web");
+    expect(resolveCapabilities(config.switches, "owner")).toMatchObject({
+      teachingLoop: { api: false, ui: false }, matrixTransformInteractive: true, planAgent: false,
+    });
   });
 
   it("missing dependency: connection key id without key, partial DingTalk callback", () => {
@@ -112,6 +113,8 @@ describe("startup validation", () => {
     const issues = collectEnvIssues({ ...devEnv(), NEXT_PUBLIC_OPENING_TEACHING_LOOP: "1", NEXT_PUBLIC_FOO: "x" }, "web");
     expect(issues.join("\n")).toMatch(/NEXT_PUBLIC_OPENING_TEACHING_LOOP: removed build-time twin; set the server switch OPENING_TEACHING_LOOP/);
     expect(issues.join("\n")).toMatch(/NEXT_PUBLIC_FOO: build-time public variables are not allowed/);
+    expect(collectEnvIssues({ ...devEnv(), NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE: "0" }, "web").join())
+      .toMatch(/NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE: build-time public variables are not allowed/);
   });
 
   it("build digest mismatch fails; matching digest passes", () => {
@@ -139,23 +142,23 @@ describe("capabilities", () => {
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }), null).teachingLoop).toEqual({ api: false, ui: false });
   });
 
-  it("api/ui/rollout combinations", () => {
+  it("retains authenticated API/UI controls after retiring rollout", () => {
     expect(resolveCapabilities(sw({}), "u1").teachingLoop).toEqual({ api: true, ui: true });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_WORKSPACE: "0" }), "u1").teachingLoop).toEqual({ api: true, ui: false });
-    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
     expect(resolveCapabilities(sw({}), null).teachingLoop).toEqual({ api: false, ui: false });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
     expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
-    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: false, ui: false });
+    expect(resolveCapabilities(sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }), "u1").teachingLoop).toEqual({ api: true, ui: true });
   });
 
-  it("rollout bucket is stable and roughly proportional", () => {
-    expect(rolloutBucket("user-a")).toBe(rolloutBucket("USER-A"));
-    const switches = sw({ OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "30" });
-    const on = Array.from({ length: 2000 }, (_, i) => resolveCapabilities(switches, `user-${i}`).teachingLoop.api).filter(Boolean).length;
-    expect(on).toBeGreaterThan(450);
-    expect(on).toBeLessThan(750);
+  it("keeps the fixed compatibility fields and never grants anonymous teaching access", () => {
+    const switches = sw({ OPENING_MATRIX_TRANSFORM_INTERACTIVE: "0", OPENING_PLAN_AGENT: "1", OPENING_ADAPTIVE_PLANNING: "1" });
+    for (const userId of [null, "user-a", "USER-A", "user-b"]) {
+      expect(resolveCapabilities(switches, userId)).toMatchObject({ matrixTransformInteractive: true, planAgent: false,
+        teachingLoop: { api: userId !== null, ui: userId !== null } });
+    }
   });
 
   it("chat 图解 is off by default and follows OPENING_CHAT_ARTIFACTS", () => {

@@ -12,7 +12,7 @@ let drift = 0;
 for (const target of Object.keys(ENV_TEMPLATE_FILES) as EnvTemplateTarget[]) {
   const file = path.join(root, ENV_TEMPLATE_FILES[target]);
   const expected = renderEnvTemplate(target);
-  if (mode === "write") { writeFileSync(file, expected); console.log(`wrote ${ENV_TEMPLATE_FILES[target]}`); continue; }
+  if (mode === "write") { writeFileSync(file, expected, "utf8"); console.log(`wrote ${ENV_TEMPLATE_FILES[target]}`); continue; }
   let actual = "";
   try { actual = readFileSync(file, "utf8"); } catch { /* missing counts as drift */ }
   if (actual === expected) console.log(`ok ${ENV_TEMPLATE_FILES[target]}`);

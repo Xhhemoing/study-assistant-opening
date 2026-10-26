@@ -40,10 +40,10 @@ describe("GET /api/opening/capabilities (PR-H)", () => {
     }
   });
 
-  it("rollout: per-user capability equals per-user API decision", async () => {
+  it("retired percentage does not narrow a fully enabled authenticated rollout", async () => {
     vi.stubEnv("OPENING_TEACHING_LOOP", "1");
     vi.stubEnv("OPENING_TEACHING_WORKSPACE", "1");
-    vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", "50");
+    vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", "0");
     let on = 0;
     for (let i = 0; i < 40; i += 1) {
       requirePrincipal.mockResolvedValue({ userId: `user-${i}`, workspaceId: "w" });
@@ -51,8 +51,7 @@ describe("GET /api/opening/capabilities (PR-H)", () => {
       expect(teachingLoopApiDenied(`user-${i}`) === null).toBe(body.capabilities.teachingLoop.api);
       if (body.capabilities.teachingLoop.api) on += 1;
     }
-    expect(on).toBeGreaterThan(0);
-    expect(on).toBeLessThan(40);
+    expect(on).toBe(40);
   });
 
   it("anonymous: authenticated=false and the loop closed; digest matches a build with no NEXT_PUBLIC_*", async () => {
@@ -64,14 +63,14 @@ describe("GET /api/opening/capabilities (PR-H)", () => {
     expect(body.buildConfigDigest).toBe(computeBuildConfigDigest({}));
   });
 
-  it("registration and matrix switches; response carries no secret names or values", async () => {
+  it("registration remains guarded and retired matrix control stays on without leaking secrets", async () => {
     requirePrincipal.mockResolvedValue({ userId: "user-1", workspaceId: "w" });
     vi.stubEnv("OPENING_RELEASE", "1");
     vi.stubEnv("OPENING_MATRIX_TRANSFORM_INTERACTIVE", "0");
     vi.stubEnv("AUTH_SECRET", "PRH_DUMMY_SECRET_MARKER_123");
     const { body, text } = await capabilities();
     expect(body.capabilities.registrationOpen).toBe(false);
-    expect(body.capabilities.matrixTransformInteractive).toBe(false);
+    expect(body.capabilities.matrixTransformInteractive).toBe(true);
     expect(text).not.toContain("PRH_DUMMY_SECRET_MARKER_123");
     for (const name of SECRET_ENV_NAMES) expect(text).not.toContain(name);
   });

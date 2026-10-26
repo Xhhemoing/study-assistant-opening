@@ -35,21 +35,6 @@ export type MatrixTransformUiState = {
   showTextAlt: boolean;
 };
 
-export function isMatrixTransformInteractiveEnabled(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): boolean {
-  const raw = (
-    env.OPENING_MATRIX_TRANSFORM_INTERACTIVE ??
-    "1"
-  )
-    .trim()
-    .toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
-    return false;
-  }
-  return true;
-}
-
 /** Content autoplay already defaults false; reduced-motion forces off. */
 export function resolveEffectiveAutoplay(
   contentAutoplay: boolean,

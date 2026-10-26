@@ -1,5 +1,7 @@
 # V2-16 Understand — 首个AI主讲闭环集成与受控试用
 
+> 2026-10-26 配置更新：矩阵交互已收敛为启用路径，不再读取 `OPENING_MATRIX_TRANSFORM_INTERACTIVE`。解析失败、静态回退与减少动效保护仍保留。以下表格是原阶段记录；现行清单见 [配置控制项盘点](../../../operations/feature-switch-inventory.md)。
+
 **Date:** 2026-10-11（Asia/Shanghai / CST）  
 **Agent:** AIstudy Integrator / QA (executor / Grok Bot)  
 **Branch tip:** `74ba005b999c5d8f3c4269b9a3ed1162e6cc3071` (`74ba005`, `feat/opening-release`) — equals PM tip baseline `74ba005` (`feat(opening): V2-15 matrix_transform UI (Experience half)`)  

@@ -1,5 +1,7 @@
 # 学习闭环 v2：按学习情况自适应编排（自动 + 辅助手动）
 
+> 2026-10-26 配置更新：未接入执行路径的 `OPENING_PLAN_AGENT` 环境入口已退役，能力协议暂保留 false。此文保留原设计；现行控制清单见 [配置控制项盘点](../operations/feature-switch-inventory.md)。
+
 **Date:** 2026-10-15
 **Baseline:** `study-assistant-opening/feat/opening-release` @ `649353f`（Hermes 已部署）
 **Status:** L0、L1 已在 `feat/opening-release`；L5 的「开始此项」与学完询问完成已随证据闭环实现，L5 其余（推迟到明天、上下移、日内重排）与 L2、L3、L4、L6、L8 未开始（2026-10-15 复核）；L7 延后

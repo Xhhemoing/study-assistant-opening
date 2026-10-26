@@ -66,11 +66,6 @@ export const DEPENDENCY_RULES: { id: string; message: string; violated: (s: Sour
     violated: (s) => isTrue(s, "OPENING_TEACHING_WORKSPACE") && present(s, "OPENING_TEACHING_LOOP") !== undefined && !isTrue(s, "OPENING_TEACHING_LOOP"),
   },
   {
-    id: "teaching-rollout-requires-api",
-    message: "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT is set but OPENING_TEACHING_LOOP is not 1",
-    violated: (s) => present(s, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT") !== undefined && present(s, "OPENING_TEACHING_LOOP") !== undefined && !isTrue(s, "OPENING_TEACHING_LOOP"),
-  },
-  {
     id: "connection-key-id-requires-key",
     message: "OPENING_CONNECTION_KEY_ID / OPENING_CONNECTION_PREVIOUS_KEYS require OPENING_CONNECTION_KEY",
     violated: (s) => (present(s, "OPENING_CONNECTION_KEY_ID") !== undefined || present(s, "OPENING_CONNECTION_PREVIOUS_KEYS") !== undefined)
@@ -120,8 +115,7 @@ export function collectEnvIssues(source: Source, role: ServerRole): string[] {
 }
 
 export type FeatureSwitches = {
-  teachingLoop: { api: boolean; ui: boolean; rolloutPercent: number };
-  matrixTransformInteractive: boolean;
+  teachingLoop: { api: boolean; ui: boolean };
   chatArtifacts: boolean;
   chatProse: boolean;
   chatSenseWeave: "off" | "shadow" | "on";
@@ -129,7 +123,6 @@ export type FeatureSwitches = {
   senseWeaveGates?: SenseWeaveGates;
   openingRelease: boolean;
   adaptivePlanning: boolean;
-  planAgent: boolean;
   systemQuery: boolean;
 };
 
@@ -144,7 +137,6 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   };
   const api = read("OPENING_TEACHING_LOOP", true);
   const ui = read("OPENING_TEACHING_WORKSPACE", api);
-  const matrixTransformInteractive = read("OPENING_MATRIX_TRANSFORM_INTERACTIVE", true);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
   const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "shadow";
@@ -163,41 +155,22 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   }
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
-  const planAgent = read("OPENING_PLAN_AGENT", false);
   const systemQuery = read("OPENING_SYSTEM_QUERY", true);
-  const rolloutRaw = present(source, "OPENING_TEACHING_LOOP_ROLLOUT_PERCENT");
-  let rolloutPercent = 100;
-  if (rolloutRaw !== undefined) {
-    if (!/^\d+$/.test(rolloutRaw) || Number(rolloutRaw) > 100) {
-      issues.push(`OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: must be an integer 0-100, got "${rolloutRaw}"`);
-    } else rolloutPercent = Number(rolloutRaw);
-  }
   if (issues.length) throw new EnvValidationError(issues);
   return {
-    teachingLoop: { api, ui, rolloutPercent }, matrixTransformInteractive, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
-    adaptivePlanning, planAgent, systemQuery,
+    teachingLoop: { api, ui }, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
+    adaptivePlanning, systemQuery,
     senseWeaveBetaUsers, senseWeaveGates,
   };
 }
 
-/** Stable 0-99 bucket per user (FNV-1a 32). Same input → same bucket in every process. */
-export function rolloutBucket(userId: string): number {
-  let hash = 0x811c9dc5;
-  for (const byte of new TextEncoder().encode(userId.toLowerCase())) {
-    hash ^= byte;
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash % 100;
-}
-
 /** Per-user, secret-free capabilities. Anonymous users get the loop closed. */
 export function resolveCapabilities(switches: FeatureSwitches, userId: string | null): OpeningCapabilities {
-  const inRollout = userId !== null && rolloutBucket(userId) < switches.teachingLoop.rolloutPercent;
-  const api = switches.teachingLoop.api && inRollout;
+  const api = userId !== null && switches.teachingLoop.api;
   return {
     ...CLOSED_CAPABILITIES,
     teachingLoop: { api, ui: api && switches.teachingLoop.ui },
-    matrixTransformInteractive: switches.matrixTransformInteractive,
+    matrixTransformInteractive: true,
     chatArtifacts: switches.chatArtifacts,
     chatProse: switches.chatProse,
     // Fragments are rendered by LearningProse; without it there is nothing to embed into.
@@ -207,7 +180,7 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     senseWeaveGates: switches.senseWeaveGates ?? SENSEWEAVE_INITIAL_GATES,
     registrationOpen: !switches.openingRelease,
     adaptivePlanning: switches.adaptivePlanning,
-    planAgent: switches.adaptivePlanning && switches.planAgent,
+    planAgent: false,
     systemQuery: userId !== null && switches.systemQuery,
   };
 }

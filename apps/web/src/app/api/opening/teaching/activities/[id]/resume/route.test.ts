@@ -61,6 +61,7 @@ describe("GET /api/opening/teaching/activities/[id]/resume (T17)", () => {
   });
 
   it("returns zod-validated LearningResume with no-store", async () => {
+    vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", "0");
     requireOpeningScope.mockResolvedValue({
       scope: { workspaceId: "w", ownerUserId: "u" },
       sql: {},
@@ -92,7 +93,7 @@ describe("GET /api/opening/teaching/activities/[id]/resume (T17)", () => {
 
   it.each([
     ["off", {}],
-    ["rollout 0", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }],
+    ["off with retired rollout value", { OPENING_TEACHING_LOOP: "0", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }],
   ])("PR-H: 404 and no service call when the loop API is %s (hidden UI is not the gate)", async (_label, env: Record<string, string>) => {
     vi.stubEnv("OPENING_TEACHING_LOOP", env.OPENING_TEACHING_LOOP ?? "0");
     if (env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT) vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_PERCENT", env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT);

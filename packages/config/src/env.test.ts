@@ -21,6 +21,9 @@ it("SenseWeave beta allowlist and gating configuration fail closed", () => {
   expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_BETA_USERS: "*" })).toThrow(EnvValidationError);
   const caps = resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "private-account" }), "private-account");
   expect(caps.chatSenseWeave).toBe("on");
+  const beta = loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "private-account" });
+  expect(resolveCapabilities(beta, "other-account").chatSenseWeave).toBe("shadow");
+  expect(resolveCapabilities(beta, null).chatSenseWeave).toBe("off");
   expect(JSON.stringify(caps)).not.toContain("private-account");
   expect(caps.senseWeaveGates).toEqual(SENSEWEAVE_INITIAL_GATES);
   const disabled = structuredClone(SENSEWEAVE_INITIAL_GATES);
