@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,8 +12,9 @@ vi.mock("./preference-controls", () => ({
 
 // The shared panel owns its dialog/mount lifecycle tests; inspect this workspace's wiring here.
 vi.mock("./study-tools-panel", () => ({
-  StudyToolsPanel: ({ children, panels }: { children: ReactNode; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" },
-    createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
+  StudyToolsToggle: () => createElement("button", {}, "工具"),
+  StudyToolsPanel: ({ children, panels, showToolbar }: { children: ReactNode; showToolbar?: boolean; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" }, createElement("div", { hidden: true, role: "tablist" }, panels.map(panel => createElement("button", { key: panel.id, role: "tab" }, panel.label))),
+    showToolbar === false ? null : createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
     panels.filter((panel, index) => panels.findIndex(item => (item.mountKey ?? item.id) === (panel.mountKey ?? panel.id)) === index).map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
 }));
 
@@ -233,10 +235,11 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain(`data-block-id="${BID3}"`);
     expect(html).not.toContain("data-teaching-past-collapsed");
     expect(html).toContain("目录");
-    expect(html).toContain("资料与引用");
-    expect(html).toContain("自由探索");
-    expect(html).toContain("学习设置");
-    expect(html).toContain('data-panel="outline"');
+    expect(html).toContain('data-panel="materials"');
+    expect(html).not.toContain("自由探索");
+    expect(html).not.toContain("学习设置");
+    expect(html).toContain('aria-label="选择学习单元"');
+    expect(html).not.toContain('data-panel="outline"');
     expect(html).toContain('data-testid="block-commands-mock"');
     expect(html).toContain(`data-block-id="${BID}"`);
     expect(html).toContain('data-return-disabled="true"');
@@ -248,6 +251,28 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain("MediaReader");
   });
 
+  it("keeps the initial lesson within ten available controls and puts the outline in its title", () => {
+    const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+      activity: activityReady, clientInit: clientInit(),
+      headerLeading: createElement("a", { href: "/opening/courses/course" }, "返回课程"),
+    }));
+    const parsed = document.createElement("div"); parsed.innerHTML = html;
+    const available = [...parsed.querySelectorAll("button,a[href],input,textarea,select,summary")].filter(control => {
+      if (control.hasAttribute("disabled") || control.closest("[hidden]")) return false;
+      for (let ancestor = control.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        if (ancestor.tagName === "DETAILS" && !ancestor.hasAttribute("open")) {
+          const summary = ancestor.querySelector(":scope > summary");
+          if (control !== summary && !summary?.contains(control)) return false;
+        }
+      }
+      return true;
+    });
+    expect(available.length).toBeLessThanOrEqual(10);
+    expect(parsed.querySelector('header [aria-label="选择学习单元"]')).not.toBeNull();
+    expect(available.filter(control => control.tagName === "BUTTON" && control.closest("header")).length).toBe(2);
+    expect(html).not.toContain("session-intervention-prefs");
+    expect(html).not.toContain("其他学习方式");
+  });
   it("restores the actual question unit and keeps earlier context available through the outline", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
@@ -466,7 +491,7 @@ describe("TeachingContinueEntry", () => {
     expect(html).toContain('data-teaching-continue-entry="workspace"');
     expect(html).toContain('data-teaching-workspace="true"');
     expect(html).toContain('data-testid="block-commands-mock"');
-    expect(html).toContain("学习设置");
+    expect(html).not.toContain("学习设置");
   });
 
   it("preserves V2-10/11/12 chrome when in workspace phase", () => {
@@ -490,8 +515,9 @@ describe("TeachingContinueEntry", () => {
       }),
     );
     expect(html).toContain('data-return-disabled="false"');
-    expect(html).toContain('data-panel="outline"');
-    expect(html).toContain("自由探索");
+    expect(html).toContain('aria-label="选择学习单元"');
+    expect(html).not.toContain('data-panel="outline"');
+    expect(html).not.toContain("自由探索");
   });
 });
 

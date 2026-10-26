@@ -18,15 +18,16 @@ vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.cours
 vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ kind: "activity", activity: data.activity })) }));
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
 vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children }: { children: React.ReactNode }) => children }));
-vi.mock("../opening/teaching/teaching-workspace", () => ({ TeachingContinueEntry: () => {
+vi.mock("../opening/teaching/teaching-workspace", async () => ({ ...(await vi.importActual("../opening/teaching/teaching-workspace")), TeachingContinueEntry: ({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) => {
   useEffect(() => { data.teachingMount(); }, []);
-  return createElement("textarea", { "aria-label": "讲解原答", defaultValue: "讲解中的步骤" });
+  return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
 } }));
 vi.mock("../opening/learning/attempt-form", () => ({ LearningAttemptForm: () => {
   useEffect(() => { data.practiceMount(); }, []);
   return createElement("textarea", { "aria-label": "练习原答", defaultValue: "" });
 } }));
 
+vi.mock("../opening/assistant/assistant-session", () => ({ AssistantSession: () => <textarea aria-label="课前工具草稿" /> }));
 import { CourseStudyWorkspace } from "./course-study-workspace";
 import { openCourseStudy } from "./course-study-entry";
 
@@ -35,6 +36,7 @@ let root: Root;
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     media, matches: false, onchange: null,
     addEventListener: vi.fn(), removeEventListener: vi.fn(),
@@ -48,8 +50,8 @@ async function click(label: string) {
   await act(async () => button.click());
 }
 
-it("lazily opens independent practice and keeps both real work surfaces mounted when returning", async () => {
-  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: {}, gates: { materials: "available" } })) } as unknown as OpeningApi;
+it("keeps fallback practice and teaching surfaces mounted while the lesson is not ready", async () => {
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
   await act(async () => root.render(createElement(CourseStudyWorkspace, { courseId: data.course.id, teachingEnabled: true,
     teachingCompileEnabled: true, sourceIds: [], timeZone: "Asia/Shanghai", api })));
   const original = host.querySelector<HTMLTextAreaElement>('[aria-label="讲解原答"]')!;
@@ -78,7 +80,7 @@ it("waits for task admission before requesting the bound activity checkpoint", a
     admit = () => resolve({ kind: "activity", activity: data.activity });
   }));
   const getTeachingResume = vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready",
-    contentVersion: 1, pathVersion: 1, clientInit: {}, gates: { materials: "available" } }));
+    contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } }));
   const api = { getTeachingResume } as unknown as OpeningApi;
   const taskId = "33333333-3333-4333-8333-333333333333";
   await act(async () => root.render(createElement(CourseStudyWorkspace, { courseId: data.course.id, activityId: data.activity.id,
@@ -101,4 +103,33 @@ it("does not request a checkpoint or mount teaching after task admission fails",
   expect(getTeachingResume).not.toHaveBeenCalled();
   expect(data.teachingMount).not.toHaveBeenCalled();
   expect(data.practiceMount).not.toHaveBeenCalled();
+});
+
+it("keeps a pre-lesson editor alive through late workspace readiness and restores only that tool", async () => {
+  let release!: (value: unknown) => void;
+  const api = { getTeachingResume: vi.fn(() => new Promise(resolve => { release = resolve; })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  await click("工具");
+  const original = host.querySelector<HTMLTextAreaElement>('[aria-label="课前工具草稿"]')!;
+  expect(original).not.toBeNull(); original.value = "保留这段原始草稿";
+  await act(async () => release({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } }));
+  await click("讲义已就绪");
+  expect(original.isConnected).toBe(true);
+  expect(original.closest("[hidden]")).not.toBeNull();
+  await click("返回课前工具");
+  expect(host.querySelector('[aria-label="课前工具草稿"]')).toBe(original);
+  expect(original.value).toBe("保留这段原始草稿");
+  expect(original.closest("[hidden]")).toBeNull();
+  const close = host.querySelector<HTMLButtonElement>('[aria-label="关闭学习工具"]')!;
+  await act(async () => close.click());
+  expect(original.isConnected).toBe(true);
+  expect(original.closest("[hidden]")).not.toBeNull();
+});
+
+it("keeps the outer return and tools available when material access blocks teaching", async () => {
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "unavailable" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  await click("讲义已就绪");
+  expect(host.querySelector('[aria-label="课程学习顶栏"]')).not.toBeNull();
+  expect(host.querySelector('[aria-label="返回课程"]')).not.toBeNull();
 });

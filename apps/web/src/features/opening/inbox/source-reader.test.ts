@@ -85,6 +85,7 @@ describe("dedicated material reader", () => {
     expect(original).not.toBeNull();
     expect(original.closest("[hidden]")).not.toBeNull();
     expect(reader.querySelector('[data-study-content]')?.classList.contains("hidden")).toBe(false);
+    await click(Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "工具")!);
     const open = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "原对话")!;
     await click(open);
     expect(reader.querySelector("[data-original-conversation]")).toBe(original);
@@ -162,7 +163,7 @@ describe("dedicated material reader", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: wide, addEventListener() {}, removeEventListener() {} }));
     const onClose = vi.fn();
     const reader = await render({ onClose });
-    const opener = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "提取文字 / OCR 核对")!;
+    const opener = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "工具")!;
     opener.focus(); await click(opener);
     const tools = reader.querySelector<HTMLDialogElement>("dialog")!;
     expect(tools.open).toBe(true);

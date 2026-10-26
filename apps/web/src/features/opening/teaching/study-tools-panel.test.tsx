@@ -3,7 +3,7 @@
 import { act, createElement, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StudyToolsPanel } from "./study-tools-panel";
+import { StudyToolsPanel, StudyToolsToggle } from "./study-tools-panel";
 
 let host: HTMLDivElement;
 let root: Root;
@@ -24,6 +24,7 @@ beforeEach(() => {
     this.setAttribute("open", "");
     this.querySelector<HTMLElement>('button[tabindex="0"],button,input')?.focus();
   } });
+  window.localStorage.clear();
   containerWidth = 1300;
   host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
 });
@@ -44,7 +45,11 @@ async function changeWidth(width: number) {
   await act(async () => resize([{ target, contentRect: { width } } as unknown as ResizeObserverEntry], {} as ResizeObserver));
 }
 function button(label: string) {
-  return [...host.querySelectorAll<HTMLButtonElement>("nav button")].find(item => item.textContent === label)!;
+  return [...host.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === label)!;
+}
+async function choose(label: string) {
+  if (!host.querySelector<HTMLDialogElement>("dialog")?.open) await click(button("工具"));
+  await click(button(label));
 }
 function Example({ onMount = () => {}, pending, suspended = false, initialPanel = null, preferContentOnNarrowEntry = false }: { onMount?: () => void; pending?: Promise<string>; suspended?: boolean; initialPanel?: string | null; preferContentOnNarrowEntry?: boolean }) {
   const [panel, setPanel] = useState<string | null>(initialPanel);
@@ -64,12 +69,48 @@ function Editor({ onMount, pending, section }: { onMount: () => void; pending?: 
 }
 
 describe("persistent companion surface", () => {
+  it("uses one toolbar toggle, reopens the last tab and restores a valid choice after remount", async () => {
+    await act(async () => root.render(createElement(Example)));
+    expect([...host.querySelectorAll("nav button")].map(item => item.textContent)).toEqual(["工具"]);
+    await click(button("工具"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("对话");
+    await choose("笔记");
+    await click(button("工具"));
+    await click(button("工具"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("笔记");
+    await act(async () => root.render(null));
+    await act(async () => root.render(createElement(Example)));
+    await click(button("工具"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("笔记");
+  });
+
+  it("shares the external header toggle with the controlled panel without a second toolbar", async () => {
+    function External() {
+      const [activePanel, onPanelChange] = useState<string | null>(null);
+      const panels = [{ id: "notes", label: "笔记", content: createElement("textarea", { defaultValue: "草稿" }) }];
+      return <><header><StudyToolsToggle {...{ panels, activePanel, onPanelChange }} /></header><StudyToolsPanel {...{ panels, activePanel, onPanelChange }} showToolbar={false}>正文</StudyToolsPanel></>;
+    }
+    await act(async () => root.render(<External />));
+    expect(host.querySelector("nav")).toBeNull();
+    await click(button("工具"));
+    const draft = host.querySelector("textarea")!; draft.value = "保存原编辑器";
+    await click(button("工具")); await click(button("工具"));
+    expect(host.querySelector("textarea")).toBe(draft);
+    expect(draft.value).toBe("保存原编辑器");
+  });
+
+  it("falls back to the first available tab when the saved tab is no longer offered", async () => {
+    window.localStorage.setItem("aistudy.study-tools.last-panel", "removed-tool");
+    await act(async () => root.render(createElement(Example)));
+    await click(button("工具"));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("对话");
+  });
   it("uses the real container width and keeps the same answer and editor through split/full-width switches", async () => {
     const mount = vi.fn();
     await act(async () => root.render(createElement(Example, { onMount: mount })));
     const answer = host.querySelector<HTMLTextAreaElement>('[aria-label="原答"]')!;
     answer.value = "正在写的步骤";
-    await click(button("对话"));
+    await choose("对话");
     const draft = host.querySelector<HTMLTextAreaElement>('[aria-label="提问草稿"]')!;
     draft.value = "为什么这样变换";
     expect(host.querySelector("[data-study-tools-layout]")?.getAttribute("data-study-tools-layout")).toBe("split");
@@ -90,14 +131,14 @@ describe("persistent companion surface", () => {
     const pending = new Promise<string>(resolve => { finish = resolve; });
     const mount = vi.fn();
     await act(async () => root.render(createElement(Example, { onMount: mount, pending })));
-    await click(button("对话"));
+    await choose("对话");
     const draft = host.querySelector('[aria-label="提问草稿"]');
-    await click(button("笔记"));
+    await choose("笔记");
     expect(host.querySelector('[aria-label="提问草稿"]')).toBe(draft);
     expect(host.querySelector("[data-current-view]")?.textContent).toBe("笔记");
-    await click(button("目录"));
+    await choose("目录");
     await act(async () => finish("已经返回的说明"));
-    await click(button("对话"));
+    await choose("对话");
     expect(host.querySelector("output")?.textContent).toBe("已经返回的说明");
     expect(host.querySelector('[aria-label="提问草稿"]')).toBe(draft);
     expect(mount).toHaveBeenCalledOnce();
@@ -105,7 +146,7 @@ describe("persistent companion surface", () => {
 
   it("moves among tabs with arrows/Home/End and leaves IME composition alone", async () => {
     await act(async () => root.render(createElement(Example)));
-    await click(button("对话"));
+    await choose("对话");
     const tabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
     tabs[0]!.focus(); await key(tabs[0]!, "ArrowRight");
     expect(tabs[1]!.getAttribute("aria-selected")).toBe("true");
@@ -119,7 +160,7 @@ describe("persistent companion surface", () => {
 
   it("returns focus to the opener and retains the draft after closing and reopening", async () => {
     await act(async () => root.render(createElement(Example)));
-    const opener = button("对话"); opener.focus(); await click(opener);
+    const opener = button("工具"); opener.focus(); await click(opener);
     const draft = host.querySelector<HTMLTextAreaElement>('[aria-label="提问草稿"]')!;
     draft.value = "稍后再发"; draft.focus();
     await key(draft, "Escape");
@@ -132,7 +173,7 @@ describe("persistent companion surface", () => {
 
   it.each([{ isComposing: true }, { keyCode: 229 }])("leaves Escape to the input method: %j", async composition => {
     await act(async () => root.render(createElement(Example)));
-    await click(button("对话"));
+    await choose("对话");
     const draft = host.querySelector<HTMLTextAreaElement>('[aria-label="提问草稿"]')!;
     draft.value = "还在输入"; draft.focus();
     await key(draft, "Escape", composition);
@@ -144,7 +185,7 @@ describe("persistent companion surface", () => {
   it("suspends the auxiliary surface for focus mode without losing its selected tab or draft", async () => {
     const mount = vi.fn();
     await act(async () => root.render(createElement(Example, { onMount: mount })));
-    await click(button("笔记"));
+    await choose("笔记");
     const draft = host.querySelector<HTMLTextAreaElement>('[aria-label="提问草稿"]')!;
     draft.value = "写到一半的笔记";
     await act(async () => root.render(createElement(Example, { onMount: mount, suspended: true })));
@@ -167,14 +208,14 @@ describe("persistent companion surface", () => {
     const draft = host.querySelector<HTMLTextAreaElement>('[aria-label="提问草稿"]')!;
     expect(draft).not.toBeNull();
     draft.value = "原会话还在";
-    await click(button("对话"));
+    await choose("对话");
     expect(host.querySelector<HTMLDialogElement>("dialog")?.open).toBe(true);
     expect(host.querySelector("[data-study-content]")?.hasAttribute("hidden")).toBe(true);
     await changeWidth(1300); await changeWidth(800);
     expect(host.querySelector<HTMLDialogElement>("dialog")?.open).toBe(true);
     expect(host.querySelector('[aria-label="提问草稿"]')).toBe(draft);
     expect(draft.value).toBe("原会话还在");
-    await click(button("对话"));
+    await click(button("工具"));
     await changeWidth(1300);
     expect(host.querySelector<HTMLDialogElement>("dialog")?.open).toBe(false);
     expect(mount).toHaveBeenCalledOnce();
@@ -190,7 +231,7 @@ describe("persistent companion surface", () => {
 
   it("lets a nested save dialog own Escape", async () => {
     await act(async () => root.render(createElement(Example)));
-    await click(button("对话"));
+    await choose("对话");
     const nested = document.createElement("dialog"); nested.setAttribute("open", "");
     host.querySelector("dialog")!.appendChild(nested);
     await key(document.body, "Escape");

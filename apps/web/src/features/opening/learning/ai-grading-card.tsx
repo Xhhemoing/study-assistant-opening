@@ -47,13 +47,14 @@ type AiGradingCardProps = {
   record: LearningObservation; autoGrade?: boolean; photo?: GradingPhotoSelection; disabled?: boolean;
   onGraded: (next: LearningObservation) => void; onDispute?: () => void; onPendingChange?: (pending: boolean) => void;
   completionAction?: AttemptPrimaryAction;
+  hideDisputeAction?: boolean;
 };
 
 export function AiGradingCard(props: AiGradingCardProps) {
   return <GradingCard key={props.record.id} {...props} />;
 }
 
-function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingChange, completionAction }: AiGradingCardProps) {
+function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingChange, completionAction, hideDisputeAction = false }: AiGradingCardProps) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const [status, setStatus] = useState<AiGradingStatus | null>(null);
   const [sending, setSending] = useState(false);
@@ -133,7 +134,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
     <StageActionBar stage={error ? "failed" : pending ? "processing" : unknown ? "evaluation-pending" : observationStage(record)} message={message}
       primary={completion ?? (status?.retryable && !unknown ? { label: retryLabel, disabled: disabled || sending, onClick: () => void enqueue() }
         : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>
-      {record.aiEvaluation && onDispute ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
+      {record.aiEvaluation && onDispute && !hideDisputeAction ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
     </StageActionBar>
   </div>;
 }

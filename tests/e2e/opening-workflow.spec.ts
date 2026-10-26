@@ -53,8 +53,9 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await citation.click();
     const reader = page.getByRole("dialog", { name: "parser-two-page.pdf", exact: true });
     await expect(reader).toBeVisible();
-    await reader.getByRole("button", { name: "提取文字 / OCR 核对", exact: true }).click();
+    await reader.getByRole("button", { name: "工具", exact: true }).click();
     const readingTools = reader.getByRole("dialog", { name: "学习辅助区", exact: true });
+    await readingTools.getByRole("tab", { name: "提取文字 / OCR 核对", exact: true }).click();
     await expect(readingTools.getByRole("tab", { name: "提取文字 / OCR 核对", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(readingTools.getByRole("region", { name: "解析正文", exact: true }).getByText(/Opening parser page one/)).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("reader-desktop-text.png"), fullPage: true });
