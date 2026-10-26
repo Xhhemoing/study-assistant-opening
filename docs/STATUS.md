@@ -1,109 +1,47 @@
-# 项目状态看板
+# 项目状态
 
-每个工具（Claude Code、pi、Grok Bot）开工前读这一页，收工时只改自己负责的行。不超过一屏；详细内容放在 PR 和计划里。
+更新：2026-10-26。只记录当前事实；历史细节见各 PR 和 Git 历史。
 
-**更新：** 2026-10-19
-**目标（至 2026-11 初）：** 自己每天真实使用 → 按使用反馈迭代笔记与 AI 表达；同时试跑 AI 主讲首个单元。
+| 项目 | 当前状态 |
+| --- | --- |
+| 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
+| 线上进程 | Web / Worker 目录标识 `189546c7`；2026-10-26 只读健康检查为 ok，但接口未返回 commit，不等于完整发布验收 |
+| 最新已推候选 | [WP1.1–WP2.3 整改分支链](https://github.com/Xhhemoing/study-assistant-opening/tree/refactor/wp2.3-feature-switches) @ `fd157787`；尚未合并/部署 |
+| 当前工作 | WP2.5 收口：开放 PR 仅余以下 2 项；不提前执行缺少前置合入的 WP2.4 |
 
-## 主干
+## 本轮开放 PR
 
-- 开发主干：`study-assistant-opening` 远端的 `feat/opening-release`。
-- `AIstudy` 远端的 `main` 冻结，不再推送（PR #2 F01 已过时，待关闭）。
-- 已合入：G1 #23、G2 #24、S1 #25、S2 #26、S2 评估 #27、S5 #28、#29、#31、#32、#33、jingwei PR1–3；2026-10-14 合入 Grok 小卡 #34–#38、#39、#42；2026-10-15 合入 #43 的 L0/L1（自适应排程数据层与规则）、模型调度与证据闭环 M1–M6/E1/E3–E5、S8、三轮 UX（`52d6f24..7fb4f85`，迁移 0061–0064）。
-- 当前发布主干为 `c5cb6424`（#75，包含 #74、Study 工作区与自动记录查询）；迁移末号 0081。#75 最终 head 的完整 CI 39359526594 成功；合并后的主干 CI 39361727094 已成功，发布必须以目标 SHA 的 push CI 成功为准。
+| PR | 一句话说明 | 当前验证 |
+| --- | --- | --- |
+| [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132) | 助理工作区聚焦与原题续接 | draft/open；`5b42fb03` [CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40317094216)，浏览器待用户 |
+| [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133) | 学习者文案与折叠诊断设置 | draft/open；`e8317cab` [CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40317099243)，浏览器待用户 |
 
-## 进行中
+## 阻塞与下一步
 
-- 2026-10-26 整改按附件继续：WP0.1/#130、WP0.2/#131已合入主干；WP0.3/[#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)与WP0.4/[#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)精确head的CI 40317094216、40317099243已成功，仍未合并。后续切片复审后先推分支，维持最多两个整改PR。浏览器、真实模型与发布分开验收，下面旧行保留历史时点。
-- 本轮用户决定：采用“学习/复习/资料”三项导航、主题/字体/减少动效三项外观、旧 `/learn/courses*` 跳转 `/opening/courses*`；WP1.5已实现测试期每日不限额策略，运行环境启用和真实模型验收待。默认模型复用既有服务端路由；其余授权/未知费用对账边界保留。
+- 始终最多 2 个开放功能 PR；#119 已由主干覆盖而关闭，已合并的 `release/opening-final-20261025` 已删除，其提交仍在主干。下列 9 项仅延期，保留分支及原 PR，不算完成。
+- WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；合并前仍需最新主干与 WP0.8 验证。
+- 浏览器/视觉/E2E 由用户验收；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP测试推导。
+- 测试期每日不限额已实现；运行环境启用及真实模型调用待验证，尚未修改线上配置。
+- [旧 API 观察](operations/legacy-api-observation.md)已实现但未部署，连续 30 天日志窗口尚未开始，不删除接口。
+- [开关盘点](operations/feature-switch-inventory.md)控制输入 22→19；仅源代码变更，未修改线上配置。
 
-- 2026-10-24 当前开发：[A1 后续修复计划](plans/2026-10-24-study-a1-follow-up.md)。#115 精确 head CI 与合并提交 push CI 均成功；A1 运行修复已提交推送 `91c2f717`，尚未合并/发布，最新 head CI 单列核对。下方旧记录保留历史时点，不能作为当前状态。
-- A1：`fix/sprint-a1-runtime-20261024` 保留既有 Worker 就绪候选，继续 OCR 健康容错、批改心跳围栏、轮询退避与文档脱敏；针对性回归、Config/Database/Worker/Web 类型、变更 lint 与环境示例检查通过；自动批改默认策略/上限待确认。真实批改准确率和用户浏览器待验。
-- B 答案隔离已有 #116，C 默认关闭候选与类型门禁优化分别保留在独立开发分支及未提交改动中；本轮不混入 A1，Explore 3–4 继续冻结。
-- SenseWeave 安全测试版迁移至最新正式主干：保留 SW0 与测试版门控；默认 shadow，白名单 on，匿名 off。真实模型采样、人工盲评、用户浏览器未完成。见[测试入口与边界](plans/2026-10-24-senseweave-beta.md)。
+<details>
+<summary>延期 PR 与恢复入口（9 项，均关闭但未合并）</summary>
 
-| 切片 | 负责 | 分支 / PR | 状态 |
-|---|---|---|---|
-| WP2.3 配置开关收敛（2026-10-26） | Codex + 配置实现/独立复审 | `refactor/wp2.3-feature-switches`，基于WP2.2 | 当前线上只读快照与Git默认历史核对后，移除矩阵环境开关、100%教学灰度桶及无执行消费者的plan-agent输入。控制名称22→19（含安全/测试/兼容别名），普通模型/额度/连接参数保留；registry OPENING项73→70。保留匿名拒绝、API/UI总开关、静态/减动效回退、SenseWeave白名单及公开能力协议。76项相关单元、Config/Web/Worker类型、env一致性、lint/269边界/strict0通过，独审无阻断；已review后推送。未修改线上配置或发布。[盘点与证据](operations/feature-switch-inventory.md)。 |
-| WP2.1 遗留页面退役（2026-10-26） | Codex + 模块迁移/独立复审 | `chore/wp2.1-retire-legacy-routes`，基于WP1.7 | 130个共享文件迁入opening，删除26页+空布局及63个独占旧UI/测试，API服务与Origin保护保留。源码页57→31；两次Web生产构建及manifest证实58→32（均含框架页）、API179不变，客户端JS6567175→6314442字节（-3.85%）。45项路由近测、9项no-mock契约、editor121项及新批335项通过；陈旧async路由断言修复后2项复查通过，Web类型/改动lint/269边界/strict0通过。首次真实HTTP发现回环host归一化会丢cookie，已改原始URL并重建，26个旧地址的状态/目标/host/重复参数全部HTTP通过。独立复审无阻断，已review后推送；图谱AST更新已完成。浏览器/完整CI/合并部署待：复验旧课程书签、登录保持、资料编辑与三页设置。 |
-| WP2.2 旧API弃用观察（2026-10-26） | Codex + 工具修复/独立复审 | `chore/wp2.2-api-observation`，基于WP2.1 | 已为首批12旧路由接入脱敏receipt日志，固定模板/方法/调用方标签/发布版本，不读取正文或记录ID/凭据；鉴权和handler行为保留。66项middleware/日志回归、Web类型、lint/269边界/strict文案0通过。检查器Windows根目录/分隔符错误已修，2项真实CLI夹具与当前179路由/31页/0发现通过；它不作为unused证明。独审无阻断，已review后推送。未删API、未部署；30天完整观察窗口尚未开始，操作见[观察说明](operations/legacy-api-observation.md)。 |
-| WP1.7 建议收件箱（2026-10-26） | Codex + 后端实现/独立复审 | `feat/wp1.7-suggestions-inbox`，依赖WP1.6 | suggestions为唯一接受/拒绝页；账户直达、学习角标，助理只读当前会话且可分页；设置/记忆/补测旧内联决策已撤下，保留记忆删除。新式proposal先筛有效draft再做微秒游标分页，列表/总数保留owner/privacy/provenance；Today与reviews共用四类计数。复审的第二页未知操作刷新丢失已修，保留原动作/key与行。139项整合单元及35项收口近测分批通过（部分重叠），10项真实PG、13项真实handler、三包类型、改动lint、291边界/strict0通过；隐私epoch夹具误判已按现有语义修复复查。独审无剩余阻断，已review后推送本分支，未新建第三个PR；无migration。浏览器、完整CI和合并发布待；用户复验单页确认、跨会话/翻页、网络未知重试与计数刷新。 |
-| WP1.6 首文本时延（2026-10-26） | Codex + 后端实现/独立复审 | `feat/wp1.6-tutor-timing`，依赖WP1.5 | 持久入队/领取/模型首文本/Redis首片段/前端正文五时点已接入，执行UUID隔离流，现有7日诊断输出P50/P90；3秒无正文显示准备进度。复审的旧执行混拼与指标阻塞已修：JS收尾100ms，指标事务独享PG16兼容的锁/语句/空闲超时，真实PG持锁及断续客户端反例通过。分批152项单元、71项PG/Redis集成，Contracts/Domain/Database/Worker/Web类型、改动lint、290客户端边界与strict文案0通过，独立复审无剩余阻断。新增0100可空观测列，回滚停新写入并保留DDL/记录。已review后推送本分支，未新建第三个PR；真实模型一周TTFT、用户浏览器、完整CI和合并发布仍待，未据合成样本宣称P50<3s/P90<6s。 |
-| WP1.5 默认模型与测试期额度（2026-10-26） | Codex + 配置实现/独立复审 | `feat/wp1.5-server-default-unlimited`，依赖WP1.4 | 新用户直接用服务器默认路由；显式dailyQuota区分limited/unlimited，不重释0/null。Web/Worker/探测/卡片/冲刺/自动批改预检统一透传，设置与readiness显示不限额。原子预留、租户、请求幂等、费用账本、未知结果和provider自身请求限制保留；单次预算默认2000分，默认12次及既有抽取例外不变。复审已修复100分不足以容纳检索+辅导、旧parent绕当前更低上限两P1，隐式parent跨模式回放保留。标准99迁移及8文件50项PG17事务/并发回归通过；62项AI/UI近测、2项roles、配置契约近测、六包类型、lint/290边界/strict0和envcheck通过。曾因缺pgvector阻塞迁移，私有runtime编译扩展后按原门禁通过，未修改共享安装。无新增迁移；回滚置limited并重启，保留账本。运行环境需OPENING_MODEL_DAILY_QUOTA_MODE=unlimited和有限parent上限；本地没有真实模型配置，未改线上环境，真实调用/浏览器/完整CI/合并发布待。 |
-| WP1.4 设置三页（2026-10-26） | Codex + 外观实现/独立复审 | `fix/wp1.4-settings-pages`，依赖WP1.3 | 外观/学习/AI与数据三入口；外观只含主题、字体、动效，诊断迁AI页；固定导航宽度并忽略旧材质/密度/圆角/宽度值，保留工具分栏。学习页复用偏好保存和规划，三档介入只改主动程度/安静状态，保留细分设置及有效层/重置；资料页移除重复导出。旧planning/advanced路径308保留查询，旧首页锚点客户端兼容，不能把片段跳转说成HTTP308。配置禁用原因放按钮下。70项主批、13项壳回归及1项路径回归分批通过；Web类型、改动lint、290客户端边界与strict文案0通过，独立复审无阻断。路径近测曾因@别名失败、改相对导入复查通过；新增组件用例createElement类型推断失败后改JSX，Web类型复查通过。浏览器滚动/首屏/视觉、完整CI与合并部署待；入口 /opening/settings、/learning、/ai。 |
-| WP1.3 统一讲解动作（2026-10-26） | Codex + 共享组件实现/独立复审 | `fix/wp1.3-explanation-actions`，依赖WP1.2 | 讲义与助理复用我没懂/举个例子/讲快点/讲细点；段落悬停、键盘聚焦或选文显示，保存/制成卡片同词。请求保留当前题、引用片段和原草稿流程，不用旧metadata rewrite冒充新讲解，不把讲快点变成跳过；服务端命令与回放不改。关闭追问时旧branchStack沿原CAS逐笔回到主线，冲突/未知结果/卸载后停止。复审的旧栈恢复、内嵌保存标签和卸载后续写问题已修，真实组件延迟响应反例回归通过；14文件112项、Web类型、改动lint、290客户端边界和strict文案0通过。旧UI断言已适配，重读缺图标导入及保存成功态选择器曾失败并复查通过。浏览器、真实模型、完整CI及合并部署待；用户复验四动作、已有草稿确认、原题帮助边界、保存与旧记录关闭恢复。 |
-| WP1.2 学习页控件收敛（2026-10-26） | Codex + 工具组件实现/独立复审 | `fix/wp1.2-study-controls`，依赖WP1.1及WP0.5 | 顶栏统一返回/单元目录与进度/专注/工具；工具三页为对话、笔记、资料，移除学习页偏好表单，作答历史/纠正/撤回/申诉收进更多操作，恢复提示3秒消失。保留课前已打开编辑器及原草稿，讲义就绪后可从资料返回原工具；复审发现隐藏面板抢占Escape已修，真实嵌套回归通过。最终10文件116项、Web/E2E类型、改动lint、289客户端边界与strict文案0通过，复审无剩余阻断；维护资料阅读器E2E入口但未运行浏览器。用户验收：同课程学习页初始控件不超过10、工具三页、标题目录、更多作答操作、课前草稿恢复及Esc；浏览器/axe、完整CI、合并部署待。 |
-| WP0.5 进度统一（2026-10-25） | Codex + 只读调查/独立复审 | `fix/wp0.5-unit-progress`，基于WP0.4的33a000d0 | 今日继续卡与学习页标题/无障碍进度共用unitProgress，按真实教学blocks分组为单元，保留活动/内容绑定、草稿与检查点写入。计数统一使用与正文同包的checkpoint，复用跳过规则；无可靠保存位置时今日卡不编造“上次位置”，空内容不显示1/0。原计数矛盾与skipped游标先红后修，复审发现同版本双cursor读分歧已统一来源；遗留thoughtTrain属性TS2353已删后Web类型复查通过。定向33项、今日入口51项分批通过（重叠），6文件lint、287边界与strict0通过；独立复审无剩余具体问题。未运行浏览器/本地完整构建，完整CI/合并部署待；用户复验同一活动在今日与学习页的N/M相同，进入练习后返回、刷新与已跳过位置一致。 |
-| WP1.1 三项导航（2026-10-26） | Codex + Today实现/独立复审 | `fix/wp1.1-three-nav` | 导航统一学习/复习/资料，旧课程/助理/冲刺归属学习；账户保留历史/安排/设置/主题/导出/版本/退出，移动搜索复用命令面板。学习页接真提问输入与全部课程；仅exam模式且有日期的未归档课程显示冲刺。CmdJ保留输入法/模态边界，提示可一次关闭。复审两项P1已修：新问题独立fresh entry保留原题边界，不复用旧active或覆盖历史草稿；真实AssistantView回归确认不自动创建/发送。18文件近测初轮193/194，旧导航断言同步后2文件26项通过；Web/E2E类型、改动lint、288客户端边界及strict0通过。未运行浏览器/完整本地构建，整体CI/合并部署待；用户检查三导航、CmdK/CmdJ、移动更多、无课程与考试卡入口。 |
-| WP0.1 版本可见（2026-10-25） | Codex + 独立只读评审 | [#130](https://github.com/Xhhemoing/study-assistant-opening/pull/130) · `fix/wp0.1-release-version` | 补health commit/builtAt、账户菜单版本与部署构建SHA；保留503、详情鉴权和no-store。17项近测、Web类型/lint/边界/文案通过。首轮CI部署模拟和独立Worker/PDF作业通过，主作业因构建元数据未分类失败；已补构建常量例外，配置/环境/元数据48项回归及Config类型/lint通过，独审无阻断。Windows模板换行曾使本地复查失败，仅规范本地干净模板后通过，无模板内容改动。线上已核对189546c7/0099、占位标题0、LaTeX预演0；最终head完整CI、standalone制品、合并部署与用户浏览器仍待。 |
-| OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
-| WP0.2 失败对话恢复（2026-10-25） | Codex + 实现/独立复审 | [#131](https://github.com/Xhhemoing/study-assistant-opening/pull/131) · `fix/wp0.2-failed-conversation` | 失败/停止可重试；隐式旧失败对话按10分钟新开，保护pending/unknown、草稿/不可读存储、上传及题目，显式历史保留。定向回归、Web类型与lint通过。首轮CI独立Worker/PDF成功，主作业3项开始页回归失败；已定位空turns时undefined相等导致null.at，补一行非空判断，新增回归先红后三文件60项及Web类型/lint通过，原3失败断言保留通过，独审无阻断。原116/39项为前阶段且重叠，不作为新head完整验收；最终head CI、浏览器、合并部署待。 |
+重开原 PR 前，重新核对最新主干、依赖、差异和 CI。提交链接固定归档位置，分支保留；未知项不视为已覆盖。
 
-| A1 R-08/R-06（2026-10-24） | Hermes | [#117](https://github.com/Xhhemoing/study-assistant-opening/pull/117) | 已合并为047eaed4，精确head ad3b7fca CI40180070571双作业成功；批改心跳、原生PG、轮询、健康与PDF接线定向通过（批次有重叠不求和）。尚未部署，真实模型、Redis/PDF长稳与用户浏览器待验。 |
-| R-04 首次提交自动批改（2026-10-25） | Hermes | `feat/sprint-a1-autograde-policy-20261024` | 已补独立工作区开关、旧客户端保留OFF、锁内重读与统一日界、仅自动来源计数、入队前只读预算估算、明确跳过原因及手动重批。0097原样保留已推送文件（非生产发布证明），0098在新隔离库连续98迁移校验通过。最终策略PG17项、最新路由/UI39项、Worker18项及相关类型通过；照片/PDF严格身份写回与状态/备份4项定向通过，旧备份失败已定向修复，批次不相加。S3兼容隔离恢复4项通过不代表生产MinIO。完整新head CI、用户浏览器与真实模型待验；未合并部署。 |
-| UI v5 整合与部署（2026-10-23） | Hermes | [#112](https://github.com/Xhhemoing/study-assistant-opening/pull/112) · `feat/ui-v5` | 整合最新正式分支学习可靠性与v5动效/材质/导航/分栏/助理全页，保留会话和作答恢复；具体CI与部署状态以PR和服务器发布记录为准。用户浏览器与真实模型待验收。 |
-| 前端终稿重构（2026-10-22） | Codex + 分工实现与独立复审 | [#105](https://github.com/Xhhemoing/study-assistant-opening/pull/105)，直接面向 `feat/opening-release` 并包含 #104 | 核心重构已发布，head `61c501a06db44cda931d62e670a12093c48d314d`。导航/主题/共槽工作区、持续对话、拍题/PDF、笔记卡片与冲刺已实现；原283项整合回归及相关类型/lint/Web构建通过，五份CI测试适配后46项近测通过（有重叠）。CI39746885158的真实Worker/PDF/重启恢复已成功，完整主作业仍在运行，尚未合并/部署。A01–A16用户浏览器、真实模型和学习效果待验收。后续上传/OCR与算法配套放#106，不计入本PR。详见[实施与交接](plans/2026-10-21-final-ui-refactor.md)。 |
-| 框架、算法与可用性整改（2026-10-22） | Codex + 五个切片/独立复审 | [#106](https://github.com/Xhhemoing/study-assistant-opening/pull/106) · `codex/study-reliability-20261022` | Worker角色拆分已发布，本次提交补齐经独立复审的配套切片：上传预检/串行读取/原项恢复/归课失败恢复；无来源文本题封存及备份；持久化拍题识别→编辑确认；精确四则运算与AI冲突退判、有效改评恢复、教学焦点更新和离线评测。定向单元各批通过（有重叠，不求和）；PGlite SQL批次：判分37、恢复/变式15、纯文本5、识别11、最终焦点3通过；adaptive整文件另有23项跨连接超时，不能记全通过，交原生PG CI确认。Contracts/Domain/AI/Database/Web/Worker/E2E类型、改动lint、246客户端边界与固定色增量检查通过；Worker构建及干净输出目录的Web生产构建通过（129页）；初次Web临时输出清理ENOTEMPTY已保留产物并隔离重建。0091/0092回滚保留学习记录与兼容约束，见同计划。begin未知响应仍可能重复建材料，识别失败同版本不开放再次付费；只有learning不能完成未解析图片流程。无真实模型准确率/用户浏览器/72h收益/生产操作。 |
-| 学习体验 P0 / 补充 S1–S3（2026-10-21） | Codex + 实现与独立复审 | [#104](https://github.com/Xhhemoing/study-assistant-opening/pull/104) · `codex/learning-experience-20261021` | 基于9e9d8a5。P0主路径已推送：首启直达课堂、自动准备题目/课程/技能、学生文案、行内检查、向量图、旧错因输入和答后练习。后续已推送今日页简化及排程移至设置；S1自动意图/默认提示/直接讲完整、读课短暂故障重试，复审修复发送并发与内部历史读取误计已读；S2新编译每条目2–3检查（短前置补课仍检验原目标1题）、隐藏错因字典/起步选项、服务端按原题约束错因并输入learnerFocus；S3题目卡生成/恢复新变式、实际作答批改后按服务端结果与耗时安排FSRS，定义卡保留回忆、旧卡显式分类，禁止题卡自评/伪造活动/替代题/过期队列推进。变式恢复/预算/归属/改答案计时经独立复核；提交前另修复刷新误回最早失败记录，普通读取沿已存在重试链恢复且不新发模型请求。各片定向单元/交互回归通过（S1为43及47项、S2为88及补充17项、S3最终73项；批次有重叠不相加），SQL分批20/21/24项通过，追加重试链11项回归通过（与24项重叠）；使用隔离PGlite PG18 WASM，不替代原生PG并发/重启验收。Contracts/Domain/AI/Database/Web/Worker及E2E类型、改动lint、228客户端边界通过；无新增DDL，错因暂存既有JSON。用户于2026-10-21明确确认发布后，前次审批阻塞已解除；5个本地切片已按相同代码树推送，代码head为5a23085ad35758443cc782a6aec7da9c574be23b，#104等待新head CI。旧bb6026b仅span旧断言失败，修复已包含；该旧head真实Worker/PDF/重启恢复通过，不能替代新head验收。未完成：0号提示/冷却、错步走查与正式题库、泄露shadow、通用置信度与延迟保留题/退出小测、独立字段、困惑记录自动汇总STATUS、全站术语与旧路由收敛；尚无真实模型/≤2点击/首题秒数/用户浏览器/72h收益或自用数据。用户验收新入口 `/opening/review?tab=cards`：配置现有模型与预算、准备所属账号的到期题卡，完成生成→作答→批改→继续；定义卡仍可翻卡，旧卡先选择方式，刷新恢复原变式。  本轮PR104补丁复核：基于d62ef0f6b437846c75d6561d4ddfe1929f82081e，补Today入口测试的listTasks/getToday替身并恢复练习保存/帮助告知（查询提示同时保留）；原入口与告知断言保留，新增保存/重复发送/失败重试回归。定向3文件33项、相关6文件131项及Web类型检查实际通过；补充测试类型、修改文件lint及补丁干净应用检查通过；按用户授权将修复提交至本PR原分支，新提交完整CI待验证，未合并/部署。基线提交CI39638614554主作业失败，后续集成/接口/默认浏览器/构建跳过，独立PDF作业成功不能替代完整CI。 |
-| 2026-10-22 学习闭环整合与质量完善 | Codex 主控 + 分工实现/复核 | `codex/study-learning-completion-20261023` | 已推送[#110](https://github.com/Xhhemoing/study-assistant-opening/pull/110)：基于主干9c71a0075cd9f2587ca0ea91bf118f60e2f18347整合#106（含#104/#105）并保留#109；补齐生产壳会话/专注/导航、已保存会话新建、分类批改评测与有上限采集CLI、完整资格记录驱动易错点、上传begin稳定身份与0091/0092不兼容回退保护。67项部署模拟通过。相关回归、受影响包类型、Worker/Web生产构建与独立产物10项HTTP检查通过；92迁移和上传仓库SQL已在PG-WASM补验，不替代原生PG。采集器9项与fixture串接通过，无真实付费调用。精确head完整CI及合并结果以PR当前状态为准；未部署，人工核定集、真实模型、长文档质量、自然延迟收益与用户浏览器未验收。 |
-| P0-1 课内自由作答批改补齐（2026-10-21） | Codex + 实现/独立复审 | `codex/study-ai-grading-20261021` | 已补齐无上传材料的课堂题：0087 绑定已保存的教学修订与题块，服务端读取题干/参考解答，自动批改、改评和学习状态共用原闭环。修复迟到历史覆盖新结果、跨次作答洗掉提示历史、原题资料误作学生照片；真实学生照片改评后仍可重评。最新课堂/批改/导师上下文联合27项PGlite SQL、相关单元和类型检查通过，独立复审无剩余阻断。Opening历史归档未含Library教学正文，缺原修订时保留记录但不能重评。真实模型十题与用户浏览器待验收。 |
-| 后续体验与智能优化 P0-2→P2（2026-10-21） | Codex + 分层实现与独立复审 | [#102](https://github.com/Xhhemoing/study-assistant-opening/pull/102) · `codex/study-ai-grading-20261021` | P0流式辅导/自动意图/首启建课目标计划、P1单下一步与四导航已提交；本轮完成P2真实pgvector混合检索及2秒查询降级、章节图谱/重解析稳定身份、导师目标/薄弱点/错因、FSRS考试日期与错题卡、课程通用真题变式练习和近7天三指标。正文完成后的补充建议改独立队列，记录查询默认启用且尊重显式关闭；修复数学符号身份、旧图谱回填、复习落到考试日、来源链及重试首字计时；原生PG CI进一步发现并修正课程首启任务未复用首课的接线遗漏。0084–0090顺序迁移通过；最终各片SQL批次27/20/17/14/8/30项通过（存在历史批次重叠，不求和），定向单元、受影响包与E2E类型通过，跨代理复审无剩余阻断。worker/Web生产构建、175文件lint、219个客户端入口边界及env一致性检查通过。本地SQL为PGlite PG18验证，首启服务4项受单后端连接阻塞；原生PG16/Redis CI已通过1296项集成（1项既有跳过）、295项接口及独立Worker/PDF/重启恢复；浏览器77通过、3跳过、6失败已按CI trace定位为两个旧入口选择器及进展页重复标题ID，已修复并保留全部业务和无障碍门禁，最终全量结果以#102当前head检查为准；真实模型、用户浏览器、2秒首字/文案比例/新题学习收益未验收。需安装pgvector并配置embedding后重建旧材料索引；回滚和验收入口见模型路由操作文档。用户已授权推送及合并；已核对最新主干f5010299与本轮基线同树，待远端最终CI完成后合并。未执行手动部署。 |
-| P0-1 通用 AI 作答批改（2026-10-21） | Codex + 分工实现与交叉复审 | `codex/study-ai-grading-20261021`，基于 #100 | 文字/照片按要点评分、置信不足退判、原答保留、手动改评及学习路径接线；提示后正确不算独立，AI 自评分不作 BKT 校准真值。26 文件329项定向测试、补充15项回归及4项交互测试通过；类型、改动 lint、客户端边界、Web/worker 生产构建通过。14项原数据库集成用例与0001–0083迁移已在官方PGlite（PG18 WASM）通过；不替代原生PG16并发/重启验收，真实模型十题及用户浏览器验收未完成。含 0083，未执行生产迁移；回滚先停批改写入，保留0083和兼容读取，不能直接回旧版读取器。推送被自动审批拒绝，尚无远端分支/PR。后续实现及复审结果见上两行。 |
-| Study R2、学习闭环与 UIUX 整合（2026-10-21） | Codex + 独立复审 | 完整候选 [#100](https://github.com/Xhhemoing/study-assistant-opening/pull/100)，依赖 #79–#99 | 按用户授权整合同一候选并提交 GitHub。R1 可验证补丁已恢复，R2 证据规则补完；精确提示/新题身份、连续复习、逐字显示、专注模态、阅读器模态层和历史回执恢复契约已修。实看并修复设置页外层空白滚动、复习卡正文面积、320px 键盘焦点及完整 axe 报告发现的语义问题；补 `0082` 持久复测协议、备份负向曝光与旧链接恢复。完整 PG、40 项 axe、升级/备份和 Web/worker 重启结果见 #100 最终 head 检查，不以祖先结果替代。真实 72h 学习效果未测量。未合并/部署；见 [UIUX 整合记录](plans/2026-10-20-uiux-delivery.md#2026-10-21-整合与实际验收) |
-| UIUX 最终方案 UX0–UX5 | Codex + 独立子代理 | `codex/uix-shell-20261021`（本地） | 核心代码与交叉复审已整合：稳定恢复与鉴权、共享主题/组件、四导航和上下文AI、分级提示/证据、课程四标签、今日/复习/资料及兼容路由。80文件868项定向单元、Web/UI/E2E类型、改动lint、边界、真实Tailwind与Web生产构建通过；后续卡片16项、UI18项通过。10核心视图×4条件axe用例已补，未跑浏览器。SQL补验已准备PG16.14，但宿主仅映射root、无法低权限启动，6套47静态用例未运行；未声明原型逐项全部完成，混排队列/逐字回复/模态转场与量化目标见[实施范围](plans/2026-10-20-uiux-delivery.md)。公开推送被自动审批拒绝，尚无远端ref/PR/head CI/部署；浏览器待用户 |
-| 2026-10-20 线上报告整改 | Codex + 独立复核 | `codex/report-remediation-20261020` | 基于已合 #76（170204ff）核实 QA01–09；修作答恢复、费用截断、停用账号存量会话、设置调试泄露和匿名健康详情，备份入口明确 measurement 限制。最近非浏览器测试与四包类型/lint/边界通过，隐私复审修复及24项复查通过，最终CI待收口。内测公开注册且暂不新增/收紧额度为用户决定；可信IP证书已安装并默认TLS实测200，自动续期已启用；完整注销未实现。Hermes根盘已清理/迁备份至3.47GiB，保留原路径与current；9项工具测试及57秒真实parser预检成功，/www发布继续，浏览器待用户。见[逐项记录](operations/report-remediation-2026-10-20.md) |
-| 首次学习与发布保护（2026-10-19） | Codex | [#76](https://github.com/Xhhemoing/study-assistant-opening/pull/76) · `codex/first-learning-20261019` | 已整合c5cb6424并推送71f3ce6a；66项最近单元、Web/Database类型通过，最终head待完整CI。补systemd路径引用、跨盘受管发布及0081兼容回退保护；14项真实systemd/配置测试及59项部署模拟通过，旧脚本实际重现5项不安全降级；独立复审无P1/P2。CI39365804145暴露runner无/usr/bin/node，修测试夹具后最终a5f228ad完整CI39366647158成功，已合并为170204ff。Hermes线上保持6c4a4ea8；已按用户授权两次安全停止另一发布构建并持有既有发布锁；另一会话仍重试，待用户停止其发布，Web/Worker PID未变，/www约13.6GiB可用于发布。现有备份在隔离PG16恢复成功（93表/74迁移），未改生产数据库。真实IP限流及用户浏览器/真实学习待验收；见[首启与试用](plans/2026-10-19-first-learning.md) |
-| 2026-10-19 GitHub Study 链路整合与清理 | Codex | [#74](https://github.com/Xhhemoing/study-assistant-opening/pull/74) 已合；整合 [#75](https://github.com/Xhhemoing/study-assistant-opening/pull/75) | 用户限定本轮优化与Study链路，历史草稿#46/#51/#63保留。#71、内容前置fe24bd8、#73已整合；修复查询兼容、追问来源隔离、检索评估、历史曝光响应契约及旧夹具。1a321316的CI中1151项集成（1既有跳过）和291项handler均通过；浏览器36通过/5跳过/4个旧夹具失配，已维护折叠入口及显式就绪transport，保留恢复安全和原件字节断言，未本地运行浏览器。完整CI和合并结果以PR75最终head检查为准。0075–0081已在隔离PG迁移，回滚见查询架构与升级计划；未部署，待用户浏览器验收。已清理17个远端/2个本地已合分支，独有提交者保留 |
-| UI 审计逐项整改 | Codex | `codex/study-ui-audit-fixes-20261019` | D01–D10、IL01–IL08 的上下文/资料意图/临时分支、阅读适宽与紧凑问答、入口与视觉层级已编码；392 项相关回归分批通过，Web 类型、改动 lint、边界及生产构建通过；未合并/部署，浏览器/窄屏/真实模型待用户复验。基于本地助理升级父提交；不覆盖另会话远端导航/查询成果。见 [逐项记录](operations/ui-audit-remediation-2026-10-19.md) |
-| 有效内容展示面积第二轮 | Codex | `codex/study-content-space-round2` | 基于b131cc9补齐阅读器信息合行、紧凑输入设置、练习开始动作置顶、资料行密度与确认空队列后收起；190项相关回归、最终14项重检、Web类型/lint/边界通过；Web生产构建通过。原31条历史保持，浏览器复验未执行，见同一[整改记录](operations/ui-audit-remediation-2026-10-19.md) |
-| Study 助理升级最终计划 | Codex + GPT-6.1 Sol high 子代理 | `codex/study-upgrade-20261019` · [#71](https://github.com/Xhhemoing/study-assistant-opening/pull/71) | 全部可实现板块已分部分本地提交并独立复核：0075–0081、锚点/交付、父预算、精确span三模式、状态/Decision/影子比较、意图、Composer/13读工具/6提案、39表恢复及检索评测。662文件5059单元/契约、类型、lint、边界及Web/worker构建通过。最新源码推送被自动审批拒绝，待明确授权；#71仍非完整实现，真实PG/handler完整CI未完成。未合并、未部署；浏览器与真实学习效果待验收，见 [计划](plans/2026-10-19-study-assistant-upgrade.md) |
-| 2026-10-19 FACDA 恢复分析与等待体验优化 | Codex | `codex/latest-code-analysis-20261019` | 基于本地6c4a4ea8优化登录成功后的防重复提交/跳转状态与普通链接恢复、Today鉴权后并行读取及加载提示。52项定向回归通过（既有时区测试首次动态导入触及5s，单次15s超时复查3项通过，未改默认配置）；Web/改动测试类型、改动lint通过。附件facda242b仅证实认证与2243.9s冷编译完成，页面/自动查询GUI/ST001–004仍待用户验收，未认定OOM或完成同版本复现。复验步骤见[发布操作](operations/opening-release.md#facda-恢复材料的结论与复验2026-10-19)。Graphify已执行AST更新，但图谱重建未完成已停止，缺SQL解析器；本轮改动随本次本地提交保存；未push/部署 |
-| Study 独立回归修复 ST-001–004 | Codex | [#68](https://github.com/Xhhemoing/study-assistant-opening/pull/68) | c283e78 经完整 CI 39206856601 和主线程独立复核后，已合入 feat/opening-release（b140d548）；四项独立缺陷修复不等于新架构验收。dc792e0/ce4de2a 尚未从合法可见仓库/refs/制品取得，不宣称源码丢失。未部署 |
-| Study 自动受限读取 | Codex | [#73](https://github.com/Xhhemoing/study-assistant-opening/pull/73) · `codex/automatic-records-refinement-20261019`，基于 fe24bd8 | 原补丁及4228253已按完全相同源码树同步为0964837。继续优化每轮工具最小化、历史失效续问澄清、决策ID约束、课程标题与日期分离、完整日期token及跨月/闰年边界，修正集成夹具写死“明天”。246项相关单元通过；本轮AI/Worker/Web类型与改动lint通过。新增真实PG回归交现有CI执行，完整CI以PR当前head为准；本地无数据库服务，真实模型/用户浏览器未验收。未合并/部署，开关默认0不变。[查询架构](architecture/STUDY_SYSTEM_QUERY.md) |
-| Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89修复五项P2及请求/结果工具配对，完整CI39216797557成功。后续接保存/临时聊天与显式开关（默认0），绑定用途/owner grant、核验完整祖先来源；只查元数据，不发起模型请求。含0074与临时24h来源元数据，回滚先停/取消遗留查询再启旧worker并保留DDL。相关222单元及补跑35项、60真实PG（含10聊天/竞态）、4HTTP、七包类型和改动lint通过；#70初轮CI两项旧workspace mock已补，terminal15项回归通过；独立review/新head完整CI待收口；[边界与用户验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。不等于26项新架构或单元三模式完成；原生模型C1/C2、release/ack、M4试验与用户浏览器待完成，无生产操作 |
-| Study 系统只读查询 | Codex | [#69](https://github.com/Xhhemoing/study-assistant-opening/pull/69)；[#70](https://github.com/Xhhemoing/study-assistant-opening/pull/70) | #69 fa322b89完整CI39216797557成功。#70 d5c4746b完整CI39228165671成功，F1/F2/F3获主侧独审；真实Web+Worker隔离进程三配置28项HTTP断言通过，无真实模型调用。主侧新构建浏览器已验保存恢复/临时消失/临时存笔记制卡禁用、日期与对象消歧和adaptive0/1、query0矩阵，发现证据链接不可点击；本轮修复保留服务端回执证据，仅确切授权的已知应用只读入口可链接，chatProse=0/1均提供入口，100相关单元、Web类型与改动lint通过，增量CI及主侧真实浏览器复验待收口。含0074与临时24h来源元数据，回滚先停/取消查询再启旧worker并保留DDL。[边界与验收步骤](architecture/STUDY_SYSTEM_QUERY.md)。默认有限规则查询，不等于26项新架构完成；真实gateway/C1/C2、release/ack、M4受控试用仍待，MinIO本地镜像拉取unauthorized未绕过，无生产操作 |
-| 专注学习界面改版 P0–P2 | Codex + 独立交叉审查 | [#67](https://github.com/Xhhemoing/study-assistant-opening/pull/67) · `codex/focused-learning-ui` | 编码已补齐：课程断点、固定版本资料阅读、练习草稿保留/另开/切回、完整教学单元与统一工具、关联真实作答的提问/笔记、矩阵平面概念课及真实迁移题。102 文件 847 项整合单元、最终 126 项定向回归、Web/34 份测试/E2E 类型、94 文件 lint、边界检查及 worker/Web 生产构建通过；无新迁移或依赖。已维护旧 E2E；最新 CI 暴露的 Today C5 旧断言已按默认收起工具语义修正，37 项最近回归通过。用户已授权合并，完整 CI 与合并状态见 #67；未部署，用户交互与真实学习效果待验收 |
-| 深度审计按板块复核与修复 | Codex + 独立交叉审查 | [#66](https://github.com/Xhhemoing/study-assistant-opening/pull/66) · `codex/audit-hardening` | 已同步实际合并的#65/#64；0073保留0070–0072，公开原文接入统一配额，迁移前停旧worker并取消待重启；跨协议回退legacy持久暂停worker，返回降级，部署/身份故障注入检查通过。整合真实PG已通过；队列spike监听竞态已修并通过隔离真实Redis。最终提交完整CI须以#66当前检查为准，不能用旧head代替。生产部署、可信代理、分支保护及用户验收未完成，详见[审议与欠项](operations/audit-remediation.md) |
-| Math I 考前冲刺与课程证据集成 | Codex + 独立身份/存储复核 | [#64](https://github.com/Xhhemoing/study-assistant-opening/pull/64) · `codex/exam-sprint` | 已在#65后合入40a4be7；head5cbfa7d的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050725855)通过，含真实PG、handler、浏览器及构建。稳定技能UUID、退役保护、引用CAS、实时资格/摘要/BKT/导师flags及显式重关联通过独审和回归，保留0070–0072。公开原文配额随#66整合。尚未部署或用户验收；见[统一数据关联](product/exam-sprint.md#统一数据关联) |
-| 目标驱动框架与首批规划/教学改进 | Codex + 独立交叉审查 | [#65](https://github.com/Xhhemoing/study-assistant-opening/pull/65) · `codex/goal-driven-learning` | 已合入b70ae56；headf12c5df的[完整CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/39050710975)通过，含真实PG、handler、浏览器及构建。目标策略/编译接线、答案自身引用、self_report/v3资格与曝光保留已实现，无DDL。可信同label跨requirement已有domain回归，生产模板尚无可信PG正例；不伪造权威记录。尚未部署或用户验收 |
-| BKT 算法与真实使用测试插件 | Codex + Astra 独立评审 | [#61](https://github.com/Xhhemoing/study-assistant-opening/pull/61) · `codex/bkt-real-use-evaluation` | 以主干 `9c7c86e` 整合并保留 S1–S7 与 0066–0069；Astra 数学复核通过，修复迟到复测 72h 间隔与归档只读入口，补真实 pg_dump 恢复验收。109 项定向单元、4 包类型和相关 lint 通过；完整 CI/合并结果见 #61。默认未报名，部署、用户浏览器与真实学习效果待验收 |
-| 自适应进化 v3：要求身份与版本资格 | Codex + 隔离子代理 | [#59](https://github.com/Xhhemoing/study-assistant-opening/pull/59) | 已与 #60 整合并合入 `cb5a68c`，完整主干 CI 38911719890 成功。按要求隔离快照/建议/任务/教学，保留已交付帮助与卡片入口，含0065可空列迁移；尚未部署。稳定节点身份、分项评分与BKT属后续 |
-| 评审修复 R1–R8 | Claude | `claude/keen-carson-ls19ie` | 已合入主干（`544304e`）；R10 技能名部分由 G3 解决、`firstAttempt` 留到 I2；R9 拆为 Grok G10 + Claude R9b。详见 `docs/plans/2026-10-15-review-and-next-steps.md` |
-| 统一模型调度 + 证据闭环（M1–M6、E1–E5） | Claude → GPT | `feat/opening-release` | 已实现；Claude 复核：全量类型/lint 通过，单元仅环境类 PDF 失败，集成有 1 个真实过期测试（R7）；E2 暂缓；浏览器与真实供应商待用户 |
-| 自适应副驾驶闭环批次 A | Codex 主对话接 Claude；子代理接 Grok | [#57](https://github.com/Xhhemoing/study-assistant-opening/pull/57) | 已合入；最终提交 `293d6d2` 完整 CI 成功，覆盖数据库/handler/既有浏览器/构建。G1/G5–G9、C2/C3/C4 已实现；待 Hermes 部署与用户浏览器验收，目标开关为 0。#46 仅移植同日去重实现，原 PR 未变动 |
-| 主干 CI（C0）与转写恢复 R9b | Codex 主对话 | C0 随 #52 已合；R9b [#56](https://github.com/Xhhemoing/study-assistant-opening/pull/56) | 已合入；最终提交 `3d6d04f` 完整 CI 成功。持久化分段回执，跨手动重试复用、补结算、阻止未知结果重发；免费模型 TTL 回执可恢复。无新增迁移 |
-| Hermes 发布 | Codex 主对话 | [#58](https://github.com/Xhhemoing/study-assistant-opening/pull/58) | 用户已授权部署；当前环境连接 `23.251.32.22:22` 返回 Network is unreachable，且无 SSH 密钥。发布脚本补齐 worker 重启、启动后崩溃检测、失败传播与成功 SHA 记录；模拟回归通过。线上未操作，待可用部署连接 |
-| 学习闭环与整体复核 | Codex 主对话 + 两个独立子代理 | [#60](https://github.com/Xhhemoing/study-assistant-opening/pull/60) | 7类闭环/恢复缺陷已修并合入 `e7a693b`；与 #59 整合后的主干完整 CI 38911719890 成功。Hermes与实际使用验收未完成 |
-| 学习闭环剩余计划 S1–S7 | Astra 研究/独立评审，Codex 与隔离子代理编写 | [#62](https://github.com/Xhhemoing/study-assistant-opening/pull/62) / `codex/learning-feedback-loop` | 七个编码切片已实现并完成独立review修复；含0067–0069及原样保留0066。首批CI单元3886/数据库807通过，1个旧backup空表断言已修。整合提交CI与合并状态以#62检查记录为准；用户浏览器/部署/真实学习收益未验收 |
+| 原 PR | 保留分支 / 提交 | 未决项 |
+| --- | --- | --- |
+| [#123](https://github.com/Xhhemoing/study-assistant-opening/pull/123) | [docs/study-status-20261025 @ 395684d4](https://github.com/Xhhemoing/study-assistant-opening/tree/395684d4dd508a7603bdb1f53623de0644345265) | 状态查询脚本与工具测试未合入；本次仅收敛看板 |
+| [#122](https://github.com/Xhhemoing/study-assistant-opening/pull/122) | [feat/sprint-c-explore-preview-20261024 @ 9e233e01](https://github.com/Xhhemoing/study-assistant-opening/tree/9e233e01fda4908a35aff49f53609709b31347cd) | Explore 预览未合入，依赖 #116，仍按默认关闭保留 |
+| [#121](https://github.com/Xhhemoing/study-assistant-opening/pull/121) | [perf/typecheck-projects-20261024 @ 934d0b28](https://github.com/Xhhemoing/study-assistant-opening/tree/934d0b2804f4d64a6fa48e5bef8c4e24a59b1a1d) | 测试分层类型检查及缓存回归未合入 |
+| [#120](https://github.com/Xhhemoing/study-assistant-opening/pull/120) | [perf/sprint-a2-parser-ranges-20261024 @ e1af5db3](https://github.com/Xhhemoing/study-assistant-opening/tree/e1af5db39087abe6e270aee01df5009ee7c0d36d) | A1 就绪已覆盖；A2 多范围解析与流式回归未合入 |
+| [#116](https://github.com/Xhhemoing/study-assistant-opening/pull/116) | [feat/sprint-b-answer-isolation-20261024 @ f2043303](https://github.com/Xhhemoing/study-assistant-opening/tree/f2043303bf25dcbc275eb555511e4beddf7fa4af) | 0097 迁移已有；答案隔离契约、仓库、API 及测试仍未合入 |
+| [#103](https://github.com/Xhhemoing/study-assistant-opening/pull/103) | [codex/study-runtime-recovery-20261021 @ 64e9f4c3](https://github.com/Xhhemoing/study-assistant-opening/tree/64e9f4c39bb15fa2934f4d57dfb199682fb04eae) | 候选已有 host 保留；进程崩溃恢复验收及 CI 未合入 |
+| [#78](https://github.com/Xhhemoing/study-assistant-opening/pull/78) | [codex/sprint-lesson-r2-20261020 @ cd078431](https://github.com/Xhhemoing/study-assistant-opening/tree/cd078431ce3ac5b2eeddc27e99a37e81d5996aba) | PR 仅恢复文档；39 文件源码及部分答案曝光修复状态未知 |
+| [#63](https://github.com/Xhhemoing/study-assistant-opening/pull/63) | [codex/project-architecture-recovery @ f86e8c5a](https://github.com/Xhhemoing/study-assistant-opening/tree/f86e8c5a7640b07bb56be66e1a557e8b50e36c45) | 学习测试请求恢复实现与回归未合入 |
+| [#51](https://github.com/Xhhemoing/study-assistant-opening/pull/51) | [codex/senseweave-0.5.0-rc1-pilot @ 7f9b7ae6](https://github.com/Xhhemoing/study-assistant-opening/tree/7f9b7ae669a649d1046760136fe8952799a647a3) | 旧 SenseWeave pilot 未合入；与 SW0 不同，保留待退役判断 |
 
-## 下一步（按顺序）
+</details>
 
-1. 完成 #76 与最新发布主干整合，待其完整 CI 成功后合并；发布前再核实合并 SHA 的 push CI。历史实现行保留原时点记录，不能据旧“待合并/保护未启用”重复开发。
-2. Hermes 发布：使用已有独立 /www 磁盘，核对实际制品、可信代理及真实 IP 限流（隔离备份恢复已完成）；保留当前应用、可回退版本和备份。按既有受管流程部署 0075–0081，不改变自适应/查询等功能开关，不降低门禁。0081 旧代码不兼容时，先停新 worker 与学习写入，保留 DDL 和学习数据；详见 Study 升级计划。
-3. 用户浏览器与真实学习验收：/onboarding → /opening/today → 同一活动的学习/作答/小结 → 至少72h后独立复测。记录生成成功率、待核对原因、实际费用、等待时间和断点恢复；未验收不标通过。
-4. 按实测等待时间选择性能切片；目标驱动首启已有 #76，不另开重复实现。规划 Agent、多步写工具与扩展自动判分等实际自用反馈后再决定。
-## 负责人已定（2026-10-13）
-
-- 0060 migration 随 #21 合入：有重复键时迁移报错并列出 job，不删数据；回滚 `DROP INDEX opening_jobs_retest_accept_key_uidx`。
-- #20：生产环境已重定向的旧页面，其 e2e 退役；仍可访问的页面照常修测试。
-- 5 个未推送的旧 worktree 已备份为远端 `backup/wt-*` 分支，可随时删除本地目录。
-- 笔记 + 表达与 AI 主讲两条线并行；AI 主讲先试跑已有代码，不新开任务。
-
-## 等用户决定
-
-| 本轮切片 | 负责 | 分支 | 状态 |
-|---|---|---|---|
-| OPT-05 已有任务预算预估 | Hermes | `feat/sprint-budget-preview-20261023` | 基于f4c4b3fd；f7f00d88/372c30b0实现只读预算并修复UUID、跨窗口接受与旧派生时段。2026-10-24快速复验：176项单元、18项原生隔离PG通过；Contracts/Domain/Database类型、17文件定向语义与20文件lint通过。GitHub交付与完整CI以本分支PR为准；本轮未重跑完整Web类型（此前600秒超时），无迁移、模型调用、合并或部署，用户浏览器待验收。 |
-
-- 本次模型/证据交接已快进推送到 `feat/opening-release`；已删除远端 `claude/keen-carson-ls19ie`、`feat/adaptive-loop-v2` 与内容已被目标分支覆盖的 `feat/course-seed-today-plan`。其余分支仍含独有提交，未删除。
-- 合并与删除 worktree 会被 Claude 的权限拦截：需用户/Shipper 合并 PR，或在设置里放行 `gh pr merge` / `git worktree remove`。
-- 本地 worktree 过多（超过 3 个上限）：已合 PR 的 `sao-fix-shell-review-badge-error`、`sao-docs-hermes-self-use-flags`、`sao-test-real-use-ac-03` 可删。
-
-已解决（2026-10-14）：Hermes SSH reset 是后量子 KEX 握手在本机网络被掐断，`~/.ssh/config` 加 `KexAlgorithms curve25519-sha256`；Grok 改由 bot 团队按卡执行。
-
-## 使用反馈
-
-自用中发现的问题记在这里，一行一条：`日期 · 页面 · 现象`。优先级高于“下一步”。
-
-- 2026-10-21 · 普通练习 / 首次引导 · 用户提供审计：自由作答没有自动批改、首次目标没有接课程规划；本轮代码复核确认。最新候选已收起部分诊断并调整导航，旧截图不能代表当前全部 UI。此条来源为用户报告与代码核查，尚非本轮真实模型自用结果。
-- 2026-10-21 · 学习主路径 · 用户对9e9d8a5的代码走读指出系统状态文案多、首题前选择过多、课内检查和答后教学不足；来源为用户提供的源码审计，未运行浏览器或真实模型。P0候选见#104；尚无本轮五天自用数据。 同日补充方案要求优先S1默认导师，再推进S2错因教学、S3复习与S4真实自用；这是产品要求，未作为实际学习收益证据。
+[收敛前的完整状态记录](https://github.com/Xhhemoing/study-assistant-opening/blob/fd157787ab74a307fa41a34b61359920ed98eab1/docs/STATUS.md)保留在 Git 历史，不能当作当前调度清单。
