@@ -275,6 +275,18 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain('data-teaching-primary-advance="true"');
   });
 
+  it("uses the same unit position for the heading and accessible progress after content changes", () => {
+    const initial = clientInit();
+    const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+      activity: activityReady,
+      clientInit: { ...initial, contentVersion: initial.contentVersion + 1, checkpointJson: { currentBlockId: BID2 } },
+    }));
+    expect(html).toContain("单元 2 / 2");
+    expect(html).toMatch(/role="progressbar"[^>]*aria-valuemax="2"[^>]*aria-valuenow="2"/);
+    const empty = renderToStaticMarkup(createElement(TeachingWorkspace, { activity: activityReady, clientInit: clientInit({ blocks: [] }) }));
+    expect(empty).not.toContain("单元 1 / 0");
+    expect(empty).not.toContain('role="progressbar"');
+  });
   it("shows material title not bare UUID as the sole source label", () => {
     const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const html = renderToStaticMarkup(

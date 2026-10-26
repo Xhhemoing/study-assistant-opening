@@ -24,6 +24,7 @@
 
 | 切片 | 负责 | 分支 / PR | 状态 |
 |---|---|---|---|
+| WP0.5 进度统一（2026-10-25） | Codex + 只读调查/独立复审 | `fix/wp0.5-unit-progress`，基于WP0.4的33a000d0 | 今日继续卡与学习页标题/无障碍进度共用unitProgress，按真实教学blocks分组为单元，保留活动/内容绑定、草稿与检查点写入。计数统一使用与正文同包的checkpoint，复用跳过规则；无可靠保存位置时今日卡不编造“上次位置”，空内容不显示1/0。原计数矛盾与skipped游标先红后修，复审发现同版本双cursor读分歧已统一来源；遗留thoughtTrain属性TS2353已删后Web类型复查通过。定向33项、今日入口51项分批通过（重叠），6文件lint、287边界与strict0通过；独立复审无剩余具体问题。未运行浏览器/本地完整构建，完整CI/合并部署待；用户复验同一活动在今日与学习页的N/M相同，进入练习后返回、刷新与已跳过位置一致。 |
 | WP1.1 三项导航（2026-10-26） | Codex + Today实现/独立复审 | `fix/wp1.1-three-nav` | 导航统一学习/复习/资料，旧课程/助理/冲刺归属学习；账户保留历史/安排/设置/主题/导出/版本/退出，移动搜索复用命令面板。学习页接真提问输入与全部课程；仅exam模式且有日期的未归档课程显示冲刺。CmdJ保留输入法/模态边界，提示可一次关闭。复审两项P1已修：新问题独立fresh entry保留原题边界，不复用旧active或覆盖历史草稿；真实AssistantView回归确认不自动创建/发送。18文件近测初轮193/194，旧导航断言同步后2文件26项通过；Web/E2E类型、改动lint、288客户端边界及strict0通过。未运行浏览器/完整本地构建，整体CI/合并部署待；用户检查三导航、CmdK/CmdJ、移动更多、无课程与考试卡入口。 |
 | WP0.1 版本可见（2026-10-25） | Codex + 独立只读评审 | [#130](https://github.com/Xhhemoing/study-assistant-opening/pull/130) · `fix/wp0.1-release-version` | 补health commit/builtAt、账户菜单版本与部署构建SHA；保留503、详情鉴权和no-store。17项近测、Web类型/lint/边界/文案通过。首轮CI部署模拟和独立Worker/PDF作业通过，主作业因构建元数据未分类失败；已补构建常量例外，配置/环境/元数据48项回归及Config类型/lint通过，独审无阻断。Windows模板换行曾使本地复查失败，仅规范本地干净模板后通过，无模板内容改动。线上已核对189546c7/0099、占位标题0、LaTeX预演0；最终head完整CI、standalone制品、合并部署与用户浏览器仍待。 |
 | OCR 扫描 PDF 分段 deadline（2026-10-25） | Hermes | `fix/ocr-segment-deadline-20261025` | 已将 OCR 分段超时接入 Worker startup config/registry，默认240秒、可配1–900秒，透传至 parse-source→parsePdfSegments；保留租约取消、心跳、费用与缓存围栏。41项定向单元、Config/Worker 类型检查通过；未部署，真实长扫描与浏览器待验。 |
