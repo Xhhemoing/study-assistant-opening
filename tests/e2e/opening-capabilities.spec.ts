@@ -22,7 +22,10 @@ test.describe("opening capabilities (U04)", () => {
       const start = page.getByRole("article", { name: "继续学习", exact: true }).getByRole("link", { name: "开始学习", exact: true });
       await expect(start).toBeVisible();
       await expect(start).toHaveAttribute("href", `/opening/courses/${f.courseId}/study`);
-      await expect(page.getByRole("button", { name: "问 AI：概念、题目或资料里的任何一段", exact: true })).toBeEnabled();
+      const question = page.getByRole("textbox", { name: "向 AI 提问", exact: true });
+      await expect(question).toBeEnabled();
+      await question.fill("如何理解向量的张成？");
+      await expect(page.getByRole("button", { name: "继续提问", exact: true })).toBeEnabled();
       await expect(page.getByText(/掌握\s*%|掌握度|mastery/i)).toHaveCount(0);
     } finally {
       await f.dispose();

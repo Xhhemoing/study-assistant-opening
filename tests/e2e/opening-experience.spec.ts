@@ -19,7 +19,7 @@ test("compact mobile navigation and settings retain every destination and predic
   await account.click();
   const more = page.getByRole("dialog").filter({ has: page.getByRole("navigation", { name: "学习工具与账户", exact: true }) });
   await expect(more).toBeVisible();
-  for (const [label, href] of [[/^学习安排/, "/opening/settings/planning"], [/^设置$/, "/opening/settings"], [/^导出$/, "/opening/settings/export"], [/^全部对话$/, "/opening/assistant"]] as const) {
+  for (const [label, href] of [[/^学习安排/, "/opening/settings/learning"], [/^设置$/, "/opening/settings"], [/^导出$/, "/opening/settings/export"], [/^全部对话$/, "/opening/assistant"]] as const) {
     await expect(more.getByRole("link", { name: label })).toHaveAttribute("href", href);
   }
   await expect(more.getByRole("link", { name: "连接", exact: true })).toHaveCount(0);
@@ -44,7 +44,20 @@ test("compact mobile navigation and settings retain every destination and predic
   await account.click();
   await more.getByRole("link", { name: "设置", exact: true }).click();
   await expect(page).toHaveURL(/\/opening\/settings$/);
-  await expect(page.getByRole("link", { name: /高级设置/ }).first()).toHaveAttribute("href", "/opening/settings/advanced");
+  const settings = page.getByRole("navigation", { name: "设置分区", exact: true });
+  await expect(settings.getByRole("link")).toHaveCount(3);
+  for (const [label, href] of [["外观", "/opening/settings"], ["学习", "/opening/settings/learning"], ["AI 与数据", "/opening/settings/ai"]] as const) {
+    await expect(settings.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
+  }
+  await expect(settings.getByRole("link", { name: "外观", exact: true })).toHaveAttribute("aria-current", "page");
+  await settings.getByRole("link", { name: "学习", exact: true }).click();
+  await expect(page).toHaveURL(/\/opening\/settings\/learning$/);
+  await expect(page.getByRole("heading", { name: "学习偏好", exact: true })).toBeVisible();
+  await settings.getByRole("link", { name: "AI 与数据", exact: true }).click();
+  await expect(page).toHaveURL(/\/opening\/settings\/ai$/);
+  await expect(settings.getByRole("link", { name: "AI 与数据", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "连接管理", exact: true })).toHaveAttribute("href", "/opening/settings/connections");
+  await expect(page.getByRole("link", { name: "导出数据", exact: true })).toHaveAttribute("href", "/opening/settings/export");
   await expect(navigation).toBeVisible();
 });
 

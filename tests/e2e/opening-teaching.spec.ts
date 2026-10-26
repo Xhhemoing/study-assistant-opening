@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { APIRequestContext, Locator } from "@playwright/test";
+import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
 import { z } from "zod";
 import { expect, test } from "./fixtures";
@@ -42,6 +42,13 @@ async function fillNonmemberAnswer(practice: Locator) {
   await practice.getByLabel("我的理由（如无解冲突、几何约束）", { exact: true }).fill("第一和第三坐标强制 α=β=2，但第二坐标算出 4，不等于 3。");
 }
 
+async function openSpanOutline(page: Page) {
+  const outline = page.getByRole("navigation", { name: "span 学习目录", exact: true });
+  if (!await outline.isVisible()) await page.getByLabel("选择学习单元", { exact: true }).click();
+  await expect(outline).toBeVisible();
+  return outline;
+}
+
 test.describe("Opening span durable teaching flow", () => {
   test.beforeAll(async () => { await seedOpeningOwner(); });
 
@@ -66,7 +73,7 @@ test.describe("Opening span durable teaching flow", () => {
       await page.getByLabel("时间预算（分钟）", { exact: true }).fill("12");
       await page.getByRole("button", { name: "揭示如何建立方程", exact: true }).click();
       await expect(page.getByText("第1坐标：1α + 0β = 3", { exact: true })).toBeVisible();
-      const steps = page.getByRole("navigation", { name: "span 教学步骤" });
+      const steps = await openSpanOutline(page);
       const issuedResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/attempts") && response.request().method() === "POST");
       await steps.getByRole("button", { name: "3. 独立新题", exact: true }).click();
       const issued = await issuedResponse;
@@ -79,7 +86,9 @@ test.describe("Opening span durable teaching flow", () => {
 
       // Keyboard editing must not navigate; focus mode must preserve the same form.
       await practice.getByLabel("α（候选系数）", { exact: true }).press("ArrowRight");
+      await openSpanOutline(page);
       await expect(steps.getByRole("button", { name: "3. 独立新题", exact: true })).toHaveAttribute("aria-current", "step");
+      await page.getByLabel("选择学习单元", { exact: true }).click();
       const originalInput = practice.getByLabel("α（候选系数）", { exact: true });
       const originalInputNode = await originalInput.elementHandle();
       expect(originalInputNode).not.toBeNull();
@@ -164,7 +173,8 @@ test.describe("Opening span durable teaching flow", () => {
       await page.getByRole("button", { name: "继续原来的步骤", exact: true }).click();
       practice = page.getByRole("region", { name: "span 真实作答", exact: true });
       await expect(page.getByLabel("时间预算（分钟）", { exact: true })).toHaveValue("12");
-      await expect(page.getByRole("navigation", { name: "span 教学步骤" }).getByRole("button", { name: "3. 独立新题", exact: true })).toHaveAttribute("aria-current", "step");
+      await expect((await openSpanOutline(page)).getByRole("button", { name: "3. 独立新题", exact: true })).toHaveAttribute("aria-current", "step");
+      await page.getByLabel("选择学习单元", { exact: true }).click();
       await expect(practice.getByRole("heading", { name: "做对了！", exact: true })).toBeVisible();
       await practice.getByText("我刚才的答案", { exact: true }).click();
       await expect(practice.locator("pre")).toHaveText(submission.answer);

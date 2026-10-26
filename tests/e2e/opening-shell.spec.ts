@@ -79,7 +79,8 @@ test.describe("opening shell", () => {
       await page.keyboard.press("Tab");
       await expect(nav.getByRole("link", { name: /^复习/ })).toBeFocused();
       await page.keyboard.press("Enter");
-      await expect(page).toHaveURL(/\/opening\/courses$/);
+      await expect(page).toHaveURL(/\/opening\/review$/);
+      await expect(nav.getByRole("link", { name: /^复习/ })).toHaveAttribute("aria-current", "page");
     } finally {
       await context.close();
     }
