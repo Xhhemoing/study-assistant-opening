@@ -37,15 +37,15 @@ describe("workspace navigation", () => {
     expect(legacyOpeningRedirectPath("/preview/notion-import")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/preview/notion-import/detail")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/preview-old")).toBeNull();
-    expect(legacyOpeningRedirectPath("/learn/courses/123")).toBeNull();
+    expect(legacyOpeningRedirectPath("/learn/courses/123")).toBe("/opening/courses/123");
   });
-  it("redirects nested mock learning entries without touching course routes", () => {
+  it("redirects nested mock learning entries and preserves legacy course identities", () => {
     expect(legacyOpeningRedirectPath("/learn/review")).toBe("/opening/cards");
     expect(legacyOpeningRedirectPath("/learn/review/abc")).toBe("/opening/cards");
     expect(legacyOpeningRedirectPath("/learn/practice/123")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/learn/goals/new")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/learn/exams")).toBe("/opening/today");
     expect(legacyOpeningRedirectPath("/learn/marketplace")).toBe("/opening/today");
-    expect(legacyOpeningRedirectPath("/learn/courses/123")).toBeNull();
+    expect(legacyOpeningRedirectPath("/learn/courses/123")).toBe("/opening/courses/123");
   });
 });

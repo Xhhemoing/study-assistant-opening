@@ -7,8 +7,8 @@
 | 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
 | 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
 | 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 当前 head；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
-| 候选检查 | 本批 PDF 生命周期实现经独立静态复审无阻断，回归源码已维护但未执行本地测试/类型/lint/构建/浏览器；完整验证以 #134 当前 head 的 Checks 为准。`69ed75a8` 的 41 项局部回归不替代完整 CI |
-| 当前工作 | 每次 PDF 加载独立持有 worker；任务清理完成后释放自有资源，避免旧销毁与新加载复用端口。切换、重试及原件回退保留；并发工作流文档未纳入本次提交 |
+| 候选检查 | `11432a7b` 远端 Worker/PDF 流程通过，综合检查未结束；本批 5 份回归同步经独立只读复审无阻断，未运行本地测试/类型/lint/构建/浏览器。完整验证以 #134 当前 head 的 Checks 为准 |
+| 当前工作 | 一次性同步集中 CI 的 6 条旧路由/界面断言，保留课程及对话身份、换题清空旧作答和设置来源保护；PDF 独立 worker 生命周期修复已推送，并发工作流文档保留在本地 |
 
 ## 本轮开放 PR
 

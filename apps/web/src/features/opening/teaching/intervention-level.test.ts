@@ -21,6 +21,10 @@ it("uses one three-option input without losing reset and effective-layer informa
   }));
   expect((html.match(/<select/g) ?? []).length).toBe(1);
   expect((html.match(/<option/g) ?? []).length).toBe(3);
-  for (const label of ["安静", "适中", "积极", "重置为默认", "全局偏好"]) expect(html).toContain(label);
+  for (const label of ["安静", "适中", "积极", "重置为默认", "当前生效设置与来源"]) expect(html).toContain(label);
+  expect(html).toContain('data-intervention-scope="global"');
+  expect(html).toContain('data-intervention-effective="true"');
+  expect(html).toContain('data-winning-layer="global"');
+  expect(html).toContain("对所有课程生效");
   expect(html).not.toContain('type="checkbox"');
 });
