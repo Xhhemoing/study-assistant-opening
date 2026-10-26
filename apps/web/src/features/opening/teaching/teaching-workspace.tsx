@@ -52,6 +52,7 @@ import { SelectionAsk } from "./selection-ask";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
+import { unitProgress } from "./unit-progress";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type TeachingToolsContext = {
@@ -258,6 +259,9 @@ export function TeachingWorkspace({
   const units = useMemo(() => buildTeachingStudyUnits(orderedBlocks), [orderedBlocks]);
   const currentUnit = teachingUnitForBlock(units, blockFocus.currentBlockId);
   const currentIndex = currentUnit ? units.indexOf(currentUnit) : -1;
+  const unitPosition = useMemo(() => unitProgress({ id: liveActivity.id, contentVersion }, {
+    activityId: liveActivity.id, contentVersion, clientInit: liveInit,
+  }), [liveActivity.id, contentVersion, liveInit]);
   const currentUnitId = currentUnit?.id ?? null;
   const [visitedUnits, setVisitedUnits] = useState<Set<string>>(() => new Set(currentUnitId ? [currentUnitId] : []));
   const currentQuestionId = currentUnit?.questionBlockId ?? null;
@@ -500,10 +504,10 @@ export function TeachingWorkspace({
 
   return <section className="flex h-full min-h-0 min-w-0 flex-col" aria-labelledby="teaching-workspace-heading" data-teaching-workspace="true" data-study-question={currentQuestionId ? "true" : "false"} data-content-version={contentVersion} data-path-version={pathVersion}>
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-8">
-      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-accent" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">{currentUnit?.title ?? "本次学习"}</h2><span className="text-xs text-text-3">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
+      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-accent" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">{currentUnit?.title ?? "本次学习"}</h2>{unitPosition ? <span className="text-xs text-text-3">单元 {unitPosition.current} / {unitPosition.total}</span> : null}</div>
       <div className="flex items-center gap-2"><span className={`text-xs ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" || liveActivity.generateStatus === "needs_check" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span><button type="button" className={ui.icon} aria-label={focusMode ? "退出专注" : "专注"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}</button></div>
     </header>
-    <div role="progressbar" aria-label="学习位置" aria-valuemin={0} aria-valuemax={Math.max(1, units.length)} aria-valuenow={Math.max(0, currentIndex + 1)} className="grid h-0.5 shrink-0 grid-flow-col auto-cols-fr gap-px bg-line">{units.map((unit, index) => <span key={unit.id} className={index <= currentIndex ? "bg-accent" : "bg-line"} />)}</div>
+    {unitPosition ? <div role="progressbar" aria-label="学习位置" aria-valuemin={0} aria-valuemax={unitPosition.total} aria-valuenow={unitPosition.current} className="grid h-0.5 shrink-0 grid-flow-col auto-cols-fr gap-px bg-line">{units.map((unit, index) => <span key={unit.id} className={index <= currentIndex ? "bg-accent" : "bg-line"} />)}</div> : null}
     {!recoveryDismissed && clientInitProp.checkpointJson?.currentBlockId ? <div role="status" className="flex shrink-0 items-center justify-between gap-2 px-4 py-2 text-xs text-text-3 sm:px-8"><span>已恢复学习位置</span><button type="button" className={ui.quiet} onClick={() => setRecoveryDismissed(true)}>知道了</button></div> : null}
     {liveActivity.generateStatus === "needs_check" ? <p className="mb-4 text-xs leading-6 text-text-3" role="note" data-teaching-needs-check="true">这节内容还在核对引用，可以先学。</p> : null}
     {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>{studentCopy.lessonUpdated}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>继续学习</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}：{workspaceConflict.message}</p></details> : null}</div> : null}
