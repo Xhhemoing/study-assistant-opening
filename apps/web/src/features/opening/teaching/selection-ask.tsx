@@ -6,6 +6,7 @@ import { createOpeningCardsClient } from "../cards/cards-client";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
 import { studyConversationHref, studyConversationIdentity } from "../assistant/study-conversation-context";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { ExplanationActions, explanationActionPrompt } from "./explanation-actions";
 
 export const LessonSelectionAskContext = createContext<((text: string) => void) | null>(null);
 
@@ -76,8 +77,8 @@ export function SelectionAsk({ binding, children, onAsk }: { binding: CurrentStu
       </div>
     </form> : binding && excerpt ? <div className="sticky bottom-0 z-30 space-y-2 rounded-card border border-line bg-popover p-1.5 text-text shadow-lg motion-safe:animate-pop [@media(pointer:fine)]:fixed [@media(pointer:fine)]:bottom-20 [@media(pointer:fine)]:right-5 [@media(pointer:fine)]:max-w-xs" data-selection-ask-controls="true">
       {blocked || tooLong ? <><button type="button" disabled className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm text-text-3"><Sparkles size={16} aria-hidden="true" />问 AI</button><p role="status" className="px-2 pb-1 text-xs leading-5 text-text-2">{blocked || "选中的内容较长，请缩小到 4000 字以内再提问。"}</p></>
-        : <div className="flex items-center gap-0.5">{ask ? <button type="button" className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm font-medium text-ai-1 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus-ring" onPointerDown={event => event.preventDefault()} onClick={() => ask(excerpt)}><Sparkles size={16} aria-hidden="true" />问选中内容</button> : <a className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm font-medium text-ai-1 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus-ring" href={studyConversationHref({ ...binding.context, fragment: excerpt })} onPointerDown={event => event.preventDefault()}><Sparkles size={16} aria-hidden="true" />问 AI</a>}
-          <button type="button" className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm text-text-2 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" onPointerDown={event => event.preventDefault()} onClick={() => setCard({ back: excerpt.slice(0, 4000), front: "", state: "edit" })}><Layers2 size={16} aria-hidden="true" />做卡片</button></div>}
+        : <div className="flex flex-wrap items-center gap-0.5">{ask ? <ExplanationActions onAction={action => ask(explanationActionPrompt(action, excerpt))} /> : <a className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm font-medium text-ai-1 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus-ring" href={studyConversationHref({ ...binding.context, fragment: excerpt })} onPointerDown={event => event.preventDefault()}><Sparkles size={16} aria-hidden="true" />我没懂</a>}
+          <button type="button" className="flex min-h-10 items-center gap-2 rounded-pill px-3 text-sm text-text-2 hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" onPointerDown={event => event.preventDefault()} onClick={() => setCard({ back: excerpt.slice(0, 4000), front: "", state: "edit" })}><Layers2 size={16} aria-hidden="true" />制成卡片</button></div>}
     </div> : null}
   </div>;
 }

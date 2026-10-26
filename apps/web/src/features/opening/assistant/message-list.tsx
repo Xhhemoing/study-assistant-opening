@@ -230,7 +230,7 @@ function DirectSnippetSave({ message, api, objectHref, selection }: { message: C
     } catch { setStatus("unavailable"); }
   }
   return <div className="mt-2 space-y-2 text-xs leading-6">
-    <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "存为笔记"}</button>
+    <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "保存"}</button>
     {notice ? <p role="status" className="text-text-2">{notice}</p> : null}
     {status === "unknown" ? <p role="alert" className="text-warn">还不确定是否已经存好，可能已经保存。请先看一下笔记列表，这里不会再存第二份。</p> : null}
     {status === "unavailable" ? <p role="alert" className="text-warn">暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。</p> : null}

@@ -63,9 +63,12 @@ it("records confusion from an example before a question has been issued", async 
     ? { event, currentEvent: event, currentIntent: intent, currentVersion: 1, move: { id: "self-example", presentation: { instructions: "先看一个小步骤" }, studentAction: "比较两个坐标" } } : { event: null }));
   const onApplied = vi.fn();
   await act(async () => root.render(createElement(StudyIntentControls, { attempt: { courseId: id, sessionId: id }, onApplied })));
-  const button = [...container.querySelectorAll("button")].find(node => node.textContent === "这里没看懂")!;
+  const button = [...container.querySelectorAll("button")].find(node => node.textContent === "我没懂")!;
   expect(button.closest("details")).toBeNull();
-  await click("这里没看懂");
+  expect(container.textContent).toContain("讲快点");
+  expect(container.textContent).toContain("讲细点");
+  expect(container.textContent).not.toContain("直接给关键步骤");
+  await click("我没懂");
   const post = fetch.mock.calls.find(call => call[1]?.method === "POST")!;
   expect(JSON.parse(String(post[1]!.body))).toEqual({ sessionId: id, clientKey: expect.any(String), change: { kind: "signal", signal: "confused" } });
   expect(onApplied).toHaveBeenCalledWith(intent, "diagnose", undefined);

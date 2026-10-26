@@ -59,8 +59,8 @@ export function InlineExplain({ context, content, heading = "补充解释", init
     <summary className="min-h-8 cursor-pointer text-sm font-medium text-text-2">{heading}</summary>
     <p className="prose-reading mt-2 whitespace-pre-wrap break-words text-text">{content}</p>
     <div className="mt-2 flex flex-wrap gap-1">
-      <button type="button" className={ui.quiet} disabled={locked} onClick={() => void save()}>{note?.status === "pending" ? "保存中…" : note?.status === "saved" ? "已存为笔记" : failed ? "保存失败，重试" : "存为笔记"}</button>
-      <button type="button" className={ui.quiet} onClick={makeCard}>做成卡片</button>
+      <button type="button" className={ui.quiet} disabled={locked} onClick={() => void save()}>{note?.status === "pending" ? "保存中…" : note?.status === "saved" ? "已存为笔记" : failed ? "保存失败，重试" : "保存"}</button>
+      <button type="button" className={ui.quiet} onClick={makeCard}>制成卡片</button>
       <button type="button" className={ui.quiet} onClick={onContinueInChat}>继续问</button>
     </div>
     {failed ? <p role="alert" className="text-xs text-danger">保存失败，内容仍保留。{note?.storageError ? "请释放浏览器存储空间后重试。" : "请重试。"}</p> : null}

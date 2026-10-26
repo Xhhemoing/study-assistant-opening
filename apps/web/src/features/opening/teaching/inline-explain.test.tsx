@@ -17,7 +17,7 @@ it("directly saves the displayed explanation, retains it after rejection, and re
   try {
     const context = { activityId: crypto.randomUUID(), blockId: crypto.randomUUID(), contentVersion: 2, label: "向量" };
     await act(async () => root.render(createElement(InlineExplain, { context, content: "这就是当前显示的解释", onContinueInChat() {} })));
-    const save = () => Array.from(host.querySelectorAll("button")).find(button => /存为笔记|保存失败/.test(button.textContent ?? ""))!;
+    const save = () => Array.from(host.querySelectorAll("button")).find(button => /^保存$|保存失败|已存为笔记/.test(button.textContent ?? ""))!;
     await act(async () => save().click());
     expect(host.textContent).toContain("保存失败，重试"); expect(host.textContent).toContain("这就是当前显示的解释");
     await act(async () => { save().click(); save().click(); });
@@ -39,7 +39,7 @@ it("keeps an edited card draft when the caller supplies a new object with the sa
     const context = { activityId: crypto.randomUUID(), blockId: crypto.randomUUID(), contentVersion: 2, label: "向量" };
     const props = { context, content: "解释内容", onContinueInChat() {} };
     await act(async () => root.render(createElement(InlineExplain, props)));
-    await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "做成卡片")!.click());
+    await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "制成卡片")!.click());
     const field = host.querySelector<HTMLTextAreaElement>("dialog textarea")!;
     await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(field, "正在编辑的卡片"); field.dispatchEvent(new Event("input", { bubbles: true })); });
     await act(async () => root.render(createElement(InlineExplain, { ...props, context: { ...context } })));
@@ -59,7 +59,7 @@ it("observes the same in-flight explanation save after unmounting and reopening"
   const props = { context, content: "保存中的解释", onContinueInChat() {} };
   try {
     await act(async () => root.render(createElement(InlineExplain, props)));
-    await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "存为笔记")!.click());
+    await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "保存")!.click());
     await act(async () => root.render(null));
     await act(async () => root.render(createElement(InlineExplain, props)));
     expect(host.textContent).toContain("保存中…");

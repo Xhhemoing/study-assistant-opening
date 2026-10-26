@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { createElement, type ReactNode } from "react";
+import { act, createElement, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
@@ -12,7 +13,7 @@ vi.mock("./preference-controls", () => ({
 
 // The shared panel owns its dialog/mount lifecycle tests; inspect this workspace's wiring here.
 vi.mock("./study-tools-panel", () => ({
-  StudyToolsToggle: () => createElement("button", {}, "工具"),
+  StudyToolsToggle: ({ activePanel, onPanelChange }: { activePanel: string | null; onPanelChange: (panel: string | null) => void }) => createElement("button", { onClick: () => onPanelChange(activePanel ? null : "chat") }, "工具"),
   StudyToolsPanel: ({ children, panels, showToolbar }: { children: ReactNode; showToolbar?: boolean; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" }, createElement("div", { hidden: true, role: "tablist" }, panels.map(panel => createElement("button", { key: panel.id, role: "tab" }, panel.label))),
     showToolbar === false ? null : createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
     panels.filter((panel, index) => panels.findIndex(item => (item.mountKey ?? item.id) === (panel.mountKey ?? panel.id)) === index).map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
@@ -61,6 +62,7 @@ vi.mock("./resume-card", async () => {
 });
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
+import type { OpeningApi } from "../client/api";
 import {
   formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
@@ -99,6 +101,28 @@ const activityReady: TeachingActivity = {
   createdAt: ISO,
   updatedAt: ISO,
 };
+
+it("stops automatic legacy returns when leaving a workspace with the first return in flight", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  let release!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { release = resolve; }));
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(TeachingWorkspace, {
+      activity: activityReady, clientInit: clientInit({ checkpointJson: { currentBlockId: BID, branchStack: [{}, {}] } }),
+      contextualTools: createElement("p", {}, "当前追问"), api: { postTeachingCommand } as unknown as OpeningApi,
+    })));
+    const tools = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "工具")!;
+    await act(async () => tools().click());
+    await act(async () => tools().click());
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+    await act(async () => root.unmount());
+    await act(async () => release({ ok: true, activityId: AID, kind: "return", contentVersion: 1, pathVersion: 2,
+      checkpointJson: { currentBlockId: BID, branchStack: [{}] }, replayed: false }));
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
 
 it("shows technical diagnostics only when the appearance preference is enabled", () => {
   const render = () => renderToStaticMarkup(createElement(TeachingWorkspace, { activity: activityReady, clientInit: clientInit(), sourceNameById: {} }));

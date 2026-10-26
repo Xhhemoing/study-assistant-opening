@@ -28,6 +28,7 @@ import {
   isBranchStackEmpty,
 } from "./block-commands";
 import { TeachingBlockItem } from "./teaching-block-item";
+import { returnToMainline } from "./return-to-mainline";
 import {
   isKnownSchemaVersion,
   readSchemaVersion,
@@ -216,6 +217,11 @@ export function TeachingWorkspace({
   const markSnapshot = useCallback((next: Partial<Omit<TeachingWorkspacePositionSnapshot, "epoch">> = {}) => {
     positionSnapshot.current = { ...positionSnapshot.current, ...next, epoch: positionSnapshot.current.epoch + 1 };
   }, []);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; markSnapshot(); };
+  }, [markSnapshot]);
 
   const commandApi = useMemo<OpeningApi>(() => ({ ...api, async postTeachingCommand(id, input) {
     if (positionInFlight.current || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
@@ -495,8 +501,27 @@ export function TeachingWorkspace({
         <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
       </details> : null}</> },
   ];
+  const returningToMainline = useRef(false);
+  const restoreMainline = async () => {
+    if (returningToMainline.current || positionInFlight.current || commandInFlight.current) {
+      setPositionError("学习操作仍在保存，请稍后再关闭追问。"); return;
+    }
+    returningToMainline.current = true; setPositionBusy(true);
+    try {
+      await returnToMainline({ api: commandApi, activityId: liveActivity.id, contentVersion, pathVersion, checkpoint: liveInit.checkpointJson,
+        isCurrent: () => mounted.current && positionSnapshot.current.activityId === liveActivity.id,
+        accept: result => {
+          const started = commandSnapshot.current;
+          const current = Boolean(started && sameWorkspaceSnapshot(started, positionSnapshot.current)
+            && result.contentVersion >= started.contentVersion && result.pathVersion >= started.pathVersion);
+          applySuccess(result); return current;
+        }, onConflict: handleConflict });
+    } catch (error) { if (mounted.current) setPositionError(userFacingMessage(error, "原学习位置尚未确认，请重新读取后继续。")); }
+    finally { returningToMainline.current = false; if (mounted.current) setPositionBusy(false); }
+  };
   const changePanel = (next: string | null) => {
     if (next && focusMode) setFocusMode(false);
+    if (next === null && panel !== null && !returnDisabled) void restoreMainline();
     setPanel(next);
   };
 

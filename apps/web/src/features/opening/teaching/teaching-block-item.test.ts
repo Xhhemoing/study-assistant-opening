@@ -101,9 +101,9 @@ describe("TeachingBlockItem", () => {
   it("offers paragraph saving and continuing with that paragraph's own block anchor", () => {
     const html = renderItem({ showCommands: false, explanationContext: { activityId: AID, blockId: AID, contentVersion: 3 }, onAskExplanation() {} });
     expect(html).toContain(`data-anchor="${BID}"`);
-    expect(html).toContain("补充解释");
-    expect(html).toContain("存为笔记");
-    expect(html).toContain("做成卡片");
+    for (const label of ["我没懂", "举个例子", "讲快点", "讲细点"]) expect(html).toContain(label);
+    expect(html).toContain("保存");
+    expect(html).toContain("制成卡片");
     expect(html).toContain("继续问");
     expect(renderItem({ block: { ...block, blockType: "question", role: "question" } as typeof block, showCommands: false, explanationContext: { activityId: AID }, onAskExplanation() {} })).not.toContain("data-anchor");
   });
