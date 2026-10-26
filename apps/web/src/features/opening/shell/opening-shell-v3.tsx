@@ -110,7 +110,7 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   return (
     <ConversationCompanionProvider><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode: toggleFocus }}><StatusToastProvider>
       <AppShell
-        counts={dueCount ? { review: dueCount } : {}}
+        counts={{ ...(dueCount ? { review: dueCount } : {}), ...(pendingCount ? { today: pendingCount } : {}) }}
         recent={[]}
         hideNav={focusMode}
         nav={shellNav}

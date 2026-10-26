@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { MemoryPanel } from "../assistant/memory-panel";
 import { createOpeningApi } from "../client/api";
 import { ReviewView } from "./review-view";
+import { AssistantProposalInbox } from "./assistant-proposal-inbox";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 
 export function SuggestionsView({ tab }: { tab?: string }) {
@@ -16,6 +17,6 @@ export function SuggestionsView({ tab }: { tab?: string }) {
     </nav>;
   return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
     <V3PageHeader title={memory ? "AI 记忆" : "待确认建议"} action={tabs} />
-    {memory ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="px-4 pb-6 md:px-6"><MemoryPanel api={api} /></div></div> : <div className="min-h-0 flex-1 overflow-y-auto"><ReviewView api={api} embedded /></div>}
+    {memory ? <div className="min-h-0 flex-1 overflow-y-auto"><div className="px-4 pb-6 md:px-6"><MemoryPanel api={api} /></div></div> : <div className="min-h-0 flex-1 overflow-y-auto"><ReviewView api={api} embedded /><AssistantProposalInbox api={api} /></div>}
   </section>;
 }

@@ -22,7 +22,7 @@ describe("every-page more menu", () => {
     const trigger = host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!;
     await act(async () => trigger.click());
     const dialog = document.querySelector('[role="dialog"]');
-    for (const href of ["/opening/assistant", "/opening/settings/planning", "/opening/settings", "/opening/settings/export"]) {
+    for (const href of ["/opening/assistant", "/opening/settings/learning", "/opening/suggestions", "/opening/settings", "/opening/settings/export"]) {
       expect(dialog?.querySelector(`a[href="${href}"]`)).not.toBeNull();
     }
     for (const href of ["/opening/today", "/opening/review", "/opening/library", "/opening/sprint", "/opening/search"]) {
@@ -33,6 +33,12 @@ describe("every-page more menu", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
+});
+it("opens the single suggestions inbox with its own pending count", async () => {
+  await act(async () => root.render(<OpeningAccountMenu userLabel="" pendingCount={3} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
+  expect(document.querySelector('a[href="/opening/suggestions"]')?.textContent).toBe("待确认建议 · 3");
+  expect(document.querySelector('a[href="/opening/settings/learning"]')?.textContent).toBe("学习安排");
 });
 it("loads the running release version only when the account menu opens", async () => {
   await act(async () => root.render(<OpeningAccountMenu userLabel="" pendingCount={null} focusMode={false} onToggleFocus={() => {}} onLogout={() => {}} logoutPending={false} />));

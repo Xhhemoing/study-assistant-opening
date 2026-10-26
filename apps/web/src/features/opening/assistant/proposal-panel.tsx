@@ -1,18 +1,14 @@
 "use client";
-
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import type { AssistantProposalCreate, AssistantProposalRecord, AssistantProposalTool, LearningObservation } from "@aistudy/contracts";
-import type { OpeningApi } from "../client/api";
-import { createOpeningLearningClient } from "../client/learning-client";
-import { buttonClass, secondaryButtonClass } from "../design/ui";
-import { userFacingMessage } from "../../../lib/user-facing-error";
+import type { AssistantProposalRecord, AssistantProposalTool } from "@aistudy/contracts";
+import { secondaryButtonClass } from "../design/ui";
+import type { PendingProposalsState } from "./use-pending-proposals";
 
-const labels: Record<AssistantProposalTool["name"], string> = {
+export const proposalLabels: Record<AssistantProposalTool["name"], string> = {
   propose_teaching_move: "安排一次讲解", propose_plan_change: "调整学习计划", propose_card: "整理成卡片",
   propose_note: "整理成笔记", propose_memory: "记住学习偏好", flag_dispute: "复核这次判分",
 };
-function proposalText(row: AssistantProposalRecord): string {
+export function proposalText(row: AssistantProposalRecord): string {
   const tool = row.tool;
   switch (tool.name) {
     case "propose_teaching_move": return tool.arguments.topic;
@@ -41,90 +37,18 @@ export function PlanProposalPreview({ row }: { row: AssistantProposalRecord }) {
     <p className="text-xs font-medium">尚未排入：{preview.unscheduledTaskIds.length ? preview.unscheduledTaskIds.map(id => titles.get(id) ?? "已不可用的学习任务").join("、") : "无"}</p>
   </section>;
 }
-const localDate = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; };
-
-/** Suggestions stay reviewable drafts. Each retry keeps its original intent key. */
-export function ProposalPanel({ api, sourceTurnId, courseId, refreshKey, objectHref = href => href }: { objectHref?: (href: string) => string; api: OpeningApi; sourceTurnId: string | null; courseId: string | null; refreshKey?: string }) {
-  const learning = useMemo(() => createOpeningLearningClient(), []);
-  const [rows, setRows] = useState<AssistantProposalRecord[]>([]);
-  const [observations, setObservations] = useState<LearningObservation[]>([]);
-  const [kind, setKind] = useState<AssistantProposalTool["name"]>("propose_note");
-  const [text, setText] = useState("");
-  const [title, setTitle] = useState("");
-  const [back, setBack] = useState("");
-  const [date, setDate] = useState(localDate);
-  const [observationId, setObservationId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const pending = useRef<{ fingerprint: string; input: AssistantProposalCreate } | null>(null);
-  const generation = useRef(0);
-  const refresh = useCallback(async () => {
-    const current = ++generation.current;
-    const proposals = await api.listAssistantProposals();
-    const facts = courseId ? await learning.listObservations(courseId) : [];
-    if (current === generation.current) { setRows(proposals); setObservations(facts); }
-  }, [api, courseId, learning]);
-  useEffect(() => { void refresh().catch(error => setMessage(userFacingMessage(error, "建议暂时无法读取"))); return () => { generation.current++; }; }, [refresh, refreshKey, sourceTurnId]);
-
-  async function propose() {
-    if (!sourceTurnId) return;
-    setBusy(true); setMessage("");
-    try {
-      const observation = observations.find(row => row.id === observationId);
-      let tool: AssistantProposalTool;
-      switch (kind) {
-        case "propose_teaching_move":
-          if (!courseId) throw new Error("请从课程进入助理后安排讲解。");
-          tool = { name: kind, arguments: { courseId, topic: text } }; break;
-        case "propose_plan_change": {
-          const current = await api.getToday(date);
-          tool = { name: kind, arguments: { date, expectedAcceptedVersion: current.acceptedVersion } }; break;
-        }
-        case "propose_card":
-          if (!observation) throw new Error("请选择要整理的真实作答。");
-          tool = { name: kind, arguments: { observationId: observation.id, front: text, back } }; break;
-        case "propose_note": tool = { name: kind, arguments: { title, text } }; break;
-        case "propose_memory": tool = { name: kind, arguments: { text, courseId } }; break;
-        case "flag_dispute":
-          if (!observation) throw new Error("请选择需要复核的真实作答。");
-          tool = { name: kind, arguments: { rootObservationId: observation.rootObservationId ?? observation.id, expectedHead: observation.effectiveHeadId ?? observation.id, reason: text } }; break;
-      }
-      const fingerprint = JSON.stringify({ sourceTurnId, tool });
-      if (pending.current?.fingerprint !== fingerprint) pending.current = { fingerprint, input: { sourceTurnId, tool, clientKey: `assistant-proposal:${crypto.randomUUID()}` } };
-      await api.proposeAssistantAction(pending.current.input);
-      pending.current = null;
-      setMessage("建议已准备好，请检查内容后接受。");
-      await refresh();
-    } catch (error) { setMessage(userFacingMessage(error, "暂时无法确认建议是否已保存；重新读取后可重试同一内容。")); }
-    finally { setBusy(false); }
-  }
-  async function decide(row: AssistantProposalRecord, action: "accept" | "reject") {
-    setBusy(true); setMessage("");
-    try {
-      await api.decideAssistantProposal(row.id, { expectedVersion: row.version, action, clientKey: `proposal-decision:${row.id}:${row.version}:${action}` });
-      await refresh();
-    } catch (error) { setMessage(userFacingMessage(error, "结果未确认，请重新读取后再操作。")); }
-    finally { setBusy(false); }
-  }
-  const field = "w-full rounded-md border border-text-3 bg-surface px-3 py-2 text-sm focus-visible:outline-accent";
-  const needsObservation = kind === "propose_card" || kind === "flag_dispute";
-  return <section aria-label="学习建议" className="space-y-3 pt-3">
-    <p className="text-xs leading-5 text-text-2">这些是根据对话给出的建议，你点了接受才会生效。</p>
-    {message ? <p role="status" className="text-sm text-warn">{message}</p> : null}
-    <button type="button" className={secondaryButtonClass} disabled={busy} onClick={() => { void refresh().catch(error => setMessage(String(error))); }}>重新读取建议</button>
-    {sourceTurnId ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void propose(); }}>
-      <label className="block text-sm">下一步想做什么<select className={field} value={kind} disabled={busy} onChange={event => setKind(event.target.value as typeof kind)}>{Object.entries(labels).map(([name, label]) => <option key={name} value={name}>{label}</option>)}</select></label>
-      {needsObservation ? <label className="block text-sm">关联作答<select required value={observationId} className={field} disabled={busy} onChange={event => setObservationId(event.target.value)}><option value="">选择一次作答</option>{observations.map(row => <option key={row.id} value={row.id}>{row.skillLabel} · {new Date(row.occurredAt).toLocaleString("zh-CN")}</option>)}</select></label> : null}
-      {kind === "propose_note" ? <label className="block text-sm">笔记标题<input required maxLength={240} value={title} onChange={event => setTitle(event.target.value)} className={field} disabled={busy} /></label> : null}
-      {kind === "propose_plan_change" ? <label className="block text-sm">安排日期<input required type="date" value={date} onChange={event => setDate(event.target.value)} className={field} disabled={busy} /></label> : <label className="block text-sm">{kind === "flag_dispute" ? "需要复核的原因" : kind === "propose_card" ? "卡片问题" : "具体内容"}<textarea required rows={3} maxLength={kind === "propose_note" ? 20000 : 2000} value={text} onChange={event => setText(event.target.value)} className={field} disabled={busy} /></label>}
-      {kind === "propose_card" ? <label className="block text-sm">卡片答案<textarea required rows={3} maxLength={4000} value={back} onChange={event => setBack(event.target.value)} className={field} disabled={busy} /></label> : null}
-      <button className={buttonClass} disabled={busy || (needsObservation && !observations.length) || (kind === "propose_teaching_move" && !courseId)} type="submit">准备建议</button>
-    </form> : <p className="text-xs text-text-3">先完成一轮保存对话，即可准备关联这次问题的建议。</p>}
-    <ul className="space-y-3">{rows.map(row => <li key={row.id} className="border-t border-line pt-3">
-      <h3 className="text-sm font-semibold">{labels[row.tool.name]}</h3><p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>
-      {row.tool.name === "propose_plan_change" ? <PlanProposalPreview row={row} /> : null}
-      {row.status === "draft" ? <div className="mt-2 flex gap-2"><button className={buttonClass} disabled={busy || (row.tool.name === "propose_plan_change" && !row.prepared?.preview)} onClick={() => void decide(row, "accept")}>接受</button><button className={secondaryButtonClass} disabled={busy} onClick={() => void decide(row, "reject")}>不采用</button></div> : <p className="mt-2 text-xs text-text-3">{row.status === "accepted" ? "已接受" : "未采用"}</p>}
-      {row.result?.href.startsWith("/") && !row.result.href.startsWith("//") ? <Link href={objectHref(row.result.href)} className={`${secondaryButtonClass} mt-2`}>查看结果</Link> : null}
+/** The conversation surface only previews suggestions; the inbox owns decisions. */
+export function ProposalPanel({ state }: { state: PendingProposalsState }) {
+  return <section aria-label="当前对话的学习建议" className="space-y-3 pt-3">
+    {state.error ? <p role="alert" className="text-sm text-warn">{state.error}</p> : null}
+    {state.loading ? <p role="status" className="text-xs text-text-2">正在读取建议…</p> : null}
+    {state.error ? <button className={secondaryButtonClass} onClick={() => void state.refresh()}>重新读取建议</button> : null}
+    <ul className="space-y-3">{state.rows.map(row => <li key={row.id} className="border-t border-line pt-3">
+      <h3 className="text-sm font-semibold">{proposalLabels[row.tool.name]}</h3>
+      <p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>
     </li>)}</ul>
+    {state.cursor ? <button className={secondaryButtonClass} disabled={state.loading} onClick={() => void state.loadMore()}>读取更多建议</button> : null}
+    {!state.error && !state.loading && !state.rows.length ? <p className="text-xs text-text-2">当前对话暂无待确认建议。</p> : null}
+    <Link href="/opening/suggestions" className={secondaryButtonClass}>前往建议收件箱{state.total ? ` · 本对话 ${state.total} 项` : ""}</Link>
   </section>;
 }

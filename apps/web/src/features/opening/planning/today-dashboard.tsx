@@ -26,7 +26,6 @@ import {
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 import { TaskLearningActionContext } from "./task-row-actions";
-import { ReviewView } from "./review-view";
 import { useNextStepMetrics } from "./use-next-step-metrics";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 import { openAssistantDrawer } from "../assistant/assistant-entry";
@@ -145,8 +144,6 @@ export function TodayDashboard({
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => planning || shouldOpenTodayQueue(focusTaskId));
-  const [reviewsOpen, setReviewsOpen] = useState(false);
-  const [pendingReviewCount, setPendingReviewCount] = useState(state.pendingReviews?.count ?? 0);
   const [reloadToken, setReloadToken] = useState(0);
   const dueCardCount = useDueReviewCount(planning ? "/opening/settings/planning" : "/opening/today") ?? 0;
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
@@ -180,16 +177,12 @@ export function TodayDashboard({
     if (focusTaskId) setQueueOpen(true);
   }, [focusTaskId]);
   useEffect(() => {
-    if (!planning) {
-      if (window.location.hash === "#suggestions") window.location.replace("/opening/settings/planning#suggestions");
-      return;
-    }
-    const openSuggestions = () => { if (window.location.hash === "#suggestions") setReviewsOpen(true); };
-    const showSuggestions = () => setReviewsOpen(true);
+    const showSuggestions = () => window.location.assign("/opening/suggestions");
+    const openSuggestions = () => { if (window.location.hash === "#suggestions") window.location.replace("/opening/suggestions"); };
     openSuggestions(); window.addEventListener("hashchange", openSuggestions);
     window.addEventListener("opening:show-suggestions", showSuggestions);
     return () => { window.removeEventListener("hashchange", openSuggestions); window.removeEventListener("opening:show-suggestions", showSuggestions); };
-  }, [planning]);
+  }, []);
 
   useEffect(() => {
     if (noCourses || state.kind !== "ready" && state.kind !== "empty") return;
@@ -368,10 +361,6 @@ export function TodayDashboard({
     ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>{finishedToday ? `先复习 ${dueCardCount} 张卡，再学下一节` : `开始学习 · 先复习 ${dueCardCount} 张卡`}</Link>
     : null;
   const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "今日学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
-  const suggestions = <details id="suggestions" open={reviewsOpen} onToggle={event => setReviewsOpen(event.currentTarget.open)} className={`mx-5 mb-5 rounded-xl border border-line bg-surface ${reviewsOpen ? "" : pendingReviewCount === 0 ? "hidden" : "group-data-[focus=true]/workspace:hidden"}`}>
-    <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">待确认建议{pendingReviewCount > 0 ? ` · ${pendingReviewCount}` : ""}</summary>
-    <ReviewView api={api} embedded onPendingCountChange={setPendingReviewCount} onDecision={rereadQueue} />
-  </details>;
   if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
 
   return (
@@ -484,7 +473,6 @@ export function TodayDashboard({
             ) : null}
           </div>
         </div>
-        {planning ? suggestions : null}
       </div>
       </TaskLearningActionContext.Provider>
     </TaskQueueRefreshContext.Provider>

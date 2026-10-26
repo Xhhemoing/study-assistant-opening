@@ -118,6 +118,8 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
   );
 }
 
+const countDescription = (id: string) => id === "today" ? "项待确认建议" : id === "review" ? "项待复习" : "项待完成";
+
 function NavGroup({ items, isActive, compact, counts, divided = false }: { items: Feature[]; isActive: (item: Feature) => boolean; compact: boolean; counts: Partial<Record<string, number>>; divided?: boolean }) {
   return (
     <ul className={divided ? "mt-4 space-y-0.5" : "space-y-0.5"}>
@@ -135,7 +137,7 @@ function NavGroup({ items, isActive, compact, counts, divided = false }: { items
                 {compact && <span className="text-cap motion-safe:animate-fade-in">{item.label}</span>}
               </span>
               <span data-hidden={compact} className="relative flex-1 whitespace-nowrap text-ui transition-opacity duration-(--duration-micro) data-[hidden=true]:sr-only">{item.label}</span>
-              {count ? <span key={count} className={`tabular-nums text-cap text-accent motion-safe:animate-badge-pop ${compact ? "absolute right-2 top-1" : "relative mr-3"}`}>{count}<span className="sr-only">项待完成</span></span> : null}
+              {count ? <span key={count} className={`tabular-nums text-cap text-accent motion-safe:animate-badge-pop ${compact ? "absolute right-2 top-1" : "relative mr-3"}`}>{count}<span className="sr-only">{countDescription(item.id)}</span></span> : null}
             </TransitionLink>
           </li>
         );
@@ -156,7 +158,7 @@ function MobileTabBar({ items, label, isActive, counts, trailing }: { items: Fea
             className="relative flex h-12 flex-col items-center justify-center gap-0.5 rounded-pill text-cap text-text-2 transition-transform duration-(--duration-micro) active:scale-95 aria-[current=page]:font-medium aria-[current=page]:text-text">
             {current && <span aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card [view-transition-name:tab-active]" />}
             <Icon size={19} aria-hidden="true" className="relative" />
-            <span className="relative">{item.label}{counts[item.id] ? ` ${counts[item.id]}` : ""}</span>
+            <span className="relative">{item.label}{counts[item.id] ? <>{` ${counts[item.id]}`}<span className="sr-only">{countDescription(item.id)}</span></> : null}</span>
           </TransitionLink>
         );
       })}

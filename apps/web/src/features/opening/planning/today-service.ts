@@ -3,6 +3,7 @@ import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
 import { validatePageSelection } from "../tutor/page-selection";
 import { resolveTodayResume, type TodayResumeState } from "./today-read";
+import { countPendingSuggestions } from "./pending-suggestions-service";
 
 export type TodayResumeReader = {
   /** Optional for legacy callers; absence is unknown, never an empty course list. */
@@ -109,9 +110,7 @@ export function createTodayResumeReader(sql: Sql): TodayResumeReader {
       };
     },
     pendingCandidates,
-    async pendingCandidateCount(scope) {
-      return (await pendingCandidates(scope)).length;
-    },
+    pendingCandidateCount: scope => countPendingSuggestions(sql, scope),
   };
 }
 

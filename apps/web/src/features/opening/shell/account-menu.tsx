@@ -2,7 +2,7 @@
 
 import type { ConversationSummary } from "@aistudy/contracts";
 import { Drawer } from "@aistudy/ui";
-import { CalendarDays, Download, Focus, LogOut, Maximize2, MoreHorizontal, Settings } from "lucide-react";
+import { CalendarDays, Download, Focus, Inbox, LogOut, Maximize2, MoreHorizontal, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ui } from "../design/ui";
 import { ShellNavLink } from "./shell-nav-link";
@@ -39,7 +39,8 @@ export function OpeningAccountMenu({ userLabel, pendingCount, focusMode, onToggl
     <Drawer open={open} onClose={() => setOpen(false)} title="更多" keepMounted>
       <nav aria-label="学习工具与账户" className="space-y-2">
         <RecentConversations recent={recent} unavailable={recentUnavailable} onNavigate={() => setOpen(false)} />
-        <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/settings/planning" onClick={() => setOpen(false)}><CalendarDays size={16} aria-hidden="true" />学习安排{pendingCount ? ` · ${pendingCount} 项待确认` : ""}</ShellNavLink>
+        <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/settings/learning" onClick={() => setOpen(false)}><CalendarDays size={16} aria-hidden="true" />学习安排</ShellNavLink>
+        <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/suggestions" onClick={() => setOpen(false)}><Inbox size={16} aria-hidden="true" />待确认建议{pendingCount ? ` · ${pendingCount}` : ""}</ShellNavLink>
         <button className={`${ui.secondary} min-h-11 w-full justify-start`} type="button" aria-pressed={focusMode} onClick={() => { onToggleFocus(); setOpen(false); }}>{focusMode ? <Maximize2 size={16} aria-hidden="true" /> : <Focus size={16} aria-hidden="true" />}{focusMode ? "退出专注模式" : "进入专注模式"}</button>
         <div className="rounded-md border border-line p-3"><p className="mb-2 text-xs text-text-2">专注计时</p><FocusTimer /></div>
         <ShellNavLink className={`${ui.secondary} min-h-11 w-full justify-start`} href="/opening/settings" onClick={() => setOpen(false)}><Settings size={16} aria-hidden="true" />设置</ShellNavLink>

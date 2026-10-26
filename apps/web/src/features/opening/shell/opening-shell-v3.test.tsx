@@ -86,6 +86,8 @@ describe("production V3 shell business wiring", () => {
   it("shows due reviews separately from pending suggestions and connects recent conversations", async () => {
     await render();
     expect(desktopNavigation().querySelector('a[href="/opening/review"]')?.textContent).toContain("7");
+    expect(desktopNavigation().querySelector('a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
+    expect(host.querySelector('nav[aria-label="学习工作台导航（移动端）"] a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
     expect(host.querySelector('[aria-label="账户切换专注"]')?.textContent).toBe("建议 3");
     expect(desktopNavigation().querySelector('a[href*="conversation="]')).toBeNull();
     expect(host.querySelector("[data-account-recent]")?.textContent).toContain("我的矩阵问题");

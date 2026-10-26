@@ -38,6 +38,7 @@ import { shouldRefreshSources } from "../inbox/source-refresh";
 import { startSourceProcessingRefresh } from "./source-processing-refresh";
 import { createQuestionDraftStore } from "./question-drafts";
 import { ProposalPanel } from "./proposal-panel";
+import { usePendingProposals } from "./use-pending-proposals";
 import { StudyIntentControls } from "../teaching/study-intent-controls";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { acknowledgeStudyExposure } from "./study-exposure-ack";
@@ -180,7 +181,7 @@ const TUTOR_ACTION_LABELS: Record<ThinTutorAction["kind"], string> = {
   guided: "开始引导提示",
   worked_example: "看完整例题",
   independent_variant: "独立做变式题",
-  delayed_retest: "开始到期复习",
+  delayed_retest: "查看待确认补测",
 };
 
 export function tutorActionLabel(kind: ThinTutorAction["kind"]): string {
@@ -1006,31 +1007,6 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         setDraft(replacePromptDraft(draft, intent.draft, () => true));
         setPendingHint("独立做变式题：完成后请在练习表单里提交结果。");
         return;
-      case "delayed_retest":
-        void acceptDueRetest(intent.action);
-        return;
-    }
-  }
-
-  async function acceptDueRetest(action: ThinTutorAction): Promise<void> {
-    setTutorActionError("");
-    try {
-      const retests = await api.listRetestCandidates();
-      // Only an explicit user click accepts; already-accepted due activities
-      // are opened instead of re-accepted (Lab design v2 §4).
-      const candidates = retests.filter((row) => !row.accepted && row.skillLabel === action.skillLabel);
-      if (candidates.length === 0) {
-        setPendingHint(`「${action.skillLabel}」没有待接受的重测任务；已接受的请到今日任务队列查看。`);
-        return;
-      }
-      const accepted: string[] = [];
-      for (const candidate of candidates) {
-        const outcome = await api.acceptRetest(candidate.id, `retest-${crypto.randomUUID()}`);
-        accepted.push(outcome.taskId);
-      }
-      setPendingHint(`已接受 ${accepted.length} 个到期重测任务；到今日任务队列开始。`);
-    } catch (err) {
-      setTutorActionError(userFacingMessage(err, "无法接受到期重测"));
     }
   }
 
@@ -1090,6 +1066,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const returnHref = studyContextReturnHref(studyContext);
   const startScreen = Boolean(start && !companion && !initialConversationId && !display.messages.length && !pending);
   const ordinaryQuestion = !embedded && !learningAttempt && !studyContext?.attemptId;
+  const proposalState = usePendingProposals(api, {
+    enabled: privacy === "saved" && !loading && !embedded && !startScreen && Boolean(conversationId),
+    ...(conversationId ? { conversationId } : {}),
+  }, [...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? "");
   return <section inert={interactionDisabled} aria-label={startScreen ? "开始" : "学习对话"} className={`flex h-full min-w-0 bg-surface ${inset ? "min-h-0 overflow-hidden" : "min-h-[400px] lg:min-h-0"}`}>
     <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${inset ? "" : "mx-auto w-full max-w-[720px]"} ${startScreen ? "justify-center px-4 py-8" : ""}`}>
       {startScreen ? <h1 className="mb-5 text-ui font-medium text-text-2">{start?.greeting}</h1> : !embedded ? <TopBar label="对话顶栏"
@@ -1149,14 +1129,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">
-          {tutorActions.map((action) => (
-            <button key={action.kind} type="button" className={secondaryButtonClass} title={action.reason} disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={() => handleTutorAction(action)}>{tutorActionLabel(action.kind)}</button>
-          ))}
+          {tutorActions.map((action) => action.kind === "delayed_retest"
+            ? <Link key={action.kind} href="/opening/suggestions" className={secondaryButtonClass} title={action.reason} aria-disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={event => { if (pending || loading || recoveryRequired || interactionDisabled) event.preventDefault(); }}>{tutorActionLabel(action.kind)}</Link>
+            : <button key={action.kind} type="button" className={secondaryButtonClass} title={action.reason} disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={() => handleTutorAction(action)}>{tutorActionLabel(action.kind)}</button>)}
         </div>
       ) : null}
 
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
-      {privacy === "saved" && !loading && !embedded && !startScreen ? <details className={`mx-5 mb-2 text-xs text-text-2 ${agent ? "xl:hidden" : ""}`}><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
+      {privacy === "saved" && !loading && !embedded && !startScreen ? <details className={`mx-5 mb-2 text-xs text-text-2 ${agent ? "xl:hidden" : ""}`}><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel state={proposalState} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题会保留在当前页面；浏览器暂时无法保存，刷新或关闭前请先复制。</p> : null}
       <Composer questionMode={ordinaryQuestion} startMode={startScreen} sendDisabled={uploadPending}
@@ -1170,7 +1150,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     {agent ? <section aria-label="产出与待确认" className="hidden w-(--layout-companion) shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg/60 px-4 py-3 xl:flex">
       <div className="space-y-2">
         <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">学习建议</h2>
-        {privacy === "saved" && !loading ? <ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
+        {privacy === "saved" && !loading ? <ProposalPanel state={proposalState} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
       </div>
       <div className="space-y-2 border-t border-line pt-3">
         <h2 id="agent-memory-heading" className="text-meta font-medium text-text-2">AI 记忆</h2>

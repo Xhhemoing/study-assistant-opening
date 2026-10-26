@@ -11,7 +11,6 @@ import { QuickAddTask } from "./quick-add-task";
 import { ActionDigest } from "./action-digest";
 import { LocalReplanCard } from "./local-replan-card";
 import { DailyDraftCard } from "./daily-draft-card";
-import { RetestProposals } from "./retest-proposals";
 import { TodayStudyTools } from "./today-study-tools";
 import { readTodayData } from "./today-data-loader";
 import { focusTodayTask, selectTodayTask, visibleTodayTasks } from "./today-task-selection";
@@ -236,7 +235,6 @@ export function TodayPlanView({
       : <TodayGroupedQueue groups={groups} state={loadState} focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} api={api} />}
     {doneView && done.length > 3 ? <button type="button" className={`${secondaryButtonClass} mx-3 mt-2`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${done.length} 项`}<ChevronDown size={12} aria-hidden /></button> : null}
     <div id="action-digest" tabIndex={-1} className="scroll-mt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
-      {hasLoadedTasks ? <RetestProposals api={api} onChanged={refresh} /> : null}
       {hasLoadedTasks ? <ActionDigest api={api} onChanged={refresh} onAdjust={() => setPlanning(true)} /> : null}
     </div>
     {hasLoadedTasks && plan ? <fieldset disabled={pending || loadState !== "ready" || planState !== "ready"} className="min-w-0 disabled:opacity-60">

@@ -22,7 +22,17 @@ export const assistantProposalRecordSchema = z.object({ id: uuidSchema, sourceTu
     }).strict().optional(),
   }).strict().nullable(),
 }).strict();
+const assistantProposalCursorSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/);
+export const pendingAssistantProposalsQuerySchema = z.object({
+  conversationId: uuidSchema.optional(), cursor: assistantProposalCursorSchema.optional(),
+}).strict();
+export const pendingAssistantProposalsResponseSchema = z.object({
+  proposals: z.array(assistantProposalRecordSchema).max(40),
+  nextCursor: assistantProposalCursorSchema.nullable(), total: z.number().int().nonnegative(),
+}).strict();
 export type AssistantProposalTool = z.infer<typeof assistantProposalToolSchema>;
 export type AssistantProposalCreate = z.infer<typeof assistantProposalCreateSchema>;
 export type AssistantProposalDecision = z.infer<typeof assistantProposalDecisionSchema>;
 export type AssistantProposalRecord = z.infer<typeof assistantProposalRecordSchema>;
+export type PendingAssistantProposalsQuery = z.infer<typeof pendingAssistantProposalsQuerySchema>;
+export type PendingAssistantProposalsResponse = z.infer<typeof pendingAssistantProposalsResponseSchema>;

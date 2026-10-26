@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import { assistantProposalCreateSchema, assistantProposalDecisionSchema, assistantProposalRecordSchema, localReplanMetadataSchema, plannedBlockSchema,
-  type AssistantProposalCreate, type AssistantProposalDecision, type AssistantProposalRecord, type Scope } from "@aistudy/contracts";
+  type AssistantProposalCreate, type AssistantProposalDecision, type AssistantProposalRecord, type PendingAssistantProposalsQuery, type Scope } from "@aistudy/contracts";
 import { lockWorkspaceLearningHistory, learningError } from "./opening-learning-facts";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
 import { contextSourceRefsIncluded, parseContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
@@ -10,6 +10,7 @@ import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { dailyDraftAdvisoryLockKeys } from "./opening-plans";
 import { proposeOpeningLocalPlan } from "./opening-local-replan";
 import { applyAssistantProposal, proposalTransactionClient } from "./opening-assistant-proposal-effects";
+import { countPendingAssistantProposals, listPendingAssistantProposals } from "./opening-assistant-proposal-pending";
 
 const map = (row: Record<string, unknown>): AssistantProposalRecord => {
   const intent = assistantProposalCreateSchema.parse(row.intent);
@@ -46,6 +47,8 @@ async function admitSourceTurn(tx: TransactionSql, scope: Scope, id: string) {
 /** Proposal tools only create drafts. Explicit acceptance owns every actual mutation. */
 export function createOpeningAssistantProposalsRepository(sql: Sql, options: { enqueueTeachingCompile?: boolean; now?: () => Date } = {}) {
   return {
+    listPending: (scope: Scope, query: PendingAssistantProposalsQuery = {}) => listPendingAssistantProposals(sql, scope, query, map),
+    countPending: (scope: Scope) => countPendingAssistantProposals(sql, scope),
     async propose(scope: Scope, raw: AssistantProposalCreate, runtime?: { jobLease?: { jobId: string; claimToken: string }; expectedPrivacyEpoch?: number }): Promise<AssistantProposalRecord> {
       const intent = assistantProposalCreateSchema.parse(raw);
       return sql.begin(async tx => {
