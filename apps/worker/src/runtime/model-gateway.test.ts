@@ -121,6 +121,10 @@ it.each([
   ["teaching.compile", 240_000], ["knowledge.extract", 240_000], ["practice.grade-text", 120_000],
   ["practice.grade-photo", 120_000], ["settings.probe", 30_000],
 ] as const)("gives %s its own request deadline", async (task, timeoutMs) => {
+  mocks.get.mockResolvedValue({
+    settings: { ...DEFAULT_OPENING_AI_SETTINGS, taskRoutes: { [task]: { primary: model.id, fallback: null } } },
+    saved: true, invalidStoredSettings: false,
+  });
   await resolveTaskModel({} as never, scope, task);
   expect(mocks.provider).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs, idleTimeoutMs: 60_000 }));
 });

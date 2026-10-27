@@ -54,11 +54,16 @@ describe("goal-aware planning", () => {
 
   it("puts near goals before ordinary weak skills and uses a small exam block when time is short", () => {
     const snap = snapshot([course(b, { skills: [{ skillLabel: "级数", status: "needs_review", lastObservedAt: null, recentAssistance: [] }], nextSkills: [] }),
-      course(a, { goal: goal({ targetDate: "2026-10-20" }) })]);
+      course(a, { goal: goal({ kind: "final-exam", targetDate: "2026-10-20" }) })]);
     expect(propose(snap)[0]?.courseId).toBe(a);
     expect(propose(snap, { capacityMinutes: 20 })).toMatchObject([{ courseId: a, minutes: 16 }]);
     expect(propose(snap, { capacityMinutes: 12 })).toEqual([]);
     expect(propose(snapshot([course(a)]), { capacityMinutes: 20 })).toEqual([]);
+  });
+  it("prioritizes an ordinary deadline without treating it as a shortened exam block", () => {
+    const snap = snapshot([course(a, { goal: goal({ kind: "custom", targetDate: "2026-10-20" }) })]);
+    expect(propose(snap)).toMatchObject([{ courseId: a, minutes: 25 }]);
+    expect(propose(snap, { capacityMinutes: 20 })).toEqual([]);
   });
 
   it("preserves same-day deduplication and requirement isolation under exam priority", () => {

@@ -8,6 +8,7 @@ import {
   OPENING_RESTORE_ROW_COLUMNS,
   parseOpeningRestoreObjectVersion,
 } from "./opening-backup-apply";
+import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import type { OpeningRestoreNamespaceCounts } from "./opening-backup-empty-namespace";
 
 const workspaceId = "a1000000-0000-4000-8000-000000000001";
@@ -80,10 +81,11 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
   });
 
   it("APPLY_ORDER columns cover every durable table and exclude never-tables", () => {
-    expect(OPENING_RESTORE_APPLY_ORDER).toHaveLength(39);
+    expect(new Set(OPENING_RESTORE_APPLY_ORDER)).toEqual(new Set(OPENING_BACKUP_TABLES));
+    expect(new Set(OPENING_RESTORE_APPLY_ORDER).size).toBe(OPENING_RESTORE_APPLY_ORDER.length);
     for (const table of OPENING_RESTORE_APPLY_ORDER) {
       expect(OPENING_RESTORE_ROW_COLUMNS[table].length).toBeGreaterThan(0);
-      expect(["sessions", "opening_jobs", "opening_outbox", "opening_budget_reservations"]).not.toContain(table);
+      expect(["sessions", "opening_jobs", "opening_outbox", "opening_budget_reservations", "opening_source_visual_recognitions"]).not.toContain(table);
     }
   });
 
@@ -137,4 +139,19 @@ it("restores Study visibility metadata without admitting paid queues or proposal
   expect(OPENING_RESTORE_APPLY_ORDER).toEqual(expect.arrayContaining(["opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events"]));
   expect(OPENING_RESTORE_APPLY_ORDER).not.toContain("opening_parent_interaction_budgets");
   expect(OPENING_RESTORE_APPLY_ORDER).not.toContain("opening_assistant_proposals");
+});
+
+it("keeps new link provenance and replay history while restoring their behavior disabled", () => {
+  expect(OPENING_RESTORE_ROW_COLUMNS.course_requirement_evidence_links).toEqual(expect.arrayContaining([
+    "source_requirement_id", "source_requirement_revision", "target_requirement_id", "target_requirement_revision", "active", "revision",
+  ]));
+  expect(OPENING_RESTORE_ROW_COLUMNS.opening_learning_asset_links).toEqual(expect.arrayContaining([
+    "asset_id", "asset_version", "origin_json", "source_refs", "status", "revision", "client_key", "create_intent",
+  ]));
+  const asset = { status: "active", origin_json: { sourceId }, source_refs: [{ sourceId, sourceVersion: 1 }], create_intent: { clientKey: "original" } };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_asset_links", asset)).toEqual({ ...asset, status: "detached" });
+  expect(asset.status).toBe("active");
+  const evidence = { active: true, source_requirement_revision: 3, target_requirement_revision: 4 };
+  expect(normalizeOpeningImportedEvaluation("course_requirement_evidence_links", evidence)).toEqual({ ...evidence, active: false });
+  expect(evidence.active).toBe(true);
 });

@@ -184,6 +184,7 @@ function storedReader(overrides: { owned?: boolean; prefs?: unknown; settings?: 
       return overrides.owned === false ? [] : [{ id: courseId }];
     }
     if (text.includes("p.adaptive_planning FROM workspaces")) return [{ adaptive_planning: stored.prefs }];
+    if (text.includes("FROM course_goals g")) return [];
     if (text.includes("p.planning_settings FROM workspaces")) return [{ planning_settings: stored.settings }];
     if (text.includes("FROM opening_tasks t")) return stored.tasks;
     if (text.includes("FROM opening_timetable_sessions")) return [];
@@ -208,7 +209,7 @@ describe("sprint budget production factory wiring with tagged-SQL fake", () => {
     const result = await getSprintBudgetService(db.sql).read(scope, courseId);
     expect(result).toMatchObject({ status: "ready", scheduledTaskIds: [taskId], tasks: [{ id: taskId, title: tasks[0]!.title }] });
     expect(result.days[0]?.blocks).toEqual([expect.objectContaining({ taskId, start: "2026-10-23T09:30:00.000Z", end: "2026-10-23T10:00:00.000Z" })]);
-    expect(db.queries).toHaveLength(7);
+    expect(db.queries).toHaveLength(8);
     expect(db.queries[0]?.text).toContain("FROM courses c");
     for (const query of db.queries) {
       expect(query.values).toContain(scope.workspaceId);
@@ -232,7 +233,7 @@ describe("sprint budget production factory wiring with tagged-SQL fake", () => {
     const db = storedReader(fixture);
     const result = await getSprintBudgetService(db.sql).read(scope, courseId);
     expect(result).toMatchObject({ status: fixture.status, days: [], tasks: [], scheduledTaskIds: [] });
-    expect(db.queries).toHaveLength(3);
+    expect(db.queries).toHaveLength(fixture.label === "corrupt preferences" ? 3 : 4);
     expect(db.events.at(-1)).toBe("commit");
     expect(db.stored).toEqual(db.before);
     expect(db.writes).toEqual([]);

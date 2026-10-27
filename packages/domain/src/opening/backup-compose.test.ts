@@ -39,6 +39,32 @@ function input(overrides: Partial<OpeningBackupComposeInput> = {}): OpeningBacku
 }
 
 describe("composeOpeningBackupDraft", () => {
+  it.each([{ present: [] }, { present: ["course_requirement_evidence_links"] }, { present: ["opening_learning_asset_links"] }])("keeps legacy archives compatible with additive inventories $present", ({ present }) => {
+    const value = input();
+    for (const name of present) value.records.tables[name] = [];
+    const original = structuredClone(value);
+    const result = composeOpeningBackupDraft(value);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    for (const table of ["course_requirement_evidence_links", "opening_learning_asset_links"]) {
+      expect(result.backup.tables[table] ?? []).toEqual([]);
+      expect(table in result.backup.tables).toBe(present.includes(table));
+    }
+    expect(value).toEqual(original);
+  });
+  it.each(["course_requirement_evidence_links", "opening_learning_asset_links"])("still validates %s rows once the additive inventory is present", table => {
+    const value = input();
+    value.records.tables[table] = [{ id: sourceId, workspace_id: workspaceId }];
+    expect(composeOpeningBackupDraft(value)).toMatchObject({ ok: false, code: "PREVIEW_REJECTED" });
+  });
+  it("still rejects missing original inventories and derived or paid execution tables", () => {
+    const missing = input(); delete missing.records.tables.opening_sources;
+    expect(composeOpeningBackupDraft(missing)).toMatchObject({ ok: false, code: "INVALID_INPUT" });
+    for (const table of ["opening_source_visual_recognitions", "opening_jobs", "opening_budget_reservations"]) {
+      const value = input(); value.records.tables[table] = [];
+      expect(composeOpeningBackupDraft(value)).toMatchObject({ ok: false, code: "INVALID_INPUT" });
+    }
+  });
   it("accepts older inventories without planning feedback and does not invent rows", () => {
     const value = input();
     delete value.records.tables.opening_plan_feedback;

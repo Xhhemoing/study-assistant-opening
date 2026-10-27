@@ -130,5 +130,5 @@ export function validBackupTableSet(tables: Record<string, unknown[]>): boolean 
   const names = Object.keys(tables);
   return names.every(name => BACKUP_TABLES.has(name))
     && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name)
-      || name === "opening_study_intent_events" || name === "opening_learning_decisions" || name === "opening_learning_shadow_predictions" || name === "opening_suggestion_feedback" || name === "opening_plan_feedback" || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events", "course_goals", "course_goal_links", "goal_time_windows", "course_requirements"].includes(name) || name in tables);
+      || name === "opening_study_intent_events" || name === "opening_learning_decisions" || name === "opening_learning_shadow_predictions" || name === "opening_suggestion_feedback" || name === "opening_plan_feedback" || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events", "course_goals", "course_goal_links", "goal_time_windows", "course_requirements", "course_requirement_evidence_links", "opening_learning_asset_links"].includes(name) || name in tables);
 }
