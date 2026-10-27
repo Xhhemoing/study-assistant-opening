@@ -2,6 +2,7 @@ export const DATABASE_PACKAGE = "@aistudy/database" as const;
 export * from "./schema/library";
 export * from "./schema/courses";
 export * from "./schema/goals";
+export * from "./schema/learning-links";
 export * from "./schema/identity";
 export * from "./schema/preferences";
 export * from "./schema/explorations";
@@ -260,7 +261,7 @@ export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, ty
 export * from "./schema/opening-exam-integration";
 export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
 export { createOpeningAiGradingRepository, type OpeningAiGradingContext } from "./repositories/opening-ai-grading";
-export { createOpeningAiGradingJobRepository } from "./repositories/opening-ai-grading-jobs";
+export { createOpeningAiGradingJobRepository, readOpeningAttemptGradingUsesVision, readOpeningObservationGradingUsesVision } from "./repositories/opening-ai-grading-jobs";
 export { createOpeningParserHealthRepository, parseParserOcrHealth, PARSER_OCR_FILES, PARSER_HEALTH_TTL_MS,
   type ParserOcrHealth, type ParserOcrObservation, type ParserOcrStatus } from "./repositories/opening-parser-health";
 export { createOpeningPdfSegmentsRepository, validatePdfSegmentPages, type OpeningPdfSegmentsRepository,
@@ -307,3 +308,25 @@ export { createOpeningPhotoRecognitionRepository } from "./repositories/opening-
 export { loadOpeningRouting } from "./repositories/opening-model-routing";
 export { checkOpeningAutoGradeBudget, readOpeningAutoGradeSkip, type OpeningAutoGradePolicy } from "./repositories/opening-auto-grade-policy";
 export { recordOpeningTutorTiming, type OpeningTutorTimingInput } from "./repositories/opening-tutor-timing";
+export * from "./repositories/opening-span-tutor-grant";
+export * from "./repositories/opening-span-tutor-budget";
+export * from "./repositories/opening-span-tutor-context";
+export * from "./repositories/opening-span-reserved-selection";
+export * from "./repositories/opening-span-tutor-next";
+export * from "./repositories/opening-span-tutor-origin";
+
+export * from "./repositories/opening-learning-goals";
+export * from "./repositories/opening-learning-goal-bridge";
+export * from "./repositories/opening-learning-goal-repository";
+export * from "./repositories/opening-learning-capacity";
+export * from "./repositories/opening-long-term-planning";
+export * from "./repositories/opening-long-term-card-session";
+export * from "./repositories/opening-course-route";
+export * from "./repositories/opening-course-route-retest";
+export * from "./repositories/opening-course-route-verification";
+export * from "./repositories/opening-course-route-origin";
+export * from "./repositories/opening-course-shared-skill";
+export * from "./repositories/opening-learning-asset-links";
+export * from "./repositories/opening-study-notes";
+export * from "./repositories/opening-answer-interpretation";
+export * from "./repositories/opening-source-visual-recognitions";

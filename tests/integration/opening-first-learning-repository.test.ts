@@ -92,7 +92,7 @@ it("normalizes the course UUID for goal lookup and starts an imminent goal with 
   expect(prefs.prefs.courseGoals[result.activity.courseId!]).toMatchObject({ targetDate: request.intent.targetDate });
   expect(await readOpeningTeachingCompilerFocus(fixture.sql, fixture.scope, result.activity.id)).toMatchObject({ learnerFocus: {
     skillLabel: request.intent.topic, activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null,
-    recentAssistance: [], goalContext: { mode: "exam", reasonCode: "deadline_near", daysRemaining: 2 },
+    recentAssistance: [], goalContext: { mode: "understand", reasonCode: "long_term", daysRemaining: 2 },
   } });
 });
 
@@ -163,4 +163,33 @@ it("returns an old unbound activity as legacy without silently creating a course
   const result = await repository().initialize(fixture.scope, request, { replayOnly: true });
   expect(result).toMatchObject({ courseId: null, activity: { id: activity.id }, tasks: [], firstTaskId: null, legacy: true, replayed: true });
   expect(await counts()).toEqual({ courses: 0, activities: 1, tasks: 0, jobs: 0, outbox: 0 });
+});
+
+it.each([undefined, 45])("creates and replays an unscheduled lesson with only an explicit daily budget (%s)", async dailyMinutes => {
+  const scheduled = input();
+  const request = { ...scheduled, intent: { ...scheduled.intent, startTime: null, minutes: 20,
+    ...(dailyMinutes !== undefined ? { dailyMinutes } : {}) }, days: [] };
+  const first = await repository().initialize(fixture.scope, request);
+  expect(first).toMatchObject({ courseId: request.intent.clientKey, tasks: [], firstTaskId: null,
+    startDate: request.startDate, endDate: request.startDate, legacy: false, replayed: false });
+  const prefs = await createOpeningAdaptivePrefsRepository(fixture.sql).get(fixture.scope);
+  expect(prefs.prefs.courseGoals[first.courseId!]).toMatchObject({ targetDate: request.intent.targetDate,
+    weeklyMinutes: (dailyMinutes ?? 0) * 7 });
+  const [activity] = await fixture.sql`SELECT intent_summary,goal_json,create_intent FROM opening_teaching_activities WHERE id=${first.activity.id}`;
+  expect(activity!.goal_json.sessionMinutes).toBe(20);
+  if (dailyMinutes === undefined) expect(activity!.goal_json).not.toHaveProperty("dailyMinutes");
+  else expect(activity!.goal_json.dailyMinutes).toBe(dailyMinutes);
+  expect(activity!.intent_summary).toContain("本次学习 20 分钟");
+  expect(activity!.create_intent.firstLearningPlan.taskKeys).toEqual([]);
+  const replay = await repository().initialize(fixture.scope, { ...request, startDate: "2026-11-04" }, { replayOnly: true });
+  expect(replay).toMatchObject({ activity: { id: first.activity.id }, tasks: [], firstTaskId: null,
+    startDate: request.startDate, endDate: request.startDate, replayed: true });
+  expect(await counts()).toEqual({ courses: 1, activities: 1, tasks: 0, jobs: 1, outbox: 1 });
+});
+
+it("rejects seeded days in an unscheduled intent before creating any data", async () => {
+  const request = input();
+  await expect(repository().initialize(fixture.scope, { ...request, intent: { ...request.intent, startTime: null } }))
+    .rejects.toMatchObject({ code: "VALIDATION" });
+  expect(await counts()).toEqual({ courses: 0, activities: 0, tasks: 0, jobs: 0, outbox: 0 });
 });

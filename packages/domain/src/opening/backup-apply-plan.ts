@@ -31,6 +31,8 @@ export type OpeningRestoreApplyPlanResult =
 export const OPENING_RESTORE_APPLY_ORDER = [
   "workspace_preferences",
   "courses",
+  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
+  "course_requirement_evidence_links",
   "opening_sources",
   "cards",
   "card_review_states",
@@ -53,6 +55,7 @@ export const OPENING_RESTORE_APPLY_ORDER = [
   "opening_assistant_candidates",
   "opening_help_exposures",
   "opening_learning_observations",
+  "opening_learning_asset_links",
   "opening_skill_evidence",
   "opening_memories",
   "opening_privacy_exclusions",

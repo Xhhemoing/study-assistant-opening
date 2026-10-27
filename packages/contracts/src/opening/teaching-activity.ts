@@ -88,6 +88,7 @@ export const teachingLearnerFocusSchema = z
 export const teachingActivitySchema = z
   .object({
     id: uuidSchema,
+    routeManaged: z.boolean().optional(),
     workspaceId: uuidSchema,
     ownerUserId: uuidSchema,
     courseId: uuidSchema.nullable(),

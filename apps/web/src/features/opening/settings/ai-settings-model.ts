@@ -49,7 +49,7 @@ export function modelProblemForTask(model: OpeningModelSummary | undefined, task
 export function effectiveTaskRoutes(data: OpeningAiSettingsResponse, settings: OpeningAiSettings) {
   return (data.tasks ?? []).map(task => {
     const key = task.key as ModelTaskKey;
-    const id = selectedModelIdForTask(settings, key, data.defaultModelId);
+    const id = selectedModelIdForTask(settings, key, data.defaultModelId, data.models);
     const model = data.models.find(item => item.id === id);
     const fallbackId = selectedFallbackModelIdForTask(settings, key);
     const fallbackModel = fallbackId ? data.models.find(item => item.id === fallbackId) : undefined;
@@ -65,7 +65,7 @@ export function transcriptionModelProblem(data: OpeningAiSettingsResponse, setti
   if (settings.transcription?.engine !== "model") return null;
   const task: TaskView = { key: "media.transcribe", label: "音视频转写", group: "materials", needs: ["audio"] };
   const key = task.key as ModelTaskKey;
-  const primaryId = selectedModelIdForTask(settings, key, data.defaultModelId);
+  const primaryId = selectedModelIdForTask(settings, key, data.defaultModelId, data.models);
   const primaryProblem = modelProblemForTask(data.models.find(model => model.id === primaryId), task);
   if (primaryProblem === null) return null;
   const fallbackId = selectedFallbackModelIdForTask(settings, key);

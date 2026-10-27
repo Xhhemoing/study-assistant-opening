@@ -67,3 +67,60 @@ def texts_by_page(conversion):
             raise RuntimeError("page assembly did not preserve the physical page number")
         result.update(local)
     return result
+
+
+def visual_kinds_by_page(conversion, by_page):
+    """Use retained physical layout and text-layer cells, never symbol guessing.
+
+    OCR output is not evidence of a native text layer: scanned pages still need
+    faithful visual transcription even when local OCR emitted plausible words.
+    """
+    kinds = {number: set() for number in by_page}
+
+    def collect(node, found):
+        label = getattr(getattr(node, "label", None), "value", getattr(node, "label", None))
+        if label in ("formula", "table", "picture"):
+            found.add(label)
+        for child in getattr(node, "children", []):
+            collect(child, found)
+        cluster = getattr(node, "cluster", None)
+        if cluster is not None:
+            collect(cluster, found)
+
+    physical = getattr(conversion, "pages", []) if hasattr(conversion, "document") else []
+    for page in physical:
+        number = page.page_no
+        if number not in kinds:
+            raise RuntimeError("visual metadata belongs to another physical page")
+        found = kinds[number]
+        cells = getattr(page, "cells", None)
+        native = any(getattr(cell, "text", "").strip() and not getattr(cell, "from_ocr", False)
+                     for cell in cells) if cells is not None else bool("\n".join(by_page[number]).strip())
+        has_ocr = any(getattr(cell, "text", "").strip() and getattr(cell, "from_ocr", False)
+                      for cell in cells) if cells is not None else False
+        if not native or has_ocr:
+            found.add("scan")
+        # Cluster cell assignment is not text-layer coverage: overlapping text
+        # clusters can be empty after cells move to a containing layout region.
+        # Actual embedded images retain mixed scanned bodies even if layout
+        # labels their content as text and local OCR is disabled.
+        if getattr(getattr(page, "parsed_page", None), "bitmap_resources", []):
+            found.add("picture")
+        layout = getattr(getattr(page, "predictions", None), "layout", None)
+        for cluster in getattr(layout, "clusters", []):
+            collect(cluster, found)
+        for element in getattr(getattr(page, "assembled", None), "elements", []):
+            collect(element, found)
+
+    if not physical:
+        document = getattr(conversion, "document", conversion)
+        for number, texts in by_page.items():
+            if not "\n".join(texts).strip():
+                kinds[number].add("scan")
+        for field in ("texts", "tables", "pictures"):
+            for item in getattr(document, field, []):
+                for provenance in getattr(item, "prov", []):
+                    if provenance.page_no in kinds:
+                        collect(item, kinds[provenance.page_no])
+    order = ("scan", "formula", "table", "picture")
+    return {number: [kind for kind in order if kind in found] for number, found in kinds.items()}

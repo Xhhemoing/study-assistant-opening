@@ -1,6 +1,6 @@
 import "server-only";
 import type { Sql } from "postgres";
-import { createOpeningAiGradingJobRepository } from "@aistudy/database";
+import { createOpeningAiGradingJobRepository, readOpeningObservationGradingUsesVision } from "@aistudy/database";
 import type { Scope } from "@aistudy/contracts";
 import { resolveAutoGradePolicy } from "./auto-grade-policy";
 
@@ -12,7 +12,11 @@ export function getAiGradingService(sql: Sql) {
     async read(scope: Scope, raw: unknown) {
       const status = await repository.read(scope, raw);
       if (status.jobId || !status.retryable) return status;
-      return repository.read(scope, raw, await resolveAutoGradePolicy(sql, scope, Boolean(status.workSource)));
+      const visualReference = await readOpeningObservationGradingUsesVision(sql, scope, status.headObservationId);
+      const resolvedPolicy = await resolveAutoGradePolicy(sql, scope, Boolean(status.workSource) || visualReference === true);
+      const policy = visualReference === null ? { ...resolvedPolicy, modelAvailable: false,
+        modelUnavailableReason: "no_model" as const, primaryModel: null, fallbackModel: null } : resolvedPolicy;
+      return repository.read(scope, raw, policy);
     },
   };
 }

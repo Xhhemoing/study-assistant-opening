@@ -20,3 +20,10 @@ it("keeps the learning action visible and puts observation criteria in diagnosti
   diagnosticPreference.enabled = true;
   const diagnostic = render(); expect(diagnostic).toContain("本步骤期待观察什么"); expect(diagnostic).toContain("继续或停止"); expect(diagnostic).toContain("覆盖知识点");
 });
+
+it("keeps a full-lesson reload available after an attempt or hint rejects stale evidence", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const session = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 1, retestId: null, createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" } as const;
+  const html = renderToStaticMarkup(createElement(SpanLesson, { courseId: id, sourceIds: [id], sourceLoadError: false, session: { ...session, sourceIds: [id] }, onReload: () => undefined }));
+  expect(html).toContain("重新读取本节");
+});

@@ -15,7 +15,8 @@ export function resolveGoalLearningContext(goal: CourseGoal | null, date: string
   const daysRemaining = targetDate === null ? null
     : Math.round((Date.parse(`${targetDate}T00:00:00Z`) - Date.parse(`${date}T00:00:00Z`)) / 86_400_000);
   const selected = goal?.learningMode ?? "auto";
-  const near = daysRemaining !== null && daysRemaining <= EXAM_WINDOW_DAYS;
+  const near = ["final-exam", "entrance-exam"].includes(goal?.kind ?? "")
+    && daysRemaining !== null && daysRemaining <= EXAM_WINDOW_DAYS;
   const mode = selected === "auto" ? near ? "exam" : "understand" : selected;
   return {
     mode,

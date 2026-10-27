@@ -50,6 +50,49 @@ it("keeps unsupported references unverified rather than inferring a numeric answ
 });
 
 describe("goal-driven teaching provider context", () => {
+  it("loads only selected visual evidence pages once with their pinned source version", async () => {
+    const selected = chunk("visual", "OCR: x²+y²=1", { page: 4, sourceVersion: 3, imageObjectKey: "owned/page4" });
+    const unselected = chunk("other", "unselected page", { page: 7, imageObjectKey: "owned/page7" });
+    const image = { sourceId: SRC_A, physicalPage: 4, mediaType: "image/png" as const, data: "data:image/png;base64,AA==" };
+    const loadPageImages = vi.fn(async () => [image]);
+    const input = await createCompilerProviderInput({ loadChunks: async () => [selected, unselected],
+      retrieveContext: async () => ({ chunks: [selected], mode: "hybrid" }), loadPageImages, intentSummary: "圆的方程" })(
+      { workspaceId: "w", ownerUserId: "u" }, { activityId: ACTIVITY, expectedContentVersion: 0, sourceIds: [SRC_A] });
+    expect(loadPageImages).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", ownerUserId: "u" }, {
+      sourceIds: [SRC_A], sourceVersions: { [SRC_A]: 3 }, physicalPage: 4,
+    });
+    expect(input).toMatchObject({ chunks: [selected], imageParts: [image], mediaCapability: "text_plus_page_images" });
+    expect(input.instruction).toContain("识别文本");
+    expect(input.text).toContain('"physicalPage":4');
+    expect(input.text).not.toContain("owned/page4");
+  });
+
+  it("fails visual evidence without an available exact page instead of silently compiling text", async () => {
+    const selected = chunk("visual", "formula", { imageObjectKey: "owned/page1" });
+    await expect(createCompilerProviderInput({ loadChunks: async () => [selected], loadPageImages: async () => [], intentSummary: "formula" })(
+      {}, { activityId: ACTIVITY, expectedContentVersion: 0, sourceIds: [SRC_A] })).rejects.toThrow("原图");
+  });
+
+  it("keeps the top three ranked visual pages and text evidence in both the prompt and published references", async () => {
+    const visual = [4,2,1,3].map(page => chunk(`v${page}`, `formula ${page}`, { page, imageObjectKey: `owned/page${page}` }));
+    const plain = chunk("plain", "native prose", { page: 7 });
+    const ranked = [...visual, plain];
+    const loadPageImages = vi.fn(async (_scope: unknown, request: { sourceIds: string[]; physicalPage: number }) => [{
+      sourceId: request.sourceIds[0]!, physicalPage: request.physicalPage, mediaType: "image/png" as const, data: "data:image/png;base64,AA==" }]);
+    const payload = { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] };
+    const provider = await createCompilerProviderInput({ loadChunks: async () => ranked,
+      retrieveContext: async () => ({ chunks: ranked, mode: "hybrid" }), currentPage: 4, loadPageImages, intentSummary: "formula" })({}, payload);
+    expect(provider.chunks.map(row => row.id)).toEqual(["v4", "v2", "v1", "plain"]);
+    expect(provider.imageParts.map(row => row.physicalPage)).toEqual([4,2,1]);
+    expect(loadPageImages).toHaveBeenCalledTimes(3);
+    expect(provider.text).not.toContain('"physicalPage":3');
+    expect(provider.instruction).toContain("不得声称覆盖全部资料");
+    const published = await createCompilerBuildPublishInput({ loadChunks: async () => ranked, evidenceChunks: provider.chunks,
+      currentPage: 4, intentSummary: "formula", writeLibraryBlocks: async () => {} })({}, payload);
+    expect(published.sourceRefs?.map(ref => ref.chunkId)).not.toContain("v3");
+    expect(published.sourceRefs?.map(ref => ref.chunkId)).toEqual(expect.arrayContaining(["v4", "v2", "v1", "plain"]));
+  });
+
   it("shares the teaching interaction budget and keeps retrieved evidence in one provider channel", async () => {
     const parentBudget = { id: "study-activity:test" };
     const selected = chunk("semantic", "矩阵的零空间");

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
 import type {
@@ -359,6 +361,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       };
 
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
 
@@ -412,6 +415,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
           }
           throw learningError("CONFLICT", "stale activity content version with different spec graph");
         }
+        await assertOpeningCourseRouteCurrent(tx, scope, input.activityId);
         if (currentContentVersion !== input.expectedVersion) {
           throw learningError("CONFLICT", "stale activity content version");
         }

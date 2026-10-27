@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import { createHash, randomUUID } from "node:crypto";
 import {
   knowledgeSnapshotSchema, openingAdaptivePrefsSchema,
@@ -26,7 +27,7 @@ async function assertCourseAndMilestone(tx: TransactionSql, scope: Scope, input:
   if (!rows.length) throw learningError("NOT_FOUND", "课程不存在或已归档");
   if (input.milestoneId === null) return;
   const prefs = await tx`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
-  const parsed = openingAdaptivePrefsSchema.safeParse(prefs[0]?.adaptive_planning);
+  const parsed = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(tx, scope, prefs[0]?.adaptive_planning));
   if (!parsed.success || !parsed.data.courseGoals[input.courseId]?.milestones?.some(item => item.id === input.milestoneId)) {
     throw conflict("所选阶段成果不属于该课程的现有目标，请刷新后重试");
   }

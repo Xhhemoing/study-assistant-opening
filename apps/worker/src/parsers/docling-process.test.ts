@@ -9,6 +9,11 @@ describe("docling parser bridge", () => {
     expect(() => decodeParserOutput('{"pages":[{"page":1,"text":"x"},{"page":1,"text":"y"}]}')).toThrow();
   });
 
+  it("preserves validated visual page metadata and rejects unknown categories", () => {
+    expect(decodeParserOutput('{"pages":[{"page":11,"text":"caption","imagePath":null,"visualKinds":["formula","picture"]}]}')[0]).toMatchObject({visualKinds:["formula","picture"]});
+    expect(() => decodeParserOutput('{"pages":[{"page":1,"text":"x","imagePath":null,"visualKinds":["made-up"]}]}')).toThrow();
+  });
+
   it("ignores log lines that pollute stdout before the JSON payload", () => {
     const polluted = '2026-09-18 15:05:36,284 MatchingPostProcessor WARNING  1 of 5 pdf cells matched neither a row nor a column band\n' + JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }] }) + "\r\n";
     const pages = decodeParserOutput(polluted);

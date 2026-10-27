@@ -1,6 +1,7 @@
 import { uuidSchema } from "@aistudy/contracts";
 import { BackupRestoreError } from "./backup-types";
 import { readNoteBackupProvenance } from "./native-note-privacy";
+import { restoreNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
 import {
@@ -48,6 +49,9 @@ const COLUMNS: Record<RestoreCollection, Record<string, string>> = {
     id: "id", workspace_id: "workspaceId", course_id: "courseId", kind: "kind", title: "title",
     priority: "priority", intensity: "intensity", abilities: "abilities",
     strategy_version: "strategyVersion", active: "active", exam_date: "examDate",
+    target_date: "targetDate", revision: "revision", weekly_minutes: "weeklyMinutes", learning_mode: "learningMode",
+    success_criteria: "successCriteria", lifecycle: "lifecycle", maintenance_interval_days: "maintenanceIntervalDays",
+    milestones: "milestones", definition_history: "definitionHistory", client_key: "clientKey", create_intent: "createIntent",
     user_override: "userOverride", archived_at: "archivedAt",
     created_at: "createdAt", updated_at: "updatedAt",
   },
@@ -151,6 +155,11 @@ export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promis
       }
     }
     await insertRows(tx, COLLECTION_TABLES[step.collection], step.records, COLUMNS[step.collection]);
+    if (step.collection === "goals") {
+      for (const goal of step.records) for (const courseId of new Set((goal.courseIds ?? [goal.courseId]) as string[])) {
+        await tx`INSERT INTO course_goal_links(workspace_id,goal_id,course_id) VALUES(${String(goal.workspaceId)},${goal.id},${courseId})`;
+      }
+    }
     if (step.collection === "documents") {
       for (const record of step.records) {
         const provenance = readNoteBackupProvenance(record, false);
@@ -175,6 +184,7 @@ export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promis
       }
     }
   }
+  await restoreNativeLearningLinks(tx, plan.steps.filter(step => step.collection === "documents").flatMap(step => step.records));
 }
 
 async function insertRows(
@@ -185,6 +195,14 @@ async function insertRows(
 ): Promise<void> {
   for (const row of rows) {
     const payload = pickColumns(row, columns);
+    if (table === "course_goals") {
+      for (const key of ["abilities", "milestones", "definition_history", "create_intent", "user_override"]) {
+        if (payload[key] != null) payload[key] = tx.json(payload[key] as never);
+      }
+      // Restoring a definition does not reauthorize future automatic learning.
+      if (!["archived", "stopped"].includes(String(payload.lifecycle))) payload.lifecycle = "paused";
+      payload.active = false;
+    }
     if (Object.keys(payload).length === 0) continue;
     await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
   }

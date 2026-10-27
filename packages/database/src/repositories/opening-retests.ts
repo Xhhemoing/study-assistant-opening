@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { cancelOwnedSpanTutorRetests } from "./opening-span-tutor-budget";
 import { z } from "zod";
 import type { Sql, TransactionSql } from "postgres";
-import { retestCandidateSchema, type RetestCandidate } from "@aistudy/contracts";
+import { retestCandidateSchema, spanTutorAutomationSchema, type RetestCandidate } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, type RetestEvidenceIdentity } from "@aistudy/domain";
 import type { OpeningScope } from "./opening-sources";
 import { lockLearningHistory, lockLearningOwner, lockWorkspaceLearningHistory, mapLearningObservation, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
@@ -12,7 +13,7 @@ import { lockLearningPreferences, readLearningAutomationState } from "./opening-
 
 const spanProtocolSchema = z.object({ protocolId: z.literal("span-delayed-3d-v1"),
   baselineObservationId: z.string().uuid(), baselineRootId: z.string().uuid(),
-  priorAnswerPolicy: z.literal("require_unseen_problem") }).strict();
+  priorAnswerPolicy: z.literal("require_unseen_problem"), tutorAutomation: spanTutorAutomationSchema.optional() }).strict();
 
 /**
  * L02 retest proposals as opening_jobs (kind=retest). No new migration.
@@ -243,6 +244,7 @@ export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: 
   const courseIds = [...new Set(identities.map((identity) => identity.courseId))];
   const jobs = await tx`SELECT id,payload FROM opening_jobs WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND kind='retest' AND payload->>'courseId' IN ${tx(courseIds)} ORDER BY id FOR UPDATE`;
+  const invalidatedActivityIds: string[] = [];
   for (const job of jobs) {
     const parsed = retestCandidateSchema.passthrough().safeParse(job.payload);
     if (!parsed.success || parsed.data.discarded === true) continue;
@@ -258,16 +260,18 @@ export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: 
       ? { evidenceChanged: true }
       : { invalidated: true, invalidationReason: "observation_revised", evidenceChanged: true };
     await tx`UPDATE opening_jobs SET payload=payload || ${tx.json(change)},updated_at=now() WHERE id=${job.id}`;
-    await tx`UPDATE opening_retest_activities
+    const invalidated = await tx`UPDATE opening_retest_activities
       SET status='invalidated', reason='evidence_changed', invalidated_at=now(), snoozed_until=NULL,
         version=version + 1, updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-        AND candidate_id=${job.id} AND status IN ('proposed','accepted','in_progress')`;
+        AND candidate_id=${job.id} AND status IN ('proposed','accepted','in_progress') RETURNING id`;
+    invalidatedActivityIds.push(...invalidated.map(row => String(row.id)));
     await tx`UPDATE opening_retest_activities
       SET reason='evidence_changed', updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND candidate_id=${job.id} AND status='completed'`;
   }
+  if (invalidatedActivityIds.length) await cancelOwnedSpanTutorRetests(tx, scope, { activityIds: invalidatedActivityIds, reason: "evidence_changed" });
   // Self-compare / outcome revisions on a retest attempt must refresh the stored result.
   if (input.currentIdentity) {
     const heads = await tx`SELECT retest_id, outcome FROM opening_learning_observations

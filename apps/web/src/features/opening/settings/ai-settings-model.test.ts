@@ -104,3 +104,9 @@ describe("AI settings presentation", () => {
     expect(html).toContain("恢复服务器默认设置");
   });
 });
+it("keeps settings readable when Luna is missing and displays the configured Luna when present",()=>{
+ const visual={key:"materials.recognize-page",label:"资料页视觉转写",group:"materials" as const,needs:["vision" as const]};
+ expect(effectiveTaskRoutes({...data,tasks:[visual]},DEFAULT_OPENING_AI_SETTINGS)[0]).toMatchObject({id:null,problem:"模型已移除或尚未配置"});
+ const luna={...data.models[0]!,id:"luna",modelName:"gpt-6-luna",supportsVision:true};
+ expect(effectiveTaskRoutes({...data,models:[...data.models,luna],tasks:[visual]},DEFAULT_OPENING_AI_SETTINGS)[0]).toMatchObject({id:"luna",problem:null});
+});

@@ -1,5 +1,6 @@
-import { projectBackupCourseMilestoneReferences } from "@aistudy/domain";
+import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
+import { readOpeningBackupLearningLinks } from "./opening-backup-learning-links";
 import { retainCompleteObservationChains } from "./opening-backup-observation-chains";
 import type { TransactionSql } from "postgres";
 import { includedProblem as currentProblem, includedTurn as currentTurn } from "./opening-backup-record-predicates";
@@ -287,15 +288,16 @@ export async function readOpeningBackupTableRows(
   tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
     && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
+  const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
   // Privacy/source filtering may omit a protocol's baseline. Keep the task and
   // stable identity, but never export a dangling baseline or replay receipt.
   tables.opening_retest_activities = tables.opening_retest_activities.map(row => {
-    const protocol = row.learning_protocol as { baselineObservationId?: unknown; baselineRootId?: unknown } | null;
-    if (!protocol || completeObservationIds.has(protocol.baselineObservationId) && completeObservationIds.has(protocol.baselineRootId)) return row;
+    const protocol = row.learning_protocol as { protocolId?: unknown; originActivityId?: unknown; baselineObservationId?: unknown; baselineRootId?: unknown } | null;
+    if (!protocol || completeObservationIds.has(protocol.baselineObservationId) && completeObservationIds.has(protocol.baselineRootId)
+      && (protocol.protocolId !== "course-route-delayed-v1" || activityIds.has(protocol.originActivityId))) return row;
     return { ...row, learning_protocol: null, accept_client_key: null,
       reason: [row.reason, "learning_protocol_baseline_unavailable"].filter(Boolean).join(";").slice(0, 200) };
   });
-  const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
   const associatedUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
   tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => activityIds.has(row.activity_id));
   const keptUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
@@ -305,6 +307,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_learning_activity_history_revisions = tables.opening_learning_activity_history_revisions.filter(row =>
     activityIds.has(row.activity_id));
   tables.workspace_preferences = projectBackupCourseMilestoneReferences(tables);
+  tables.course_goals = projectBackupFormalGoalReferences(tables);
   const sessionIds = new Set(tables.opening_learning_sessions.map(row => row.id));
   tables.opening_learning_decisions = asRows(await tx`SELECT id, workspace_id, owner_user_id, layer, target_id, parent_decision_id, client_key, receipt, created_at
     FROM opening_learning_decisions WHERE workspace_id=${id} AND owner_user_id=${userId}
@@ -335,5 +338,6 @@ export async function readOpeningBackupTableRows(
     client_key, version, event_kind, payload, resulting_intent, action, created_at FROM opening_study_intent_events
     WHERE workspace_id=${id} AND owner_user_id=${userId} AND id = ANY(${includedEventIds}::uuid[])
     ORDER BY session_id, version, id`);
+  Object.assign(tables, await readOpeningBackupLearningLinks(tx, id, userId, tables));
   return tables;
 }

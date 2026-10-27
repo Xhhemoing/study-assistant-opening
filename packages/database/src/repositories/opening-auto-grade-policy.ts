@@ -38,25 +38,35 @@ export type OpeningAutoGradeBudgetContext = {
   question: string; answer: string; referenceText: string;
   misconceptions?: Parameters<typeof buildAnswerGradingInput>[0]["misconceptions"];
   workSource?: { mime?: string; bytes?: number } | null;
+  referenceSources?: { mime?: string; bytes?: number }[];
 };
 
 /** Metadata-only estimate: no fabricated image payload or provider invocation.
- * reservationTerms strips encoded bytes before pricing. PDF source size cannot
- * establish the rendered page size, so PDF admission remains indeterminate. */
+ * reservationTerms strips encoded bytes before pricing. The PDF renderer rejects
+ * data URLs over 2,800,000 characters, hence each decoded page is <=2,100,000 bytes.
+ * PDF file size is not used as a rendered-page size estimate. */
 export async function checkOpeningAutoGradeBudget(tx: Sql | TransactionSql, scope: Scope, policy: OpeningAutoGradePolicy, context: OpeningAutoGradeBudgetContext): Promise<OpeningBudgetAvailability | { allowed: false; reason: "budget_unavailable" }> {
   const check = async (model: Omit<ResolvedTaskModel, "provider"> | null | undefined) => {
     if (!model) return { allowed: false, reason: "budget_unavailable" } as const;
     const imageParts: Parameters<typeof buildAnswerGradingInput>[0]["imageParts"] = [];
-    if (context.workSource) {
-      const { mime, bytes } = context.workSource;
+    const media = [...(context.referenceSources ?? []), ...(context.workSource ? [context.workSource] : [])];
+    if ((context.referenceSources?.length ?? 0) > 3 || media.length > 4) return { allowed: false, reason: "budget_unavailable" } as const;
+    let totalBytes = 0;
+    for (const { mime, bytes } of media) {
       const bound = mediaInputCostBound(model.modelSnapshot);
-      if (!bound || !Number.isSafeInteger(bytes) || bytes! <= 0 || bytes! > bound.mediaMaxInputBytes
-        || (mime !== "image/jpeg" && mime !== "image/png" && mime !== "image/webp")) {
+      const renderedBytes = mime === "application/pdf" ? 2_100_000 : bytes;
+      totalBytes += renderedBytes ?? Number.NaN;
+      if (model.supportsVision !== true || !bound || !Number.isSafeInteger(bytes) || bytes! <= 0
+        || !Number.isSafeInteger(totalBytes) || totalBytes > bound.mediaMaxInputBytes
+        || !["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(mime ?? "")) {
         return { allowed: false, reason: "budget_unavailable" } as const;
       }
-      imageParts.push({ data: "", mediaType: mime, sourceId: "sealed", physicalPage: 1 });
+      imageParts.push({ data: "", mediaType: mime === "application/pdf" ? "image/png" : mime as "image/jpeg" | "image/png" | "image/webp", sourceId: "00000000-0000-4000-8000-000000000000", physicalPage: Number.MAX_SAFE_INTEGER });
     }
-    const input = buildAnswerGradingInput({ ...context, imageParts });
+    const input = buildAnswerGradingInput({ ...context, imageParts, imageRoles: imageParts.map((part, index) => ({
+      sourceId: part.sourceId!, physicalPage: part.physicalPage!,
+      role: index < (context.referenceSources?.length ?? 0) ? "reference_material" : "student_work",
+    })) });
     const terms = reservationTerms(model, input, 1);
     // Valid finite prices can still overflow when multiplied by token bounds.
     // This is an unavailable estimate, not a reason to roll back the saved answer.

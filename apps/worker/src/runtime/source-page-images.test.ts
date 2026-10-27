@@ -2,8 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { createSourcePageImages } from "./source-page-images";
 
 describe("source page image authorization", () => {
+  it("rejects a PDF whose old page chunk remains after the current source version advanced", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const sql = vi.fn(async () => [{ mime: "application/pdf", version: 2, bytes: 100 }]);
+    const storage = { finalKey: vi.fn(), presignGet: vi.fn() } as never;
+    await expect(createSourcePageImages(sql as never, storage)({ workspaceId: "w", ownerUserId: "u" }, {
+      sourceIds: [id], sourceVersions: { [id]: 1 }, physicalPage: 4,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(storage.presignGet).not.toHaveBeenCalled();
+  });
   it("skips selected non-PDF sources that do not contain the requested page", async () => {
-    const sql = vi.fn(async () => [{ mime: "text/plain" }]);
+    const sql = vi.fn(async () => [{ mime: "text/plain", version: 0 }]);
     const storage = { finalKey: vi.fn(), presignGet: vi.fn() } as never;
     const result = await createSourcePageImages(sql as never, storage)({ workspaceId: "w", ownerUserId: "u" }, {
       sourceIds: ["11111111-1111-4111-8111-111111111111"], sourceVersions: { "11111111-1111-4111-8111-111111111111": 0 }, physicalPage: 2,
@@ -16,7 +25,7 @@ describe("source page image authorization", () => {
   it("returns page 1 bytes for image sources", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const sql = vi.fn(async () => [{ mime: "image/png", bytes: png.byteLength }]);
+    const sql = vi.fn(async () => [{ mime: "image/png", version: 0, bytes: png.byteLength }]);
     const storage = {
       finalKey: vi.fn(() => "opening/sources/x/v0"),
       presignGet: vi.fn(async () => `data:image/png;base64,${png.toString("base64")}`),
@@ -31,7 +40,7 @@ describe("source page image authorization", () => {
 
   it("skips image sources for pages other than 1", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
-    const sql = vi.fn(async () => [{ mime: "image/jpeg", bytes: 10 }]);
+    const sql = vi.fn(async () => [{ mime: "image/jpeg", version: 0, bytes: 10 }]);
     const storage = { finalKey: vi.fn(), presignGet: vi.fn() } as never;
     const result = await createSourcePageImages(sql as never, storage)({ workspaceId: "w", ownerUserId: "u" }, {
       sourceIds: [id], sourceVersions: { [id]: 0 }, physicalPage: 2,

@@ -38,7 +38,7 @@ export async function resolveAutoGradePolicy(sql: Sql, scope: Scope, photo = fal
       primaryModel = convert(resolveModelForTask(merged.models, settings, task, merged.defaultModelId));
     } catch (error) {
       if (error instanceof OpeningModelRoutingError && !fallbackModel) {
-        const selectedIds = [selectedModelIdForTask(settings, task, merged.defaultModelId), selectedFallbackModelIdForTask(settings, task)];
+        const selectedIds = [selectedModelIdForTask(settings, task, merged.defaultModelId, merged.models), selectedFallbackModelIdForTask(settings, task)];
         if (merged.models.some(model => selectedIds.includes(model.id) && model.availability === "budget_disabled"
           && model.apiKey && model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0
           && (!photo || model.supportsVision))) modelUnavailableReason = "budget";

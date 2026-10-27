@@ -25,6 +25,7 @@ const autoGrade = (): OpeningAutoGradePolicy => ({
   enabled: true, modelAvailable: true, dailyCap: 50,
   dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
   primaryModel: {
+    supportsVision: true,
     modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture",
       inputCentsPerMillion: 100, outputCentsPerMillion: 100,
       mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 1024, mediaInputCentsPerMillion: 100 },

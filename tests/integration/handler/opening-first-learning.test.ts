@@ -44,3 +44,17 @@ describe("authenticated first-learning handler", () => {
     expect(row!.count).toBe(0);
   });
 });
+
+it("accepts an omitted schedule and returns the real lesson without creating recurring tasks", async () => {
+  const { startTime: _startTime, ...input } = body();
+  const response = await POST(request({ ...input, minutes: 20 }, fixture.cookie));
+  expect(response.status).toBe(201);
+  const result = await response.json();
+  expect(result).toMatchObject({ taskId: null, plannedDays: 0, scheduleInitialized: false, draftCreated: false });
+  expect(result.href).toBe(`/opening/courses/${result.courseId}/study?activity=${result.activityId}`);
+  const replay = await POST(request({ ...input, minutes: 20, startTime: null }, fixture.cookie));
+  expect(replay.status).toBe(201);
+  expect(await replay.json()).toMatchObject({ activityId: result.activityId, taskId: null, courseId: result.courseId });
+  const [counts] = await fixture.sql`SELECT count(*)::int AS count FROM opening_tasks WHERE course_id=${result.courseId}`;
+  expect(counts!.count).toBe(0);
+});

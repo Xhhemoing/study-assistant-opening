@@ -1,6 +1,5 @@
 import type { Scope } from "@aistudy/contracts";
-import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanExposureHistory } from "@aistudy/database";
-import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
+import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
 const inputSchema = z.object({ sessionId: z.string().uuid(), sourceId: z.string().uuid(), clientKey: z.string().min(8).max(160), mode: z.enum(["self_study", "overview", "challenge"]) }).strict();
@@ -21,13 +20,11 @@ export function createSpanReservedService(sql: Sql) {
         if (saved.sessionId !== input.sessionId || saved.spanExercise?.sourceId !== input.sourceId || !saved.spanExercise.problemId.startsWith("span-reserved-")) throw Object.assign(new Error("保留题请求已改变"), { code: "CONFLICT" });
         return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey: input.clientKey, spanExercise: saved.spanExercise });
       }
-      const history = await readOpeningSpanExposureHistory(tx, scope);
-      if (history.unknownHistory) throw Object.assign(new Error("旧记录中的题目身份暂不可核实，不能把下一题称作未曝光检查。请先核对旧记录，或继续普通练习。"), { code: "CONFLICT" });
-      const bank = listSpanReservedProblems();
-      const available = bank.filter(problem => !history.problemIds.has(problem.id) && !history.familyIds.has(problem.familyId));
-      const desired = input.mode === "challenge" ? "span-reserved-transfer" : input.mode === "overview" ? "span-reserved-dependent" : "span-reserved-fraction";
-      const candidate = available.find(problem => problem.id === desired) ?? available[0];
-      if (!candidate) throw Object.assign(new Error("本组检查题或题族已发放完毕；可回看记录或继续普通练习，重复不标作未曝光检查。"), { code: "CONFLICT" });
+      const choice = await readOpeningSpanReservedChoice(tx, scope, input.mode);
+      if (choice.kind === "unavailable") throw Object.assign(new Error(choice.reason === "unknown_history"
+        ? "旧记录中的题目身份暂不可核实，不能把下一题称作未曝光检查。请先核对旧记录，或继续普通练习。"
+        : "本组检查题或题族已发放完毕；可回看记录或继续普通练习，重复不标作未曝光检查。"), { code: "CONFLICT" });
+      const candidate = choice.problem;
       return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey: input.clientKey,
         spanExercise: { sourceId: input.sourceId, problemId: candidate.id, version: Number(candidate.version) } });
     });

@@ -9,6 +9,7 @@ import { createOpeningApi } from "../client/api";
 import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from "../design/ui";
 import { groupReviewTasks, loadReviewSources, type ReviewSources, type ReviewTask } from "./review-queue";
 import { MixedReviewView } from "./mixed-review-view";
+import { BudgetCardSession } from "./budget-card-session";
 import { WeakPoints } from "./weak-points";
 import { readReviewTab, reviewTabHref, reviewTabs, type ReviewTab } from "./review-route";
 
@@ -38,6 +39,7 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
   const [sources, setSources] = useState<ReviewSources | null>(null);
   const [loadedAt, setLoadedAt] = useState(0);
   const [revision, setRevision] = useState(0);
+  const [budgetOpen, setBudgetOpen] = useState(false);
   useEffect(() => {
     const sync = () => {
       const next = readReviewTab(new URLSearchParams(window.location.search).get("tab") ?? undefined);
@@ -67,12 +69,15 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
   const show = (item: ReviewTask) => tab === "all" || (tab === "retests" ? item.kind === "retest" : item.kind === "reinforcement");
   const ready = groups?.ready.filter(show) ?? [], upcoming = groups?.upcoming.filter(show) ?? [], unavailable = groups?.unavailable.filter(show) ?? [];
   const cardCount = cardsVisited ? remainingCards : sources?.cards.kind === "ready" ? sources.cards.value.length : null;
+  const cardSessionId = new URLSearchParams(search).get("cardSession") ?? undefined;
 
   return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
     <PageHeader title="复习" />
     <div className="min-h-0 flex-1 overflow-y-auto"><ContentGrid className="px-5 py-4">
+      {cardSessionId ? <BudgetCardSession key={cardSessionId} initialActivityId={cardSessionId} cardsClient={cardsClient} /> : <>
       <nav aria-label="复习分类" className="flex gap-1 overflow-x-auto border-b border-line">{reviewTabs.map(item => <a key={item.id} className={`min-h-11 shrink-0 whitespace-nowrap border-b-2 px-2 py-3 text-sm focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ${tab === item.id ? "border-ink font-medium text-accent" : "border-transparent text-text-2"}`} href={reviewTabHref(item.id, search)} onFocus={event => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })} onClick={event => navigate(event, item.id)} aria-current={tab === item.id ? "page" : undefined}>{item.label}</a>)}</nav>
       {tab === "all" ? <section className="flex flex-wrap items-center justify-between gap-4 border-b border-line pb-5" aria-labelledby="review-cards-heading"><div><h2 id="review-cards-heading" className="font-semibold">记忆卡片{cardCount !== null ? ` · ${cardCount} 张待复习` : ""}</h2>{cardCount === 0 ? <p className="mt-1 text-meta text-text-2">今天没有到期卡片</p> : null}{!cardsVisited && sources?.cards.kind === "error" ? <p role="alert" className="mt-2 text-sm text-danger">卡片读取失败：{sources.cards.message}</p> : null}</div><div className="flex flex-wrap gap-2"><a className={ui.primary} href={reviewTabHref("session", search)} onClick={event => navigate(event, "session")}>开始连续复习</a><a className={ui.secondary} href={reviewTabHref("cards", search)} onClick={event => navigate(event, "cards")}>复习卡片</a></div></section> : null}
+      {tab === "all" ? <div className="space-y-3"><button className={ui.quiet} type="button" onClick={() => setBudgetOpen(value => !value)} aria-expanded={budgetOpen}>按本次时长复习卡片</button>{budgetOpen ? <BudgetCardSession cardsClient={cardsClient} /> : null}</div> : null}
       {tab === "session" ? <MixedReviewView cardsClient={cardsClient} taskClient={api} next={sessionNext(search)} /> : null}
       <div hidden={tab !== "cards"}>{cardsVisited ? <CardReviewView embedded client={cardsClient} onRemainingChange={setRemainingCards} /> : null}</div>
       {tab === "weak" ? <WeakPoints /> : null}
@@ -84,6 +89,7 @@ export function ReviewHub({ initialTab = "all" }: { initialTab?: ReviewTab }) {
           {unavailable.length ? <section className="space-y-3"><h3 className="text-sm font-semibold">暂不可开始</h3><ReviewTaskList items={unavailable} /><Link className={ui.quiet} href="/opening/today">到今天查看任务</Link></section> : null}
         </>}
       </section> : null}
+      </>}
       <p className="border-t border-line pt-3 text-xs text-text-2"><Link className="font-medium text-accent underline underline-offset-4" href="/opening/settings/planning#suggestions">查看学习建议</Link></p>
     </ContentGrid></div>
   </section>;

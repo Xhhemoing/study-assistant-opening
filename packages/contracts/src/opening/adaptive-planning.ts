@@ -55,6 +55,11 @@ export const courseGoalSchema = z
     priority: z.number().int().min(0).max(5).optional(),
     revision: z.number().int().nonnegative().optional(),
     milestones: z.array(courseMilestoneSchema).max(8).optional(),
+    goalId: uuidSchema.optional(),
+    kind: z.enum(["final-exam", "entrance-exam", "interest", "maintenance", "custom"]).optional(),
+    examDate: localDateSchema.nullable().optional(),
+    lifecycle: z.enum(["active", "maintenance", "reduced", "paused", "archived", "stopped"]).optional(),
+    successCriteria: z.string().max(2000).optional(),
   })
   .strict();
 
@@ -67,6 +72,24 @@ export const courseGoalUpdateSchema = z.object({
   milestones: z.array(courseMilestoneUpdateSchema).max(8).optional(),
 }).strict();
 
+/** An explicit course-local span opt-in; account switches remain authoritative. */
+export const spanTutorGrantSchema = z.object({
+  enabled: z.boolean(),
+  dailyMinutes: z.number().int().min(10).max(180),
+  revision: z.number().int().positive(),
+  confirmedAt: isoDateTimeSchema,
+  updatedAt: isoDateTimeSchema,
+  expiresOn: localDateSchema.nullable(),
+}).strict();
+export const spanTutorGrantUpdateSchema = z.object({
+  courseId: uuidSchema.transform(value => value.toLowerCase()),
+  enabled: z.boolean(),
+  dailyMinutes: z.number().int().min(10).max(180),
+  expiresOn: localDateSchema.nullable(),
+  expectedRevision: z.number().int().nonnegative(),
+}).strict();
+export type SpanTutorGrant = z.infer<typeof spanTutorGrantSchema>;
+export type SpanTutorGrantUpdate = z.infer<typeof spanTutorGrantUpdateSchema>;
 /** Stored in workspace_preferences.adaptive_planning, apart from semester settings. */
 export const openingAdaptivePrefsSchema = z
   .object({
@@ -75,6 +98,9 @@ export const openingAdaptivePrefsSchema = z
     /** Explicit automation opt-in; absent historical coach preferences remain advisory. */
     coachAutoAcceptEnabled: z.boolean().optional(),
     courseGoals: z.record(uuidSchema, courseGoalSchema),
+    /** Persisted selections only; formal course_goals own the selected definitions. */
+    courseGoalRefs: z.record(uuidSchema, uuidSchema).optional(),
+    spanTutorGrants: z.record(uuidSchema.refine(value => value === value.toLowerCase(), "Course grant keys must be canonical UUIDs"), spanTutorGrantSchema).optional(),
     /** Server-owned monotonic revisions survive explicit goal removal. */
     courseGoalRevisions: z.record(uuidSchema, z.number().int().nonnegative()).optional(),
   })
@@ -92,6 +118,7 @@ export const openingAdaptivePrefsPatchSchema = z
     autonomy: planningAutonomySchema.optional(),
     coachBudgetMinutes: z.number().int().min(10).max(600).optional(),
     coachAutoAcceptEnabled: z.boolean().optional(),
+    spanTutorGrant: spanTutorGrantUpdateSchema.optional(),
     courseGoal: z
       .object({
         courseId: uuidSchema,

@@ -25,6 +25,13 @@ export async function startFirstLearning(deps: FirstLearningDependencies, scope:
     intent: input, startDate: today, planTimeZone: timeZone, days: initialLearningDays(input, today, timeZone),
   }, { replayOnly: Boolean(input.targetDate && input.targetDate < today) });
   const { activity } = initialized;
+  if (input.startTime === null) {
+    return { activityId: activity.id, taskId: null, courseId: initialized.courseId, planDate: today,
+      planStartDate: initialized.startDate, planEndDate: initialized.endDate, plannedDays: 0,
+      generateStatus: activity.generateStatus, contentVersion: activity.contentVersion,
+      draftCreated: false, scheduleInitialized: false,
+      href: initialized.courseId ? `/opening/courses/${initialized.courseId}/study?activity=${activity.id}` : "/opening/today" };
+  }
   let taskId = initialized.firstTaskId;
   // Recover an older, interrupted onboarding without reattaching a course the learner may have removed.
   if (!taskId && initialized.legacy) {
@@ -37,7 +44,8 @@ export async function startFirstLearning(deps: FirstLearningDependencies, scope:
   }
   if (!taskId) throw new ApiError("CONFLICT", "首次学习任务已不可用，请从课程继续。", 409);
   let scheduleInitialized = false;
-  if (!preference.saved) scheduleInitialized = await deps.settings.initialize(scope, initialLearningSchedule(input, initialized.startDate));
+  const schedule = initialLearningSchedule(input, initialized.startDate);
+  if (!preference.saved && schedule) scheduleInitialized = await deps.settings.initialize(scope, schedule);
   const current = await deps.settings.get(scope);
   if (current.invalidStoredSettings) throw new ApiError("CONFLICT", "学习时间设置已变化，请先到设置页检查。", 409);
   const planDate = localDateKeyInZone(now, current.settings?.timeZone ?? timeZone);

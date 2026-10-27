@@ -59,9 +59,9 @@ const embeddingExample: TemplateLine = { value: JSON.stringify({ baseUrl: "https
   modelName: "your-embedding-model", apiKeyEnv: "PRIMARY_MODEL_API_KEY", dimensions: 1536,
   inputCentsPerMillion: 2, requestDimensions: true }), commented: true };
 const modelCatalogExample: TemplateLine = {
-  value: JSON.stringify([{ id: "fast", label: "日常模型", providerId: "primary", providerLabel: "主供应商", modelName: "your-model-name",
-    baseUrl: "https://your-provider.example/v1", apiKeyEnv: "PRIMARY_MODEL_API_KEY", inputCentsPerMillion: 10, outputCentsPerMillion: 20,
-    supportsVision: false, supportsAudio: false, billing: "metered", dailyRequestCap: null }]),
+  value: JSON.stringify([{ id: "fast", label: "Luna 视觉资料模型", providerId: "primary", providerLabel: "主供应商", modelName: "gpt-6-luna",
+    baseUrl: "https://your-provider.example/v1", apiKeyEnv: "PRIMARY_MODEL_API_KEY", inputCentsPerMillion: 0, outputCentsPerMillion: 0,
+    supportsVision: true, supportsAudio: false, billing: "metered", dailyRequestCap: null }]),
   commented: true,
 };
 
@@ -128,7 +128,7 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_MODEL_DAILY_CAP_CENTS", group: "model", doc: "Daily paid cap in provider billing cents (workspace planning timezone). In limited mode 0 disables paid calls; configured free_tier models keep their request cap.", consumers: both, kind: "int", min: 0, secret: false, dev: { value: "0" }, docker: { value: "0" } },
   { name: "OPENING_MODEL_INPUT_CENTS_PER_MILLION", group: "model", doc: "Input price per million tokens.", consumers: both, kind: "string", secret: false, dev: { value: "0" }, docker: { value: "0" } },
   { name: "OPENING_MODEL_OUTPUT_CENTS_PER_MILLION", group: "model", doc: "Output price per million tokens.", consumers: both, kind: "string", secret: false, dev: { value: "0" }, docker: { value: "0" } },
-  { name: "OPENING_MODEL_CATALOG", group: "model", doc: "Optional JSON catalog (max 32). apiKeyEnv names a SERVER secret; never inline a key. supportsAudio defaults false; billing=metered requires positive prices, billing=free_tier allows zero prices and requires dailyRequestCap=1..100000. See docs/operations/opening-model-routing.md.", consumers: both, kind: "json", secret: false, dev: modelCatalogExample, docker: modelCatalogExample },
+  { name: "OPENING_MODEL_CATALOG", group: "model", doc: "Optional JSON catalog (max 32). Luna visual example uses unconfigured zero prices: fill verified provider URL/rates and media token/byte/rate bounds before image calls. apiKeyEnv names a SERVER secret; never inline a key. supportsAudio defaults false; billing=metered requires positive prices, billing=free_tier allows zero prices and requires dailyRequestCap=1..100000. See docs/operations/opening-model-routing.md.", consumers: both, kind: "json", secret: false, dev: modelCatalogExample, docker: modelCatalogExample },
   { name: "OPENING_MODEL_DEFAULT_ID", group: "model", doc: "Catalog default model id.", consumers: both, kind: "string", secret: false, dev: { value: "fast", commented: true }, docker: { value: "fast", commented: true } },
   { name: "OPENING_EMBEDDING_CONFIG", group: "model", doc: "Optional server JSON for semantic retrieval: HTTPS baseUrl, modelName, apiKeyEnv, dimensions (1..4096), inputCentsPerMillion. Set requestDimensions=false for providers that do not accept that parameter. A free_tier requires zero price and dailyRequestCap. Missing configuration/key keeps lexical retrieval. Index and query use the same model identity.", consumers: both, kind: "json", secret: false, dev: embeddingExample, docker: embeddingExample },
   { name: "PRIMARY_MODEL_API_KEY", group: "model", doc: "Example catalog apiKeyEnv target (secret store only).", consumers: both, kind: "string", secret: true, dev: { value: "", commented: true }, docker: { value: "", commented: true } },

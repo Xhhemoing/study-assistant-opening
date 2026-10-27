@@ -74,3 +74,11 @@ describe("server model catalog", () => {
     }
   });
 });
+it("provides a Luna visual catalog example with prices deliberately unconfigured",async()=>{
+ const { ENV_REGISTRY }=await import("./registry");
+ const sample=ENV_REGISTRY.find(row=>row.name==="OPENING_MODEL_CATALOG")!.dev!.value;
+ const entries=JSON.parse(sample);expect(entries[0]).toMatchObject({modelName:"gpt-6-luna",supportsVision:true,inputCentsPerMillion:0,outputCentsPerMillion:0});
+ const configured=loadOpeningModelCatalog({OPENING_MODEL_CATALOG:sample,OPENING_MODEL_DAILY_CAP_CENTS:"100",PRIMARY_MODEL_API_KEY:"unit-placeholder"});
+ expect(configured.models[0]!.availability).toBe("pricing_missing");
+ expect(loadOpeningModelCatalog({OPENING_MODEL_CATALOG:sample}).models[0]!.availability).toBe("missing_key");
+});

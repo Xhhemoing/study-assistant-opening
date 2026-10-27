@@ -84,3 +84,15 @@ it("does not use an unrelated budget-disabled model to explain a missing selecte
   mocks.routing.mockResolvedValue({ settings: openingAiSettingsSchema.parse({ ...DEFAULT_OPENING_AI_SETTINGS, defaultModelId: "removed" }), merged });
   await expect(resolveAutoGradePolicy({} as never, scope)).resolves.toMatchObject({ modelAvailable: false, modelUnavailableReason: "no_model" });
 });
+it("uses configured Luna for a sealed photo while text keeps the ordinary default", async () => {
+  const luna = { ...model, id: "luna", modelName: "gpt-6-luna", supportsVision: true,
+    mediaInputTokenUpperBound: 3000, mediaMaxInputBytes: 100000, mediaInputCentsPerMillion: 100 };
+  mocks.routing.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS,
+    merged: mergeOpeningCatalog([], [model, luna], { defaultModelId: "paid", dailyCapCents: 100 }) });
+  await expect(resolveAutoGradePolicy({} as never, scope, true)).resolves.toMatchObject({
+    modelAvailable: true, primaryModel: { supportsVision: true, modelSnapshot: { id: "luna", modelName: "gpt-6-luna" } },
+  });
+  await expect(resolveAutoGradePolicy({} as never, scope)).resolves.toMatchObject({
+    modelAvailable: true, primaryModel: { supportsVision: false, modelSnapshot: { id: "paid", modelName: "fixture" } },
+  });
+});

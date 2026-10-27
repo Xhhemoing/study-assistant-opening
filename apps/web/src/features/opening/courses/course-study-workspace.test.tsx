@@ -85,7 +85,7 @@ it("waits for task admission before requesting the bound activity checkpoint", a
   const taskId = "33333333-3333-4333-8333-333333333333";
   await act(async () => root.render(createElement(CourseStudyWorkspace, { courseId: data.course.id, activityId: data.activity.id,
     taskId, teachingEnabled: true, teachingCompileEnabled: false, sourceIds: [], timeZone: "Asia/Shanghai", api })));
-  expect(openCourseStudy).toHaveBeenCalledWith(api, expect.objectContaining({ activityId: data.activity.id, taskId }));
+  expect(openCourseStudy).toHaveBeenCalledWith(api, expect.objectContaining({ activityId: data.activity.id, taskId }), expect.objectContaining({ task: expect.any(Function), start: expect.any(Function) }));
   expect(getTeachingResume).not.toHaveBeenCalled();
   expect(data.teachingMount).not.toHaveBeenCalled();
   await act(async () => admit());

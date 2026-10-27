@@ -48,3 +48,27 @@ describe("explicit model routing", () => {
     expect(openingModelSnapshot({ ...second, apiKey: "private" } as never)).toEqual({ id: "two", providerId: "b", modelName: "model-2", inputCentsPerMillion: 10, outputCentsPerMillion: 20 });
   });
 });
+
+describe("Luna visual defaults",()=>{
+ const luna:OpeningModelSummary={...first,id:"luna",modelName:"gpt-6-luna",supportsVision:true};
+ it.each(["materials.recognize-page","practice.recognize-photo","practice.grade-photo","teaching.compile-visual"] as const)("selects configured Luna for %s without borrowing a text default",task=>{
+  expect(resolveModelForTask([first,luna],{...DEFAULT_OPENING_AI_SETTINGS,defaultModelId:"one"},task,"one")).toBe(luna);
+ });
+ it("preserves explicit task routes and manual locks, including their capability failures",()=>{
+  const visualOther={...first,supportsVision:true},settings={...DEFAULT_OPENING_AI_SETTINGS,taskRoutes:{"materials.recognize-page":{primary:"one",fallback:null}}};
+  expect(resolveModelForTask([visualOther,luna],settings,"materials.recognize-page","luna")).toBe(visualOther);
+  expect(resolveModelForTask([visualOther,luna],{...settings,mode:"manual",manualModelId:"one"},"materials.recognize-page","luna")).toBe(visualOther);
+  expect(()=>resolveModelForTask([first,luna],settings,"materials.recognize-page","luna")).toThrow(/图片输入/);
+ });
+ it("requires the exact configured model and keeps its unavailable or missing-vision failure explicit",()=>{
+  expect(()=>resolveModelForTask([first,{...luna,modelName:"alias-gpt-6-luna"}],DEFAULT_OPENING_AI_SETTINGS,"materials.recognize-page","one")).toThrow(/gpt-6-luna/);
+  expect(()=>resolveModelForTask([first,{...luna,supportsVision:false}],DEFAULT_OPENING_AI_SETTINGS,"materials.recognize-page","one")).toThrow(/图片输入/);
+  expect(()=>resolveModelForTask([first,{...luna,availability:"missing_key"}],DEFAULT_OPENING_AI_SETTINGS,"materials.recognize-page","one")).toThrow(/不会自动切换/);
+ });
+ it("does not silently choose between Luna providers or switch away from a preferred unavailable provider",()=>{
+  const other={...luna,id:"luna-other",providerId:"another"};
+  expect(()=>resolveModelForTask([first,luna,other],DEFAULT_OPENING_AI_SETTINGS,"materials.recognize-page","one")).toThrow(/多个/);
+  expect(resolveModelForTask([luna,other],{...DEFAULT_OPENING_AI_SETTINGS,defaultModelId:"luna-other"},"materials.recognize-page","luna")).toBe(other);
+  expect(()=>resolveModelForTask([{...luna,availability:"missing_key"},other],{...DEFAULT_OPENING_AI_SETTINGS,defaultModelId:"luna"},"materials.recognize-page","luna-other")).toThrow(/不会自动切换/);
+ });
+});

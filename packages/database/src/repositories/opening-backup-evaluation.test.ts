@@ -27,3 +27,12 @@ it("retains imported classroom identity without inventing access to its original
     stem_snapshot: "Original question", evaluation_spec: { kind: "teaching_question", revisionId: "revision", blockId: "block" } };
   expect(normalizeOpeningImportedEvaluation("opening_learning_item_versions", row)).toEqual({ ...row, evaluation_spec: null });
 });
+it("restores learning history without restoring tutor consent or cancellation ownership", () => {
+  const consent = { enabled: true, dailyMinutes: 30, revision: 2 };
+  const prefs = { adaptive_planning: { autonomy: "manual", spanTutorGrants: { course: consent } } };
+  expect(normalizeOpeningImportedEvaluation("workspace_preferences", prefs)).toEqual({ adaptive_planning: { autonomy: "manual", spanTutorGrants: { course: { ...consent, enabled: false } } } });
+  const row = { learning_protocol: { protocolId: "span-delayed-3d-v1", tutorAutomation: { createdTaskVersion: 1 } } };
+  expect(normalizeOpeningImportedEvaluation("opening_retest_activities", row)).toEqual({ learning_protocol: { protocolId: "span-delayed-3d-v1" } });
+  expect(consent.enabled).toBe(true);
+  expect(row.learning_protocol).toHaveProperty("tutorAutomation");
+});

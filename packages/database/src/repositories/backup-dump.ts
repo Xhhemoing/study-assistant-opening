@@ -1,4 +1,5 @@
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
+import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import {
   buildNativeBackup,
@@ -69,6 +70,8 @@ export async function dumpWorkspaceSnapshot(
     selectAll(sql, "learning_events", workspaceId),
   ]);
   const latestMigrationId = (await listMigrationFiles()).at(-1);
+  const goalLinks = await sql`SELECT goal_id,course_id FROM course_goal_links WHERE workspace_id=${workspaceId}`;
+  for (const goal of goals) goal.courseIds = [...new Set([goal.courseId, ...goalLinks.filter(link => link.goal_id === goal.id).map(link => link.course_id)])];
   if (!latestMigrationId) {
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
@@ -80,7 +83,7 @@ export async function dumpWorkspaceSnapshot(
     memberships,
     goals,
     windows,
-    documents,
+    documents: await attachNativeLearningLinks(sql, workspaceId, documents),
     blocks,
     relations,
     revisions,

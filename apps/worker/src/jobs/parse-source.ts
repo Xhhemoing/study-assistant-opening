@@ -9,7 +9,8 @@ import type { OpeningSourceRepository } from "@aistudy/database";
 import { createDoclingProcess, UnsupportedMimeError, ConversionFailedError } from "../parsers/docling-process";
 import { markdownChunks } from "./markdown-chunks";
 import { htmlChunks } from "./html-chunks";
-import type { ParserRunner } from "../parsers/types";
+import type { ParserRunner, ParsedPage, VisualPageKind } from "../parsers/types";
+import type { OpeningScope } from "@aistudy/database";
 import type { OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
@@ -19,8 +20,18 @@ const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
 
+export type ParseSourceVisualPageInput = {
+  scope: OpeningScope; job: OpeningJobRecord; sourceId: string; sourceVersion: number;
+  physicalPage: number; nativeText: string; visualKinds: VisualPageKind[];
+  /** Worker-owned original file, not a parser/model-provided image path. */
+  localFilePath: string; mime: string; signal: AbortSignal;
+};
+export type ParseSourceVisualPageResult = { text: string; imageObjectKey: string };
+
 export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: OpeningSourceChunksRepository; storage: Storage; runner: ParserRunner; tempDir: string;
-  segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number }) {
+  segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
+  recognizePage?: (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult>;
+  assertCurrent?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void> }) {
   const parser = createDoclingProcess({ run: deps.runner });
   // The parser child runs with cwd=services/parser; a relative tempDir would
   // resolve there and the CLI would reject the input as missing (exit 4).
@@ -46,22 +57,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
       return { pages: chunks.length };
     }
-    if (IMAGE_SOURCE_MIMES.has(source.mime)) {
-      const objectKey = deps.storage.finalKey(source.id, source.version);
-      // OCR text is optional: empty string is allowed when imageObjectKey is set.
-      await deps.chunks.replaceChunks(scope, {
-        sourceId: source.id,
-        sourceVersion: source.version,
-        chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: objectKey }],
-      });
-      return { pages: 1, imageOnly: true };
-    }
+    const isImage = IMAGE_SOURCE_MIMES.has(source.mime);
+    if (isImage && job.claimToken && !deps.assertCurrent) throw new Error("source execution check is required for claimed image parse jobs");
     // Legacy .ppt and .eml: keep the object stored, but do not claim readable text for tutoring.
     if (source.mime === "application/vnd.ms-powerpoint" || source.mime === "message/rfc822") {
       await deps.sources.markParseState(scope, source.id, "unsupported");
       return { unsupported: true, storedOnly: true };
     }
-    if (source.mime !== "application/pdf" && source.mime !== "application/vnd.openxmlformats-officedocument.presentationml.presentation") {
+    if (!isImage && source.mime !== "application/pdf" && source.mime !== "application/vnd.openxmlformats-officedocument.presentationml.presentation") {
       await deps.sources.markParseState(scope, source.id, "unsupported");
       return { unsupported: true };
     }
@@ -71,9 +74,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
     const temp = path.join(workDir, "source");
     let execution: Awaited<ReturnType<typeof watchPdfExecution>> | undefined;
     try {
-      if (source.mime === "application/pdf" && deps.segments) execution = await watchPdfExecution(
-        () => deps.segments!.assertCurrent(scope, { sourceId: source.id, sourceVersion: source.version }), deps.executionPollMs,
-      );
+      const assertCurrent = (isImage || source.mime === "application/pdf") && deps.assertCurrent
+        ? () => deps.assertCurrent!(scope, { sourceId: source.id, sourceVersion: source.version })
+        : source.mime === "application/pdf" && deps.segments
+          ? () => deps.segments!.assertCurrent(scope, { sourceId: source.id, sourceVersion: source.version }) : undefined;
+      if (assertCurrent) execution = await watchPdfExecution(assertCurrent, deps.executionPollMs);
       const signal = execution?.signal ?? new AbortController().signal;
       signal.throwIfAborted();
       const response = await fetch(url, { signal });
@@ -81,13 +86,35 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       let bytes = 0;
       const limited = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; if (bytes > source.bytes) callback(new Error("source download exceeds declared bytes")); else { callback(null, chunk); } } });
       await pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), limited, createWriteStream(temp), { signal });
-      const pages = source.mime === "application/pdf"
+      const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }] : source.mime === "application/pdf"
         ? await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
           segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds })
         : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
       signal.throwIfAborted();
-      await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: pages.map((page) => ({ page: page.page, slideLabel: null, startMs: null, endMs: null, text: page.text, imageObjectKey: null })) });
-      return { pages: pages.length };
+      const chunks = [];
+      for (const page of pages) {
+        signal.throwIfAborted();
+        const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || source.mime === "application/pdf") ? ["scan" as const] : [];
+        let text = page.text;
+        let imageObjectKey: string | null = null;
+        if ((isImage || source.mime === "application/pdf") && visualKinds.length) {
+          if (!deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
+          await assertCurrent?.();
+          const result = await deps.recognizePage({ scope, job, sourceId: source.id, sourceVersion: source.version,
+            physicalPage: page.page, nativeText: page.text, visualKinds, localFilePath: temp, mime: source.mime, signal });
+          signal.throwIfAborted();
+          await assertCurrent?.();
+          if (typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
+          const extractionLabel = visualKinds.includes("scan") ? "本地提取（可能含OCR）" : "原生提取";
+          text = `${page.text ? `[${extractionLabel}]\n${page.text}\n\n` : ""}[视觉转写与描述]\n${result.text}`;
+          imageObjectKey = result.imageObjectKey;
+        }
+        chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
+      }
+      signal.throwIfAborted();
+      await assertCurrent?.();
+      await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks });
+      return isImage ? { pages: 1, imageOnly: false } : { pages: pages.length };
     } catch (error) {
       if (error instanceof UnsupportedMimeError) throw new UnsupportedSourceError("unsupported source MIME");
       if (error instanceof ConversionFailedError) throw new Error(`document conversion failed: ${error.message}`);

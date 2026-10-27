@@ -36,6 +36,7 @@ export const courses = pgTable(
     interventionSettings: jsonb("intervention_settings"),
   },
   (table) => [
+    uniqueIndex("courses_workspace_id_id_uidx").on(table.workspaceId, table.id),
     uniqueIndex("courses_workspace_slug_uidx").on(table.workspaceId, table.slug),
   ],
 );

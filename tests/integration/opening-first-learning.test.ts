@@ -76,3 +76,23 @@ describe("first-learning persistence and recovery", () => {
     expect(count!.count).toBe(0);
   });
 });
+
+it("starts and replays without a schedule, preserving existing workspace settings and learner goal edits", async () => {
+  const { deps, input } = setup();
+  const before = await deps.settings.get(fixture.scope);
+  const unscheduled = { ...input, startTime: null, minutes: 20 };
+  deps.now = () => new Date("2026-10-19T03:00:00Z");
+  const first = await startFirstLearning(deps, fixture.scope, unscheduled);
+  expect(first).toMatchObject({ taskId: null, plannedDays: 0, draftCreated: false, scheduleInitialized: false });
+  expect(await deps.settings.get(fixture.scope)).toEqual(before);
+  const [row] = await fixture.sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${fixture.scope.workspaceId}`;
+  expect(row!.adaptive_planning.courseGoals[first.courseId!].weeklyMinutes).toBe(0);
+  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning=jsonb_set(adaptive_planning,
+    ${["courseGoals", first.courseId!, "weeklyMinutes"]}::text[], '90'::jsonb) WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const replay = await startFirstLearning(deps, fixture.scope, unscheduled);
+  expect(replay).toMatchObject({ activityId: first.activityId, courseId: first.courseId, taskId: null, plannedDays: 0 });
+  const [after] = await fixture.sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${fixture.scope.workspaceId}`;
+  expect(after!.adaptive_planning.courseGoals[first.courseId!].weeklyMinutes).toBe(90);
+  const [counts] = await fixture.sql`SELECT count(*)::int AS count FROM opening_tasks WHERE course_id=${first.courseId!}`;
+  expect(counts!.count).toBe(0);
+});

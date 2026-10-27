@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[] };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[] } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -21,7 +21,11 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (!page || typeof page !== "object") throw new TypeError("invalid PDF segment page");
     const row = page as Record<string, unknown>;
     if (row.page !== start + index || typeof row.text !== "string" || row.text.length > 200_020 || row.imagePath !== null) throw new TypeError("invalid PDF segment page");
-    return { page: row.page as number, text: row.text, imagePath: null };
+    if (row.visualKinds !== undefined && (!Array.isArray(row.visualKinds) || row.visualKinds.length > 4
+      || row.visualKinds.some(kind => !["scan", "formula", "table", "picture"].includes(String(kind)))
+      || new Set(row.visualKinds).size !== row.visualKinds.length)) throw new TypeError("invalid PDF visual classification");
+    return { page: row.page as number, text: row.text, imagePath: null,
+      ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }) };
   });
 }
 

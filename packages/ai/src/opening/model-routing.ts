@@ -10,14 +10,23 @@ export function selectedOpeningModelId(settings: OpeningAiSettings, mode: TutorM
   return settings.mode === "manual" ? settings.manualModelId : settings.routes[mode] ?? settings.defaultModelId ?? serverDefaultId;
 }
 /**
- * Manual lock → task route → tutor mode route (tutor tasks) → workspace default → server default.
+ * Manual lock → task route → declared visual default / tutor mode route → workspace default → server default.
  * The manual lock wins so "use this one model everywhere" stays one switch.
  */
-export function selectedModelIdForTask(settings: OpeningAiSettings, task: ModelTaskKey, serverDefaultId: string | null): string | null {
+export function selectedModelIdForTask(settings: OpeningAiSettings, task: ModelTaskKey, serverDefaultId: string | null, models?: readonly OpeningModelSummary[]): string | null {
   if (settings.mode === "manual") return settings.manualModelId;
   const taskPrimary = settings.taskRoutes?.[task]?.primary;
   if (taskPrimary) return taskPrimary;
-  const { tutorMode } = modelTaskSpec(task);
+  const { tutorMode, defaultModelName } = modelTaskSpec(task);
+  if (defaultModelName) {
+    if (!models) return null;
+    const candidates = models.filter(model => model.modelName === defaultModelName);
+    for (const preferred of [settings.defaultModelId, serverDefaultId]) {
+      if (preferred && candidates.some(model => model.id === preferred)) return preferred;
+    }
+    if (candidates.length !== 1) return null;
+    return candidates[0]!.id;
+  }
   if (tutorMode) return selectedOpeningModelId(settings, tutorMode, serverDefaultId);
   return settings.defaultModelId ?? serverDefaultId;
 }
@@ -29,7 +38,15 @@ export function resolveOpeningModel<T extends OpeningModelSummary>(models: T[], 
   return pickAvailableModel(models, selectedOpeningModelId(settings, mode, serverDefaultId));
 }
 export function resolveModelForTask<T extends OpeningModelSummary>(models: T[], settings: OpeningAiSettings, task: ModelTaskKey, serverDefaultId: string | null): T {
-  return assertTaskInputs(pickAvailableModel(models, selectedModelIdForTask(settings, task, serverDefaultId)), task);
+  const id = selectedModelIdForTask(settings, task, serverDefaultId, models);
+  const { defaultModelName } = modelTaskSpec(task);
+  if (id === null && defaultModelName && settings.mode !== "manual" && !settings.taskRoutes?.[task]?.primary) {
+    const count = models.filter(model => model.modelName === defaultModelName).length;
+    throw new OpeningModelRoutingError(count > 1
+      ? `存在多个 ${defaultModelName} 供应商配置，请明确选择此任务的模型或目录默认项；不会自动切换供应商。`
+      : `请先配置 ${defaultModelName} 及图片输入能力、密钥和实际价格，或明确选择此任务的模型。`);
+  }
+  return assertTaskInputs(pickAvailableModel(models, id), task);
 }
 /** Null when no fallback is configured or it cannot serve the task; the primary error then stands. */
 export function resolveFallbackModelForTask<T extends OpeningModelSummary>(models: T[], settings: OpeningAiSettings, task: ModelTaskKey): T | null {

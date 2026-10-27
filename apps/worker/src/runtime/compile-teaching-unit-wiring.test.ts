@@ -16,7 +16,7 @@ const content = vi.hoisted(() => ({
   publishActivitySpec: vi.fn(),
 }));
 
-const model = vi.hoisted(() => ({ complete: vi.fn() }));
+const model = vi.hoisted(() => ({ complete: vi.fn(), task: vi.fn() }));
 const readFocus = vi.hoisted(() => vi.fn());
 vi.mock("./model-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./model-gateway")>();
@@ -24,12 +24,14 @@ vi.mock("./model-gateway", async (importOriginal) => {
   return {
     ...actual,
     createDbModelGateway: () => createModelGateway({
-      resolve: async () => ({
+      resolve: async (_scope, task) => { model.task(task); return ({
         provider: model,
-        modelSnapshot: { id: "teach-model", providerId: "p", modelName: "real-model", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+        modelSnapshot: { id: "teach-model", providerId: "p", modelName: "real-model", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+          mediaInputTokenUpperBound: 1000, mediaMaxInputBytes: 1024, mediaInputCentsPerMillion: 1 },
         inputCentsPerMillion: 1,
         outputCentsPerMillion: 1,
-      }),
+        supportsVision: true, mediaInputTokenUpperBound: 1000, mediaMaxInputBytes: 1024, mediaInputCentsPerMillion: 1,
+      }); },
     }),
   };
 });
@@ -39,6 +41,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
   readOpeningTeachingCompilerFocus: readFocus,
+  assertOpeningCourseRouteReady: vi.fn(async () => {}),
   createOpeningSourceEmbeddingsRepository: () => ({
     authorizeChunks: async (_scope: unknown, chunks: SourceChunk[]) => ({ chunks, privacyEpoch: 0 }),
     hasIndex: async () => false,
@@ -171,6 +174,18 @@ const payload = {
 };
 
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
+  it("injects the actual page loader and uses the visual task only for image-bearing compilation", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const dependencies = shared();
+    dependencies.chunks.listForSources = vi.fn(async () => [{ ...chunk, imageObjectKey: "owned/page1" }]);
+    const pageImages = vi.fn(async () => [{ sourceId: SOURCE, physicalPage: 1, mediaType: "image/png" as const, data: "data:image/png;base64,AA==" }]);
+    const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, { ...dependencies, pageImages }));
+    await run(job, payload);
+    expect(pageImages).toHaveBeenCalledWith(scope, { sourceIds: [SOURCE], sourceVersions: { [SOURCE]: 1 }, physicalPage: 1 });
+    expect(model.task).toHaveBeenCalledWith("teaching.compile-visual");
+    expect(model.complete.mock.calls[0]![0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: [expect.objectContaining({ sourceId: SOURCE, physicalPage: 1 })] });
+  });
+
   it("does not spend or publish an empty lesson when the operator disables compilation", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "0");
     const dependencies = shared();

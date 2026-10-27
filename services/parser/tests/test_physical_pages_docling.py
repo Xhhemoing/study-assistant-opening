@@ -4,6 +4,7 @@ Run separately in the pinned parser venv. The stdlib-only suite tests boundary
 failures; this suite exercises real ConversionResult/Page/ReadingOrderModel and
 TableItem export, including the upstream merge that corrupts charspans.
 """
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,6 +42,14 @@ def result_for(*page_elements):
 
 
 class PhysicalPagesDoclingTests(unittest.TestCase):
+    def test_converter_keeps_text_regions_without_native_cells_for_visual_routing(self):
+        with patch.dict(os.environ, {"PARSER_OCR_MODEL_DIR": ""}), patch("docling.document_converter.DocumentConverter") as converter:
+            cli.create_converter()
+        options = converter.call_args.kwargs["format_options"][InputFormat.PDF].pipeline_options
+        self.assertFalse(options.do_ocr)
+        self.assertTrue(options.layout_options.keep_empty_clusters)
+        self.assertTrue(options.generate_parsed_pages)
+
     def test_whole_reading_order_pipeline_merges_document_but_retains_page_assemblies(self):
         result = result_for([text_element(11, "inter-")], [text_element(12, "national")], [])
         before = [page.assembled.model_dump_json() for page in result.pages]
@@ -115,6 +124,10 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertNotIn("page-eleven-only", output[12])
         self.assertNotIn("x²", output[12])
         self.assertEqual(output[13], "")
+        visual = cli.visual_kinds_by_page(result, cli.texts_by_page(result))
+        self.assertIn("formula", visual[11])
+        self.assertIn("table", visual[12])
+        self.assertEqual(visual[13], ["scan"])
 
 
 if __name__ == "__main__":

@@ -6,8 +6,43 @@ import { isOpeningManualGradingRevision, readOpeningAiGradingContext } from "./o
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
 import { checkOpeningAutoGradeBudget, readOpeningAutoGradeSkip, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
+import { openingAnswerInterpretationPriorCostUnresolved } from "./opening-answer-interpretation-ledger";
+import { readTeachingQuestionForGrading } from "./opening-teaching-question";
+import { readOpeningPinnedTeachingChunks } from "./opening-grading-visual-references";
 
 const kind = "grade-observation";
+
+/** Pre-submit routing hint from the owned immutable question, never client media flags.
+ * The observation transaction revalidates the complete context before admission. */
+export async function readOpeningAttemptGradingUsesVision(sql: Sql, scope: Scope, attemptId: string): Promise<boolean | null> {
+  const [item] = await sql`SELECT v.*,a.source_ids AS attempt_source_ids,a.source_versions AS attempt_source_versions
+    FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id
+      AND v.problem_id=a.problem_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
+    JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
+    WHERE a.id=${attemptId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
+  if (!item) throw learningError("NOT_FOUND", "找不到这次作答的原题");
+  try {
+    const teaching = await readTeachingQuestionForGrading(sql as unknown as TransactionSql, scope, item);
+    const versions = item.attempt_source_versions as Record<string, number>;
+    const refs = teaching?.sourceRefs ?? (item.source_id ? [{ sourceId: String(item.source_id),
+      version: versions?.[String(item.source_id)], chunkId: item.chunk_id == null ? null : String(item.chunk_id),
+      page: item.physical_page == null ? null : Number(item.physical_page) }] : []);
+    const chunks = await readOpeningPinnedTeachingChunks(sql, scope, refs, versions ?? {});
+    return chunks.some(chunk => Boolean(chunk.image_object_key) && chunk.page != null);
+  } catch (error) {
+    // A previously issued question may outlive a referenced chunk. Preserve the
+    // answer fact while refusing automatic grading; null must never mean text.
+    if ((error as { code?: unknown } | null)?.code === "CONFLICT") return null;
+    throw error;
+  }
+}
+
+export async function readOpeningObservationGradingUsesVision(sql: Sql, scope: Scope, observationId: string): Promise<boolean | null> {
+  const [observation] = await sql`SELECT attempt_id FROM opening_learning_observations
+    WHERE id=${observationId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!observation?.attempt_id) throw learningError("NOT_FOUND", "找不到这次作答的原题");
+  return readOpeningAttemptGradingUsesVision(sql, scope, String(observation.attempt_id));
+}
 export const openingAiGradingJobKey = (scope: Scope, input: GradeObservationJobPayload) =>
   `ai-grade:${scope.workspaceId}:${input.rootObservationId}:${input.answerRevision}`;
 
@@ -47,13 +82,14 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
     AND key=${openingAiGradingJobKey(scope, input)} AND kind=${kind}`;
   const operationId = String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${head.id}`);
   const ledger = await readOpeningAiGradingLedger(tx, scope, operationId);
+  const interpretationCostUnresolved=await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(head.id));
   const usable = record.revisionKind !== "retract" && record.eligibility?.usableForCurrentVersion === "yes";
   const evaluated = Boolean(record.aiEvaluation || record.serverEvaluation);
   const canGrade = usable && !evaluated && !isOpeningManualGradingRevision(head) && Boolean(record.attemptId && record.problemId && record.itemVersionId
     && (record.answer.trim() || head.grading_work_source));
   const matchingJob = job && (job.payload as GradeObservationJobPayload).observationId === head.id;
   const currentJob = matchingJob && Number(job.privacy_epoch) === Number(head.current_epoch);
-  const status = ledger === "unknown" || ledger === "in_flight" && (!currentJob || job.state !== "running") ? "unknown_cost"
+  const status = interpretationCostUnresolved||ledger === "unknown" || ledger === "in_flight" && (!currentJob || job.state !== "running") ? "unknown_cost"
     : evaluated && usable ? record.outcome === "unverified" ? "needs_manual" : "graded"
       : canGrade && currentJob && job.state === "running" ? "grading"
         : canGrade && currentJob && job.state === "queued" ? "queued" : "needs_manual";
@@ -63,14 +99,14 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
     const context = await readOpeningAiGradingContext(tx, scope, { observationId: String(head.id) }, { readOnly: true });
     const budget = await checkOpeningAutoGradeBudget(tx, scope, policy, {
       question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
-      misconceptions: context.misconceptions, workSource: context.workSourceMetadata,
+      misconceptions: context.misconceptions, workSource: context.workSourceMetadata, referenceSources: context.referenceSourceMetadata,
     });
     if (!budget.allowed) autoGradeSkipped = budget.reason === "budget_unavailable" ? "budget_unavailable" : "budget";
   }
   return aiGradingStatusSchema.parse({ rootObservationId: input.rootObservationId, headObservationId: head.id,
     autoGradeSkipped,
     answerRevision: input.answerRevision, jobId: job?.id ?? null, status,
-    retryable: canGrade && ledger === "unsent" && (!job || matchingJob && ["failed", "cancelled", "outcome_unknown"].includes(String(job.state))),
+    retryable: !interpretationCostUnresolved&&canGrade && ledger === "unsent" && (!job || matchingJob && ["failed", "cancelled", "outcome_unknown"].includes(String(job.state))),
     workSource: head.grading_work_source ?? null });
 }
 

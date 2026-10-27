@@ -11,6 +11,7 @@ import { FeedbackPractice } from "./feedback-practice";
 import { createAiGradingPoll } from "./ai-grading-poll";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "./stage-action-bar";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { AnswerInterpretationControl } from "./answer-interpretation-control";
 
 
 export const aiOutcomeLabels = { correct: "正确", incorrect: "需改进", unverified: "暂不能判断" } as const;
@@ -38,6 +39,10 @@ export function AiGradingResult({ record }: { record: LearningObservation }) {
       <div className="break-words text-text-2"><LearningProse text={criterion.feedback} /></div>
     </li>)}</ol>
     {result.transcription ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">查看图片识别文字</summary><p className="whitespace-pre-wrap break-words text-sm leading-6 text-text-2">{result.transcription}</p></details> : null}
+    {result.proofFeedback?<section className="space-y-2" aria-label="证明步骤核对"><p className="text-sm font-medium text-text">证明步骤 · {result.proofFeedback.coverage==="complete"?"已逐步核对":result.proofFeedback.coverage==="partial"?"尚有步骤未核对":"原答尚不可读"}</p>
+      <ol className="space-y-3">{result.proofFeedback.steps.map(step=><li key={step.stepIndex} className="rounded border border-line p-3 text-sm leading-6"><p className="font-medium text-text">第{step.stepIndex}步{step.required?"（必要步骤）":""} · {aiOutcomeLabels[step.verdict]}</p>
+        <LearningProse text={step.claim}/><LearningProse text={step.feedback}/><p className="text-text-2">这一步的自检：{step.repairPrompt}</p></li>)}</ol>
+    </section>:<p className="text-xs text-text-3">本次未提供证明步骤的分项结论。</p>}
     {result.followUp && observationStage(record) === "reliable" && result.questionMatch ? <FeedbackPractice key={record.id} question={result.followUp} /> : null}
     {diagnostics ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">批改详情</summary><p className="text-xs leading-6 text-text-3">模型：{result.modelLabel ?? "未提供"} · 自评置信度 {Math.round(result.confidence * 100)}%（不是判分准确率）</p></details> : null}
   </section>;
@@ -121,7 +126,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
     answer_changed: "答案已修改并保存，不会自动重批。请手动重新批改。",
   };
   const skipped = status?.autoGradeSkipped ? skippedMessages[status.autoGradeSkipped] : undefined;
-  const retryLabel = status?.answerRevision && status.answerRevision > 1 ? "重新批改"
+  const retryLabel = status?.answerRevision && status.answerRevision > 1 ? "重新批改（可能产生费用）"
     : status && !status.jobId ? "手动批改" : "重试批改";
   const completion = !pending && !error && status?.autoGradeSkipped !== "answer_changed" && completionAction && canCompleteObservation(record)
     ? { ...completionAction, disabled: disabled || completionAction.disabled } : undefined;
@@ -131,6 +136,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
   return <div className="space-y-3" aria-busy={pending}>
     {photoHref ? <a className="inline-flex min-h-10 items-center text-xs text-accent underline underline-offset-4" target="_blank" rel="noreferrer" href={photoHref}>查看作答照片</a> : null}
     <AiGradingResult record={record} />
+    {photo?<AnswerInterpretationControl key={record.id} observationId={record.id} onUpdated={onGraded} disabled={pending||disabled}/>:null}
     <StageActionBar stage={error ? "failed" : pending ? "processing" : unknown ? "evaluation-pending" : observationStage(record)} message={message}
       primary={completion ?? (status?.retryable && !unknown ? { label: retryLabel, disabled: disabled || sending, onClick: () => void enqueue() }
         : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>

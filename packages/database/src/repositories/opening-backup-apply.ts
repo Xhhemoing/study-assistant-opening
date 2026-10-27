@@ -19,7 +19,7 @@ import {
   OPENING_RESTORE_APPLY_ORDER,
   planOpeningRestoreApply,
   validateOpeningRestore,
-  validateBackupCourseMilestones,
+  validateBackupCourseMilestones, validateBackupLearningGoals,
   type OpeningBackup,
   type OpeningDeletionMark,
   type OpeningRestoreApplyPlan,
@@ -111,7 +111,7 @@ const RESTORE_GUARANTEES: OpeningRestoreApplyGuarantees = {
 /** Allowlisted insert columns per APPLY_ORDER table (snake_case as exported). */
 export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_ORDER)[number], readonly string[]> = {
   workspace_preferences: [
-    "workspace_id", "default_entry", "ai_settings", "planning_settings", "adaptive_planning", "intervention_settings",
+    "workspace_id", "default_entry", "ai_settings", "planning_settings", "adaptive_planning", "learning_management", "intervention_settings",
     "auto_grade_on_save",
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
@@ -121,6 +121,17 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "assessment_enabled", "retest_suggestions_enabled", "automatic_reminders_enabled", "intervention_settings",
     "retest_suggestions_enabled_at", "automatic_reminders_enabled_at", "created_at", "updated_at",
   ],
+  course_goals: ["id", "workspace_id", "course_id", "kind", "title", "priority", "intensity", "abilities", "strategy_version",
+    "active", "exam_date", "target_date", "revision", "weekly_minutes", "learning_mode", "success_criteria", "lifecycle",
+    "maintenance_interval_days", "milestones", "definition_history", "client_key", "create_intent", "user_override", "archived_at", "created_at", "updated_at"],
+  course_goal_links: ["workspace_id", "goal_id", "course_id"],
+  goal_time_windows: ["id", "workspace_id", "goal_id", "phase", "starts_at", "ends_at", "modifier", "created_at", "updated_at"],
+  course_requirements: ["id", "workspace_id", "owner_user_id", "course_id", "stable_skill_id", "knowledge_node_id", "requirement_key",
+    "title", "position", "mandatory", "goal_ids", "prerequisite_ids", "source_refs", "verification", "evidence_conditions", "revision", "lifecycle", "origin", "approved_at", "created_at", "updated_at"],
+  course_requirement_evidence_links: ["id", "workspace_id", "owner_user_id", "source_requirement_id", "source_requirement_revision",
+    "target_requirement_id", "target_requirement_revision", "stable_skill_id", "revision", "active", "created_at", "updated_at"],
+  opening_learning_asset_links: ["id", "workspace_id", "owner_user_id", "asset_type", "asset_id", "asset_version", "course_id", "goal_id", "requirement_id",
+    "purpose", "origin_json", "source_refs", "status", "revision", "client_key", "create_intent", "created_at", "updated_at"],
   cards: [
     "id", "workspace_id", "owner_user_id", "front", "back", "source_document_id", "syllabus_point_id",
     "tags", "course_id", "skill_label", "source_ids", "archived", "content_version", "paused_until", "maintain_until",
@@ -275,7 +286,10 @@ const JSONB_COLUMNS = new Set([
   "learning_events.payload",
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",
-  "workspace_preferences.adaptive_planning",
+  "workspace_preferences.adaptive_planning", "workspace_preferences.learning_management",
+  "course_goals.abilities", "course_goals.milestones", "course_goals.definition_history", "course_goals.create_intent", "course_goals.user_override",
+  "goal_time_windows.modifier", "course_requirements.source_refs", "course_requirements.verification",
+  "course_requirements.evidence_conditions", "opening_learning_asset_links.origin_json", "opening_learning_asset_links.source_refs", "opening_learning_asset_links.create_intent",
   "workspace_preferences.intervention_settings",
   "courses.intervention_settings",
   "opening_sources.error",
@@ -433,11 +447,12 @@ export async function executeOpeningRestoreApply(
         return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
           [...milestone.history, milestone].some(version => version.evidenceRefs.length > 0)));
       });
-      if (linkedMilestones) {
+      if (linkedMilestones || backup.tables.course_goals?.length || backup.tables.course_requirements?.length) {
         const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
         if (!workspace) throw new Error("restore workspace owner is missing");
         const linkErrors: string[] = [];
         validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
+        validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
         if (linkErrors.length) throw new Error(linkErrors.join("; "));
       }
       const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
@@ -624,4 +639,3 @@ export function createOpeningS3RestoreObjectPut(
     },
   };
 }
-

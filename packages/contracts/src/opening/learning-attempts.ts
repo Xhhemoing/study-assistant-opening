@@ -33,10 +33,13 @@ export const learningAttemptSubmitInputSchema = z.object({
   referenceCheck: referenceCheckInputSchema.optional(), retestId: uuidSchema.nullable().optional(),
   workSource: aiGradingWorkSourceSchema.optional(),
 }).strict();
+export const courseRequirementBindingSchema = z.object({ id: uuidSchema, revision: z.number().int().positive(),
+  stableSkillId: uuidSchema, requirementKey: z.string().trim().min(1).max(200) }).strict();
 export const learningAttemptSchema = z.object({
   id: uuidSchema, workspaceId: uuidSchema, sessionId: uuidSchema, courseId: uuidSchema,
   skillLabel: z.string(), requirementKey: z.string().nullable(),
   problemId: uuidSchema.nullable(), itemVersionId: uuidSchema.nullable(),
+  courseRequirement: courseRequirementBindingSchema.optional(),
   stemSnapshot: z.string().min(1).refine(value => Array.from(value).length <= 2000, "question snapshot exceeds 2000 characters").optional(),
   sourceIds: z.array(uuidSchema), sourceVersions: sourceVersionsSchema,
   startedAt: isoDateTimeSchema, submittedAt: isoDateTimeSchema.nullable(),
@@ -59,7 +62,8 @@ export const learningAttemptContextReadSchema = z.object({
       && attempt.sourceVersions[anchor.sourceId] === anchor.sourceVersion
       : anchor.sourceVersion == null
         && (anchor.blockId ? anchor.contentVersion != null
-          && attempt.requirementKey === `teaching:${anchor.blockId}:v${anchor.contentVersion}`
+          && (attempt.requirementKey === `teaching:${anchor.blockId}:v${anchor.contentVersion}`
+            || (attempt.courseRequirement !== undefined && attempt.requirementKey === attempt.courseRequirement.requirementKey))
           : anchor.contentVersion == null && Boolean(attempt.stemSnapshot))
         && attempt.sourceIds.every(id => Number.isInteger(attempt.sourceVersions[id]))));
 }, "assistant context requires a canonical attempt and saved question version");

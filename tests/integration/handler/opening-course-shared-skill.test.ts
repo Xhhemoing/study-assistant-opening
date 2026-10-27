@@ -1,0 +1,21 @@
+import { randomUUID } from "node:crypto";
+import { beforeAll,afterAll,it,expect,vi } from "vitest";
+import { createOpeningFixture,type OpeningFixture } from "../opening-fixture";
+import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
+import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
+import { GET,POST } from "../../../apps/web/src/app/api/opening/courses/[id]/shared-skills/route";
+let f:OpeningFixture,runtime:ReturnType<typeof createAuthRuntime>;
+beforeAll(async()=>{f=await createOpeningFixture();runtime=createAuthRuntime({databaseUrl:process.env.OPENING_TEST_DATABASE_URL!,authSecret:process.env.AUTH_SECRET!,sessionCookieSecure:false,sessionTtlSeconds:3600,authCookieName:"aistudy_session"});setAuthRuntimeForTests(runtime);vi.stubEnv("OPENING_TEACHING_LOOP","1");});
+afterAll(async()=>{setAuthRuntimeForTests(null);vi.unstubAllEnvs();await runtime?.close();await f?.close();});
+const context=(id:string)=>({params:Promise.resolve({id})});
+const request=(id:string,method="GET",body?:unknown,cookie=f.cookie)=>new Request(`http://localhost/api/opening/courses/${id}/shared-skills`,{method,headers:{cookie,"content-type":"application/json"},...(body===undefined?{}:{body:JSON.stringify(body)})});
+it("authenticates the actual shared-skill boundary and does not disclose another user's requirements",async()=>{
+ const id=randomUUID();await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${id},${f.scope.workspaceId},'Owned course',${id})`;
+ expect((await GET(request(id,"GET",undefined,""),context(id))).status).toBe(401);
+ const value=await GET(request(id),context(id));expect(value.status).toBe(200);expect(value.headers.get("Cache-Control")).toBe("no-store");expect(await value.json()).toMatchObject({courseId:id,requirements:[],links:[]});
+ const foreign=randomUUID();await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${foreign},${f.otherScope.workspaceId},'Private course',${foreign})`;
+ expect((await GET(request(foreign),context(foreign))).status).toBe(404);
+ const body={action:"link",sourceRequirementId:randomUUID(),expectedSourceRevision:1,targetRequirementId:randomUUID(),expectedTargetRevision:1,expectedLinkRevision:0,confirmed:true};
+ expect((await POST(request(id,"POST",body),context(id))).status).toBe(404);expect((await POST(request(id,"POST",{...body,workspaceId:f.otherScope.workspaceId}),context(id))).status).toBe(400);
+ expect(await f.sql`SELECT id FROM course_requirement_evidence_links WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});

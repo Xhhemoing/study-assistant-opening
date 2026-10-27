@@ -259,3 +259,21 @@ describe("task-bound direct activity entry", () => {
     expect(client.createTeachingActivity).not.toHaveBeenCalled();
   });
 });
+it("opens a managed delayed route task through its exact server context without generic creation", async () => {
+  const client = api(); client.listTasks.mockResolvedValue({ tasks: [task()] });
+  const route = { task: vi.fn(async () => ({ managed: true as const, courseId, taskId, expectedTaskVersion: 2, goalId: courseId, expectedGoalRevision: 3, requirementId: courseId, expectedRequirementRevision: 4, minutes: 15, notBeforeAt: null, available: true, reason: null })), start: vi.fn(async () => ({ kind: "ready" as const, activity: activity({ routeManaged: true }), href: `/opening/courses/${courseId}/study?activity=${activityId}`, resumed: false, requirementId: courseId, action: "transfer_check" as const })) };
+  const result = await openCourseStudy(client, { ...options, taskId }, route);
+  expect(result).toMatchObject({ kind: "activity", activity: { id: activityId, routeManaged: true } });
+  expect(route.start).toHaveBeenCalledWith(courseId, expect.objectContaining({ taskId, expectedTaskVersion: 2, expectedGoalRevision: 3, expectedRequirementRevision: 4, minutes: 15 }));
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
+it.each(["复测已取消，原记录保留。", "复测已过期，请选择新的学习。", "目标已变化，请重新读取。"])("does not turn an unavailable route task into generic teaching: %s", async reason => {
+  const client = api(); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => ({ managed: true as const, courseId, taskId, expectedTaskVersion: 2, goalId: courseId, expectedGoalRevision: 3, requirementId: courseId, expectedRequirementRevision: 4, minutes: 15, notBeforeAt: null, available: false, reason })), start: vi.fn() };
+  await expect(openCourseStudy(client, { ...options, taskId }, route)).rejects.toThrow(reason); expect(route.start).not.toHaveBeenCalled(); expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
+it("preserves old unmanaged task behavior and does not query routes for an explicit ordinary activity", async () => {
+  const client = api([activity()]); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => ({ managed: false as const })), start: vi.fn() };
+  await openCourseStudy(client, { ...options, taskId }, route); expect(client.createTeachingActivity).toHaveBeenCalledOnce();
+  route.task.mockClear(); await openCourseStudy(client, { ...options, activityId }, route); expect(route.task).not.toHaveBeenCalled();
+});
+it("does not create a replacement when the route task lookup fails", async () => { const client = api(); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => { throw new Error("任务上下文无法读取"); }), start: vi.fn() }; await expect(openCourseStudy(client, { ...options, taskId }, route)).rejects.toThrow("任务上下文无法读取"); expect(client.createTeachingActivity).not.toHaveBeenCalled(); });

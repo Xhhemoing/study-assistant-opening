@@ -1,4 +1,5 @@
 "use client";
+import { StudyNoteComposer } from "../learning-links/study-note-composer";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type ComposerPurpose, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
@@ -1087,6 +1088,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   }, [...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? "");
   const showProposalRail = agent && proposalsEnabled && proposalState.total > 0;
   const [proposalRailOpen, setProposalRailOpen] = useState(false);
+  const [studyNoteOpen, setStudyNoteOpen] = useState(false);
   return <section inert={interactionDisabled} aria-label={startScreen ? "开始" : "学习对话"} className={`flex h-full min-w-0 bg-surface ${agent ? "flex-col xl:flex-row" : ""} ${inset ? "min-h-0 overflow-hidden" : "min-h-[400px] lg:min-h-0"}`}>
     <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${inset ? "" : agent ? "w-full" : "mx-auto w-full max-w-[720px]"} ${startScreen ? "justify-center px-4 py-8" : ""}`}>
       {startScreen ? <h1 className="mb-5 text-ui font-medium text-text-2">{start?.greeting}</h1> : !embedded ? <TopBar label="对话顶栏"
@@ -1124,6 +1126,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       </div> : null}
       {contextProblem ? <p role="alert" className="mx-4 mt-2 rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn">{contextProblem}{returnHref ? <a href={returnHref} className="ml-2 underline">返回阅读</a> : null}</p> : null}
       {task ? <TaskContext task={task} api={api} disabled={pending || loading || recoveryRequired || interactionDisabled} onPrompt={setPrompt} /> : null}
+      <div className="shrink-0 border-b border-line px-4 py-2"><button type="button" className={v3ui.toolbarButton} disabled={interactionDisabled} aria-expanded={studyNoteOpen} onClick={() => setStudyNoteOpen(value => !value)}>记下我的理解或错因</button>{studyNoteOpen ? <div className="max-h-[50dvh] overflow-y-auto py-3"><StudyNoteComposer context={{ ...studyContext, label: studyContext?.label ?? initialTitle ?? "自由探索", fragment: undefined }} /></div> : null}</div>
       {privacy === "ephemeral" ? <div className="shrink-0 border-b border-line px-4 py-2 text-xs leading-5 text-text-2" role="status">
         <p className="font-medium">临时对话从这里开始</p><p>本轮不接续已保存历史；只使用本标签页的临时消息、当前输入和所选背景。刷新后不会恢复。</p>
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}

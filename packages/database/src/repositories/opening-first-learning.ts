@@ -7,7 +7,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { ADAPTIVE_STRATEGY_VERSION, localDateKeyInZone, nextLearningStep, resolveGoalLearningContext } from "@aistudy/domain";
 import { admitLearningSources, learningError, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { createOpeningTeachingActivityInTransaction, mapTeachingActivity } from "./opening-teaching-activities";
-import { mergeCourseGoal } from "./opening-course-milestones";
+import { projectOpeningAdaptiveGoals, writeOpeningCourseGoalInTx } from "./opening-learning-goal-bridge";
 import { withTaskPlanningFields } from "./opening-task-fields";
 
 const daySeedSchema = z.object({ date: calendarDateSchema, title: z.string().min(1).max(240),
@@ -21,7 +21,7 @@ export type FirstLearningInitializationResult = {
   startDate: string; endDate: string; replayed: boolean; legacy: boolean;
 };
 const savedPlanSchema = z.object({ startDate: calendarDateSchema, endDate: calendarDateSchema,
-  timeZone: z.string().min(1).max(80), taskKeys: z.array(z.string()).min(1).max(28) }).strict();
+  timeZone: z.string().min(1).max(80), taskKeys: z.array(z.string()).max(28) }).strict();
 
 function mapTask(row: Record<string, unknown>): TaskItem {
   return withTaskPlanningFields({ id: String(row.id), version: Number(row.version), title: String(row.title),
@@ -71,8 +71,10 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
           return { courseId, activity, ...tasks, startDate: plan.startDate, endDate: plan.endDate, replayed: true, legacy: false };
         }
         if (options.replayOnly) throw learningError("VALIDATION", "目标日期已过去，且没有可恢复的同一学习意图");
-        const startDate = calendarDateSchema.parse(raw.startDate), days = daySeedSchema.array().min(1).max(28).parse(raw.days);
-        if (days[0]!.date !== startDate || days.some((day, index) => Date.parse(day.notBefore) >= Date.parse(day.dueAt)
+        const startDate = calendarDateSchema.parse(raw.startDate), days = daySeedSchema.array().max(28).parse(raw.days);
+        const scheduled = intent.startTime !== null;
+        if (scheduled ? days.length === 0 : days.length > 0) throw learningError("VALIDATION", "首次学习日程与所选模式不一致");
+        if ((days.length > 0 && days[0]!.date !== startDate) || days.some((day, index) => Date.parse(day.notBefore) >= Date.parse(day.dueAt)
           || (index > 0 && day.date <= days[index - 1]!.date))) throw learningError("VALIDATION", "首次学习计划日期无效");
         try { new Intl.DateTimeFormat("en", { timeZone: raw.planTimeZone }); }
         catch { throw learningError("VALIDATION", "首次学习计划时区无效"); }
@@ -87,22 +89,25 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
           await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
             VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
         }
-        const goal = mergeCourseGoal(undefined, { targetDate: intent.targetDate, weeklyMinutes: intent.minutes * 7,
-          learningMode: "auto", priority: 1 }, 0, new Date().toISOString());
-        const prefs = openingAdaptivePrefsSchema.parse({ ...parsed.data, courseGoals: { ...parsed.data.courseGoals, [courseId]: goal },
-          courseGoalRevisions: { ...parsed.data.courseGoalRevisions, [courseId]: goal.revision! } });
+        const dailyMinutes = scheduled ? intent.minutes : intent.dailyMinutes;
+        const prefs = await writeOpeningCourseGoalInTx(tx, scope, parsed.data, { courseId, expectedRevision: 0,
+          goal: { targetDate: intent.targetDate, weeklyMinutes: (dailyMinutes ?? 0) * 7, learningMode: "auto", priority: 1 } });
+        const goal = (await projectOpeningAdaptiveGoals(tx, scope, prefs)).prefs.courseGoals[courseId]!;
         await tx`INSERT INTO workspace_preferences(workspace_id,adaptive_planning) VALUES(${scope.workspaceId},${tx.json(prefs)})
           ON CONFLICT(workspace_id) DO UPDATE SET adaptive_planning=EXCLUDED.adaptive_planning,updated_at=now()`;
         // The activity id must be known to retain the established first-task -> activity shortcut.
         const summary = [intent.topic, intent.goal && `希望做到：${intent.goal}`, intent.targetDate && `目标日期：${intent.targetDate}`,
-          `每天可用 ${intent.minutes} 分钟`].filter(Boolean).join("\n");
-        const provisionalPlan = { startDate, endDate: days.at(-1)!.date, timeZone: raw.planTimeZone };
+          scheduled ? `每天可用 ${intent.minutes} 分钟` : `本次学习 ${intent.minutes} 分钟`,
+          !scheduled && dailyMinutes !== undefined ? `每天可用 ${dailyMinutes} 分钟` : null].filter(Boolean).join("\n");
+        const provisionalPlan = { startDate, endDate: days.at(-1)?.date ?? startDate, timeZone: raw.planTimeZone };
         const learnerFocus = { skillLabel: intent.topic, ...nextLearningStep({ status: "unobserved", observations: [], wantsFullExplanation: false }),
           goalContext: resolveGoalLearningContext(goal, startDate), recentAssistance: [], strategyVersion: ADAPTIVE_STRATEGY_VERSION };
         const activity = await createOpeningTeachingActivityInTransaction(tx, scope, {
           clientKey, courseId, intentKind: intent.goal || intent.targetDate ? "goal" : "topic",
           intentSummary: summary, sourceIds: intent.sourceIds,
-          goalJson: { learningGoal: intent.goal, targetDate: intent.targetDate, dailyMinutes: intent.minutes, learnerFocus }, createIntent,
+          goalJson: { learningGoal: intent.goal, targetDate: intent.targetDate,
+            ...(scheduled ? { dailyMinutes: intent.minutes } : { sessionMinutes: intent.minutes, ...(dailyMinutes !== undefined ? { dailyMinutes } : {}) }),
+            learnerFocus }, createIntent,
         }, { enqueueCompile: true });
         const taskKeys = days.map((day, index) => index === 0 ? `first-learning-activity:${activity.id}` : `first-learning:${intent.clientKey}:day:${day.date}`);
         for (const [index, day] of days.entries()) {

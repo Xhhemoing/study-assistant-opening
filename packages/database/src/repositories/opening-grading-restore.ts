@@ -1,4 +1,4 @@
-import { aiGradingWorkSourceSchema } from "@aistudy/contracts";
+import { aiGradingWorkSourceSchema, answerInterpretationMetadataSchema } from "@aistudy/contracts";
 import { isDeepStrictEqual } from "node:util";
 
 type Row = Record<string, unknown>;
@@ -59,7 +59,8 @@ export function restoreOpeningGradingMetadata(rows: Row[], workspaceId: string, 
     }
     // 0093 assigned each legacy non-AI revision its own row-based key, even for
     // unchanged text. Keep those facts, but do not manufacture a modern paid key.
-    if (previous && !sameRevision && row.answer === previous.answer && operation !== legacyKey) {
+    const interpretationRaw = record(row.submitted_intent)?.answerInterpretation;
+    if (previous && !sameRevision && row.answer === previous.answer && operation !== legacyKey && interpretationRaw === undefined) {
       throw new Error("restored unchanged answer cannot acquire a new grading operation identity");
     }
     const rawPhoto = row.grading_work_source ?? ai?.workSource ?? previous?.grading_work_source ?? null;
@@ -75,6 +76,24 @@ export function restoreOpeningGradingMetadata(rows: Row[], workspaceId: string, 
     if (sameRevision && !isDeepStrictEqual(photo, previous.grading_work_source)
       && (previous.grading_work_source != null || !ai && !gradingInput)) {
       throw new Error("restored answer photo changed without a new answer revision");
+    }
+    if (interpretationRaw !== undefined) {
+      const interpretation = answerInterpretationMetadataSchema.parse(interpretationRaw);
+      const original = byId.get(identity(interpretation.originalTranscriptionObservationId));
+      const originalAi = record(original?.ai_evaluation) ?? record(record(record(original?.submitted_intent)?.aiGrading)?.proposal);
+      const prior = interpretation.previousInterpretationObservationId == null ? null : byId.get(identity(interpretation.previousInterpretationObservationId));
+      const priorMetadata = prior ? answerInterpretationMetadataSchema.safeParse(record(prior.submitted_intent)?.answerInterpretation) : null;
+      const sameRoot = (other: Row | undefined | null) => other && identity(other.root_observation_id ?? other.id) === root && identity(other.owner_user_id) === identity(row.owner_user_id);
+      const ancestors = new Set<string>();
+      for (let ancestor: Row | null | undefined = predecessor; ancestor; ancestor = ancestor.revises_observation_id == null ? undefined : byId.get(identity(ancestor.revises_observation_id))) ancestors.add(identity(ancestor.id));
+      if (!previous || !sameRoot(original) || !ancestors.has(identity(original?.id)) || !isDeepStrictEqual(interpretation.workSource, photo) || row.answer !== interpretation.correctedTranscription
+        || originalAi?.transcription !== undefined && originalAi.transcription !== interpretation.originalTranscription
+        || (prior ? !sameRoot(prior) || !ancestors.has(identity(prior.id)) || !priorMetadata?.success || priorMetadata.data.version + 1 !== interpretation.version
+          || priorMetadata.data.originalTranscriptionObservationId !== interpretation.originalTranscriptionObservationId
+          || priorMetadata.data.originalTranscription !== interpretation.originalTranscription
+          : interpretation.previousInterpretationObservationId !== null || interpretation.version !== 1)) {
+        throw new Error("restored photo interpretation identity or revision is invalid");
+      }
     }
     const result = { ...row, answer_revision: Number(ordinal), grading_work_source: photo, grading_operation_id: operation };
     completed.set(id, result);

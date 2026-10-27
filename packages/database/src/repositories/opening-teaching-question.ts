@@ -1,5 +1,5 @@
 import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
-import { teachingMisconceptionsSchema, teachingQuestionInteractionSchema } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, teachingMisconceptionsSchema, teachingQuestionInteractionSchema, teachingSourceRefSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
@@ -10,6 +10,8 @@ export type TeachingQuestionSpec = {
   activityId: string; teachingUnitId: string; contentVersion: number;
   documentId: string; revisionId: string; revisionNumber: number; blockId: string;
   answerBlockId: string | null;
+  sourceRefs?: TeachingSourceRef[];
+  courseRequirement?: { id:string; revision:number; stableSkillId:string; requirementKey:string };
 };
 
 export function teachingQuestionText(content: Record<string, unknown> | undefined): string | null {
@@ -24,7 +26,7 @@ export function teachingQuestionText(content: Record<string, unknown> | undefine
 /** Only a published, owned teaching revision can issue this identity. Client text is never used. */
 export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: Scope,
   activityId: string, input: { blockId: string; contentVersion: number }, sourceVersions: Record<string, number>) {
-  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
+  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.goal_json,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
     FROM opening_teaching_activity_specs s
     JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
     JOIN opening_teaching_units u ON u.id=s.teaching_unit_id AND u.workspace_id=s.workspace_id AND u.owner_user_id=s.owner_user_id
@@ -66,7 +68,10 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
   const spec: TeachingQuestionSpec = { kind: "teaching_question", specVersion: "teaching-question-v1",
     activityId, teachingUnitId: String(row.teaching_unit_id), contentVersion: input.contentVersion,
     documentId: String(row.document_id), revisionId: String(row.revision_id), revisionNumber: Number(row.revision_number),
-    blockId: input.blockId, answerBlockId: answerBlock?.id ?? null };
+    blockId: input.blockId, answerBlockId: answerBlock?.id ?? null, sourceRefs: references };
+  const route=(row.goal_json as {courseRoute?:unknown}|undefined)?.courseRoute;
+  if(route!==undefined){const context=courseRouteActivityContextSchema.parse(route);
+    spec.courseRequirement={id:context.requirementId,revision:context.requirementRevision,stableSkillId:context.stableSkillId,requirementKey:context.requirementKey};}
   return { spec, stem };
 }
 
@@ -121,6 +126,7 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
   }
   const rubric = answer?.content.rubric ?? answer?.content.criteria ?? answer?.content.scoringCriteria;
   const misconceptions = teachingMisconceptionsSchema.safeParse(answer?.content.misconceptions).data ?? [];
-  return { stem, misconceptions, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
+  const sourceRefs = teachingSourceRefSchema.array().max(64).parse(spec.sourceRefs ?? []);
+  return { stem, misconceptions, sourceRefs, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
     rubric ? `评分要点：\n${typeof rubric === "string" ? rubric : JSON.stringify(rubric)}` : ""].filter(Boolean).join("\n\n") };
 }

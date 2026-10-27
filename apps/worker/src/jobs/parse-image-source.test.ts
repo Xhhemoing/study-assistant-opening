@@ -35,7 +35,7 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   };
 }
 
-async function makeHandler(current: SourceRecord) {
+async function makeHandler(current: SourceRecord, recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]) {
   const states: State[] = [];
   let replaceInput: unknown;
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "opening-parse-image-"));
@@ -62,20 +62,38 @@ async function makeHandler(current: SourceRecord) {
     runner: async () => {
       throw new Error("image parse must not call document parser");
     },
-    tempDir,
+    tempDir, recognizePage,
   });
   return { handler, states, replaceInput: () => replaceInput, tempDir };
 }
 
 describe("parse image sources", () => {
-  it("parses PNG into one page-1 chunk with image key and ready state", async () => {
+  it("does not publish an unreadable image as ready when recognition is unavailable", async () => {
     const d = await makeHandler(source());
+    await expect(d.handler(job, {sourceId})).rejects.toThrow("visual recognition");
+    expect(d.replaceInput()).toBeUndefined();
+    expect(d.states).toEqual([]);
+  });
+  it("rejects claimed images without execution cancellation checks", async () => {
+    const d = await makeHandler(source(), async () => ({text:"recognized",imageObjectKey:"image"}));
+    await expect(d.handler({...job,claimToken:"claim"}, {sourceId})).rejects.toThrow("execution check");
+    expect(d.replaceInput()).toBeUndefined();
+  });
+  it("keeps recognition failure and empty recognition out of ready chunks", async () => {
+    for (const recognize of [async () => { throw new Error("recognition failed"); }, async () => ({text:"  ", imageObjectKey:"image"})]) {
+      const d = await makeHandler(source(), recognize);
+      await expect(d.handler(job, {sourceId})).rejects.toThrow();
+      expect(d.replaceInput()).toBeUndefined();
+    }
+  });
+  it("parses PNG into one page-1 chunk with image key and ready state", async () => {
+    const d = await makeHandler(source(), async input => ({text: "转写：原题 x²", imageObjectKey: `opening/sources/${input.sourceId}/v3`}));
     const result = await d.handler(job, { sourceId });
-    expect(result).toEqual({ pages: 1, imageOnly: true });
+    expect(result).toEqual({ pages: 1, imageOnly: false });
     expect(d.replaceInput()).toEqual({
       sourceId,
       sourceVersion: 3,
-      chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: `opening/sources/${sourceId}/v3` }],
+      chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "[视觉转写与描述]\n转写：原题 x²", imageObjectKey: `opening/sources/${sourceId}/v3` }],
     });
     expect(d.states).toEqual(["ready"]);
     expect(d.states.includes("unsupported")).toBe(false);
@@ -83,7 +101,7 @@ describe("parse image sources", () => {
 
   it("parses JPEG and WebP the same way", async () => {
     for (const mime of ["image/jpeg", "image/webp"] as const) {
-      const d = await makeHandler(source({ mime, name: `photo.${mime.split("/")[1]}` }));
+      const d = await makeHandler(source({ mime, name: `photo.${mime.split("/")[1]}` }), async () => ({text: "转写", imageObjectKey: "image/v3"}));
       await d.handler(job, { sourceId });
       expect(d.states).toEqual(["ready"]);
       expect((d.replaceInput() as { chunks: { imageObjectKey: string }[] }).chunks[0]!.imageObjectKey).toContain(`/v3`);

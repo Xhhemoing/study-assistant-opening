@@ -9,7 +9,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningPlanError } from "./opening-plan-error";
 
 export type LocalPlanAdditional = {
-  tasks: TaskItem[]; suggestedTasks: SuggestedTask[]; snapshot: Record<string, unknown>; origin: "agent";
+  tasks: TaskItem[]; suggestedTasks: SuggestedTask[]; snapshot: Record<string, unknown>; origin: "agent" | "user";
 };
 export type LocalPlanOptions = {
   now?: Date; intent?: Record<string, unknown>; preserveAll?: boolean;

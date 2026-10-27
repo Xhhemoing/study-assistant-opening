@@ -7,7 +7,7 @@ type Rows = Record<string, unknown>[];
 /** The caller owns the workspace owner gate and repeatable-read transaction. */
 export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspaceId: string, sourceIds: readonly string[]) {
   const workspace_preferences: Rows = [...await tx`
-    SELECT workspace_id, default_entry, ai_settings, planning_settings, adaptive_planning, intervention_settings, auto_grade_on_save, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
+    SELECT workspace_id, default_entry, ai_settings, planning_settings, adaptive_planning, learning_management, intervention_settings, auto_grade_on_save, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
       to_char(retest_suggestions_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS retest_suggestions_enabled_at,
       to_char(automatic_reminders_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS automatic_reminders_enabled_at,
       created_at, updated_at
@@ -53,5 +53,20 @@ export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspa
     FROM course_asset_memberships m JOIN courses c ON c.id = m.course_id AND c.workspace_id = ${workspaceId}
     WHERE m.workspace_id = ${workspaceId} AND m.asset_type = 'source' AND m.asset_id = ANY(${[...sourceIds]}::uuid[])
     ORDER BY m.id`] : [];
-  return { workspace_preferences, courses, course_asset_memberships, cards, card_review_states, learning_events };
+  const course_goals: Rows = [...await tx`SELECT * FROM course_goals WHERE workspace_id=${workspaceId} ORDER BY id`];
+  const course_goal_links: Rows = [...await tx`SELECT * FROM course_goal_links WHERE workspace_id=${workspaceId} ORDER BY goal_id,course_id`];
+  const goal_time_windows: Rows = [...await tx`SELECT * FROM goal_time_windows WHERE workspace_id=${workspaceId} ORDER BY id`];
+  const includedSources = new Set(sourceIds);
+  const course_requirements: Rows = [...await tx`SELECT * FROM course_requirements WHERE workspace_id=${workspaceId} ORDER BY id`].map(row => {
+    const refs = row.source_refs as Array<{ sourceId: string }>;
+    if (refs.every(ref => includedSources.has(ref.sourceId))) return row;
+    // Preserve the full range and dependency identities without exporting excluded source-derived text.
+    return { ...row, title: "材料不可用的课程要求", knowledge_node_id: null, approved_at: null,
+      source_refs: refs.filter(ref => includedSources.has(ref.sourceId)), verification: {
+        kind: "unavailable", status: "missing", exerciseKeys: [], rubric: null,
+        missingReasons: ["此要求部分材料未包含在备份中，请补充可读材料并重新确认要求与验证标准。"],
+      } };
+  });
+  return { workspace_preferences, courses, course_asset_memberships, cards, card_review_states, learning_events,
+    course_goals, course_goal_links, goal_time_windows, course_requirements };
 }

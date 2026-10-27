@@ -6,10 +6,10 @@ import type { SpanLessonSnapshot } from "@aistudy/contracts";
 
 const mocks = vi.hoisted(() => ({ request: vi.fn() }));
 vi.mock("./span-session-client", async original => ({ ...await original<typeof import("./span-session-client")>(), spanLessonRequest: mocks.request }));
-vi.mock("./span-lesson", () => ({ SpanLesson: ({ session, onProgress }: { session: SpanLessonSnapshot; onProgress: (intent: SpanLessonSnapshot["intent"], move: string, status: string) => Promise<boolean> }) =>
+vi.mock("./span-lesson", () => ({ SpanLesson: ({ session, onProgress, onReload }: { session: SpanLessonSnapshot; onReload?: () => void; onProgress: (intent: SpanLessonSnapshot["intent"], move: string, status: string) => Promise<boolean> }) =>
   createElement("section", { "aria-label": session.activityId },
     createElement("input", { "aria-label": "未提交的思考", defaultValue: "" }),
-    createElement("button", { onClick: () => void onProgress(session.intent, "self-independent", "active") }, "保存步骤")) }));
+    createElement("button", { onClick: () => void onProgress(session.intent, "self-independent", "active") }, "保存步骤"), onReload ? createElement("button", { onClick: onReload }, "重新读取本节") : null) }));
 vi.mock("./span-session-summary", () => ({ SpanSessionSummary: () => createElement("p", null, "会话小结") }));
 import { SpanLessonSession } from "./span-lesson-session";
 
@@ -27,7 +27,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", `/opening/courses/${courseId}/study/span`);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 async function render(props: Partial<ComponentProps<typeof SpanLessonSession>> = {}) {
   await act(async () => root.render(createElement(SpanLessonSession, { ...baseProps, ...props })));
 }
@@ -79,4 +79,56 @@ it("automatically creates only one session under StrictMode and restores it with
   await act(async () => root.render(createElement(StrictMode, null, createElement(SpanLessonSession, baseProps))));
   expect(mocks.request.mock.calls.filter(call => call[2]?.method === "POST")).toHaveLength(1);
   expect(container.querySelector(`section[aria-label="${firstId}"]`)).not.toBeNull();
+});
+
+it("blocks an old derived lesson after its origin evidence changes and submits the current origin snapshot", async () => {
+  const changed = { ...details({ ...snapshot, activityId: secondId, sessionId: secondId }), originChange: { reason: "evidence_changed", originSession: { ...snapshot, revision: 8 }, observationId: sourceId } };
+  mocks.request.mockResolvedValue(changed);
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ kind: "choice", reason: "evidence_changed", message: "原评价已变化，请重新选择。", primary: { label: "查看记录", href: `/opening/courses/${courseId}#course-learning-records` } }));
+  vi.stubGlobal("fetch", fetcher);
+  await render({ initialActivityId: secondId });
+  expect(container.querySelector(`section[aria-label="${secondId}"]`)).toBeNull();
+  expect(container.textContent).toContain("原评价已变化");
+  const next = [...container.querySelectorAll("button")].find(node => node.textContent === "安排下一步学习")!;
+  await act(async () => next.click());
+  expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ activityId: firstId, expectedRevision: 8, observationId: sourceId, clientKey: `span-next:${firstId}:8:${sourceId}` });
+  expect(mocks.request.mock.calls.some(call => call[2]?.method === "POST" || call[2]?.method === "PATCH")).toBe(false);
+});
+
+it("opens the superseded activity history read-only and returns to the current choice without issuing work", async () => {
+  mocks.request.mockResolvedValue({ ...details({ ...snapshot, activityId: secondId, sessionId: secondId }),
+    attempts: [{ id: secondId, startedAt: snapshot.createdAt }],
+    observations: [{ id: secondId, attemptId: secondId, answer: "旧纠偏答案保留", occurredAt: snapshot.createdAt }],
+    originChange: { reason: "evidence_changed", originSession: { ...snapshot, revision: 8 }, observationId: sourceId } });
+  const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+  await render({ initialActivityId: secondId });
+  await act(async () => [...container.querySelectorAll("button")].find(node => node.textContent === "查看原活动历史")!.click());
+  expect(container.textContent).toContain("旧纠偏答案保留");
+  expect(container.querySelector(`section[aria-label="${secondId}"]`)).toBeNull();
+  expect(container.querySelector("textarea,input,form")).toBeNull();
+  await act(async () => [...container.querySelectorAll("button")].find(node => node.textContent === "返回重新选择")!.click());
+  expect(container.textContent).toContain("安排下一步学习");
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(mocks.request.mock.calls.some(call => call[2]?.method === "POST" || call[2]?.method === "PATCH")).toBe(false);
+});
+
+it.each([null, snapshot])("does not continue automatically when changed materials block the origin (%s)", async originSession => {
+  mocks.request.mockResolvedValue({ ...details(null), originChange: { reason: "source_unavailable", originSession, observationId: sourceId } });
+  const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+  await render({ initialActivityId: secondId });
+  expect(container.querySelector('[aria-label="下一步学习安排"]')).toBeNull();
+  expect(container.querySelector(`a[href="/opening/courses/${courseId}"]`)).not.toBeNull();
+  expect(mocks.request.mock.calls.some(call => call[2]?.method === "POST" || call[2]?.method === "PATCH")).toBe(false);
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+it("rereads a stale open tab into the origin-change choice without mounting the old remediation again", async () => {
+  mocks.request.mockResolvedValueOnce(details({ ...snapshot, activityId: secondId, sessionId: secondId }));
+  await render({ initialActivityId: secondId });
+  expect(container.querySelector(`section[aria-label="${secondId}"]`)).not.toBeNull();
+  mocks.request.mockResolvedValueOnce({ ...details({ ...snapshot, activityId: secondId, sessionId: secondId }), originChange: { reason: "evidence_changed", originSession: snapshot, observationId: sourceId } });
+  await act(async () => [...container.querySelectorAll("button")].find(node => node.textContent === "重新读取本节")!.click());
+  expect(container.querySelector(`section[aria-label="${secondId}"]`)).toBeNull();
+  expect(container.textContent).toContain("原评价已变化");
+  expect(mocks.request.mock.calls.some(call => call[2]?.method === "POST" || call[2]?.method === "PATCH")).toBe(false);
 });

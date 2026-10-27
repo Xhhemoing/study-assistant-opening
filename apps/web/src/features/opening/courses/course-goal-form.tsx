@@ -1,345 +1,130 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CourseGoal, CourseGoalUpdate, GoalLearningMode, OpeningAdaptivePrefsPatch } from "@aistudy/contracts";
+import { z } from "zod";
+import { learningGoalCreateSchema, learningGoalSelectSchema, learningGoalUpdateSchema, type CourseGoal, type CourseGoalUpdate, type LearningGoal, type LearningGoalCreate, type LearningGoalList, type OpeningAdaptivePrefsPatch } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui } from "../design/ui";
 import { CourseMilestones } from "./course-milestones";
+import { createLearningGoalClient, LearningGoalRequestError, type LearningGoalClient } from "./learning-goal-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
-const WEEKLY_MIN = 0;
-const WEEKLY_MAX = 3000;
-
-/** Local calendar YYYY-MM-DD (box/user zone). */
-export function todayLocalDate(now: Date = new Date()): string {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-/** Parse weekly minutes; rejects non-integers and values outside 0–3000. */
+export function todayLocalDate(now: Date = new Date()) { return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`; }
 export function parseWeeklyMinutes(raw: string): { ok: true; value: number } | { ok: false; error: string } {
-  const trimmed = raw.trim();
-  if (trimmed === "") {
-    return { ok: false, error: "请填写每周投入分钟（0–3000）。" };
-  }
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || !Number.isInteger(n)) {
-    return { ok: false, error: "每周投入分钟须为整数。" };
-  }
-  if (n < WEEKLY_MIN || n > WEEKLY_MAX) {
-    return { ok: false, error: `每周投入分钟须在 ${WEEKLY_MIN}–${WEEKLY_MAX} 之间。` };
-  }
-  return { ok: true, value: n };
+  const value = Number(raw.trim());
+  return raw.trim() && Number.isInteger(value) && value >= 0 && value <= 3000 ? { ok: true, value } : { ok: false, error: "每周投入分钟须为 0–3000 的整数。" };
 }
-
-export function buildCourseGoalPatch(
-  courseId: string,
-  goal: CourseGoalUpdate | null,
-  expectedRevision?: number,
-): OpeningAdaptivePrefsPatch {
-  return { courseGoal: { courseId, goal, ...(expectedRevision === undefined ? {} : { expectedRevision }) } };
+export function buildCourseGoalPatch(courseId: string, goal: CourseGoalUpdate | null, expectedRevision?: number): OpeningAdaptivePrefsPatch { return { courseGoal: { courseId, goal, ...(expectedRevision === undefined ? {} : { expectedRevision }) } }; }
+const pendingSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("create"), courseId: z.string().uuid(), input: learningGoalCreateSchema }),
+  z.object({ kind: z.literal("update"), courseId: z.string().uuid(), id: z.string().uuid(), input: learningGoalUpdateSchema }),
+  z.object({ kind: z.literal("select"), courseId: z.string().uuid(), input: learningGoalSelectSchema }),
+]);
+type Pending = z.infer<typeof pendingSchema>;
+const memoryPending = new Map<string, Pending>();
+function pendingKey(courseId: string) { return `aistudy:goal-command:${courseId}`; }
+function remember(courseId: string, command: Pending | null) {
+  if (command) memoryPending.set(courseId, command); else memoryPending.delete(courseId);
+  try { if (command) sessionStorage.setItem(pendingKey(courseId), JSON.stringify(command)); else sessionStorage.removeItem(pendingKey(courseId)); return true; } catch { return false; }
 }
-
-export function CourseGoalForm({
-  courseId,
-  api: suppliedApi,
-}: {
-  courseId: string;
-  api?: OpeningApi;
-}) {
+function restore(courseId: string): Pending | null {
+  try { const raw = sessionStorage.getItem(pendingKey(courseId)); if (raw) { const parsed = pendingSchema.safeParse(JSON.parse(raw)); if (parsed.success && parsed.data.courseId === courseId) return parsed.data; } } catch { /* The memory copy remains a request, never an authority result. */ }
+  return memoryPending.get(courseId) ?? null;
+}
+function durablePending(courseId: string) { try { const raw = sessionStorage.getItem(pendingKey(courseId)); if (!raw) return false; const value = pendingSchema.safeParse(JSON.parse(raw)); return value.success && value.data.courseId === courseId; } catch { return false; } }
+type Definition = Omit<LearningGoalCreate, "clientKey">;
+type Editor = Omit<Definition, "weeklyMinutes"> & { weeklyMinutes: string; id: string | null; revision: number };
+function editor(courseId: string, goal?: LearningGoal): Editor { return { id: goal?.id ?? null, revision: goal?.revision ?? 0, title: goal?.title ?? "", courseIds: goal?.courseIds ?? [courseId], kind: goal?.kind ?? "custom", targetDate: goal?.targetDate ?? null, examDate: goal?.examDate ?? null, weeklyMinutes: String(goal?.weeklyMinutes ?? 120), priority: goal?.priority ?? 0, learningMode: goal?.learningMode ?? "auto", successCriteria: goal?.successCriteria ?? "" }; }
+function definition(value: Editor): Definition { return { title: value.title, courseIds: value.courseIds, kind: value.kind, targetDate: value.targetDate, examDate: value.examDate, weeklyMinutes: Number(value.weeklyMinutes), priority: value.priority, learningMode: value.learningMode, successCriteria: value.successCriteria }; }
+const kindLabels = { custom: "自定义", "final-exam": "期末考试", "entrance-exam": "升学考试", interest: "兴趣与理解", maintenance: "长期保持" };
+export function CourseGoalForm(props: { courseId: string; api?: OpeningApi; goalClient?: LearningGoalClient }) { return <GoalEditor key={props.courseId} {...props} />; }
+function GoalEditor({ courseId, api: suppliedApi, goalClient }: { courseId: string; api?: OpeningApi; goalClient?: LearningGoalClient }) {
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
-
-  const [targetDate, setTargetDate] = useState("");
-  const [weeklyMinutes, setWeeklyMinutes] = useState("120");
-  const [learningMode, setLearningMode] = useState<GoalLearningMode>("auto");
-  const [priority, setPriority] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [message, setMessage] = useState("");
-  const [hasGoal, setHasGoal] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const [reloadToken, setReloadToken] = useState(0);
-  const [storedGoal, setStoredGoal] = useState<CourseGoal | null>(null);
-  const [baseRevision, setBaseRevision] = useState(0);
-  const [mustReload, setMustReload] = useState(false);
-  const scopeRef = useRef(courseId);
-  scopeRef.current = courseId;
-  const saving = useRef(false);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError("");
-    setLoadFailed(false);
-    api
-      .getAdaptivePrefs()
-      .then((res) => {
-        if (!active) return;
-        if (res.invalidStoredPrefs) throw new Error("已保存的课程目标暂时无法读取，请重试。");
-        setLoadFailed(false);
-        const existing = res.prefs.courseGoals[courseId];
-        setStoredGoal(existing ?? null);
-        setBaseRevision(res.prefs.courseGoalRevisions?.[courseId] ?? existing?.revision ?? 0);
-        setMustReload(false);
-        if (existing) {
-          setTargetDate(existing.targetDate ?? "");
-          setWeeklyMinutes(String(existing.weeklyMinutes));
-          setLearningMode(existing.learningMode ?? "auto");
-          setPriority(existing.priority ?? 0);
-          setHasGoal(true);
-        } else {
-          setTargetDate("");
-          setWeeklyMinutes("120");
-          setLearningMode("auto");
-          setPriority(0);
-          setHasGoal(false);
-        }
-      })
-      .catch((reason: unknown) => {
-        if (active) {
-          setLoadFailed(true);
-          setError(userFacingMessage(reason, "课程目标读取失败，请重试。"));
-        }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [api, courseId, reloadToken]);
-
-  const datePast =
-    Boolean(targetDate) && /^\d{4}-\d{2}-\d{2}$/.test(targetDate) && targetDate < todayLocalDate();
-
-  async function save() {
-    if (busy || saving.current || mustReload) return;
-    setError("");
-    setMessage("");
-    const parsed = parseWeeklyMinutes(weeklyMinutes);
-    if (!parsed.ok) {
-      setError(parsed.error);
-      return;
-    }
-    const date = targetDate.trim();
-    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      setError("请填写有效的目标日期，或留空。");
-      return;
-    }
-    const goal: CourseGoal = {
-      targetDate: date || null,
-      weeklyMinutes: parsed.value,
-      learningMode,
-      priority,
-    };
-    setBusy(true);
-    saving.current = true;
+  const client = useMemo(() => goalClient ?? createLearningGoalClient(), [goalClient]);
+  const [data, setData] = useState<LearningGoalList | null>(null), [edit, setEdit] = useState(() => editor(courseId));
+  const [courses, setCourses] = useState<Array<{ id: string; title: string; archivedAt?: string | null }>>([]);
+  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [reload, setReload] = useState(0);
+  const [error, setError] = useState(""), [message, setMessage] = useState(""), [catalogError, setCatalogError] = useState("");
+  const [pending, setPending] = useState<Pending | null>(() => restore(courseId));
+  const pendingRef = useRef(pending); pendingRef.current = pending;
+  const [storageWarning, setStorageWarning] = useState(() => Boolean(restore(courseId)) && !durablePending(courseId));
+  const active = useRef(true), writing = useRef(false);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => { let live = true; setLoading(true); setError("");
+    void client.list().then(value => {
+      if (!live) return;
+      setData(value);
+      const command = pendingRef.current;
+      const refreshed = command?.kind === "update" ? value.goals.find(goal => goal.id === command.id) : undefined;
+      if (command?.kind === "update" && refreshed && refreshed.revision > command.input.expectedRevision) {
+        remember(courseId, null); setPending(null); setMessage("目标已更新，刚才的修改不能直接覆盖。下方显示当前目标，请核对；这不表示刚才的保存一定成功。");
+      }
+      const selected = value.goals.find(goal => goal.id === value.selectedGoalIds[courseId]);
+      setEdit(editor(courseId, refreshed ?? selected ?? value.goals.find(goal => goal.courseIds.includes(courseId))));
+    }).catch(reason => { if (live) { setData(null); setError(userFacingMessage(reason, "课程目标暂时无法读取。")); } }).finally(() => { if (live) setLoading(false); });
+    void client.courses().then(value => { if (live) { setCourses(value); setCatalogError(""); } }).catch(() => { if (live) setCatalogError("课程列表暂不可读取，已有课程关联仍保留。重新读取后可关联其他课程。"); });
+    return () => { live = false; };
+  }, [client, courseId, reload]);
+  const conflict = data?.legacyConflicts.find(value => value.courseId === courseId);
+  const current = data?.goals.find(goal => goal.id === edit.id);
+  const selectedId = data?.selectedGoalIds[courseId] ?? null;
+  const locked = busy || Boolean(pending);
+  function change<K extends keyof Editor>(key: K, value: Editor[K]) { setEdit(previous => ({ ...previous, [key]: value })); setMessage(""); }
+  async function execute(command: Pending) {
+    if (writing.current) return;
+    const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setMessage(""); setPending(command); setStorageWarning(!remember(courseId, command));
     try {
-      const result = await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, goal, baseRevision));
-      if (scopeRef.current !== courseId) return;
-      const fresh = result.prefs.courseGoals[courseId] ?? null;
-      setStoredGoal(fresh);
-      setBaseRevision(result.prefs.courseGoalRevisions?.[courseId] ?? fresh?.revision ?? 0);
-      setHasGoal(true);
-      setMessage("课程目标已保存。");
+      if (command.kind === "select") { const result = await client.select(command.input); if (active.current) setData(result); }
+      else {
+        const result = command.kind === "create" ? await client.create(command.input) : await client.update(command.id, command.input);
+        if (active.current) { setData(previous => previous ? { ...previous, goals: [...previous.goals.filter(goal => goal.id !== result.id), result] } : previous); setEdit(editor(courseId, result)); }
+      }
+      remember(courseId, null);
+      if (active.current) { setPending(null); setMessage(command.kind === "select" ? "已选择本课程使用的目标，其他目标和历史保留。" : "目标已保存。需要切换本课程目标时，请明确选择。" ); if (command.kind === "create") setReload(value => value + 1); }
     } catch (reason) {
-      if (scopeRef.current !== courseId) return;
-      setMustReload(true);
-      setError(userFacingMessage(reason, "课程目标保存失败，请重试。"));
-    } finally {
-      saving.current = false;
-      if (scopeRef.current === courseId) setBusy(false);
-    }
+      if (reason instanceof LearningGoalRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { remember(courseId, null); if (active.current) { setPending(null); setData(null); } }
+      if (active.current) setError(userFacingMessage(reason, "保存结果待确认，请原样重新确认这次保存。"));
+    } finally { writing.current = false; if (active.current) setBusy(false); }
   }
-
-  async function clearGoal() {
-    if (busy || saving.current || mustReload) return;
-    setError("");
-    setMessage("");
-    setBusy(true);
-    saving.current = true;
-    try {
-      const result = await api.patchAdaptivePrefs(buildCourseGoalPatch(courseId, null, baseRevision));
-      if (scopeRef.current !== courseId) return;
-      setStoredGoal(null);
-      setBaseRevision(result.prefs.courseGoalRevisions?.[courseId] ?? 0);
-      setTargetDate("");
-      setWeeklyMinutes("120");
-      setLearningMode("auto");
-      setPriority(0);
-      setHasGoal(false);
-      setMessage("已清除课程目标。");
-    } catch (reason) {
-      if (scopeRef.current !== courseId) return;
-      setMustReload(true);
-      setError(userFacingMessage(reason, "清除课程目标失败，请重试。"));
-    } finally {
-      saving.current = false;
-      if (scopeRef.current === courseId) setBusy(false);
-    }
+  function save() {
+    if (locked || !data) return;
+    const minutes = parseWeeklyMinutes(edit.weeklyMinutes);
+    if (!minutes.ok) { setError(minutes.error); return; }
+    const value = definition(edit), parsed = learningGoalCreateSchema.safeParse({ ...value, clientKey: "validation-only" });
+    if (!parsed.success) { setError("请填写目标名称、有效日期与课程关联；考试日期仅用于考试目标。"); return; }
+    void execute(edit.id ? { kind: "update", courseId, id: edit.id, input: { ...value, expectedRevision: edit.revision } } : { kind: "create", courseId, input: { ...value, clientKey: `goal:${crypto.randomUUID()}` } });
   }
-
-  function syncMilestones(fresh: CourseGoal) {
-    // Unsaved base fields retain their original OCC baseline. A child reload must
-    // never bless old input values with a newer version read in another panel.
-    const baseIsClean = targetDate === (storedGoal?.targetDate ?? "")
-      && weeklyMinutes === String(storedGoal?.weeklyMinutes ?? 120)
-      && learningMode === (storedGoal?.learningMode ?? "auto")
-      && priority === (storedGoal?.priority ?? 0);
-    setStoredGoal(fresh);
-    if (baseIsClean) {
-      setTargetDate(fresh.targetDate ?? "");
-      setWeeklyMinutes(String(fresh.weeklyMinutes));
-      setLearningMode(fresh.learningMode ?? "auto");
-      setPriority(fresh.priority ?? 0);
-      setBaseRevision(fresh.revision ?? 0);
-    }
+  function select() { if (!current || !data || locked) return; void execute({ kind: "select", courseId, input: { courseId, goalId: current.id, expectedRevision: current.revision, expectedSelectedGoalId: selectedId, ...(conflict ? { resolveLegacy: true } : {}) } }); }
+  function keepLegacy() { if (!conflict) return; setEdit({ ...editor(courseId), title: "保留的旧课程目标", targetDate: conflict.legacyGoal.targetDate, weeklyMinutes: String(conflict.legacyGoal.weeklyMinutes), priority: conflict.legacyGoal.priority ?? 0, learningMode: conflict.legacyGoal.learningMode ?? "auto" }); setMessage("旧值已填入新目标草稿；创建后再明确选择，其他正式目标不会被覆盖。"); }
+  const dirty = current && JSON.stringify(definition(edit)) !== JSON.stringify(definition(editor(courseId, current)));
+  function milestonesSaved(fresh: CourseGoal) {
+    if (!current) return;
+    const updated = { ...current, ...fresh, revision: fresh.revision ?? current.revision };
+    setData(previous => previous ? { ...previous, goals: previous.goals.map(goal => goal.id === current.id ? updated : goal) } : previous);
+    if (!dirty) setEdit(editor(courseId, updated));
   }
-
-  return (
-    <section
-      className="border-t border-line pt-5"
-      aria-labelledby="course-goal-heading"
-      data-testid="course-goal-form"
-    >
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="course-goal-heading" className="text-sm font-semibold text-text">
-          课程目标
-        </h2>
-        <p className="text-xs text-text-3">{loading ? "读取中" : loadFailed ? "暂不可读取" : hasGoal ? "已设置" : "未设置"}</p>
-      </div>
-      <p className="mt-1 text-xs leading-6 text-text-3">
-        先选择目标日期与讲练方式；日期留空支持长期学习。未设置目标也可以直接开始。
-      </p>
-      {loading ? (
-        <p className="mt-3 text-xs text-text-3" role="status">
-          正在读取课程目标…
-        </p>
-      ) : loadFailed ? (
-        <div className="mt-3 space-y-2">
-          {error ? (
-            <p className="text-xs leading-5 text-danger" role="alert">
-              {error}
-            </p>
-          ) : null}
-          <button
-            type="button"
-            className={ui.quiet}
-            onClick={() => setReloadToken((v) => v + 1)}
-          >
-            重试
-          </button>
-        </div>
-      ) : (
-        <div className="mt-3 space-y-3">
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="block min-w-0 flex-1 basis-52 space-y-1">
-              <span className={ui.label}>目标日期（可选）</span>
-              <div className="flex gap-2">
-                <input
-                  id="course-goal-target-date"
-                  type="date"
-                  className={`${ui.input} min-w-0`}
-                  value={targetDate}
-                  disabled={busy || mustReload}
-                  onChange={(event) => {
-                    setTargetDate(event.target.value);
-                    setMessage("");
-                  }}
-                />
-                {targetDate ? (
-                  <button
-                    type="button"
-                    className={ui.quiet}
-                    disabled={busy || mustReload}
-                    onClick={() => {
-                      setTargetDate("");
-                      setMessage("");
-                    }}
-                  >
-                    清除日期
-                  </button>
-                ) : null}
-              </div>
-            </label>
-            <label className="block min-w-0 flex-1 basis-48 space-y-1">
-              <span className={ui.label}>学习安排</span>
-              <select id="course-goal-learning-mode" className={ui.input} value={learningMode} disabled={busy || mustReload}
-                onChange={event => { setLearningMode(event.target.value as GoalLearningMode); setMessage(""); }}>
-                <option value="auto">随目标调整</option>
-                <option value="understand">理解与迁移</option>
-                <option value="exam">应试练习</option>
-              </select>
-            </label>
-          </div>
-          <p className="text-xs leading-6 text-text-3">
-            {learningMode === "auto" ? "目标或未完成阶段成果进入最后14天时，优先短讲解和练习；其他时间侧重理解与迁移。"
-              : learningMode === "exam" ? "优先练习与必要补课，减少无关扩展；仍保留独立作答与复测记录。"
-                : "侧重理解、方法解释与迁移；遇到阻塞时先补必要前置，再回到原任务。"}
-          </p>
-          {datePast ? (
-            <p className="text-xs leading-6 text-warn" role="status">
-              目标日期早于今天；仍可保存，但草案可能不再按该截止日期推进。
-            </p>
-          ) : null}
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className={ui.secondary}
-              disabled={busy || mustReload}
-              onClick={() => void save()}
-            >
-              {busy ? "保存中…" : "保存"}
-            </button>
-            <button
-              type="button"
-              className={ui.quiet}
-              disabled={busy || mustReload}
-              onClick={() => void clearGoal()}
-            >
-              清除目标
-            </button>
-          </div>
-          {error ? (
-            <p className="text-xs leading-5 text-danger" role="alert">
-              {error}
-            </p>
-          ) : null}
-          {message ? (
-            <p className="text-xs leading-6 text-text-2" role="status">
-              {message}
-            </p>
-          ) : null}
-          {mustReload ? <button type="button" className={ui.secondary} disabled={busy} onClick={() => setReloadToken(value => value + 1)}>重新读取课程目标</button> : null}
-          <fieldset className="border-t border-line pt-3">
-            <legend className="py-1 pr-3 text-sm font-medium text-text">投入时间、优先级与阶段成果</legend>
-            <div className="mt-3 space-y-4">
-              <div className="flex flex-wrap items-end gap-3">
-                <label className="block min-w-0 flex-1 basis-40 space-y-1">
-                  <span className={ui.label}>每周投入分钟</span>
-                  <input id="course-goal-weekly-minutes" type="number" inputMode="numeric" min={WEEKLY_MIN} max={WEEKLY_MAX} step={1}
-                    className={ui.input} value={weeklyMinutes} disabled={busy || mustReload}
-                    onChange={event => { setWeeklyMinutes(event.target.value); setMessage(""); }} />
-                </label>
-                <label className="block min-w-0 flex-1 basis-40 space-y-1">
-                  <span className={ui.label}>相对其他课程</span>
-                  <select id="course-goal-priority" className={ui.input} value={priority} disabled={busy || mustReload}
-                    onChange={event => { setPriority(Number(event.target.value)); setMessage(""); }}>
-                    {(["常规", "略优先", "较优先", "优先", "重点", "首要"] as const).map((label, value) =>
-                      <option key={value} value={value}>{label}</option>)}
-                  </select>
-                </label>
-              </div>
-              <p className="text-xs leading-6 text-text-3">时间与优先级调整后，使用上方“保存”确认。{priority > 0 ? "本课程可排在其他课程的普通积压任务之前，当天截止事项仍优先。" : ""}</p>
-              {storedGoal ? <CourseMilestones key={courseId} courseId={courseId} goal={storedGoal} api={api}
-                onSaved={syncMilestones} disabled={busy || mustReload} /> : <p className="text-xs text-text-3">保存课程目标后，可添加阶段成果与成功标准。</p>}
-            </div>
-          </fieldset>
-        </div>
-      )}
-    </section>
-  );
+  const courseOptions: Array<{ id: string; title: string; archivedAt?: string | null }> = [...courses, ...edit.courseIds.filter(id => !courses.some(course => course.id === id)).map(id => ({ id, title: id === courseId ? "本课程" : `已关联课程 ${id}` }))];
+  return <section id="course-goals" className="space-y-3 border-t border-line pt-5" aria-labelledby="course-goal-heading" data-testid="course-goal-form">
+    <h2 id="course-goal-heading" className="text-sm font-semibold text-text">课程目标</h2>
+    <p className="text-xs leading-6 text-text-3">一门课程可以有多个目标，一个目标也可关联多门课程。日期可留空；目标预算参与工作区共同安排，保存不会自动授权导师。</p>
+    {pending ? <div className="space-y-2" role="status"><p className="text-sm text-warn">保存结果待确认。刚才填写的内容已保留，请用下方按钮继续确认。</p><button type="button" className={ui.secondary} disabled={busy} onClick={() => void execute(pending)}>重新确认这次保存</button>{storageWarning ? <p className="text-xs text-warn">此设备暂时无法保存恢复信息，请保留本页；刷新后可能无法恢复这次请求。</p> : null}</div> : null}
+    {loading ? <p role="status" className="text-xs text-text-3">正在读取课程目标…</p> : data ? <>
+      {conflict ? <div className="space-y-2 border-l-2 border-warn pl-3"><p className="text-sm text-text-2">旧课程目标尚待明确选择：每周 {conflict.legacyGoal.weeklyMinutes} 分钟，目标日期 {conflict.legacyGoal.targetDate ?? "未设置"}。选择正式目标会保留旧值历史。</p><button type="button" className={ui.quiet} disabled={locked} onClick={keepLegacy}>将旧目标保留为另一个目标</button></div> : null}
+      <div className="flex flex-wrap items-end gap-2"><label className="min-w-0 flex-1 space-y-1"><span className={ui.label}>查看与编辑目标</span><select className={ui.input} disabled={locked} value={edit.id ?? ""} onChange={event => setEdit(editor(courseId, data.goals.find(goal => goal.id === event.target.value)))}><option value="">新目标</option>{data.goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title}{selectedId === goal.id ? "（本课程当前目标）" : ""}</option>)}</select></label><button type="button" className={ui.quiet} disabled={locked} onClick={() => setEdit(editor(courseId))}>添加另一个目标</button></div>
+      <fieldset disabled={locked} className="space-y-3"><legend className="sr-only">目标定义</legend>
+        <label className="block space-y-1"><span className={ui.label}>目标名称</span><input className={ui.input} maxLength={160} value={edit.title} onChange={event => change("title", event.target.value)} /></label>
+        <div className="flex flex-wrap gap-3"><label className="min-w-0 flex-1 basis-44 space-y-1"><span className={ui.label}>目标类型</span><select className={ui.input} value={edit.kind} onChange={event => { const kind = event.target.value as Editor["kind"]; setEdit(value => ({ ...value, kind, examDate: ["final-exam", "entrance-exam"].includes(kind) ? value.examDate : null })); }}>{Object.entries(kindLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+        <label className="min-w-0 flex-1 basis-44 space-y-1"><span className={ui.label}>目标日期（可选）</span><input className={ui.input} type="date" value={edit.targetDate ?? ""} onChange={event => change("targetDate", event.target.value || null)} /></label>
+        {["final-exam", "entrance-exam"].includes(edit.kind) ? <label className="min-w-0 flex-1 basis-44 space-y-1"><span className={ui.label}>考试日期（可选）</span><input className={ui.input} type="date" value={edit.examDate ?? ""} onChange={event => change("examDate", event.target.value || null)} /></label> : null}</div>
+        <label className="block space-y-1"><span className={ui.label}>成功标准</span><textarea className={ui.input} rows={3} maxLength={2000} value={edit.successCriteria} onChange={event => change("successCriteria", event.target.value)} /></label>
+        <div className="flex flex-wrap gap-3"><label className="min-w-0 flex-1 basis-40 space-y-1"><span className={ui.label}>每周投入分钟</span><input className={ui.input} type="number" min={0} max={3000} step={1} value={edit.weeklyMinutes} onChange={event => change("weeklyMinutes", event.target.value)} /></label><label className="min-w-0 flex-1 basis-32 space-y-1"><span className={ui.label}>优先级（0–5）</span><input className={ui.input} type="number" min={0} max={5} step={1} value={edit.priority} onChange={event => change("priority", Number(event.target.value))} /></label><label className="min-w-0 flex-1 basis-40 space-y-1"><span className={ui.label}>学习安排</span><select className={ui.input} value={edit.learningMode} onChange={event => change("learningMode", event.target.value as Editor["learningMode"])}><option value="auto">随目标调整</option><option value="understand">理解与迁移</option><option value="exam">应试练习</option></select></label></div>
+        {edit.targetDate && edit.targetDate < todayLocalDate() ? <p className="text-xs text-warn">目标日期早于今天，请核对；仍可保留历史目标。</p> : null}
+        <fieldset className="space-y-2"><legend className={ui.label}>关联课程（共同使用此目标与预算）</legend>{courseOptions.map(course => <label className="flex items-center gap-2 text-sm text-text-2" key={course.id}><input type="checkbox" value={course.id} checked={edit.courseIds.includes(course.id)} disabled={Boolean(course.archivedAt)} onChange={event => change("courseIds", event.target.checked ? [...edit.courseIds, course.id] : edit.courseIds.filter(id => id !== course.id))} />{course.title}{course.archivedAt ? "（已归档）" : ""}</label>)}{catalogError ? <p className="text-xs text-warn">{catalogError}</p> : null}</fieldset>
+      </fieldset>
+      <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={locked} onClick={save}>{busy ? "保存中…" : edit.id ? "保存目标" : "创建目标"}</button>{current && current.courseIds.includes(courseId) && (selectedId !== current.id || conflict) ? <button type="button" className={ui.secondary} disabled={locked || Boolean(dirty)} onClick={select}>{conflict ? "使用此目标并保留旧值历史" : "本课程使用此目标"}</button> : null}</div>
+      {current && current.id === selectedId && !conflict ? <CourseMilestones key={current.id} courseId={courseId} goal={{ ...current, goalId: current.id }} api={api} onSaved={milestonesSaved} disabled={locked} /> : null}
+    </> : null}
+    {error ? <p className="text-xs leading-6 text-danger" role="alert">{error}</p> : null}{message ? <p className="text-xs leading-6 text-text-2" role="status">{message}</p> : null}
+    <button type="button" className={ui.quiet} disabled={busy || loading} onClick={() => setReload(value => value + 1)}>重新读取课程目标</button>
+  </section>;
 }

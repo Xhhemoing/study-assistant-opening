@@ -1,3 +1,4 @@
+import { validateBackupLearningGoals } from "./backup-learning-goals";
 import { validateBackupStudy } from "./backup-study";
 import { validateBackupRetestProtocols } from "./backup-retest-protocol";
 import { validateOpeningBackupCards } from "./backup-cards";
@@ -42,6 +43,8 @@ export type RestorePreview = {
 
 const TABLE_ALLOWLIST = [
   ...LEARNING_STATE_TABLES,
+  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
+  "course_requirement_evidence_links", "opening_learning_asset_links",
   "cards", "card_review_states", "learning_events",
   "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
   "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
@@ -377,6 +380,7 @@ export function validateOpeningRestore(
   validateBackupPlanFeedback(tables, errors);
   validateBackupPlanControl(tables, errors);
   validateBackupCourseMilestones(tables, errors);
+  validateBackupLearningGoals(tables, errors);
   validateBackupLearningState(tables, errors);
   validateOpeningBackupCards(tables, errors);
   validateBackupStudy(tables, errors);

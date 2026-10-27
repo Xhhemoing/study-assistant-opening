@@ -9,7 +9,9 @@ import { AssistantView } from "../assistant/assistant-view";
 import { studyConversationIdentity, type StudyConversationContext } from "../assistant/study-conversation-context";
 import { textareaClass, ui } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
-import { associateStudyNote, readStudyNote, saveStudyNote, subscribeStudyNote, writeStudyNote, type StudyNoteDraft } from "./study-note-draft";
+import { associateStudyNote, hasExistingStudyNote, readStudyNote, saveStudyNote, subscribeStudyNote, writeStudyNote, type StudyNoteDraft } from "./study-note-draft";
+import { StudyNoteComposer } from "../learning-links/study-note-composer";
+import { AssetLearningLinks } from "../learning-links/asset-learning-links";
 
 /** The prompt's tutor must use its real attempt, so delivered help stays in the evidence chain. */
 export function StudyContextTools({ context, isQuestion = false, learningAttempt = null, initialQuestion = "", questionBlockedReason, section, askRequest }: {
@@ -47,6 +49,12 @@ export function StudyContextTools({ context, isQuestion = false, learningAttempt
 }
 
 export function StudyNotePanel({ context }: { context: StudyConversationContext }) {
+  const [legacy, setLegacy] = useState(false), [legacyAvailable, setLegacyAvailable] = useState(false);
+  useEffect(() => { setLegacyAvailable(hasExistingStudyNote(context)); }, [context]);
+  return <div className="space-y-3">{legacyAvailable ? <div className="space-y-2"><p className="text-xs text-text-3">此前的笔记草稿与未知保存请求仍保留，新入口不会重新发送它。</p><button className={ui.quiet} type="button" onClick={() => setLegacy(value => !value)}>{legacy ? "返回新的理解与关联笔记" : "查看此前笔记草稿或保存结果"}</button></div> : null}{legacy ? <LegacyStudyNotePanel context={context} /> : <StudyNoteComposer context={context} />}</div>;
+}
+
+function LegacyStudyNotePanel({ context }: { context: StudyConversationContext }) {
   const [draft, setDraft] = useState<StudyNoteDraft | null>(null);
   const [storageWarning, setStorageWarning] = useState(false);
   const [message, setMessage] = useState("");
@@ -85,5 +93,6 @@ export function StudyNotePanel({ context }: { context: StudyConversationContext 
     {message ? <p role="alert" className="text-xs text-danger">{message}</p> : null}
     {storageWarning ? <p role="status" className="text-xs leading-6 text-warn">此浏览器无法保留未保存的笔记。工具切换期间仍保留内容，刷新前请先复制或保存。</p> : null}
     <Link className={ui.quiet} href={`/opening/library?tab=notes${context.courseId ? `&courseId=${encodeURIComponent(context.courseId)}` : ""}`}>查看笔记列表</Link>
+    {draft?.status === "saved" && draft.documentId ? <AssetLearningLinks assetType="document" assetId={draft.documentId} /> : null}
   </div>;
 }

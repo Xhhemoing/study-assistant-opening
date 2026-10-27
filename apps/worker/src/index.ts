@@ -6,7 +6,7 @@ import { assertConsumersActive, consumersReady, createWorkerReadiness, type Read
 import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
 import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, recordOpeningTutorTiming,
-  createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository } from "@aistudy/database";
+  createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository, createOpeningSourceVisualRecognitionsRepository } from "@aistudy/database";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
@@ -14,6 +14,7 @@ import { createOpeningBudgetRepository, createOpeningJobRepository, createOpenin
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createTutorStreamWriter } from "./runtime/tutor-stream";
 import { createSourcePageImages } from "./runtime/source-page-images";
+import { createSourceVisualRecognition } from "./runtime/source-visual-recognition";
 import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
 import { createOpeningSourceEmbeddingsRepository } from "@aistudy/database";
 import { createIndexSourceHandler } from "./jobs/index-source";
@@ -27,6 +28,7 @@ import { validateParserPaths } from "./parsers/parser-preflight";
 import { createParserHealthLease } from "./runtime/parser-health-lease";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
+import { createSpanTutorNextAction } from "./runtime/span-tutor-next-action";
 import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
 import { createRecognizePhotoQuestionHandler } from "./jobs/recognize-photo-question";
 import { createOpeningPhotoRecognitionRepository } from "@aistudy/database";
@@ -189,8 +191,6 @@ export async function main(): Promise<void> {
   const chunks = createOpeningSourceChunksRepository(sql);
   const storage = new OpeningS3(env.s3);
   const parserDisabled: JobHandler = async () => { throw new Error("parser queues are disabled for WORKER_ROLE=learning"); };
-  const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
-    segments: createOpeningPdfSegmentsRepository(sql), segmentTimeoutSeconds: startup.ocrSegmentTimeoutSeconds }) : parserDisabled;
   const retest = createRetestCandidateHandler({
     readLearningPreferences: (scope, courseId) => readLearningPreferences(sql, scope, courseId),
     readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
@@ -221,6 +221,13 @@ export async function main(): Promise<void> {
   const indexSource = createIndexSourceHandler({ repository: createOpeningSourceEmbeddingsRepository(sql),
     config: embeddingConfig, budget: scope => scopeBudget(budget, scope) });
   const models = createDbModelGateway(sql);
+  const visualRecognitions = createOpeningSourceVisualRecognitionsRepository(sql);
+  const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
+    segments: createOpeningPdfSegmentsRepository(sql), segmentTimeoutSeconds: startup.ocrSegmentTimeoutSeconds,
+    assertCurrent: (scope, identity) => visualRecognitions.assertCurrent(scope, identity),
+    recognizePage: createSourceVisualRecognition({ repository: visualRecognitions, gateway: models,
+      budget: scope => scopeBudget(budget, scope), storage }),
+  }) : parserDisabled;
   const knowledge = createOpeningKnowledgeRepository(sql);
   const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
     listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
@@ -281,6 +288,7 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    nextAction: createSpanTutorNextAction(sql),
     timing: { record: (scope, input) => recordOpeningTutorTiming(sql, scope, input) },
     onTimingUnavailable: reportError,
     retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),

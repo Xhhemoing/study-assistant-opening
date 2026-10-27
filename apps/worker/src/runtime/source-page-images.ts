@@ -16,7 +16,7 @@ export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
     for (const sourceId of input.sourceIds) {
       const version = input.sourceVersions[sourceId];
       if (version === undefined) throw new OpeningSourceError("CONFLICT", "材料版本尚未确认");
-      const rows = await sql`SELECT s.mime,s.bytes FROM opening_sources s
+      const rows = await sql`SELECT s.mime,s.bytes,s.version FROM opening_sources s
         JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
         WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
@@ -26,6 +26,7 @@ export function createSourcePageImages(sql: Sql, storage: OpeningS3) {
       // selected sources can still contribute text, but do not have to share
       // the same physical page or file format.
       if (!rows.length) continue;
+      if (Number(rows[0]!.version) !== version) throw new OpeningSourceError("CONFLICT", "材料版本已变化，请重新选择当前版本与物理页");
       const mime = String(rows[0]!.mime);
       if (IMAGE_SOURCE_MIMES.has(mime)) {
         if (input.physicalPage !== 1) continue;

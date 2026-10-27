@@ -6,6 +6,8 @@ import { readOpeningMemoryDeletions, type OpeningMemoryDeletions } from "./openi
 
 export const OPENING_BACKUP_TABLES = [
   "workspace_preferences", "courses", "course_asset_memberships",
+  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
+  "course_requirement_evidence_links", "opening_learning_asset_links",
   "cards", "card_review_states", "learning_events",
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
