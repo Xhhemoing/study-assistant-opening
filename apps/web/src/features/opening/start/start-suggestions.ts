@@ -16,7 +16,7 @@ export function startSuggestions({ state, activities = [], reviewCount, today }:
     href: `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}` });
   if (reviewCount != null && reviewCount > 0) suggestions.push({ id: "review", label: `复习 ${reviewCount} 项`, href: "/opening/review" });
   const exam = state.courses?.status === "ready" ? state.courses.items
-    .filter(course => !course.archivedAt && course.targetDate && course.targetDate >= today)
+    .filter(course => !course.archivedAt && course.learningMode === "exam" && course.targetDate && course.targetDate >= today)
     .sort((left, right) => left.targetDate!.localeCompare(right.targetDate!))[0] : null;
   if (exam?.targetDate) suggestions.push({ id: `exam:${exam.id}`, label: `${exam.title} · ${exam.targetDate} 考试`, meta: "冲刺",
     href: `/opening/sprint?courseId=${encodeURIComponent(exam.id)}` });

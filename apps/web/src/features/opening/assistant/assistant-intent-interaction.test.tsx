@@ -22,6 +22,7 @@ vi.mock("./ai-readiness", async () => {
 vi.mock("./proposal-panel", () => ({ ProposalPanel: () => null }));
 
 import { AssistantView } from "./assistant-view";
+import { MessageActions } from "./message-actions";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 const conversationId = "11111111-1111-4111-8111-111111111111";
@@ -42,6 +43,52 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals();
 });
 
+it("maps the four explanation controls to existing reply modes and draft callbacks", async () => {
+  const reply = vi.fn(), prompt = vi.fn(), save = vi.fn();
+  await act(async () => root.render(<MessageActions text="原回答" onReplyMode={reply} onPrompt={prompt} onSave={save} />));
+  for (const label of ["我没懂", "举个例子", "讲快点", "讲细点"]) {
+    const action = Array.from(host.querySelectorAll("button")).find(button => button.textContent === label);
+    expect(action, label).toBeDefined();
+    await act(async () => action!.click());
+  }
+  expect(reply.mock.calls).toEqual([["hint"], ["explain"]]);
+  expect(prompt.mock.calls[0]?.[0]).toContain("具体例子");
+  expect(prompt.mock.calls[1]?.[0]).toContain("讲快");
+  expect(save).not.toHaveBeenCalled();
+  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "保存")!.click());
+  expect(save).toHaveBeenCalledOnce();
+});
+
+it.each(["mode", "draft", "none"] as const)("only exposes explanation actions with actual %s callbacks", async kind => {
+  await act(async () => root.render(<MessageActions text="原回答" onReplyMode={kind === "mode" ? vi.fn() : undefined} onPrompt={kind === "draft" ? vi.fn() : undefined} />));
+  const labels = Array.from(host.querySelectorAll("button")).map(button => button.textContent);
+  expect(labels.includes("我没懂")).toBe(kind === "mode");
+  expect(labels.includes("讲细点")).toBe(kind === "mode");
+  expect(labels.includes("举个例子")).toBe(kind === "draft");
+  expect(labels.includes("讲快点")).toBe(kind === "draft");
+});
+
+it.each(["举个例子", "讲快点"])("prepares %s in the guarded draft without sending", async label => {
+  readiness.blocked = false;
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const submitTurn = vi.fn();
+  const api = {
+    listSources: vi.fn(async () => []), submitTurn,
+    resumeConversation: vi.fn(async () => ({ conversationId, courseId: null, sourceIds: [], boundedHistory: [], historyTruncated: false })),
+    listTurns: vi.fn(async () => [{ id: sourceId, conversationId, role: "assistant", text: "矩阵秩是列空间的维数", status: "complete", citations: [], createdAt: "2026-10-21T10:00:00Z" }]),
+    getPendingJob: vi.fn(async () => null),
+  } as unknown as OpeningApi;
+  await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId} initialDraft="保留我原先的问题" />));
+  const button = Array.from(host.querySelectorAll("button")).find(item => item.textContent === label)!;
+  await act(async () => button.click());
+  expect(confirm).toHaveBeenCalledOnce();
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我原先的问题");
+  confirm.mockReturnValue(true);
+  await act(async () => button.click());
+  expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toContain(label === "举个例子" ? "具体例子" : "讲快");
+  expect(submitTurn).not.toHaveBeenCalled();
+});
+
 it.each(["explain", "composer"] as const)("shares the send lock during source preflight when %s starts first", async first => {
   readiness.blocked = false;
   const sources = [{ id: sourceId, name: "线代讲义", version: 1, uploadState: "uploaded", parseState: "ready" }];
@@ -58,7 +105,7 @@ it.each(["explain", "composer"] as const)("shares the send lock during source pr
   } as unknown as OpeningApi;
   await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId}
     studyContext={{ sourceId, sourceVersion: 1 }} initialDraft="我自己的推导" />));
-  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
+  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "讲细点")!;
   const composer = () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!;
   await act(async () => { (first === "explain" ? explain() : composer()).click(); });
   expect(submitTurn).not.toHaveBeenCalled();
@@ -80,7 +127,7 @@ it("direct explanation sends once, preserves a written draft, and retries the sa
     getJob: vi.fn(async () => ({ id: jobId, status: "succeeded", error: null, updatedAt: "2026-10-21T10:00:00Z" })),
   } as unknown as OpeningApi;
   await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId} initialDraft="保留我正在写的推导" />));
-  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
+  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "讲细点")!;
   await act(async () => { explain().click(); explain().click(); });
   expect(submitTurn).toHaveBeenCalledOnce();
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我正在写的推导");
@@ -114,7 +161,7 @@ it("uses a new direct-explanation request when the help scope changes after a fa
   await act(async () => root.render(<AssistantView api={api} learningAttempt={attempt}
     studyContext={{ courseId, attemptId: attempt.id }} initialDraft="这一题怎么开始？" />));
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
-  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
+  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "讲细点")!;
   await act(async () => explain().click());
   const scope = Array.from(host.querySelectorAll("select")).find(select => select.querySelector('[value="language_support"]'))!;
   await act(async () => { scope.value = "language_support"; scope.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -139,7 +186,7 @@ it("releases the shared lock when source preflight rejects the send", async () =
   } as unknown as OpeningApi;
   await act(async () => root.render(<AssistantView api={api} initialConversationId={conversationId}
     studyContext={{ sourceId, sourceVersion: 1 }} initialDraft="我的草稿" />));
-  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "直接讲完整")!;
+  const explain = () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "讲细点")!;
   await act(async () => explain().click());
   expect(submitTurn).not.toHaveBeenCalled();
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("我的草稿");

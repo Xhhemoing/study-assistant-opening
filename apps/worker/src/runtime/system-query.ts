@@ -23,7 +23,7 @@ async function callDbQueryModel(sql: Sql, scope: import("@aistudy/contracts").Sc
     import("./model-gateway"), import("@aistudy/database"), import("@aistudy/config"),
   ]);
   const catalog = loadOpeningModelCatalog();
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents,
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: catalog.dailyCapCents, dailyQuotaMode: catalog.dailyQuotaMode, parentCapCents: catalog.parentCapCents,
     pricingConfigured: catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0) });
   return createDbModelGateway(sql).call(scope, "tutor.listen", { ...options, input, budget: scopeBudget(budget, scope) });
 }

@@ -72,26 +72,25 @@ describe("opening capabilities vs backend authorization (PR-H)", () => {
     return denied[0]!;
   }
 
-  const envs: [string, Record<string, string>][] = [
-    ["A off", { OPENING_TEACHING_LOOP: "0" }],
-    ["B dark launch (api only)", { OPENING_TEACHING_LOOP: "1" }],
-    ["C api+ui", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }],
-    ["D rollout 50%", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "50" }],
-    ["E rollout 0%", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }],
+  const envs: [string, Record<string, string>, { api: boolean; ui: boolean }][] = [
+    ["A off", { OPENING_TEACHING_LOOP: "0", OPENING_TEACHING_WORKSPACE: "0" }, { api: false, ui: false }],
+    ["B dark launch (api only)", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "0" }, { api: true, ui: false }],
+    ["C api+ui", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1" }, { api: true, ui: true }],
+    ["D retired rollout 50%", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "50" }, { api: true, ui: true }],
+    ["E retired rollout 0%", { OPENING_TEACHING_LOOP: "1", OPENING_TEACHING_WORKSPACE: "1", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "0" }, { api: true, ui: true }],
+    ["F off with retired rollout", { OPENING_TEACHING_LOOP: "0", OPENING_TEACHING_WORKSPACE: "0", OPENING_TEACHING_LOOP_ROLLOUT_PERCENT: "100" }, { api: false, ui: false }],
   ];
 
-  it.each(envs)("env %s: capabilities.teachingLoop.api == backend allows, per user", async (_label, env) => {
+  it.each(envs)("env %s: capabilities.teachingLoop.api == backend allows, per user", async (_label, env, expected) => {
     for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
-    const seen = new Set<boolean>();
     for (const cookie of cookies) {
       const body = await caps(cookie);
       expect(body.authenticated).toBe(true);
       const { api, ui } = body.capabilities.teachingLoop;
+      expect({ api, ui }).toEqual(expected);
       expect(ui && !api, "UI never shown without API").toBe(false);
       expect(await guardDenied(cookie)).toBe(!api);
-      seen.add(api);
     }
-    if (env.OPENING_TEACHING_LOOP_ROLLOUT_PERCENT === "50") expect(seen.size, "50% rollout splits 12 users").toBe(2);
   });
 
   it("a client that ignores capabilities (direct request with LOOP=0) is still rejected", async () => {

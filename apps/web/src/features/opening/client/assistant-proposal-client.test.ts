@@ -1,10 +1,37 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAssistantProposalClient } from "./assistant-proposal-client";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const tool = { name: "propose_note" as const, arguments: { title: "Span", text: "检查全部坐标。" } };
 const proposal = { id, sourceTurnId: id, tool, version: 0, status: "draft", createdAt: "2026-10-19T00:00:00Z", basisVersion: "state:1", result: null, prepared: null };
 describe("assistant proposal client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("requests pending pages with conversation and opaque cursor without changing the legacy list", async () => {
+    const transport = vi.fn<typeof fetch>(async path => new Response(JSON.stringify(String(path).includes("status=draft")
+      ? { proposals: [proposal], total: 67, nextCursor: "next_cursor" } : { proposals: [proposal] })));
+    const api = createAssistantProposalClient(transport);
+    expect(await api.listPendingAssistantProposals({ conversationId: id, cursor: "prior_cursor" })).toEqual({ proposals: [proposal], total: 67, nextCursor: "next_cursor" });
+    expect(String(transport.mock.calls[0]![0])).toBe(`/api/opening/assistant-proposals?status=draft&conversationId=${id}&cursor=prior_cursor`);
+    expect(await api.listAssistantProposals()).toEqual([proposal]);
+    expect(transport.mock.calls[1]![0]).toBe("/api/opening/assistant-proposals");
+  });
+  it("broadcasts only successfully parsed proposal writes and never fabricates a pending total", async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal("window", { dispatchEvent });
+    const transport = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ proposal: { ...proposal, status: "rejected", version: 1 } })))
+      .mockResolvedValueOnce(new Response("{}"))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    const api = createAssistantProposalClient(transport);
+    await api.proposeAssistantAction({ clientKey: "draft-request-1", sourceTurnId: id, tool });
+    await api.decideAssistantProposal(id, { expectedVersion: 0, action: "reject", clientKey: "reject-request-1" });
+    await expect(api.proposeAssistantAction({ clientKey: "draft-request-2", sourceTurnId: id, tool })).rejects.toThrow();
+    await expect(api.decideAssistantProposal(id, { expectedVersion: 0, action: "accept", clientKey: "accept-request-1" })).rejects.toMatchObject({ status: 503 });
+    await expect(api.listPendingAssistantProposals()).rejects.toMatchObject({ status: 503 });
+    expect(dispatchEvent.mock.calls.map(([event]) => event.type)).toEqual(["opening:reviews-changed", "opening:reviews-changed"]);
+  });
   it("creates only a draft and preserves the same request identity on explicit retry", async () => {
     const transport = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ proposal }), { status: 200 }));
     const api = createAssistantProposalClient(transport);

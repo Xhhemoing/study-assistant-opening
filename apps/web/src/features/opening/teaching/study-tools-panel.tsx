@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { X } from "lucide-react";
+import { PanelsTopLeft, X } from "lucide-react";
 import { ui } from "../design/ui";
 
 export type StudyToolPanel = {
@@ -12,13 +12,40 @@ export type StudyToolPanel = {
   mountKey?: string;
 };
 
+const LAST_PANEL_KEY = "aistudy.study-tools.last-panel";
+let lastPanel: string | null = null;
+function rememberPanel(id: string) {
+  lastPanel = id;
+  try { window.localStorage.setItem(LAST_PANEL_KEY, id); } catch { /* Keep the current choice when storage is unavailable. */ }
+}
+function rememberedPanel(panels: StudyToolPanel[]): string | null {
+  let saved = lastPanel;
+  try { saved = window.localStorage.getItem(LAST_PANEL_KEY); } catch { /* Use this session's choice. */ }
+  return panels.find(panel => panel.id === saved)?.id ?? panels[0]?.id ?? null;
+}
+type StudyToolsControl = {
+  panels: StudyToolPanel[];
+  activePanel: string | null;
+  onPanelChange: (id: string | null) => void;
+  suspended?: boolean;
+};
+
+/** The parent owns visibility; both header and inline entry reopen the same last valid tab. */
+export function StudyToolsToggle({ panels, activePanel, onPanelChange, suspended = false, controlsId }: StudyToolsControl & { controlsId?: string }) {
+  const open = !suspended && panels.some(panel => panel.id === activePanel);
+  if (!panels.length) return null;
+  return <button type="button" className={ui.quiet} aria-expanded={open} aria-controls={controlsId}
+    onClick={() => onPanelChange(open ? null : rememberedPanel(panels))}><PanelsTopLeft size={16} aria-hidden="true" />工具</button>;
+}
+
 /** One auxiliary surface. Container resizing, closing and tab switches preserve visited subtrees. */
-export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, fillHeight = false, suspended = false, contentClassName = "", toolbarClassName = "", preferContentOnNarrowEntry = false }: {
+export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, fillHeight = false, suspended = false, contentClassName = "", toolbarClassName = "", preferContentOnNarrowEntry = false, showToolbar = true }: {
   panels: StudyToolPanel[];
   fillHeight?: boolean;
   suspended?: boolean;
   contentClassName?: string;
   toolbarClassName?: string;
+  showToolbar?: boolean;
   /** Only the initial automatic companion opening yields to task content on narrow screens. */
   preferContentOnNarrowEntry?: boolean;
   activePanel: string | null;
@@ -41,6 +68,8 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
   const mountKeys = [...new Set(panels.map(panel => panel.mountKey ?? panel.id))];
   const requestedKey = requested?.mountKey ?? requested?.id;
   if (requestedKey) visited.current.add(requestedKey);
+
+  useEffect(() => { if (requested) rememberPanel(requested.id); }, [requested?.id]);
 
   useEffect(() => {
     const element = container.current;
@@ -101,9 +130,9 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
     function escape(event: globalThis.KeyboardEvent) {
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       const element = dialog.current;
-      if (!element) return;
+      if (!element || element.closest("[hidden],[inert]")) return;
       // A nested save dialog owns Escape, including its busy cancellation guard.
-      if ([...document.querySelectorAll("dialog[open]")].some(other => other !== element && (element.contains(other) || !other.contains(element)))) return;
+      if ([...document.querySelectorAll('dialog[open],[role="dialog"][data-state="open"]')].some(other => other !== element && !other.closest("[hidden],[inert]") && (element.contains(other) || !other.contains(element)))) return;
       event.preventDefault();
       onPanelChange(null);
     }
@@ -123,11 +152,9 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
   }
 
   return <div ref={container} className={`flex min-w-0 flex-col ${fillHeight ? "h-full min-h-0" : ""}`} data-study-tools-layout={wide ? "split" : "switch"}>
-    <nav aria-label="学习工具" className={`mb-2 flex min-w-0 shrink-0 flex-wrap gap-1 ${toolbarClassName}`}>
-      {panels.map(panel => <button key={panel.id} type="button" className={ui.quiet}
-        aria-expanded={selected?.id === panel.id} aria-controls={`${id}-companion`}
-        onClick={() => onPanelChange(selected?.id === panel.id ? null : panel.id)}>{panel.label}</button>)}
-    </nav>
+    {showToolbar ? <nav aria-label="学习工具" className={`mb-2 flex min-w-0 shrink-0 flex-wrap gap-1 ${toolbarClassName}`}>
+      <StudyToolsToggle panels={panels} activePanel={selected?.id ?? null} onPanelChange={onPanelChange} suspended={suspended} controlsId={`${id}-companion`} />
+    </nav> : null}
     <div className={`grid min-w-0 ${fillHeight ? "min-h-0 flex-1 grid-rows-[minmax(0,1fr)]" : ""} ${selected && wide ? "grid-cols-[minmax(0,1fr)_340px]" : "grid-cols-1"}`}>
       <div ref={content} hidden={Boolean(selected && !wide)} className={selected && !wide ? "hidden" : `min-w-0 ${contentClassName} ${fillHeight ? "min-h-0 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]" : ""}`} data-study-content="true">{children}</div>
       <dialog ref={dialog} data-study-companion="true" id={`${id}-companion`} aria-label="学习辅助区"

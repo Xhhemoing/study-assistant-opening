@@ -1,5 +1,5 @@
 import { openingModelProbeInputSchema, uuidSchema } from "@aistudy/contracts";
-import { probeModel } from "../../../../../../../../features/settings/model-probe-service";
+import { probeModel } from "../../../../../../../../features/opening/settings/model-probe-service";
 import { ApiError, jsonError, mapDomainError } from "../../../../../../../../features/auth/service";
 import { readOpeningJsonBody } from "../../../../../../../../features/opening/request-body";
 import { requireOpeningScope } from "../../../../../../../../features/opening/runtime";

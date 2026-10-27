@@ -56,19 +56,43 @@ describe("opening same-origin middleware", () => {
     expect(response.headers.get("x-middleware-next")).toBe("1");
   });
 
-  it("keeps legacy course links outside the Opening redirect", () => {
-    // PRODUCT DECISION: /learn/courses* stays reachable so existing course deep
-    // links are not broken. Mock was stripped from that page instead of redirecting.
+  it("permanently redirects legacy course deep links and preserves repeated filters", () => {
     vi.stubEnv("OPENING_RELEASE", "1");
-    const response = middleware(pageRequest("/learn/courses/course-1?tab=goals"));
-    expect(response.status).toBe(200);
+    const response = middleware(pageRequest("/learn/courses/course-1?tab=goals&tag=one&tag=two"));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/courses/course-1?tab=goals&tag=one&tag=two`);
   });
 
-  it("keeps legacy course links outside production mock redirects too", () => {
-    vi.stubEnv("NODE_ENV", "production");
+  it.each(["production", "development"])("keeps course aliases permanent in %s without the release flag", environment => {
+    vi.stubEnv("NODE_ENV", environment);
     vi.stubEnv("OPENING_RELEASE", "0");
     const response = middleware(pageRequest("/learn/courses/course-1"));
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/courses/course-1`);
+  });
+
+  it.each(["127.0.0.1", "[::1]", "localhost"])("preserves the request host %s when NextURL normalizes loopback names", host => {
+    vi.stubEnv("__NEXT_NO_MIDDLEWARE_URL_NORMALIZE", "1");
+    const response = middleware(new NextRequest(`http://${host}:3107/learn/courses/course-1?tag=a&tag=b`));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`http://${host}:3107/opening/courses/course-1?tag=a&tag=b`);
+  });
+
+  it.each([
+    ["/learn/courses", "/opening/courses"],
+    ["/learn/courses/new", "/opening/courses/new"],
+    ["/library/new", "/opening/library/new"],
+    ["/library/source-1", "/opening/library/source-1"],
+    ["/search", "/opening/search"],
+    ["/settings/advanced", "/opening/settings/advanced"],
+    ["/settings/export", "/opening/settings/export"],
+    ["/ui-preview", "/opening/today"],
+    ["/ui-preview/opening", "/opening/today"],
+  ])("preserves a retired page alias %s before removing its page module", (from, target) => {
+    vi.stubEnv("NODE_ENV", "development"); vi.stubEnv("OPENING_RELEASE", "0");
+    const response = middleware(pageRequest(`${from}?tag=a&tag=b&version=0&returnTo=%2Fopening%2Ftoday`));
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`${publicBase}${target}?tag=a&tag=b&version=0&returnTo=%2Fopening%2Ftoday`);
   });
 
   it.each([
@@ -111,12 +135,12 @@ describe("opening same-origin middleware", () => {
     }
   });
 
-  it("does not redirect mock legacy pages in development without OPENING_RELEASE", () => {
+  it("keeps retired mock URLs redirecting in development after their pages are removed", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("OPENING_RELEASE", "0");
     const response = middleware(pageRequest("/learn/goals"));
-    expect(response.status).toBe(200);
-    expect(response.headers.get("x-middleware-next")).toBe("1");
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toBe(`${publicBase}/opening/today`);
   });
 });
 
@@ -142,6 +166,85 @@ describe("cookie-auth base URL configuration", () => {
     expect(cookieAuthBaseUrl({ NODE_ENV: "development" } as NodeJS.ProcessEnv, "http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
     expect(cookieAuthBaseUrl({ NODE_ENV: "production" } as NodeJS.ProcessEnv, "http://127.0.0.1:3000")).toBeNull();
     expect(cookieAuthBaseUrl({ NODE_ENV: "production", PUBLIC_BASE_URL: " https://study.example " } as NodeJS.ProcessEnv, "http://evil.example")).toBe("https://study.example");
+  });
+});
+
+describe("legacy API observation does not change request handling", () => {
+  beforeEach(() => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_BASE_URL", publicBase);
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+  it("records a blocked request without logging credentials or consuming its body", () => {
+    const input = new NextRequest(`${publicBase}/api/practice/private-id?token=secret`, {
+      method: "POST", body: "private answer", headers: { origin: "https://foreign.example", cookie: "session=secret" },
+    });
+    expect(middleware(input).status).toBe(403);
+    expect(input.bodyUsed).toBe(false);
+    expect(console.info).toHaveBeenCalledOnce();
+    const event = JSON.parse(vi.mocked(console.info).mock.calls[0]![0] as string);
+    expect(event).toMatchObject({ event: "deprecated_api_request", route: "/api/practice/[id]", method: "POST" });
+    expect(JSON.stringify(event)).not.toMatch(/private|secret|foreign/);
+  });
+
+  it("keeps a same-origin request and active routes unchanged when logging fails", () => {
+    vi.mocked(console.info).mockImplementation(() => { throw new Error("stdout unavailable"); });
+    const input = new NextRequest(`${publicBase}/api/explorations`, { method: "POST", headers: { origin: publicBase } });
+    expect(middleware(input).headers.get("x-middleware-next")).toBe("1");
+    vi.mocked(console.info).mockClear();
+    expect(middleware(new NextRequest(`${publicBase}/api/courses`, { method: "POST", headers: { origin: publicBase } })).headers.get("x-middleware-next")).toBe("1");
+    expect(console.info).not.toHaveBeenCalled();
+  });
+});
+
+const sprintCourse = "11111111-1111-4111-8111-111111111111";
+describe("legacy sprint compatibility", () => {
+  it.each([["", "GET"], ["/study", "GET"], ["", "HEAD"], ["/study", "HEAD"]])("permanently redirects the old course%s entry via %s without losing query context", (suffix, method) => {
+    const input = new NextRequest(`${publicBase}/opening/courses/${sprintCourse}${suffix}?mode=sprint&conversation=kept&filter=a&filter=b&courseId=old`, { method });
+    const response = middleware(input);
+    expect(response.status).toBe(308);
+    const target = new URL(response.headers.get("location")!);
+    expect(target.pathname).toBe("/opening/sprint");
+    expect(target.searchParams.get("courseId")).toBe(sprintCourse);
+    expect(target.searchParams.get("conversation")).toBe("kept");
+    expect(target.searchParams.getAll("filter")).toEqual(["a", "b"]);
+    expect(target.searchParams.has("mode")).toBe(false);
+    expect(middleware(new NextRequest(target)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each(["http://127.0.0.1:3000", "http://[::1]:3000"])("keeps the request authority through both legacy sprint redirects: %s", origin => {
+    vi.stubEnv("__NEXT_NO_MIDDLEWARE_URL_NORMALIZE", "1");
+    const first = middleware(new NextRequest(`${origin}/learn/courses/${sprintCourse}/study?mode=sprint&conversation=kept&filter=a&filter=b`));
+    expect(first.status).toBe(308);
+    const course = new URL(first.headers.get("location")!);
+    expect(course.origin).toBe(origin);
+    expect(course.pathname).toBe(`/opening/courses/${sprintCourse}/study`);
+    const second = middleware(new NextRequest(course));
+    expect(second.status).toBe(308);
+    const canonical = new URL(second.headers.get("location")!);
+    expect(canonical.origin).toBe(origin);
+    expect(canonical.pathname).toBe("/opening/sprint");
+    expect(canonical.searchParams.get("courseId")).toBe(sprintCourse);
+    expect(canonical.searchParams.get("conversation")).toBe("kept");
+    expect(canonical.searchParams.getAll("filter")).toEqual(["a", "b"]);
+    expect(middleware(new NextRequest(canonical)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each([
+    `/opening/courses/${sprintCourse}/study?mode=practice`,
+    `/opening/courses/${sprintCourse}/study?mode=sprint&mode=practice`,
+    "/opening/courses/not-a-course/study?mode=sprint",
+    `/opening/courses/${sprintCourse}/exam?mode=sprint`,
+  ])("keeps other or ambiguous course entries unchanged: %s", pathname => {
+    expect(middleware(pageRequest(pathname)).headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it.each(["POST", "PUT"])("does not redirect a %s sent to a legacy sprint page", method => {
+    const response = middleware(new NextRequest(`${publicBase}/opening/courses/${sprintCourse}/study?mode=sprint`, { method }));
+    expect(response.headers.get("location")).toBeNull();
+    expect(response.headers.get("x-middleware-next")).toBe("1");
   });
 });
 

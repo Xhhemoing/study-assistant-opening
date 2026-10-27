@@ -12,6 +12,7 @@ import CardsPage from "../../../app/(opening)/opening/cards/page";
 import NotePage from "../../../app/(opening)/opening/library/[id]/page";
 import ExamPage from "../../../app/(opening)/opening/courses/[id]/exam/page";
 import { ConversationObjectFrame } from "./conversation-object-frame";
+import { CourseDetail } from "../courses/course-detail";
 
 const conversation = "11111111-1111-4111-8111-111111111111", courseId = "22222222-2222-4222-8222-222222222222";
 function frame(node: unknown) {
@@ -30,13 +31,16 @@ it("adds one route-level frame to course detail, review/card destination and exa
   expect(calls.read).toHaveBeenCalledWith({}, courseId);
   expect(frame(await CoursePage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({}) })).props.conversation).toBeUndefined();
 });
-it("keeps conversation and canonical target parameters across existing cards and sprint redirects", async () => {
+it("keeps the conversation when cards redirect and the canonical sprint renders its course", async () => {
   await expect(CardsPage({ searchParams: Promise.resolve({ conversation, cardId: "original-card" }) })).rejects.toThrow("redirect");
   const cards = new URL(calls.redirect.mock.lastCall![0], "https://study.test");
   expect(cards.pathname).toBe("/opening/review"); expect(cards.searchParams.get("conversation")).toBe(conversation); expect(cards.searchParams.get("cardId")).toBe("original-card");
-  await expect(SprintPage({ searchParams: Promise.resolve({ conversation, courseId, source: "source", version: "3" }) })).rejects.toThrow("redirect");
-  const sprint = new URL(calls.redirect.mock.lastCall![0], "https://study.test");
-  expect(sprint.pathname).toBe(`/opening/courses/${courseId}`); expect(sprint.searchParams.get("conversation")).toBe(conversation); expect(sprint.searchParams.get("version")).toBe("3");
+  calls.redirect.mockClear();
+  const sprint = frame(await SprintPage({ searchParams: Promise.resolve({ conversation, courseId, source: "source", version: "3" }) }));
+  expect(sprint.props.conversation).toBe(conversation);
+  expect(sprint.props.children.type).toBe(CourseDetail);
+  expect(sprint.props.children.props).toEqual({ id: courseId, mode: "sprint", conversationId: conversation });
+  expect(calls.redirect).not.toHaveBeenCalled();
   expect(frame(await SprintPage({ searchParams: Promise.resolve({ conversation }) })).props.conversation).toBe(conversation);
 });
 it("does not pass a malformed conversation into the course's continuation links", async () => {
@@ -46,7 +50,7 @@ it("does not pass a malformed conversation into the course's continuation links"
 
 it("carries only an explicit note conversation while preserving the document identity and permission-owning editor", async () => {
   const noteId = "33333333-3333-4333-8333-333333333333";
-  const { DocumentEditor } = await import("../../editor/document-editor");
+  const { DocumentEditor } = await import("../editor/document-editor");
   const known = frame(await NotePage({ params: Promise.resolve({ id: noteId }), searchParams: Promise.resolve({ conversation }) }));
   expect(known.props.conversation).toBe(conversation);
   expect(known.props.children.type).toBe(DocumentEditor);

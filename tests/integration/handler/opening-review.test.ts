@@ -13,6 +13,8 @@ import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { taskCandidate } from "../opening-task-acceptance-fixture";
 import { backupRows } from "../opening-backup-records-fixture";
 import { seedReviewRetest } from "../opening-review-fixture";
+import { createOpeningAssistantProposalsRepository } from "@aistudy/database";
+import { GET as reviewCount } from "../../../apps/web/src/app/api/opening/reviews/route";
 
 let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
 beforeAll(async () => {
@@ -31,24 +33,49 @@ function request(body?: unknown, cookie = fixture.cookie) {
 }
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
 const decision = (id: string, origin: "assistant" | "retest") => ({ candidateRef: { id, origin, kind: origin === "assistant" ? "task" : "retest" }, clientKey: randomUUID() });
+async function newProposal(scope = fixture.scope) {
+  const records = backupRows(fixture.sql, scope), sourceId = await records.source(), conversationId = await records.conversation(), sourceTurnId = randomUUID();
+  await fixture.sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,source_ids,source_versions)
+    VALUES(${sourceTurnId},${scope.workspaceId},${conversationId},'user','请准备一个建议','explain','complete',${[sourceId]},${fixture.sql.json({ [sourceId]: 1 })})`;
+  const proposal = await createOpeningAssistantProposalsRepository(fixture.sql).propose(scope, { sourceTurnId, clientKey: randomUUID(),
+    tool: { name: "propose_note", arguments: { title: "新式建议", text: "等待明确确认" } } });
+  return { proposal, sourceId };
+}
+async function expectSharedCount(expected: number) {
+  const response = await reviewCount(request());
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ total: expected });
+  expect(await createTodayResumeReader(fixture.sql).pendingCandidateCount(fixture.scope)).toBe(expected);
+}
 
 it("lists real task/memory/retest proposals and counts them together for Today", async () => {
   const task = await taskCandidate(fixture), memory = await taskCandidate(fixture), retest = await seedReviewRetest(fixture);
+  await newProposal();
   await fixture.sql`UPDATE opening_assistant_candidates SET payload = ${fixture.sql.json({ kind: "memory", text: "习惯先尝试", temporary: false })} WHERE id = ${memory.id}`;
   expect((await assistantList(request())).status).toBe(200);
   expect((await (await assistantList(request())).json()).map((row: { id: string }) => row.id).sort()).toEqual([task.id, memory.id].sort());
   expect(await (await retestList(request())).json()).toMatchObject([{ id: retest.id, kind: "task", accepted: false }]);
-  expect(await createTodayResumeReader(fixture.sql).pendingCandidateCount(fixture.scope)).toBe(3);
+  await expectSharedCount(4);
+  expect(await createTodayResumeReader(fixture.sql).pendingCandidates(fixture.scope)).toHaveLength(3);
   expect(await fixture.sql`SELECT id FROM opening_tasks`).toHaveLength(0);
 });
 
 it("requires authentication and hides foreign or currently excluded sources", async () => {
   expect((await retestList(request(undefined, ""))).status).toBe(401);
   const task = await taskCandidate(fixture, true), retest = await seedReviewRetest(fixture);
+  await newProposal();
   await taskCandidate({ ...fixture, scope: fixture.otherScope });
   await seedReviewRetest(fixture, fixture.otherScope);
+  await newProposal(fixture.otherScope);
+  await expectSharedCount(3);
   await backupRows(fixture.sql, fixture.scope).exclude(task.sourceId!);
   await backupRows(fixture.sql, fixture.scope).exclude(retest.sourceId);
+  // Exclusions advance privacy_epoch, invalidating all drafts from the old epoch.
+  await expectSharedCount(0);
+  const refreshed = await newProposal();
+  await expectSharedCount(1);
+  await backupRows(fixture.sql, fixture.scope).exclude(refreshed.sourceId);
+  await expectSharedCount(0);
   expect(await (await assistantList(request())).json()).toEqual([]);
   expect(await (await retestList(request())).json()).toEqual([]);
   expect((await acceptRetest(request({ clientKey: randomUUID() }), params(retest.id))).status).toBe(404);

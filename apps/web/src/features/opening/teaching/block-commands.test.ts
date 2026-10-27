@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { TeachingCommandConflict, TeachingCommandResponse, TeachingCommandSuccess } from "@aistudy/contracts";
+import type { TeachingCommandResponse, TeachingCommandSuccess } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import {
   BlockCommands,
@@ -37,7 +37,7 @@ describe("BlockCommands explanation provenance", () => {
       api: api as unknown as OpeningApi, explanationContext: { activityId: BID, blockId: BID, contentVersion: version },
       onAskExplanation: ask, onReread: () => render(2),
     })); }
-    const why = () => host.querySelector<HTMLButtonElement>('[data-command-kind="why"]')!;
+    const why = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "讲细点")!;
     try {
       await act(async () => render(1)); const originalButton = why();
       await act(async () => why().click()); expect(host.textContent).toContain("旧版的实际解释");
@@ -64,7 +64,7 @@ describe("BlockCommands explanation provenance", () => {
       api: api as unknown as OpeningApi, onSuccess: success,
       explanationContext: { activityId: BID, blockId: BID, contentVersion: version }, onAskExplanation() {},
     }));
-    const why = () => host.querySelector<HTMLButtonElement>('[data-command-kind="why"]')!;
+    const why = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "讲细点")!;
     try {
       await act(async () => render(1)); await act(async () => why().click());
       await act(async () => render(2)); await act(async () => why().click());
@@ -121,7 +121,7 @@ describe("BlockCommandsBarView", () => {
     }));
     expect(html).toContain(`data-anchor="${BID}"`);
     expect(html).toContain("先比较两组向量的方向。");
-    for (const action of ["存为笔记", "做成卡片", "继续问"]) expect(html).toContain(action);
+    for (const action of ["保存", "制成卡片", "继续问"]) expect(html).toContain(action);
   });
   it("keeps a confused acknowledgement separate from an actual supplemental explanation", () => {
     const html = renderToStaticMarkup(createElement(BlockCommandsBarView, {
@@ -129,155 +129,59 @@ describe("BlockCommandsBarView", () => {
       explanationContext: { activityId: BID, contentVersion: 2 }, onAskExplanation() {}, onCommand() {},
     }));
     expect(html).toContain("已记下这里需要讲清楚。");
-    expect(html).not.toContain("存为笔记");
+    expect(html).not.toContain("保存");
   });
-  it("keeps all auxiliary actions in one initially collapsed native disclosure", () => {
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: false,
-        whyAvailable: true,
-        onCommand: () => undefined,
-      }),
-    );
-    const help = html.match(/<details[^>]*data-command-help="true"[^>]*>([\s\S]*?)<\/details>/);
-    expect(help).not.toBeNull();
-    expect(help![0].split(">")[0]).not.toMatch(/\bopen(?:=|\s|$)/);
-    expect(help![1]).toMatch(/<summary[^>]*>[\s\S]*?学习帮助[\s\S]*?<\/summary>/);
-    expect(help![1]).toContain('role="group"');
-    expect(help![1]).toContain('aria-label="当前学习单元帮助"');
-    for (const kind of TEACHING_COMMAND_KINDS) {
-      expect(help![1]).toContain(`data-command-kind="${kind}"`);
-    }
-    expect(help![1]).toContain(SKIP_HONESTY_COPY);
-    expect(html).not.toContain('role="toolbar"');
+  it("offers the same four explanation actions without branch or skip controls", () => {
+    const html = renderToStaticMarkup(createElement(BlockCommandsBarView, {
+      blockId: BID, returnDisabled: false, onAskExplanation() {}, onCommand() {},
+    }));
+    for (const label of ["我没懂", "举个例子", "讲快点", "讲细点"]) expect(html).toContain(label);
+    for (const legacy of ["分支栈为空", 'data-command-kind="branch"', 'data-command-kind="return"', 'data-command-kind="skip"']) expect(html).not.toContain(legacy);
   });
 
-  it("keeps help results and recovery visible outside the collapsed disclosure", () => {
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: true,
-        whyAvailable: true,
-        assist: { kind: "why", summary: "先比较两组向量的方向。" },
-        conflict: {
-          ok: false,
-          conflict: "stale_path_version",
-          message: "学习路径已更新。",
-          currentPathVersion: 3,
-        },
-        onCommand: () => undefined,
-        onReread: () => undefined,
-      }),
-    );
-    const helpEnd = html.indexOf("</details>");
-    expect(html.indexOf('data-command-assist="why"')).toBeGreaterThan(helpEnd);
-    expect(html.indexOf('data-command-conflict="stale_path_version"')).toBeGreaterThan(helpEnd);
-    expect(html.indexOf('data-command-reread="true"')).toBeGreaterThan(helpEnd);
-    expect(html).toContain("学习路径已更新");
-    expect(html).not.toContain("path=3");
+  it.each([{ disabled: true }, { busyKind: "example" }, { rereadBusy: true }] as const)("keeps action locking: %j", state => {
+    const html = renderToStaticMarkup(createElement(BlockCommandsBarView, {
+      blockId: BID, returnDisabled: false, onAskExplanation() {}, onCommand() {}, ...state,
+    }));
+    expect((html.match(/<button[^>]*disabled/g) ?? []).length).toBe(4);
   });
 
-  it.each([
-    { disabled: true },
-    { busyKind: "example" },
-    { rereadBusy: true },
-  ] as const)("preserves command locking while help is available: %j", (state) => {
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: false,
-        whyAvailable: true,
-        onCommand: () => undefined,
-        ...state,
-      }),
-    );
-    for (const kind of TEACHING_COMMAND_KINDS) {
-      expect(html).toMatch(new RegExp(`data-command-kind="${kind}"[^>]*disabled`));
-    }
-    expect(html).toContain("学习帮助");
-  });
-
-  it("can open the commands inside an explicitly selected parent help panel", () => {
-    const html = renderToStaticMarkup(
-      createElement(BlockCommands, {
-        activityId: "activity-1",
-        blockId: BID,
-        contentVersion: 2,
-        returnDisabled: false,
-        compact: true,
-        defaultOpen: true,
-      }),
-    );
-    expect(html).toMatch(/<details[^>]*data-command-help="true"[^>]*open=""/);
-    expect(html).toContain('data-command-kind="skip"');
-  });
-
-  it("renders kinds (why hidden by default), disables return when stack empty, skip honesty, no force overwrite", () => {
-    const onCommand = vi.fn();
-    const conflict: TeachingCommandConflict = {
-      ok: false,
-      conflict: "stale_content_version",
-      message: "content_version mismatch",
-      currentContentVersion: 3,
-      currentPathVersion: 2,
-    };
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: true,
-        conflict,
-        assist: { kind: "why", summary: "因为矩阵秩反映线性无关行数。" },
-        onCommand,
-        onReread: () => undefined,
-      }),
-    );
-    expect(html).toContain('data-block-commands="true"');
-    expect(html).toContain('data-why-available="false"');
-    expect(html).not.toContain('data-command-kind="why"');
-    for (const kind of TEACHING_COMMAND_KINDS.filter((k) => k !== "why")) {
-      expect(html).toContain(`data-command-kind="${kind}"`);
-    }
-    expect(html).toContain("data-skip-honesty");
-    expect(html).toContain(SKIP_HONESTY_COPY);
-    // Stub-era: why assist panel not shown when whyAvailable=false
-    expect(html).not.toContain('data-command-assist="why"');
+  it("keeps conflict recovery visible and suppresses unusable rewrite actions without an assistant", () => {
+    const html = renderToStaticMarkup(createElement(BlockCommandsBarView, {
+      blockId: BID, returnDisabled: true, onCommand() {}, onReread() {},
+      conflict: { ok: false, conflict: "stale_content_version", message: "content changed", currentContentVersion: 3 },
+    }));
+    expect(html).toContain("我没懂");
+    expect(html).not.toContain("举个例子");
+    expect(html).not.toContain("讲快点");
     expect(html).toContain('data-command-conflict="stale_content_version"');
-    expect(html).toContain("data-command-reread");
     expect(html).toContain("重新读取教学内容");
-    expect(html).not.toContain("data-force-overwrite");
     expect(html).not.toContain("force overwrite");
-    expect(html).not.toContain("LWW");
-    // return button disabled when stack empty
-    expect(html).toMatch(/data-command-kind="return"[^>]*disabled/);
   });
 
-  it("does not surface English UUID why stub as 说明", () => {
-    const stub = `Why this block (text): revisit the goal and evidence behind block ${BID}.`;
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: true,
-        whyAvailable: true,
-        assist: { kind: "why", summary: stub },
-        onCommand: () => undefined,
-      }),
-    );
-    expect(html).toContain('data-command-kind="why"');
-    expect(html).not.toContain('data-command-assist="why"');
+  it("does not surface English UUID why stubs as a delivered explanation", () => {
+    const stub = `Why this block (text): revisit block ${BID}.`;
+    const html = renderToStaticMarkup(createElement(BlockCommandsBarView, {
+      blockId: BID, returnDisabled: false, whyAvailable: true, onCommand() {}, assist: { kind: "why", summary: stub },
+    }));
+    expect(html).toContain("讲细点");
     expect(html).not.toContain(stub);
-    expect(html).not.toContain("Why this block");
+    expect(html).not.toContain('data-command-assist="why"');
   });
 
-  it("enables return when stack not empty", () => {
-    const html = renderToStaticMarkup(
-      createElement(BlockCommandsBarView, {
-        blockId: BID,
-        returnDisabled: false,
-        onCommand: () => undefined,
-      }),
-    );
-    expect(html).toContain('data-command-kind="return"');
-    expect(html).not.toMatch(/data-command-kind="return"[^>]*disabled/);
+  it("prepares actual contextual requests without rewriting or skipping the current lesson", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div"), root = createRoot(host);
+    const ask = vi.fn(), command = vi.fn();
+    try {
+      await act(async () => root.render(createElement(BlockCommandsBarView, {
+        blockId: BID, returnDisabled: false, onCommand: command, onAskExplanation: ask,
+        explanationContext: { activityId: BID, contentVersion: 2, fragment: "当前单元原文" },
+      })));
+      for (const button of host.querySelectorAll<HTMLButtonElement>("button")) await act(async () => button.click());
+      expect(ask).toHaveBeenCalledTimes(4);
+      expect(ask.mock.calls.every(call => String(call[0]).includes("当前单元原文"))).toBe(true);
+      expect(command).not.toHaveBeenCalled();
+    } finally { await act(async () => root.unmount()); }
   });
 });

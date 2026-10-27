@@ -35,21 +35,6 @@ export type MatrixTransformUiState = {
   showTextAlt: boolean;
 };
 
-export function isMatrixTransformInteractiveEnabled(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): boolean {
-  const raw = (
-    env.OPENING_MATRIX_TRANSFORM_INTERACTIVE ??
-    "1"
-  )
-    .trim()
-    .toLowerCase();
-  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
-    return false;
-  }
-  return true;
-}
-
 /** Content autoplay already defaults false; reduced-motion forces off. */
 export function resolveEffectiveAutoplay(
   contentAutoplay: boolean,
@@ -279,7 +264,7 @@ export function MatrixTransformStaticView({
           role="status"
           data-math-params-error={parseErrors.join("; ")}
         >
-          参数未完全通过校验，以下为尽力静态展示：{parseErrors.join("；")}
+          部分图示参数无法使用，以下保留可显示的内容：{parseErrors.join("；")}
         </div>
       ) : null}
       <div className="flex flex-wrap gap-4">

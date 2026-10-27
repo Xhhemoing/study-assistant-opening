@@ -2,10 +2,10 @@ import { z } from "zod";
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { CourseStudyWorkspace } from "../../../../../../features/courses/course-study-workspace";
-import { loadCourseStudyContext } from "../../../../../../features/courses/server/course-study-context";
-import { courseStudyStandaloneActivity, parseCourseStudyPracticeEntry } from "../../../../../../features/courses/course-study-query";
-import { loadCourseSpanResume } from "../../../../../../features/courses/server/course-span-resume";
+import { CourseStudyWorkspace } from "../../../../../../features/opening/courses/course-study-workspace";
+import { loadCourseStudyContext } from "../../../../../../features/opening/courses/server/course-study-context";
+import { courseStudyStandaloneActivity, parseCourseStudyPracticeEntry } from "../../../../../../features/opening/courses/course-study-query";
+import { loadCourseSpanResume } from "../../../../../../features/opening/courses/server/course-span-resume";
 
 export default async function CourseStudyPage({ params, searchParams }: {
   params: Promise<{ id: string }>; searchParams: Promise<{ activity?: string; task?: string; retest?: string; after?: string; block?: string; contentVersion?: string; skillLabel?: string; requirementKey?: string; mode?: string; exercise?: string; variant?: string; conversation?: string }>;

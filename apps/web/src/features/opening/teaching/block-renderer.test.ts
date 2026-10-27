@@ -236,18 +236,13 @@ describe("BlockRenderer", () => {
     expect(html).not.toContain('data-matrix-controls="true"');
   });
 
-  it("PR-H: without a capabilities response the block fails closed to static", () => {
-    process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE = "1";
-    try {
+  it("without a capabilities response the block keeps its static fallback", () => {
       const html = renderToStaticMarkup(
         createElement(BlockRenderer, {
           block: { blockId: BID, position: 0, blockType: "matrix_transform", role: "teach", content: { matrixA: [[1, 0], [0, 1]], vectorX: [1, 2] } },
         }),
       );
       expect(html).toContain('data-matrix-mode="static"');
-    } finally {
-      delete process.env.OPENING_MATRIX_TRANSFORM_INTERACTIVE;
-    }
   });
 
 });

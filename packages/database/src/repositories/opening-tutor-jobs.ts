@@ -1,5 +1,5 @@
 import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readOpeningStudyIntentInTx } from "./opening-study-intent-events";
-import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay, TUTOR_STALE_MESSAGE } from "@aistudy/domain";
+import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay, TUTOR_STALE_MESSAGE, localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -29,6 +29,7 @@ export type OpeningTutorJobRecord = {
   createdAt: string;
   updatedAt: string;
   claimToken?: string;
+  executionId?: string;
 };
 
 function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
@@ -44,6 +45,7 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
     createdAt: new Date(row.created_at as string | Date).toISOString(),
     updatedAt: new Date(row.updated_at as string | Date).toISOString(),
     ...(typeof row.claim_token === "string" ? { claimToken: row.claim_token } : {}),
+    ...(typeof row.timing_execution_id === "string" ? { executionId: row.timing_execution_id } : {}),
   };
 }
 
@@ -260,17 +262,32 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
     loadHistoryContext: (scope: OpeningScope, currentTurnId: string, purpose?: TutorHistoryPurpose) => loadTutorHistoryContext(sql, scope, currentTurnId, purpose),
     async claim(id: string): Promise<OpeningTutorJobRecord | null> {
-      const rows = await sql`
-        UPDATE opening_tutor_jobs j SET status = 'running', claim_token = ${randomUUID()}, updated_at = now()
+      return sql.begin(async tx => {
+      // Completion/cancellation lock the workspace before the job. Hold the
+      // referenced workspace first so the timing insert cannot invert that order.
+      const owner = await tx`SELECT w.id FROM workspaces w JOIN opening_tutor_jobs j ON j.workspace_id=w.id
+        WHERE j.id=${id} FOR KEY SHARE OF w`;
+      if (!owner.length) return null;
+      const executionId = randomUUID();
+      const rows = await tx`
+        UPDATE opening_tutor_jobs j SET status = 'running', claim_token = ${randomUUID()}, timing_execution_id=${executionId}, updated_at = now()
         FROM workspaces w,opening_conversations c
         WHERE j.id = ${id} AND j.workspace_id = w.id
           AND c.id=j.conversation_id AND c.workspace_id=j.workspace_id AND c.owner_user_id=w.owner_user_id
           AND j.status = 'queued'
-        RETURNING j.*, w.owner_user_id
+        RETURNING j.*, w.owner_user_id, clock_timestamp() AS claimed_at
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;
-      return { ...mapJob(row), ownerUserId: row.owner_user_id as string };
+      const observedAt = new Date(row.claimed_at as string | Date);
+      const [preferences] = await tx`SELECT planning_settings FROM workspace_preferences WHERE workspace_id=${row.workspace_id as string}`;
+      const zone = (preferences?.planning_settings as { timeZone?: string } | null)?.timeZone;
+      await tx`INSERT INTO opening_learning_experience_events
+        (workspace_id,owner_user_id,event_key,kind,target_type,target_id,local_day,execution_id,observed_at,recorded_at)
+        VALUES(${row.workspace_id as string},${row.owner_user_id as string},${`tutor_claimed:${id}:${executionId}`},
+          'tutor_claimed','job',${id},${localDateKeyInZone(observedAt, resolveWorkspaceTimeZone(zone))},${executionId},${observedAt},clock_timestamp())`;
+      return { ...mapJob(row), ownerUserId: row.owner_user_id as string, executionId };
+      }) as Promise<OpeningTutorJobRecord | null>;
     },
 
     async heartbeat(id: string, claimToken: string): Promise<boolean> {
@@ -346,7 +363,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
 
     /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
     async readStream(scope: OpeningScope, id: string, context: {
-      privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string;
+      privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string; executionId?: string;
     }): Promise<OpeningTutorJobRecord | null> {
       return sql.begin(async tx => {
         if (context.exposureReceiptId) await lockWorkspaceLearningHistory(tx, scope);
@@ -362,6 +379,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
+        if (context.executionId !== undefined && row.timing_execution_id !== context.executionId) throw new Error("stream execution changed");
         const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(context.contextSourceRefs)}::jsonb`)}`;
         if (!available) throw new Error("stream material unavailable or excluded");
         if (context.exposureReceiptId) {

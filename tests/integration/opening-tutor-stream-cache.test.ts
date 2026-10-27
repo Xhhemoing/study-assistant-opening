@@ -7,6 +7,19 @@ const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379", {
   lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, connectTimeout: 3_000, commandTimeout: 3_000,
   retryStrategy: () => null,
 });
+
+it("publishes only into the expected execution and confirms missing/old writes as zero", async () => {
+  const workspaceId = randomUUID(), jobId = randomUUID(), executionId = randomUUID();
+  const key = `opening:tutor-stream:${workspaceId}:${jobId}`; keys.push(key);
+  const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+  expect(await writer.append(workspaceId, jobId, "missing", executionId)).toBe(0);
+  await writer.begin(workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, executionId });
+  expect(await writer.append(workspaceId, jobId, "wrong", randomUUID())).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "legacy")).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "first", executionId)).toBe(1);
+  expect(await writer.append(workspaceId, jobId, " second", executionId)).toBe(2);
+  expect(await reader.read(workspaceId, jobId)).toMatchObject({ text: "first second", sequence: 2, executionId });
+});
 redis.on("error", () => undefined);
 const keys: string[] = [];
 beforeAll(async () => { await redis.connect(); });

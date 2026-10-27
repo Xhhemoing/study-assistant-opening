@@ -29,7 +29,6 @@ export {
   loadServerConfig,
   parseBooleanEnv,
   resolveCapabilities,
-  rolloutBucket,
   type FeatureSwitches,
   type ServerConfig,
 } from "./server-config";

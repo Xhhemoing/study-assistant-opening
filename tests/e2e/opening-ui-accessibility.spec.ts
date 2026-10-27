@@ -35,8 +35,8 @@ test.beforeEach(async ({ context, baseURL }) => {
   });
 });
 
-type View = "today" | "courses" | "overview" | "units" | "progress" | "review" | "library" | "settings" | "lesson" | "assistant" | "agent";
-const views: readonly View[] = ["today", "courses", "overview", "units", "progress", "review", "library", "settings", "lesson", "assistant", "agent"];
+type View = "today" | "courses" | "overview" | "units" | "progress" | "review" | "library" | "settings-appearance" | "settings-learning" | "settings-ai" | "lesson" | "assistant" | "agent";
+const views: readonly View[] = ["today", "courses", "overview", "units", "progress", "review", "library", "settings-appearance", "settings-learning", "settings-ai", "lesson", "assistant", "agent"];
 const conditions = [
   { name: "desktop light", viewport: { width: 1366, height: 900 }, colorScheme: "light", reducedMotion: "no-preference" },
   { name: "desktop dark", viewport: { width: 1366, height: 900 }, colorScheme: "dark", reducedMotion: "no-preference" },
@@ -83,17 +83,43 @@ async function openView(page: Page, view: View) {
       await expect(page.getByRole("tab", { name: "材料", exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.getByRole("heading", { name: "还没有材料", exact: true })).toBeVisible();
       break;
-    case "settings":
+    case "settings-appearance":
       await page.goto("/opening/settings");
-      await expect(page.getByRole("heading", { name: "设置", exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "保存学习偏好", exact: true })).toBeEnabled();
+      await expect(page.getByRole("heading", { name: "外观与阅读", exact: true })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "设置分区" }).getByRole("link", { name: "外观", exact: true })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("combobox", { name: "主题", exact: true })).toBeEnabled();
+      await expect(page.getByRole("combobox", { name: "阅读字体", exact: true })).toBeEnabled();
+      await expect(page.getByRole("combobox", { name: "动态效果", exact: true })).toBeEnabled();
       break;
-    case "lesson":
+    case "settings-learning":
+      await page.goto("/opening/settings/learning");
+      await expect(page.getByRole("navigation", { name: "设置分区" }).getByRole("link", { name: "学习", exact: true })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("button", { name: "保存学习偏好", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "保存介入偏好", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "保存学期设置", exact: true })).toBeEnabled();
+      break;
+    case "settings-ai":
+      await page.goto("/opening/settings/ai");
+      await expect(page.getByRole("navigation", { name: "设置分区" }).getByRole("link", { name: "AI 与数据", exact: true })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("region", { name: "当前模型与用量", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "重新读取模型设置", exact: true })).toBeEnabled();
+      await expect(page.getByRole("region", { name: "AI 记忆设置", exact: true })).toBeVisible();
+      break;
+    case "lesson": {
       await page.goto(`${courseHref}/study/matrix`);
-      await expect(page.getByRole("heading", { name: "矩阵怎样变换平面向量", exact: true })).toBeVisible();
-      await page.getByRole("navigation", { name: "本课步骤" }).getByRole("button", { name: "3. 自己尝试", exact: true }).click();
+      const unitMenu = page.locator('summary[aria-label="选择学习单元"]');
+      await expect(unitMenu).toBeVisible();
+      await expect(unitMenu).toContainText("矩阵怎样变换平面向量");
+      await unitMenu.click();
+      const outline = page.getByRole("navigation", { name: "矩阵学习目录", exact: true });
+      const questionUnit = outline.getByRole("button", { name: "3. 自己尝试", exact: true });
+      await expect(questionUnit).toBeEnabled();
+      await questionUnit.click();
+      await expect(outline).not.toBeVisible();
+      await expect(page.getByRole("heading", { name: "3. 自己尝试", exact: true })).toBeVisible();
       await expect(page.getByRole("textbox", { name: "我的原始思考", exact: true })).toBeEnabled();
       break;
+    }
     case "agent": {
       await page.goto("/opening/agent");
       const input = page.getByRole("textbox", { name: "消息输入", exact: true });
@@ -141,10 +167,25 @@ for (const condition of conditions) {
         await testInfo.attach("axe-results", { body: JSON.stringify(result, null, 2), contentType: "application/json" });
         expect(result.violations.map(({ id, impact, help, nodes }) => ({ id, impact, help, targets: nodes.map(node => node.target) }))).toEqual([]);
         await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(condition.viewport.width);
-        if (view === "settings") {
-          // Long forms and their sr-only labels belong to the shell's scroll
-          // area; they must not create an empty outer-document scroll range.
+        if (view.startsWith("settings-")) {
+          // Every settings section stays inside the shell; short pages need no
+          // artificial scroll range merely to satisfy an old long-form scenario.
           await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(condition.viewport.height);
+          const sections = page.getByRole("navigation", { name: "设置分区" }).getByRole("link");
+          await sections.first().focus();
+          for (let index = 1; index < await sections.count(); index += 1) await page.keyboard.press("Tab");
+          await expect(sections.last()).toBeFocused();
+          await expect(sections.last()).toBeInViewport({ ratio: 1 });
+          expect(await page.evaluate(() => window.scrollY)).toBe(0);
+        }
+        if (view === "settings-appearance") {
+          await page.getByRole("combobox", { name: "主题", exact: true }).focus();
+          await page.keyboard.press("Tab");
+          await expect(page.getByRole("combobox", { name: "阅读字体", exact: true })).toBeFocused();
+          await page.keyboard.press("Tab");
+          await expect(page.getByRole("combobox", { name: "动态效果", exact: true })).toBeFocused();
+        }
+        if (view === "settings-learning") {
           const main = page.locator("#main-content");
           const save = main.getByRole("button", { name: "保存介入偏好", exact: true });
           await expect(save).toBeEnabled();
@@ -155,11 +196,17 @@ for (const condition of conditions) {
           await expect(main.getByRole("button", { name: "重置为默认", exact: true })).toBeFocused();
           await page.keyboard.press("Shift+Tab");
           await expect(save).toBeFocused();
+          // Semester settings remain a genuinely long form on the learning page.
+          const semesterSave = main.getByRole("button", { name: "保存学期设置", exact: true });
+          await semesterSave.scrollIntoViewIfNeeded();
+          await expect(semesterSave).toBeInViewport();
+          await semesterSave.focus();
+          await expect(semesterSave).toBeFocused();
           expect(await main.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
           expect(await page.evaluate(() => window.scrollY)).toBe(0);
-          const bottomPath = testInfo.outputPath("settings-bottom.png");
+          const bottomPath = testInfo.outputPath("settings-learning-bottom.png");
           await page.screenshot({ path: bottomPath });
-          await testInfo.attach("settings-bottom", { path: bottomPath, contentType: "image/png" });
+          await testInfo.attach("settings-learning-bottom", { path: bottomPath, contentType: "image/png" });
           await main.evaluate(element => { element.focus({ preventScroll: true }); element.scrollTop = 0; });
         }
         if (condition.reducedMotion === "reduce") {

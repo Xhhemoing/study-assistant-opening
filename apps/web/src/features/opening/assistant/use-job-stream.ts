@@ -23,10 +23,11 @@ export function useJobStream(jobId: string | null, conversationId: string | null
       const durationMs = Math.round(performance.now() - timing.startedAt);
       if (durationMs < 1 || durationMs > 600_000) return;
       measured.current = timing.jobId;
-      void recordLearningExperience({ kind: "first_text", jobId: timing.jobId, clientKey: timing.clientKey, durationMs });
+      void recordLearningExperience({ kind: "first_text", jobId: timing.jobId, clientKey: timing.clientKey, durationMs,
+        ...(reply?.executionId ? { executionId: reply.executionId, observedAt: new Date().toISOString() } : {}) });
     });
     return () => cancelAnimationFrame(frame);
-  }, [hasText, jobId, conversationId, timing]);
+  }, [hasText, jobId, conversationId, timing, reply?.executionId]);
   const cancel = useCallback(() => connection.current?.cancel(), []);
   return { reply: reply?.jobId === jobId && reply.conversationId === conversationId ? reply : null, cancel };
 }

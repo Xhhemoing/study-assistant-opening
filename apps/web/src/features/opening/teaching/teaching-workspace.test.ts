@@ -1,4 +1,6 @@
-import { createElement, type ReactNode } from "react";
+// @vitest-environment jsdom
+import { act, createElement, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
@@ -11,8 +13,9 @@ vi.mock("./preference-controls", () => ({
 
 // The shared panel owns its dialog/mount lifecycle tests; inspect this workspace's wiring here.
 vi.mock("./study-tools-panel", () => ({
-  StudyToolsPanel: ({ children, panels }: { children: ReactNode; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" },
-    createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
+  StudyToolsToggle: ({ activePanel, onPanelChange }: { activePanel: string | null; onPanelChange: (panel: string | null) => void }) => createElement("button", { onClick: () => onPanelChange(activePanel ? null : "chat") }, "工具"),
+  StudyToolsPanel: ({ children, panels, showToolbar }: { children: ReactNode; showToolbar?: boolean; panels: { id: string; label: string; content: ReactNode; mountKey?: string }[] }) => createElement("div", { "data-tools-layout": "true" }, createElement("div", { hidden: true, role: "tablist" }, panels.map(panel => createElement("button", { key: panel.id, role: "tab" }, panel.label))),
+    showToolbar === false ? null : createElement("nav", {}, panels.map(panel => createElement("button", { key: panel.id }, panel.label))), children,
     panels.filter((panel, index) => panels.findIndex(item => (item.mountKey ?? item.id) === (panel.mountKey ?? panel.id)) === index).map(panel => createElement("section", { key: panel.id, hidden: true, "data-panel": panel.id }, panel.content))),
 }));
 
@@ -59,6 +62,7 @@ vi.mock("./resume-card", async () => {
 });
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
+import type { OpeningApi } from "../client/api";
 import {
   formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
@@ -98,11 +102,158 @@ const activityReady: TeachingActivity = {
   updatedAt: ISO,
 };
 
+it("stops automatic legacy returns when leaving a workspace with the first return in flight", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  let release!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { release = resolve; }));
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(TeachingWorkspace, {
+      activity: activityReady, clientInit: clientInit({ checkpointJson: { currentBlockId: BID, branchStack: [{}, {}] } }),
+      contextualTools: createElement("p", {}, "当前追问"), api: { postTeachingCommand } as unknown as OpeningApi,
+    })));
+    const tools = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "工具")!;
+    await act(async () => tools().click());
+    await act(async () => tools().click());
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+    await act(async () => root.unmount());
+    await act(async () => release({ ok: true, activityId: AID, kind: "return", contentVersion: 1, pathVersion: 2,
+      checkpointJson: { currentBlockId: BID, branchStack: [{}] }, replayed: false }));
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+});
+
 it("shows technical diagnostics only when the appearance preference is enabled", () => {
   const render = () => renderToStaticMarkup(createElement(TeachingWorkspace, { activity: activityReady, clientInit: clientInit(), sourceNameById: {} }));
   expect(render()).not.toContain("活动标识：");
   diagnosticPreference.enabled = true;
   expect(render()).toContain("活动标识：");
+});
+
+async function withNavigationWorkspace(api: Partial<OpeningApi>, checkpoint: Record<string, unknown>, run: (host: HTMLDivElement, leave: () => Promise<void>) => Promise<void>) {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(createElement(TeachingWorkspace, { activity: activityReady,
+      clientInit: clientInit({ checkpointJson: checkpoint }), contextualTools: createElement("p", {}, "当前追问"), api: api as OpeningApi })));
+    await run(host, async () => { await act(async () => root.render(null)); });
+  } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+}
+function navigateToQuestion(host: HTMLDivElement) {
+  [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "2. 练习 2")!.click();
+}
+const currentUnitId = (host: HTMLDivElement) => host.querySelector('[data-study-unit-current="true"]')?.getAttribute("data-study-unit");
+
+it("returns legacy branches before navigating once, then keeps the selected unit when tools close", async () => {
+  let releaseReturn!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { releaseReturn = resolve; }));
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{ resumeBlockId: BID }] }, async host => {
+      await act(async () => { navigateToQuestion(host); navigateToQuestion(host); });
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+      expect(currentUnitId(host)).toBe(BID);
+      await act(async () => releaseReturn({ ok: true, kind: "return", contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [] } }));
+      expect(postTeachingCheckpoint).toHaveBeenCalledExactlyOnceWith(AID, { expectedVersion: 1, currentBlockId: BID2 });
+      expect(currentUnitId(host)).toBe(BID2);
+      expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("2");
+      const tools = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "工具")!;
+      await act(async () => tools().click());
+      await act(async () => tools().click());
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(currentUnitId(host)).toBe(BID2);
+    });
+});
+
+it.each(["conflict", "network"])("does not save the selected target after a legacy return %s", async failure => {
+  const postTeachingCommand = vi.fn(async () => {
+    if (failure === "network") throw new Error("回主线结果尚未确认");
+    return { ok: false, conflict: "stale_path_version", message: "位置已变化" };
+  });
+  const postTeachingCheckpoint = vi.fn();
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{ resumeBlockId: BID }] }, async host => {
+      await act(async () => navigateToQuestion(host));
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+      expect(currentUnitId(host)).toBe(BID);
+      if (failure === "network") expect(host.querySelector('[role="alert"] button')).not.toBeNull();
+      else expect(host.querySelector('[data-workspace-command-conflict="stale_path_version"]')).not.toBeNull();
+    });
+});
+
+it("passes each confirmed return version to the next return before saving the target", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } })
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 3, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}, {}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand.mock.calls.map(call => call[1].expectedPathVersion)).toEqual([1, 2]);
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+    expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("3");
+  });
+});
+
+it("keeps ordinary navigation free of return commands", async () => {
+  const postTeachingCommand = vi.fn();
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand).not.toHaveBeenCalled();
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("keeps a partially confirmed return and retries only the remaining branch", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } })
+    .mockResolvedValueOnce({ ok: false, conflict: "stale_path_version", message: "位置已变化" })
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, pathVersion: 3, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn(async () => ({ ok: true as const, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } }));
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}, {}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+    expect(currentUnitId(host)).toBe(BID);
+    expect(host.querySelector("[data-teaching-workspace]")?.getAttribute("data-path-version")).toBe("2");
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand.mock.calls.map(call => call[1].expectedPathVersion)).toEqual([1, 2, 2]);
+    expect(postTeachingCheckpoint).toHaveBeenCalledOnce();
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("does not select the target if its checkpoint fails after a confirmed return", async () => {
+  const postTeachingCommand = vi.fn().mockResolvedValue({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [] } });
+  const postTeachingCheckpoint = vi.fn().mockRejectedValueOnce(new Error("位置保存未确认"))
+    .mockResolvedValueOnce({ ok: true, contentVersion: 1, checkpointJson: { currentBlockId: BID2, branchStack: [] } });
+  await withNavigationWorkspace({ postTeachingCommand, postTeachingCheckpoint }, { currentBlockId: BID, branchStack: [{}] }, async host => {
+    await act(async () => navigateToQuestion(host));
+    expect(currentUnitId(host)).toBe(BID);
+    expect(host.querySelector('[role="alert"] button')).not.toBeNull();
+    await act(async () => navigateToQuestion(host));
+    expect(postTeachingCommand).toHaveBeenCalledOnce();
+    expect(postTeachingCheckpoint).toHaveBeenCalledTimes(2);
+    expect(currentUnitId(host)).toBe(BID2);
+  });
+});
+
+it("does not save a navigation target after leaving during a legacy return", async () => {
+  let release!: (value: unknown) => void;
+  const postTeachingCommand = vi.fn(() => new Promise(resolve => { release = resolve; }));
+  const postTeachingCheckpoint = vi.fn();
+  await withNavigationWorkspace({ postTeachingCommand: postTeachingCommand as OpeningApi["postTeachingCommand"], postTeachingCheckpoint },
+    { currentBlockId: BID, branchStack: [{}, {}] }, async (host, leave) => {
+      await act(async () => navigateToQuestion(host));
+      await leave();
+      await act(async () => release({ ok: true, contentVersion: 1, pathVersion: 2, checkpointJson: { currentBlockId: BID, branchStack: [{}] } }));
+      expect(postTeachingCommand).toHaveBeenCalledOnce();
+      expect(postTeachingCheckpoint).not.toHaveBeenCalled();
+    });
 });
 
 describe("asynchronous teaching position updates", () => {
@@ -233,10 +384,11 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain(`data-block-id="${BID3}"`);
     expect(html).not.toContain("data-teaching-past-collapsed");
     expect(html).toContain("目录");
-    expect(html).toContain("资料与引用");
-    expect(html).toContain("自由探索");
-    expect(html).toContain("学习设置");
-    expect(html).toContain('data-panel="outline"');
+    expect(html).toContain('data-panel="materials"');
+    expect(html).not.toContain("自由探索");
+    expect(html).not.toContain("学习设置");
+    expect(html).toContain('aria-label="选择学习单元"');
+    expect(html).not.toContain('data-panel="outline"');
     expect(html).toContain('data-testid="block-commands-mock"');
     expect(html).toContain(`data-block-id="${BID}"`);
     expect(html).toContain('data-return-disabled="true"');
@@ -248,6 +400,28 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain("MediaReader");
   });
 
+  it("keeps the initial lesson within ten available controls and puts the outline in its title", () => {
+    const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+      activity: activityReady, clientInit: clientInit(),
+      headerLeading: createElement("a", { href: "/opening/courses/course" }, "返回课程"),
+    }));
+    const parsed = document.createElement("div"); parsed.innerHTML = html;
+    const available = [...parsed.querySelectorAll("button,a[href],input,textarea,select,summary")].filter(control => {
+      if (control.hasAttribute("disabled") || control.closest("[hidden]")) return false;
+      for (let ancestor = control.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        if (ancestor.tagName === "DETAILS" && !ancestor.hasAttribute("open")) {
+          const summary = ancestor.querySelector(":scope > summary");
+          if (control !== summary && !summary?.contains(control)) return false;
+        }
+      }
+      return true;
+    });
+    expect(available.length).toBeLessThanOrEqual(10);
+    expect(parsed.querySelector('header [aria-label="选择学习单元"]')).not.toBeNull();
+    expect(available.filter(control => control.tagName === "BUTTON" && control.closest("header")).length).toBe(2);
+    expect(html).not.toContain("session-intervention-prefs");
+    expect(html).not.toContain("其他学习方式");
+  });
   it("restores the actual question unit and keeps earlier context available through the outline", () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
@@ -275,6 +449,18 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain('data-teaching-primary-advance="true"');
   });
 
+  it("uses the same unit position for the heading and accessible progress after content changes", () => {
+    const initial = clientInit();
+    const html = renderToStaticMarkup(createElement(TeachingWorkspace, {
+      activity: activityReady,
+      clientInit: { ...initial, contentVersion: initial.contentVersion + 1, checkpointJson: { currentBlockId: BID2 } },
+    }));
+    expect(html).toContain("单元 2 / 2");
+    expect(html).toMatch(/role="progressbar"[^>]*aria-valuemax="2"[^>]*aria-valuenow="2"/);
+    const empty = renderToStaticMarkup(createElement(TeachingWorkspace, { activity: activityReady, clientInit: clientInit({ blocks: [] }) }));
+    expect(empty).not.toContain("单元 1 / 0");
+    expect(empty).not.toContain('role="progressbar"');
+  });
   it("shows material title not bare UUID as the sole source label", () => {
     const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const html = renderToStaticMarkup(
@@ -454,7 +640,7 @@ describe("TeachingContinueEntry", () => {
     expect(html).toContain('data-teaching-continue-entry="workspace"');
     expect(html).toContain('data-teaching-workspace="true"');
     expect(html).toContain('data-testid="block-commands-mock"');
-    expect(html).toContain("学习设置");
+    expect(html).not.toContain("学习设置");
   });
 
   it("preserves V2-10/11/12 chrome when in workspace phase", () => {
@@ -478,8 +664,9 @@ describe("TeachingContinueEntry", () => {
       }),
     );
     expect(html).toContain('data-return-disabled="false"');
-    expect(html).toContain('data-panel="outline"');
-    expect(html).toContain("自由探索");
+    expect(html).toContain('aria-label="选择学习单元"');
+    expect(html).not.toContain('data-panel="outline"');
+    expect(html).not.toContain("自由探索");
   });
 });
 

@@ -119,7 +119,7 @@ it("prepares a reversible reply-style choice without sending or overwriting the 
       <Composer draft="保留我正在写的问题" modePrefill={mode} onClearIntentOverride={() => setMode(null)} onDraftChange={() => undefined} onSubmit={submit} /></>;
   }
   await act(async () => root.render(<Parent />));
-  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "只给提示")!.click());
+  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "我没懂")!.click());
   expect(submit).not.toHaveBeenCalled();
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("保留我正在写的问题");
   expect(host.querySelector('[aria-label="撤回本轮选择，恢复自动判断"]')).not.toBeNull();

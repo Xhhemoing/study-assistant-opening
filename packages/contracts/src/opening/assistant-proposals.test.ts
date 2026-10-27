@@ -1,7 +1,15 @@
 import { expect, it } from "vitest";
-import { assistantProposalCreateSchema, assistantProposalDecisionSchema } from "./assistant-proposals";
+import { assistantProposalCreateSchema, assistantProposalDecisionSchema, pendingAssistantProposalsQuerySchema, pendingAssistantProposalsResponseSchema } from "./assistant-proposals";
 import { resolveComposerPurpose, isSystemQueryPurpose } from "./composer-purpose";
 const id = "00000000-0000-4000-8000-000000000001";
+it("bounds pending-list filters and requires an explicit total and cursor", () => {
+  expect(pendingAssistantProposalsQuerySchema.parse({ conversationId: id, cursor: "abc_123-DEF" })).toEqual({ conversationId: id, cursor: "abc_123-DEF" });
+  for (const input of [{ conversationId: "other" }, { cursor: "x".repeat(513) }, { cursor: "a/b" }, { ownerUserId: id }]) {
+    expect(pendingAssistantProposalsQuerySchema.safeParse(input).success).toBe(false);
+  }
+  expect(pendingAssistantProposalsResponseSchema.parse({ proposals: [], nextCursor: null, total: 0 })).toEqual({ proposals: [], nextCursor: null, total: 0 });
+  expect(pendingAssistantProposalsResponseSchema.safeParse({ proposals: [], nextCursor: null }).success).toBe(false);
+});
 it("routes all five semantic intents separately from disclosure authority", () => {
   for (const purpose of ["answer", "explain_state", "teach", "plan", "query"] as const) expect(resolveComposerPurpose({ purpose })).toBe(purpose);
   expect(isSystemQueryPurpose({ querySystem: true })).toBe(true); expect(isSystemQueryPurpose({ purpose: "explain_state" })).toBe(true);

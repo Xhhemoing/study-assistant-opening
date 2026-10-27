@@ -150,14 +150,15 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     </div>
     <p className="text-xs font-medium text-text-2">我的解答 · 原答案</p>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
-    {current.revisionKind !== "retract" ? <AiGradingCard record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} /> : null}
+    {current.revisionKind !== "retract" ? <AiGradingCard hideDisputeAction record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} /> : null}
     <p className="text-xs text-text-3">作答时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{diagnostics && current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
-    <div className="flex flex-wrap gap-2">
+    <details className="relative"><summary aria-label="更多作答操作" className="inline-flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-md text-lg focus-visible:ring-2 focus-visible:ring-accent">…</summary><div className="flex flex-wrap gap-2 rounded-lg border border-line bg-surface p-2">
       {current.outcome === "incorrect" && current.revisionKind !== "retract" && (!current.aiEvaluation || current.verdictSource !== "ai_graded" || current.aiEvaluation.questionMatch) ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
       <button type="button" className={buttonClass} disabled={busy || !!editor} onClick={() => historyOpen ? updateHistory({ type: "close" }) : void load()}>{historyOpen ? "收起历史" : "查看历史"}</button>
       <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void load("replace")}>{current.revisionKind === "retract" ? "纠正并重新纳入" : "纠正记录"}</button>
       {current.revisionKind !== "retract" ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void load("retract")}>撤回记录</button> : null}
-    </div>
+      {current.revisionKind !== "retract" && current.aiEvaluation ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void load("replace", true)}>判错了</button> : null}
+    </div></details>
     {historyOpen && history ? <ol className="space-y-3 border-l border-line pl-4" aria-label="观察修订历史">{history.revisions.map((item, index) => <li key={item.id} className="space-y-1 text-xs text-text-3">
       <p className="font-medium text-text">第 {index + 1} 次记录 · {item.revisionKind === "retract" ? "撤回" : item.revisionKind === "replace" ? "纠正" : "原记录"}{item.id === history.headObservationId ? " · 当前记录" : " · 历史记录（不重复计数）"}</p>
       <p>{item.skillLabel} · {outcomeLabel(item)}{helpSuffix(item.assistance)}{diagnostics && item.requirementKey ? ` · 要求：${item.requirementKey}` : ""}</p>

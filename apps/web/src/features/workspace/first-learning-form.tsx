@@ -7,6 +7,7 @@ import { ui } from "../opening/design/ui";
 import { FirstLearningMaterials } from "./first-learning-materials";
 import { emptyFirstLearningDraft, readFirstLearningDraft, saveFirstLearningDraft, submitFirstLearningDraft, type FirstLearningDraft } from "./first-learning-draft";
 import { userFacingMessage } from "../../lib/user-facing-error";
+import { FirstLearningReadiness } from "./first-learning-readiness";
 
 export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; onStarted: (href: string) => void }) {
   const [draft, setDraft] = useState<FirstLearningDraft | null>(null);
@@ -43,6 +44,7 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
   }
   if (!draft) return <p className="text-sm text-zinc-500" role="status">正在准备学习意图…</p>;
   return <form className="space-y-4" onSubmit={submit} aria-busy={busy} aria-label="首次学习设置">
+    <FirstLearningReadiness key={draftKey} draftKey={draftKey} />
     <div className="space-y-1.5"><label className={ui.label} htmlFor="first-topic">想学什么？</label>
       <input id="first-topic" className={ui.input} required maxLength={120} disabled={busy} placeholder="例如：矩阵为什么能表示线性变换" value={draft.topic} onChange={event => update({ topic: event.target.value })} /></div>
     <div className="space-y-1.5"><label className={ui.label} htmlFor="first-goal">学完希望做到什么？（可选）</label>
@@ -57,6 +59,5 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
     {error ? <div className="space-y-2 text-sm leading-6 text-red-700" role="alert"><p>{error}</p><Link className={ui.quiet} href="/opening/today">查看今日页</Link><Link className={ui.quiet} href="/opening/settings">检查学习设置</Link></div> : null}
     {destination ? <p className="text-sm text-zinc-600" role="status">正在进入第一节课。<a className={ui.quiet} href={destination}>继续进入</a></p> : null}
     <button className={`${ui.primary} w-full sm:w-auto`} disabled={busy} type="submit">{busy ? <LoaderCircle className="motion-safe:animate-spin" size={16} aria-hidden /> : <ArrowRight size={16} aria-hidden />}{busy ? "正在准备…" : "保存目标并开始"}</button>
-    <p className="text-xs leading-6 text-zinc-500">按当前配置准备主讲内容。AI 不可用时仍保留目标与任务，可以继续向助理提问或记笔记。</p>
   </form>;
 }

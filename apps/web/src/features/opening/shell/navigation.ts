@@ -5,28 +5,21 @@ export type OpeningNavigationItem = {
   group: "core" | "tools";
 };
 
-/** One source for the four primary destinations and their stable tool entries. */
+/** The same three destinations own desktop, mobile and legacy entry routes. */
 export function openingNavigation(): OpeningNavigationItem[] {
   return [
-    { href: "/opening/today", label: "开始", icon: "start", group: "core" },
-    { href: "/opening/courses", label: "课程", icon: "courses", group: "core" },
-    { href: "/opening/agent", label: "助理", icon: "assistant", group: "core" },
+    { href: "/opening/today", label: "学习", icon: "start", group: "core" },
+    { href: "/opening/review", label: "复习", icon: "review", group: "core" },
     { href: "/opening/library", label: "资料", icon: "library", group: "core" },
-    { href: "/opening/review", label: "复习", icon: "review", group: "tools" },
-    { href: "/opening/sprint", label: "冲刺", icon: "sprint", group: "tools" },
-    { href: "/opening/search", label: "搜索", icon: "search", group: "tools" },
   ];
 }
 
-export function navigationIsActive(href: string, pathname: string, search = ""): boolean {
+export function navigationIsActive(href: string, pathname: string, _search = ""): boolean {
   const hrefPath = href.split("?")[0] ?? href;
   const path = pathname.split("?")[0] ?? pathname;
-  const params = new URLSearchParams(search || pathname.split("?")[1] || "");
-  // Course sprint mode belongs to the sprint tool. Legacy /opening/cards links only
-  // redirect into review, so they are owned by the review entry rather than a nav alias.
-  const section = /^\/opening\/courses\/[^/]+\/?$/.test(path) && params.getAll("mode").length === 1 && params.get("mode") === "sprint" ? "/opening/sprint"
-    : path === "/opening/cards" || path.startsWith("/opening/cards/") ? "/opening/review" : null;
-  if (section) return hrefPath === section;
-  if (hrefPath === "/opening/today" && ["/opening/assistant", "/opening/suggestions"].some(owner => path === owner || path.startsWith(`${owner}/`))) return true;
-  return path === hrefPath || path.startsWith(`${hrefPath}/`);
+  const within = (owner: string) => path === owner || path.startsWith(`${owner}/`);
+  if (["/opening/courses", "/opening/agent", "/opening/assistant", "/opening/sprint", "/opening/suggestions"].some(within)) return hrefPath === "/opening/today";
+  if (within("/opening/cards")) return hrefPath === "/opening/review";
+  if (within("/opening/search")) return hrefPath === "/opening/library";
+  return within(hrefPath);
 }

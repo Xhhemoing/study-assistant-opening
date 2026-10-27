@@ -1,17 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS, openingAiSettingsResponseSchema } from "@aistudy/contracts";
 import { MODEL_TASKS } from "@aistudy/ai";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), catalog: vi.fn(), scope: vi.fn(), models: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), catalog: vi.fn(), scope: vi.fn(), models: vi.fn(), usage: vi.fn() }));
 vi.mock("../../../../features/opening/runtime", () => ({ requireOpeningScope: mocks.scope }));
 vi.mock("@aistudy/config", async importOriginal => ({ ...await importOriginal<typeof import("@aistudy/config")>(), loadOpeningModelCatalog: mocks.catalog }));
 vi.mock("@aistudy/database", async importOriginal => ({
   ...await importOriginal<typeof import("@aistudy/database")>(),
   createOpeningAiSettingsRepository: () => ({ get: mocks.get, set: mocks.set }),
   createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }),
+  readOpeningDailyBudgetUsage: mocks.usage,
 }));
 import { ApiError } from "../../../../features/auth/service";
 import { GET, PUT } from "./route";
-import { switchRoutingMode } from "../../../../features/settings/ai-settings-model";
+import { switchRoutingMode } from "../../../../features/opening/settings/ai-settings-model";
 const model = { id: "one", providerId: "p", providerLabel: "P", modelName: "opaque", label: "One", baseUrl: "https://private-endpoint.example", apiKey: "never-return-me", inputCentsPerMillion: 10, outputCentsPerMillion: 20, availability: "available" as const };
 const scope = { workspaceId: "w", ownerUserId: "u" };
 const put = (body: unknown) => new Request("http://localhost/api/opening/ai-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -22,8 +23,21 @@ beforeEach(() => {
   mocks.get.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false });
   mocks.set.mockResolvedValue(undefined);
   mocks.models.mockResolvedValue([]);
+  mocks.usage.mockResolvedValue({ localDate: "2026-10-26", timeZone: "Asia/Shanghai", spentCents: 7, reservedCents: 11 });
 });
 describe("AI settings HTTP boundary", () => {
+  it("returns the owner's measured spend separately from outstanding reservations", async () => {
+    const response = await GET(new Request("http://localhost/api/opening/ai-settings"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).dailyUsage).toEqual({ localDate: "2026-10-26", timeZone: "Asia/Shanghai", spentCents: 7, reservedCents: 11 });
+    expect(mocks.usage).toHaveBeenCalledWith({}, scope);
+  });
+  it("keeps model settings readable but marks failed usage reads as unknown rather than zero", async () => {
+    mocks.usage.mockRejectedValue(new Error("ledger unavailable"));
+    const response = await GET(new Request("http://localhost/api/opening/ai-settings"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).dailyUsage).toBeNull();
+  });
   it("parses the complete GET response with every public registered task", async () => {
     const response = await GET(new Request("http://localhost/api/opening/ai-settings"));
     expect(response.status).toBe(200);

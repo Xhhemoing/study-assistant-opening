@@ -152,7 +152,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
   const embeddingConfig = override ? null : loadOpeningEmbeddingConfig();
   const tutor = override?.config ?? { ...loadOpeningTutorConfig(), inputCentsPerMillion: 0, outputCentsPerMillion: 0 };
   const budgetRepo = createOpeningBudgetRepository(sql, {
-    envCapCents: catalog?.dailyCapCents ?? 100_000,
+    envCapCents: catalog?.dailyCapCents ?? 100_000, dailyQuotaMode: catalog?.dailyQuotaMode ?? "limited", parentCapCents: catalog?.parentCapCents ?? 2000,
     pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0 || catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
   const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });

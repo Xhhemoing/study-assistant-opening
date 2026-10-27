@@ -7,7 +7,7 @@ import {
   requirePrincipal,
 } from "../../../features/auth/service";
 import { getAuthRuntime } from "../../../server/runtime";
-import { createCourseBodySchema, parseCourseRequest, readCourseJson } from "../../../features/courses/server/course-request-schemas";
+import { createCourseBodySchema, parseCourseRequest, readCourseJson } from "../../../features/opening/courses/server/course-request-schemas";
 
 export async function POST(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();

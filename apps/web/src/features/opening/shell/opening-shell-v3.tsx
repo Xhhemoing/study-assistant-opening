@@ -1,24 +1,22 @@
 "use client";
 
-import { LogOut, Minimize2, RotateCcw, Sparkles } from "lucide-react";
-import { TransitionLink as Link } from "../v3/motion/view-transition";
+import { Minimize2 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
-import { CommandPalette } from "../../search/command-palette";
+import { CommandPalette } from "../search/command-palette";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { ConversationCompanionProvider } from "../assistant/conversation-companion";
-import { openAssistantDrawer } from "../assistant/assistant-entry";
 import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 import { AppShell, type ShellNav } from "../v3/shell/app-shell";
 import { FEATURES, type Feature } from "../v3/shell/features";
 import { navigationIsActive, openingNavigation } from "./navigation";
 import { StatusToastProvider } from "../v3/ui/toast";
-import { ui } from "../v3/ui/controls";
 import { OpeningAccountMenu } from "./account-menu";
 import { ConnectionNotice } from "./connection-notice";
 import { useRecentConversations } from "./recent-conversations";
 import { useDueReviewCount } from "./review-count";
+import { NavigationShortcutsHint } from "./navigation-shortcuts-hint";
 import { WorkspaceLayoutContext } from "./workspace-layout-context";
 
 const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
@@ -30,7 +28,7 @@ const OPENING_NAV = {
   mobileLabel: "学习工作台导航（移动端）",
   core: navigation.filter(item => item.group === "core").map(item => navigationFeature(item.href, item.label, "core")),
   tools: navigation.filter(item => item.group === "tools").map(item => navigationFeature(item.href, item.label, "tool")),
-  system: [FEATURES.find(item => item.id === "settings")!],
+  system: [],
 };
 
 /**
@@ -112,8 +110,8 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   return (
     <ConversationCompanionProvider><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode: toggleFocus }}><StatusToastProvider>
       <AppShell
-        counts={dueCount ? { review: dueCount } : {}}
-        recent={recent.map(thread => ({ id: thread.id, title: thread.title, href: `/opening/assistant?conversation=${encodeURIComponent(thread.id)}` }))}
+        counts={{ ...(dueCount ? { review: dueCount } : {}), ...(pendingCount ? { today: pendingCount } : {}) }}
+        recent={[]}
         hideNav={focusMode}
         nav={shellNav}
         onOpenSearch={openPalette}
@@ -122,14 +120,10 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
           {accountMenu}
           <span className="truncate text-meta text-text-2 in-data-[compact=true]:sr-only">{userLabel}</span>
         </div>}
-        mobileMenuExtra={<div className="grid gap-1">
-          <Link href="/opening/review" className={`${ui.quiet} justify-start`}><RotateCcw size={16} aria-hidden="true" />复习{dueCount ? ` · ${dueCount}` : ""}</Link>
-          <button type="button" className={`${ui.quiet} justify-start`} onClick={() => openAssistantDrawer()}><Sparkles size={16} aria-hidden="true" />问 AI</button>
-          <button type="button" className={`${ui.quiet} justify-start`} onClick={toggleFocus}>{focusMode ? "退出专注" : "进入专注"}</button>
-          <button type="button" className={`${ui.quiet} justify-start`} onClick={logout} disabled={logoutPending}><LogOut size={16} aria-hidden="true" />{logoutPending ? "正在退出…" : "退出登录"}</button>
-        </div>}
+        mobileMenuExtra={accountMenu}
         banner={<>
           {logoutError ? <div className="mx-3 mt-2 rounded-pill bg-danger-soft px-4 py-2 text-meta text-danger" role="alert">{logoutError}</div> : null}
+          <NavigationShortcutsHint />
           <ConnectionNotice />
           <OpeningCapabilityNotice />
         </>}>

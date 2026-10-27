@@ -35,7 +35,12 @@ const user: TurnRecord = { id: userTurnId, conversationId, role: "user", text: "
 const assistant = (status: TurnRecord["status"]): TurnRecord => ({ id: assistantTurnId, conversationId, role: "assistant", text: status === "failed" ? "已停止这次回答。" : "", citations: [], createdAt: at, mode: "hint", status });
 
 describe("turn wait phases", () => {
-  it("stays quiet first, says it is slower after 20s and offers actions after 90s", () => {
+  it("explains progress after three seconds without changing the retry threshold", () => {
+    expect(turnWaitPhase(2999)).toBe("normal");
+    expect(turnWaitPhase(3000)).toBe("slow");
+    expect(turnWaitPhase(89_999)).toBe("slow");
+  });
+  it("stays quiet first, shows preparation after 3s and offers actions after 90s", () => {
     expect(turnWaitPhase(SLOW_TURN_MS - 1)).toBe("normal");
     expect(turnWaitPhase(SLOW_TURN_MS)).toBe("slow");
     expect(turnWaitPhase(STALLED_TURN_MS - 1)).toBe("slow");
@@ -99,7 +104,7 @@ it("resends a failed turn with a stable retry key, so a second click cannot char
   expect(submitTurn.mock.calls[0]?.[0]).toMatchObject({ conversationId, text: user.text, mode: "hint", clientKey: `retry-${assistantTurnId}`, privacy: "saved" });
 });
 
-it("shows a slow state after 20s and 重试 / 取消 after 90s without text; 重试 stops the job before resending", async () => {
+it("shows preparation after 3s and 重试 / 取消 after 90s without text; 重试 stops the job before resending", async () => {
   const state: { turns: TurnRecord[]; pending: Awaited<ReturnType<OpeningApi["getPendingJob"]>> } = {
     turns: [user, assistant("pending")], pending: { id: jobId, status: "queued", error: null, updatedAt: at },
   };
@@ -126,6 +131,25 @@ it("shows a slow state after 20s and 重试 / 取消 after 90s without text; 重
   expect(submitTurn).toHaveBeenCalledOnce();
   expect(cancelJob.mock.invocationCallOrder[0]).toBeLessThan(submitTurn.mock.invocationCallOrder[0]!);
   expect(submitTurn.mock.calls[0]?.[0]).toMatchObject({ text: user.text, clientKey: `retry-${assistantTurnId}` });
+});
+
+it("keeps the three-second wait clock when a delayed submission receives its job id", async () => {
+  const state: { turns: TurnRecord[]; pending: Awaited<ReturnType<OpeningApi["getPendingJob"]>> } = { turns: [], pending: null };
+  let finishSubmit!: (result: Awaited<ReturnType<OpeningApi["submitTurn"]>>) => void;
+  const submitTurn = vi.fn<OpeningApi["submitTurn"]>(() => new Promise(resolve => { finishSubmit = resolve; }));
+  await act(async () => root.render(<AssistantView api={fakeApi(state, { submitTurn })} initialConversationId={conversationId} initialDraft="等待中的问题" />));
+  await advance(0);
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
+  expect(submitTurn).toHaveBeenCalledOnce();
+  await advance(2500);
+  expect(host.textContent).not.toContain(TURN_WAIT_COPY.slow);
+  await act(async () => {
+    state.turns = [user, assistant("pending")];
+    state.pending = { id: jobId, status: "queued", error: null, updatedAt: at };
+    finishSubmit({ jobId, turnId: userTurnId, replayed: false });
+  });
+  await advance(500);
+  expect(host.textContent).toContain(TURN_WAIT_COPY.slow);
 });
 
 it("does not resend when stopping the stalled job ends with an unconfirmed outcome", async () => {
@@ -256,6 +280,24 @@ it("restores the saved conversation draft before deciding whether an old failure
   } finally { store.remove(scope); clearIdentity(); }
 });
 
+it("keeps a new Today prompt separate from a stored conversation draft and sends nothing automatically", async () => {
+  const store = createQuestionDraftStore();
+  const scope = `${assistantContextScope(undefined)}::${conversationId}:::`;
+  store.write(scope, "原会话尚未发送的草稿");
+  const { api } = resumableApi("failed");
+  api.submitTurn = vi.fn<OpeningApi["submitTurn"]>();
+  api.createConversation = vi.fn<OpeningApi["createConversation"]>();
+  await act(async () => root.render(<AssistantView api={api} embedded startFresh promptRequest={{ id: "today-1", text: "独立新问题" }} />));
+  await advance(0);
+  expect(host.querySelector("textarea")?.value).toBe("独立新问题");
+  expect(store.read(scope)).toBe("原会话尚未发送的草稿");
+  expect(api.listConversations).not.toHaveBeenCalled();
+  expect(api.resumeConversation).not.toHaveBeenCalled();
+  expect(api.listTurns).not.toHaveBeenCalled();
+  expect(api.submitTurn).not.toHaveBeenCalled();
+  expect(api.createConversation).not.toHaveBeenCalled();
+  store.remove(scope);
+});
 it("retains an unsubmitted upload and its failed conversation on reopening", async () => {
   vi.setSystemTime(new Date(at));
   const { api } = resumableApi("failed");

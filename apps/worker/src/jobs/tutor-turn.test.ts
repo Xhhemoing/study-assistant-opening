@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError, OpeningModelRoutingError } from "@aistudy/ai";
-import { OpeningBudgetError } from "@aistudy/database";
+import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
 import type { ConversationPlanningContext, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
@@ -59,6 +59,80 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it("records one model/Redis observation per execution without blocking first publication", async () => {
+    vi.useFakeTimers();
+    try {
+    const executionId = "10000000-0000-4000-8000-000000000001", claimToken = "10000000-0000-4000-8000-000000000002";
+    const { deps, provider, tutorJobs } = setup({ claim: { ...claimedJob, executionId, claimToken } });
+    let finish!: () => void;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    const record = vi.fn((_scope: unknown, _input: OpeningTutorTimingInput) => waiting), unavailable = vi.fn();
+    let sequence = 0;
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string, _execution?: string) => ++sequence) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta(""); await delta("First"); await delta(" text");
+      return { text: "First text", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    const run = createTutorTurnHandler({ ...deps, stream, timing: { record }, onTimingUnavailable: unavailable })(claimedJob.id);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stream.append).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(record.mock.calls.map(call => call[1].kind)).toEqual(["tutor_first_text", "tutor_first_chunk"]);
+    expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ executionId, claimToken, observedAt: expect.any(Date), durationMs: expect.any(Number) }));
+    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId]);
+    finish(); await run;
+    expect(provider.complete).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([false, true])("bounds permanently pending timing writes before the business terminal (failure=%s)", async failure => {
+    vi.useFakeTimers();
+    try {
+      const { deps, provider, tutorJobs } = setup({ claim: { ...claimedJob, executionId: "10000000-0000-4000-8000-000000000001", claimToken: "claim" } });
+      const businessError = new Error("provider interrupted"), unavailable = vi.fn();
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("Answer");
+        if (failure) throw businessError;
+        return { text: "Answer", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const run = createTutorTurnHandler({ ...deps, stream: { begin: async () => {}, append: async () => 1 },
+        timing: { record: () => new Promise(() => {}) }, onTimingUnavailable: unavailable })(claimedJob.id);
+      const settled = vi.fn();
+      const result = run.then(value => { settled(); return value; }, error => { settled(); return error; });
+      await vi.advanceTimersByTimeAsync(99);
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled(); expect(tutorJobs.fail).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(unavailable).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expect.stringContaining("timing") }));
+      if (failure) { expect(await result).toBe(businessError); expect(tutorJobs.fail).toHaveBeenCalledOnce(); }
+      else { expect(await result).toEqual({ skipped: false }); expect(tutorJobs.completeTurn).toHaveBeenCalledOnce(); }
+      expect(provider.complete).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([0, "failure"])("does not claim Redis publication for %s", async result => {
+    const { deps, provider } = setup({ claim: { ...claimedJob, executionId: "10000000-0000-4000-8000-000000000001", claimToken: "claim" } });
+    const record = vi.fn(async (_scope: unknown, _input: OpeningTutorTimingInput) => {});
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => { if (result === "failure") throw new Error("redis unavailable"); return 0; }) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("Answer"); return { text: "Answer", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream, timing: { record }, onStreamUnavailable: vi.fn() })(claimedJob.id);
+    expect(record.mock.calls.map(call => call[1].kind)).toEqual(["tutor_first_text"]);
+  });
+
+  it("reports timing persistence failures without changing the successful answer or resending", async () => {
+    const { deps, provider, tutorJobs } = setup({ claim: { ...claimedJob, executionId: "10000000-0000-4000-8000-000000000001", claimToken: "claim" } });
+    const error = new Error("timing write failed"), unavailable = vi.fn();
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("Answer"); return { text: "Answer", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream: { begin: async () => {}, append: async () => 1 }, timing: { record: async () => { throw error; } }, onTimingUnavailable: unavailable })(claimedJob.id);
+    expect(unavailable).toHaveBeenCalledWith(error); expect(provider.complete).toHaveBeenCalledOnce();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledOnce(); expect(tutorJobs.fail).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["这题答案是什么", "hint", "两个简短的起步方向"],

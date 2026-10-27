@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assistantProposalCreateSchema, assistantProposalDecisionSchema, assistantProposalRecordSchema,
-  type AssistantProposalCreate, type AssistantProposalDecision } from "@aistudy/contracts";
+  pendingAssistantProposalsQuerySchema, pendingAssistantProposalsResponseSchema,
+  type AssistantProposalCreate, type AssistantProposalDecision, type PendingAssistantProposalsQuery } from "@aistudy/contracts";
 import { OpeningApiError } from "./api";
 
 export function createAssistantProposalClient(fetchImpl: typeof fetch = fetch) {
@@ -18,11 +19,22 @@ export function createAssistantProposalClient(fetchImpl: typeof fetch = fetch) {
     async listAssistantProposals() {
       return z.object({ proposals: z.array(assistantProposalRecordSchema) }).parse(await request("/api/opening/assistant-proposals")).proposals;
     },
+    async listPendingAssistantProposals(input: PendingAssistantProposalsQuery = {}) {
+      const query = pendingAssistantProposalsQuerySchema.parse(input);
+      const params = new URLSearchParams({ status: "draft" });
+      if (query.conversationId) params.set("conversationId", query.conversationId);
+      if (query.cursor) params.set("cursor", query.cursor);
+      return pendingAssistantProposalsResponseSchema.parse(await request(`/api/opening/assistant-proposals?${params}`));
+    },
     async proposeAssistantAction(input: AssistantProposalCreate) {
-      return z.object({ proposal: assistantProposalRecordSchema }).parse(await request("/api/opening/assistant-proposals", assistantProposalCreateSchema.parse(input))).proposal;
+      const proposal = z.object({ proposal: assistantProposalRecordSchema }).parse(await request("/api/opening/assistant-proposals", assistantProposalCreateSchema.parse(input))).proposal;
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("opening:reviews-changed"));
+      return proposal;
     },
     async decideAssistantProposal(id: string, input: AssistantProposalDecision) {
-      return z.object({ proposal: assistantProposalRecordSchema }).parse(await request(`/api/opening/assistant-proposals/${encodeURIComponent(id)}/decision`, assistantProposalDecisionSchema.parse(input))).proposal;
+      const proposal = z.object({ proposal: assistantProposalRecordSchema }).parse(await request(`/api/opening/assistant-proposals/${encodeURIComponent(id)}/decision`, assistantProposalDecisionSchema.parse(input))).proposal;
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("opening:reviews-changed"));
+      return proposal;
     },
   };
 }

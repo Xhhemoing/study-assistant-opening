@@ -2,7 +2,7 @@ import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppearancePreferencesProvider, appearanceStorageKey, useDiagnosticsEnabled, type AppearancePreferences } from "./appearance-preferences";
-import { AppearanceSettings } from "./appearance-settings";
+import { AppearanceSettings, DiagnosticsSettings } from "./appearance-settings";
 
 type Effect = { deps: unknown[]; cleanup?: () => void };
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], cursor: 0, pending: [] as Array<() => void>, effectSlots: new Set<number>() }));
@@ -85,7 +85,12 @@ describe("local appearance preferences", () => {
     expect(renderToStaticMarkup(tree)).toContain("diagnostics-off");
     const settings = renderToStaticMarkup(render(createElement(AppearanceSettings)));
     expect(settings).toContain('id="appearance"');
-    expect(settings.match(/ disabled=""/g)).toHaveLength(4);
+    expect(settings.match(/ disabled=""/g)).toHaveLength(3);
+    expect(settings).not.toContain("诊断模式");
+    expect(settings).not.toContain("材质");
+    expect(settings).not.toContain("圆角");
+    expect(settings).not.toContain("左侧导航");
+    expect(renderToStaticMarkup(render(createElement(DiagnosticsSettings)))).toContain("诊断模式");
     expect(settings).not.toContain('checked=""');
     expect(storage.getItem).not.toHaveBeenCalled();
     tree.props.value.updatePreferences({ theme: "light" });

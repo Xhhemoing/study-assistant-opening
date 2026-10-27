@@ -34,7 +34,12 @@ export function ReviewView({ api: supplied, embedded = false, onPendingCountChan
       setState((current) => ({ ...current, kind: error instanceof OpeningApiError && error.status === 401 ? "loggedOut" : "error", message: userFacingMessage(error, "暂时无法读取建议") }));
     }
   }, [api, actions]);
-  useEffect(() => { void refresh(); return () => { requestId.current += 1; }; }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    const changed = () => { void refresh(); };
+    window.addEventListener("opening:reviews-changed", changed);
+    return () => { requestId.current += 1; window.removeEventListener("opening:reviews-changed", changed); };
+  }, [refresh]);
   useEffect(() => {
     if (state.kind === "ready") onPendingCountChange?.(pendingCount);
   }, [state.kind, pendingCount, onPendingCountChange]);

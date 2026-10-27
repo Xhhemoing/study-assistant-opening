@@ -20,6 +20,11 @@ const readyFacts = {
 };
 
 describe("ai readiness classification", () => {
+  it("reports explicit unlimited daily quota without inventing a remaining balance", () => {
+    const items = buildAiReadinessItems({ ...readyFacts, dailyQuotaMode: "unlimited", effectiveCapCents: 0, remainingCents: 0, usedCents: 9000 });
+    expect(items.find(item => item.key === "daily_budget")).toMatchObject({ ok: true, detail: expect.stringContaining("每日不限额") });
+    expect(items.find(item => item.key === "daily_budget")?.detail).not.toContain("剩余");
+  });
   it("marks vision_model as soft and does not hard-block when only vision is missing", () => {
     const items = buildAiReadinessItems({ ...readyFacts, visionAvailable: false });
     const vision = items.find(item => item.key === "vision_model");

@@ -35,6 +35,7 @@ import { getSpanProblem } from "@aistudy/domain";
 import { HintLadder } from "../hint-ladder";
 import { SpanPractice, spanPracticeScope } from "./span-practice";
 import { SpanLesson } from "./span-lesson";
+import { LessonCompanionWorkspace } from "../lesson-companion-workspace";
 const id = "11111111-1111-4111-8111-111111111111";
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
   sourceIds: [id], sourceVersions: { [id]: 1 }, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, spanExercise: getSpanProblem("span-independent-3d")! };
@@ -105,7 +106,8 @@ it("registers the sole active span entry and never carries a previous step's att
   const first = lesson(); const initial = find(first, node => node.type === SpanPractice)!;
   (initial.props.onAttempt as (value: LearningAttempt | null) => void)(attempt); lesson();
   expect(studyBinding.set).toHaveBeenLastCalledWith(expect.objectContaining({ learningAttempt: attempt, context: expect.objectContaining({ attemptId: id, itemVersionId: id }) }));
-  const navigation = find(lesson(), node => node.type === "nav" && node.props["aria-label"] === "span 教学步骤")!;
+  const workspace = find(lesson(), node => node.type === LessonCompanionWorkspace)!;
+  const navigation = find(workspace.props.outline as ReactNode, node => node.type === "nav" && node.props["aria-label"] === "span 学习目录")!;
   const steps = navigation.props.children as ReactElement<{ onClick: () => void }>[];
   steps[0]!.props.onClick(); lesson();
   // 示范步骤可以直接围绕课程提问，但绝不携带上一题的作答。

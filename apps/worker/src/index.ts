@@ -5,7 +5,7 @@ import { loadOpeningJobStaleConfig, loadWorkerStartupConfig } from "@aistudy/con
 import { assertConsumersActive, consumersReady, createWorkerReadiness, type ReadyConsumer } from "./runtime/worker-readiness";
 import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
-import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository,
+import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, recordOpeningTutorTiming,
   createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository } from "@aistudy/database";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
@@ -217,7 +217,7 @@ export async function main(): Promise<void> {
   });
   // TZ01: factory timeZone is fallback only; reserve() prefers planning_settings.timeZone
   // and counts completed spend via resolveBudgetLocalDay half-open bounds.
-  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0) || openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: openingModel.dailyCapCents, dailyQuotaMode: openingModel.dailyQuotaMode, parentCapCents: openingModel.parentCapCents, pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0) || openingModel.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0) });
   const indexSource = createIndexSourceHandler({ repository: createOpeningSourceEmbeddingsRepository(sql),
     config: embeddingConfig, budget: scope => scopeBudget(budget, scope) });
   const models = createDbModelGateway(sql);
@@ -281,6 +281,8 @@ export async function main(): Promise<void> {
   });
   const memory = createOpeningMemoryRepository(sql);
   const tutorTurn = createTutorTurnHandler({
+    timing: { record: (scope, input) => recordOpeningTutorTiming(sql, scope, input) },
+    onTimingUnavailable: reportError,
     retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),
     learnerContext: createOpeningTutorLearnerContextRepository(sql),
     stream: createTutorStreamWriter(producer),

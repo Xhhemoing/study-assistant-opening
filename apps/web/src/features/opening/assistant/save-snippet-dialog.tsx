@@ -8,7 +8,7 @@ import type { OpeningApi } from "../client/api";
 import { buttonClass, inputClass, secondaryButtonClass, textareaClass, ui } from "../design/ui";
 import { type SnippetDraft, type SnippetSaveResult } from "./save-snippet";
 import { readSnippetSaveReceipt, saveSnippetWithReceipt, snippetSaveIdentity, startAnotherSnippetSave, subscribeSnippetSave } from "./snippet-save-receipt";
-import { libraryNotePath } from "../../editor/library-paths";
+import { libraryNotePath } from "../editor/library-paths";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type Props = { draft: SnippetDraft; api: Pick<OpeningApi, "createSnippet">; onClose: () => void };

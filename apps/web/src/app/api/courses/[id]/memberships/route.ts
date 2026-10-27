@@ -6,7 +6,7 @@ import {
   requirePrincipal,
 } from "../../../../../features/auth/service";
 import { getAuthRuntime } from "../../../../../server/runtime";
-import { addMembershipBodySchema, courseIdParamSchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema } from "../../../../../features/courses/server/course-request-schemas";
+import { addMembershipBodySchema, courseIdParamSchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema } from "../../../../../features/opening/courses/server/course-request-schemas";
 
 type Params = { params: Promise<{ id: string }> };
 

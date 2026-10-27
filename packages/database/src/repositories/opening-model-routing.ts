@@ -4,7 +4,7 @@ import type { Sql } from "postgres";
 import { createOpeningAiSettingsRepository } from "./opening-ai-settings";
 import { createOpeningModelProvidersRepository } from "./opening-model-providers";
 
-type Catalog = { models: Parameters<typeof mergeOpeningCatalog>[0]; defaultModelId: string | null; dailyCapCents: number };
+type Catalog = { models: Parameters<typeof mergeOpeningCatalog>[0]; defaultModelId: string | null; dailyCapCents: number; dailyQuotaMode?: "limited" | "unlimited" };
 /** Shared Web/Worker routing inputs; never contacts a provider. */
 export async function loadOpeningRouting(sql: Sql, scope: Scope, catalog: Catalog) {
   const [preference, custom] = await Promise.all([
@@ -17,6 +17,6 @@ export async function loadOpeningRouting(sql: Sql, scope: Scope, catalog: Catalo
   const effective = resolveEffectiveDailyCap({ envCapCents: catalog.dailyCapCents,
     workspaceCapCents: preference.settings.dailyCapCents ?? null,
     confirmed: Boolean(preference.settings.budgetConfirmedAt), pricingConfigured });
-  const merged = mergeOpeningCatalog(catalog.models, custom, { defaultModelId: catalog.defaultModelId, dailyCapCents: effective.capCents });
+  const merged = mergeOpeningCatalog(catalog.models, custom, { defaultModelId: catalog.defaultModelId, dailyCapCents: effective.capCents, dailyQuotaMode: catalog.dailyQuotaMode ?? "limited" });
   return { settings: preference.settings, merged };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { TransitionLink as Link } from "../v3/motion/view-transition";
+
 import { ArrowLeft, ArrowRight, BookOpen, Focus, Maximize2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
@@ -28,6 +28,7 @@ import {
   isBranchStackEmpty,
 } from "./block-commands";
 import { TeachingBlockItem } from "./teaching-block-item";
+import { returnToMainline } from "./return-to-mainline";
 import {
   isKnownSchemaVersion,
   readSchemaVersion,
@@ -36,15 +37,18 @@ import {
 import {
   canRequestTeachingCompile,
   formatActivityUpdatedAt,
+
   teachingActivityGenerateStatusLabel,
   teachingActivityStatusLabel,
 } from "./today-activity";
-import { PreferenceControls } from "./preference-controls";
+
+import { RestoredPositionNotice } from "./restored-position-notice";
 import { ResumeCard, type LocalUnsentDraft } from "./resume-card";
-import { ActivityEndControl } from "./activity-end-control";
 import { TeachingGoalGuidance } from "./goal-guidance";
+import { ActivityEndControl } from "./activity-end-control";
+
 import { sourceViewerHref } from "../inbox/source-viewer";
-import { StudyToolsPanel } from "./study-tools-panel";
+import { StudyToolsPanel, StudyToolsToggle } from "./study-tools-panel";
 import { StudyContextTools } from "./study-context-tools";
 import { useStudyAssistantContext } from "../assistant/current-study-context";
 import { teachingAssistantContext } from "./lesson-assistant-context";
@@ -52,6 +56,7 @@ import { SelectionAsk } from "./selection-ask";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
+import { unitProgress } from "./unit-progress";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type TeachingToolsContext = {
@@ -102,6 +107,8 @@ export type TeachingWorkspaceProps = {
    */
   sourceNameById?: Record<string, string> | null;
   contextualTools?: ContextualTeachingTools;
+  headerLeading?: ReactNode;
+  previousToolsAction?: ReactNode;
   /** The originating ordinary conversation stays separate from this activity or attempt. */
   originalConversationId?: string | null;
 };
@@ -158,18 +165,21 @@ export function buildSourceNameMap(
 
 export function TeachingWorkspace({
   activity,
-  clientInit: clientInitProp,
-  assistantHref,
   timeZone = "Asia/Shanghai",
+  clientInit: clientInitProp,
+
+
   api: apiProp,
   onActivityUpdated,
   sourceNameById: sourceNameByIdProp = null,
   contextualTools,
+  headerLeading,
+  previousToolsAction,
   originalConversationId = null,
 }: TeachingWorkspaceProps) {
   const diagnostics = useDiagnosticsEnabled();
   const { focusMode, toggleFocusMode, setFocusMode } = useWorkspaceLayout();
-  const [recoveryDismissed, setRecoveryDismissed] = useState(false);
+  const outlineMenu = useRef<HTMLDetailsElement>(null);
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [liveActivity, setLiveActivity] = useState(activity);
   const [liveInit, setLiveInit] = useState<ActivitySpecClientInit>(clientInitProp);
@@ -207,9 +217,14 @@ export function TeachingWorkspace({
   const markSnapshot = useCallback((next: Partial<Omit<TeachingWorkspacePositionSnapshot, "epoch">> = {}) => {
     positionSnapshot.current = { ...positionSnapshot.current, ...next, epoch: positionSnapshot.current.epoch + 1 };
   }, []);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; markSnapshot(); };
+  }, [markSnapshot]);
 
-  const commandApi = useMemo<OpeningApi>(() => ({ ...api, async postTeachingCommand(id, input) {
-    if (positionInFlight.current || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
+  const sendCommand = useCallback(async (id: string, input: Parameters<OpeningApi["postTeachingCommand"]>[1], ownsNavigation = false) => {
+    if ((positionInFlight.current && !ownsNavigation) || commandInFlight.current) throw new Error("另一项学习操作仍在保存，请稍后再试。");
     const latest = positionSnapshot.current;
     if (id !== latest.activityId || input.expectedVersion !== latest.contentVersion || (input.expectedPathVersion != null && input.expectedPathVersion !== latest.pathVersion)) throw new Error("学习内容已切换，请重新读取当前内容后再操作。");
     commandInFlight.current = true;
@@ -217,7 +232,8 @@ export function TeachingWorkspace({
     commandSnapshot.current = { ...positionSnapshot.current };
     try { return await api.postTeachingCommand(id, input); }
     finally { commandInFlight.current = false; }
-  } }), [api, markSnapshot]);
+  }, [api, markSnapshot]);
+  const commandApi = useMemo<OpeningApi>(() => ({ ...api, postTeachingCommand: (id, input) => sendCommand(id, input) }), [api, sendCommand]);
 
   // Sync when parent passes a new activity/init identity (e.g. today dashboard reload).
   useEffect(() => {
@@ -258,6 +274,9 @@ export function TeachingWorkspace({
   const units = useMemo(() => buildTeachingStudyUnits(orderedBlocks), [orderedBlocks]);
   const currentUnit = teachingUnitForBlock(units, blockFocus.currentBlockId);
   const currentIndex = currentUnit ? units.indexOf(currentUnit) : -1;
+  const unitPosition = useMemo(() => unitProgress({ id: liveActivity.id, contentVersion }, {
+    activityId: liveActivity.id, contentVersion, clientInit: liveInit,
+  }), [liveActivity.id, contentVersion, liveInit]);
   const currentUnitId = currentUnit?.id ?? null;
   const [visitedUnits, setVisitedUnits] = useState<Set<string>>(() => new Set(currentUnitId ? [currentUnitId] : []));
   const currentQuestionId = currentUnit?.questionBlockId ?? null;
@@ -363,8 +382,26 @@ export function TeachingWorkspace({
     if (positionInFlight.current || !schemaOk) return;
     if (commandInFlight.current) { setPositionError("学习操作仍在保存，请稍后切换单元。"); return; }
     positionInFlight.current = true; setPositionBusy(true); setPositionError(null);
-    const started = { ...positionSnapshot.current };
+    let started = { ...positionSnapshot.current };
     try {
+      let checkpoint = liveInit.checkpointJson;
+      if (!isBranchStackEmpty(checkpoint)) {
+        // Hold the navigation lock while unwinding; no target cursor is saved until every return is confirmed.
+        await returnToMainline({ api: { ...api, postTeachingCommand: (id, input) => sendCommand(id, input, true) },
+          activityId: started.activityId, contentVersion: started.contentVersion, pathVersion: started.pathVersion, checkpoint,
+          isCurrent: () => mounted.current && (sameWorkspaceSnapshot(started, positionSnapshot.current)
+            || Boolean(commandSnapshot.current && sameWorkspaceSnapshot(commandSnapshot.current, positionSnapshot.current))),
+          accept: result => {
+            const commandStarted = commandSnapshot.current;
+            const current = Boolean(commandStarted && sameWorkspaceSnapshot(commandStarted, positionSnapshot.current)
+              && result.contentVersion >= commandStarted.contentVersion && result.pathVersion >= commandStarted.pathVersion);
+            applySuccess(result);
+            if (current) { checkpoint = result.checkpointJson; started = { ...positionSnapshot.current }; }
+            return current;
+          }, onConflict: handleConflict });
+        if (!isBranchStackEmpty(checkpoint)) throw new Error("原学习位置尚未确认，请重新读取后再切换单元。");
+      }
+      if (!mounted.current || !sameWorkspaceSnapshot(started, positionSnapshot.current)) return;
       await saveCurrentTeachingUnitPosition(api, started, () => positionSnapshot.current, unit.questionBlockId ?? unit.id, result => {
         markSnapshot({ contentVersion: result.contentVersion });
         setLiveInit(previous => ({ ...previous, contentVersion: result.contentVersion, checkpointJson: result.checkpointJson }));
@@ -373,9 +410,9 @@ export function TeachingWorkspace({
         setPanel(null);
         requestAnimationFrame(() => contentRef.current?.querySelector<HTMLElement>('[data-study-unit-current="true"] h3')?.focus({ preventScroll: true }));
       });
-    } catch (error) { setPositionError(userFacingMessage(error, "学习位置保存未确认，请重新读取后继续。")); }
-    finally { positionInFlight.current = false; setPositionBusy(false); }
-  }, [api, markSnapshot, schemaOk]);
+    } catch (error) { if (mounted.current) setPositionError(userFacingMessage(error, "学习位置保存未确认，请重新读取后继续。")); }
+    finally { positionInFlight.current = false; if (mounted.current) setPositionBusy(false); }
+  }, [api, markSnapshot, schemaOk, liveInit.checkpointJson, sendCommand, applySuccess, handleConflict]);
 
   const updateLiveActivity = useCallback((next: TeachingActivity) => {
     markSnapshot({ activityId: next.id, contentVersion: next.contentVersion, pathVersion: next.pathVersion });
@@ -445,8 +482,8 @@ export function TeachingWorkspace({
   };
   const legacyPanels = [
     { id: "outline", label: "目录", content: <div className="space-y-4">
-      <p className="text-xs leading-6 text-text-3">回看完整知识单元，切换位置会保存阅读断点。</p>
-      <ol className="space-y-1">{units.map((unit, index) => <li key={unit.id}><button type="button" className={`${ui.quiet} h-auto w-full justify-start whitespace-normal py-2 text-left ${unit.id === currentUnitId ? "bg-accent-soft text-accent" : ""}`} aria-current={unit.id === currentUnitId ? "step" : undefined} disabled={positionBusy} onClick={() => { void navigateUnit(unit); }}>{index + 1}. {unit.title}</button></li>)}</ol>
+      <p className="text-sm font-medium">学习目录</p><TeachingGoalGuidance focus={liveActivity.learnerFocus} /><p className="text-xs leading-6 text-text-3">回看完整知识单元，切换位置会保存阅读断点。</p>
+      <ol className="space-y-1">{units.map((unit, index) => <li key={unit.id}><button type="button" className={`${ui.quiet} h-auto w-full justify-start whitespace-normal py-2 text-left ${unit.id === currentUnitId ? "bg-accent-soft text-accent" : ""}`} aria-current={unit.id === currentUnitId ? "step" : undefined} disabled={positionBusy} onClick={() => { void navigateUnit(unit).then(() => { if (outlineMenu.current) outlineMenu.current.open = false; }); }}>{index + 1}. {unit.title}</button></li>)}</ol>
       <button type="button" className={ui.secondary} onClick={toggleWholeLesson} aria-pressed={showAll}>{showAll ? "只看当前单元" : "查看整节内容"}</button>
       {liveInit.goals.length ? <details className="text-xs leading-6 text-text-2"><summary className="cursor-pointer">本节目标</summary><ul className="mt-2 list-disc space-y-1 pl-4">{liveInit.goals.map(goal => <li key={goal.goalId}>{goal.statement}</li>)}</ul></details> : null}
     </div> },
@@ -463,18 +500,6 @@ export function TeachingWorkspace({
       })}</ul> : <p className="text-xs leading-6 text-text-3">本节没有附带可定位的资料引用。</p>}
       <p className="text-xs leading-6 text-text-3">打开引用后可返回原学习单元。历史引用使用原来的资料版本。</p>
     </div> },
-    { id: "settings", label: "学习设置", content: <div className="space-y-4">
-      <TeachingGoalGuidance focus={liveActivity.learnerFocus} />
-      <PreferenceControls scope="session" activityId={liveActivity.id} courseId={liveActivity.courseId} expectedUpdatedAt={liveActivity.updatedAt} compact />
-      <p className="text-xs leading-6 text-text-3">按自己的节奏来，卡住时可以看提示或换个例子。</p>
-      {diagnostics ? <details className="space-y-2 text-xs leading-6 text-text-3"><summary className="cursor-pointer">诊断信息</summary>
-        <p>阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
-        <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p><p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
-        <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
-        <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
-      </details> : null}
-      <Link href={assistantHref ?? (liveActivity.courseId ? `/opening/assistant?courseId=${encodeURIComponent(liveActivity.courseId)}` : "/opening/assistant")} className={ui.quiet}>自由探索</Link>
-    </div> },
   ];
 
   const sharedContextContent = <ConversationCompanionTabs conversationId={originalConversationId} section={panel === "notes" ? "notes" : "chat"} tutorRequestKey={currentAskRequest?.id} tutorLabel={currentQuestionId ? "本题辅导" : "本节提问"}>
@@ -486,30 +511,59 @@ export function TeachingWorkspace({
   </ConversationCompanionTabs>;
   const panels = [
     { id: "chat", label: "对话", mountKey: "context", content: sharedContextContent },
-    { id: "outline", label: "目录", content: <div className="space-y-5">
-      {legacyPanels.find(item => item.id === "outline")?.content}
-      <details><summary className="cursor-pointer py-2 text-xs text-text-2">资料与引用</summary><div className="pt-2">{legacyPanels.find(item => item.id === "materials")?.content}</div></details>
-      <details><summary className="cursor-pointer py-2 text-xs text-text-2">学习设置</summary><div className="pt-2">{legacyPanels.find(item => item.id === "settings")?.content}</div></details>
-    </div> },
     { id: "notes", label: "笔记", mountKey: "context", content: sharedContextContent },
+    { id: "materials", label: "资料", content: <>{previousToolsAction}{legacyPanels.find(item => item.id === "materials")?.content}
+      {diagnostics ? <details className="mt-4 space-y-2 text-xs leading-6 text-text-3"><summary className="cursor-pointer">诊断信息</summary>
+        <p>阅读进度只记录位置；掌握判断继续依据独立作答与后续练习。</p>
+        <p>最近更新 {formatActivityUpdatedAt(liveActivity.updatedAt, timeZone)}</p>{/* learner-copy-ignore: version metadata appears only inside explicitly enabled diagnostics */}<p>内容版本 {contentVersion} · 路径版本 {pathVersion} · 校验 {liveInit.verificationStatus ?? "未知"}</p>
+        <p className="break-all">活动标识：{liveActivity.id}</p><p className="break-all">当前位置：{blockFocus.currentBlockId ?? "未设置"}</p>
+        <p>界面开关不改变 AI 介入偏好。个人答案与草稿继续使用原有保存流程。</p>
+      </details> : null}</> },
   ];
+  const returningToMainline = useRef(false);
+  const restoreMainline = async () => {
+    if (returningToMainline.current || positionInFlight.current || commandInFlight.current) {
+      setPositionError("学习操作仍在保存，请稍后再关闭追问。"); return;
+    }
+    returningToMainline.current = true; setPositionBusy(true);
+    try {
+      await returnToMainline({ api: commandApi, activityId: liveActivity.id, contentVersion, pathVersion, checkpoint: liveInit.checkpointJson,
+        isCurrent: () => mounted.current && positionSnapshot.current.activityId === liveActivity.id,
+        accept: result => {
+          const started = commandSnapshot.current;
+          const current = Boolean(started && sameWorkspaceSnapshot(started, positionSnapshot.current)
+            && result.contentVersion >= started.contentVersion && result.pathVersion >= started.pathVersion);
+          applySuccess(result); return current;
+        }, onConflict: handleConflict });
+    } catch (error) { if (mounted.current) setPositionError(userFacingMessage(error, "原学习位置尚未确认，请重新读取后继续。")); }
+    finally { returningToMainline.current = false; if (mounted.current) setPositionBusy(false); }
+  };
   const changePanel = (next: string | null) => {
     if (next && focusMode) setFocusMode(false);
+    if (next === null && panel !== null && !returnDisabled) void restoreMainline();
     setPanel(next);
   };
 
   return <section className="flex h-full min-h-0 min-w-0 flex-col" aria-labelledby="teaching-workspace-heading" data-teaching-workspace="true" data-study-question={currentQuestionId ? "true" : "false"} data-content-version={contentVersion} data-path-version={pathVersion}>
     <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-8">
-      <div className="flex min-w-0 flex-wrap items-center gap-2"><BookOpen size={16} aria-hidden className="shrink-0 text-accent" /><h2 id="teaching-workspace-heading" className="text-sm font-semibold text-text">{currentUnit?.title ?? "本次学习"}</h2><span className="text-xs text-text-3">单元 {Math.max(1, currentIndex + 1)} / {units.length}</span></div>
-      <div className="flex items-center gap-2"><span className={`text-xs ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" || liveActivity.generateStatus === "needs_check" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span><button type="button" className={ui.icon} aria-label={focusMode ? "退出专注" : "专注"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}</button></div>
+      <div className="flex min-w-0 flex-1 items-center gap-2">{headerLeading}<BookOpen size={16} aria-hidden className="shrink-0 text-accent" />
+        <details ref={outlineMenu} className="relative min-w-0">
+          <summary aria-label="选择学习单元" className="flex min-h-11 cursor-pointer list-none flex-wrap items-center gap-2 rounded-md px-2 focus-visible:ring-2 focus-visible:ring-accent">
+            <h2 id="teaching-workspace-heading" className="truncate text-sm font-semibold text-text">{currentUnit?.title ?? "本次学习"}</h2>
+            {unitPosition ? <span className="text-xs text-text-3">单元 {unitPosition.current} / {unitPosition.total}</span> : null}
+          </summary>
+          <div className="absolute left-0 top-full z-20 max-h-80 w-72 max-w-[80vw] overflow-y-auto rounded-xl border border-line bg-surface p-3 shadow-lg">{legacyPanels.find(item => item.id === "outline")?.content}</div>
+        </details>
+      </div>
+      <div className="flex items-center gap-2"><span className={`text-xs ${generateTone}`}>{liveActivity.status === "completed" ? "已结束" : liveActivity.generateStatus === "ready" || liveActivity.generateStatus === "needs_check" ? teachingActivityStatusLabel(liveActivity.status) : liveActivity.generateStatus === "queued" || liveActivity.generateStatus === "generating" ? "正在准备" : teachingActivityGenerateStatusLabel(liveActivity.generateStatus, { contentVersion })}</span><button type="button" className={ui.icon} aria-label={focusMode ? "退出专注" : "专注"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}</button><StudyToolsToggle panels={panels} activePanel={panel} onPanelChange={changePanel} suspended={focusMode} /></div>
     </header>
-    <div role="progressbar" aria-label="学习位置" aria-valuemin={0} aria-valuemax={Math.max(1, units.length)} aria-valuenow={Math.max(0, currentIndex + 1)} className="grid h-0.5 shrink-0 grid-flow-col auto-cols-fr gap-px bg-line">{units.map((unit, index) => <span key={unit.id} className={index <= currentIndex ? "bg-accent" : "bg-line"} />)}</div>
-    {!recoveryDismissed && clientInitProp.checkpointJson?.currentBlockId ? <div role="status" className="flex shrink-0 items-center justify-between gap-2 px-4 py-2 text-xs text-text-3 sm:px-8"><span>已恢复学习位置</span><button type="button" className={ui.quiet} onClick={() => setRecoveryDismissed(true)}>知道了</button></div> : null}
+    {unitPosition ? <div role="progressbar" aria-label="学习位置" aria-valuemin={0} aria-valuemax={unitPosition.total} aria-valuenow={unitPosition.current} className="grid h-0.5 shrink-0 grid-flow-col auto-cols-fr gap-px bg-line">{units.map((unit, index) => <span key={unit.id} className={index <= currentIndex ? "bg-accent" : "bg-line"} />)}</div> : null}
+    <RestoredPositionNotice key={`${activity.id}:${clientInitProp.contentVersion}:${String(clientInitProp.checkpointJson?.currentBlockId ?? "")}`} restored={typeof clientInitProp.checkpointJson?.currentBlockId === "string"} />
     {liveActivity.generateStatus === "needs_check" ? <p className="mb-4 text-xs leading-6 text-text-3" role="note" data-teaching-needs-check="true">这节内容还在核对引用，可以先学。</p> : null}
     {workspaceConflict ? <div className={`${tone.warning} mb-4 space-y-2 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-command-conflict={workspaceConflict.conflict}><p>{studentCopy.lessonUpdated}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().catch(() => undefined); }}>继续学习</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{workspaceConflict.conflict}：{workspaceConflict.message}</p></details> : null}</div> : null}
     {rereadError || positionError ? <div className="mb-4 space-y-2 text-xs leading-6 text-danger" role="alert"><p>{studentCopy.lessonRetry}</p><button type="button" className={ui.secondary} onClick={() => { void handleBlockReread().then(() => setPositionError(null)).catch(() => undefined); }}>{studentCopy.retry}</button>{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{rereadError ?? positionError}</p></details> : null}</div> : null}
-    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
-    <div className="min-h-0 flex-1 pb-4"><StudyToolsPanel fillHeight preferContentOnNarrowEntry={originalConversationId !== null} contentClassName="px-4 sm:px-8" toolbarClassName="px-4 sm:px-8" panels={panels} activePanel={panel} onPanelChange={changePanel} suspended={focusMode}>
+    {!schemaOk ? <div className={`${tone.warning} mb-4 rounded-lg px-3 py-2 text-xs leading-6`} role="status" data-workspace-schema-fail="true">{studentCopy.lessonUnavailable}{diagnostics ? <details><summary className="cursor-pointer">技术信息</summary>{/* learner-copy-ignore: unsupported schema details appear only inside explicitly enabled diagnostics */}<p>schema 版本不受支持：{schemaVersion}</p></details> : null}</div> : null}
+    <div className="min-h-0 flex-1 pb-4"><StudyToolsPanel showToolbar={false} fillHeight preferContentOnNarrowEntry={originalConversationId !== null} contentClassName="px-4 sm:px-8" toolbarClassName="px-4 sm:px-8" panels={panels} activePanel={panel} onPanelChange={changePanel} suspended={focusMode}>
       <ContentGrid><div ref={contentRef} className="min-w-0 space-y-6 pb-4" data-teaching-blocks="true" data-lesson-shortcuts="true" data-current-block-id={blockFocus.currentBlockId ?? ""}>
         {schemaOk ? units.map(unit => {
           const current = unit.id === currentUnitId;
@@ -567,6 +621,9 @@ export type TeachingContinueEntryProps = {
    */
   teachingCompileEnabled?: boolean;
   contextualTools?: ContextualTeachingTools;
+  headerLeading?: ReactNode;
+  previousToolsAction?: ReactNode;
+  onWorkspaceVisibilityChange?: (visible: boolean) => void;
   /** The originating ordinary conversation stays separate from this activity or attempt. */
   originalConversationId?: string | null;
 };
@@ -583,6 +640,9 @@ export function TeachingContinueEntry({
   onActivityUpdated,
   teachingCompileEnabled = true,
   contextualTools,
+  headerLeading,
+  previousToolsAction,
+  onWorkspaceVisibilityChange,
   originalConversationId = null,
 }: TeachingContinueEntryProps) {
   const diagnostics = useDiagnosticsEnabled();
@@ -598,6 +658,12 @@ export function TeachingContinueEntry({
   const [workspaceInit, setWorkspaceInit] = useState<ActivitySpecClientInit | null>(
     initialClientInit,
   );
+  const workspaceVisible = phase === "workspace" && Boolean(workspaceInit)
+    && activity.status !== "completed" && activity.status !== "skipped";
+  useEffect(() => {
+    onWorkspaceVisibilityChange?.(workspaceVisible);
+    return () => onWorkspaceVisibilityChange?.(false);
+  }, [workspaceVisible, onWorkspaceVisibilityChange]);
   const [waitError, setWaitError] = useState<string | null>(null);
   const [waitBusy, setWaitBusy] = useState(false);
   const [liveResume, setLiveResume] = useState<LearningResume | null>(resumeProp);
@@ -709,6 +775,8 @@ export function TeachingContinueEntry({
           timeZone={timeZone}
           api={api}
           contextualTools={contextualTools}
+          headerLeading={headerLeading}
+          previousToolsAction={previousToolsAction}
           originalConversationId={originalConversationId}
           onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }}
         />

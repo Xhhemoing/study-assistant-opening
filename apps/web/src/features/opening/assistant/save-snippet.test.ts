@@ -21,7 +21,7 @@ describe("explicit snippet save", () => {
     expect(prepareSnippetDraft(query)).toBeNull();
     const save = vi.fn(), card = vi.fn();
     const html = renderToStaticMarkup(createElement(MessageList, { messages: [query], onSaveSnippet: save, onCreateCard: card }));
-    expect(html).toMatch(/disabled=""[^>]*>.*?保存片段/);
+    expect(html).toMatch(/disabled=""[^>]*>.*?保存/);
     expect(html).toMatch(/disabled=""[^>]*>.*?制成卡片/);
     expect(html).toContain("临时系统查询暂不支持"); expect(save).not.toHaveBeenCalled(); expect(card).not.toHaveBeenCalled();
   });
@@ -94,11 +94,11 @@ it("renders save actions for every valid temporary message and none for saved hi
     { ...message, id: "new-assistant" },
   ];
   const html = renderToStaticMarkup(createElement(MessageList, { messages, onSaveSnippet: () => undefined }));
-  expect(html.match(/>保存片段<\/button>/g)).toHaveLength(4);
+  expect(html.match(/>保存<\/button>/g)).toHaveLength(4);
   const saved = renderToStaticMarkup(createElement(MessageList, {
     messages: [{ ...message, origin: "saved" }], onSaveSnippet: () => undefined,
   }));
-  expect(saved).not.toContain("保存片段");
+  expect(saved).not.toMatch(/>保存<\/button>/);
 });
 
 it("shows a blocked save entry and explains the missing source context", () => {

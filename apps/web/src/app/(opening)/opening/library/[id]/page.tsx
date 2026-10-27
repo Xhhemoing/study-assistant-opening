@@ -1,4 +1,4 @@
-import { DocumentEditor } from "../../../../../features/editor/document-editor";
+import { DocumentEditor } from "../../../../../features/opening/editor/document-editor";
 import { ConversationObjectFrame } from "../../../../../features/opening/assistant/conversation-object-frame";
 
 type Props = {

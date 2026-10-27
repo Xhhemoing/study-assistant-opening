@@ -1,15 +1,17 @@
 import { createSessionFetch } from "../../auth/session-expiry";
 import { readServerEvents } from "../client/sse";
+import { uuidSchema } from "@aistudy/contracts";
 
 export type StreamingReply = {
   jobId: string;
   conversationId: string;
   assistantTurnId: string;
   text: string;
+  executionId?: string;
 };
 
 type Visibility = Pick<Document, "hidden" | "addEventListener" | "removeEventListener">;
-type StreamPayload = { text: string; sequence: number; assistantTurnId: string; conversationId: string };
+type StreamPayload = { text: string; sequence: number; assistantTurnId: string; conversationId: string; executionId?: string };
 function isPayload(value: unknown): value is StreamPayload {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<StreamPayload>;
@@ -34,6 +36,7 @@ export function createJobStream({ jobId, conversationId, onReply, fetchImpl = fe
   let sequence = -1;
   let text = "";
   let assistantTurnId: string | null = null;
+  let executionId: string | null = null;
   let failures = 0;
   const clearTimer = () => { if (timer !== null) clearTimeout(timer); timer = null; };
   function cancel() {
@@ -78,13 +81,19 @@ export function createJobStream({ jobId, conversationId, onReply, fetchImpl = fe
         const payload: unknown = JSON.parse(event.data);
         if (!isPayload(payload) || payload.conversationId !== conversationId
           || assistantTurnId && payload.assistantTurnId !== assistantTurnId) return;
+        const execution = uuidSchema.safeParse(payload.executionId);
+        const nextExecutionId = execution.success ? execution.data : null;
+        if (nextExecutionId !== executionId) {
+          if (event.event !== "snapshot") throw new Error("stream execution changed without snapshot");
+          executionId = nextExecutionId; sequence = -1; text = "";
+        }
         if (payload.sequence <= sequence) return;
         if (event.event === "delta" && payload.sequence !== sequence + 1) throw new Error("stream gap");
         sequence = payload.sequence;
         assistantTurnId = payload.assistantTurnId;
         text = event.event === "snapshot" ? payload.text : text + payload.text;
         failures = 0;
-        onReply({ jobId, conversationId, assistantTurnId, text });
+        onReply({ jobId, conversationId, assistantTurnId, text, ...(executionId ? { executionId } : {}) });
       }, controller.signal);
     } catch {
       if (current()) failures += 1;

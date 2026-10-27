@@ -9,7 +9,7 @@ describe("0099_opening_teaching_unit_titles migration", () => {
 
   it("is the next contiguous migration", async () => {
     const files = await listMigrationFiles();
-    expect(files.at(-1)).toBe("0099_opening_teaching_unit_titles.sql");
+    expect(files).toContain("0099_opening_teaching_unit_titles.sql");
   });
 
   it("only renames the exact worker placeholder and never a learner-edited title", () => {

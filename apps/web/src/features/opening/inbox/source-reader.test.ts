@@ -15,7 +15,7 @@ const originalConversation = vi.hoisted(() => ({ render: vi.fn() }));
 vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: (props: { conversationId: string; className?: string }) => {
   originalConversation.render(props); return createElement("input", { "data-original-conversation": props.conversationId, defaultValue: "原对话草稿" });
 } }));
-vi.mock("./native-pdf-runtime", () => ({ loadPdfRuntime: async () => { throw new Error("PDF test transport unavailable"); } }));
+vi.mock("./native-pdf-runtime", () => ({ createPdfWorker: vi.fn(), loadPdfRuntime: async () => { throw new Error("PDF test transport unavailable"); } }));
 vi.mock("./source-content", () => ({ SourceContent: () => createElement("section", { "aria-label": "解析正文" }, "提取文字") }));
 const record = { id: "11111111-1111-4111-8111-111111111111", name: "讲义.pdf", mime: "application/pdf", version: 2, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
 let host: HTMLDivElement;
@@ -85,6 +85,7 @@ describe("dedicated material reader", () => {
     expect(original).not.toBeNull();
     expect(original.closest("[hidden]")).not.toBeNull();
     expect(reader.querySelector('[data-study-content]')?.classList.contains("hidden")).toBe(false);
+    await click(Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "工具")!);
     const open = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "原对话")!;
     await click(open);
     expect(reader.querySelector("[data-original-conversation]")).toBe(original);
@@ -162,7 +163,7 @@ describe("dedicated material reader", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: wide, addEventListener() {}, removeEventListener() {} }));
     const onClose = vi.fn();
     const reader = await render({ onClose });
-    const opener = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "提取文字 / OCR 核对")!;
+    const opener = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "工具")!;
     opener.focus(); await click(opener);
     const tools = reader.querySelector<HTMLDialogElement>("dialog")!;
     expect(tools.open).toBe(true);

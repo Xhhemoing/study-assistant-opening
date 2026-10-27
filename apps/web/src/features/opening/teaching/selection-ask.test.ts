@@ -1,6 +1,8 @@
 import { isValidElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CurrentStudyContext } from "../assistant/current-study-context";
+// Save lifecycle and transport are exercised with the real component in selection-ask-save.test.tsx.
+vi.mock("./selection-note-save", () => ({ SelectionNoteSave: () => null }));
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, effects: [] as Array<() => void> }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
   useContext: () => null,
@@ -11,6 +13,7 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
     if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.effects.push(() => { previous?.cleanup?.(); hooks.values[i] = { deps, cleanup: effect() }; }); },
 }));
 import { selectedLessonExcerpt, SelectionAsk } from "./selection-ask";
+import { explanationActionPrompt } from "./explanation-actions";
 const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8222-222222222222";
 const binding: CurrentStudyContext = { isQuestion: true, learningAttempt: { id } as NonNullable<CurrentStudyContext["learningAttempt"]>,
   context: { courseId: id, activityId: id, blockId: id, contentVersion: 2, attemptId: id, itemVersionId: id, purpose: "learning_help", label: "当前题" } };
@@ -33,6 +36,7 @@ function render(value: CurrentStudyContext = binding) { hooks.cursor = 0; const 
 function find(node: ReactNode, type: string): Record<string, unknown> | undefined {
   if (Array.isArray(node)) return node.map(value => find(value, type)).find(Boolean);
   if (!isValidElement<Record<string, unknown>>(node)) return undefined;
+  if (typeof node.type === "function") return find((node.type as (props: unknown) => ReactNode)(node.props), type);
   return node.type === type ? node.props : find(node.props.children as ReactNode, type);
 }
 function select(text?: string, value = binding) {
@@ -49,7 +53,7 @@ it("accepts only one visible instructional region, excluding answer fields and c
 it("opens the existing companion with the selected text without navigating away or changing attempt binding", () => {
   const tree = select(), button = find(tree, "button")!;
   expect(find(tree, "a")).toBeUndefined();
-  (button.onClick as () => void)(); expect(onAsk).toHaveBeenCalledWith("选中的真实题干");
+  (button.onClick as () => void)(); expect(onAsk).toHaveBeenCalledWith(explanationActionPrompt("confused", "选中的真实题干"));
   expect(binding.context.attemptId).toBe(id);
   const preventDefault = vi.fn(); (button.onPointerDown as (event: { preventDefault: () => void }) => void)({ preventDefault }); expect(preventDefault).toHaveBeenCalledOnce();
 });

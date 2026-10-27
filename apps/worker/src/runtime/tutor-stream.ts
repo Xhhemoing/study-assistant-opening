@@ -1,11 +1,13 @@
 import type IORedis from "ioredis";
 import { parseContextSourceRefs, type ContextSourceRef } from "@aistudy/database";
+import { uuidSchema } from "@aistudy/contracts";
 
 export type TutorStreamContext = {
   privacyEpoch: number;
   contextSourceRefs: ContextSourceRef[];
   exposureReceiptId: string | null;
   claimToken?: string;
+  executionId?: string;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -18,21 +20,24 @@ export function createTutorStreamWriter(redis: IORedis) {
   return {
     async begin(workspaceId: string, jobId: string, context: TutorStreamContext) {
       await redis.multi().del(keyFor(workspaceId, jobId)).hset(keyFor(workspaceId, jobId), {
-        context: JSON.stringify(context), text: "", sequence: "0",
+        context: JSON.stringify(context), executionId: context.executionId ?? "", text: "", sequence: "0",
       }).expire(keyFor(workspaceId, jobId), TTL_SECONDS).exec();
     },
-    async append(workspaceId: string, jobId: string, text: string): Promise<void> {
-      if (!text) return;
+    async append(workspaceId: string, jobId: string, text: string, executionId?: string): Promise<number> {
+      if (!text) return 0;
       // Append, sequence and notification are one atomic operation. A late subscriber reads the full snapshot.
-      await redis.eval(`
+      const result = await redis.eval(`
         if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+        if (redis.call('HGET', KEYS[1], 'executionId') or '') ~= ARGV[3] then return 0 end
         local text = redis.call('HGET', KEYS[1], 'text') or ''
         local sequence = redis.call('HINCRBY', KEYS[1], 'sequence', 1)
         redis.call('HSET', KEYS[1], 'text', text .. ARGV[1])
         redis.call('EXPIRE', KEYS[1], ARGV[2])
         redis.call('PUBLISH', KEYS[2], cjson.encode({text=ARGV[1], sequence=sequence}))
         return sequence
-      `, 2, keyFor(workspaceId, jobId), channelFor(workspaceId, jobId), text, TTL_SECONDS);
+      `, 2, keyFor(workspaceId, jobId), channelFor(workspaceId, jobId), text, TTL_SECONDS, executionId ?? "");
+      if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) throw new Error("invalid stream publication sequence");
+      return result;
     },
   };
 }
@@ -46,7 +51,8 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
   if (!refs || !Number.isSafeInteger(context.privacyEpoch) || context.privacyEpoch < 0
     || !Number.isSafeInteger(sequence) || sequence < 0 || typeof row.text !== "string"
     || !(context.exposureReceiptId === null || typeof context.exposureReceiptId === "string")
-    || (context.claimToken !== undefined && typeof context.claimToken !== "string")) throw new Error("invalid tutor stream cache");
+    || (context.claimToken !== undefined && typeof context.claimToken !== "string")
+    || (context.executionId !== undefined && !uuidSchema.safeParse(context.executionId).success)) throw new Error("invalid tutor stream cache");
   return { ...context, contextSourceRefs: refs, text: row.text, sequence };
 }
 

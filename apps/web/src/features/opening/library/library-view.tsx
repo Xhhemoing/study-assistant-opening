@@ -1,15 +1,15 @@
 "use client";
 
-import { BookOpen, Download, FilePlus2, Files, Import, Upload } from "lucide-react";
+import { BookOpen, FilePlus2, Files, Import, Upload } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@aistudy/ui";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { PageHeader, ui } from "../design/ui";
-import { LibraryDocumentList } from "../../workspace/library-document-list";
-import { libraryNewNotePath, type LibraryBasePath } from "../../editor/library-paths";
+import { LibraryDocumentList } from "./library-document-list";
+import { libraryNewNotePath, type LibraryBasePath } from "../editor/library-paths";
 import { LearnerStateCard } from "../teaching/learner-state-card";
-import { CourseNotes } from "../../courses/course-note";
+import { CourseNotes } from "../courses/course-note";
 import { MaterialLibrary } from "./material-library";
 import type { SourceViewerTarget } from "../inbox/source-viewer";
 import { openingUploadAccept, uploadFileRejection } from "../inbox/upload-dropzone";
@@ -62,7 +62,7 @@ export function LibraryView({ tab = "materials", basePath = "/opening/library", 
   }
 
   return <section className="relative flex h-full min-h-0 min-w-0 flex-col bg-bg text-text" onDragOver={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }} onDrop={dropFiles}>
-    <PageHeader title="资料" action={<div className="flex flex-wrap items-center gap-1.5">{opening ? null : <Link className={ui.quiet} href="/preview/notion-import" title="从 Notion 导出文件本地预览导入"><Import size={14} aria-hidden="true" />导入</Link>}<Link className={ui.quiet} href={opening ? "/opening/settings/export" : "/settings/export"}><Download size={14} aria-hidden="true" />导出</Link>{selected === "notes" ? <Link className={ui.secondary} href={libraryNewNotePath(basePath, activeCourseId)}><FilePlus2 size={14} aria-hidden="true" />新建笔记</Link> : null}<button type="button" className={selected === "materials" && materialsEmpty ? ui.secondary : ui.primary} disabled={uploadBusy || !!incomingFiles} onClick={() => picker.current?.click()}><Upload size={15} aria-hidden="true" />上传</button></div>} />
+    <PageHeader title="资料" action={<div className="flex flex-wrap items-center gap-1.5">{opening ? null : <Link className={ui.quiet} href="/preview/notion-import" title="从 Notion 导出文件本地预览导入"><Import size={14} aria-hidden="true" />导入</Link>}{selected === "notes" ? <Link className={ui.secondary} href={libraryNewNotePath(basePath, activeCourseId)}><FilePlus2 size={14} aria-hidden="true" />新建笔记</Link> : null}<button type="button" className={selected === "materials" && materialsEmpty ? ui.secondary : ui.primary} disabled={uploadBusy || !!incomingFiles} onClick={() => picker.current?.click()}><Upload size={15} aria-hidden="true" />上传</button></div>} />
     <input ref={picker} className="sr-only" tabIndex={-1} type="file" disabled={uploadBusy || !!incomingFiles} multiple accept={openingUploadAccept} aria-label="上传材料" onChange={event => { acceptFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
     {dragging ? <div className="pointer-events-none absolute inset-2 z-30 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent bg-accent-soft/95 text-lg font-medium text-accent">松开文件，添加到资料</div> : null}
     {fileError ? <p role="alert" className="px-5 py-3 text-sm text-danger">{fileError}</p> : null}

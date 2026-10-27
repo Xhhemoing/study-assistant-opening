@@ -1,7 +1,7 @@
 /** A durable user intent shared by planning, answers, compilation and fallback. */
 export type ParentInteractionBudget = {
   id: string;
-  /** Optional tighter limit. Otherwise the ledger pins the workspace's effective daily cap. */
+  /** Optional tighter limit. The ledger also enforces the current finite parent ceiling. */
   budgetCents?: number;
   /** Includes rejected/released attempts, so zero-priced calls cannot loop forever. */
   maxProviderCalls?: number;

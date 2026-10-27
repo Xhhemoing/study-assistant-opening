@@ -1,5 +1,5 @@
 import type { ReviewQueueItem, TaskItem } from "@aistudy/contracts";
-import { courseStudyHref } from "../../courses/course-study-model";
+import { courseStudyHref } from "../courses/course-study-model";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type ReviewTask = { task: TaskItem; kind: "retest" | "reinforcement"; href: string | null; availableAt: string | null };

@@ -80,7 +80,7 @@ it("directly saves an owned saved answer by its real turn id, reports completion
   const createSnippet = vi.fn(() => new Promise<{ documentId: string }>(resolve => { finish = resolve; }));
   const props = { messages: [message], directSaveApi: { createSnippet }, proseEnabled: false, objectHref: (href: string) => `${href}${href.includes("?") ? "&" : "?"}conversation=original-conversation` };
   await act(async () => root.render(createElement(MessageList, props)));
-  const save = () => Array.from(host.querySelectorAll("button")).find(button => /存为笔记|正在保存笔记/.test(button.textContent ?? ""))!;
+  const save = () => Array.from(host.querySelectorAll("button")).find(button => /^保存$|已存为笔记|正在保存笔记/.test(button.textContent ?? ""))!;
   await act(async () => { save().click(); save().click(); });
   expect(createSnippet).toHaveBeenCalledOnce();
   expect(createSnippet).toHaveBeenCalledWith({ savedTurnId, title: message.text, text: message.text });
@@ -100,11 +100,11 @@ it("keeps a direct answer save uncertain across reopening instead of displaying 
   const createSnippet = vi.fn().mockRejectedValue(new Error("reply lost"));
   const props = { messages: [message], directSaveApi: { createSnippet }, proseEnabled: false };
   await act(async () => root.render(createElement(MessageList, props)));
-  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "存为笔记")!.click());
+  await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "保存")!.click());
   await act(async () => root.render(null));
   await act(async () => root.render(createElement(MessageList, props)));
   expect(host.textContent).toContain("还不确定是否已经存好");
-  expect(Array.from(host.querySelectorAll("button")).find(button => button.textContent === "存为笔记")!.disabled).toBe(true);
+  expect(Array.from(host.querySelectorAll("button")).find(button => button.textContent === "保存")!.disabled).toBe(true);
   expect(createSnippet).toHaveBeenCalledOnce();
 });
 

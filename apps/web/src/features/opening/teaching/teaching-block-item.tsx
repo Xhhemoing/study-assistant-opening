@@ -15,7 +15,8 @@ import type { StudyConversationContext } from "../assistant/study-conversation-c
 import { InlineExplain } from "./inline-explain";
 import { teachingStudyUnitText } from "./study-unit-focus";
 import { normalizeToCatalogId } from "./component-catalog";
-import { ui } from "../design/ui";
+import { useState } from "react";
+import { ExplanationActions, explanationActionPrompt } from "./explanation-actions";
 
 /** Chrome classes for focus status — keep past/skipped dimmed, current ringed. */
 export function teachingBlockItemClassName(
@@ -77,12 +78,20 @@ export function TeachingBlockItem({
   explanationContext,
   onAskExplanation,
 }: TeachingBlockItemProps) {
+  const [actionsVisible, setActionsVisible] = useState(false);
   const catalog = normalizeToCatalogId(block.blockType, block.role);
   const explanation = explanationContext && ["text", "math", "step", "example"].includes(catalog)
     ? teachingStudyUnitText({ id: block.blockId, title: "", blocks: [block], questionBlockId: null }) : "";
   return (
     <div
       className={unitChrome ? "min-w-0 space-y-3" : teachingBlockItemClassName(focusStatus)}
+      tabIndex={explanation ? 0 : undefined}
+      role={explanation ? "group" : undefined}
+      aria-label={explanation ? "调整本段讲解" : undefined}
+      onMouseEnter={() => setActionsVisible(true)}
+      onMouseLeave={event => { if (!event.currentTarget.contains(document.activeElement)) setActionsVisible(false); }}
+      onFocus={() => setActionsVisible(true)}
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setActionsVisible(false); }}
       data-teaching-block-focus={focusStatus}
       data-block-id={block.blockId}
     >
@@ -92,8 +101,8 @@ export function TeachingBlockItem({
         sourceRefs={sourceRefs}
         attemptContext={attemptContext}
       />
-      {explanation && explanationContext && onAskExplanation ? <div className="space-y-1">
-        <button type="button" className={ui.quiet} onClick={() => onAskExplanation(explanation)}>补充解释</button>
+      {explanation && explanationContext && onAskExplanation ? <div hidden={!actionsVisible} className={actionsVisible ? "space-y-1" : "hidden"}>
+        <ExplanationActions onAction={action => onAskExplanation(explanationActionPrompt(action, explanation))} />
         <InlineExplain context={{ ...explanationContext, blockId: block.blockId }} content={explanation}
           heading="保存这段讲解" initiallyCollapsed onContinueInChat={() => onAskExplanation(explanation)} />
       </div> : null}

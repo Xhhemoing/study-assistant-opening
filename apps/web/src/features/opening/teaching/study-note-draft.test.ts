@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { associateStudyNote, readStudyNote, saveStudyNote, studyNoteDocument, writeStudyNote } from "./study-note-draft";
 import type { StudyConversationContext } from "../assistant/study-conversation-context";
-import { EditorApiError } from "../../editor/editor-api";
+import { EditorApiError } from "../editor/editor-api";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
 const sourceId = "22222222-2222-4222-8222-222222222222";

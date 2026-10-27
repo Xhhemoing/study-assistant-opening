@@ -34,6 +34,7 @@ import type {
   OpeningBudgetRepository,
   OpeningTutorJobsRepository,
   OpeningStudyExposureInput,
+  OpeningTutorTimingInput,
 } from "@aistudy/database";
 import { mergeContextSourceRefs, OpeningBudgetError } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
@@ -68,7 +69,9 @@ export type TutorTurnDeps = {
   proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
     jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
-  stream?: TutorStreamWriter;
+  stream?: Pick<TutorStreamWriter, "begin"> & { append: (...args: Parameters<TutorStreamWriter["append"]>) => Promise<number | void> };
+  timing?: { record(scope: Scope, input: OpeningTutorTimingInput): Promise<unknown> };
+  onTimingUnavailable?: (error: unknown) => void;
   streamExposures?: { generate(scope: Scope, input: OpeningStudyExposureInput): Promise<{ id: string }> };
   onStreamUnavailable?: (error: unknown) => void;
   tutorJobs: OpeningTutorJobsRepository;
@@ -131,12 +134,42 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
   return async function processTutorTurn(tutorJobId: string): Promise<{ skipped: boolean; replayed?: boolean }> {
     const claimed = await deps.tutorJobs.claim(tutorJobId);
     if (!claimed) return { skipped: true };
+    const claimObservedAt = performance.now();
     return withJobHeartbeat(
       () => claimed.claimToken ? deps.tutorJobs.heartbeat(claimed.id, claimed.claimToken) : Promise.resolve(),
       async () => {
     const scope = {
       workspaceId: claimed.workspaceId,
       ownerUserId: claimed.ownerUserId ?? "",
+    };
+    const timingWrites: Promise<void>[] = [];
+    const reportTimingUnavailable = (error: unknown) => {
+      try {
+        if (deps.onTimingUnavailable) deps.onTimingUnavailable(error);
+        else console.error("tutor timing write failed", error instanceof Error ? error.name : "unknown error");
+      } catch {
+        // An observer must never replace the original provider outcome.
+        console.error("tutor timing error reporter failed");
+      }
+    };
+    let timingFlush: Promise<void> | undefined;
+    const flushTiming = () => {
+      // One bounded tail for this execution, including a later business-error path.
+      timingFlush ??= timingWrites.length ? new Promise<void>(resolve => {
+        const timeout = setTimeout(() => {
+          reportTimingUnavailable(new Error("tutor timing flush timed out after 100ms"));
+          resolve();
+        }, 100);
+        void Promise.all(timingWrites).then(() => { clearTimeout(timeout); resolve(); });
+      }) : Promise.resolve();
+      return timingFlush;
+    };
+    const recordTiming = (kind: OpeningTutorTimingInput["kind"], observedAt: Date, durationMs: number) => {
+      if (!deps.timing || !claimed.executionId || !claimed.claimToken) return;
+      const input: OpeningTutorTimingInput = { jobId: claimed.id, executionId: claimed.executionId, claimToken: claimed.claimToken, kind, observedAt, durationMs };
+      // Keep rejection handlers attached after a flush timeout. Late writes still
+      // need the repository's current execution/lease checks to be accepted.
+      timingWrites.push(Promise.resolve().then(() => deps.timing!.record(scope, input)).then(() => undefined).catch(reportTimingUnavailable));
     };
     const scopedBudget: BudgetedRepository = {
       reserve: (input) => deps.budget.reserve(scope, input),
@@ -279,15 +312,26 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (deps.stream) {
         try {
           await deps.stream.begin(scope.workspaceId, claimed.id, { privacyEpoch: jobEpoch ?? 0,
-            contextSourceRefs, exposureReceiptId: exposureReceipt?.id ?? null, claimToken: claimed.claimToken });
+            contextSourceRefs, exposureReceiptId: exposureReceipt?.id ?? null, claimToken: claimed.claimToken,
+            ...(claimed.executionId ? { executionId: claimed.executionId } : {}) });
         } catch (error) {
           streamAvailable = false;
           deps.onStreamUnavailable?.(error);
         }
       }
+      let firstTextAt: number | null = null;
       const onTextDelta = deps.stream ? async (delta: string) => {
+        if (!delta) return;
+        if (firstTextAt === null) {
+          const observedAt = new Date();
+          firstTextAt = performance.now();
+          recordTiming("tutor_first_text", observedAt, Math.round(firstTextAt - claimObservedAt));
+        }
         if (!streamAvailable) return;
-        try { await deps.stream!.append(scope.workspaceId, claimed.id, delta); }
+        try {
+          const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, delta, claimed.executionId);
+          if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
+        }
         catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
       } : undefined;
       const input: ProviderInput = {
@@ -407,6 +451,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         kind: mode === "explain" ? "solution" as const : "hint" as const,
         level: mode === "explain" ? "revealed" as const : "hinted" as const,
       } : undefined);
+      await flushTiming();
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,
@@ -431,6 +476,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       // tutor worker slot; suggestions run in their own bounded queue.
       return { skipped: false };
     } catch (error) {
+      await flushTiming();
       const unknownOutcome =
         (error instanceof OpeningProviderError &&
           ["PROVIDER_TIMEOUT", "PROVIDER_NETWORK"].includes(error.code)) ||

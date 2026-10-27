@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { TurnRecord, TutorMode } from "@aistudy/contracts";
 
 /** After this long without a first token the learner sees that it is slower than usual. */
-export const SLOW_TURN_MS = 20_000;
+export const SLOW_TURN_MS = 3_000;
 /** After this long without a first token the learner is offered 重试 / 取消. */
 export const STALLED_TURN_MS = 90_000;
 
@@ -15,7 +15,7 @@ export function turnWaitPhase(elapsedMs: number): TurnWaitPhase {
 }
 
 export const TURN_WAIT_COPY = {
-  slow: "还在想，比平时慢一些…",
+  slow: "正在准备回答，内容会逐步显示…",
   stalled: "等了比较久还没有开始回答。可以再试一次，或者先取消。",
   stalledEphemeral: "等了比较久还没有开始回答。取消后问题会留在输入框里，可以再发一次。",
 } as const;

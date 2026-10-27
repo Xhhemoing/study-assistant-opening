@@ -30,7 +30,7 @@ import type { OpeningApi } from "../client/api";
 import { prepareSnippetDraft, type SnippetSaveResult } from "./save-snippet";
 import { readSnippetSaveReceipt, saveSnippetWithReceipt, subscribeSnippetSave } from "./snippet-save-receipt";
 import { secondaryButtonClass } from "../design/ui";
-import { libraryNotePath } from "../../editor/library-paths";
+import { libraryNotePath } from "../editor/library-paths";
 
 /** LAB-U01: a page refusal (turn status `clarify`) is a follow-up question, not a failure. */
 export const CLARIFY_FOLLOW_UP = "追问：要讲哪份材料的哪一页？请在「参考资料」里重新选择材料和页码后再问。";
@@ -230,7 +230,7 @@ function DirectSnippetSave({ message, api, objectHref, selection }: { message: C
     } catch { setStatus("unavailable"); }
   }
   return <div className="mt-2 space-y-2 text-xs leading-6">
-    <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "存为笔记"}</button>
+    <button type="button" className={secondaryButtonClass} disabled={status !== "idle"} onPointerDown={event => event.preventDefault()} onClick={() => void save()}>{status === "pending" ? "正在保存笔记…" : status === "saved" ? "已存为笔记" : "保存"}</button>
     {notice ? <p role="status" className="text-text-2">{notice}</p> : null}
     {status === "unknown" ? <p role="alert" className="text-warn">还不确定是否已经存好，可能已经保存。请先看一下笔记列表，这里不会再存第二份。</p> : null}
     {status === "unavailable" ? <p role="alert" className="text-warn">暂时无法确认是否已保存，先不重复保存。请到笔记列表看一下。</p> : null}

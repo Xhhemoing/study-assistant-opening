@@ -16,7 +16,7 @@ export function LearningEvidenceEligibilityDetails({ eligibility, versionApplica
       </dl>
       {versionApplicability === "unavailable" ? <p className="mt-2">来源或历史版本不可用；保留原始观察，但不据此生成补测引用。</p> : null}
       <ul className="mt-2 list-inside list-disc space-y-1">{eligibilityReasonLabels(eligibility).map((reason) => <li key={reason}>{reason}</li>)}</ul>
-      <p className="mt-2">{automatic ? "内置题自动评价只覆盖这道结构化题目；本次正确不代表已经掌握。" : "资格说明不改变原始自报结果，也不代表系统客观判分或已经掌握。"}</p>
+      <p className="mt-2">{automatic ? "内置题自动评价只覆盖这道结构化题目；本次正确不代表已经掌握。" : "这些使用条件不改变原始自报结果，也不代表系统客观判分或已经掌握。"}</p>
     </>;
-  return expanded ? <section className="w-full text-xs text-text-2" aria-label="资格与原因">{content}</section> : <details className="w-full text-xs text-text-3"><summary className="cursor-pointer py-1">查看资格与原因</summary>{content}</details>;
+  return expanded ? <section className="w-full text-xs text-text-2" aria-label="学习记录的使用条件与原因">{content}</section> : <details className="w-full text-xs text-text-3"><summary className="cursor-pointer py-1">查看学习记录的使用条件与原因</summary>{content}</details>;
 }

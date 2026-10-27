@@ -1,11 +1,10 @@
 "use client";
 
 import { TransitionLink as Link } from "../../v3/motion/view-transition";
-import { ArrowLeft, ArrowRight, BookOpen, Focus, Maximize2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningLearningClient } from "../../client/learning-client";
 import { ContentBlock, ContentGrid, ui } from "../../design/ui";
-import { useWorkspaceLayout } from "../../shell/workspace-layout-context";
 import { conversationObjectHref } from "../../assistant/conversation-links";
 import { LessonCompanionWorkspace } from "../lesson-companion-workspace";
 import type { CurrentStudyContext } from "../../assistant/current-study-context";
@@ -24,7 +23,6 @@ export function MatrixConceptLesson(props: MatrixConceptLessonProps) {
   return <Lesson key={props.courseId} {...props} />;
 }
 function Lesson({ courseId, courseTitle, practiceHref, delayedPracticeHref, matrixPracticeEnabled, interactiveEnabled, originalConversationId }: MatrixConceptLessonProps) {
-  const { focusMode, toggleFocusMode } = useWorkspaceLayout();
   const { progress, update, ready, storageWarning } = useMatrixLessonProgress(courseId);
   const heading = useRef<HTMLHeadingElement>(null);
   const courseHref = conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}`, originalConversationId);
@@ -36,10 +34,8 @@ function Lesson({ courseId, courseTitle, practiceHref, delayedPracticeHref, matr
     context: { courseId, label: "矩阵怎样变换平面向量", returnTo: `/opening/courses/${encodeURIComponent(courseId)}/study/matrix` } };
   function visit(next: number) { update(value => visitMatrixLessonSection(value, next)); }
   return <section className="flex h-full min-h-0 flex-col bg-surface text-text" data-matrix-concept-lesson={courseId}>
-    <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-5 py-3"><Link className={ui.quiet} href={courseHref}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><span className="min-w-0 flex-1 truncate text-sm">{courseTitle}</span><button type="button" className={ui.quiet} aria-label={focusMode ? "退出专注学习" : "专注学习"} aria-pressed={focusMode} onClick={toggleFocusMode}>{focusMode ? <Maximize2 size={16} aria-hidden /> : <Focus size={16} aria-hidden />}{focusMode ? "退出专注学习" : "专注学习"}</button></header>
-    <div className="min-h-0 flex-1"><LessonCompanionWorkspace originalConversationId={originalConversationId} binding={binding} outline={<nav aria-label="矩阵学习目录" className="space-y-1">{MATRIX_LESSON_SECTIONS.map((label, index) => <button key={label} type="button" disabled={!ready} className={`${ui.quiet} w-full justify-start whitespace-normal text-left`} aria-current={section === index ? "step" : undefined} onClick={() => visit(index)}>{index + 1}. {label}</button>)}</nav>}><ContentGrid className="space-y-6 px-5 py-7 sm:px-8">
-      <h1 className="text-xl font-semibold tracking-tight text-text">矩阵怎样变换平面向量</h1>
-      <nav aria-label="本课步骤"><ol className="flex flex-wrap gap-x-4 gap-y-2">{MATRIX_LESSON_SECTIONS.map((label, index) => <li key={label}><button type="button" disabled={!ready} aria-current={section === index ? "step" : undefined} className={section === index ? "rounded py-1 text-xs font-semibold text-accent underline underline-offset-4" : "rounded py-1 text-xs text-text-3 hover:text-text focus-visible:ring-2 focus-visible:ring-focus-ring"} onClick={() => visit(index)}>{index + 1}. {label}</button></li>)}</ol></nav>
+    <LessonCompanionWorkspace title="矩阵怎样变换平面向量" returnHref={courseHref} progress={{ current: section + 1, total: MATRIX_LESSON_SECTIONS.length }} originalConversationId={originalConversationId} binding={binding} outline={<nav aria-label="矩阵学习目录" className="space-y-1">{MATRIX_LESSON_SECTIONS.map((label, index) => <button key={label} type="button" disabled={!ready} className={`${ui.quiet} w-full justify-start whitespace-normal text-left`} aria-current={section === index ? "step" : undefined} onClick={() => visit(index)}>{index + 1}. {label}</button>)}</nav>}><ContentGrid className="space-y-6 px-5 py-7 sm:px-8">
+      <p className="text-xs text-text-3">{courseTitle}</p>
       {!ready ? <p role="status" className="text-sm text-text-3">正在恢复本标签页的学习位置和原始思考…</p> : null}
       {storageWarning ? <p role="status" className="rounded-lg bg-warn-soft p-3 text-xs leading-6 text-warn">浏览器无法持久保存本课笔记，当前页面内仍会保留；刷新或关闭页面前请复制原答案。</p> : null}
       <ContentBlock width={section === 0 || section === 2 || section === 3 ? "wide" : "prose"}><section className="space-y-5" aria-labelledby="matrix-lesson-section"><h2 ref={heading} id="matrix-lesson-section" tabIndex={-1} className="text-lg font-semibold outline-none">{section + 1}. {MATRIX_LESSON_SECTIONS[section]}</h2>
@@ -50,7 +46,7 @@ function Lesson({ courseId, courseTitle, practiceHref, delayedPracticeHref, matr
         {section === 4 ? <><div className="max-w-2xl space-y-4 prose-reading"><p className="text-lg font-medium text-text">矩阵的列告诉你基本步子的新去处；原坐标告诉你每列取几份。</p><p>遇到 Av 时，可以先拆 v，再取列，再相加。逐行计算与几何组合是同一件事的两种看法。</p><dl className="grid gap-3 rounded-xl bg-surface-2 p-4 font-sans text-sm"><div><dt className="text-xs text-text-3">本课思考</dt><dd>{progress.original ? "原始思考已在本标签页保留；本题解析已查看。" : "尚未保留原始思考。"}</dd></div><div><dt className="text-xs text-text-3">你的对照</dt><dd>{progress.reflection ? reflectionLabels[progress.reflection] : "尚未选择；可以回看反馈。"}</dd></div><div><dt className="text-xs text-text-3">学习记录</dt><dd>接下来做一道新题，把自己的解题过程保存到课程学习记录。</dd></div></dl></div><PracticeRecordStatus courseId={courseId} />{progress.reflection === "need_explanation" ? <button type="button" className={ui.secondary} onClick={() => visit(1)}>先回看“两种基本步子”</button> : null}<div className="space-y-3 border-t border-line pt-4"><h3 className="text-sm font-semibold">下一步：用新题检验，而不是再读一遍答案</h3><p className="max-w-2xl prose-reading text-text-2">正式矩阵乘法题会把“按坐标取列再相加”的想法扩展到三维输入和多个输入列：内置题的 A 是 2×3，B 是 3×2；B 的每一列分别变换后，得到 AB 对应的一列。进入练习后先保留自己的答案，再查看精确核算；已有未完成的答案会优先恢复。</p>{matrixPracticeEnabled ? <div className="flex flex-wrap gap-2"><Link className={ui.primary} href={practiceHref}>做一道独立迁移题<ArrowRight size={14} aria-hidden="true" /></Link><Link className={ui.secondary} href={delayedPracticeHref}>明天再做另一道变式</Link></div> : <div className="space-y-2"><p role="status" className="text-xs text-warn">需先添加可读取的课程材料，或恢复归档课程，再进入内置矩阵练习。可在可用的普通练习中保留答案并手动核对。</p><Link className={ui.primary} href={conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}/study?mode=practice`, originalConversationId)}>进入普通独立练习</Link></div>}<p className="text-xs leading-6 text-text-3">“明天再做”是复测建议，尚未创建计划任务。只有实际间隔后完成的新作答，才可能构成延迟学习证据。</p><Link className={ui.quiet} href={`${courseHref}#course-learning-records`}><BookOpen size={14} aria-hidden="true" />查看正式学习记录与后续补测</Link></div></> : null}
       </section></ContentBlock>
       <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-5"><button type="button" disabled={!ready || section === 0} className={ui.secondary} onClick={() => visit(section - 1)}><ArrowLeft size={14} aria-hidden="true" />回看上一步</button>{section < 4 && section !== 2 ? <button type="button" disabled={!ready} className={ui.primary} onClick={() => visit(section + 1)}>{section === 1 ? "换个矩阵，自己尝试" : section === 3 ? "整理本课收获" : "看看图与计算的关系"}<ArrowRight size={14} aria-hidden="true" /></button> : section === 4 ? <Link className={ui.secondary} href={courseHref}>返回课程</Link> : null}</footer>
-    </ContentGrid></LessonCompanionWorkspace></div>
+    </ContentGrid></LessonCompanionWorkspace>
   </section>;
 }
 

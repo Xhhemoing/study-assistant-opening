@@ -16,7 +16,7 @@ vi.mock("../v3/motion/view-transition", () => ({
   ViewTransitionBoundary: () => null,
   runViewTransition: (update: () => void) => update(),
 }));
-vi.mock("../../search/command-palette", () => ({ CommandPalette: () => null }));
+vi.mock("../search/command-palette", () => ({ CommandPalette: ({ open }: { open: boolean }) => open ? <div role="dialog">全局搜索已打开</div> : null }));
 vi.mock("../assistant/assistant-drawer", () => ({ AssistantDrawer: () => null }));
 vi.mock("../assistant/assistant-view", () => ({ AssistantView: () => {
   useEffect(() => { data.chatMounts(); }, []);
@@ -25,9 +25,9 @@ vi.mock("../assistant/assistant-view", () => ({ AssistantView: () => {
 vi.mock("../capabilities/capabilities-provider", () => ({ OpeningCapabilityNotice: () => null }));
 vi.mock("../inbox/citation-reader-host", () => ({ CitationReaderHost: () => null }));
 vi.mock("./connection-notice", () => ({ ConnectionNotice: () => null }));
-vi.mock("./account-menu", () => ({ OpeningAccountMenu: ({ pendingCount, focusMode, onToggleFocus }: {
-  pendingCount: number | null; focusMode: boolean; onToggleFocus: () => void;
-}) => <button type="button" aria-label="账户切换专注" aria-pressed={focusMode} onClick={onToggleFocus}>建议 {pendingCount}</button> }));
+vi.mock("./account-menu", () => ({ OpeningAccountMenu: ({ pendingCount, focusMode, onToggleFocus, recent = [] }: {
+  pendingCount: number | null; focusMode: boolean; onToggleFocus: () => void; recent?: { title: string }[];
+}) => <><span data-account-recent>{recent.map(item => item.title).join("、")}</span><button type="button" aria-label="账户切换专注" aria-pressed={focusMode} onClick={onToggleFocus}>建议 {pendingCount}</button></> }));
 vi.mock("./recent-conversations", () => ({ useRecentConversations: () => ({
   recent: [{ id: "11111111-1111-4111-8111-111111111111", title: "我的矩阵问题" }], unavailable: false,
 }) }));
@@ -55,39 +55,52 @@ async function render(children: ReactNode = <PageHeader title="学习" />) {
 function desktopNavigation() { return host.querySelector('nav[aria-label="学习工作台导航"]')!; }
 
 describe("production V3 shell business wiring", () => {
+  it("retains navigation collapse without exposing width adjustment", async () => {
+    await render();
+    expect(host.querySelector('[aria-label="调整导航宽度"]')).toBeNull();
+    expect(document.documentElement.style.getPropertyValue("--layout-nav")).toBe("");
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="收起导航"]')!.click());
+    expect(host.querySelector('nav[data-compact="true"]')).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="展开导航"]')!.click());
+    expect(host.querySelector('nav[data-compact="false"]')).not.toBeNull();
+  });
   it.each([
     ["/opening/today", "", "/opening/today"],
-    ["/opening/agent", "", "/opening/agent"],
+    ["/opening/agent", "", "/opening/today"],
     ["/opening/review", "", "/opening/review"],
     ["/opening/review", "tab=cards", "/opening/review"],
-    ["/opening/courses/course-a", "mode=sprint", "/opening/sprint"],
+    ["/opening/courses/course-a", "mode=sprint", "/opening/today"],
     ["/opening/assistant", "", "/opening/today"],
-    ["/opening/settings/export", "", "/opening/settings"],
+    ["/opening/settings/export", "", null],
   ])("selects exactly one destination for %s?%s", async (pathname, search, expected) => {
     data.pathname = pathname; data.search = search; await render();
     const nav = desktopNavigation();
     const destinations = [...nav.querySelectorAll("a[href]")].map(link => link.getAttribute("href"));
     expect(new Set(destinations).size).toBe(destinations.length);
     const selected = nav.querySelectorAll('a[aria-current="page"]');
-    expect(selected).toHaveLength(1);
-    expect(selected[0]?.getAttribute("href")).toBe(expected);
+    expect(selected).toHaveLength(expected ? 1 : 0);
+    if (expected) expect(selected[0]?.getAttribute("href")).toBe(expected);
+    expect(destinations).toEqual(["/opening/today", "/opening/review", "/opening/library"]);
   });
 
   it("shows due reviews separately from pending suggestions and connects recent conversations", async () => {
     await render();
     expect(desktopNavigation().querySelector('a[href="/opening/review"]')?.textContent).toContain("7");
+    expect(desktopNavigation().querySelector('a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
+    expect(host.querySelector('nav[aria-label="学习工作台导航（移动端）"] a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
     expect(host.querySelector('[aria-label="账户切换专注"]')?.textContent).toBe("建议 3");
-    expect(desktopNavigation().querySelector('a[href="/opening/assistant?conversation=11111111-1111-4111-8111-111111111111"]')?.textContent).toBe("我的矩阵问题");
+    expect(desktopNavigation().querySelector('a[href*="conversation="]')).toBeNull();
+    expect(host.querySelector("[data-account-recent]")?.textContent).toContain("我的矩阵问题");
   });
 
-  it("keeps review reachable in the mobile more menu", async () => {
+  it("opens the same command palette from mobile search without repeating navigation in More", async () => {
     await render();
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="更多"]')!.click());
-    const review = document.querySelector('[role="dialog"] a[href="/opening/review"]');
-    expect(review?.textContent).toContain("复习");
-    expect(review?.textContent).toContain("7");
+    const searches = host.querySelectorAll<HTMLButtonElement>('[aria-label="打开全局搜索"]');
+    expect(searches.length).toBe(2);
+    await act(async () => searches[searches.length - 1]!.click());
+    expect(host.textContent).toContain("全局搜索已打开");
+    expect(host.querySelectorAll('a[href="/opening/review"]')).toHaveLength(2);
   });
-
   it("shares focus state with the mounted workspace and ignores composition Escape", async () => {
     function Workspace() {
       const layout = useWorkspaceLayout();

@@ -15,7 +15,7 @@ it("production never allows demo study data even when OPENING_RELEASE is off", (
   expect(shouldRedirectLegacyMockPages({ NODE_ENV: "production", OPENING_RELEASE: "" })).toBe(true);
 });
 
-it("covers old mock URL aliases with redirects while keeping /learn/courses*", () => {
+it("covers retired URL aliases while keeping real Opening entries reachable", () => {
   const redirected = [
     "/learn",
     "/learn/practice/x",
@@ -33,22 +33,20 @@ it("covers old mock URL aliases with redirects while keeping /learn/courses*", (
   for (const pathname of redirected) {
     expect(legacyOpeningRedirectPath(pathname), pathname).not.toBeNull();
   }
-  expect(legacyOpeningRedirectPath("/learn/courses")).toBeNull();
-  expect(legacyOpeningRedirectPath("/learn/courses/course-1")).toBeNull();
-  expect(legacyOpeningRedirectPath("/learn/courses/course-1/edit")).toBeNull();
-  expect(legacyOpeningRedirectPath("/settings/advanced")).toBeNull();
-  expect(legacyOpeningRedirectPath("/library")).toBeNull();
-  expect(legacyOpeningRedirectPath("/search")).toBeNull();
+  expect(legacyOpeningRedirectPath("/learn/courses")).toBe("/opening/courses");
+  expect(legacyOpeningRedirectPath("/learn/courses/course-1")).toBe("/opening/courses/course-1");
+  expect(legacyOpeningRedirectPath("/learn/courses/course-1/edit")).toBe("/opening/courses/course-1/edit");
+  expect(legacyOpeningRedirectPath("/settings/advanced")).toBe("/opening/settings/advanced");
+  expect(legacyOpeningRedirectPath("/library")).toBe("/opening/library");
+  expect(legacyOpeningRedirectPath("/search")).toBe("/opening/search");
   expect(legacyOpeningRedirectPath("/onboarding")).toBeNull();
-  expect(legacyOpeningRedirectPath("/ui-preview")).toBeNull();
+  expect(legacyOpeningRedirectPath("/ui-preview")).toBe("/opening/today");
 });
 
 it("production learn course and advanced settings sources do not import mock providers", () => {
   const files = [
-    "apps/web/src/app/(workspace)/learn/courses/[id]/page.tsx",
-    "apps/web/src/features/courses/legacy-course-detail.tsx",
-    "apps/web/src/features/settings/advanced-settings-view.tsx",
-    "apps/web/src/app/(workspace)/settings/advanced/page.tsx",
+    "apps/web/src/features/opening/courses/course-detail.tsx",
+    "apps/web/src/features/opening/settings/advanced-settings-view.tsx",
   ];
   for (const file of files) {
     const text = readSrc(file);
@@ -58,9 +56,7 @@ it("production learn course and advanced settings sources do not import mock pro
 
 it("keeps migrated aliases and their real-API destinations free of mock providers", () => {
   for (const name of ["library", "search", "settings"]) {
-    const alias = readSrc(`apps/web/src/app/(workspace)/${name}/page.tsx`);
-    expect(alias).not.toMatch(/createMockProvider|useStudyProvider|lib\/data\/mock/);
-    expect(alias).toContain(`redirect(openingAliasHref("/opening/${name}", await searchParams))`);
+    expect(legacyOpeningRedirectPath(`/${name}`)).toBe(`/opening/${name}`);
   }
   const surfaces: Array<{ file: string; mustNotMatch: RegExp; mustMatch?: RegExp }> = [
     {
@@ -69,7 +65,7 @@ it("keeps migrated aliases and their real-API destinations free of mock provider
       mustMatch: /LibraryView/,
     },
     {
-      file: "apps/web/src/features/search/search-workspace.tsx",
+      file: "apps/web/src/features/opening/search/search-workspace.tsx",
       mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
       mustMatch: /createSearchApi/,
     },
@@ -83,10 +79,6 @@ it("keeps migrated aliases and their real-API destinations free of mock provider
       mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
       mustMatch: /Onboarding/,
     },
-    {
-      file: "apps/web/src/app/ui-preview/page.tsx",
-      mustNotMatch: /createMockProvider|useStudyProvider|lib\/data\/mock/,
-    },
   ];
   for (const surface of surfaces) {
     const text = readSrc(surface.file);
@@ -96,12 +88,12 @@ it("keeps migrated aliases and their real-API destinations free of mock provider
 });
 
 it("production course and advanced settings error paths never fall back to demo study data", () => {
-  const course = readSrc("apps/web/src/features/courses/course-detail.tsx");
+  const course = readSrc("apps/web/src/features/opening/courses/course-detail.tsx");
   expect(course).toMatch(/课程内容加载失败，请重试。/);
   expect(course).toMatch(/LoadError/);
   expect(course).not.toMatch(/createMockProvider|createLegacyStudyProvider|buildSeedItems|SEED_GOAL_ID|resetDemoData/);
 
-  const advanced = readSrc("apps/web/src/features/settings/advanced-settings-view.tsx");
+  const advanced = readSrc("apps/web/src/features/opening/settings/advanced-settings-view.tsx");
   expect(advanced).toMatch(/设置暂时无法读取，请重试。/);
   expect(advanced).toMatch(/demo-reset-unavailable/);
   expect(advanced).toMatch(/mock-diagnostics-unavailable/);
@@ -115,24 +107,5 @@ it("production course and advanced settings error paths never fall back to demo 
 
   const demoProvider = readSrc("apps/web/src/lib/data/demo-study-provider.ts");
   expect(demoProvider).toMatch(/createMockProvider/);
-});
-
-it("mock-backed learn pages are production-dead and only dynamic-import demo UI", () => {
-  const pages = [
-    "apps/web/src/app/(workspace)/learn/page.tsx",
-    "apps/web/src/app/(workspace)/learn/review/page.tsx",
-    "apps/web/src/app/(workspace)/learn/goals/page.tsx",
-    "apps/web/src/app/(workspace)/learn/goals/new/page.tsx",
-    "apps/web/src/app/(workspace)/learn/goals/[id]/page.tsx",
-    "apps/web/src/app/(workspace)/learn/practice/[itemId]/page.tsx",
-    "apps/web/src/app/(workspace)/learn/practice/[itemId]/result/page.tsx",
-  ];
-  for (const file of pages) {
-    const text = readSrc(file);
-    expect(text, file).toMatch(/process\.env\.NODE_ENV === ["']production["']/);
-    expect(text, file).toMatch(/notFound\(/);
-    expect(text, file).toMatch(/await import\(/);
-    expect(text, file).not.toMatch(/from ["'].*today-plan-view|from ["'].*practice-player|from ["'].*goal-list|from ["'].*review-session/);
-  }
 });
 

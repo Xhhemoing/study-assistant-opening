@@ -166,7 +166,7 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     expect(isTeachingWorkspaceContentUsable(activity, readyInit)).toBe(false);
   });
 
-  it("workspace keeps settings behind the outline and a closed disclosure (C5)", async () => {
+  it("workspace starts with a closed unit outline and keeps obsolete session settings out of the lesson (C5)", async () => {
     const html = renderToStaticMarkup(
       createElement(TeachingWorkspace, {
         activity: { ...activity, generateStatus: "ready" },
@@ -176,8 +176,7 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     expect(html).toContain("data-teaching-workspace=\"true\"");
     expect(html).not.toContain("data-today-primary-cta");
     expect(html).toContain("主讲正文");
-    // The initial lesson does not mount the outline's settings content.
-    expect(html).toMatch(/<button\b[^>]*aria-expanded="false"[^>]*>目录<\/button>/);
+    expect(html).toContain('aria-label="选择学习单元"');
     expect(html).not.toContain("学习设置");
     expect(html).not.toMatch(/<a\b[^>]*href="\/opening\/assistant/);
 
@@ -192,13 +191,18 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ error: { message: "Preferences unavailable in this fixture" } }, { status: 503 })));
     try {
       await act(async () => root.render(createElement(TeachingWorkspace, { activity: { ...activity, generateStatus: "ready" }, clientInit: readyInit, sourceNameById: {} })));
-      const outline = Array.from(host.querySelectorAll("button")).find(button => button.textContent === "目录" && !button.hasAttribute("role"))!;
-      await act(async () => outline.click());
-      const summary = Array.from(host.querySelectorAll("summary")).find(item => item.textContent === "学习设置")!;
-      expect(summary).toBeDefined();
-      expect(summary.parentElement?.tagName).toBe("DETAILS");
-      expect((summary.parentElement as HTMLDetailsElement).open).toBe(false);
-      expect(summary.parentElement?.querySelector('a[href="/opening/assistant"]')?.textContent).toBe("自由探索");
+      const summary = host.querySelector<HTMLElement>('summary[aria-label="选择学习单元"]')!;
+      expect(summary).not.toBeNull();
+      const outline = summary.parentElement as HTMLDetailsElement;
+      expect(outline.tagName).toBe("DETAILS");
+      expect(outline.open).toBe(false);
+      expect(summary.textContent).toContain("单元 1 / 1");
+      await act(async () => summary.click());
+      expect(outline.open).toBe(true);
+      expect(outline.textContent).toContain("学习目录");
+      expect(outline.querySelector('button[aria-current="step"]')).not.toBeNull();
+      expect(outline.textContent).not.toContain("学习设置");
+      expect(outline.querySelector('a[href="/opening/assistant"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       host.remove();

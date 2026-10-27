@@ -8,4 +8,6 @@ export const openingLearningExperienceEvents = pgTable("opening_learning_experie
   eventKey: text("event_key").notNull(), kind: text("kind").notNull(), targetType: text("target_type").notNull(),
   targetId: uuid("target_id").notNull(), localDay: date("local_day").notNull(), durationMs: integer("duration_ms"),
   recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  executionId: uuid("execution_id"),
+  observedAt: timestamp("observed_at", { withTimezone: true }),
 }, table => [uniqueIndex("opening_learning_experience_key_uidx").on(table.workspaceId, table.ownerUserId, table.eventKey)]);

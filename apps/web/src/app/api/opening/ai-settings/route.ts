@@ -3,7 +3,7 @@ import { OpeningModelConfigurationError } from "@aistudy/config";
 import { jsonError, mapDomainError } from "../../../../features/auth/service";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { readOpeningJsonBody } from "../../../../features/opening/request-body";
-import { readAiSettings, saveAiSettings } from "../../../../features/settings/ai-settings-service";
+import { readAiSettings, saveAiSettings } from "../../../../features/opening/settings/ai-settings-service";
 
 function settingsError(error: unknown): Response {
   if (error instanceof OpeningModelRoutingError || error instanceof OpeningModelConfigurationError) {

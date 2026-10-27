@@ -16,7 +16,6 @@ import {
   clampStepIndex,
   handleMatrixTransformKey,
   initialUiState,
-  isMatrixTransformInteractiveEnabled,
   resetUiState,
   resolveEffectiveAutoplay,
   retreatStep,
@@ -107,19 +106,6 @@ describe("reduced-motion / autoplay (T15)", () => {
     expect(resolveEffectiveAutoplay(false, false)).toBe(false);
   });
 
-  it("interactive flag defaults on; off via env", () => {
-    expect(isMatrixTransformInteractiveEnabled({})).toBe(true);
-    expect(
-      isMatrixTransformInteractiveEnabled({
-        OPENING_MATRIX_TRANSFORM_INTERACTIVE: "0",
-      }),
-    ).toBe(false);
-    expect(
-      isMatrixTransformInteractiveEnabled({
-        NEXT_PUBLIC_OPENING_MATRIX_TRANSFORM_INTERACTIVE: "false",
-      }),
-    ).toBe(true); // PR-H: NEXT_PUBLIC_* twin ignored
-  });
 });
 
 describe("MatrixTransformStaticView (T16)", () => {

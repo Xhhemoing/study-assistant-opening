@@ -1,19 +1,19 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { CourseSprintMode } from "../../courses/course-sprint-mode";
+import { CourseSprintMode } from "../courses/course-sprint-mode";
 import { sprintCourseHref, sprintCourseScope } from "./sprint-course-route";
 
 const id = "11111111-1111-4111-8111-111111111111";
 describe("course sprint navigation", () => {
-  it("moves valid legacy links to course mode without dropping search context", () => {
+  it("uses the canonical sprint entry without dropping search context", () => {
     const href = sprintCourseHref({ courseId: id, mode: "old", tab: "sources", filter: ["a", "b"] });
     const url = new URL(href!, "http://localhost");
-    expect(url.pathname).toBe(`/opening/courses/${id}`);
-    expect(url.searchParams.get("mode")).toBe("sprint");
+    expect(url.pathname).toBe("/opening/sprint");
+    expect(url.searchParams.has("mode")).toBe(false);
     expect(url.searchParams.get("tab")).toBe("sources");
     expect(url.searchParams.getAll("filter")).toEqual(["a", "b"]);
-    expect(url.searchParams.has("courseId")).toBe(false);
+    expect(url.searchParams.get("courseId")).toBe(id);
   });
   it("chooses a course for missing, invalid or repeated course identifiers", () => {
     expect(sprintCourseHref({})).toBeNull();

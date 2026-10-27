@@ -21,13 +21,14 @@ import {
   type TeachingCommandResponse,
   type TeachingCommandSuccess,
 } from "@aistudy/contracts";
-import { ChevronDown, CircleHelp, LoaderCircle, RefreshCw } from "lucide-react";
+import { LoaderCircle, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { ui, tone } from "../design/ui";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { StudyConversationContext } from "../assistant/study-conversation-context";
 import { InlineExplain } from "./inline-explain";
+import { ExplanationActions, explanationActionPrompt, type ExplanationAction } from "./explanation-actions";
 
 export const TEACHING_COMMAND_KINDS: TeachingCommandKind[] = [
   "why",
@@ -56,7 +57,7 @@ const CONFLICT_LABEL: Record<TeachingCommandConflictCode, string> = {
   stale_revision: "教材已更新，请重新读取后再试",
   client_key_intent_mismatch: "这次操作与上次提交的内容不一致，请重新读取后再试",
   block_not_in_spec: "这部分内容已调整，请重新读取",
-  branch_stack_empty: "没有可返回的分支",
+  branch_stack_empty: "学习位置已变化，请重新读取后继续",
   generate_in_flight: "教学内容仍在生成中，请稍后再改写",
   draft_anchor_lost: "部分笔记的关联位置已改变，请保留原文并重新读取",
   validation: "这次操作未能完成，请检查内容后重试",
@@ -137,12 +138,10 @@ export type BlockCommandsBarViewProps = {
 export function BlockCommandsBarView({
   blockId,
   busyKind = null,
-  returnDisabled,
   conflict = null,
   assist = null,
   disabled = false,
   compact = false,
-  defaultOpen = false,
   whyAvailable = false,
   onCommand,
   onReread,
@@ -152,9 +151,12 @@ export function BlockCommandsBarView({
 }: BlockCommandsBarViewProps) {
   const diagnostics = useDiagnosticsEnabled();
   const busy = busyKind != null || rereadBusy;
-  const visibleKinds = whyAvailable
-    ? TEACHING_COMMAND_KINDS
-    : TEACHING_COMMAND_KINDS.filter((kind) => kind !== "why");
+  const availableActions: ExplanationAction[] = onAskExplanation ? ["confused", "example", "faster", "deeper"] : whyAvailable ? ["confused", "deeper"] : ["confused"];
+  const explain = (action: ExplanationAction) => {
+    if (action === "deeper" && whyAvailable) { onCommand("why"); return; }
+    if (onAskExplanation) { onAskExplanation(explanationActionPrompt(action, explanationContext?.fragment)); return; }
+    if (action === "confused") onCommand("confused");
+  };
   const showAssist =
     (whyAvailable || assist?.kind === "confused") &&
     Boolean(assist?.summary) &&
@@ -167,69 +169,7 @@ export function BlockCommandsBarView({
       data-block-id={blockId}
       data-why-available={whyAvailable ? "true" : "false"}
     >
-      <button type="button" className={ui.secondary} disabled={disabled || busy} onClick={() => onCommand("confused")}>
-        {busyKind === "confused" ? "正在记下…" : "这里没看懂"}
-      </button>
-      <details className="group/help" data-command-help="true" open={defaultOpen}>
-        <summary
-          className={`${ui.quiet} list-none [&::-webkit-details-marker]:hidden`}
-          aria-busy={busy}
-        >
-          {busy ? (
-            <LoaderCircle size={14} className="animate-spin" aria-hidden />
-          ) : (
-            <CircleHelp size={14} aria-hidden />
-          )}
-          学习帮助
-          <ChevronDown
-            size={12}
-            className="transition-transform group-open/help:rotate-180 motion-reduce:transition-none"
-            aria-hidden
-          />
-        </summary>
-        <div className="mt-2 space-y-2 rounded-lg border border-line p-3">
-          <div
-            className="flex flex-wrap gap-1"
-            role="group"
-            aria-label="当前学习单元帮助"
-          >
-            {visibleKinds.map((kind) => {
-              const isReturn = kind === "return";
-              const kindDisabled =
-                disabled || busy || (isReturn && returnDisabled);
-              const title =
-                kind === "skip"
-                  ? SKIP_HONESTY_COPY
-                  : kind === "why"
-                    ? "仅解释说明，不改写正文"
-                    : isReturn && returnDisabled
-                      ? "分支栈为空，无法返回"
-                      : KIND_LABEL[kind];
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  className={ui.secondary}
-                  data-command-kind={kind}
-                  disabled={kindDisabled}
-                  title={title}
-                  aria-label={KIND_LABEL[kind]}
-                  aria-busy={busyKind === kind}
-                  onClick={() => onCommand(kind)}
-                >
-                  {busyKind === kind ? (
-                    <LoaderCircle size={12} className="animate-spin" aria-hidden />
-                  ) : null}
-                  {KIND_LABEL[kind]}
-                </button>
-              );
-            })}
-          </div>
-          <p className="text-xs leading-5 text-text-3" data-skip-honesty="true">
-            {SKIP_HONESTY_COPY}
-          </p>
-        </div>
-      </details>
+      <ExplanationActions onAction={explain} availableActions={availableActions} disabled={disabled || busy} />
 
       {showAssist && assist?.kind === "why" && explanationContext && onAskExplanation ? <InlineExplain
         context={{ ...explanationContext, blockId }} content={assist!.summary!}
@@ -260,7 +200,7 @@ export function BlockCommandsBarView({
               </summary>
               <p className="mt-1">{conflict.message}</p>
               <p className="mt-1 tabular-nums">
-                服务端版本
+                当前内容
                 {conflict.currentContentVersion != null
                   ? ` content=${conflict.currentContentVersion}`
                   : ""}

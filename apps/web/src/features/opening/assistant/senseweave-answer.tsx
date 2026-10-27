@@ -58,7 +58,7 @@ function downloadShadow() {
 export function SenseWeaveDiagnostics({ prepared, mode }: { prepared: PreparedAnswer; mode: Exclude<SenseWeaveMode, "off"> }) {
   const types = prepared.segments.flatMap(segment => segment.kind === "block" ? [segment.type] : []);
   return <p className="mt-2 text-xs text-text-3" data-senseweave-diagnostics={mode}>
-    SenseWeave{mode === "shadow" ? "（影子）" : ""}：{types.length ? types.join("、") : "保持文字"} · {prepared.preset} · {prepared.ms.toFixed(1)} ms
+    SenseWeave{mode === "shadow" ? "（仅记录）" : ""}：{types.length ? types.join("、") : "保持文字"} · {prepared.preset} · {prepared.ms.toFixed(1)} ms
     <button type="button" onClick={downloadShadow} className="ml-2 min-h-7 underline focus-visible:ring-2 focus-visible:ring-focus-ring">导出本页匿名统计</button>
   </p>;
 }

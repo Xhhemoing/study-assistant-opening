@@ -10,8 +10,9 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.join(root, "apps/web/src");
 const args = new Set(process.argv.slice(2));
 const walk = (dir, out = []) => {
@@ -23,15 +24,20 @@ const walk = (dir, out = []) => {
 };
 const files = walk(src);
 const segs = (p) => p.split("/").filter(Boolean);
+const sourceSegments = (file) => path.relative(src, file).split(path.sep);
+const isApiFile = (file) => {
+  const [app, api] = sourceSegments(file);
+  return app === "app" && api === "api";
+};
 
-const routes = files.filter(f => f.endsWith("/route.ts") && f.includes("/app/api/")).map(f => {
+const routes = files.filter(f => path.basename(f) === "route.ts" && isApiFile(f)).map(f => {
   const text = readFileSync(f, "utf8");
   const methods = new Set([...text.matchAll(/export\s+(?:async\s+)?(?:function|const)\s+(GET|POST|PUT|PATCH|DELETE)\b/g)].map(m => m[1]));
   for (const m of text.matchAll(/export\s*\{([^}]*)\}/g)) for (const k of m[1].match(/\b(GET|POST|PUT|PATCH|DELETE)\b/g) ?? []) methods.add(k);
   const url = path.relative(path.join(src, "app"), path.dirname(f)).split(path.sep).join("/");
   return { url: `/${url}`, segs: segs(url), methods, file: path.relative(root, f) };
 });
-const pages = files.filter(f => f.endsWith("/page.tsx") && !f.includes("/app/api/")).map(f => {
+const pages = files.filter(f => path.basename(f) === "page.tsx" && sourceSegments(f)[0] === "app" && !isApiFile(f)).map(f => {
   const url = path.relative(path.join(src, "app"), path.dirname(f)).split(path.sep).filter(s => !/^\(.*\)$/.test(s)).join("/");
   return segs(url);
 });
@@ -62,7 +68,7 @@ const pageExists = (pathSegs) => pages.some(p => {
 
 const findings = [];
 for (const f of files) {
-  if (!/\.tsx?$/.test(f) || /\.(test|spec)\.tsx?$/.test(f) || f.includes("/app/api/")) continue;
+  if (!/\.tsx?$/.test(f) || /\.(test|spec)\.tsx?$/.test(f) || isApiFile(f)) continue;
   const text = readFileSync(f, "utf8");
   const rel = path.relative(root, f);
   const lineOf = (i) => text.slice(0, i).split("\n").length;

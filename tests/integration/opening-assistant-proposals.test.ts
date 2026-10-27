@@ -99,3 +99,56 @@ it("a cancelled worker lease or changed privacy cannot persist a late proposal",
   const [count] = await f.sql`SELECT count(*)::int AS count FROM opening_assistant_proposals WHERE workspace_id=${f.scope.workspaceId}`;
   expect(count!.count).toBe(0);
 });
+
+it("finds old drafts behind processed records and pages every pending row without losing timestamp precision", async () => {
+  const context = await setup(), repo = createOpeningAssistantProposalsRepository(f.sql);
+  const draft = await repo.propose(f.scope, { sourceTurnId: context.sourceTurnId, clientKey: randomUUID(), tool: { name: "propose_note", arguments: { title: "旧建议", text: "仍待确认" } } });
+  await f.sql`UPDATE opening_assistant_proposals SET created_at='2026-10-01T00:00:00.000001Z' WHERE id=${draft.id}`;
+  await f.sql`INSERT INTO opening_assistant_proposals(id,workspace_id,owner_user_id,source_turn_id,client_key,intent,context_source_refs,basis_version,privacy_epoch,status,created_at)
+    SELECT gen_random_uuid(),workspace_id,owner_user_id,source_turn_id,gen_random_uuid()::text,intent,context_source_refs,basis_version,privacy_epoch,'accepted','2026-10-02T00:00:00Z'
+    FROM opening_assistant_proposals CROSS JOIN generate_series(1,45) WHERE id=${draft.id}`;
+  expect((await repo.list(f.scope)).some(item => item.id === draft.id)).toBe(false);
+  expect(await repo.listPending(f.scope)).toMatchObject({ total: 1, nextCursor: null, proposals: [{ id: draft.id }] });
+  await f.sql`INSERT INTO opening_assistant_proposals(id,workspace_id,owner_user_id,source_turn_id,client_key,intent,context_source_refs,basis_version,privacy_epoch,created_at)
+    SELECT gen_random_uuid(),workspace_id,owner_user_id,source_turn_id,gen_random_uuid()::text,intent,context_source_refs,basis_version,privacy_epoch,
+      '2026-10-03T00:00:00Z'::timestamptz + (n / 3) * interval '1 microsecond'
+    FROM opening_assistant_proposals CROSS JOIN generate_series(1,45) n WHERE id=${draft.id}`;
+  const first = await repo.listPending(f.scope);
+  expect(first.proposals).toHaveLength(40); expect(first.total).toBe(46); expect(first.nextCursor).not.toBeNull();
+  const second = await repo.listPending(f.scope, { cursor: first.nextCursor! });
+  expect(second.proposals).toHaveLength(6); expect(second.total).toBe(46); expect(second.nextCursor).toBeNull();
+  expect(new Set([...first.proposals, ...second.proposals].map(item => item.id)).size).toBe(46);
+  expect(await repo.countPending(f.scope)).toBe(46);
+});
+
+it("filters across all conversation turns and rejects foreign scope, malformed cursors, and revoked provenance", async () => {
+  const context = await setup(), repo = createOpeningAssistantProposalsRepository(f.sql);
+  const [source] = await f.sql`SELECT conversation_id FROM opening_turns WHERE id=${context.sourceTurnId}`;
+  const conversationId = String(source!.conversation_id);
+  const draft = await repo.propose(f.scope, { sourceTurnId: context.sourceTurnId, clientKey: randomUUID(), tool: { name: "propose_note", arguments: { title: "原对话建议", text: "检查归属" } } });
+  const otherConversation = await backupRows(f.sql, f.scope).conversation();
+  const nextTurn = randomUUID();
+  await f.sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status)
+    VALUES(${nextTurn},${f.scope.workspaceId},${otherConversation},'user','另一个对话','explain','complete')`;
+  await repo.propose(f.scope, { sourceTurnId: nextTurn, clientKey: randomUUID(), tool: { name: "propose_note", arguments: { title: "另一个建议", text: "不可混入" } } });
+  await f.sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,created_at)
+    SELECT gen_random_uuid(),${f.scope.workspaceId},${conversationId},'user','后续消息','explain','complete',now() + n * interval '1 second' FROM generate_series(1,50) n`;
+  expect(await repo.listPending(f.scope, { conversationId })).toMatchObject({ total: 1, proposals: [{ id: draft.id }] });
+  expect(await repo.listPending(f.otherScope)).toMatchObject({ total: 0, proposals: [] });
+  expect(await repo.listPending({ ...f.scope, ownerUserId: f.otherScope.ownerUserId })).toMatchObject({ total: 0, proposals: [] });
+  await expect(repo.listPending(f.otherScope, { conversationId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  for (const cursor of ["garbage", Buffer.from(JSON.stringify({ createdAt: "bad", id: draft.id })).toString("base64url"), "x".repeat(513)]) {
+    await expect(repo.listPending(f.scope, { cursor })).rejects.toThrow();
+  }
+  const cursor = Buffer.from(JSON.stringify({ createdAt: "2099-01-01T00:00:00.000001Z", id: draft.id })).toString("base64url");
+  expect(await repo.listPending(f.scope, { conversationId: otherConversation, cursor })).toMatchObject({ total: 1, proposals: [{ sourceTurnId: nextTurn }] });
+  await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${f.scope.workspaceId},${context.sourceId})`;
+  expect(await repo.listPending(f.scope, { conversationId })).toMatchObject({ total: 0, proposals: [] });
+  expect(await repo.countPending(f.scope)).toBe(1);
+  await f.sql`DELETE FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId} AND source_id=${context.sourceId}`;
+  await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${context.sourceId}`;
+  expect(await repo.listPending(f.scope, { conversationId })).toMatchObject({ total: 0, proposals: [] });
+  expect(await repo.countPending(f.scope)).toBe(1);
+  await f.sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${f.scope.workspaceId}`;
+  expect(await repo.countPending(f.scope)).toBe(0);
+});

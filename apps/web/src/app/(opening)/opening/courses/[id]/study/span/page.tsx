@@ -2,7 +2,7 @@ import { TransitionLink as Link } from "../../../../../../../features/opening/v3
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { uuidSchema, type StudySessionIntent } from "@aistudy/contracts";
-import { loadCourseStudyContext } from "../../../../../../../features/courses/server/course-study-context";
+import { loadCourseStudyContext } from "../../../../../../../features/opening/courses/server/course-study-context";
 import { SpanLessonSession } from "../../../../../../../features/opening/teaching/span/span-lesson-session";
 import { createStudyIntentService } from "../../../../../../../features/opening/teaching/span/intent-service";
 import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";

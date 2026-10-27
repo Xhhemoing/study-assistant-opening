@@ -16,7 +16,7 @@ import { LoadingRows, secondaryButtonClass } from "../design/ui";
 import { ResponsiveInspector } from "../design/inspector";
 import { TaskContext } from "./task-context";
 import { replacePromptDraft, type StudyTask } from "../planning/study-task";
-import { MemoryPanel } from "./memory-panel";
+import { resolveBoundConversationContext } from "./bound-conversation";
 import { prepareSnippetDraft, type SelectedExcerpt } from "./save-snippet";
 import { SaveSnippetDialog } from "./save-snippet-dialog";
 import { CreateCardDialog } from "../cards/create-card-dialog";
@@ -38,6 +38,7 @@ import { shouldRefreshSources } from "../inbox/source-refresh";
 import { startSourceProcessingRefresh } from "./source-processing-refresh";
 import { createQuestionDraftStore } from "./question-drafts";
 import { ProposalPanel } from "./proposal-panel";
+import { usePendingProposals } from "./use-pending-proposals";
 import { StudyIntentControls } from "../teaching/study-intent-controls";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { acknowledgeStudyExposure } from "./study-exposure-ack";
@@ -72,6 +73,8 @@ export type AssistantViewProps = {
   initialConversationId?: string | null;
   /** Drawer toolbar opens only: re-check implicit recovery without remounting drafts. */
   implicitResumeVersion?: number;
+  /** Full-page restoration verifies saved context anchors before resuming a study conversation. */
+  resumeBoundConversation?: boolean;
   /** Course page / shell query binding (Package B) — not only learningAttempt. */
   initialCourseId?: string | null;
   learningAttempt?: LearningAttempt;
@@ -180,7 +183,7 @@ const TUTOR_ACTION_LABELS: Record<ThinTutorAction["kind"], string> = {
   guided: "开始引导提示",
   worked_example: "看完整例题",
   independent_variant: "独立做变式题",
-  delayed_retest: "开始到期复习",
+  delayed_retest: "查看待确认补测",
 };
 
 export function tutorActionLabel(kind: ThinTutorAction["kind"]): string {
@@ -301,7 +304,7 @@ export function AssistantView(props: Props) {
     startFresh={session ? true : props.startFresh}
     onNew={() => setSession(value => ({ identity, count: assistantSessionIndex(value, identity) + 1 }))} />;
 }
-function AssistantWorkspace({ api: apiProp, initialConversationId = null, implicitResumeVersion, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
+function AssistantWorkspace({ api: apiProp, initialConversationId = null, implicitResumeVersion, resumeBoundConversation = false, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false, agent = false, onConversationChange,
   start, onConversationReady, companion = false, objectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
   const mounted = useRef(true);
@@ -317,8 +320,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const initialPage = studyContext?.page ?? pageProp;
   const api = useMemo(() => apiProp ?? createOpeningApi(), [apiProp]);
   const [conversationId, setConversationIdState] = useState<string | null>(
-    learningAttempt ? null : initialConversationId,
+    learningAttempt && !resumeBoundConversation ? null : initialConversationId,
   );
+  const boundResumeContext = useRef(studyContext);
+  boundResumeContext.current = studyContext;
   const conversationIdRef = useRef(conversationId);
   const conversationChange = useRef(onConversationChange);
   conversationChange.current = onConversationChange;
@@ -371,6 +376,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const submissionLock = useRef<symbol | null>(null);
   const submitClocks = useRef(new Map<string, number>());
   const [firstTextTiming, setFirstTextTiming] = useState<FirstTextTiming | null>(null);
+  const [waitRequestKey, setWaitRequestKey] = useState<string | null>(null);
   const { reply: streamingReply, cancel: cancelJobStream } = useJobStream(privacy === "saved" ? activeJobId : null, conversationId, firstTextTiming);
   const draftStore = useMemo(() => createQuestionDraftStore(), []);
   const observedTurns = useRef<readonly TurnRecord[]>([]);
@@ -547,6 +553,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       const snapshot = await conversationReader.read(id, signal);
       if (!snapshot) return false;
       const { resume: nextResume, turns: nextTurns, pending: discovery } = snapshot;
+      if (resumeBoundConversation) {
+        const prepared = boundResumeContext.current;
+        const verified = resolveBoundConversationContext(nextTurns, prepared);
+        const contextChanged = studyConversationIdentity(verified.context) !== studyConversationIdentity(prepared);
+        if (verified.error || contextChanged) {
+          setError(verified.error ?? "这段对话的提问背景刚刚变化，请重新打开后再继续。");
+          setRecoveryRequired(true);
+          return true;
+        }
+      }
       const last = nextTurns.at(-1);
       const previous = observedTurns.current.at(-1);
       if (last?.status === "failed" && last.id === previous?.id && previous.status === "pending") {
@@ -619,7 +635,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       }
       return true;
     },
-    [conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, setConversationId],
+    [conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, resumeBoundConversation, setConversationId],
   );
 
 
@@ -631,7 +647,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       try {
         await Promise.all([refreshSources(), refreshOrganization(), refreshTutorActions()]);
         if (cancelled) return;
-        if (initialConversationId && !learningAttempt) {
+        if (initialConversationId && (!learningAttempt || resumeBoundConversation)) {
           setConversationId(initialConversationId);
           await refreshConversation(initialConversationId, controller.signal);
           return;
@@ -674,7 +690,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       cancelled = true;
       controller.abort();
     };
-  }, [api, initialConversationId, implicitResumeVersion, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, studyContext?.attemptId, initialSourceIds.length]);
+  }, [api, initialConversationId, implicitResumeVersion, resumeBoundConversation, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, studyContext?.attemptId, initialSourceIds.length]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -711,7 +727,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     : savedDisplay, [privacy, savedDisplay, ephemeralMessages, ephemeralPendingMessages]);
   const showingPendingReply = display.messages.some(message => message.role === "assistant" && message.status === "pending");
   const firstTextShown = display.messages.some(message => message.role === "assistant" && message.status === "pending" && Boolean(message.text.trim()));
-  const waitPhase = useTurnWaitPhase(pending && !firstTextShown, activeJobId ?? "local");
+  const waitPhase = useTurnWaitPhase(pending && !firstTextShown, waitRequestKey ?? activeJobId ?? "local");
   const retryTarget = privacy === "saved" ? failedTurnRetry(recoveredTurns) : null;
   useEffect(() => {
     onRetainStateChange?.({ pending: pending || loading || uploadPending,
@@ -864,6 +880,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     submitClocks.current.set(input.clientKey, submittedAt);
     if (submitClocks.current.size > 32) submitClocks.current.delete(submitClocks.current.keys().next().value!);
     setFirstTextTiming(null);
+    setWaitRequestKey(input.clientKey);
     setPending(true);
     let jobSubmitted = false;
     const abortController = new AbortController();
@@ -1004,31 +1021,6 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         setDraft(replacePromptDraft(draft, intent.draft, () => true));
         setPendingHint("独立做变式题：完成后请在练习表单里提交结果。");
         return;
-      case "delayed_retest":
-        void acceptDueRetest(intent.action);
-        return;
-    }
-  }
-
-  async function acceptDueRetest(action: ThinTutorAction): Promise<void> {
-    setTutorActionError("");
-    try {
-      const retests = await api.listRetestCandidates();
-      // Only an explicit user click accepts; already-accepted due activities
-      // are opened instead of re-accepted (Lab design v2 §4).
-      const candidates = retests.filter((row) => !row.accepted && row.skillLabel === action.skillLabel);
-      if (candidates.length === 0) {
-        setPendingHint(`「${action.skillLabel}」没有待接受的重测任务；已接受的请到今日任务队列查看。`);
-        return;
-      }
-      const accepted: string[] = [];
-      for (const candidate of candidates) {
-        const outcome = await api.acceptRetest(candidate.id, `retest-${crypto.randomUUID()}`);
-        accepted.push(outcome.taskId);
-      }
-      setPendingHint(`已接受 ${accepted.length} 个到期重测任务；到今日任务队列开始。`);
-    } catch (err) {
-      setTutorActionError(userFacingMessage(err, "无法接受到期重测"));
     }
   }
 
@@ -1088,8 +1080,15 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const returnHref = studyContextReturnHref(studyContext);
   const startScreen = Boolean(start && !companion && !initialConversationId && !display.messages.length && !pending);
   const ordinaryQuestion = !embedded && !learningAttempt && !studyContext?.attemptId;
-  return <section inert={interactionDisabled} aria-label={startScreen ? "开始" : "学习对话"} className={`flex h-full min-w-0 bg-surface ${inset ? "min-h-0 overflow-hidden" : "min-h-[400px] lg:min-h-0"}`}>
-    <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${inset ? "" : "mx-auto w-full max-w-[720px]"} ${startScreen ? "justify-center px-4 py-8" : ""}`}>
+  const proposalsEnabled = privacy === "saved" && !loading && !embedded && !startScreen && Boolean(conversationId);
+  const proposalState = usePendingProposals(api, {
+    enabled: proposalsEnabled,
+    ...(conversationId ? { conversationId } : {}),
+  }, [...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? "");
+  const showProposalRail = agent && proposalsEnabled && proposalState.total > 0;
+  const [proposalRailOpen, setProposalRailOpen] = useState(false);
+  return <section inert={interactionDisabled} aria-label={startScreen ? "开始" : "学习对话"} className={`flex h-full min-w-0 bg-surface ${agent ? "flex-col xl:flex-row" : ""} ${inset ? "min-h-0 overflow-hidden" : "min-h-[400px] lg:min-h-0"}`}>
+    <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${inset ? "" : agent ? "w-full" : "mx-auto w-full max-w-[720px]"} ${startScreen ? "justify-center px-4 py-8" : ""}`}>
       {startScreen ? <h1 className="mb-5 text-ui font-medium text-text-2">{start?.greeting}</h1> : !embedded ? <TopBar label="对话顶栏"
         title={<Heading className="min-w-0 truncate text-ui-lg font-semibold text-text">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "对话")}</Heading>}
         actions={<TopBarTools label="对话工具">
@@ -1147,14 +1146,15 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">
-          {tutorActions.map((action) => (
-            <button key={action.kind} type="button" className={secondaryButtonClass} title={action.reason} disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={() => handleTutorAction(action)}>{tutorActionLabel(action.kind)}</button>
-          ))}
+          {tutorActions.map((action) => action.kind === "delayed_retest"
+            ? <Link key={action.kind} href="/opening/suggestions" className={secondaryButtonClass} title={action.reason} aria-disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={event => { if (pending || loading || recoveryRequired || interactionDisabled) event.preventDefault(); }}>{tutorActionLabel(action.kind)}</Link>
+            : <button key={action.kind} type="button" className={secondaryButtonClass} title={action.reason} disabled={pending || loading || recoveryRequired || interactionDisabled} onClick={() => handleTutorAction(action)}>{tutorActionLabel(action.kind)}</button>)}
         </div>
       ) : null}
 
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
-      {privacy === "saved" && !loading && !embedded && !startScreen ? <details className={`mx-5 mb-2 text-xs text-text-2 ${agent ? "xl:hidden" : ""}`}><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /></details> : null}
+      {agent && proposalsEnabled && proposalState.error && !showProposalRail ? <div role="alert" className="mx-5 mb-2 space-y-2 text-sm text-warn"><p>{proposalState.error}</p><button type="button" className={secondaryButtonClass} disabled={proposalState.loading} onClick={() => void proposalState.refresh()}>重新读取建议</button></div> : null}
+      {!agent && proposalsEnabled ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel state={proposalState} /></details> : null}
       {!learningAttempt ? <AiReadinessChecklist className="mx-4 mb-2" onBlockedChange={setAiBlocked} /> : null}
       {draftUnavailable && privacy === "saved" ? <p role="status" className="mx-5 mb-2 text-xs leading-5 text-warn">问题会保留在当前页面；浏览器暂时无法保存，刷新或关闭前请先复制。</p> : null}
       <Composer questionMode={ordinaryQuestion} startMode={startScreen} sendDisabled={uploadPending}
@@ -1165,19 +1165,15 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
       {startScreen && start ? <StartSuggestions {...start} objectHref={objectHref} onExample={setPrompt} /> : null}
     </div>
-    {agent ? <section aria-label="产出与待确认" className="hidden w-(--layout-companion) shrink-0 flex-col gap-3 overflow-y-auto border-l border-line bg-bg/60 px-4 py-3 xl:flex">
-      <div className="space-y-2">
-        <h2 id="agent-proposals-heading" className="text-meta font-medium text-text-2">学习建议</h2>
-        {privacy === "saved" && !loading ? <ProposalPanel api={api} objectHref={objectHref} refreshKey={[...turns].reverse().find(turn => turn.role === "assistant" && turn.status === "complete")?.id ?? ""} sourceTurnId={[...turns].reverse().find(turn => turn.role === "user" && turn.status === "complete")?.id ?? null} courseId={boundCourseId} /> : <p className="text-meta text-text-3">临时对话不会产生待确认的建议。</p>}
-      </div>
-      <div className="space-y-2 border-t border-line pt-3">
-        <h2 id="agent-memory-heading" className="text-meta font-medium text-text-2">AI 记忆</h2>
-        <MemoryPanel api={api} />
-      </div>
+    {showProposalRail ? <section aria-label="产出与待确认" className="flex w-full shrink-0 flex-col border-t border-line bg-bg/60 px-4 py-3 xl:w-(--layout-companion) xl:overflow-y-auto xl:border-l xl:border-t-0">
+      <h2 id="agent-proposals-heading" className="hidden text-meta font-medium text-text-2 xl:block">待你确认 · {proposalState.total}</h2>
+      <button type="button" className="flex min-h-11 items-center justify-between text-sm text-text-2 xl:hidden" aria-expanded={proposalRailOpen} aria-controls={`${draftId}-suggestions`} onClick={() => setProposalRailOpen(value => !value)}>待你确认 · {proposalState.total}<span>{proposalRailOpen ? "收起" : "展开"}</span></button>
+      <div id={`${draftId}-suggestions`} className={`${proposalRailOpen ? "block" : "hidden"} max-h-72 overflow-y-auto xl:block xl:max-h-none`}><ProposalPanel state={proposalState} /></div>
     </section> : null}
     {snippetDraft ? <SaveSnippetDialog draft={snippetDraft} api={api} onClose={() => setSnippetDraft(null)} /> : null}
     {cardDraft ? <CreateCardDialog draft={cardDraft.input} api={api} onClose={() => setCardDraft(null)} /> : null}
-    <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料与记忆" id="exploration-context">
+    <ResponsiveInspector open={contextOpen} onClose={() => setContextOpen(false)} title="参考资料" id="exploration-context">
+      <Link href="/opening/settings/ai#memory" className={`${secondaryButtonClass} mb-4`}>管理学习记忆</Link>
       <p className="mb-4 text-xs leading-6 text-text-2">{assistantContextHint(selectedSourceIds)}</p>
       {sourceRefreshError ? <div className="mb-3 space-y-2 text-xs text-warn"><p role="status">材料状态暂时无法读取；已保留上次状态，会继续核实，尚未标记为解析完成。</p><button type="button" className={secondaryButtonClass} onClick={() => { if (sourceRefresh.current) sourceRefresh.current.retry(); else void refreshSources().catch(() => setSourceRefreshError(true)); }}>重新读取材料状态</button></div> : null}
       {!learningAttempt && !studyContext?.sourceId ? <label className="mb-4 block space-y-2 text-xs text-text"><span>资料使用方式</span><select aria-label="资料使用方式" className="min-h-10 w-full rounded border border-text-3 bg-surface px-2" value={materialMode} disabled={pending || loading || interactionDisabled} onChange={event => { const mode = event.target.value as typeof materialMode; setSourceSelection(mode); if (mode !== "selected") setCurrentPage(""); }}><option value="auto">自动参考本课资料</option><option value="selected">仅用所选资料</option><option value="none">不用资料</option></select><p>{materialMode === "auto" ? (boundCourseId ? "自动查找本课程可读资料；回答后列出实际引用。" : "未绑定课程，不会自动补入课程资料。") : materialMode === "selected" ? "只检索你选择的资料；尚未选择时不能发送。" : "本轮不检索资料。已有对话文字仍可能包含先前讨论的内容。"}</p></label> : null}
@@ -1193,7 +1189,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         membershipSourceIds={learningAttempt || !boundCourseId ? null : membershipIds}
       />
       <Link className={`${secondaryButtonClass} mt-3 w-full justify-between`} href="/opening/library?tab=materials#upload">管理 / 上传材料<ArrowUpRight size={13} aria-hidden /></Link>
-      <details className="mt-5 border-t border-line pt-2"><summary className="flex min-h-10 cursor-pointer items-center gap-2 text-xs font-medium text-text-2 focus-visible:ring-2 focus-visible:ring-focus-ring"><ShieldCheck size={14} aria-hidden />AI 记忆与待确认建议</summary><MemoryPanel api={api} /></details>
+      <Link className={`${secondaryButtonClass} mt-5 w-full`} href="/opening/settings#memory"><ShieldCheck size={14} aria-hidden />管理学习记忆</Link>
     </ResponsiveInspector>
   </section>;
 }
