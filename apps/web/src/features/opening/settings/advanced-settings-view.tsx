@@ -36,7 +36,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
     setError("");
     try {
       const body = await fetchWorkspacePreferences();
-      setDefaultEntry(body.defaultEntry ?? null);
+      setDefaultEntry(body.defaultEntry ?? "explore");
     } catch {
       setError("设置暂时无法读取，请重试。");
     } finally {
@@ -83,7 +83,7 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
         ) : null}
         <details className="group border-b border-line pb-4" data-advanced-fold="entry-explore">
           <summary className="min-h-11 cursor-pointer list-none py-2 text-sm font-medium text-text marker:content-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
-            <span className="inline-flex items-center gap-2">默认入口与探索相关<span className="text-xs font-normal text-text-3 group-open:hidden">（已折叠）</span></span>
+            <span className="inline-flex items-center gap-2">默认入口<span className="text-xs font-normal text-text-3 group-open:hidden">（已折叠）</span></span>
           </summary>
           <div className="mt-3 space-y-6">
             {loading ? <LoadingRows label="正在读取设置" /> : null}
@@ -92,14 +92,14 @@ export function AdvancedSettingsView({ basePath = "/settings", embedded = false 
                 <section className="grid gap-4 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="default-entry-heading">
                   <div>
                     <h2 className="text-sm font-medium text-text" id="default-entry-heading">默认入口</h2>
-                    <p className="mt-1 text-xs leading-6 text-text-3">打开工作区首页时进入这里。自由探索等非闭环入口仅作备选，不作为推荐首页。</p>
+                    <p className="mt-1 text-xs leading-6 text-text-3">打开 AIstudy 时先进入这里。三个入口始终都在导航中，顺序不会变。</p>
                   </div>
                   <div className="space-y-3">
                     <div className="divide-y divide-line">
                       {workspaceEntries.map((entry) => (
                         <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-text-2 focus-within:ring-2 focus-within:ring-accent has-[:checked]:bg-accent-soft has-[:checked]:text-accent" key={entry.value}>
                           <input checked={defaultEntry === entry.value} className="size-4 accent-accent" name="default-entry" onChange={() => setDefaultEntry(entry.value)} type="radio" />
-                          {entry.label}{entry.value === "explore" ? <span className="text-xs text-text-2">（备选，非推荐）</span> : null}
+                          {entry.label}
                         </label>
                       ))}
                     </div>

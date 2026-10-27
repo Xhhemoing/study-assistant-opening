@@ -3,9 +3,10 @@ import type { GuidanceMode } from "../../../lib/data/types";
 
 export type WorkspaceEntry = "learn" | "explore" | "library";
 
+/** 持久值沿用 learn / explore / library；在 Opening 中分别对应 学习 / 助理 / 知识库。 */
 export const workspaceEntries: Array<{ value: WorkspaceEntry; label: string }> = [
-  { value: "learn", label: "目标学习" },
-  { value: "explore", label: "自由探索" },
+  { value: "explore", label: "助理（未设置时的默认）" },
+  { value: "learn", label: "学习" },
   { value: "library", label: "知识库" },
 ];
 

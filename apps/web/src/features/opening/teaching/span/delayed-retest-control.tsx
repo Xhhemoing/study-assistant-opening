@@ -38,7 +38,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
     void schedule(true);
   }, [record.id]);
   return <div className="space-y-2 border-t border-line pt-3">
-    {receipt ? <div role="status" className="space-y-2"><p className="text-sm leading-7">{shouldAutoScheduleRetest(record) ? "已自动排进复习：" : "复习已加入今日任务："}{new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 之后再做一道新题。</p><Link className={ui.secondary} href={receipt.href}>打开这项复习</Link><Link className={ui.quiet} href="/opening/today">查看今日任务</Link></div> : <><button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule(false)}>{pending ? "正在保存复测任务…" : "安排 3 天后再练习"}</button><p className="text-xs leading-6 text-text-3">隔 3 天再做一道新题，看看哪些内容还记得。</p></>}
+    {receipt ? <div role="status" className="space-y-2"><p className="text-sm leading-7">{shouldAutoScheduleRetest(record) ? "已自动排进复习：" : "复习已加入今日任务："}{new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 之后再做一道新题。</p><Link className={ui.secondary} href={receipt.href}>打开这项复习</Link><Link className={ui.quiet} href="/opening/courses">回到学习</Link></div> : <><button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule(false)}>{pending ? "正在保存复测任务…" : "安排 3 天后再练习"}</button><p className="text-xs leading-6 text-text-3">隔 3 天再做一道新题，看看哪些内容还记得。</p></>}
     {error ? <p role="alert" className="text-xs leading-6 text-danger">{error}</p> : null}
   </div>;
 }

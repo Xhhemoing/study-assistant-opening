@@ -12,7 +12,7 @@ const LEGACY_OPENING_REDIRECTS: { test: (pathname: string) => boolean; target: (
   { test: p => p === "/settings" || p.startsWith("/settings/"), target: p => `/opening${p}`, permanent: true },
   { test: p => p === "/search", target: () => "/opening/search", permanent: true },
   { test: p => p === "/ui-preview" || p.startsWith("/ui-preview/"), target: () => "/opening/today", permanent: true },
-  { test: (p) => p === "/learn", target: () => "/opening/today" },
+  { test: (p) => p === "/learn", target: () => "/opening/courses" },
   {
     test: (p) => p === "/learn/review" || p.startsWith("/learn/review/"),
     target: () => "/opening/cards",

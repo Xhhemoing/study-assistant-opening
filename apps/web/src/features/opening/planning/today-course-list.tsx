@@ -7,7 +7,7 @@ export function TodayCourseList({ courses }: { courses: TodayCourse[] }) {
   return <section aria-label="我的课程" className="px-5 py-4 group-data-[focus=true]/workspace:hidden">
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
       <h2 className="text-sm font-semibold">我的课程</h2>
-      <Link href="/opening/courses" className={ui.quiet}>全部课程</Link>
+      <Link href="/opening/courses?view=all" className={ui.quiet}>全部课程</Link>
     </div>
     {courses.length ? <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
       {courses.map(course => <li key={course.id} className="flex items-center gap-1 pr-2">

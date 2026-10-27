@@ -14,23 +14,26 @@ describe("UI v3 feature registry", () => {
 
   it("highlights exactly one navigation entry per path", () => {
     expect(activeNavId("/opening/assistant")).toBe("today");
-    expect(activeNavId("/opening/courses/abc/study")).toBe("today");
+    expect(activeNavId("/opening/courses/abc/study")).toBe("courses");
     expect(activeNavId("/opening/agent")).toBe("today");
-    expect(activeNavId("/opening/sprint")).toBe("today");
+    expect(activeNavId("/opening/sprint")).toBe("courses");
+    expect(activeNavId("/opening/review")).toBe("courses");
+    expect(activeNavId("/opening/cards")).toBe("courses");
     expect(activeNavId("/opening/search")).toBe("library");
     expect(activeNavId("/opening/settings/export")).toBe("settings");
     expect(activeNavId("/login")).toBeNull();
   });
 
   it("derives only three primary destinations and no duplicate tools", () => {
-    expect(NAV_CORE.map(item => [item.route, item.label])).toEqual([["/opening/today", "学习"], ["/opening/review", "复习"], ["/opening/library", "资料"]]);
+    expect(NAV_CORE.map(item => [item.route, item.label])).toEqual([["/opening/today", "助理"], ["/opening/courses", "学习"], ["/opening/library", "知识库"]]);
     expect(NAV_TOOLS).toEqual([]);
   });
 
   it("derives transition direction from depth", () => {
     expect(navDirection("/opening/courses", "/opening/courses/abc/study")).toBe("forward");
     expect(navDirection("/opening/courses/abc/study", "/opening/courses/abc")).toBe("back");
-    expect(navDirection("/opening/review", "/opening/library")).toBe("swap");
+    expect(navDirection("/opening/courses", "/opening/library")).toBe("swap");
+    expect(navDirection("/opening/courses", "/opening/review")).toBe("forward");
   });
 
   it("builds hrefs and covers every opening route once", () => {

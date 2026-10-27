@@ -2,7 +2,7 @@
 
 import { Minimize2 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { CommandPalette } from "../search/command-palette";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { ConversationCompanionProvider } from "../assistant/conversation-companion";
@@ -18,6 +18,7 @@ import { useRecentConversations } from "./recent-conversations";
 import { useDueReviewCount } from "./review-count";
 import { NavigationShortcutsHint } from "./navigation-shortcuts-hint";
 import { WorkspaceLayoutContext } from "./workspace-layout-context";
+import { ShellCountsContext } from "./shell-counts-context";
 
 const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
   ...FEATURES.find(item => item.route === href)!, label, placement,
@@ -33,7 +34,7 @@ const OPENING_NAV = {
 
 /**
  * 生产壳层（UI v3）：v3 AppShell 负责导航、外观层与页面过渡；这里只接业务数据与全局能力：
- * 复习计数、账户（专注 / 退出）、命令面板（⌘K）、学习助手抽屉（⌘J，右侧打开）、引用阅读器、连接/能力提示。
+ * 三入口（助理 / 学习 / 知识库）、待确认与复习计数、账户（专注 / 退出）、命令面板（⌘K）、学习助手抽屉（⌘J，右侧打开）、引用阅读器、连接/能力提示。
  * 专注由用户主动进入（账户菜单），不再进入学习页时自动隐藏导航。
  */
 export function OpeningShellV3({ children }: { children: ReactNode }) {
@@ -48,6 +49,7 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const { recent, unavailable: recentUnavailable } = useRecentConversations(pathname);
   const dueCount = useDueReviewCount(pathname);
+  const shellCounts = useMemo(() => ({ pendingSuggestions: pendingCount, dueReviews: dueCount ?? null }), [pendingCount, dueCount]);
   const shellNav: ShellNav = { ...OPENING_NAV, isActive: (item, path) => navigationIsActive(item.route, path, search) };
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -108,9 +110,9 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   const accountMenu = <OpeningAccountMenu pathname={pathname} search={search} recent={recent} recentUnavailable={recentUnavailable} userLabel={userLabel} pendingCount={pendingCount} focusMode={focusMode} onToggleFocus={toggleFocus} onLogout={logout} logoutPending={logoutPending} />;
 
   return (
-    <ConversationCompanionProvider><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode: toggleFocus }}><StatusToastProvider>
+    <ConversationCompanionProvider><ShellCountsContext.Provider value={shellCounts}><WorkspaceLayoutContext.Provider value={{ focusMode, setFocusMode, toggleFocusMode: toggleFocus }}><StatusToastProvider>
       <AppShell
-        counts={{ ...(dueCount ? { review: dueCount } : {}), ...(pendingCount ? { today: pendingCount } : {}) }}
+        counts={{ ...(dueCount ? { courses: dueCount } : {}), ...(pendingCount ? { today: pendingCount } : {}) }}
         recent={[]}
         hideNav={focusMode}
         nav={shellNav}
@@ -136,6 +138,6 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
       <CommandPalette onClose={closePalette} onOpen={openPalette} open={paletteOpen} />
       <Suspense fallback={null}><AssistantDrawer /></Suspense>
       <CitationReaderHost />
-    </StatusToastProvider></WorkspaceLayoutContext.Provider></ConversationCompanionProvider>
+    </StatusToastProvider></WorkspaceLayoutContext.Provider></ShellCountsContext.Provider></ConversationCompanionProvider>
   );
 }

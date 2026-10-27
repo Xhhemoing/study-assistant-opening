@@ -25,7 +25,7 @@ function allowedReturn(value: string): boolean {
   if (!value.startsWith("/opening/") || value.includes("\\")) return false;
   try {
     const url = new URL(value, "https://study.invalid");
-    return url.origin === "https://study.invalid" && (["/opening/library", "/opening/cards", "/opening/review", "/opening/today", "/opening/sprint"].includes(url.pathname) || /^\/opening\/courses\/[0-9a-f-]{36}(?:\/study(?:\/span|\/matrix)?)?$/.test(url.pathname));
+    return url.origin === "https://study.invalid" && (["/opening/library", "/opening/cards", "/opening/review", "/opening/today", "/opening/courses", "/opening/sprint"].includes(url.pathname) || /^\/opening\/courses\/[0-9a-f-]{36}(?:\/study(?:\/span|\/matrix)?)?$/.test(url.pathname));
   } catch { return false; }
 }
 const integerQuery = z.string().regex(/^(0|[1-9]\d*)$/).transform(Number).pipe(z.number().int().nonnegative());

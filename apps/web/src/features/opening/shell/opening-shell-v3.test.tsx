@@ -67,9 +67,10 @@ describe("production V3 shell business wiring", () => {
   it.each([
     ["/opening/today", "", "/opening/today"],
     ["/opening/agent", "", "/opening/today"],
-    ["/opening/review", "", "/opening/review"],
-    ["/opening/review", "tab=cards", "/opening/review"],
-    ["/opening/courses/course-a", "mode=sprint", "/opening/today"],
+    ["/opening/review", "", "/opening/courses"],
+    ["/opening/review", "tab=cards", "/opening/courses"],
+    ["/opening/courses/course-a", "mode=sprint", "/opening/courses"],
+    ["/opening/search", "", "/opening/library"],
     ["/opening/assistant", "", "/opening/today"],
     ["/opening/settings/export", "", null],
   ])("selects exactly one destination for %s?%s", async (pathname, search, expected) => {
@@ -80,12 +81,12 @@ describe("production V3 shell business wiring", () => {
     const selected = nav.querySelectorAll('a[aria-current="page"]');
     expect(selected).toHaveLength(expected ? 1 : 0);
     if (expected) expect(selected[0]?.getAttribute("href")).toBe(expected);
-    expect(destinations).toEqual(["/opening/today", "/opening/review", "/opening/library"]);
+    expect(destinations).toEqual(["/opening/today", "/opening/courses", "/opening/library"]);
   });
 
   it("shows due reviews separately from pending suggestions and connects recent conversations", async () => {
     await render();
-    expect(desktopNavigation().querySelector('a[href="/opening/review"]')?.textContent).toContain("7");
+    expect(desktopNavigation().querySelector('a[href="/opening/courses"]')?.textContent).toContain("7项待复习");
     expect(desktopNavigation().querySelector('a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
     expect(host.querySelector('nav[aria-label="学习工作台导航（移动端）"] a[href="/opening/today"]')?.textContent).toContain("3项待确认建议");
     expect(host.querySelector('[aria-label="账户切换专注"]')?.textContent).toBe("建议 3");
@@ -99,7 +100,7 @@ describe("production V3 shell business wiring", () => {
     expect(searches.length).toBe(2);
     await act(async () => searches[searches.length - 1]!.click());
     expect(host.textContent).toContain("全局搜索已打开");
-    expect(host.querySelectorAll('a[href="/opening/review"]')).toHaveLength(2);
+    expect(host.querySelectorAll('a[href="/opening/courses"]')).toHaveLength(2);
   });
   it("shares focus state with the mounted workspace and ignores composition Escape", async () => {
     function Workspace() {

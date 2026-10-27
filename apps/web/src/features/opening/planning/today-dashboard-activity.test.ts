@@ -112,7 +112,7 @@ describe("Today teaching-activity CTA semantics (CT-03)", () => {
     );
     expect(html).toContain('data-today-primary-cta="true"');
     expect(html).toContain("开始学习");
-    expect(html).toContain('href="/opening/today"');
+    expect(html).toContain('href="/opening/courses"');
     expect(html).toContain("打开自由对话（次要）");
     expect(html).toContain("/opening/assistant?conversation=11111111-1111-4111-8111-111111111111");
   });

@@ -82,7 +82,7 @@ it("reads only metadata for due suggestions and preserves one mounted conversati
   expect(host.querySelector("textarea")).toBe(textarea); expect(host.querySelector('[aria-label="停止回答"]')).not.toBeNull();
   await act(async () => host.querySelector<HTMLAnchorElement>('[aria-label="新对话"]')!.click());
   expect(window.location.pathname + window.location.search).toBe("/opening/assistant?context=none");
-  expect(host.textContent).toContain("你好，今天想学什么？"); expect(host.textContent).not.toContain("为什么？");
+  expect(host.textContent).toContain("今天，接着往前一点。"); expect(host.textContent).not.toContain("为什么？");
   expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("");
   expect(api.cancelJob).not.toHaveBeenCalled(); expect(api.createConversation).toHaveBeenCalledOnce();
 });

@@ -111,7 +111,7 @@ describe("AI 主讲 entry path", () => {
   it("Today offers a course entry after confirming there is no activity to continue", async () => {
     await renderToday([], true);
     expect(container.textContent).toContain("从课程继续学习");
-    expect(container.querySelector('a[href="/opening/courses"]')?.textContent).toBe("选择课程");
+    expect([...container.querySelectorAll("a")].find(link => link.textContent === "选择课程")?.getAttribute("href")).toBe("/opening/courses?view=all");
     expect(container.querySelector("[data-teaching-continue-entry]")).toBeNull();
   });
 

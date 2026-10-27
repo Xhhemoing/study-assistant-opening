@@ -11,7 +11,7 @@ describe("start composer", () => {
     expect(populated).toContain("继续 3"); expect(populated).not.toContain("继续 4"); expect(populated).not.toContain("示例问题");
     const empty = renderToStaticMarkup(createElement(StartSuggestions, { suggestions: [], examples: ["示例问题"], onExample() {} }));
     expect(empty).toContain("示例问题");
-    for (const href of ["sprint", "cards", "search", "courses/new"]) expect(empty).toContain(`href="/opening/${href}"`);
+    for (const href of ["courses", "library/new", "search", "assistant"]) expect(empty).toContain(`href="/opening/${href}"`);
   });
   it("labels removable context and accepts an explicit attachment-only question", () => {
     const html = renderToStaticMarkup(createElement(Composer, { questionMode: true, startMode: true, draft: "", emptyText: "请帮我读题", contextChips: [{ id: "source", label: "题目照片" }], onRemoveContext() {}, onDraftChange() {}, onSubmit() {} }));

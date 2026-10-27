@@ -118,7 +118,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
   );
 }
 
-const countDescription = (id: string) => id === "today" ? "项待确认建议" : id === "review" ? "项待复习" : "项待完成";
+const countDescription = (id: string) => id === "today" ? "项待确认建议" : id === "courses" || id === "review" ? "项待复习" : "项待完成";
 
 function NavGroup({ items, isActive, compact, counts, divided = false }: { items: Feature[]; isActive: (item: Feature) => boolean; compact: boolean; counts: Partial<Record<string, number>>; divided?: boolean }) {
   return (

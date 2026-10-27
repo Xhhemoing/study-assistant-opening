@@ -1089,7 +1089,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const [proposalRailOpen, setProposalRailOpen] = useState(false);
   return <section inert={interactionDisabled} aria-label={startScreen ? "开始" : "学习对话"} className={`flex h-full min-w-0 bg-surface ${agent ? "flex-col xl:flex-row" : ""} ${inset ? "min-h-0 overflow-hidden" : "min-h-[400px] lg:min-h-0"}`}>
     <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${inset ? "" : agent ? "w-full" : "mx-auto w-full max-w-[720px]"} ${startScreen ? "justify-center px-4 py-8" : ""}`}>
-      {startScreen ? <h1 className="mb-5 text-ui font-medium text-text-2">{start?.greeting}</h1> : !embedded ? <TopBar label="对话顶栏"
+      {startScreen ? <div className="mb-5 space-y-1.5"><h1 className="text-title font-semibold tracking-[-0.01em] text-text">{start?.greeting}</h1>{start?.subtitle ? <p className="text-ui text-text-2">{start.subtitle}</p> : null}{start?.lead ? <div className="pt-3">{start.lead}</div> : null}</div> : !embedded ? <TopBar label="对话顶栏"
         title={<Heading className="min-w-0 truncate text-ui-lg font-semibold text-text">{task?.title || initialTitle || (learningAttempt ? "练习辅导" : "对话")}</Heading>}
         actions={<TopBarTools label="对话工具">
           <button type="button" className={v3ui.toolbarButton} aria-expanded={contextOpen} aria-controls="exploration-context" aria-pressed={contextOpen} disabled={interactionDisabled} onClick={() => setContextOpen(!contextOpen)}><BookOpen size={14} aria-hidden /><span className="hidden sm:inline">{selectedSourceIds.length ? `${selectedSourceIds.length} 份材料` : "参考资料"}</span><span className="sr-only sm:hidden">参考资料</span></button>

@@ -393,7 +393,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       ) : recorded ? (
         <div className="space-y-3">
           <p className="text-sm text-text" role="status">原答案已保存。</p>
-          <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={gradingPhoto.workSourceId ? gradingPhoto : undefined} completionAction={initialProblem ? { label: "结束练习", href: "/opening/today" } : undefined} onChanged={onRecorded} onUpdated={next => {
+          <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={gradingPhoto.workSourceId ? gradingPhoto : undefined} completionAction={initialProblem ? { label: "结束练习", href: "/opening/courses" } : undefined} onChanged={onRecorded} onUpdated={next => {
             const current = readPracticeDraft(scope, null, draft.id);
             if (!current || current.attemptId !== next.attemptId || current.start?.sessionId !== next.sessionId) return;
             setAutoGrade(false); setRecorded(next); patch({ observationId: next.id });

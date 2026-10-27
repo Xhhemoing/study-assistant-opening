@@ -1,4 +1,5 @@
 "use client";
+import { LearningSwitch } from "../shell/learning-switch";
 
 import { CourseCover, type CourseCoverProps } from "@aistudy/ui";
 import type { CourseGoal } from "@aistudy/contracts";
@@ -38,7 +39,7 @@ export function CourseList({ opening = false }: { opening?: boolean }) {
   const courses = useMemo(() => filterCourses(rows, query, state), [rows, query, state]);
   const createHref = opening ? "/opening/courses/new" : "/learn/courses/new";
   return <section className="flex h-full min-h-0 flex-col bg-bg text-text">
-    <PageHeader title="课程" action={<Link className={ui.primary} href={createHref}><Plus size={14} aria-hidden="true" />新建课程</Link>} />
+    <PageHeader title={opening ? "学习" : "课程"} action={<div className="flex items-center gap-2">{opening ? <LearningSwitch current="courses" /> : null}<Link className={ui.primary} href={createHref}><Plus size={14} aria-hidden="true" />新建课程</Link></div>} />
     <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <div role="group" aria-label="课程状态" className="mb-3 flex gap-1">{([{ value: "active", label: "进行中" }, { value: "archived", label: "已归档" }] as const).map((item) => <button className={`${ui.quiet} ${state === item.value ? "bg-accent-soft text-accent" : ""}`} type="button" key={item.value} aria-pressed={state === item.value} onClick={() => setState(item.value)}>{item.label}</button>)}</div>
       <div className="mb-4 flex flex-wrap items-center gap-2"><label className="relative min-w-0 flex-1 sm:max-w-xs"><Search size={13} aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-3" /><input aria-label="搜索课程" placeholder="搜索课程或描述…" className={`${ui.input} pl-8`} value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="ml-auto flex rounded border border-line p-0.5"><button type="button" aria-label="列表视图" aria-pressed={!grid} onClick={() => setGrid(false)} className={`${ui.icon} ${!grid ? "bg-accent-soft text-accent" : ""}`}><List size={14} aria-hidden="true" /></button><button type="button" aria-label="卡片视图" aria-pressed={grid} onClick={() => setGrid(true)} className={`${ui.icon} ${grid ? "bg-accent-soft text-accent" : ""}`}><LayoutGrid size={14} aria-hidden="true" /></button></div></div>

@@ -74,34 +74,15 @@ it("shows every existing course and the full course destination within learning"
   const courses = host.querySelector('[aria-label="我的课程"]');
   expect(courses?.querySelector('a[href="/opening/courses/course"]')?.textContent).toContain("线性代数");
   expect(courses?.querySelector('a[href="/opening/courses/old-course"]')?.textContent).toContain("已归档");
-  expect(courses?.querySelector('a[href="/opening/courses"]')?.textContent).toBe("全部课程");
+  expect(courses?.querySelector('a[href="/opening/courses?view=all"]')?.textContent).toBe("全部课程");
 });
 
-it.each([false, true])("offers a real AI draft input even with no courses (%s), without sending a model request", async noCourses => {
+it.each([false, true])("keeps asking in the assistant entry instead of a duplicate learning ask bar (%s)", async noCourses => {
   const host = await render(makeApi(), noCourses ? { state: { kind: "empty", courses: { status: "ready", items: [] } } } : {});
-  const input = host.querySelector<HTMLInputElement>('input[aria-label="向 AI 提问"]');
-  expect(input).not.toBeNull();
-  const form = input!.closest("form")!;
-  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-  expect(submit.textContent).toBe("继续提问");
-  expect(submit.disabled).toBe(true);
-  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(host.querySelector('input[aria-label="向 AI 提问"]')).toBeNull();
   expect(openAssistant).not.toHaveBeenCalled();
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "  解释矩阵的秩  ");
-    input!.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  expect(openAssistant).not.toHaveBeenCalled();
-  await act(async () => {
-    input!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-  });
-  expect(openAssistant).not.toHaveBeenCalled();
-  await act(async () => input!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true })));
-  await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-  expect(openAssistant).toHaveBeenCalledExactlyOnceWith("/opening/assistant", "解释矩阵的秩");
-  expect(input!.value).toBe("");
 });
+
 
 it("opens a task deep link and keeps review discoverable even with no course", async () => {
   const host = await render(makeApi(), { planning: true, focusTaskId: "task" });

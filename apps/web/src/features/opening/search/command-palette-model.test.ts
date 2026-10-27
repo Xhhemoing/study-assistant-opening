@@ -74,6 +74,6 @@ describe("command palette keyboard model", () => {
       "/opening/settings",
       "/opening/settings/advanced",
     ]));
-    expect(PALETTE_COMMANDS.find((command) => command.id === "materials")?.label).toBe("材料");
+    expect(PALETTE_COMMANDS.find((command) => command.id === "materials")?.label).toBe("资料");
   });
 });

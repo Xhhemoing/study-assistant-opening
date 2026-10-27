@@ -18,7 +18,7 @@ export function teachingAssistantContext(value: TeachingToolsContext): CurrentSt
       contentVersion: value.contentVersion, attemptId: learningAttempt?.id, itemVersionId: learningAttempt?.itemVersionId ?? undefined,
       purpose: "learning_help", label: value.unitTitle, fragment: value.unitText,
       ...(!questionBound && source && pinned ? { sourceId: source.sourceId, sourceVersion: version, page: source.page ?? undefined, chunkId: source.chunkId ?? undefined } : {}),
-      returnTo: value.activity.courseId ? `/opening/courses/${value.activity.courseId}/study` : "/opening/today" } };
+      returnTo: value.activity.courseId ? `/opening/courses/${value.activity.courseId}/study` : "/opening/courses" } };
 }
 
 export function spanPracticeEntryKey(courseId: string, mode: string, problemId: string, retestId?: string, newEvidenceEventId?: string): string {

@@ -53,7 +53,7 @@ describe("settings page split structure", () => {
     expect(html).toContain('data-advanced-fold="export"');
     expect(html).toContain('data-advanced-fold="danger"');
     expect(html).toContain('data-advanced-fold="developer"');
-    expect(html).toContain("默认入口与探索相关");
+    expect(html).toContain("默认入口");
     expect(html).toContain("导出与备份");
     expect(html).toContain("危险操作");
     expect(html).toContain("开发者");

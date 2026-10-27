@@ -2,10 +2,12 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { entryDestination } from "./entry-destination";
 
-type PreferenceResponse = { defaultEntry: "learn" | "explore" | "library" | null };
+type PreferenceResponse = { defaultEntry?: unknown };
 
-export function RootRedirect() {
+/** 根入口：读取已保存的默认入口后再跳转；release 与旧工作区共用，不先闪进某一页。 */
+export function RootRedirect({ release = false }: { release?: boolean }) {
   const router = useRouter();
   const [error, setError] = useState("");
 
@@ -28,7 +30,9 @@ export function RootRedirect() {
         }
         if (!response.ok) throw new Error();
         const body = await response.json() as PreferenceResponse;
-        router.replace(`/${body.defaultEntry ?? "learn"}`);
+        const destination = entryDestination(body.defaultEntry, release);
+        if (!destination) throw new Error("invalid-entry");
+        if (active) router.replace(destination);
       })
       .catch(() => {
         if (active) setError("暂时无法连接学习空间，请检查网络后重试。");
@@ -39,7 +43,7 @@ export function RootRedirect() {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [router]);
+  }, [router, release]);
 
   if (error) {
     return (

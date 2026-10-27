@@ -28,11 +28,11 @@ import { TeachingLoopTrialEmpty } from "../teaching/teaching-loop-trial-empty";
 import { TaskLearningActionContext } from "./task-row-actions";
 import { useNextStepMetrics } from "./use-next-step-metrics";
 import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
-import { openAssistantDrawer } from "../assistant/assistant-entry";
 import { TodayCourseList } from "./today-course-list";
-import { Sparkles } from "lucide-react";
 import { finishedTodayActivity } from "./today-finished";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { LearningSwitch } from "../shell/learning-switch";
+import { LEARNING_HOME_HREF } from "../shell/destinations";
 
 /** 一键学习会话入口：连续复习 → 当前学习单元。 */
 export function todaySessionHref(next: { href: string; label: string }): string {
@@ -47,29 +47,6 @@ export function friendlyTodayLabel(date: Date, timeZone?: string): string {
     return localDateKey(date, timeZone);
   }
 }
-
-/** 用户在学习页起草，继续到助手确认后发送。 */
-export function TodayAskBar() {
-  const [draft, setDraft] = useState("");
-  const composing = useRef(false);
-  return <div className="px-4 pb-2 sm:px-5" data-today-ask="true">
-    <form className="flex flex-wrap items-center gap-2 rounded-panel border border-line bg-surface px-3 py-2" onSubmit={event => {
-      event.preventDefault();
-      const text = draft.trim();
-      if (!text || composing.current) return;
-      openAssistantDrawer("/opening/assistant", text);
-      setDraft("");
-    }}>
-      <Sparkles aria-hidden="true" size={16} className="shrink-0 text-ai-2" />
-      <input aria-label="向 AI 提问" placeholder="问 AI：概念、题目或资料里的任何一段" value={draft} onChange={event => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
-        if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
-      }} className="min-h-10 min-w-0 flex-1 bg-transparent text-ui text-text placeholder:text-text-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
-      <button type="submit" className={ui.secondary} disabled={!draft.trim()}>继续提问</button>
-    </form>
-  </div>;
-}
-
-
 
 /** Visible outcome when the Today primary CTA runs with/without an existing activity. */
 export type TodayPrimaryCtaPlan =
@@ -145,7 +122,7 @@ export function TodayDashboard({
   const [task, setTask] = useState<StudyTask | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => planning || shouldOpenTodayQueue(focusTaskId));
   const [reloadToken, setReloadToken] = useState(0);
-  const dueCardCount = useDueReviewCount(planning ? "/opening/settings/planning" : "/opening/today") ?? 0;
+  const dueCardCount = useDueReviewCount(planning ? "/opening/settings/planning" : LEARNING_HOME_HREF) ?? 0;
   const [activities, setActivities] = useState<TeachingActivity[]>([]);
   const [activityLoad, setActivityLoad] = useState<"loading" | "ready" | "error">("loading");
   const [selectedActivity, setSelectedActivity] = useState<TeachingActivity | null>(null);
@@ -360,15 +337,15 @@ export function TodayDashboard({
   const sessionPrimary = sessionStudy && dueCardCount > 0
     ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>{finishedToday ? `先复习 ${dueCardCount} 张卡，再学下一节` : `开始学习 · 先复习 ${dueCardCount} 张卡`}</Link>
     : null;
-  const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "今日学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
-  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
+  const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} action={planning ? undefined : <LearningSwitch current="today" dueCount={dueCardCount} />} /></div>;
+  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><nav aria-label="不建课也能开始" className="flex flex-wrap items-center gap-2 px-5 pb-4 text-meta text-text-2"><span>不建课也可以：</span><Link href="/opening/review" className={ui.quiet}>复习卡片</Link><Link href="/opening/today" className={ui.quiet}>问助理</Link><Link href="/opening/library/new" className={ui.quiet}>写笔记</Link></nav></div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex min-h-full flex-col bg-bg text-text">
         {heading}
-        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
+        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href={LEARNING_HOME_HREF}>重新读取</Link></p> : null}
         {!planning ? <div ref={nextStepMetrics.ref} onClickCapture={event => {
           if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
         }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
@@ -396,8 +373,7 @@ export function TodayDashboard({
                 自由对话
               </Link>
             }
-          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
-          <TodayAskBar />
+          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href={`${LEARNING_HOME_HREF}?view=all`}>选择课程</Link>} /> : null}
           {ctaError ? (
             <p className="px-4 text-xs text-danger sm:px-5" role="alert">{ctaError}</p>
           ) : null}
@@ -412,7 +388,7 @@ export function TodayDashboard({
         <div className="flex min-h-0 flex-1 flex-col">
           <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
             {planning ? <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起任务列表" : "查看任务列表"}</button> : <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>}
-            {planning ? <><Link href="/opening/today" className={ui.quiet}>返回今天</Link><Link href="/opening/review" className={ui.quiet}>复习</Link></> : null}
+            {planning ? <><Link href={LEARNING_HOME_HREF} className={ui.quiet}>返回学习</Link><Link href="/opening/review" className={ui.quiet}>复习</Link></> : null}
           </nav>
           {planning ? <div
             id="today-queue"

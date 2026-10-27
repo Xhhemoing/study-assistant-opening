@@ -27,11 +27,11 @@ export type Feature = {
 };
 
 export const FEATURES: Feature[] = [
-  { id: "today", route: "/opening/today", label: "学习", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/planning/today-dashboard" },
+  { id: "today", route: "/opening/today", label: "助理", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/start/assistant-home" },
   { id: "suggestions", route: "/opening/suggestions", label: "建议", icon: "start", placement: "none", depth: 0, layout: "redirect", parent: "today", source: "app/(opening)/opening/suggestions → /opening/today" },
   { id: "agent", route: "/opening/agent", label: "助理", icon: "assistant", placement: "none", depth: 1, layout: "workspace", parent: "today", source: "features/opening/assistant/agent-workspace" },
   { id: "assistant", route: "/opening/assistant", label: "对话", icon: "assistant", placement: "none", depth: 1, layout: "thread", parent: "today", source: "features/opening/assistant/assistant-entry" },
-  { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "none", depth: 1, layout: "list", parent: "today", source: "app/(opening)/opening/courses/page" },
+  { id: "courses", route: "/opening/courses", label: "学习", icon: "courses", placement: "core", depth: 0, layout: "list", source: "features/opening/planning/today-dashboard（学习首页）/ courses/course-list" },
   { id: "course-new", route: "/opening/courses/new", label: "新建课程", icon: "add", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/opening/courses/course-create" },
   { id: "course", route: "/opening/courses/[id]", label: "课程空间", icon: "courses", placement: "none", depth: 1, layout: "course", parent: "courses", source: "features/opening/courses/course-detail" },
   { id: "course-exam", route: "/opening/courses/[id]/exam", label: "考试", icon: "exam", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/opening/exam-sprint/course-exam-view" },
@@ -40,11 +40,11 @@ export const FEATURES: Feature[] = [
   { id: "study-matrix", route: "/opening/courses/[id]/study/matrix", label: "矩阵变换", icon: "canvas", placement: "none", depth: 2, layout: "canvas", parent: "courses", source: "features/opening/courses/course-matrix-lesson" },
   { id: "study-summary", route: "/opening/courses/[id]/study/summary", label: "本次小结", icon: "courses", placement: "none", depth: 2, layout: "summary", parent: "courses", source: "新增：读取学习会话汇总（练习服务）" },
   { id: "review-session", route: "/opening/review/session", label: "复习会话", icon: "review", placement: "none", depth: 2, layout: "session", parent: "review", source: "新增：复用 features/opening/review 复习服务与 cards/card-review-view 的评分接口" },
-  { id: "review", route: "/opening/review", label: "复习", icon: "review", placement: "core", depth: 0, layout: "list", source: "features/opening/review/review-hub" },
-  { id: "library", route: "/opening/library", label: "资料", icon: "library", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/library/page" },
+  { id: "review", route: "/opening/review", label: "复习", icon: "review", placement: "none", depth: 1, layout: "list", parent: "courses", source: "features/opening/review/review-hub" },
+  { id: "library", route: "/opening/library", label: "知识库", icon: "library", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/library/page" },
   { id: "library-new", route: "/opening/library/new", label: "上传资料", icon: "upload", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/opening/editor/new-document" },
   { id: "document", route: "/opening/library/[id]", label: "资料", icon: "library", placement: "none", depth: 2, layout: "reader", parent: "library", source: "features/opening/editor/document-editor（原生文档）/ PDF·照片阅读" },
-  { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "none", depth: 1, layout: "list", parent: "today", source: "features/opening/exam-sprint/sprint-course-chooser" },
+  { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "none", depth: 1, layout: "list", parent: "courses", source: "features/opening/exam-sprint/sprint-course-chooser" },
   { id: "cards", route: "/opening/cards", label: "卡组", icon: "cards", placement: "none", depth: 1, layout: "list", parent: "review", source: "features/opening/review/review-route (legacyCardsHref)" },
   { id: "search", route: "/opening/search", label: "搜索", icon: "search", placement: "none", depth: 1, layout: "list", parent: "library", source: "features/opening/search/search-workspace" },
   { id: "settings", route: "/opening/settings", label: "设置", icon: "settings", placement: "system", depth: 0, layout: "settings", source: "app/(opening)/opening/settings/page" },

@@ -447,7 +447,7 @@ export function TeachingWorkspace({
         label: units[currentIndex + 1]?.questionBlockId ? "下一题" : "下一单元",
         disabled: positionBusy,
         onClick: () => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); },
-      } : { label: "结束练习", href: conversationObjectHref(liveActivity.courseId ? `/opening/courses/${liveActivity.courseId}` : "/opening/today", originalConversationId) },
+      } : { label: "结束练习", href: conversationObjectHref(liveActivity.courseId ? `/opening/courses/${liveActivity.courseId}` : "/opening/courses", originalConversationId) },
     }),
     [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady, units, currentIndex, positionBusy, navigateUnit, originalConversationId],
   );

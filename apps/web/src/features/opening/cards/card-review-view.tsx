@@ -192,8 +192,8 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
             title="这组记忆卡片已经处理完毕"
             description={`本次完成 ${state.items.length} 张。`}
             action={
-              <Link href="/opening/today" className={secondaryButtonClass}>
-                返回开始
+              <Link href="/opening/courses" className={secondaryButtonClass}>
+                回到学习
               </Link>
             }
           />

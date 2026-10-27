@@ -29,14 +29,14 @@ export function TodayResumeBody({
   }
   if (state.kind === "error") {
     return (
-      <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" action={<Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>} />
+      <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" action={<Link href="/opening/courses" className={secondaryButtonClass}>重新读取</Link>} />
     );
   }
   if (hasNoTodayCourses(state)) return <TodayNoCourses />;
   const item = state.continueItem;
   const ctaLabel = todayActivityCtaLabel(activity ?? null);
   // Without an interactive handler, land on Today dashboard (activity wiring lives there).
-  const primaryHref = "/opening/today";
+  const primaryHref = "/opening/courses";
   const assistantHref = item
     ? `/opening/assistant?conversation=${encodeURIComponent(item.conversationId)}`
     : "/opening/assistant";

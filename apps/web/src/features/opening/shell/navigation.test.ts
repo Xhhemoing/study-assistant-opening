@@ -5,31 +5,32 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 describe("workspace navigation", () => {
   it("has exactly the three learning destinations in order", () => {
     expect(openingNavigation().map(item => [item.href, item.label, item.group])).toEqual([
-      ["/opening/today", "学习", "core"],
-      ["/opening/review", "复习", "core"],
-      ["/opening/library", "资料", "core"],
+      ["/opening/today", "助理", "core"],
+      ["/opening/courses", "学习", "core"],
+      ["/opening/library", "知识库", "core"],
     ]);
   });
   it.each([
     ["/opening/today", "/opening/today"],
-    ["/opening/courses", "/opening/today"],
-    ["/opening/courses/course-a/study", "/opening/today"],
-    ["/opening/courses/course-a?mode=sprint", "/opening/today"],
+    ["/opening/courses", "/opening/courses"],
+    ["/opening/courses/course-a/study", "/opening/courses"],
+    ["/opening/courses/course-a?mode=sprint", "/opening/courses"],
     ["/opening/agent", "/opening/today"],
     ["/opening/assistant", "/opening/today"],
-    ["/opening/sprint", "/opening/today"],
+    ["/opening/sprint", "/opening/courses"],
+    ["/opening/practice", "/opening/courses"],
     ["/opening/suggestions", "/opening/today"],
-    ["/opening/cards/session", "/opening/review"],
-    ["/opening/review?tab=cards", "/opening/review"],
+    ["/opening/cards/session", "/opening/courses"],
+    ["/opening/review?tab=cards", "/opening/courses"],
     ["/opening/library/doc-1", "/opening/library"],
     ["/opening/search", "/opening/library"],
   ])("keeps one owner for %s", (pathname, expected) => {
     expect(openingNavigation().filter(item => navigationIsActive(item.href, pathname)).map(item => item.href)).toEqual([expected]);
   });
   it("keeps route boundaries and settings activation intact", () => {
-    expect(navigationIsActive("/opening/today", "/opening/coursesx")).toBe(false);
-    expect(navigationIsActive("/opening/review", "/opening/cardsx")).toBe(false);
-    expect(navigationIsActive("/opening/review", "/opening/cards")).toBe(true);
+    expect(navigationIsActive("/opening/courses", "/opening/coursesx")).toBe(false);
+    expect(navigationIsActive("/opening/courses", "/opening/cardsx")).toBe(false);
+    expect(navigationIsActive("/opening/courses", "/opening/cards")).toBe(true);
     expect(navigationIsActive("/opening/today", "/learn/courses/123")).toBe(false);
     expect(navigationIsActive("/opening/settings/connections", "/opening/settings/connections")).toBe(true);
   });
