@@ -1,5 +1,7 @@
 # Review & test gates (Paula 2026-10-11)
 
+> 历史切片验收规则（2026-10-11）。当前日常开发、评审粒度和有效检查复用以 [现行工作流](../../../operations/agent-workflow.md) 为准；浏览器验收遵循根 AGENTS.md 的用户约定。本页仅解释旧任务记录，不为新改动默认增加逐片 ACCEPT、重复测试或 evidence 文件；具体已约定的安全、发布和验收要求仍保留。
+
 Applies to all opening-release / AI-led v2 slices. **Implementer ≠ Accepter.** Status `verified` / **ACCEPT** only after an independent Accept that re-ran named tests (or honestly marked them `not_run`).
 
 ## After every IMPLEMENT

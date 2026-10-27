@@ -29,7 +29,8 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 ## 日常开发默认路径
 
 - 先定位相关模块，简述实现选择后直接推进。需求明确的小改动无需额外审批、独立设计/计划文件或逐项验收报告；只有影响产品方向、数据迁移或跨包 API 的关键歧义才先澄清。
-- 一次交付一个可用切片。只加载当前任务需要的技能和文件；子 Agent 用于互不冲突的独立任务，避免重复读取、实现和检查。
+- 一次交付一个完整可用结果，其下组件、文件和实现任务可连续推进，不逐个插入独立 review、PR 或全量检查。普通低风险改动由实现者自查；复杂、跨模块或涉及授权、隐私、事务、迁移、生命周期和数据正确性的改动保留独立只读评审，高风险边界提前定向检查，具体节奏见多工具工作流。
+- 只加载当前任务需要的技能和文件；子 Agent 用于有独立收益的调查、实现或评审，不为每个小板块固定唤醒一组角色。已有页面的小修复沿用现有设计，不自动触发新界面设计流程。
 - 日常只运行最接近改动的测试；TypeScript 变更补所属包类型检查，跨包公开类型变化再扩到受影响消费方。文档/注释变更检查 diff 即可，不启动服务或全套测试。
 - 单元测试指定 `--project unit` 和相关文件；集成/handler 测试按改动选择。不要先跑包含所有项目的 `npm test`，又单独重复跑 integration/handler。
 - CI/runner 相关改动才考虑 `verify:ci`。完整 lint/typecheck/test/build 留给现有 CI 或明确请求的完整检查；没有新修改、新失败或未解决疑点不重复执行。
@@ -39,7 +40,11 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 
 ## 多工具协作
 
-开工前读 [docs/STATUS.md](docs/STATUS.md)，收工时更新自己负责的行。Claude Code 负责难的部分（架构、migration、权限/并发、跨包、集成与合并）并写任务卡；Grok Bot 照任务卡实现边界清楚的切片；pi 用不同模型做只读第二审查。分工、任务卡模板和可用模型见 [多工具开发分工](docs/operations/agent-workflow.md)，它取代 `docs/operations/codex-team.md` 中的旧角色与模型路由。同一文件只允许一个写入者，最多 3 个活跃 worktree。分工本身不构成 commit、push、合并或发布授权。
+开工前读 [docs/STATUS.md](docs/STATUS.md)，收工时更新自己负责的行。当前主线程负责统筹、集成和交付；Claude Code、Grok Bot、pi 按可用能力和任务风险分工，不要求每个改动依次转交全部工具。分工、任务卡模板和评审时机见 [多工具开发分工](docs/operations/agent-workflow.md)，它取代 `docs/operations/codex-team.md` 中的旧角色与模型路由。分工本身不构成 commit、push、合并或发布授权。
+
+- 本项目最多同时运行 3 个子 Agent，可为 3 名独立实现者，覆盖通用的两名实现者上限。调查和评审共用这 3 个名额；需要评审时等待名额释放，不额外启动第 4 个子 Agent。独立任务不足 3 个时不凑数。
+- 普通子 Agent 默认使用 `gpt-6.1-sol`、`high`；委派工具支持时，在 spawn 参数中显式设置模型与强度。
+- 同一文件只允许一个写入者；公共契约、锁文件、schema、授权和事务协议由主线程协调。优先复用合适的 checkout 和分支，目录互不冲突时可共享 checkout；确需隔离或并行才新建 worktree，不强制每名 Agent 一个 worktree，仍最多 3 个活跃 worktree。
 
 ## 防御逻辑的边界
 
@@ -74,4 +79,4 @@ The knowledge graph lives in `graphify-out/` (ignored; never commit it). When th
 
 - For codebase questions, run `graphify query "<question>"` when `graphify-out/graph.json` exists; use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. Use `graphify-out/wiki/index.md` for broad navigation and read `GRAPH_REPORT.md` only for architecture review or when queries are not enough.
 - Dirty `graphify-out/` files are expected and are not a reason to skip graphify, unless the task is about stale graph output or the user says not to use it.
-- After a coherent task or slice, run `graphify update .` once (AST-only, no API cost), not after every edit.
+- Graph maintenance is on demand, not a routine completion gate. After source changes, mark an existing graph stale using its `graphify-out/needs_update` flag; skip documentation/comment-only changes. Check the flag before queries: stale graphs are navigation only, and current relationships require reading current source or a requested `graphify update .`. Do not auto-refresh per task, commit, status reply or batch; do not start silent background updates. See `docs/operations/agent-workflow.md` for maintenance and output boundaries.

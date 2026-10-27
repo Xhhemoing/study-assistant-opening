@@ -4,22 +4,32 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `4e37a1c5`；[该提交 push CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40275247893) |
+| 开发主干 | `feat/opening-release` @ `4bd1e8b7`，PR #134 已合入；[该提交 push CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40433699299) 运行中 |
 | 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
-| 最新候选 | [整合草稿 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 当前 head；覆盖 WP0.3–WP2.3/2.5 及后续交互修复，尚未合并/部署 |
-| 候选检查 | `a0c6511e` 远端 Worker/PDF、Lint、类型、单元/契约、集成、handler 及计划/技术检查通过；综合任务达到 45 分钟上限被取消，浏览器日志已记录 12 项失败、未完整结束，后续构建未到达。完整 CI 未通过 |
-| 当前工作 | 5 份浏览器脚本同步三导航、三设置页和标题目录下拉，保留 axe、键盘、原题答案/提示曝光及权限断言；本批未执行本地检查或浏览器。新账户冒烟及 PDF 切换/重试仍待用户验收 |
+| 最新候选 | [整合 PR #134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) 已合入 `4bd1e8b7`；尚未部署 |
+| 候选检查 | `5aa2572b` [完整 CI 通过](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40384100343)：综合检查（浏览器 95 通过/3 跳过、构建通过）及 Worker/PDF 成功；用户新账户五步与真实模型验收仍待完成 |
+| 当前工作 | 合并提交 push CI 运行中；正式发布前仍须核对备份恢复、对象存储及配置备份，WP0.8 用户浏览器验收和真实模型验收未完成。WP2.4 和 P3 的其他前置仍待核对，整体计划未完成 |
 
-## 本轮开放 PR
+## 开发效率优化（2026-10-26）
+
+- 已同步当前工作区的连续开发、集中评审、有效检查复用及按需图谱规则；历史逐片 ACCEPT 规则只解释旧任务。普通开发不等待图谱刷新，陈旧图仅导航；安全、发布与现有 CI 保留。根目录入口已指向本看板。
+- 已实测结构刷新实验：总450.17秒，其中 AST/跨文件处理422.01秒、清理导出26.93秒；与历史完整刷新446–496秒相比无明确提速，未采纳新增脚本。实验与原始图备份仅留私有位置；原图已恢复并标待更新，SQL解析依赖仍缺失。
+- 实验5项小图回归通过、独立只读核验无阻断；最终交付为规则/入口调整，文档一致性、链接、UTF-8及差异检查按本轮核对。不据此宣称产品、浏览器或持续开发吞吐已验收；未改 CI、依赖或线上，无本轮提交/推送。
+## 三任务并行开发（2026-10-26）
+
+- 按用户要求，项目允许最多 3 个并行子 Agent，可同时承担 3 个独立实现任务；调查、实现和评审共用名额，主线程负责依赖、共享协议、集成和最终交付。任务不足或存在语义依赖时按实际并行度安排。
+- 本轮同步项目指令和协作流程，并固定项目 Codex 并发与子 Agent 默认模型。保留最多 3 个活跃 worktree、单文件单写者、共享数据库与重检查串行、复杂结果独立评审及用户浏览器验收。
+- 项目配置 TOML 解析、CLI 配置加载检查、指令/流程副本一致性及 diff 空白检查通过；定向独立文本核验无阻断。CLI 未展示字段来源及合并后值，未验证本会话热加载；三任务开发的端到端提速和产品质量尚未实测。本轮不涉及产品源码、依赖、CI 或线上配置，不提交或推送。
+## 本轮整合 PR
 
 | PR | 一句话说明 | 当前验证 |
 | --- | --- | --- |
-| [#134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) | 学习、助理、设置、默认 AI 与遗留入口整改整合 | draft/open；当前 head 的 CI 与用户浏览器验收待完成 |
+| [#134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) | 学习、助理、设置、默认 AI 与遗留入口整改整合 | 已合入 `4bd1e8b7`；合并提交 push CI 运行中，待用户浏览器验收与部署 |
 
 ## 阻塞与下一步
 
-- 始终最多 2 个开放功能 PR，当前仅 #134；被替代的 [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)（`5b42fb03`）和 [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)（`e8317cab`）可从原 PR/分支恢复。下列 9 项仅延期，不算完成。
-- WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；合并前仍需最新主干与 WP0.8 验证。
+- 始终最多 2 个开放功能 PR，当前无开放功能 PR；被替代的 [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)（`5b42fb03`）和 [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)（`e8317cab`）可从原 PR/分支恢复。下列 9 项仅延期，不算完成。
+- WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；相关整改已合入，仍需核对最新主干与 WP0.8 验证。
 - [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
 - 测试期每日不限额已实现；服务器默认模型与密钥存在性已只读核实，部署后启用无限模式及真实调用仍待完成，尚未修改线上配置。
 - 模型配置互斥限当前页面实例；普通保存结果未知时需确认服务器请求已结束后重新打开，不能从一次 GET 推断保存完成。跨标签页写入仍遵循现有服务器行为。
