@@ -1,14 +1,14 @@
 # 项目状态
 
-更新：2026-10-27。远端/线上行保留其注明日期的已核实状态；本地学习闭环候选见下方。
+更新：2026-10-28。
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `4bd1e8b7`，PR #134 已合入；[该提交 push CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40433699299) 已通过 |
-| 线上进程 | 2026-10-26 只读核实 Web / Worker 均运行 `189546c7`；health 为 ok 但未返回 commit / builtAt。默认模型已有配置，无限日额度尚未启用 |
-| 最新候选 | [学习闭环 PR #135](https://github.com/Xhhemoing/study-assistant-opening/pull/135)，包含导师编排、M2/M3、学习证据与 Luna 视觉资料链；用户已授权提交合并，未授权本轮部署 |
-| 候选检查 | PR #135 最新 CI 为本轮合并依据；本地近邻单元、数据库/HTTP 集成、类型及 lint 的覆盖与限制见下方。人工浏览器、真实模型质量和长期学习效果仍待验收 |
-| 当前工作 | 完成 CI 发现的问题修复与交叉复核，通过现有 CI 后合入开发主干。正式发布仍需应用 smoke 和数据库/对象存储一致备份；本机 beta/Hermes 保持现有运行版本，整体计划尚未验收完成 |
+| 开发主干 | `feat/opening-release` @ `177ae423`，PR #135 已于 2026-10-28 合并；[主干 push CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40611932284) 已通过 |
+| 线上版本 | 运行 `4bd1e8b7`；health 为 ok，但 commit 字段为空，界面不显示版本号（M0「版本可见」未完成） |
+| 开放 PR | 1 个：M0 部署前收口（未配置视觉模型时上传解析退回本地提取；状态与分工整理） |
+| 当前工作 | M0 收口：部署前异家族只读审查 → 修确定阻塞 → 部署与迁移 0101–0103 等用户确认 → 部署后验收 Worker 队列消费、合成 PDF 上传解析、一次真实文本模型与视觉模型调用 |
+| 待验收 | 浏览器体验、真实模型质量、长期学习效果均待用户验收或尚未测量（unknown） |
 
 ## 本轮提交与合并整理（2026-10-27）
 
@@ -21,25 +21,18 @@
 
 ## Luna 视觉资料接入（2026-10-27，原始开发记录；当前提交见上）
 
-- 目标：保留原生文本，把 PDF 扫描页、手写、公式和图表，以及 JPG/PNG/WebP 照片，接入资料识别、检索、课程教学、作答批改和既有学习证据链。有效工作区为 `.agent_workspace/wp0-remediation`，基于 `2e673010` 的未提交候选；复用三个 `gpt-6.1-sol/high` 代理实施与交叉评审。产品视觉任务默认选择已配置的 `gpt-6-luna`，保留用户明确的任务路由与手动锁定；不会自动猜选另一供应商。
+- 目标：保留原生文本，把 PDF 扫描页、手写、公式和图表，以及 JPG/PNG/WebP 照片，接入资料识别、检索、课程教学、作答批改和既有学习证据链。基于 `2e673010` 的未提交候选；复用三个 `gpt-6.1-sol/high` 代理实施与交叉评审。产品视觉任务默认选择已配置的 `gpt-6-luna`，保留用户明确的任务路由与手动锁定；不会自动猜选另一供应商。
 - 识别按原始资料版本和物理页持久化忠实转写、图表描述、不确定项、模型归属及费用操作标识，保留原生提取内容。普通文字 PDF 不调用视觉识别；Docling 保留真实原生/OCR 元数据，混合页按布局及嵌入图片识别，分段缓存使用 `v4-visual`。PPTX 继续既有原生文本路径，本轮未增加 PPTX 原图渲染。
 - 转写和描述写入既有 chunks/index 队列及检索，教学按检索排名核对最多三页原图，并让发布引用与实际发送内容一致，其余页继续可检索。批改区分学生原稿与参考资料，支持一页作答和三页参考；文字作答遇视觉题同样走视觉模型与媒体预算。原题引用精确绑定 chunk、版本及物理页，不使用另一同页片段冒充。识别本身不写“已掌握”或“正确”，沿用现有作答、证明反馈、校正版本及复测证据规则。
 - 交叉评审修复了：相同内容解析重放导致引用 ID 变化；预检后引用丢失回滚已发题答案；文字作答的视觉参考误走纯文本预算；旧 PDF 版本原图误读；原生页误标扫描；带图 PPTX 误入 PDF/照片识别。引用失效时仍保存原答案和合法作答照片，实际批改继续严格拒绝；异工作区、隐私排除、版本和页码保护不放松。确认未发送的付费请求可以恢复，发送结果未知时不另起请求；取消、隐私变更和失去任务租约不能发布识别结果。
-- 非浏览器验证：真实原生/扫描 PDF 各五页转换退出 0。原生版第一页无视觉标记，公式/表格/手写页有对应标记，五页原生文字逐字未变；扫描版五页全部触发视觉。真实 PDF→PNG 两项检查通过。路由、输出格式、预算、教学/批改、解析与照片准入的近邻单元及定向 lint 已通过；共享包、数据库、AI、Web/Worker 类型检查已通过。数据库主批 8 文件 107 项中 106 通过，剩余为异工作区照片拒绝码断言与实际 `CONFLICT` 不一致，已修正测试预期，该文件 7 项定向复查全部通过；真实 HTTP handler 2 文件 12 项通过。数据库用隔离 PostgreSQL，模型端为受控 provider；首次 handler 检查因隔离 Redis 缺失及 Windows 配置路径错误失败，修正并确认 PONG 后原命令通过，未修改生产逻辑或限流。最终 Worker 类型检查及 PPTX 兼容回归 16 项通过。日志保留于本机临时目录 `aistudy-pg-test-20261027` 的 `luna-integration-accepted.log`、`luna-admission-recheck.log`、`luna-handler-final.log`、`luna-types-verified.log`、`luna-worker-final.log`；失败日志未覆盖。完整全仓 CI、浏览器和本轮业务 API 真实付费模型质量尚未验收。
+- 非浏览器验证：真实原生/扫描 PDF 各五页转换退出 0。原生版第一页无视觉标记，公式/表格/手写页有对应标记，五页原生文字逐字未变；扫描版五页全部触发视觉。真实 PDF→PNG 两项检查通过。路由、输出格式、预算、教学/批改、解析与照片准入的近邻单元及定向 lint 已通过；共享包、数据库、AI、Web/Worker 类型检查已通过。数据库主批 8 文件 107 项中 106 通过，剩余为异工作区照片拒绝码断言与实际 `CONFLICT` 不一致，已修正测试预期，该文件 7 项定向复查全部通过；真实 HTTP handler 2 文件 12 项通过。数据库用隔离 PostgreSQL，模型端为受控 provider；首次 handler 检查因隔离 Redis 缺失及 Windows 配置路径错误失败，修正并确认 PONG 后原命令通过，未修改生产逻辑或限流。最终 Worker 类型检查及 PPTX 兼容回归 16 项通过。日志保留在仓库外的私有位置；失败日志未覆盖。完整全仓 CI、浏览器和本轮业务 API 真实付费模型质量尚未验收。
 - 启用前提：应用数据库执行新增 `0103_source_visual_recognitions.sql`，统一构建并重启同一候选的 Web/Worker；在 `/opening/settings/ai` 配置供应商地址、真实 API key、`gpt-6-luna` 图片能力、实际输入/输出与媒体价格、媒体输入上限及预算。示例的零价格只是未配置占位，不能直接当免费可用配置。无需另买专用 OCR key。当前运行的本机 beta 和 Hermes 均未在本轮升级，0103 仅在隔离测试数据库应用；回退应停止视觉解析并回退应用，保留原件、学习事实、费用记录及新增识别缓存表，不能直接删表或重置已发送记录。
 - 用户浏览器验收（待完成）：完成上述配置后，从资料入口上传原生文字 PDF、扫描/公式/图表 PDF 和手写照片，确认解析结果保留原文并标明转写与不确定项；将资料加入课程并生成教学内容，检查引用物理页与原图一致；提交文字或作答照片，确认批改对应原题、可保存识别校正及进入原有复测流程。缺少模型/额度、取消和旧引用应显示真实不可用状态，原答案不丢失。已有解析成功的旧资料不会自动产生付费回填，新上传及失败解析重试使用本链路。浏览器待验收不阻塞后续开发。
 
 ## 本机隔离测试版（2026-10-27）
 
-- 按用户选择，将有效工作区当前未提交源码构建并运行成本机测试版：`http://127.0.0.1:3100/register`。包含本地学习闭环、照片校正、跨课技能和笔记关联候选；Git起点为`2e673010`，不是这些改动的已提交版本。本轮未提交、推送、合并或连接/修改Hermes。
-- Web生产预览构建与Worker类型检查退出0。独立PostgreSQL 16已应用全部102项迁移；Redis、MinIO、认证密钥及模型密钥加密配置均为beta专用，业务数据在有效工作区`.local/beta-20261027`，未导入线上账号或资料。全角色Worker取得当前PID、候选路径及有效期对应的readiness；health为ok。health的commit字段为null，不能从该字段推导本地改动的Git身份。
-- 真实HTTP检查通过：新用户注册、登录/session、今日与模型设置读取、课程创建及最新学习路线读取、PDF上传/逐字节原件下载、完整Worker真实PDF解析与内容读取。初次smoke缺少today必需date参数返回422，修正调用后通过；未放松接口校验。独立只读评审推动修复PID复用归属、tsx父进程遗留消费者及仅检查Web健康的误报问题，定向复核无剩余确定阻断。
-- 最终交付的`Stop-Beta.ps1`、`Start-Beta.ps1`已实测完整停止/重启，并再次验证登录、课程路线、解析状态与原件字节保留。首次数据库由沙箱身份创建/运行，跨身份停止被拒绝；已用原身份安全停止并统一为本机用户运行，随后完整停启退出0。当前服务保持运行；重启电脑后需手动启动。运行时仍复用既有临时目录的PG/Redis程序及项目根parser/离线缓存，需保留这些路径。
-- 操作入口和前提见[本机使用说明](../.local/beta-20261027/使用说明.md)；非浏览器smoke结果在同目录`smoke-result.json`。`environment.json`和`smoke-account.json`是忽略的私有配置，不提交。停止保留数据；0101/0102不直接逆迁移，回退采用停止测试版并保留新表和事实。
-- 本机未发现可用模型密钥，测试版提供`/opening/settings/ai`自行配置模型、密钥及预算；未执行真实/付费模型调用。浏览器交互、视觉、照片识别质量和学习成效待用户验收；本轮运行证据不替代全仓库CI、正式发布或总计划剩余验收。
-- 部署期间同一开发工作区另有Luna/OCR、视觉批改及模型路由改动，新增0103。用户明确选择保留已构建测试版、后续另行更新。最初Worker直接加载开发目录，停启后带入新视觉识别装配；新增PDF真实失败，数据库原始错误为缺少`opening_source_visual_recognitions`。独立调查确认新解析器在Docling默认backend清理parsed_page后可能将原生文字误判scan，单补0103仍会要求未配置模型，因此没有应用0103或改共享开发源码。
-- 已恢复独立运行制品：原Web构建复制至`.local/beta-20261027/web-artifact`；从首次成功Worker加载期间、后续源码变化前的tsx编译缓存恢复625个本地模块并打包至`worker-snapshot/index.js`；当时无本地修改的parser从Git恢复20文件至`parser-snapshot`。独立只读复核确认本地模块已内联，无@aistudy/相对TS外部导入、0103或新视觉识别装配，当前外部依赖仅Node和既有第三方包。启动配置只读这些私有制品，helper的build/migrate动作已禁用，避免保留版本被误更新；未冻结或改动开发工作区。
-- 2026-10-27 16:40 UTC，恢复制品后相同两页PDF重新上传→完整Worker解析→原件逐字节下载及内容读取成功，`smoke-result.json`已更新；之前失败任务及原件保留，不改写失败证据。最后再次对该独立制品完成完整停启和登录/课程/解析状态/原件持久性复查。当前测试版不包含后续Luna开发，后续升级须单独准备兼容制品与迁移。本轮全树diff空白检查发现并行修改的`auto-grade-policy.test.ts`末尾多余空行，未改他人文件；本轮STATUS定向diff检查退出0。
+- 2026-10-27 曾用未提交源码（起点 `2e673010`）在开发者本机构建隔离测试版，非浏览器检查覆盖注册登录、课程路线、PDF 上传与 Worker 解析、原件下载。该版本不含后续视觉资料链改动，不代表当前主干；运行细节保存在仓库外的私有位置。
+- 当时未执行真实或付费模型调用；浏览器交互、视觉识别质量和学习效果待用户验收。
 
 ## Hermes 发布准备（2026-10-26）
 
@@ -61,10 +54,11 @@
 | PR | 一句话说明 | 当前验证 |
 | --- | --- | --- |
 | [#134](https://github.com/Xhhemoing/study-assistant-opening/pull/134) | 学习、助理、设置、默认 AI 与遗留入口整改整合 | 已合入 `4bd1e8b7`；合并提交 push CI 已通过，待用户浏览器验收与部署 |
-| [#135](https://github.com/Xhhemoing/study-assistant-opening/pull/135) | 协作流程及项目配置整理 | 开放；`2e673010` CI 运行中，尚未合入 |
+| [#135](https://github.com/Xhhemoing/study-assistant-opening/pull/135) | 导师编排、课程与视觉学习闭环 | 已于 2026-10-28 合入 `177ae423`；主干 push CI 已通过，未部署 |
 
 ## 阻塞与下一步
 
+- 2026-10-28 部署前异家族审查发现：工作区未配置 `gpt-6-luna` 时（线上现状），含图片/表格/公式或扫描页的 PDF 与图片上传会整单解析失败，而 `4bd1e8b7` 下同类上传可成功。修复为视觉路由不可用时退回本地提取；修复合入前不部署 `177ae423`。
 - 始终最多 2 个开放功能 PR，当前无开放功能 PR；被替代的 [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)（`5b42fb03`）和 [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)（`e8317cab`）可从原 PR/分支恢复。下列 9 项仅延期，不算完成。
 - WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；相关整改已合入，仍需核对最新主干与 WP0.8 验证。
 - [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
@@ -110,7 +104,7 @@
 
 ### 总计划实施进度（2026-10-27，本批候选已集成）
 
-- 用户已授权按总计划并行开发。有效工作区为 `.agent_workspace/wp0-remediation`，起点 `2e673010`；只读 fetch 核对远端 `feat/opening-release` 的 `4bd1e8b7`，产品、测试和依赖文件与本地起点一致。保留已有修改，未提交、推送或发布。
+- 用户已授权按总计划并行开发。有效工作区起点 `2e673010`；只读 fetch 核对远端 `feat/opening-release` 的 `4bd1e8b7`，产品、测试和依赖文件与本地起点一致。保留已有修改，未提交、推送或发布。
 - 持续职责：`teaching_orchestration` 负责对话到实际活动、教学与后继动作；`learning_entry_resume` 负责首启、今日入口、续学及授权/复测交互；`integration_review` 负责预算、复测纠偏与接口，并在实现后转为独立评审。均使用 `gpt-6.1-sol / high`，主线程负责共享契约、授权事务、恢复边界和集成验证。代理在本会话复用，不代表会话关闭后有后台服务继续运行。
 - M1候选已接通：无固定日程首启、今日真实任务、课程导师授权、对话生成/恢复真实span活动、确定性作答、三天自动/手动复测和实际后继纠偏活动。M1只采信 `span-exact-v1`；受助、未知和题族用尽不伪装独立通过。预发未见题与授权/预算/活动写入同事务；刷新下一动作复用语义回执，不重复活动。暂停不自动发题，备份恢复不恢复自动授权。
 - 独立交叉评审已推动修复：课程UUID别名、改期漏计预算、取消回执误显成功、未知授权请求被旧GET过早收敛、错误恢复URL、源活动与其他活动混淆、刷新重复活动、并发耗尽最后题族、暂停后隐式发题及改评后旧纠偏继续推荐。来源失效保护已覆盖对话、直达、旧next回执、新attempt及帮助首次交付；只核对已引用head/材料，不因原活动完成revision递增或无关新观察误拦。旧活动、预算、已交付帮助和答案保留；独立定向只读复核无新增阻断。
@@ -147,7 +141,7 @@
 
 ### M2/M3 连续开发（2026-10-27，课程与长期管理集成候选）
 
-- 继续复用 `teaching_orchestration`、`learning_entry_resume`、`integration_review`，实际配置 `gpt-6.1-sol / high`。本次恢复已确认三个实例可继续；上轮额度中断不等同于成果完成。有效候选仍为 `.agent_workspace/wp0-remediation`；保留 M1 和其他修改，不提交、推送或发布。
+- 继续复用 `teaching_orchestration`、`learning_entry_resume`、`integration_review`，实际配置 `gpt-6.1-sol / high`。本次恢复已确认三个实例可继续；上轮额度中断不等同于成果完成。有效候选仍为原工作区的未提交源码；保留 M1 和其他修改，不提交、推送或发布。
 - 本轮完整使用结果：正式多目标与课程范围确认→真实编译发布→保存题目/作答/评价→纠偏、跨活动前置返回及逐项综合检查；显式安排72小时课程延迟复测→今日任务→同一课程活动→六类结果与实际后继动作。M3共同预算、缺席续学/缩短、周期保持任务、目标生命周期和有界卡片复习接入此链。M2/M3保持必做；待用户浏览器验收不阻塞实现。
 - 主线程已实现正式目标读写/选择 API、旧 Opening 目标适配、跨课程关联及并发修订，普通目标期限与考试日期分离；首启和现有消费者改读统一投影。新增 `0101_full_learning_goals.sql` 已在本机隔离测试库应用，未应用业务库。Opening 备份纳入正式目标/关联/要求/共同预算配置；恢复目标暂停、要求待重新确认，原自动授权不恢复。
 - 三代理交叉评审已修：编辑单项要求误增全部版本、生成相同题干伪装独立新题、引用分块消失仍可用、未知请求遭4xx清除、关联课程归档误阻另一课程、归档后worker继续发送/发布、恢复活动与其他任务串用、夏令时保持日期偏移、间隔内求助后错误晋级、前置活动切换丢失返回位置。备份保留缺资料要求及依赖身份，过滤私密资料后不保留悬挂复测协议；恢复目标暂停、标准待核对。
@@ -159,7 +153,7 @@
 
 #### 本轮复现与迁移边界
 
-在有效工作区执行 `npm test -- --project integration tests/integration/opening-course-route.test.ts tests/integration/opening-long-term-planning.test.ts tests/integration/opening-learning-goals.test.ts tests/integration/opening-course-requirement-backup.test.ts`；实际认证接口使用handler项目同名文件。专用测试数据库和Redis配置不写入文档。最终类型命令为 `npm run typecheck -w @aistudy/contracts -w @aistudy/domain -w @aistudy/database -w @aistudy/worker -w @aistudy/web`。收尾已按专用data目录及已核对进程路径停止本轮PostgreSQL/Redis，55433/56379不再监听，数据与日志保留；再次复现须显式启动隔离环境。没有执行浏览器、完整产品构建、远端CI、提交、推送或发布。
+在有效工作区执行 `npm test -- --project integration tests/integration/opening-course-route.test.ts tests/integration/opening-long-term-planning.test.ts tests/integration/opening-learning-goals.test.ts tests/integration/opening-course-requirement-backup.test.ts`；实际认证接口使用handler项目同名文件。专用测试数据库和Redis配置不写入文档。最终类型命令为 `npm run typecheck -w @aistudy/contracts -w @aistudy/domain -w @aistudy/database -w @aistudy/worker -w @aistudy/web`。收尾已确认本轮隔离PostgreSQL/Redis测试服务停止，数据与日志保留在仓库外的私有位置；再次复现须显式启动隔离环境。没有执行浏览器、完整产品构建、远端CI、提交、推送或发布。
 
 `0101`为兼容扩展，但旧版写入器可能剥离新目标语义，不能直接降级后继续双写。回退优先停用新编排、保留正式目标/要求/版本/活动事实并使用兼容读取；数据库回退须先备份新事实并验证恢复，不能直接删除新表/列。迁移仅在本地隔离库应用，业务库发布与回退演练未执行。
 
@@ -212,16 +206,16 @@
 - Contracts、Domain、Database、AI、Worker、Web六包类型最终全部退出0。主线程备份/迁移消费21路径定向ESLint退出0，三代理认领路径定向ESLint通过；备份/校正元数据3文件36单元通过，证明接受与pending恢复、共享资格/保持、笔记保存/返回及旧挂点近邻均通过，各批有重叠不相加冒充全仓库测试。正常仓库行尾配置下`git diff --check`退出0。
 - 三代理交叉评审修复并复核：目标课归档误拦原课返回、共享新证据未进入保持间隔、照片网络未知后重挂载丢请求、未知请求4xx错误清除、证明缺分步仍判正确、编号证明题识别遗漏、反馈达到上限时追加说明溢出。没有剩余已确认的本轮阻断。
 - 复现命令：`npm test -- --project integration tests/integration/opening-answer-interpretation.test.ts tests/integration/opening-course-shared-skill.test.ts tests/integration/opening-learning-asset-links.test.ts tests/integration/opening-learning-links-backup.test.ts tests/integration/opening-course-route.test.ts tests/integration/opening-long-term-planning.test.ts tests/integration/opening-learning-goals.test.ts tests/integration/opening-ai-grading-jobs-repository.test.ts tests/integration/opening-ai-grading-retry-regression.test.ts tests/integration/opening-grading-backup-restore.test.ts`；handler项目选择三个同名新文件。类型命令：`npm run typecheck -w @aistudy/contracts -w @aistudy/domain -w @aistudy/database -w @aistudy/ai -w @aistudy/worker -w @aistudy/web`。
-- 日志保留在本机专用临时目录`aistudy-pg-test-20261027`：`m2-core-final-integration.log`保留首次失败，`m2-photo-final-integration.log`记录修正后7项，`m2-core-final-types.log`记录六包，另有三组handler、unit/lint日志。私有数据库/Redis配置未写入项目。未执行浏览器、完整产品构建、远端CI、提交、推送或发布；0102未应用业务库。
+- 日志保留在仓库外的私有位置：保留首次失败、修正后7项集成检查、六包类型检查，以及三组handler、unit/lint的记录。私有数据库/Redis配置未写入项目。未执行浏览器、完整产品构建、远端CI、提交、推送或发布；0102未应用业务库。
 
 本轮三项核心能力已经实现和完成上述非浏览器集成核验，不继续列为暂缓。总计划尚余多资料自动覆盖全范围、技能重命名/拆合、期限与优先级变化的可执行取舍，以及A8–A10更完整组合和真实长期使用证据；继续按原总计划推进这些必做结果。明确的证明命令做服务端缺步骤拒判，未声称自动识别所有隐含证明题或提供形式化证明认证。用户浏览器验收、真实课程内容质量、跨周保持及学习成效仍须分别验证，不能由本轮工程测试推导。
-收尾已按专用data目录和经核对的Redis进程路径停止本轮测试服务，55433/56379均不再监听，数据和日志保留。再次复现须显式启动专用环境。
+收尾已确认本轮隔离测试服务停止，数据和日志保留在仓库外的私有位置。再次复现须显式启动专用环境。
 
 ### OCR 与 gpt-6-luna 小样本对照（2026-10-27）
 
 - 用户请求真实比较并参考 DeepStudent/DeepTutor；本轮只做资料识别实验与源码研究，未改业务逻辑、生产模型配置或发布。复用两个 gpt-6.1-sol/high 代理研究并交叉评审；独立指定 gpt-6-luna/high 代理只看五张 PNG 盲转写，没有读取标准答案、生成脚本或本地输出。这是 Codex 模型运行层实验，不是 AIstudy provider API 端到端验证。
 - 5 页（4 页构造文字/公式矩阵/表格箭头/错误证明，1 页 Mathpix 公开手写示例），144 DPI；本地 OCR 输入为同一组 PNG 组成的纯图片 PDF。当前候选 opening_parser + Docling 2.126.0/RapidOCR 3.9.2/PP-OCRv4 mobile Torch 实际运行成功，5 页 102.66 秒；另跑数字 PDF 无 OCR 原生提取控制，44.81 秒，均退出0。使用根目录已有离线 runtime/model 缓存，未安装或下载模型。不能用代理运行时长推导 API 性能或价格。
 - 读输出前定义25个语义保真单元，独立评审并由主线程核对：Luna各页4/5、8/8、5/5、4/4、3/3，共24/25；本地扫描OCR为4/5、1/8、4/5、1/4、0/3，共10/25；数字PDF无OCR为5/5、4/8、4/5、4/4、0/3，共17/25。不是字符准确率/代表性课程准确率。Luna保留公式二维关系、手写分段和原始错误步骤；本地丢失积分/求和/矩阵关系并混淆λ。两种看图识别均错了B0O1l相似字形编号；原图字形高度相似，严格计错但不能作为清晰字符辨认能力的强证据。Luna另有标题前缀遗漏（不在25项中）。原生提取完整保留该编号，不能声称多模态所有材料都优于原生文本。
-- 样本、原始输出、运行日志和独立逐项评分保存在 `C:/Users/86080/AppData/Local/Temp/aistudy-ocr-luna-20261027-083427`，入口 `experiment.json`、`scoring-rubric.md`、`reviewer-scores.json`、`local-run-metadata.json`；只有一次采样，公开手写样本可能被训练见过，未测真实课程全册/模糊照片/生产API成本延迟/专用数学OCR/学习成效。
+- 样本、原始输出、运行日志和独立逐项评分保存在仓库外的私有位置；只有一次采样，公开手写样本可能被训练见过，未测真实课程全册/模糊照片/生产API成本延迟/专用数学OCR/学习成效。
 - DeepStudent固定源码62f6d6b5092f45e9f33c5e3e813c89bf78c88f3e：PDFium原生文字+页图、配置的远程OCR/VLM、按页索引与缓存；系统OCR只在部分配置路径兜底，不能声称所有PDF无key可用。DeepTutor固定源码a31d82624c27d75f4e771d4fcb78dce16470b383：ParseService分层；默认text_only、Docling OCR关闭；扫描空文本可走LiteParse；MinerU云需专有token，视觉描述复用既有provider。两者均非把全部PDF直接发给视觉模型；研究是静态源码证据，未实测其OCR质量。
 - 推荐下一实施结果：保留原生文字提取，扫描/手写/公式图表引入Luna视觉转写并按页持久化可检索内容，保留原图/物理页/修订，识别与纠错评分分离；教学复杂内容可读取原图，缺页/识别失败可见并可重试。现在图片parse-source分支仍保存空text，teaching-compiler仍text_only/imageParts空，不能只改模型名宣称接通。可复用支持该模型及图片输入的provider key，无需先购买专用OCR服务key；实际图片API能力、用量和预算上界须在接入时验证。此核心衔接应进入下一轮实现，不继续作为可选暂缓；本轮尚未实现该衔接。
