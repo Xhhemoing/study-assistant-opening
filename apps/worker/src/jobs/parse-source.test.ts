@@ -2,6 +2,7 @@ import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OpeningModelRoutingError } from "@aistudy/ai";
 import type { SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
 import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
@@ -19,7 +20,7 @@ afterEach(async () => { for (const dir of dirs.splice(0)) { expect(await readdir
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: "a".repeat(64), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
-async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; bytes?: Uint8Array; recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
+async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
   const current = input.source ?? source({ bytes: input.bytes?.byteLength ?? 3 });
   const states: State[] = [];
   let replaceInput: unknown;
@@ -36,7 +37,7 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
       sources: { get: async () => current, markParseState: async (_scope, _id, state) => { states.push(state); return current; } },
       chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
-      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? '{"pageCount":2}' : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
+      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
       tempDir, recognizePage: input.recognizePage, assertCurrent: input.assertCurrent,
     }),
   }));
@@ -129,6 +130,38 @@ describe("parse source handler", () => {
       await expect(d.handler(job, {sourceId})).rejects.toThrow("visual recognition");
       expect(d.replaceInput()).toBeUndefined();
     }
+  });
+  it("preserves local PDF text and skips remaining recognition after a routing error", async () => {
+    const recognizePage = vi.fn(async () => { throw new OpeningModelRoutingError("请先配置 gpt-6-luna"); });
+    const d = await deps({ recognizePage, pageCount: 3, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "native prose", imagePath: null, visualKinds: [] },
+      { page: 2, text: "local formula", imagePath: null, visualKinds: ["formula"] },
+      { page: 3, text: "local OCR", imagePath: null, visualKinds: ["scan"] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3 });
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
+      { page: 2, slideLabel: null, startMs: null, endMs: null, text: "local formula", imageObjectKey: null },
+      { page: 3, slideLabel: null, startMs: null, endMs: null, text: "local OCR", imageObjectKey: null },
+    ] });
+    expect(recognizePage).toHaveBeenCalledOnce();
+  });
+  it("preserves an image-only chunk when visual model routing is unavailable", async () => {
+    const recognizePage = vi.fn(async () => { throw new OpeningModelRoutingError("请先配置 gpt-6-luna"); });
+    const d = await deps({ source: source({ mime: "image/png" }), recognizePage });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1, imageOnly: true });
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: "final" },
+    ] });
+  });
+  it("propagates provider errors without replacing chunks", async () => {
+    const recognizePage = vi.fn(async () => { throw new Error("provider timeout"); });
+    const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "local formula", imagePath: null, visualKinds: ["formula"] },
+      { page: 2, text: "native prose", imagePath: null, visualKinds: [] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("provider timeout");
+    expect(d.replaceInput()).toBeUndefined();
   });
   it("does not publish recognition returned after the source execution was revoked", async () => {
     let revoked = false;
