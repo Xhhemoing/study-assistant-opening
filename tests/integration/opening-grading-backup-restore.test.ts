@@ -35,11 +35,17 @@ async function seed(photoAtSubmission = true) {
     answer: "1", outcome: "unverified", assistance: "independent", clientKey: randomUUID(),
   }, { ...(photoAtSubmission ? { workSource: photo } : {}), autoGrade: {
     enabled: true, modelAvailable: true, dailyCap: 50,
-    primaryModel: { modelSnapshot: { id: "backup", providerId: "fixture", modelName: "fixture", inputCentsPerMillion: 0, outputCentsPerMillion: 0,
+    primaryModel: { supportsVision: true, modelSnapshot: { id: "backup", providerId: "fixture", modelName: "fixture", inputCentsPerMillion: 0, outputCentsPerMillion: 0,
       mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 104857600, mediaInputCentsPerMillion: 0 },
       inputCentsPerMillion: 0, outputCentsPerMillion: 0, billing: "free_tier", dailyRequestCap: 10000 },
     dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000),
   } });
+  // This round-trip begins with an actually admitted photo-capable auto job;
+  // changing only modelAvailable cannot bypass media capability/budget checks.
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId}
+    AND kind='grade-observation' AND payload->>'rootObservationId'=${original.id}`).toHaveLength(1);
+  const [saved] = await fixture.sql`SELECT auto_grade_enqueued_at FROM opening_learning_observations WHERE id=${original.id}`;
+  expect(saved?.auto_grade_enqueued_at).toBeTruthy();
   return { fixture, f, original, photo };
 }
 async function revise(fixture: BackupFixture, root: LearningObservation, previous: LearningObservation, answer: string) {

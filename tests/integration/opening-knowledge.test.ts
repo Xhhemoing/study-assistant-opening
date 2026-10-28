@@ -232,10 +232,35 @@ describe("opening knowledge repository", () => {
     if (excluded) { expect(definitions).toEqual({}); return; }
     expect(Object.keys(definitions)).toHaveLength(2);
     const replacement = (await chunks.listChunks(f.scope, sourceId))[0]!;
-    expect(replacement.id).not.toBe(chunkId);
+    expect(replacement.id).toBe(chunkId);
     const saved = await repo.replace(f.scope, courseId, { expectedVersion: 1,
       snapshot: snapshotFor(courseId, replacement.id, 2), sourceVersions: { [sourceId]: 1 } });
     expect(saved.snapshot.nodes.map(node => node.id)).toEqual(original.snapshot.nodes.map(node => node.id));
+  });
+
+  it("replaces changed reparse evidence without silently reassigning the old graph's skill identities", async () => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const original = await repo.replace(f.scope, courseId, { expectedVersion: 0,
+      snapshot: snapshotFor(courseId, chunkId, 1), sourceVersions: { [sourceId]: 1 } });
+    await f.sql`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb WHERE course_id=${courseId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql), old = (await chunks.listChunks(f.scope, sourceId))[0]!;
+    await chunks.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [{ page: old.page, slideLabel: old.slideLabel,
+      startMs: old.startMs, endMs: old.endMs, text: `${old.text} with a changed mathematical definition`, imageObjectKey: old.imageObjectKey }] });
+    const changed = (await chunks.listChunks(f.scope, sourceId))[0]!;
+    expect(changed.id).not.toBe(chunkId);
+    expect((await repo.get(f.scope, courseId))!.snapshot).toEqual(original.snapshot);
+    expect(Object.keys((await repo.getForRebuild(f.scope, courseId))!.nodeDefinitions)).toHaveLength(2);
+    await expect(repo.replace(f.scope, courseId, { expectedVersion: 1,
+      snapshot: snapshotFor(courseId, changed.id, 2), sourceVersions: { [sourceId]: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+    const rebuilt = snapshotFor(courseId, changed.id, 2);
+    const ids = new Map(rebuilt.nodes.map(node => [node.id, randomUUID()]));
+    rebuilt.nodes = rebuilt.nodes.map(node => ({ ...node, id: ids.get(node.id)! }));
+    rebuilt.edges = rebuilt.edges.map(edge => ({ ...edge, from: ids.get(edge.from)!, to: ids.get(edge.to)! }));
+    const saved = await repo.replace(f.scope, courseId, { expectedVersion: 1, snapshot: rebuilt, sourceVersions: { [sourceId]: 1 } });
+    expect(saved.snapshot.nodes.map(node => node.id)).toEqual(rebuilt.nodes.map(node => node.id));
+    expect(saved.snapshot.nodes.map(node => node.id)).not.toEqual(original.snapshot.nodes.map(node => node.id));
+    expect(saved.snapshot.nodes.every(node => node.evidenceChunkIds.includes(changed.id))).toBe(true);
   });
 
   it("rejects other owner / other course", async () => {

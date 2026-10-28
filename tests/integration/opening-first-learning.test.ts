@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningPlanningSettingsRepository, createOpeningFirstLearningRepository } from "@aistudy/database";
+import { createOpeningPlanningSettingsRepository, createOpeningFirstLearningRepository, createOpeningLearningGoalRepository } from "@aistudy/database";
 import { createOpeningTeachingActivityService } from "../../apps/web/src/features/opening/teaching/activity-service";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { startFirstLearning } from "../../apps/web/src/features/workspace/first-learning-service";
@@ -86,13 +86,23 @@ it("starts and replays without a schedule, preserving existing workspace setting
   expect(first).toMatchObject({ taskId: null, plannedDays: 0, draftCreated: false, scheduleInitialized: false });
   expect(await deps.settings.get(fixture.scope)).toEqual(before);
   const [row] = await fixture.sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${fixture.scope.workspaceId}`;
-  expect(row!.adaptive_planning.courseGoals[first.courseId!].weeklyMinutes).toBe(0);
-  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning=jsonb_set(adaptive_planning,
-    ${["courseGoals", first.courseId!, "weeklyMinutes"]}::text[], '90'::jsonb) WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const goals = createOpeningLearningGoalRepository(fixture.sql), courseId = first.courseId!;
+  const initialGoals = await goals.list(fixture.scope, courseId);
+  expect(initialGoals.goals).toHaveLength(1);
+  const goal = initialGoals.goals[0]!;
+  expect(goal.weeklyMinutes).toBe(0);
+  expect(row!.adaptive_planning.courseGoalRefs[courseId]).toBe(goal.id);
+  expect(row!.adaptive_planning.courseGoals[courseId]).toBeUndefined();
+  const editedGoal = await goals.update(fixture.scope, goal.id, { expectedRevision: goal.revision, weeklyMinutes: 90 });
   const replay = await startFirstLearning(deps, fixture.scope, unscheduled);
   expect(replay).toMatchObject({ activityId: first.activityId, courseId: first.courseId, taskId: null, plannedDays: 0 });
   const [after] = await fixture.sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${fixture.scope.workspaceId}`;
-  expect(after!.adaptive_planning.courseGoals[first.courseId!].weeklyMinutes).toBe(90);
+  expect(after!.adaptive_planning.courseGoalRefs[courseId]).toBe(goal.id);
+  expect(after!.adaptive_planning.courseGoals[courseId]).toBeUndefined();
+  const afterGoals = await goals.list(fixture.scope, courseId);
+  expect(afterGoals.goals).toEqual([editedGoal]);
+  expect(editedGoal).toMatchObject({ id: goal.id, weeklyMinutes: 90, revision: goal.revision + 1 });
+  expect(await deps.settings.get(fixture.scope)).toEqual(before);
   const [counts] = await fixture.sql`SELECT count(*)::int AS count FROM opening_tasks WHERE course_id=${first.courseId!}`;
   expect(counts!.count).toBe(0);
 });

@@ -94,7 +94,7 @@ async function ledger(scope: Scope = fixture.scope) {
   return { tasks: [...tasks], states: [...states], receipts: [...receipts], drafts: [...drafts] };
 }
 
-async function rejectsAtomically(input: AcceptPlanInput, error: { code: string; reason?: string }, clock = now) {
+async function rejectsAtomically(input: AcceptPlanInput, error: { code: string; reason?: string; message?: unknown }, clock = now) {
   const before = await ledger();
   await expect(repository(clock).acceptPlan(fixture.scope, input)).rejects.toMatchObject(error);
   expect(await ledger()).toEqual(before);
@@ -279,7 +279,9 @@ describe("adaptive draft acceptance", () => {
     if (change === "archived") await fixture.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
     else if (change === "privacy_excluded") await backupRows(fixture.sql, fixture.scope).exclude(sourceId);
     else await fixture.sql`DELETE FROM course_asset_memberships WHERE course_id=${courseId} AND asset_id=${sourceId}`;
-    await rejectsAtomically(acceptance(draft.id), { code: "CONFLICT", reason: "source_unavailable" });
+    await rejectsAtomically(acceptance(draft.id), change === "archived"
+      ? { code: "CONFLICT", message: expect.stringMatching(/课程.*归档/) }
+      : { code: "CONFLICT", reason: "source_unavailable" });
   });
 
   it("refuses an expired adaptive slot without writing any acceptance state", async () => {
