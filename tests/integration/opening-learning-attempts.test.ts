@@ -89,6 +89,34 @@ it("replays exact requests without advancing the committed revision and conflict
   expect(Number(after?.revision)).toBe(2);
 });
 
+it.each(["not_confident", "somewhat_confident", "confident", null] as const)("seals original confidence with the first answer (%s)", async preAnswerConfidence => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  expect(attempt.preAnswerConfidence).toBeNull();
+  const input = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions",
+    sourceIds: [f.sourceId], problemId: attempt.problemId, answer: "1", outcome: "correct" as const,
+    assistance: "independent" as const, clientKey: randomUUID() };
+  const record = await f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence });
+  expect((await f.attempts.get(fixture.scope, attempt.id))?.preAnswerConfidence).toBe(preAnswerConfidence);
+  expect((await f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence })).id).toBe(record.id);
+  await expect(f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence: preAnswerConfidence === "confident" ? "not_confident" : "confident" }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(f.learning.insertObservation(fixture.scope, { ...input, clientKey: randomUUID() }, { preAnswerConfidence: "confident" }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await f.attempts.get(fixture.scope, attempt.id))?.preAnswerConfidence).toBe(preAnswerConfidence);
+  const [stored] = await fixture.sql`SELECT submitted_intent FROM opening_learning_observations WHERE id=${record.id}`;
+  if (preAnswerConfidence === null) expect(stored?.submitted_intent).not.toHaveProperty("preAnswerConfidence");
+  else expect(stored?.submitted_intent).toMatchObject({ preAnswerConfidence });
+});
+
+it("rolls confidence back with a rejected answer and refuses cross-workspace submission", async () => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const input = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
+    problemId: attempt.problemId, answer: "1", outcome: "correct" as const, assistance: "independent" as const, clientKey: randomUUID() };
+  await expect(f.learning.insertObservation(fixture.otherScope, input, { preAnswerConfidence: "confident" })).rejects.toThrow();
+  await expect(f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence: "confident", workSource: { id: randomUUID(), version: 1, physicalPage: 1 } })).rejects.toThrow();
+  expect(await f.attempts.get(fixture.scope, attempt.id)).toMatchObject({ submittedAt: null, observationId: null, preAnswerConfidence: null });
+});
+
 it("serializes concurrent fact commits into a contiguous course revision", async () => {
   const f = await learningAttemptFixture(fixture);
   const attempts = await Promise.all(Array.from({ length: 6 }, () => f.start()));

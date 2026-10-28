@@ -12,10 +12,10 @@ export async function learningAttemptFixture(fixture: OpeningFixture) {
   const session = await learning.createSession(fixture.scope, { courseId, skillLabel: "fractions", sourceIds: [sourceId] });
   const start = (extra = {}) => attempts.create(fixture.scope, { sessionId: session.id, clientKey: randomUUID(),
     problem: { sourceId, chunkId, physicalPage: 1, stemSnapshot: "1/2 + 1/2?", artifactKind: "reference_item" }, ...extra });
-  const submit = (attempt: Attempt, extra = {}) => learning.insertObservation(fixture.scope, {
+  const submit = (attempt: Attempt, extra = {}, options: { preAnswerConfidence?: import("@aistudy/contracts").LearningAttemptSubmitInput["preAnswerConfidence"] } = {}) => learning.insertObservation(fixture.scope, {
     attemptId: attempt.id, sessionId: session.id, courseId, skillLabel: "fractions", sourceIds: [sourceId], problemId: attempt.problemId,
     answer: "1", outcome: "correct", assistance: "independent", clientKey: randomUUID(), ...extra,
-  }, { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50,
+  }, { ...options, autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50,
     primaryModel: { modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture", inputCentsPerMillion: 0, outputCentsPerMillion: 0 }, inputCentsPerMillion: 0, outputCentsPerMillion: 0, billing: "free_tier", dailyRequestCap: 10000 },
     dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000) } });
   const help = async (attempt: Attempt, level: "hinted" | "revealed" = "hinted") => {

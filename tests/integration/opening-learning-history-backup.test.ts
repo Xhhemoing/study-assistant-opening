@@ -43,9 +43,10 @@ it.each(["complete", "completeWithParseJob"])("captures immutable finalized sour
     { version: 0, bytes: "4", sha256: actual.sha256, availability: "available" },
   ]);
 });
-it.each([false,true])("restores attempt facts, revision and historical objects in dependency order (missing=%s)", async missing => {
+it.each([[false, false], [true, false], [false, true]])("restores attempt facts, revision and historical objects in dependency order (missing=%s, legacy=%s)", async (missing, legacy) => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
-  const exposure = await f.help(attempt), observation = await f.submit(attempt);
+  const confidence = legacy ? null : "confident";
+  const exposure = await f.help(attempt), observation = await f.submit(attempt, {}, { preAnswerConfidence: confidence });
   const revisionInput = { rootObservationId: observation.id, revisesObservationId: observation.id, expectedHead: observation.id,
     revisionKind: "replace" as const, reason: "Correct answer", clientKey: randomUUID(), replacement: { answer: "2", outcome: "incorrect" as const, assistance: "independent" as const } };
   const revised = await reviseOpeningLearningObservation(fixture.sql,fixture.scope,revisionInput);
@@ -57,7 +58,8 @@ it.each([false,true])("restores attempt facts, revision and historical objects i
   const directory = await mkdtemp(path.join(tmpdir(), "learning-history-"));
   try {
     const records = await readOpeningBackupRecords(fixture.sql, fixture.scope);
-    expect(records.tables.opening_learning_attempts).toMatchObject([{ id: attempt.id, item_version_id: attempt.itemVersionId }]);
+    expect(records.tables.opening_learning_attempts).toMatchObject([{ id: attempt.id, item_version_id: attempt.itemVersionId, pre_answer_confidence: confidence }]);
+    if (legacy) for (const row of records.tables.opening_learning_attempts) delete row.pre_answer_confidence;
     expect(records.tables.opening_help_exposures).toMatchObject([{ id: exposure.id, attempt_id: attempt.id }]);
     expect(records.tables.opening_learning_observations).toHaveLength(3);
     // The delivered help exposure is also a learning-semantic fact, so it occupies workspace revision 1
@@ -121,7 +123,7 @@ it.each([false,true])("restores attempt facts, revision and historical objects i
       expect(await reviseOpeningLearningObservation(fixture.sql,fixture.scope,retractInput)).toMatchObject({ disposition: "replayed", headObservationId: retracted.headObservationId });
       expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE root_observation_id=${observation.id}`).toHaveLength(3);
       const restored = await f.attempts.get(fixture.scope, attempt.id);
-      expect(restored).toMatchObject({ observationId: observation.id, itemVersionId: attempt.itemVersionId, sourceVersions: { [f.sourceId]: 1 } });
+      expect(restored).toMatchObject({ observationId: observation.id, itemVersionId: attempt.itemVersionId, sourceVersions: { [f.sourceId]: 1 }, preAnswerConfidence: confidence });
       expect(await fixture.sql`SELECT availability FROM opening_source_versions WHERE source_id=${f.sourceId} AND version=1`)
         .toMatchObject([{ availability: missing ? "unavailable" : "available" }]);
       expect(await fixture.sql`SELECT revision FROM opening_learning_history_revisions WHERE course_id=${f.courseId}`)

@@ -29,6 +29,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
     skillLabel: String(row.skill_label), requirementKey: row.requirement_key as string | null, problemId: row.problem_id as string | null,
     itemVersionId: row.item_version_id as string | null, sourceIds: row.source_ids as string[], sourceVersions: row.source_versions as Record<string, number>,
     startedAt: learningIso(row.started_at)!, submittedAt: learningIso(row.submitted_at), observationId: row.observation_id as string | null,
+    preAnswerConfidence: (row.pre_answer_confidence ?? null) as LearningAttempt["preAnswerConfidence"],
     historyRevision: Number(row.history_revision), ...(matrixExercise ? { matrixExercise } : {}), ...(spanExercise ? { spanExercise } : {}),
     ...(typeof row.item_stem_snapshot === "string" ? { stemSnapshot: row.item_stem_snapshot } : {}),
     ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),

@@ -235,7 +235,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_learning_attempts = asRows(await tx`
     SELECT a.id,a.workspace_id,a.owner_user_id,a.session_id,a.course_id,a.activity_id,a.skill_label,a.requirement_key,
       a.problem_id,a.item_version_id,a.source_ids,a.source_versions,a.started_at,a.submitted_at,a.observation_id,
-      a.client_key,a.create_intent,a.history_revision,a.context_anchor
+      a.client_key,a.create_intent,a.history_revision,a.context_anchor,a.pre_answer_confidence
     FROM opening_learning_attempts a WHERE a.workspace_id=${id} AND a.owner_user_id=${userId}
       AND ${includedLearningSession(tx,id,userId,tx`a.session_id`)}
       AND ${cleanUuidSources(tx,id,tx`a.source_ids`)} ORDER BY a.id`);

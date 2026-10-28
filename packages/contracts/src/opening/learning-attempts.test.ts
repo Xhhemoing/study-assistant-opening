@@ -2,6 +2,13 @@ import { expect, it } from "vitest";
 import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema } from "./learning-attempts";
 import { evidenceEligibilitySchema } from "./learning-evidence";
 const sessionId = "11111111-1111-4111-8111-111111111111";
+it.each(["not_confident", "somewhat_confident", "confident", null])("accepts optional ordinal pre-answer confidence %s", preAnswerConfidence => {
+  const input = { clientKey: "confidence-001", answer: "1", outcome: "correct", assistance: "independent", preAnswerConfidence };
+  expect(learningAttemptSubmitInputSchema.parse(input)).toEqual(input);
+});
+it.each([0, 0.8, "low", "", true])("rejects non-category confidence %s", preAnswerConfidence => {
+  expect(learningAttemptSubmitInputSchema.safeParse({ clientKey: "confidence-001", answer: "1", outcome: "correct", assistance: "independent", preAnswerConfidence }).success).toBe(false);
+});
 it("allows an unlinked server-issued attempt without inventing a problem", () => {
   expect(learningAttemptCreateInputSchema.parse({ sessionId, clientKey: "start-001" })).toEqual({ sessionId, clientKey: "start-001" });
 });
