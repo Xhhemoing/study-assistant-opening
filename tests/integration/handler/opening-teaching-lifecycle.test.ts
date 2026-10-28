@@ -240,7 +240,11 @@ describe("teaching inline attempts and answer gates", () => {
       reading = track(createOpeningTeachingContentRepository(reader.sql).getSubmittedAnswerKey(f.scope, seeded.activity.id, seeded.question, attempt.id));
       await waitUntilBlocked(f.sql, reader.pid, holder.pid, "answer source admission", /opening_sources/);
       publishing = track(createOpeningTeachingContentRepository(publisher.sql).publishActivitySpec(f.scope, { activityId: seeded.activity.id, teachingUnitId: seeded.unit.id, expectedVersion: 1, revisionNumber: rewritten.revisionNumber, expectedRevisionNumber: seeded.unit.currentRevisionNumber, blockOrder: spec.blockOrder, sourceRefs: spec.sourceRefs }));
-      await waitUntilBlocked(f.sql, publisher.pid, reader.pid, "publish waits for answer version", /opening_teaching_activities/);
+      // Answer delivery records a help exposure. Both it and publication lock
+      // workspace history before the activity, so publication waits there while
+      // the reader holds the original activity version and awaits its source.
+      await waitUntilBlocked(f.sql, publisher.pid, reader.pid, "publish waits for answer version",
+        /^\s*SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id\s*=\s*\$1\s+AND owner_user_id\s*=\s*\$2 FOR UPDATE\s*$/);
       release();
       expect((await reading).answer).toBe("受保护的参考答案：秩为2");
       expect((await publishing).version).toBe(2);
