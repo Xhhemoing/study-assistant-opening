@@ -38,7 +38,7 @@ function NextControl({ activity, courseId, client: suppliedClient, onNavigate = 
       else { const value = await client.scheduleRetest(courseId, command.input); if (active.current) setRetest(value); }
       setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* Verified receipt resolves the command in memory. */ }
     } catch (reason) {
-      if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* This first request was explicitly rejected. */ } }
+      if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* This first request was explicitly rejected. */ } }
       if (active.current) setError(userFacingMessage(reason, kind === "retest" ? "复测安排结果尚未确认，请保留本页并重新确认这次安排。" : "下一步安排结果尚未确认，请保留本页并重新确认这次安排。"));
     } finally { writing.current = false; if (active.current) setBusy(false); }
   }

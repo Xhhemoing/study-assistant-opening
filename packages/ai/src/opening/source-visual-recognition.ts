@@ -12,7 +12,7 @@ export function createSourceVisualRecognitionInput(input:{sourceId:string;source
    "原图是转写依据；nativeText只是可能错序、缺失或乱码的辅助。逐段核对，不可用常识、计算或已知答案补全模糊原文。相似的0/O、1/l及大小写无法判断时明确列入uncertainties。",
    "transcription仅包含原页内容，保留原语言、编号、单位、负号、上下标、条件及阅读顺序。公式用等价LaTeX，分段函数与矩阵必须保留二维关系；表格用Markdown且保留行列对应，箭头以A→B保留方向与分支。不要替作者修正错误。",
    "description只描述原图可见的布局、图形和关系，不能把推断、答案或补写的证明混入transcription；不能确认的符号、关系和缺失放uncertainties。不要把图示顺序当作已达标。",
-   '只返回严格JSON对象，字段必须恰为{transcription:string,description:string,uncertainties:string[],contentKinds:("text"|"handwriting"|"formula"|"table"|"chart")[]}；contentKinds只列实际可见类型且不重复。禁止Markdown代码围栏和额外字段。',
+   '只返回严格JSON对象，字段必须恰为{transcription:string,description:string,uncertainties:string[],contentKinds:("text"|"handwriting"|"formula"|"table"|"chart")[]}；contentKinds只列实际可见类型且不重复。空白页的transcription为空字符串、contentKinds为空数组，并在description中如实说明空白；不要虚构内容或分类。禁止Markdown代码围栏和额外字段。',
    "transcription最多24000字符，description最多4000字符，uncertainties最多30条且每条最多500字符。无法辨认的内容保留可见部分并说明不确定；不能为了填满正文虚构内容。JSON内所有LaTeX反斜线必须正确转义。",
   ].join("\n"),
   text:JSON.stringify({sourceId,sourceVersion:input.sourceVersion,physicalPage:input.physicalPage,nativeText:input.nativeText.slice(0,12000),nativeTextTruncated:input.nativeText.length>12000}),

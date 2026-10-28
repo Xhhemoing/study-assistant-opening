@@ -19,7 +19,12 @@ describe("bounded page visual transcription",()=>{
   expect(parseSourceVisualRecognitionOutput(JSON.stringify(result))).toEqual(result);
   expect(parseSourceVisualRecognitionOutput(JSON.stringify({...result,transcription:"",description:"有坐标轴的曲线图"})).description).toContain("坐标轴");
  });
+ it("accepts a visibly blank page without inventing a content kind or transcription",()=>{
+  const blank={transcription:"",description:"该页为空白页，没有可见文字或图形。",uncertainties:[],contentKinds:[]};
+  expect(parseSourceVisualRecognitionOutput(JSON.stringify(blank))).toEqual(blank);
+  expect(()=>parseSourceVisualRecognitionOutput(JSON.stringify({...blank,description:""}))).toThrow();
+ });
  it("rejects empty, malformed, oversized or extra model data instead of inventing a transcript",()=>{
-  for(const value of ["",JSON.stringify({...result,transcription:"",description:""}),JSON.stringify({...result,transcription:"x".repeat(24001)}),JSON.stringify({...result,description:"x".repeat(4001)}),JSON.stringify({...result,uncertainties:Array(31).fill("?")}),JSON.stringify({...result,uncertainties:[""]}),JSON.stringify({...result,uncertainties:["x".repeat(501)]}),JSON.stringify({...result,contentKinds:["formula","formula"]}),JSON.stringify({...result,contentKinds:[]}),JSON.stringify({...result,contentKinds:["answer"]}),JSON.stringify({...result,correctedProof:"fixed"}),"```json\n"+JSON.stringify(result)+"\n```"," ".repeat(48001)])expect(()=>parseSourceVisualRecognitionOutput(value)).toThrow();
+  for(const value of ["",JSON.stringify({...result,transcription:"",description:""}),JSON.stringify({...result,transcription:"x".repeat(24001)}),JSON.stringify({...result,description:"x".repeat(4001)}),JSON.stringify({...result,uncertainties:Array(31).fill("?")}),JSON.stringify({...result,uncertainties:[""]}),JSON.stringify({...result,uncertainties:["x".repeat(501)]}),JSON.stringify({...result,contentKinds:["formula","formula"]}),JSON.stringify({...result,contentKinds:["answer"]}),JSON.stringify({...result,correctedProof:"fixed"}),"```json\n"+JSON.stringify(result)+"\n```"," ".repeat(48001)])expect(()=>parseSourceVisualRecognitionOutput(value)).toThrow();
  });
 });

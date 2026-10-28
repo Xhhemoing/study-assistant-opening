@@ -66,6 +66,31 @@ afterAll(async () => {
 });
 
 describe("quick-add clientKey idempotency (PR-E)", () => {
+  it.each(["course", "remove-course", "skill", "origin"] as const)("rejects changed %s on a replay without changing the original task", async field => {
+    const courseId = randomUUID(), otherCourseId = randomUUID();
+    for (const id of [courseId, otherCourseId]) await fx.sql`INSERT INTO courses (id, workspace_id, title, slug)
+      VALUES (${id}, ${fx.scope.workspaceId}, 'Quick-add course', ${id})`;
+    const repo = createOpeningPlansRepository(fx.sql), key = `planning-${randomUUID()}`;
+    const input = { ...body("Course task", key), courseId, skillLabel: "Original skill", origin: "manual" as const };
+    const first = await repo.createTask(fx.scope, input);
+    const change = field === "course" ? { courseId: otherCourseId }
+      : field === "remove-course" ? { courseId: null }
+        : field === "skill" ? { skillLabel: "Different skill" } : { origin: "course_seed" as const };
+    await expect(repo.createTask(fx.scope, { ...input, ...change })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await repo.createTask(fx.scope, input)).toMatchObject({ id: first.id, courseId, skillLabel: "Original skill" });
+    expect(await keyedRows(fx.scope, key)).toHaveLength(1);
+  });
+
+  it("compares replayed course UUIDs canonically and keeps default planning fields compatible", async () => {
+    const courseId = randomUUID();
+    await fx.sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseId}, ${fx.scope.workspaceId}, 'UUID course', ${courseId})`;
+    const repo = createOpeningPlansRepository(fx.sql), input = { ...body("Canonical course", `canonical-${randomUUID()}`), courseId };
+    const first = await repo.createTask(fx.scope, input);
+    expect(await repo.createTask(fx.scope, { ...input, courseId: courseId.toUpperCase(), origin: "manual", skillLabel: null })).toMatchObject({ id: first.id });
+    const plain = body("Plain", `plain-${randomUUID()}`), standalone = await repo.createTask(fx.scope, plain);
+    expect(await repo.createTask(fx.scope, { ...plain, courseId: null, skillLabel: "ignored without course", origin: "manual" })).toMatchObject({ id: standalone.id });
+  });
+
   it("R3: a concurrent same-key loser returns the winner's task instead of 23505", async () => {
     const key = `r3-${randomUUID()}`;
     const hold = await holdKey(fx.scope, key, "R3");

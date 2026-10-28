@@ -37,7 +37,7 @@ function RoutePanel({ courseId, archived = false, client: suppliedClient, goalsC
       if (command.kind === "confirm") { const value = await client.confirm(courseId, command.input); if (active.current) { setSnapshot(value); setEditing(null); } }
       else { const value = await client.start(courseId, command.input); if (active.current) { setResult(value); if (value.kind === "ready") onNavigate(value.href); } }
       saveCommand(null); if (active.current) setPending(null);
-    } catch (reason) { if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { saveCommand(null); if (active.current) { setPending(null); setSnapshot(null); } } if (active.current) setError(userFacingMessage(reason, "安排结果尚未确认，请原样重新确认。")); }
+    } catch (reason) { if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { saveCommand(null); if (active.current) { setPending(null); setSnapshot(null); } } if (active.current) setError(userFacingMessage(reason, "安排结果尚未确认，请原样重新确认。")); }
     finally { writing.current = false; if (active.current) setBusy(false); }
   }
   function confirm() {

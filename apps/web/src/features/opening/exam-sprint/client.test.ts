@@ -393,3 +393,22 @@ describe("exam integration shares mutation recovery", () => {
     expect(client.getSnapshot().overview?.state.sourceRecords[0]).toEqual(result.state.sourceRecords[0]);
   });
 });
+
+it("keeps a first HTTP 408 sprint mutation locked and recovers the same command key", async () => {
+  const fetcher = vi.fn<Fetcher>()
+    .mockResolvedValueOnce(Response.json({ error: "request timed out" }, { status: 408 }))
+    .mockResolvedValueOnce(Response.json(overview(1)))
+    .mockResolvedValueOnce(Response.json(overview(1)));
+  const keyFactory = vi.fn(() => key);
+  const client = createExamSprintClient({ fetcher, keyFactory });
+  await client.send(intent);
+  const original = fetcher.mock.calls[0]![1]?.body;
+  expect(client.getSnapshot()).toMatchObject({ uncertain: true, busy: false });
+  await client.send({ action: "start", mode: "practice" });
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await client.recover();
+  expect(fetcher.mock.calls.map(call => call[1]?.method)).toEqual(["POST", "GET", "POST"]);
+  expect(fetcher.mock.calls[2]![1]?.body).toBe(original);
+  expect(keyFactory).toHaveBeenCalledTimes(1);
+  expect(client.getSnapshot().uncertain).toBe(false);
+});

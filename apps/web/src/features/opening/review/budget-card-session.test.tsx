@@ -36,3 +36,31 @@ it("stops at the explicit budget and excludes hidden page time", async () => {
   } finally { vi.useRealTimers(); }
 });
 it.each([401, 409])("keeps an unknown stop intent after retry status %s", async status => { const { LearningManagementRequestError } = await import("../planning/learning-management-client"); const value = clients(); vi.mocked(value.management.cardCommand).mockRejectedValueOnce(new TypeError("lost")).mockRejectedValueOnce(new LearningManagementRequestError("请核对", status)); await render(value, id); await act(async () => button("暂停并保存停止点").click()); const original = vi.mocked(value.management.cardCommand).mock.calls[0]; await act(async () => button("重新确认这次停止点").click()); await act(async () => button("重新读取卡片活动").click()); expect(host.textContent).toContain("停止点保存待确认"); await act(async () => button("重新确认这次停止点").click()); expect(vi.mocked(value.management.cardCommand).mock.calls[2]).toEqual(original); });
+
+it.each(["start", "stop"] as const)("retains the first HTTP 408 %s command across remount and replays it exactly", async action => {
+  const { LearningManagementRequestError } = await import("../planning/learning-management-client");
+  const value = clients();
+  vi.mocked(value.management.cardCommand).mockRejectedValueOnce(new LearningManagementRequestError("request timed out", 408))
+    .mockResolvedValue(action === "start" ? session : { ...session, status: "paused", revision: 2 });
+  await render(value, action === "stop" ? id : undefined);
+  await act(async () => button(action === "start" ? "开始本次限时复习" : "暂停并保存停止点").click());
+  const original = vi.mocked(value.management.cardCommand).mock.calls[0];
+  expect(JSON.parse(sessionStorage.getItem("aistudy:card-session-command:verified-card-test")!)).toEqual(original![0]);
+  await act(async () => root.render(null));
+  await render(value, action === "stop" ? id : undefined);
+  expect(host.textContent).toContain(action === "start" ? "本次活动创建待确认" : "停止点保存待确认");
+  await act(async () => button(action === "start" ? "重新确认这次开始" : "重新确认这次停止点").click());
+  expect(vi.mocked(value.management.cardCommand).mock.calls[1]).toEqual(original);
+  expect(sessionStorage.getItem("aistudy:card-session-command:verified-card-test")).toBeNull();
+});
+
+it("still clears a first definite HTTP 409 card command rejection", async () => {
+  const { LearningManagementRequestError } = await import("../planning/learning-management-client");
+  const value = clients();
+  vi.mocked(value.management.cardCommand).mockRejectedValueOnce(new LearningManagementRequestError("conflict", 409));
+  await render(value);
+  await act(async () => button("开始本次限时复习").click());
+  expect(sessionStorage.getItem("aistudy:card-session-command:verified-card-test")).toBeNull();
+  expect([...host.querySelectorAll("button")].some(node => node.textContent === "重新确认这次开始")).toBe(false);
+  expect((button("开始本次限时复习") as HTMLButtonElement).disabled).toBe(false);
+});

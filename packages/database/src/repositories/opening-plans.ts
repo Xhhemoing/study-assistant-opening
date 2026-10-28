@@ -263,7 +263,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         if (Number(current.version) !== input.expectedVersion) throw new OpeningPlanError("CONFLICT", "task version is stale");
         const readTask = async () => {
           const tasks = await createOpeningPlansRepository(tx as unknown as Sql).listTasks(scope);
-          return tasks.find((item) => item.id === taskId)!;
+          return tasks.find((item) => item.id === String(current.id))!;
         };
         const before = current.not_before ? new Date(current.not_before as string | Date).getTime() : null;
         const after = input.notBefore === null ? null : new Date(input.notBefore).getTime();

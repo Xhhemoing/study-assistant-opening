@@ -129,6 +129,34 @@ async function delayedSeed(twoChecks=false){
   await compile(started.activity,1);
   return {...x,retests,receipt,request,started,baselineAnswer:answered};
 }
+it("keeps a delayed retest separate from an active ordinary transfer check",async()=>{
+  const x=await seed();await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope,{assessmentEnabled:true,retestSuggestionsEnabled:true,automaticRemindersEnabled:false});
+  const baseline=ready(await x.start());await compile(baseline.activity);const answered=await answer(baseline.activity);
+  await ageBaseline(x.courseId);
+  const ordinary=ready(await x.start());expect(ordinary.action).toBe("transfer_check");
+  expect(ready(await x.start()).activity.id).toBe(ordinary.activity.id);
+  const retests=createOpeningCourseRouteRetestRepository(f.sql),snapshot=await x.repo.read(f.scope,x.courseId,baseline.activity.id);
+  const receipt=await retests.schedule(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:baseline.activity.id,
+    expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:answered.observation.id,clientKey:randomUUID(),minutes:20});
+  const task=await retests.readTask(f.scope,x.courseId,receipt.taskId);
+  expect(task.managed).toBe(true);if(!task.managed)throw new Error("Expected managed retest");
+  const request={goalId:task.goalId,expectedGoalRevision:task.expectedGoalRevision,requirementId:task.requirementId,
+    expectedRequirementRevision:task.expectedRequirementRevision,taskId:task.taskId,expectedTaskVersion:task.expectedTaskVersion,
+    clientKey:randomUUID(),minutes:task.minutes};
+  const started=ready(await x.repo.start(f.scope,x.courseId,request));
+  expect(started.activity.id).not.toBe(ordinary.activity.id);
+  expect(ready(await x.repo.start(f.scope,x.courseId,{...request,clientKey:randomUUID()})).activity.id).toBe(started.activity.id);
+  expect(ready(await x.repo.start(f.scope,x.courseId,{...request,taskId:request.taskId.toUpperCase(),clientKey:randomUUID()})).activity.id).toBe(started.activity.id);
+  expect(ready(await x.start()).activity.id).toBe(ordinary.activity.id);
+  const [binding]=await f.sql`SELECT goal_json,create_intent FROM opening_teaching_activities WHERE id=${started.activity.id}`;
+  expect(binding!.goal_json.courseRoute.retestId).toBe(receipt.retestId);
+  expect(binding!.create_intent.taskId).toBe(receipt.taskId);
+  await compile(started.activity,1);const result=await answer(started.activity);
+  expect(result.observation.retestId).toBe(receipt.retestId);
+  const [completed]=await f.sql`SELECT t.status AS task_status,r.status AS retest_status FROM opening_tasks t
+    JOIN opening_retest_activities r ON r.task_id=t.id WHERE t.id=${receipt.taskId}`;
+  expect(completed).toMatchObject({task_status:"done",retest_status:"completed"});
+});
 it.each(["passed","failed","assisted","insufficient_evidence"] as const)("connects a real generic delayed retest %s to the actual next action",async branch=>{
   const x=await delayedSeed(),result=await answer(x.started.activity,0,branch==="failed"?"incorrect":"correct",branch==="assisted"?"hinted":"independent",branch!=="insufficient_evidence");
   const snapshot=await x.repo.read(f.scope,x.courseId,x.started.activity.id);

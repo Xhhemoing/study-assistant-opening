@@ -98,6 +98,46 @@ describe("planDay localDate+timeZone day boundary", () => {
     },
   ];
 
+  it("clips an overnight free window to the beginning of the requested local day", () => {
+    const result = planDay([task(1)], [{
+      start: "2026-10-08T15:45:00.000Z", end: "2026-10-08T17:00:00.000Z", kind: "free",
+    }], { localDate: "2026-10-09", timeZone: SH });
+    expect(result.blocks).toEqual([expect.objectContaining({
+      taskId: id(1), start: "2026-10-08T16:00:00.000Z", end: "2026-10-08T16:30:00.000Z",
+    })]);
+  });
+
+  it.each([
+    ["2026-10-09T15:45:00.000Z", "2026-10-09T16:45:00.000Z"],
+    ["2026-10-09T16:00:00.000Z", "2026-10-09T17:00:00.000Z"],
+  ])("does not place a task outside the requested day in %s to %s", (start, end) => {
+    const result = planDay([task(1)], [{ start, end, kind: "free" }], { localDate: "2026-10-09", timeZone: SH });
+    expect(result.blocks).toEqual([]);
+    expect(result.unscheduledTaskIds).toEqual([id(1)]);
+  });
+
+  it("allows a task to end exactly at the next local midnight", () => {
+    const result = planDay([task(1)], [{
+      start: "2026-10-09T15:30:00.000Z", end: "2026-10-09T16:45:00.000Z", kind: "free",
+    }], { localDate: "2026-10-09", timeZone: SH });
+    expect(result.blocks[0]).toMatchObject({ start: "2026-10-09T15:30:00.000Z", end: "2026-10-09T16:00:00.000Z" });
+  });
+
+  it("does not label a future deadline overdue when all free time lies outside the day", () => {
+    const result = planDay([task(1, { dueAt: "2026-10-10T08:00:00.000Z" })], [{
+      start: "2026-10-09T16:00:00.000Z", end: "2026-10-09T17:00:00.000Z", kind: "free",
+    }], { localDate: "2026-10-09", timeZone: SH });
+    expect(result.unscheduled).toEqual([{ taskId: id(1), reason: "duration_exceeds_free_slots" }]);
+  });
+
+  it("uses the actual end of a 25-hour DST day when clipping free time", () => {
+    const result = planDay([task(1)], [{
+      start: "2026-11-02T04:45:00.000Z", end: "2026-11-02T05:45:00.000Z", kind: "free",
+    }], { localDate: "2026-11-01", timeZone: "America/New_York" });
+    expect(result.blocks).toEqual([]);
+    expect(result.unscheduledTaskIds).toEqual([id(1)]);
+  });
+
   it("uses resolveLocalDayBounds when localDate+timeZone set (skips retest at/after nextDayStart)", () => {
     const onDay = retest(1, "2026-10-09T00:00:00.000Z"); // 08:00 SH — still on Oct 9
     const nextDay = retest(2, "2026-10-09T16:00:00.000Z"); // nextDayStart SH (= Oct 10 00:00)

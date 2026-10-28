@@ -17,6 +17,17 @@ const createTask = () => createOpeningPlansRepository(f.sql).createTask(f.scope,
   title: "反馈任务", minutes: 20, priority: 1, dueAt: null, candidateId: null,
 });
 
+it.each(["unchanged", "defer", "resume"] as const)("returns the current task for an uppercase UUID when applying %s", async action => {
+  const task = await createTask(), plans = createOpeningPlansRepository(f.sql);
+  if (action === "resume") await plans.deferTask(f.scope, task.id, { notBefore: later, expectedVersion: 1 });
+  const result = await plans.deferTask(f.scope, task.id.toUpperCase(), {
+    notBefore: action === "defer" ? later : null,
+    expectedVersion: action === "resume" ? 2 : 1,
+  });
+  expect(result).toMatchObject({ id: task.id, version: action === "unchanged" ? 1 : action === "defer" ? 2 : 3 });
+  expect(result.notBefore ?? null).toBe(action === "defer" ? later : null);
+});
+
 /** Fail after the real task/retest UPDATE, before the feedback INSERT. */
 function failFeedback(sql: Sql): Sql {
   return new Proxy(sql, { get(target, property) {

@@ -82,7 +82,7 @@ function GoalEditor({ courseId, api: suppliedApi, goalClient }: { courseId: stri
       remember(courseId, null);
       if (active.current) { setPending(null); setMessage(command.kind === "select" ? "已选择本课程使用的目标，其他目标和历史保留。" : "目标已保存。需要切换本课程目标时，请明确选择。" ); if (command.kind === "create") setReload(value => value + 1); }
     } catch (reason) {
-      if (reason instanceof LearningGoalRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { remember(courseId, null); if (active.current) { setPending(null); setData(null); } }
+      if (reason instanceof LearningGoalRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { remember(courseId, null); if (active.current) { setPending(null); setData(null); } }
       if (active.current) setError(userFacingMessage(reason, "保存结果待确认，请原样重新确认这次保存。"));
     } finally { writing.current = false; if (active.current) setBusy(false); }
   }

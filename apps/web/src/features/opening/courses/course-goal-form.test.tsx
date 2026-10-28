@@ -21,6 +21,33 @@ it("creates a cross-course goal with independent ordinary and exam dates", async
 it("saves a formal revision without overwriting another goal or changing the selected reference", async () => { const api = client(); await render(api); await change("每周投入分钟", "210"); await act(async () => button("保存目标").click()); expect(api.update).toHaveBeenCalledWith(goalId, expect.objectContaining({ expectedRevision: 3, weeklyMinutes: 210, learningMode: "understand", priority: 1 })); expect(api.select).not.toHaveBeenCalled(); });
 it("requires an explicit formal selection to resolve legacy JSON", async () => { const api = client({ ...list, selectedGoalIds: {}, legacyConflicts: [{ courseId, legacyGoal: { targetDate: "2026-11-01", weeklyMinutes: 200 }, candidateGoalIds: [goalId] }] }); await render(api); expect(host.textContent).toContain("旧课程目标"); expect(api.select).not.toHaveBeenCalled(); await act(async () => button("使用此目标并保留旧值历史").click()); expect(api.select).toHaveBeenCalledWith({ courseId, goalId, expectedRevision: 3, expectedSelectedGoalId: null, resolveLegacy: true }); });
 it("keeps the original command after an unknown write, including a remount", async () => { const api = client(); vi.mocked(api.update).mockRejectedValueOnce(new TypeError("lost")); await render(api); await change("目标名称", "原始意图"); await act(async () => button("保存目标").click()); expect(host.textContent).toContain("保存结果待确认"); const original = vi.mocked(api.update).mock.calls[0]; await act(async () => root.unmount()); root = createRoot(host); await render(api); expect(host.textContent).toContain("保存结果待确认"); await act(async () => button("重新确认这次保存").click()); expect(vi.mocked(api.update).mock.calls[1]).toEqual(original); });
+it("preserves a timed-out goal creation across remount and a rejected retry", async () => {
+  const { LearningGoalRequestError } = await import("./learning-goal-client");
+  const api = client({ goals: [], selectedGoalIds: {}, legacyConflicts: [] });
+  vi.mocked(api.create).mockRejectedValueOnce(new LearningGoalRequestError("创建请求超时", 408)).mockRejectedValueOnce(new LearningGoalRequestError("登录恢复中", 401));
+  await render(api); await change("目标名称", "超时原目标");
+  await act(async () => button("创建目标").click());
+  const original = vi.mocked(api.create).mock.calls[0];
+  expect(host.textContent).toContain("保存结果待确认");
+  await act(async () => root.unmount()); root = createRoot(host); await render(api);
+  await act(async () => button("重新确认这次保存").click());
+  expect(host.textContent).toContain("保存结果待确认");
+  await act(async () => button("重新确认这次保存").click());
+  expect(vi.mocked(api.create).mock.calls).toEqual([original, original, original]);
+});
+it.each([401, 409])("clears a definitely rejected new goal request after HTTP %i", async status => {
+  const { LearningGoalRequestError } = await import("./learning-goal-client");
+  const api = client({ goals: [], selectedGoalIds: {}, legacyConflicts: [] });
+  vi.mocked(api.create).mockRejectedValueOnce(new LearningGoalRequestError("请求已拒绝", status));
+  await render(api); await change("目标名称", "被拒绝的目标");
+  await act(async () => button("创建目标").click());
+  const rejected = vi.mocked(api.create).mock.calls[0]![0];
+  expect(host.textContent).not.toContain("保存结果待确认");
+  await act(async () => button("重新读取课程目标").click());
+  await change("目标名称", "重新选择的目标");
+  await act(async () => button("创建目标").click());
+  expect(vi.mocked(api.create).mock.calls[1]![0].clientKey).not.toBe(rejected.clientKey);
+});
 it("does not treat a failed read as an empty goal list", async () => { const api = client(); vi.mocked(api.list).mockRejectedValue(new Error("offline")); await render(api); expect(host.textContent).toContain("重新读取课程目标"); expect(host.querySelector('input')).toBeNull(); expect(api.create).not.toHaveBeenCalled(); });
 it("rejects a weekly budget outside the existing limits", () => { expect(parseWeeklyMinutes("3001").ok).toBe(false); expect(parseWeeklyMinutes("12.5").ok).toBe(false); expect(parseWeeklyMinutes("0")).toEqual({ ok: true, value: 0 }); });
 it("retains an unknown formal-goal command when a retry is rejected", async () => { const { LearningGoalRequestError } = await import("./learning-goal-client"); const api = client(); vi.mocked(api.update).mockRejectedValueOnce(new TypeError("lost")).mockRejectedValueOnce(new LearningGoalRequestError("登录恢复中", 401)); await render(api); await act(async () => button("保存目标").click()); const original = vi.mocked(api.update).mock.calls[0]; await act(async () => button("重新确认这次保存").click()); expect(host.textContent).toContain("保存结果待确认"); await act(async () => button("重新确认这次保存").click()); expect(vi.mocked(api.update).mock.calls[2]).toEqual(original); });

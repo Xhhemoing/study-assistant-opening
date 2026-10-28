@@ -1,4 +1,4 @@
-import type { TimeBlock, WeekSession } from "@aistudy/contracts";
+import { openingPlanningSettingsSchema, type TimeBlock, type WeekSession } from "@aistudy/contracts";
 import { zonedLocalInstant } from "./local-day-bounds";
 
 type PeriodTime = { start: string; end: string };
@@ -46,8 +46,10 @@ export function expandWeekSessions(rows: WeekSession[], options: ExpandOptions):
   if (!options.periodTimes || Object.keys(options.periodTimes).length === 0) {
     throw new Error("periodTimes must contain clock mappings for absolute timetable expansion");
   }
+  if (!openingPlanningSettingsSchema.shape.weekOneMonday.safeParse(options.weekOneMonday).success) {
+    throw new RangeError("weekOneMonday must be a valid YYYY-MM-DD Monday date");
+  }
   const monday = Date.parse(`${options.weekOneMonday}T00:00:00Z`);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(options.weekOneMonday) || !Number.isFinite(monday)) throw new RangeError("weekOneMonday must be a valid YYYY-MM-DD date");
   const normalized = normalizeWeekSessions(rows);
   return normalized.flatMap((row) => row.weeks.map((week) => {
     const start = options.periodTimes![row.startPeriod];

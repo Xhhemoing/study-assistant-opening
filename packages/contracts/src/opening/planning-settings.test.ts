@@ -5,6 +5,13 @@ import {
 } from "./planning-settings";
 
 describe("openingPlanningSettingsSchema", () => {
+  it.each(["2026-02-30", "2026-09-08", "2026-13-01"])("rejects an invalid academic Monday: %s", (weekOneMonday) => {
+    expect(openingPlanningSettingsSchema.safeParse({
+      ...DEFAULT_OPENING_PLANNING_SETTINGS,
+      weekOneMonday,
+    }).success).toBe(false);
+  });
+
   it("accepts defaults and overnight sleep", () => {
     const parsed = openingPlanningSettingsSchema.parse({
       ...DEFAULT_OPENING_PLANNING_SETTINGS,

@@ -5,6 +5,13 @@ import { expandToTimeBlocks, parsePeriodTimes } from "./timezone";
 
 const fixture = "tests/fixtures/opening/timetable-synthetic.xlsx";
 
+it("rejects a nonexistent academic Monday instead of shifting imported classes", () => {
+  expect(() => expandToTimeBlocks(
+    [{ courseName: "数学", weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 1 }],
+    { weekOneMonday: "2026-02-30", periodTimes: { 1: { start: "08:00", end: "08:45" } }, timeZone: "Asia/Shanghai" },
+  )).toThrow(/weekOneMonday/);
+});
+
 it("parses Saturday, split weeks, and deduplicates a merged display", async () => {
   const result = await parseTimetable(fixture);
   expect(result.sessions).toEqual(expect.arrayContaining([
