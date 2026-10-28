@@ -4,11 +4,19 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `177ae423`，PR #135 已于 2026-10-28 合并；[主干 push CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40611932284) 已通过 |
-| 线上版本 | 运行 `4bd1e8b7`；health 为 ok，但 commit 字段为空，界面不显示版本号（M0「版本可见」未完成） |
-| 开放 PR | 1 个：M0 部署前收口（未配置视觉模型时上传解析退回本地提取；状态与分工整理） |
-| 当前工作 | M0 收口：部署前异家族只读审查 → 修确定阻塞 → 部署与迁移 0101–0103 等用户确认 → 部署后验收 Worker 队列消费、合成 PDF 上传解析、一次真实文本模型与视觉模型调用 |
+| 开发主干 | `feat/opening-release` @ `e84fae28`，上传回退修复 PR #136 已合并；[精确主干 push CI](https://github.com/Xhhemoing/study-assistant-opening/actions/runs/40659007847) 已通过 |
+| 线上版本 | 本轮未部署；此前版本 `4bd1e8b7` 的版本字段为空问题尚待使用当前发布 runner 验收，不把代码合并记为线上修复 |
+| 开放 PR | 独立修复 #137 在途；上传回退真实仓储回归在当前命名分支收尾，未改 #137 |
+| 当前工作 | M0 收口：上传回退已通过精确 CI 和 Claude 定向审查；补真实仓储/Worker 回执回归。部署与迁移 0101–0103 等用户确认，发布时仍需 Worker 稳定消费、合成 PDF 上传解析及真实模型验收 |
 | 待验收 | 浏览器体验、真实模型质量、长期学习效果均待用户验收或尚未测量（unknown） |
+
+## M0 上传回退实际仓储回归（2026-10-28）
+
+- 已确认的上传回退修复 #136 合入 `e84fae28`，精确 PR CI（40655029223）与主干 push CI（40659007847）均全绿；Claude 定向只读审查未发现确定发布阻塞。没有部署或修改线上配置。
+- 新增 `tests/integration/opening-parse-source-routing.test.ts`，使用真实 PostgreSQL、资料/分块/分段/任务仓储、解析 handler 与 Worker `runJob`，验证 PDF 原生/OCR 文字写回并仅尝试一次不可用视觉路由、图片原件与 `imageOnly` 回执、供应商失败保留旧 chunks 且任务失败。三个用例全部通过，无跳过。
+- 测试类型检查保留严格选项，仅包含该新增文件并限定 Node ambient 类型，沿用 Worker npm 脚本与共享重任务锁，退出 0；首次默认堆 OOM、随后超时均保留为失败，不改写为通过。对新增文件的 Claude 静态复核无确定阻塞；未改生产逻辑、依赖、迁移或 CI。
+- parser runner、对象下载与视觉路由受控，不是实际 Docling、对象存储或 Redis 队列端到端；不证明 OCR 质量、批改准确性或学习效果。开发网关已有文本与合成公式页各一次真实成功证据，不重复调用，也不外推成线上验证。
+- 本轮专用数据库已停止。部署仍需明确确认动作与回退，发布后补 Worker 实际消费/稳定窗口、合成 PDF 上传解析和真实模型验收；浏览器由用户执行。混合 PDF 本地提取为空且视觉不可用的页，尚缺单独的“部分页未识别”提示，原件保留，按非阻塞记录。
 
 ## 本轮提交与合并整理（2026-10-27）
 
@@ -58,8 +66,8 @@
 
 ## 阻塞与下一步
 
-- 2026-10-28 部署前异家族审查发现：工作区未配置 `gpt-6-luna` 时（线上现状），含图片/表格/公式或扫描页的 PDF 与图片上传会整单解析失败，而 `4bd1e8b7` 下同类上传可成功。修复为视觉路由不可用时退回本地提取；修复合入前不部署 `177ae423`。
-- 始终最多 2 个开放功能 PR，当前无开放功能 PR；被替代的 [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)（`5b42fb03`）和 [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)（`e8317cab`）可从原 PR/分支恢复。下列 9 项仅延期，不算完成。
+- 2026-10-28 已修复并合入 #136：缺少 `gpt-6-luna` 时 PDF 保留本地原生/OCR 文本，图片保留原图；预算与供应商错误仍失败，不静默更换供应商。精确 PR CI 和主干 CI 均通过，Claude 定向只读审查无确定阻塞；本轮未部署。
+- 始终最多 2 个开放功能 PR；当前独立 #137 在途，本轮不触碰其分支。被替代的 [#132](https://github.com/Xhhemoing/study-assistant-opening/pull/132)（`5b42fb03`）和 [#133](https://github.com/Xhhemoing/study-assistant-opening/pull/133)（`e8317cab`）可从原 PR/分支恢复。下列 9 项仅延期，不算完成。
 - WP2.4 必须等待 WP0.2、WP0.5、WP1.2、WP1.3 合入；相关整改已合入，仍需核对最新主干与 WP0.8 验证。
 - [浏览器/视觉/E2E 由用户验收](quality/2026-10-06-opening-browser-acceptance-checklist.md)；真实模型一周 TTFT、SenseWeave 采样和学习效果尚未通过，不从单元/HTTP 测试推导。HTTP 仅用隔离配置，未验证完整依赖栈或正式发布版本。
 - 测试期每日不限额已实现；服务器默认模型与密钥存在性已只读核实，部署后启用无限模式及真实调用仍待完成，尚未修改线上配置。
