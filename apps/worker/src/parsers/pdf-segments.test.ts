@@ -40,9 +40,9 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toEqual([]);
   });
 
-  it("does not reuse the old merged-charspan cache after the physical-page extraction upgrade", async () => {
+  it("does not reuse visual metadata cached before native cell provenance was retained", async () => {
     const d = setup(2);
-    const legacyProfile = "docling-2.126.0/pdf-segments-v1/text";
+    const legacyProfile = "docling-2.126.0/pdf-segments-v3-visual/text";
     await parsePdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
     expect(profile).not.toBe(legacyProfile);
@@ -51,6 +51,17 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toEqual([[1, 2]]);
     d.ranges.length = 0;
     await parsePdfSegments({ ...d.input, parserProfile: profile });
+    expect(d.ranges).toEqual([]);
+  });
+
+  it("keeps visual categories through durable cache reuse without re-running native extraction", async () => {
+    const d = setup(1);
+    const runner = d.input.runner;
+    d.input.runner = async (argv, signal) => argv.includes("--inspect-pdf") ? runner(argv, signal)
+      : {exitCode:0,stdout:JSON.stringify({pages:[{page:1,text:"caption",imagePath:null,visualKinds:["formula","picture"]}]})};
+    expect((await parsePdfSegments(d.input))[0]).toMatchObject({visualKinds:["formula","picture"]});
+    d.input.runner = runner;
+    expect((await parsePdfSegments(d.input))[0]).toMatchObject({visualKinds:["formula","picture"]});
     expect(d.ranges).toEqual([]);
   });
 

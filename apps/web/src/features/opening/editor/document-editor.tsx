@@ -41,6 +41,7 @@ import { RevisionReviewPanel } from "../../revision-review/revision-review-panel
 import { Inspector } from "../design/inspector";
 import { LoadError, LoadingRows, ui } from "../design/ui";
 import { useAppearancePreferences } from "../settings/appearance-preferences";
+import { AssetLearningLinks } from "../learning-links/asset-learning-links";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
@@ -334,7 +335,7 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
         {!conflict && savedAsNewHref ? <p className="mb-4 text-xs text-text-2" role="status">本地修改已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
         <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-surface [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-surface [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-text" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme={resolvedTheme} onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
       </div></div>
-      <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4"><PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
+      <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4">{basePath === "/opening/library" ? <AssetLearningLinks assetType="document" assetId={documentId} /> : null}<PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
     </div>
   </div>;

@@ -10,6 +10,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
+import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
 
 /** One transaction owns selection, task creation and the accepted plan version. */
 export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPlanInput, now: Date, options: { source?: "coach"; expectedDraftVersion?: number } = {}) {
@@ -52,6 +53,7 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
       }
       return draft;
     }
+    await assertOpeningLearningManagementDraft(tx, scope, draft, now);
     if (draft.status !== "draft" || Number(draft.base_version) !== input.expectedBaseVersion
       || Number(state!.accepted_version) !== input.expectedBaseVersion
       || (draft.strategy_version !== "local-replan-v1" && state!.hard_blocks_fingerprint && state!.hard_blocks_fingerprint !== draft.hard_blocks_fingerprint)) {

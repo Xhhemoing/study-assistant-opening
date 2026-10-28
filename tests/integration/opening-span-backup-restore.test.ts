@@ -179,7 +179,11 @@ it.each(["completed", "cancelled"] as const)("restores a real archive and preven
         sourceIds: [f.sourceId], dueAt: f.scheduled.notBeforeAt, accepted: false, kind: "task",
         evidenceObservationIds: [f.record.id], evidenceRootIds: [f.record.rootObservationId ?? f.record.id] }])).toEqual([]);
     }
-    expect(await createSpanDelayedRetestService(sql).schedule(scope, f.request)).toEqual(f.scheduled);
+    // Replaying the immutable acceptance returns the same business identity
+    // with its current terminal state, rather than an obsolete pending receipt.
+    const terminalReceipt = { ...f.scheduled, taskStatus: terminalStatus === "completed" ? "done" : "skipped", activityStatus: terminalStatus };
+    expect(await createSpanDelayedRetestService(sql).schedule(scope, f.request)).toEqual(terminalReceipt);
+    expect(await createSpanDelayedRetestService(sql).schedule(scope, f.request)).toEqual(terminalReceipt);
     expect(await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`).toEqual(terminal);
     expect(await sql`SELECT id FROM opening_tasks WHERE workspace_id=${scope.workspaceId} ORDER BY id`).toEqual(taskIds);
     // Preserve legitimate scan jobs emitted by the new practice above.

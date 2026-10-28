@@ -1,0 +1,9 @@
+import { expect, it, vi } from "vitest";
+import { createLearningAssetLinkClient } from "./learning-asset-link-client";
+const id = "11111111-1111-4111-8111-111111111111";
+const link = { id, assetType: "document", assetId: id, assetVersion: null, courseId: null, goalId: null, requirementId: null, purpose: "understanding", origin: null, sourceRefs: [], status: "active", revision: 1, createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" };
+const view = { link, courseTitle: null, goalTitle: null, requirementTitle: null, assetAvailable: true, originAvailable: false, originHref: null, sourceHrefs: [], warnings: [] };
+const note = { clientKey: "original-note-request", title: "理解", text: "自己的解释", courseId: null, goalId: null, requirementId: null, purpose: "understanding" as const, origin: null };
+it("uses the atomic save endpoint and preserves the original note request", async () => { const transport = vi.fn<typeof fetch>(async () => Response.json({ documentId: id, link: view })); await createLearningAssetLinkClient(transport).note(note); expect(transport.mock.calls[0]?.[0]).toBe("/api/opening/study-notes"); expect(JSON.parse(String(transport.mock.calls[0]?.[1]?.body))).toEqual(note); });
+it("does not follow a response navigation outside the learning surfaces", async () => { const transport = vi.fn<typeof fetch>(async () => Response.json({ links: [{ ...view, originHref: "//outside.invalid" }] })); await expect(createLearningAssetLinkClient(transport).list({ assetType: "document", assetId: id })).rejects.toThrow(); });
+it("keeps a rejected save as a status-bearing error and does not silently make a second request", async () => { const transport = vi.fn<typeof fetch>(async () => Response.json({ error: { message: "要求版本已变化" } }, { status: 409 })); await expect(createLearningAssetLinkClient(transport).note(note)).rejects.toMatchObject({ status: 409, message: "要求版本已变化" }); expect(transport).toHaveBeenCalledTimes(1); });

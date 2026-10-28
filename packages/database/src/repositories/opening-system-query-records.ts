@@ -4,6 +4,7 @@ import type { OpeningSystemQueryDraft } from "./opening-system-query";
 import { cardReadable } from "./card-sources";
 import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 /** Metadata only: never releases note bodies, card answers or exam solutions. */
@@ -60,9 +61,9 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
       ORDER BY s.updated_at DESC,s.id LIMIT 10`;
     if (courses.length > 9) { out.status = "partial"; out.reason = "truncated"; }
+    const prefs = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(tx, scope));
     for (const item of courses.slice(0, 9)) {
-      const prefs = openingAdaptivePrefsSchema.safeParse(item.adaptive_planning);
-      const examDate = prefs.success ? prefs.data.courseGoals[String(item.course_id)]?.targetDate ?? null : null;
+      const examDate = prefs.success ? prefs.data.courseGoals[String(item.course_id)]?.examDate ?? null : null;
       out.data.push({ id: item.id, updatedAt: iso(item.updated_at), examDate, attemptCount: Number(item.attempt_count),
         completedCount: Number(item.completed_count), basis: "stored_snapshot",
         summary: `${String(item.title).slice(0, 240)}考前练习；目标日期 ${examDate ?? "未设置"}；已开始 ${item.attempt_count} 次作答，已提交 ${item.completed_count} 次。成绩与错因可在课程练习中查看。` });

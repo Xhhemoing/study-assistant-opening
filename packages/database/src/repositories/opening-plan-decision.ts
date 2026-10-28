@@ -2,11 +2,12 @@ import type { PlanDraft, Scope } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
 import { recordOpeningLearningDecision } from "./opening-learning-decisions";
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 
 /** A receipt belongs to a newly generated draft. Existing drafts never gain invented historical reasons. */
 export async function recordOpeningPlanDraftDecision(tx: TransactionSql, scope: Scope, draft: PlanDraft, unscheduledReasons: Array<{ taskId: string; reason: string }> = []) {
   const state = await readOpeningLearnerState(tx, scope);
-  const [prefs] = await tx`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
+  const prefs = await readProjectedOpeningAdaptivePrefs(tx, scope);
   const selected = new Set(draft.blocks.map(block => block.taskId));
   const refFor = (id: string) => { const suggestion = draft.suggestedTasks?.find(row => row.id === id); return suggestion ? `suggestion:${suggestion.key}` : `task:${id}`; };
   const candidates = [
@@ -17,7 +18,7 @@ export async function recordOpeningPlanDraftDecision(tx: TransactionSql, scope: 
     { action: "propose_plan_draft", eligible: true, reasonCodes: ["learner_confirmation_required"], evidenceRefs: [`plan_draft:${draft.id}`] },
   ];
   return recordOpeningLearningDecision(tx, scope, { layer: "plan", targetId: draft.id,
-    stateVersion: state.stateVersion, goalVersion: JSON.stringify(prefs?.adaptive_planning ?? null),
+    stateVersion: state.stateVersion, goalVersion: JSON.stringify(prefs),
     intentVersion: `plan-day:${draft.date}:base:${draft.baseVersion}`, policyVersion: draft.strategyVersion ?? "plan-day-v1",
     candidates, selectedAction: "propose_plan_draft", reasonCodes: ["learner_confirmation_required"],
     evidenceRefs: [`plan_draft:${draft.id}`, ...draft.blocks.map(block => refFor(block.taskId))],

@@ -24,7 +24,10 @@ function model(name: string, price: number, complete = vi.fn(async () => output)
     inputCentsPerMillion: price, outputCentsPerMillion: price }, inputCentsPerMillion: price, outputCentsPerMillion: price };
 }
 async function setup() {
-  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start(), { outcome: "unverified" });
+  const f = await learningAttemptFixture(fixture);
+  // This suite exercises text-only paid retries, not a synthetic backup image locator.
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${f.chunkId}`;
+  const original = await f.submit(await f.start(), { outcome: "unverified" });
   const repository = createOpeningAiGradingRepository(fixture.sql), jobs = createOpeningAiGradingJobRepository(fixture.sql);
   const queue = createOpeningJobRepository(fixture.sql), status = await jobs.read(fixture.scope, { observationId: original.id });
   const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });

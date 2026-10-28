@@ -50,6 +50,34 @@ it("rejects a saved arithmetic item with a wrong reference before recording an a
   expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE session_id=${f.session.id}`).toHaveLength(0);
 });
 
+it.each([false, true])("rejects a missing exact sealed visual chunk without substituting another page/chunk (same-page replacement=%s)", async replaceOnSamePage => {
+  const f = await seed(true);
+  await fixture.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${f.sourceId}`;
+  await fixture.sql`UPDATE opening_source_chunks SET page=5,image_object_key=${`opening/sources/${f.sourceId}/v1`} WHERE id=${f.chunkId}`;
+  await fixture.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text,image_object_key)
+    VALUES(${f.sourceId},1,1,'另一页原生正文，保证同版本材料仍然ready。',NULL)`;
+  const attempt = await f.start(), original = await f.submit(attempt);
+  expect((await f.grader.context(fixture.scope, { observationId: original.id })).referenceSources).toContainEqual({ sourceId: f.sourceId, sourceVersion: 1, physicalPage: 5 });
+  const [identity] = await fixture.sql`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${attempt.itemVersionId!}`;
+  expect(identity!.evaluation_spec.sourceRefs).toContainEqual({ sourceId: f.sourceId, chunkId: f.chunkId, version: 1 });
+  await fixture.sql`DELETE FROM opening_source_chunks WHERE id=${f.chunkId}`;
+  if (replaceOnSamePage) await fixture.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text,image_object_key)
+    VALUES(${f.sourceId},1,5,'同页新块不能代替封存题目引用的准确旧块。',${`opening/sources/${f.sourceId}/v1`})`;
+  expect((await fixture.sql`SELECT version,parse_state FROM opening_sources WHERE id=${f.sourceId}`)[0]).toMatchObject({ version: 1, parse_state: "ready" });
+  await expect(f.grader.context(fixture.scope, { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await fixture.sql`SELECT answer FROM opening_learning_observations WHERE id=${original.id}`)[0]!.answer).toBe(original.answer);
+});
+
+it("rejects a sealed visual chunk when its physical page is no longer locatable", async () => {
+  const f = await seed(true);
+  await fixture.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${f.sourceId}`;
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=${`opening/sources/${f.sourceId}/v1`} WHERE id=${f.chunkId}`;
+  const attempt = await f.start(), original = await f.submit(attempt);
+  expect((await f.grader.context(fixture.scope, { observationId: original.id })).referenceSources).toContainEqual({ sourceId: f.sourceId, sourceVersion: 1, physicalPage: 1 });
+  await fixture.sql`UPDATE opening_source_chunks SET page=NULL WHERE id=${f.chunkId}`;
+  await expect(f.grader.context(fixture.scope, { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
 it.each([false, true])("grades a canonical classroom question and preserves corrections (materials=%s)", async withSource => {
   const f = await seed(withSource), attempt = await f.start(), original = await f.submit(attempt);
   expect(attempt.problemId).toBeTruthy();

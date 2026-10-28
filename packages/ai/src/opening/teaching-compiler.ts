@@ -617,6 +617,8 @@ export type BuildCompilerPublishInputOptions = {
   retrieveContext?: import("./hybrid-retrieval").MaterialRetriever;
   /** Publishing uses the exact excerpts already sent to the model. */
   evidenceChunks?: SourceChunk[];
+  /** Resolve only server-owned physical pages pinned by the selected evidence. */
+  loadPageImages?: (scope: unknown, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }) => Promise<ProviderInput["imageParts"]>;
   learnerFocus?: import("@aistudy/contracts").TeachingLearnerFocus;
   focusAttempt?: { question: string; answer: string };
   loadChunks?: (
@@ -646,6 +648,11 @@ type CompilePayload = {
   sourceIds?: string[];
   mode?: string;
 };
+
+function visualPageKey(chunk: SourceChunk): string {
+  if (chunk.page == null || !Number.isInteger(chunk.page) || chunk.page < 1) throw new Error("视觉材料缺少可核对的物理页，请重新识别材料后再生成讲义");
+  return `${chunk.sourceId}:${chunk.sourceVersion}:${chunk.page}`;
+}
 
 /**
  * Deterministic outline + evidence for one payload. The provider prompt and the
@@ -704,7 +711,7 @@ async function prepareCompile(
         operationId: `teaching:${payload.activityId}:${payload.expectedContentVersion}`,
         parentBudget: options.parentBudget,
       })).chunks : scopedChunks);
-  const pack = assembleTeachingEvidencePack({
+  let pack = assembleTeachingEvidencePack({
     chunks: evidenceChunks.filter(chunk => focusSources.has(chunk.sourceId) && sourceIds.includes(chunk.sourceId)),
     ranked: Boolean(options.retrieveContext || options.evidenceChunks),
     query,
@@ -715,6 +722,22 @@ async function prepareCompile(
     denylist: options.denylist,
     privacyExcludedSourceIds: options.privacyExcludedSourceIds,
   });
+  // Keep retrieval's existing rank. One lesson checks at most three original
+  // pages; other visual pages remain indexed for later lessons, not silently
+  // treated as text-only evidence in this lesson.
+  const visualPages = new Set<string>();
+  const bounded = pack.chunks.filter(chunk => {
+    if (!chunk.imageObjectKey) return true;
+    const key = visualPageKey(chunk);
+    if (visualPages.has(key)) return true;
+    if (visualPages.size >= 3) return false;
+    visualPages.add(key);
+    return true;
+  });
+  if (bounded.length !== pack.chunks.length) pack = assembleTeachingEvidencePack({
+    chunks: bounded, ranked: true, query, maxCharacters: 6000, allowlistSourceIds: scopedSourceIds,
+    denylist: options.denylist, privacyExcludedSourceIds: options.privacyExcludedSourceIds,
+  });
   return { outline: proposed, pack, sourceIds };
 }
 
@@ -722,6 +745,21 @@ async function prepareCompile(
 export function createCompilerProviderInput(options: BuildCompilerPublishInputOptions = {}) {
   return async function buildProviderInput(scope: unknown, payload: CompilePayload): Promise<ProviderInput> {
     const { outline, pack } = await prepareCompile(options, scope, payload, null);
+    const pages = new Map<string, { sourceId: string; sourceVersion: number; physicalPage: number; chunkIds: string[] }>();
+    for (const chunk of pack.chunks.filter(chunk => chunk.imageObjectKey)) {
+      const key = visualPageKey(chunk);
+      const page = pages.get(key) ?? { sourceId: chunk.sourceId, sourceVersion: chunk.sourceVersion, physicalPage: chunk.page!, chunkIds: [] };
+      page.chunkIds.push(chunk.id);
+      pages.set(key, page);
+    }
+    const imageParts: ProviderInput["imageParts"] = [];
+    for (const page of pages.values()) {
+      const loaded = await options.loadPageImages?.(scope, { sourceIds: [page.sourceId], sourceVersions: { [page.sourceId]: page.sourceVersion }, physicalPage: page.physicalPage });
+      if (!loaded?.length || loaded.length !== 1 || loaded[0]!.sourceId !== page.sourceId || loaded[0]!.physicalPage !== page.physicalPage) {
+        throw new Error("暂时无法读取所选材料的对应原图，请检查材料版本与物理页后重试");
+      }
+      imageParts.push(loaded[0]!);
+    }
     const prompt = buildCompileProviderInput(outline, pack, { includeEvidence: false });
     const intent = options.intentSummary ? `学习意图：${options.intentSummary.slice(0, 500)}\n` : "";
     const learner = options.learnerFocus ? `本次学习重点（仅用于选择教学活动，不是新的学习事实）：${JSON.stringify({
@@ -739,13 +777,14 @@ export function createCompilerProviderInput(options: BuildCompilerPublishInputOp
         : "没有 prerequisiteRepair 时不主动补讲整条前置链，缺少前置证据不代表学生不会。",
     ].filter(Boolean).join("\n") : "";
     return {
-      instruction: prompt.instruction + (focusInstructions ? `\n${focusInstructions}` : ""),
-      text: `${intent}${learner}${prompt.text}`,
+      instruction: prompt.instruction + (focusInstructions ? `\n${focusInstructions}` : "") + (imageParts.length
+        ? "\n原图仅对应 visualEvidencePages 中列出的材料版本、物理页与 chunkIds。本节视觉核对仅覆盖列出的最多三页，不得声称覆盖全部资料；其他视觉页仍已索引，可供后续课节检索使用。识别文本可能漏字、漏公式或表格关系，须同时核对原图；原图与识别文本冲突或看不清时明确材料缺口，不补写未知条件，不把推测作为材料事实。仅为列出的页做图像结论，其他纯文本材料仍只有文字证据。" : ""),
+      text: `${intent}${learner}${prompt.text}${imageParts.length ? `\nvisualEvidencePages=${JSON.stringify([...pages.values()])}` : ""}`,
       chunks: pack.chunks,
       mode: "explain",
       maxOutputTokens: 5500,
-      mediaCapability: "text_only",
-      imageParts: [],
+      mediaCapability: imageParts.length ? "text_plus_page_images" : "text_only",
+      imageParts,
       outputFormat: "json",
     };
   };

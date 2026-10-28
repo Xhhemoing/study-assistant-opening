@@ -51,6 +51,7 @@ import {
 } from "@aistudy/ai";
 import type { TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
+import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
 import {
   isBudgetReplayError,
@@ -63,6 +64,8 @@ import {
 type Scope = { workspaceId: string; ownerUserId: string };
 
 export type TutorTurnDeps = {
+  /** Course-scoped span orchestration; the adapter owns grant and transaction checks. */
+  nextAction?: TutorNextActionService;
   retrieveContext?: import("@aistudy/ai").MaterialRetriever;
   learnerContext?: { read(scope: Scope, input: { courseId?: string | null; sourceIds: readonly string[] }): Promise<TutorLearnerContext | null>;
     assertCurrent(scope: Scope, context: TutorLearnerContext): Promise<void> };
@@ -185,6 +188,29 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const jobEpoch = deps.privacy
         ? await deps.privacy.getWorkspaceEpoch(scope)
         : null;
+      const nextActionCourseId = turn.courseId ?? turn.contextAnchor?.courseId;
+      if (deps.nextAction && nextActionCourseId && turn.purpose === "teach" && !turn.querySystem
+        && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
+        const prepared = await prepareTutorNextAction(deps.nextAction, scope, {
+          courseId: nextActionCourseId, sourceIds: turn.sourceIds, sourceVersions: turn.sourceVersions,
+          userTurnId: claimed.userTurnId, question: composerMessageText(turn.text), operationId: `tutor-next:${claimed.userTurnId}`,
+          ...(jobEpoch === null ? {} : { expectedPrivacyEpoch: jobEpoch }),
+          ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}),
+        });
+        if (prepared) {
+          await deps.nextAction.assertCurrent(scope, prepared.context);
+          if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+          const label = prepared.resumed ? "继续上次未完成的学习" : {
+            full_explain: "先看一个完整示例", targeted_explain: "针对刚才的错误继续学习",
+            reduced_help_practice: "用一道新题减少帮助再试一次", transfer_check: "独立完成一道新题",
+            diagnose: "从一道短诊断题开始",
+          }[prepared.decision.activityKind];
+          await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId,
+            text: prepared.action ? `[${label}](${prepared.action.href})` : `${prepared.choice.message}\n\n[${prepared.choice.label}](${prepared.choice.href})`, citations: [], candidates: [],
+            contextSourceRefs: prepared.context.sourceRefs, expectedPrivacyEpoch: prepared.context.privacyEpoch, claimToken: claimed.claimToken });
+          return { skipped: false };
+        }
+      }
       if (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
         if (!deps.proposals) throw new Error("proposal service unavailable");
         const reply = await deps.proposals.reply(scope, { sourceTurnId: claimed.userTurnId, purpose: turn.purpose, question: turn.text,

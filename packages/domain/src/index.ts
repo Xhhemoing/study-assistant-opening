@@ -523,3 +523,9 @@ export { matrixErrorCardReference } from "./srs/error-card";
 export { tutorLearnerContextInstruction } from "./opening/tutor-learner-context";
 
 export { checkArithmeticAnswer, corroborateArithmeticGrade } from "./opening/arithmetic-check";
+export * from "./opening/long-term-planning";
+export * from "./opening/course-route";
+export * from "./opening/course-route-retest";
+export * from "./opening/backup-learning-goals";
+export * from "./opening/course-shared-skill";
+export * from "./opening/proof-feedback";

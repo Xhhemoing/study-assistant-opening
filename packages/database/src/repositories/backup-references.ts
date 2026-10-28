@@ -77,7 +77,13 @@ export async function assertRestoreReferences(tx: Sql, plan: NativeRestorePlan):
           if (!uuidSchema.safeParse(row.assetId).success) invalid();
         } else ref(ASSET_TABLES[String(row.assetType)], row.assetId, false, true);
         break;
-      case "goals": ref("courses", row.courseId); break;
+      case "goals":
+        ref("courses", row.courseId);
+        if (row.courseIds !== undefined) {
+          if (!Array.isArray(row.courseIds) || row.courseIds.length === 0) invalid();
+          for (const id of row.courseIds as unknown[]) ref("courses", id);
+        }
+        break;
       case "windows": ref("course_goals", row.goalId); break;
       case "explorations":
         ref("courses", row.courseId, true); ref("course_goals", row.goalId, true); break;

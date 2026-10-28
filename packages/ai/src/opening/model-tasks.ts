@@ -12,6 +12,8 @@ export type ModelTaskSpec = {
   tutorMode?: TutorMode;
   /** Input kinds the model must accept; routing fails explicitly otherwise. */
   needs?: readonly ModelInputKind[];
+  /** Default only; explicit task routes and the manual lock still win. */
+  defaultModelName?: string;
 };
 
 export type ModelInputKind = "vision" | "audio";
@@ -25,12 +27,14 @@ export const MODEL_TASKS = {
   "tutor.hint": { label: "辅导 · 提示", group: "tutor", purpose: "tutor", tutorMode: "hint" },
   "tutor.explain": { label: "辅导 · 解释", group: "tutor", purpose: "tutor", tutorMode: "explain" },
   "tutor.think_together": { label: "辅导 · 共同思考", group: "tutor", purpose: "tutor", tutorMode: "think_together" },
+  "materials.recognize-page": { label: "资料页视觉转写", group: "materials", purpose: "recognize-source-page", needs: ["vision"], defaultModelName: "gpt-6-luna" },
+  "teaching.compile-visual": { label: "视觉资料主讲内容编译", group: "teaching", purpose: "compile-teaching-unit", needs: ["vision"], defaultModelName: "gpt-6-luna" },
   "knowledge.extract": { label: "课程知识图谱抽取", group: "materials", purpose: "build-course-knowledge" },
   "teaching.compile": { label: "AI 主讲内容编译", group: "teaching", purpose: "compile-teaching-unit" },
   "practice.grade-text": { label: "文字作答批改", group: "practice", purpose: "grade-text" },
   "practice.exam": { label: "真题考点与模拟练习", group: "practice", purpose: "course-exam" },
-  "practice.grade-photo": { label: "拍照作答评阅", group: "practice", purpose: "grade-photo", needs: ["vision"] },
-  "practice.recognize-photo": { label: "题目照片文字识别", group: "practice", purpose: "recognize-photo-question", needs: ["vision"] },
+  "practice.grade-photo": { label: "拍照作答评阅", group: "practice", purpose: "grade-photo", needs: ["vision"], defaultModelName: "gpt-6-luna" },
+  "practice.recognize-photo": { label: "题目照片文字识别", group: "practice", purpose: "recognize-photo-question", needs: ["vision"], defaultModelName: "gpt-6-luna" },
   "settings.probe": { label: "模型连通性测试", group: "settings", purpose: "probe" },
   "media.transcribe": { label: "音视频转写", group: "materials", purpose: "transcribe", needs: ["audio"] },
 } as const satisfies Record<string, ModelTaskSpec>;

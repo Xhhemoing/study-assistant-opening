@@ -5,6 +5,7 @@ import {
   createOpeningLearningRepository,
   createOpeningStudyContextRepository,
   createOpeningSpanSessionRepository,
+  readOpeningAttemptGradingUsesVision,
 } from "@aistudy/database";
 import { assertRetestSubmitEarliestAllowed, prepareRetestSkillLink, resolveAssistance } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -86,7 +87,10 @@ export function createOpeningAttemptService(sql: Sql) {
       const input = learningAttemptSubmitInputSchema.parse(raw);
       const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
       const exposures = await learning.listDeliveredExposures(scope, attempt.sessionId, { attemptId: attempt.id, assessmentDomain: attempt.requirementKey?.startsWith("language:") ? "language" : "math" });
-      const autoGrade = await resolveAutoGradePolicy(sql, scope, Boolean(input.workSource));
+      const visualReference = attempt.itemVersionId && !attempt.submittedAt ? await readOpeningAttemptGradingUsesVision(sql, scope, attempt.id) : false;
+      const resolvedPolicy = await resolveAutoGradePolicy(sql, scope, Boolean(input.workSource) || visualReference === true);
+      const autoGrade = visualReference === null ? { ...resolvedPolicy, modelAvailable: false,
+        modelUnavailableReason: "no_model" as const, primaryModel: null, fallbackModel: null } : resolvedPolicy;
       const [reported] = attempt.spanExercise ? await sql`SELECT id FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId}
         AND owner_user_id=${scope.ownerUserId} AND attempt_id=${attempt.id} AND payload->'signals' @> '["copied_answer"]'::jsonb LIMIT 1` : [];
       const assistance = resolveAssistance(reported ? "revealed" : input.assistance, exposures);

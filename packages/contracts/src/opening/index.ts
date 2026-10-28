@@ -281,3 +281,10 @@ export * from "./span-session";
 export { firstLearningInputSchema, type FirstLearningInput } from "./first-learning";
 
 export * from "./tutor-learner-context";
+export * from "./span-tutor-automation";
+export * from "./learning-goals";
+export * from "./learning-management";
+export * from "./course-route";
+export * from "./answer-interpretation";
+export * from "./learning-asset-links";
+export * from "./course-shared-skill";

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema } from "@aistudy/contracts";
 import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext, readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
@@ -15,7 +16,7 @@ import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
 import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
 import type { AiGradingWorkSource } from "@aistudy/contracts";
 import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
-import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
+import { admitOpeningAiGradingWorkSource, readOpeningAiGradingContext } from "./opening-ai-grading-context";
 import { checkOpeningAutoGradeBudget } from "./opening-auto-grade-policy";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
@@ -107,6 +108,20 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     throw learningError("CONFLICT", "paused or completed span lesson cannot accept an answer");
   }
   const boundRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
+  const [routeActivity] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id=${String(session.activity_id)}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const rawRoute = (routeActivity?.goal_json as { courseRoute?: unknown } | undefined)?.courseRoute;
+  const route = rawRoute === undefined ? null : courseRouteActivityContextSchema.parse(rawRoute);
+  if (route?.retestId) {
+    // Persist the old attempt's answer even after cancellation/expiry. It remains
+    // a fact, while the delayed projection rechecks timing and qualification.
+    const [bound] = await tx`SELECT id,candidate_id,course_id,skill_label,requirement_key,task_id,status,not_before_at,recommended_at,scheduled_start_at
+      FROM opening_retest_activities WHERE id=${route.retestId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND course_id=${input.courseId} FOR UPDATE`;
+    if (!bound || bound.requirement_key !== attempt?.requirement_key || bound.skill_label !== input.skillLabel
+      || retestActivity && retestActivity.id !== bound.id) throw learningError("VALIDATION", "提交的延迟复测与服务器保存的课程要求不一致。");
+    retestActivity = bound;
+  }
   if (boundRetestId) {
     const boundRetests = await tx`SELECT id,candidate_id,course_id,skill_label,requirement_key,task_id,status,
       not_before_at,recommended_at,scheduled_start_at FROM opening_retest_activities
@@ -177,7 +192,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (opts.workSource) {
     // Photo admission, answer and jobs commit together; foreign/stale photos
     // roll the entire submission back, never leave a text-only grading job.
-    const context = await readOpeningAiGradingContext(tx, scope, { observationId: id });
+    const context = await admitOpeningAiGradingWorkSource(tx, scope, id);
     await tx`UPDATE opening_learning_observations SET source_ids=${context.sourceIds},source_versions=${tx.json(context.sourceVersions)} WHERE id=${id}`;
     Object.assign(rows[0], { source_ids: context.sourceIds, source_versions: context.sourceVersions });
   }
@@ -185,14 +200,22 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     const admissionAt = await readOpeningAutoGradeAdmissionTime(tx);
     const skip = await readOpeningAutoGradeSkip(tx, scope, opts.autoGrade, admissionAt);
     if (!skip) {
-      const context = await readOpeningAiGradingContext(tx, scope, { observationId: id });
-      const budget = await checkOpeningAutoGradeBudget(tx, scope, opts.autoGrade, {
-        question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
-        misconceptions: context.misconceptions, workSource: context.workSourceMetadata,
-      });
-      if (budget.allowed) {
-        await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: id, answerRevision: 1 });
-        await tx`UPDATE opening_learning_observations SET auto_grade_enqueued_at=${admissionAt} WHERE id=${id}`;
+      let context;
+      try { context = await readOpeningAiGradingContext(tx, scope, { observationId: id }); }
+      catch (error) {
+        // References can disappear after routing preflight. Keep the submitted
+        // fact and sealed photo; only automatic grading admission is refused.
+        if ((error as { code?: unknown } | null)?.code !== "CONFLICT") throw error;
+      }
+      if (context) {
+        const budget = await checkOpeningAutoGradeBudget(tx, scope, opts.autoGrade, {
+          question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
+          misconceptions: context.misconceptions, workSource: context.workSourceMetadata, referenceSources: context.referenceSourceMetadata,
+        });
+        if (budget.allowed) {
+          await enqueueOpeningAiGradingInTx(tx, scope, { observationId: id, rootObservationId: id, answerRevision: 1 });
+          await tx`UPDATE opening_learning_observations SET auto_grade_enqueued_at=${admissionAt} WHERE id=${id}`;
+        }
       }
     }
   }

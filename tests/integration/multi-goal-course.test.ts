@@ -118,12 +118,12 @@ describe("multi-goal course with time windows", () => {
     return rows[0]!.id;
   }
 
-  it("persists four goal kinds on one course and enforces kind uniqueness", async () => {
+  it("persists multiple goal kinds and keeps same-kind goals as distinct definitions", async () => {
     for (const kind of GOAL_KINDS) {
       await insertGoal(kind);
     }
     const rows = await sql`
-      SELECT kind, active, intensity
+      SELECT id, kind, active, intensity
       FROM course_goals
       WHERE course_id = ${courseId}
       ORDER BY array_position(ARRAY['final-exam', 'entrance-exam', 'interest', 'maintenance']::text[], kind)
@@ -131,7 +131,14 @@ describe("multi-goal course with time windows", () => {
     expect(rows).toHaveLength(4);
     expect(rows.map((row) => row.kind)).toEqual(GOAL_KINDS);
 
-    await expect(insertGoal("final-exam")).rejects.toThrow();
+    const secondExamId = await insertGoal("final-exam", { priority: 3, intensity: 0.8 });
+    const exams = await sql`SELECT id,kind,active,intensity,priority FROM course_goals
+      WHERE workspace_id=${workspaceId} AND course_id=${courseId} AND kind='final-exam' ORDER BY id`;
+    expect(exams).toHaveLength(2);
+    expect(new Set(exams.map(row => row.id)).size).toBe(2);
+    expect(exams.find(row => row.id === secondExamId)).toMatchObject({ kind: "final-exam", active: true, intensity: 0.8, priority: 3 });
+    expect(exams.find(row => row.id === rows[0]!.id)).toMatchObject({ ...rows[0], priority: 0 });
+    expect(secondExamId).not.toBe(rows[0]!.id);
   });
 
   it("rejects cross-workspace goal/course links", async () => {

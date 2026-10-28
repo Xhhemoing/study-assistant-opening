@@ -399,3 +399,4 @@ export * from "./opening/course-exam";
 export { gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "./opening/grading-evaluation";
 export type { GradingEvaluationDataset, GradingEvaluationRun } from "./opening/grading-evaluation";
 export * from "./opening/photo-question-recognition";
+export * from "./opening/source-visual-recognition";

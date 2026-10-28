@@ -7,7 +7,7 @@ import { createSpanDelayedRetestService } from "./delayed-retest-service";
 
 const dependencies = vi.hoisted(() => ({
   history: vi.fn(), evidence: vi.fn(), save: vi.fn(), lockCandidate: vi.fn(), lockHistory: vi.fn(),
-  preferences: vi.fn(), revision: vi.fn(), accept: vi.fn(),
+  preferences: vi.fn(), revision: vi.fn(), accept: vi.fn(), budget: vi.fn(),
 }));
 vi.mock("@aistudy/database", () => ({
   createOpeningLearningRepository: () => ({ observationHistory: dependencies.history }),
@@ -17,6 +17,7 @@ vi.mock("@aistudy/database", () => ({
   lockWorkspaceLearningHistory: dependencies.lockHistory,
   lockLearningPreferences: dependencies.preferences,
   nextWorkspaceLearningHistoryRevision: dependencies.revision,
+  assertSpanTutorRetestBudget: dependencies.budget,
 }));
 vi.mock("../../learning/retest-service", () => ({
   createOpeningRetestService: (db: Sql) => ({ accept: (...args: unknown[]) => db.begin(() => dependencies.accept(...args)) }),
@@ -38,6 +39,7 @@ function harness(options: { existing?: boolean; status?: string; accepted?: bool
   let activity = { id: randomUUID(), status: options.status ?? "proposed", task_id: options.taskId ?? null, not_before_at: null as string | null,
     accepted_at: null as string | null, learning_protocol: null as Record<string, unknown> | null,
     candidate_reference_id: null as string | null, accept_client_key: null as string | null };
+  let cancelledBefore = false;
   let jobPresent = true;
   let exists = options.existing ?? true;
   const calls: string[] = [];
@@ -46,10 +48,13 @@ function harness(options: { existing?: boolean; status?: string; accepted?: bool
     const query = strings.join("?").replace(/\s+/g, " ").trim(); calls.push(query);
     if (query.startsWith("SELECT r.id AS replay_activity_id")) return Promise.resolve(activity.accept_client_key === values[2] ? [{
       replay_activity_id: activity.id, ...activity, course_id: head.courseId, replay_task_id: activity.task_id,
+      task_status: activity.status === "cancelled" ? "skipped" : activity.status === "completed" ? "done" : "pending", activity_status: activity.status,
       baseline_id: activity.learning_protocol?.baselineObservationId, baseline_root_id: activity.learning_protocol?.baselineRootId,
       submitted_at: head.submittedAt, recorded_at: head.recordedAt,
     }] : []);
     if (query.startsWith("SELECT id AS replay_candidate_id")) return Promise.resolve(payload.acceptClientKey === request.clientKey ? [{ replay_candidate_id: payload.id, payload }] : []);
+    if (query.startsWith("SELECT id FROM opening_retest_activities")) return Promise.resolve(cancelledBefore ? [{ id: randomUUID() }] : []);
+    if (query.startsWith("SELECT version,status FROM opening_tasks")) return Promise.resolve([{ version: 1, status: "pending" }]);
     if (query.startsWith("SELECT candidate_id")) return Promise.resolve(exists && ["proposed", "accepted", "in_progress"].includes(activity.status) ? [{ candidate_id: jobPresent ? payload.id : null }] : []);
     if (query.startsWith("SELECT id,status,task_id")) return Promise.resolve([activity]);
     if (query.startsWith("UPDATE opening_jobs")) { payload = structuredClone(values[0]) as typeof payload; return Promise.resolve([]); }
@@ -79,13 +84,14 @@ function harness(options: { existing?: boolean; status?: string; accepted?: bool
     if (activity.status === "proposed") activity = { ...activity, status: "accepted", task_id: taskId, accepted_at: "2026-10-01T13:00:00.000Z" };
     return { taskId };
   });
-  return { sql, savepoint, calls, restore: () => { jobPresent = false; }, finish: (status: string) => { activity.status = status; }, state: () => structuredClone({ payload, activity, exists, jobPresent }) };
+  return { sql, savepoint, calls, cancelEarlier: () => { cancelledBefore = true; }, restore: () => { jobPresent = false; }, finish: (status: string) => { activity.status = status; }, state: () => structuredClone({ payload, activity, exists, jobPresent }) };
 }
 beforeEach(() => {
   vi.resetAllMocks();
   dependencies.history.mockResolvedValue({ headObservationId: head.id, revisions: [head] });
   dependencies.evidence.mockResolvedValue({ context: { version: { applicability: "exact" } } });
   dependencies.preferences.mockResolvedValue({ retestSuggestionsEnabled: true });
+  dependencies.budget.mockResolvedValue({ localDate: "2026-10-04", timeZone: "Asia/Shanghai", minutes: 20, grantRevision: 1 });
 });
 
 it("converts the scanner's proposed candidate to the explicit baseline before accepting, and replays without rewriting", async () => {
@@ -118,7 +124,7 @@ it.each(["completed", "cancelled"])("replays the original acceptance after the a
   const first = await service.schedule(scope, request);
   h.finish(status);
   const before = h.state();
-  expect(await service.schedule(scope, request)).toEqual(first);
+  expect(await service.schedule(scope, request)).toMatchObject({ ...first, taskStatus: status === "cancelled" ? "skipped" : "done", activityStatus: status });
   expect(h.state()).toEqual(before);
   expect(dependencies.save).not.toHaveBeenCalled();
   expect(dependencies.revision).toHaveBeenCalledTimes(2);
@@ -176,4 +182,46 @@ it("replays a restored acceptance without jobs or imported scoring authority, us
   expect(dependencies.history).toHaveBeenCalledTimes(historyReads);
   expect(dependencies.accept).toHaveBeenCalledOnce();
   await expect(service.schedule(scope, { ...request, observationId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
+it("accepts automatic retests only through the ordinary transaction and persists owned budget metadata", async () => {
+  const h = harness({ existing: false }), service = createSpanDelayedRetestService(h.sql);
+  const result = await service.scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 });
+  expect(result.taskId).toBeTruthy();
+  expect(dependencies.budget).toHaveBeenCalledWith(expect.anything(), scope, { courseId: head.courseId,
+    notBeforeAt: dueAt, minutes: 20, expectedGrantRevision: 1 }, expect.any(Date));
+  expect(h.state().activity.learning_protocol).toMatchObject({ protocolId: "span-delayed-3d-v1",
+    tutorAutomation: { localDate: "2026-10-04", timeZone: "Asia/Shanghai", minutes: 20, grantRevision: 1, createdTaskVersion: 1 } });
+  expect(dependencies.accept).toHaveBeenCalledOnce();
+  const before = h.state();
+  dependencies.budget.mockRejectedValue(new Error("authorization now disabled"));
+  expect(await service.scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 })).toEqual(result);
+  expect(h.state()).toEqual(before);
+  expect(dependencies.budget).toHaveBeenCalledOnce();
+});
+
+it("requires explicit acceptance after any earlier cancellation even for a new real answer", async () => {
+  const h = harness({ existing: false }); h.cancelEarlier();
+  await expect(createSpanDelayedRetestService(h.sql).scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(dependencies.save).not.toHaveBeenCalled();
+  expect(dependencies.accept).not.toHaveBeenCalled();
+});
+
+it("does not create a candidate when the shared target-day budget cannot admit it", async () => {
+  const h = harness({ existing: false }), before = h.state();
+  dependencies.budget.mockRejectedValue(Object.assign(new Error("target day budget exhausted"), { code: "CONFLICT" }));
+  await expect(createSpanDelayedRetestService(h.sql).scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(h.state()).toEqual(before);
+  expect(dependencies.accept).not.toHaveBeenCalled();
+});
+
+it("reports cancelled manual acceptance receipts as cancelled without recreating the task", async () => {
+  const h = harness(), service = createSpanDelayedRetestService(h.sql);
+  const first = await service.schedule(scope, request);
+  h.finish("cancelled");
+  const before = h.state();
+  expect(await service.schedule(scope, request)).toMatchObject({ taskId: first.taskId, taskStatus: "skipped", activityStatus: "cancelled" });
+  expect(h.state()).toEqual(before);
 });

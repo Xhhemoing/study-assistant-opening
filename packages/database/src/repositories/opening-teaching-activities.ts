@@ -33,6 +33,7 @@ export function mapTeachingActivity(row: Record<string, unknown>): TeachingActiv
     contentVersion: Number(row.content_version),
     checkpointJson: (row.checkpoint_json ?? undefined) as TeachingActivity["checkpointJson"],
     ...(focus.success ? { learnerFocus: focus.data } : {}),
+    ...(goal?.courseRoute ? { routeManaged: true } : {}),
     clientKey: String(row.client_key),
     createdAt: learningIso(row.created_at)!,
     updatedAt: learningIso(row.updated_at)!,

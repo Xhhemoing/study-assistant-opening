@@ -17,6 +17,41 @@ function fixture() {
 function errors(tables: Record<string, Record<string, unknown>[]>) {
   const result: string[] = []; validateBackupRetestProtocols(tables, result); return result;
 }
+function courseFixture(): Record<string, Record<string, unknown>[]> {
+  const tables: Record<string, Record<string, unknown>[]> = fixture();
+  const row = tables.opening_retest_activities![0]!;
+  row.learning_protocol = { protocolId: "course-route-delayed-v1", goalId: uuid(30), goalRevision: 1,
+    requirementId: uuid(31), requirementRevision: 1, stableSkillId: uuid(32), baselineObservationId: uuid(4),
+    baselineRootId: uuid(4), originActivityId: uuid(33), minutes: 20 };
+  const scope = { workspace_id: uuid(1), owner_user_id: uuid(2), course_id: uuid(3) };
+  tables.course_goals = [{ workspace_id: uuid(1), course_id: uuid(3), id: uuid(30), revision: 2 }];
+  tables.course_requirements = [{ ...scope, id: uuid(31), revision: 2, goal_ids: [uuid(30)], stable_skill_id: uuid(32), requirement_key: SPAN_REQUIREMENT_KEY }];
+  tables.opening_teaching_activities = [{ ...scope, id: uuid(33) }];
+  return tables;
+}
+describe("course delayed retest backup", () => {
+  it("preserves historical revisions without granting live eligibility", () => expect(errors(courseFixture())).toEqual([]));
+  it("accepts a current requirement shared by all course goals", () => {
+    const tables = courseFixture();
+    Object.assign(tables.course_requirements![0]!, { revision: 1, goal_ids: [] });
+    expect(errors(tables)).toEqual([]);
+  });
+  it("rejects a current requirement limited to a different goal", () => {
+    const tables = courseFixture();
+    Object.assign(tables.course_requirements![0]!, { revision: 1, goal_ids: [uuid(99)] });
+    expect(errors(tables)).toContain("course retest protocol reference is missing or mismatched");
+  });
+  it.each(["goalId", "requirementId", "stableSkillId", "originActivityId"])("rejects mismatched %s", key => {
+    const tables = courseFixture();
+    (tables.opening_retest_activities![0]!.learning_protocol as Record<string, unknown>)[key] = uuid(99);
+    expect(errors(tables)).toContain("course retest protocol reference is missing or mismatched");
+  });
+  it("rejects a forged future requirement revision", () => {
+    const tables = courseFixture();
+    (tables.opening_retest_activities![0]!.learning_protocol as Record<string, unknown>).requirementRevision = 3;
+    expect(errors(tables)).toContain("course retest protocol reference is missing or mismatched");
+  });
+});
 describe("backup retest domain receipts", () => {
   it("keeps protocol, acceptance and stable aliases without a job reference", () => {
     expect(errors(fixture())).toEqual([]);
@@ -58,4 +93,13 @@ describe("backup retest domain receipts", () => {
     const tables = fixture(); Object.assign(tables.opening_retest_activities[0]!, { [field]: null });
     expect(errors(tables)).toContain("retest acceptance receipt is incomplete");
   });
+});
+it("accepts validated automation metadata but rejects invalid imported metadata", () => {
+  const tables = fixture();
+  const protocol = tables.opening_retest_activities[0]!.learning_protocol;
+  const automation = { localDate: "2026-10-04", timeZone: "UTC", minutes: 20, grantRevision: 1, createdTaskVersion: 1 };
+  Object.assign(protocol, { tutorAutomation: automation });
+  expect(errors(tables)).toEqual([]);
+  Object.assign(automation, { minutes: -1 });
+  expect(errors(tables)).toContain("retest learning protocol is invalid");
 });

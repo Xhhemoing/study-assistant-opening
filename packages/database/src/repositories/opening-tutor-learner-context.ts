@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import type { Sql, TransactionSql } from "postgres";
 import { openingAdaptivePrefsSchema, tutorLearnerContextSchema, type LearningObservation, type Scope, type TutorLearnerContext } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "@aistudy/domain";
@@ -44,7 +45,7 @@ export function createOpeningTutorLearnerContextRepository(sql: Sql) {
           LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
           WHERE c.id=${input.courseId!} AND c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL`;
         if (!course) throw learningError("NOT_FOUND", "study course not found");
-        const preferences = openingAdaptivePrefsSchema.safeParse(course.adaptive_planning ?? {});
+        const projected = await readProjectedOpeningAdaptivePrefs(tx, scope, course.adaptive_planning); const preferences = openingAdaptivePrefsSchema.safeParse(projected);
         const goal = preferences.success ? preferences.data.courseGoals[input.courseId!] : undefined;
         const heads = await tx`SELECT o.* FROM opening_learning_observations o
           JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)

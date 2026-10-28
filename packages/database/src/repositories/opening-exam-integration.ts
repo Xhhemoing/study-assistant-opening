@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -44,7 +45,7 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
     FROM opening_exam_attempt_links WHERE sprint_id=${String(row.id)} ORDER BY learning_attempt_id` : [];
   const mappings = row ? await tx`SELECT source_item_id,skill_ids FROM opening_exam_source_mappings WHERE sprint_id=${String(row.id)}` : [];
   const [preferences] = binding ? await tx`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}` : [];
-  const parsed = openingAdaptivePrefsSchema.safeParse(preferences?.adaptive_planning);
+  const parsed = openingAdaptivePrefsSchema.safeParse(binding ? await readProjectedOpeningAdaptivePrefs(tx, scope, preferences?.adaptive_planning) : null);
   const goal = binding && parsed.success ? parsed.data.courseGoals[binding.courseId] : null;
   const eligible = row && binding ? await readExamEligibleAttemptIds(tx, scope, String(row.id), snapshot.state) : [];
   return {

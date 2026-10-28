@@ -36,6 +36,8 @@ async function seed(outcome: "incorrect" | "correct" = "incorrect", reference = 
   const sourceId = await rows.source(), chunkId = await rows.chunk(sourceId);
   const referenceSourceId = await rows.source();
   await rows.chunk(referenceSourceId);
+  // These are text references; the backup helper's private locator is not an image.
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE source_id IN (${sourceId},${referenceSourceId})`;
   await fixture.sql`UPDATE opening_source_chunks SET text='A trusted reference answer' WHERE source_id=${referenceSourceId}`;
   const repo = createOpeningLearningRepository(fixture.sql);
   const session = await repo.createSession(scope, { courseId, skillLabel: "derivatives", sourceIds: [sourceId, referenceSourceId] });

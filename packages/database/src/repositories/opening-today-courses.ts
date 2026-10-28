@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import { openingAdaptivePrefsSchema, type CourseGoal, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { learningError, learningIso } from "./opening-learning-facts";
@@ -13,7 +14,7 @@ export async function readOpeningTodayCourses(sql: Sql, scope: Scope): Promise<O
     WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
     ORDER BY c.title,c.id`;
   if (!rows.length) throw learningError("NOT_FOUND", "workspace not found");
-  const parsed = openingAdaptivePrefsSchema.safeParse(rows[0]?.adaptive_planning);
+  const parsed = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(sql, scope, rows[0]?.adaptive_planning));
   return rows.flatMap(row => {
     if (row.id == null) return [];
     const id = String(row.id);

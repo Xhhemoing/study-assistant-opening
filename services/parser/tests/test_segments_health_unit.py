@@ -115,7 +115,7 @@ class PdfSegmentTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as file, patch.object(cli, "pdf_page_count", return_value=12), patch.object(cli, "convert", return_value=document) as convert:
             code, output, _ = self.call("--input", file.name, "--mime", cli.PDF, "--max-pages", "2000", "--page-start", "11", "--page-end", "12")
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(output)["pages"], [{"page": 11, "text": "page eleven", "imagePath": None}, {"page": 12, "text": "", "imagePath": None}])
+            self.assertEqual(json.loads(output)["pages"], [{"page": 11, "text": "page eleven", "imagePath": None, "visualKinds": []}, {"page": 12, "text": "", "imagePath": None, "visualKinds": ["scan"]}])
             self.assertEqual(convert.call_args.args[2], (11, 12))
 
     def test_inspection_does_not_initialize_converter(self):
@@ -174,9 +174,9 @@ class PdfSegmentTests(unittest.TestCase):
             code, output, _ = self.call("--input", file.name, "--mime", cli.PDF, "--max-pages", "2000", "--page-start", "11", "--page-end", "13")
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output)["pages"], [
-                {"page": 11, "text": "inter-", "imagePath": None},
-                {"page": 12, "text": "national", "imagePath": None},
-                {"page": 13, "text": "", "imagePath": None},
+                {"page": 11, "text": "inter-", "imagePath": None, "visualKinds": []},
+                {"page": 12, "text": "national", "imagePath": None, "visualKinds": []},
+                {"page": 13, "text": "", "imagePath": None, "visualKinds": ["scan"]},
             ])
             self.assertEqual([call.args[1].page_no for call in render.call_args_list], [11, 12, 13])
 

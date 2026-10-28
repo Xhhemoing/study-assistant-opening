@@ -1,0 +1,21 @@
+"use client";
+import { useEffect, useMemo, useState } from "react";
+import type { CourseRouteSnapshot, LearningGoal, StudyNoteCreate } from "@aistudy/contracts";
+import { createLearningGoalClient } from "../courses/learning-goal-client";
+import { createCourseRouteClient } from "../courses/course-route-client";
+import { ui } from "../design/ui";
+export type LearningLinkTarget = Pick<StudyNoteCreate, "courseId" | "goalId" | "requirementId" | "expectedGoalRevision" | "expectedRequirementRevision">;
+export function LearningLinkTargetForm({ value, onChange, disabled = false }: { value: LearningLinkTarget; onChange: (value: LearningLinkTarget) => void; disabled?: boolean }) {
+  const goalsClient = useMemo(() => createLearningGoalClient(), []), routeClient = useMemo(() => createCourseRouteClient(), []);
+  const [courses, setCourses] = useState<Array<{ id: string; title: string; archivedAt?: string | null }>>([]), [goals, setGoals] = useState<LearningGoal[]>([]), [route, setRoute] = useState<CourseRouteSnapshot | null>(null);
+  const [loading, setLoading] = useState(false), [error, setError] = useState(""), [reload, setReload] = useState(0);
+  useEffect(() => { let live = true; void goalsClient.courses().then(rows => { if (live) setCourses(rows); }).catch(() => { if (live) setError("课程列表暂不可读取，可保留独立笔记，稍后再关联。"); }); return () => { live = false; }; }, [goalsClient, reload]);
+  useEffect(() => { let live = true; setGoals([]); setRoute(null); if (!value.courseId) return; setLoading(true); setError("");
+    void Promise.allSettled([goalsClient.list(value.courseId), routeClient.read(value.courseId)]).then(([goals, route]) => { if (!live) return; if (goals.status === "fulfilled") setGoals(goals.value.goals); if (route.status === "fulfilled") setRoute(route.value); if (goals.status === "rejected" || route.status === "rejected") setError("部分目标或课程范围暂不可读取，未代选其他关联；可以只关联课程，或稍后重试。"); }).finally(() => { if (live) setLoading(false); }); return () => { live = false; };
+  }, [goalsClient, routeClient, value.courseId, reload]);
+  return <fieldset disabled={disabled} className="space-y-3"><legend className="text-xs font-medium">课程、目标与要求（可选，明确选择后才关联）</legend>
+    <label className="block space-y-1"><span className={ui.label}>关联课程</span><select className={ui.input} value={value.courseId ?? ""} onChange={event => onChange({ courseId: event.target.value || null, goalId: null, requirementId: null })}><option value="">独立使用，暂不关联课程</option>{value.courseId && !courses.some(course => course.id === value.courseId) ? <option value={value.courseId}>原课程（列表读取中）</option> : null}{courses.map(course => <option key={course.id} value={course.id}>{course.title}{course.archivedAt ? "（已归档，只关联历史）" : ""}</option>)}</select></label>
+    {value.courseId ? <><label className="block space-y-1"><span className={ui.label}>关联目标</span><select className={ui.input} value={value.goalId ?? ""} disabled={disabled || loading} onChange={event => { const goal = goals.find(goal => goal.id === event.target.value); onChange({ courseId: value.courseId, goalId: goal?.id ?? null, ...(goal ? { expectedGoalRevision: goal.revision } : {}), requirementId: null }); }}><option value="">不指定目标</option>{goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label><label className="block space-y-1"><span className={ui.label}>关联课程要求</span><select className={ui.input} value={value.requirementId ?? ""} disabled={disabled || loading || !route} onChange={event => { const row = route?.requirements.find(row => row.requirement.id === event.target.value); onChange({ ...value, requirementId: row?.requirement.id ?? null, expectedRequirementRevision: row?.requirement.revision }); }}><option value="">不指定要求</option>{route?.requirements.filter(row => !value.goalId || !row.requirement.goalIds.length || row.requirement.goalIds.includes(value.goalId)).map(row => <option key={row.requirement.id} value={row.requirement.id}>{row.requirement.title}</option>)}</select></label></> : null}
+    {loading ? <p role="status" className="text-xs text-text-3">正在读取可关联的目标与范围…</p> : null}{error ? <p role="status" className="text-xs text-warn">{error}<button type="button" className={ui.quiet} onClick={() => setReload(value => value + 1)}>重新读取关联选项</button></p> : null}
+  </fieldset>;
+}

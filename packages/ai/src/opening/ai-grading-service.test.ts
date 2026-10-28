@@ -21,7 +21,7 @@ function setup() {
     modelSnapshot: { id: "changed", providerId: "fixture", modelName: "changed-model", inputCentsPerMillion: 20_000, outputCentsPerMillion: 20_000 } };
   let saved: LearningObservation | null = null;
   const repository = {
-    context: vi.fn(async () => ({ observation: original, stem: "1/2+1/2?", referenceText: "1", misconceptions: [],
+    context: vi.fn<Repository["context"]>(async () => ({ observation: original, stem: "1/2+1/2?", referenceText: "1", misconceptions: [],
       existing: saved, answerRevision: 1, operationId: base, workSource: null })),
     apply: vi.fn(async () => { saved = graded; return graded; }),
     ledger: vi.fn<Repository["ledger"]>(async () => "unsent"),
@@ -32,8 +32,73 @@ function setup() {
     release: vi.fn(async () => undefined), markUnknown: vi.fn(async () => undefined) };
   const gateway = createModelGateway({ resolve: async () => model });
   const service = createOpeningAiGradingService({ repository, gateway, budget: () => budget, images: async () => [] });
-  return { repository, budget, complete, service };
+  return { repository, budget, complete, service, gateway };
 }
+
+it("grades the original work alongside pinned reference images with distinct roles and preserves correction metadata", async () => {
+  const f = setup();
+  const context = await f.repository.context(scope, input);
+  const work = { id: "work", version: 2, physicalPage: 1 };
+  const reference = { sourceId: "reference", sourceVersion: 3, physicalPage: 4 };
+  const interpretation = { kind: "photo_transcription" as const, version: 1, workSource: work, originalTranscriptionObservationId: original.id,
+    originalTranscription: "错误识别", correctedTranscription: "原稿内容", previousInterpretationObservationId: null, correctionReason: "漏识别" };
+  f.repository.context.mockResolvedValue({ ...context, workSource: work, referenceSources: [reference], interpretation });
+  const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async (_scope, request) => [{ sourceId: request.sourceIds[0]!, physicalPage: request.physicalPage,
+    mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images });
+  await service.grade(scope, input);
+  expect(images).toHaveBeenCalledWith(scope, { sourceIds: ["reference"], sourceVersions: { reference: 3 }, physicalPage: 4 });
+  const sent = call.mock.calls[0]![2].input;
+  expect(JSON.parse(sent.text)).toMatchObject({ studentAnswer: original.answer, photoTranscriptionCorrection: interpretation, imageRoles: [
+    { role: "student_work", sourceId: "work", physicalPage: 1 }, { role: "reference_material", sourceId: "reference", physicalPage: 4 },
+  ] });
+  expect(sent.imageParts).toHaveLength(2);
+  expect(call.mock.calls[0]![1]).toBe("practice.grade-photo");
+  expect(sent.instruction).toContain("不能先改正");
+});
+
+it("does not send or reserve when the required reference page cannot be read", async () => {
+  const f = setup();
+  f.repository.context.mockResolvedValue({ ...await f.repository.context(scope, input), referenceSources: [{ sourceId: "r", sourceVersion: 1, physicalPage: 3 }] });
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway: f.gateway, budget: () => f.budget, images: async () => [] });
+  await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(f.complete).not.toHaveBeenCalled(); expect(f.budget.reserve).not.toHaveBeenCalled();
+});
+
+it("rejects five distinct work/reference pages before loading or sending", async () => {
+  const f = setup();
+  f.repository.context.mockResolvedValue({ ...await f.repository.context(scope, input), workSource: { id: "w", version: 1, physicalPage: 1 },
+    referenceSources: [1,2,3,4].map(physicalPage => ({ sourceId: "r", sourceVersion: 1, physicalPage })) });
+  const images = vi.fn(async () => []);
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway: f.gateway, budget: () => f.budget, images });
+  await expect(service.grade(scope, input)).rejects.toThrow("三");
+  expect(images).not.toHaveBeenCalled(); expect(f.complete).not.toHaveBeenCalled();
+});
+
+it("grades one original work page together with three reference pages without dropping any image", async () => {
+  const f = setup();
+  f.repository.context.mockResolvedValue({ ...await f.repository.context(scope, input), workSource: { id: "work", version: 1, physicalPage: 1 },
+    referenceSources: [1,2,3].map(physicalPage => ({ sourceId: "reference", sourceVersion: 1, physicalPage })) });
+  const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async (_scope, request) => [{ sourceId: request.sourceIds[0]!, physicalPage: request.physicalPage,
+    mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  await createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images }).grade(scope, input);
+  expect(images).toHaveBeenCalledTimes(4);
+  expect(call.mock.calls[0]![2].input.imageParts).toHaveLength(4);
+  expect(JSON.parse(call.mock.calls[0]![2].input.text).imageRoles.map((image: { role: string }) => image.role)).toEqual(["student_work", "reference_material", "reference_material", "reference_material"]);
+});
+
+it("does not treat a reference image as a missing student answer", async () => {
+  const f = setup();
+  f.repository.context.mockResolvedValue({ ...await f.repository.context(scope, input), observation: { ...original, answer: "" },
+    referenceSources: [{ sourceId: "reference", sourceVersion: 1, physicalPage: 1 }] });
+  const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async () => [{ sourceId: "reference", physicalPage: 1, mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images });
+  await expect(service.grade(scope, input)).rejects.toThrow("答案");
+  expect(call).not.toHaveBeenCalled();
+});
 
 it.each(["not_sent", "cancelled"] as const)("replays %s before a changed-model reserve and advances the existing deterministic chain", async reason => {
   const f = setup();

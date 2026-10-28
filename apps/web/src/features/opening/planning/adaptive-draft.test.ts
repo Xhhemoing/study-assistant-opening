@@ -38,7 +38,7 @@ const draftInput = (goal: CourseGoal | null, tasks: TaskItem[] = []): BuildAdapt
 
 describe("goal-aware adaptive draft integration", () => {
   it("allows an imminent goal to use the budget and keeps displaced pending work visible", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 }, [pending(1), pending(2)]);
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 }, [pending(1), pending(2)]);
     input.yesterdayAccepted = [{ taskId: id(1), start: "2026-10-16T17:00:00Z", end: "2026-10-16T17:30:00Z", reason: "昨天" }];
     const result = buildAdaptiveDraft(input);
     expect(result.adaptive.suggestedTasks).toMatchObject([{ courseId: examCourse, minutes: 24 }]);
@@ -49,7 +49,7 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("reserves real deadlines first and fits the shortened exam task into the remaining budget", () => {
-    const result = buildAdaptiveDraft(draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 }, [
+    const result = buildAdaptiveDraft(draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 }, [
       pending(1, { minutes: 10, dueAt: "2026-10-17T18:00:00Z" }), pending(2),
     ]));
     expect(result.blocks[0]?.taskId).toBe(id(1));
@@ -65,7 +65,7 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("does not charge impossible or future-deferred pending work as committed time", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 }, [
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 }, [
       pending(1, { minutes: 90, dueAt: "2026-10-17T18:00:00Z" }),
       pending(2, { courseId: examCourse, notBefore: "2026-10-18T17:00:00Z" }),
     ]);
@@ -76,14 +76,14 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("still respects same-day suppression when a high-priority goal has spare time", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 }, [pending(1)]);
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 }, [pending(1)]);
     const first = buildAdaptiveDraft(input).adaptive.suggestedTasks![0]!;
     input.adaptive.snapshot.plannerHistory = [{ date: input.date, identity: first.key.replace(`planner:${input.date}:`, ""), status: "done" }];
     expect(buildAdaptiveDraft(input).adaptive.suggestedTasks).toEqual([]);
   });
 
   it("uses time remaining after a late page open and the confirmation buffer", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 });
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
     input.now = new Date("2026-10-17T17:40:00Z");
     input.freeBlocks = [{ start: "2026-10-17T17:00:00Z", end: "2026-10-17T18:00:00Z", kind: "free" }];
     input.planDayOptions = preferredOrder => ({ preferredOrder, planningNow: input.now.toISOString(), localDate: input.date, timeZone: input.timeZone });
@@ -94,7 +94,7 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("deduplicates overlapping free time and fits an exam block around fixed exclusions", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 });
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
     input.freeBlocks = [
       { start: "2026-10-17T17:00:00Z", end: "2026-10-17T18:00:00Z", kind: "free" },
       { start: "2026-10-17T17:00:00Z", end: "2026-10-17T18:00:00Z", kind: "free" },
@@ -107,7 +107,7 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("accounts for prior suggestions when consuming fragmented continuous slots", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 });
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
     input.freeBlocks = [25, 10, 10].map((minutes, index) => ({
       start: `2026-10-17T${17 + index}:00:00Z`, end: `2026-10-17T${17 + index}:${minutes}:00Z`, kind: "free",
     }));
@@ -121,7 +121,7 @@ describe("goal-aware adaptive draft integration", () => {
   });
 
   it("does not propose an indivisible study block when every free fragment is below ten minutes", () => {
-    const input = draftInput({ targetDate: "2026-10-20", weeklyMinutes: 0 });
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
     input.freeBlocks = [0, 1, 2].map(index => ({
       start: `2026-10-17T${17 + index}:00:00Z`, end: `2026-10-17T${17 + index}:09:00Z`, kind: "free",
     }));

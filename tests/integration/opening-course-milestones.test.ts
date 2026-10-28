@@ -13,6 +13,7 @@ const milestone = (extra: Partial<CourseMilestoneUpdate> = {}): CourseMilestoneU
 beforeAll(async () => { f = await createOpeningFixture(); });
 beforeEach(async () => {
   await f.reset();
+  await f.sql`DELETE FROM course_goals WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
   await f.sql`UPDATE workspace_preferences SET adaptive_planning=NULL WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
 });
 afterAll(async () => { await f?.close(); });

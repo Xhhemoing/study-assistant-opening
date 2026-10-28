@@ -1,5 +1,5 @@
 import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
-import { teachingMisconceptionsSchema, teachingQuestionInteractionSchema } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, teachingMisconceptionsSchema, teachingQuestionInteractionSchema, teachingSourceRefSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
@@ -10,6 +10,8 @@ export type TeachingQuestionSpec = {
   activityId: string; teachingUnitId: string; contentVersion: number;
   documentId: string; revisionId: string; revisionNumber: number; blockId: string;
   answerBlockId: string | null;
+  sourceRefs?: TeachingSourceRef[];
+  courseRequirement?: { id:string; revision:number; stableSkillId:string; requirementKey:string };
 };
 
 export function teachingQuestionText(content: Record<string, unknown> | undefined): string | null {
@@ -24,7 +26,7 @@ export function teachingQuestionText(content: Record<string, unknown> | undefine
 /** Only a published, owned teaching revision can issue this identity. Client text is never used. */
 export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: Scope,
   activityId: string, input: { blockId: string; contentVersion: number }, sourceVersions: Record<string, number>) {
-  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
+  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.goal_json,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
     FROM opening_teaching_activity_specs s
     JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
     JOIN opening_teaching_units u ON u.id=s.teaching_unit_id AND u.workspace_id=s.workspace_id AND u.owner_user_id=s.owner_user_id
@@ -66,7 +68,10 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
   const spec: TeachingQuestionSpec = { kind: "teaching_question", specVersion: "teaching-question-v1",
     activityId, teachingUnitId: String(row.teaching_unit_id), contentVersion: input.contentVersion,
     documentId: String(row.document_id), revisionId: String(row.revision_id), revisionNumber: Number(row.revision_number),
-    blockId: input.blockId, answerBlockId: answerBlock?.id ?? null };
+    blockId: input.blockId, answerBlockId: answerBlock?.id ?? null, sourceRefs: references };
+  const route=(row.goal_json as {courseRoute?:unknown}|undefined)?.courseRoute;
+  if(route!==undefined){const context=courseRouteActivityContextSchema.parse(route);
+    spec.courseRequirement={id:context.requirementId,revision:context.requirementRevision,stableSkillId:context.stableSkillId,requirementKey:context.requirementKey};}
   return { spec, stem };
 }
 
@@ -103,11 +108,33 @@ export function teachingQuestionIdentityMatches(db: LearningSql) {
               ELSE '' END,2000)=v.stem_snapshot))`;
 }
 
+/** Card variants are generated from card text, not from the private lineage's
+ * source bytes. Keep those stored refs for version/privacy fences, but do not
+ * present them (including a student's old photo) as this new question's evidence. */
+function cardVariantLineageOnly(spec: TeachingQuestionSpec, refs: TeachingSourceRef[], row: Record<string, unknown>): boolean {
+  const intent = row.create_intent as Record<string, unknown> | null;
+  if (!intent || intent.kind !== "card_review_variant" || typeof intent.cardId !== "string" || !intent.cardId
+    || !Number.isSafeInteger(intent.cardContentVersion) || Number(intent.cardContentVersion) < 1
+    || !Number.isSafeInteger(intent.reviewReps) || Number(intent.reviewReps) < 0
+    || !Number.isSafeInteger(intent.privacyEpoch) || Number(intent.privacyEpoch) < 0
+    || spec.activityId !== row.activity_id || spec.revisionId !== row.teaching_revision_id || spec.blockId !== row.teaching_block_id
+    || intent.variantRevisionId !== row.teaching_revision_id || intent.variantBlockId !== row.teaching_block_id
+    || !Number.isSafeInteger(spec.contentVersion) || spec.contentVersion < 1 || intent.variantContentVersion !== spec.contentVersion
+    || !intent.sourceVersions || typeof intent.sourceVersions !== "object" || Array.isArray(intent.sourceVersions)) return false;
+  const versions = intent.sourceVersions as Record<string, unknown>;
+  const ids = Object.keys(versions);
+  return refs.length === ids.length && new Set(refs.map(ref => ref.sourceId)).size === refs.length
+    && refs.every(ref => ref.chunkId == null && ref.page == null && ref.version != null
+      && Number.isSafeInteger(versions[ref.sourceId]) && Number(versions[ref.sourceId]) >= 0
+      && Number(ref.version) === versions[ref.sourceId]);
+}
+
 /** Read the immutable question and its hidden answer only for server-side grading. */
 export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: Scope, item: Record<string, unknown>) {
   if (item.teaching_revision_id == null) return null;
-  const [row] = await tx`SELECT r.blocks FROM opening_learning_item_versions v
+  const [row] = await tx`SELECT r.blocks,v.activity_id,v.teaching_revision_id,v.teaching_block_id,a.create_intent FROM opening_learning_item_versions v
     JOIN library_revisions r ON r.id=v.teaching_revision_id AND r.workspace_id=v.workspace_id
+    JOIN opening_teaching_activities a ON a.id=v.activity_id AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
     WHERE v.id=${String(item.id)} AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND ${teachingQuestionIdentityMatches(tx)}`;
   if (!row) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
@@ -121,6 +148,7 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
   }
   const rubric = answer?.content.rubric ?? answer?.content.criteria ?? answer?.content.scoringCriteria;
   const misconceptions = teachingMisconceptionsSchema.safeParse(answer?.content.misconceptions).data ?? [];
-  return { stem, misconceptions, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
+  const sourceRefs = teachingSourceRefSchema.array().max(64).parse(spec.sourceRefs ?? []);
+  return { stem, misconceptions, sourceRefs: cardVariantLineageOnly(spec, sourceRefs, row) ? [] : sourceRefs, referenceText: [text ? `课堂保存的参考解答（由教学内容生成，需结合题意判断）：\n${text}` : "",
     rubric ? `评分要点：\n${typeof rubric === "string" ? rubric : JSON.stringify(rubric)}` : ""].filter(Boolean).join("\n\n") };
 }

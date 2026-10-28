@@ -3,13 +3,14 @@ import type { LearningAttempt, Scope, SpanLessonSnapshot } from "@aistudy/contra
 import type { Sql } from "postgres";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { learningObservation } from "../../../../../../../packages/domain/src/opening/learning-summary-fixtures";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn(), originChange: vi.fn() }));
 vi.mock("@aistudy/database", () => ({
   createOpeningSpanSessionRepository: () => mocks,
   createOpeningLearningAttemptRepository: () => mocks,
   createOpeningLearningRepository: () => mocks,
   readOpeningCourseObservationHeads: mocks.heads,
   createOpeningStudyIntentRepository: () => ({ latest: mocks.intent }),
+  readOpeningSpanTutorOriginChange: mocks.originChange,
 }));
 import { createSpanLessonSessionService } from "./lesson-session-service";
 import { spanLessonDetailsSchema } from "./span-session-client";
@@ -17,7 +18,7 @@ const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8
 const scope: Scope = { workspaceId: id, ownerUserId: id };
 const session: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-independent", status: "paused", revision: 4, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", requirementKey: null, historyRevision: 0, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")!, startedAt: session.createdAt, submittedAt: null, observationId: null };
-beforeEach(() => { vi.clearAllMocks(); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); });
+beforeEach(() => { vi.clearAllMocks(); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
 const service = () => createSpanLessonSessionService({} as Sql);
 it("recovers only the exact activity's shared session and effective facts without rewriting first-answer help", async () => {
   const original = { ...learningObservation, courseId: id, sessionId: id, attemptId: id, assistance: "independent" as const };
@@ -55,4 +56,13 @@ it("accepts only a server-resolved durable retest alias for the same stored less
   mocks.matchesRetestReference.mockResolvedValue(true);
   expect((await service().read(scope, id, id, other)).session?.retestId).toBe(id);
   expect(mocks.matchesRetestReference).toHaveBeenCalledWith(scope, id, id, other);
+});
+it("returns the current origin snapshot while retaining the derived lesson's actual history", async () => {
+  const currentOrigin = { ...session, activityId: other, sessionId: other, revision: 9, status: "completed" };
+  mocks.originChange.mockResolvedValue({ reason: "evidence_changed", originSession: currentOrigin, observationId: other });
+  mocks.listByActivity.mockResolvedValue([attempt]);
+  const result = await service().read(scope, id, id);
+  expect(result).toMatchObject({ session, originChange: { reason: "evidence_changed", originSession: { activityId: other, revision: 9 }, observationId: other } });
+  expect(result.attempts[0]?.id).toBe(attempt.id);
+  expect(mocks.save).not.toHaveBeenCalled(); expect(mocks.create).not.toHaveBeenCalled();
 });

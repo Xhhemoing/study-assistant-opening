@@ -6,6 +6,7 @@ export { firstLearningInputSchema, type FirstLearningInput } from "@aistudy/cont
 
 /** A first, bounded plan; future tasks stay out of today's queue until their local day. */
 export function initialLearningDays(input: FirstLearningInput, startDate: string, timeZone: string): FirstLearningDaySeed[] {
+  if (input.startTime === null) return [];
   const remaining = input.targetDate
     ? Math.ceil((Date.parse(`${input.targetDate}T12:00:00Z`) - Date.parse(`${startDate}T12:00:00Z`)) / 86_400_000)
     : 7;
@@ -24,7 +25,8 @@ export function initialLearningDays(input: FirstLearningInput, startDate: string
   });
 }
 
-export function initialLearningSchedule(input: FirstLearningInput, today: string): OpeningPlanningSettings {
+export function initialLearningSchedule(input: FirstLearningInput, today: string): OpeningPlanningSettings | null {
+  if (input.startTime === null) return null;
   const [hour, minute] = input.startTime.split(":").map(Number);
   const end = hour! * 60 + minute! + input.minutes;
   const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();

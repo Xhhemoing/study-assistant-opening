@@ -1,14 +1,16 @@
 import { z } from "zod";
-import { retestCandidateSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningLearningRepository, createOpeningRetestRepository, lockLearningPreferences, lockOpeningRetestReviewCandidate, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, readOpeningLearningEvidenceContext } from "@aistudy/database";
+import { retestCandidateSchema, spanTutorAutomationSchema, type Scope, type SpanTutorBudget } from "@aistudy/contracts";
+import { assertSpanTutorRetestBudget, createOpeningLearningRepository, createOpeningRetestRepository, lockLearningPreferences, lockOpeningRetestReviewCandidate, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, readOpeningLearningEvidenceContext } from "@aistudy/database";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, suggestRetestAt } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { createOpeningRetestService } from "../../learning/retest-service";
 const inputSchema = z.object({ observationId: z.string().uuid(), clientKey: z.string().min(8).max(160) }).strict();
+const automaticInputSchema = inputSchema.extend({ expectedGrantRevision: z.number().int().nonnegative() });
 const delayedPrompt = "线性组合与 span 延迟复测：离开示范，独立完成服务器发放的新题，建立等式并检查全部坐标。";
 const conflict = (message: string) => Object.assign(new Error(message), { code: "CONFLICT" });
 const protocolSchema = z.object({ protocolId: z.literal("span-delayed-3d-v1"), baselineObservationId: z.string().uuid(),
-  baselineRootId: z.string().uuid(), priorAnswerPolicy: z.literal("require_unseen_problem") }).strict();
+  baselineRootId: z.string().uuid(), priorAnswerPolicy: z.literal("require_unseen_problem"),
+  tutorAutomation: spanTutorAutomationSchema.optional() }).strict();
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 const at = (value: unknown) => value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : NaN;
 
@@ -24,8 +26,8 @@ function transactionClient(tx: TransactionSql): Sql {
 }
 
 /** Explicit acceptance reuses the existing candidate → task → retest lifecycle. */
-export function createSpanDelayedRetestService(sql: Sql) {
-  return { async schedule(scope: Scope, raw: unknown) {
+export function createSpanDelayedRetestService(sql: Sql, now: () => Date = () => new Date()) {
+  async function schedule(scope: Scope, raw: unknown, automatic?: { expectedGrantRevision: number }) {
     const input = inputSchema.parse(raw);
     return sql.begin(async tx => {
       // The scanner takes this same lock before checking the one-active-cycle constraint.
@@ -34,7 +36,7 @@ export function createSpanDelayedRetestService(sql: Sql) {
       // Restore does not trust imported scoring authority. An existing acceptance
       // is still replayable from its immutable intent, task and baseline identity.
       const receipts = await tx`SELECT r.id AS replay_activity_id,r.candidate_reference_id,r.learning_protocol,
-          r.task_id,r.accepted_at,r.not_before_at,r.course_id,t.id AS replay_task_id,
+          r.task_id,r.accepted_at,r.not_before_at,r.course_id,r.status AS activity_status,t.status AS task_status,t.id AS replay_task_id,
           b.id AS baseline_id,COALESCE(b.root_observation_id,b.id) AS baseline_root_id,b.submitted_at,b.recorded_at
         FROM opening_retest_activities r
         LEFT JOIN opening_tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.owner_user_id=r.owner_user_id
@@ -57,6 +59,7 @@ export function createSpanDelayedRetestService(sql: Sql) {
         }
         return { candidateId: String(receipt.candidate_reference_id), taskId: String(receipt.task_id), activityId: String(receipt.replay_activity_id),
           courseId: String(receipt.course_id), notBeforeAt: iso(receipt.not_before_at),
+          taskStatus: String(receipt.task_status), activityStatus: String(receipt.activity_status),
           href: `/opening/courses/${receipt.course_id}/study/span?retest=${receipt.replay_activity_id}` };
       }
       const db = transactionClient(tx);
@@ -77,6 +80,15 @@ export function createSpanDelayedRetestService(sql: Sql) {
         throw conflict("原答案缺少可信的提交时间，尚不能安排正式 3 天复测。");
       }
       const dueAt = suggestRetestAt(new Date(Math.max(submittedAt, recordedAt)).toISOString(), 3);
+      let tutorBudget: SpanTutorBudget | undefined;
+      if (automatic) {
+        const cancelled = await tx`SELECT id FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND course_id=${head.courseId} AND skill_label=${SPAN_SKILL_LABEL}
+          AND requirement_key=${SPAN_REQUIREMENT_KEY} AND status IN ('cancelled','declined') LIMIT 1`;
+        if (cancelled.length) throw conflict("你已取消过这项复测。新答案已保存，请明确接受后再安排，刷新不会自动恢复。");
+        tutorBudget = await assertSpanTutorRetestBudget(tx, scope, { courseId: head.courseId, notBeforeAt: dueAt,
+          minutes: 20, expectedGrantRevision: automatic.expectedGrantRevision }, now());
+      }
       const protocol = { protocolId: "span-delayed-3d-v1", baselineObservationId: head.id,
         baselineRootId: head.rootObservationId ?? head.id, priorAnswerPolicy: "require_unseen_problem" };
       const sameBaseline = (prior: Partial<typeof protocol> | undefined) => prior?.protocolId === protocol.protocolId
@@ -139,7 +151,11 @@ export function createSpanDelayedRetestService(sql: Sql) {
         throw conflict("原复测任务的时间约束与这次记录不一致，请重新核对后再安排。");
       }
       const accepted = await createOpeningRetestService(db).accept(scope, candidateId, input.clientKey);
-      const [scheduled] = await tx`UPDATE opening_retest_activities SET learning_protocol=${tx.json(protocol)},
+      const [createdTask] = automatic ? await tx`SELECT version,status FROM opening_tasks WHERE id=${accepted.taskId}
+        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE` : [];
+      if (automatic && (!createdTask || !Number.isInteger(Number(createdTask.version)) || Number(createdTask.version) < 1)) throw conflict("自动复测任务回执不完整，请保留原请求核对。");
+      const learningProtocol = tutorBudget ? { ...protocol, tutorAutomation: { ...tutorBudget, createdTaskVersion: Number(createdTask!.version) } } : protocol;
+      const [scheduled] = await tx`UPDATE opening_retest_activities SET learning_protocol=${tx.json(learningProtocol)},
           candidate_reference_id=${candidateId},accept_client_key=${input.clientKey},version=version+1,updated_at=now()
         WHERE candidate_id=${candidateId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
           AND task_id=${accepted.taskId} AND accepted_at IS NOT NULL AND (accept_client_key IS NULL OR accept_client_key=${input.clientKey})
@@ -148,7 +164,13 @@ export function createSpanDelayedRetestService(sql: Sql) {
       await nextWorkspaceLearningHistoryRevision(tx, scope);
       return { candidateId, taskId: accepted.taskId, activityId: String(scheduled!.id), courseId: head.courseId,
         notBeforeAt: new Date(scheduled!.not_before_at as Date).toISOString(),
+        taskStatus: createdTask ? String(createdTask.status) : "pending", activityStatus: "accepted",
         href: `/opening/courses/${head.courseId}/study/span?retest=${scheduled.id}` };
     });
-  } };
+  }
+  return { schedule: (scope: Scope, raw: unknown) => schedule(scope, raw),
+    scheduleAutomatic: (scope: Scope, raw: unknown) => {
+      const { expectedGrantRevision, ...input } = automaticInputSchema.parse(raw);
+      return schedule(scope, input, { expectedGrantRevision });
+    } };
 }

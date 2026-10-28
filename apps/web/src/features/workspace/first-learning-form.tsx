@@ -14,11 +14,13 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [destination, setDestination] = useState<string | null>(null);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const locked = useRef(false);
   useEffect(() => {
     let restored: FirstLearningDraft | null = null;
     try { restored = readFirstLearningDraft(window.sessionStorage, draftKey); } catch { /* Storage can be disabled. */ }
     setDraft(restored ?? emptyFirstLearningDraft(crypto.randomUUID(), Intl.DateTimeFormat().resolvedOptions().timeZone));
+    setScheduleEnabled(Boolean(restored?.startTime));
   }, [draftKey]);
   function persist(next: FirstLearningDraft) {
     try { saveFirstLearningDraft(window.sessionStorage, draftKey, next); } catch { /* Storage can be disabled. */ }
@@ -31,6 +33,7 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!draft || locked.current) return;
+    if (scheduleEnabled && !draft.startTime) { setError("请选择开始时刻，或取消固定学习时段。"); return; }
     locked.current = true; setBusy(true); setError(""); persist(draft);
     try {
       const result = await submitFirstLearningDraft(draft);
@@ -38,7 +41,7 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
       // Keep the confirmed intent until the next page opens; even a stalled navigation can safely resume it.
       onStarted(result.href);
     } catch (cause) {
-      setError(cause instanceof z.ZodError ? "请检查主题、目标日期和每日学习时间。" : userFacingMessage(cause, "暂时无法开始，请保留内容后重试。"));
+      setError(cause instanceof z.ZodError ? "请检查主题、目标日期和学习时长。" : userFacingMessage(cause, "暂时无法开始，请保留内容后重试。"));
       locked.current = false; setBusy(false);
     }
   }
@@ -47,14 +50,22 @@ export function FirstLearningForm({ draftKey, onStarted }: { draftKey: string; o
     <FirstLearningReadiness key={draftKey} draftKey={draftKey} />
     <div className="space-y-1.5"><label className={ui.label} htmlFor="first-topic">想学什么？</label>
       <input id="first-topic" className={ui.input} required maxLength={120} disabled={busy} placeholder="例如：矩阵为什么能表示线性变换" value={draft.topic} onChange={event => update({ topic: event.target.value })} /></div>
+    <p className="text-xs leading-6 text-text-3">先学 {draft.minutes} 分钟，无需先安排固定时间。</p>
+    <details className="rounded-md border border-line px-3 py-2">
+      <summary className="min-h-10 cursor-pointer py-2 text-sm font-medium text-text-2">可选约束{draft.startTime ? ` · 每天 ${draft.startTime}` : ""}</summary>
+      <div className="space-y-4 pb-2 pt-3">
     <div className="space-y-1.5"><label className={ui.label} htmlFor="first-goal">学完希望做到什么？（可选）</label>
       <textarea id="first-goal" className={`${ui.input} min-h-20 leading-6`} maxLength={1000} disabled={busy} placeholder="例如：能用二维图形解释矩阵乘法" value={draft.goal} onChange={event => update({ goal: event.target.value })} /></div>
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
       <div className="space-y-1.5"><label className={ui.label} htmlFor="first-date">目标日期（可选）</label><input id="first-date" className={ui.input} type="date" disabled={busy} value={draft.targetDate} onChange={event => update({ targetDate: event.target.value })} /></div>
-      <div className="space-y-1.5"><label className={ui.label} htmlFor="first-minutes">每天几分钟？</label><input id="first-minutes" className={ui.input} type="number" required min={10} max={180} step={1} disabled={busy} value={draft.minutes || ""} onChange={event => update({ minutes: Number(event.target.value) })} /></div>
-      <div className="space-y-1.5"><label className={ui.label} htmlFor="first-time">通常几点开始？</label><input id="first-time" className={ui.input} type="time" required disabled={busy} value={draft.startTime} onChange={event => update({ startTime: event.target.value })} /></div>
+      <div className="space-y-1.5"><label className={ui.label} htmlFor="first-minutes">本次学几分钟？</label><input id="first-minutes" className={ui.input} type="number" required min={10} max={180} step={1} disabled={busy} value={draft.minutes || ""} onChange={event => update({ minutes: Number(event.target.value) })} /></div>
+      {!scheduleEnabled ? <div className="space-y-1.5"><label className={ui.label} htmlFor="first-daily-minutes">每天可用几分钟？（可选）</label><input id="first-daily-minutes" className={ui.input} type="number" min={10} max={180} step={1} disabled={busy} placeholder="暂不设每日预算" value={draft.dailyMinutes ?? ""} onChange={event => update({ dailyMinutes: event.target.value === "" ? undefined : Number(event.target.value) })} /></div> : null}
     </div>
+    <label className="flex min-h-10 items-center gap-2 text-sm text-text-2"><input type="checkbox" checked={scheduleEnabled} disabled={busy} onChange={event => { setScheduleEnabled(event.target.checked); if (!event.target.checked) update({ startTime: "" }); }} />安排固定学习时段</label>
+    {scheduleEnabled ? <div className="space-y-1.5"><label className={ui.label} htmlFor="first-time">每天几点开始？</label><input id="first-time" className={ui.input} type="time" required disabled={busy} value={draft.startTime} onChange={event => update({ startTime: event.target.value })} /><p className="text-xs leading-6 text-text-3">将按每天 {draft.minutes} 分钟准备日程草案，由你确认后采用。</p></div> : null}
     <p className="text-xs leading-6 text-zinc-500">按 {draft.timeZone} 记录。已有学习时间设置会保留；新计划需由你确认。</p>
+      </div>
+    </details>
     <FirstLearningMaterials selected={draft.sourceIds} disabled={busy} onChange={sourceIds => update({ sourceIds })} />
     {error ? <div className="space-y-2 text-sm leading-6 text-red-700" role="alert"><p>{error}</p><Link className={ui.quiet} href="/opening/today">查看今日页</Link><Link className={ui.quiet} href="/opening/settings">检查学习设置</Link></div> : null}
     {destination ? <p className="text-sm text-zinc-600" role="status">正在进入第一节课。<a className={ui.quiet} href={destination}>继续进入</a></p> : null}

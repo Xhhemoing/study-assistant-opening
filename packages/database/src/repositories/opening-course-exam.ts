@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -89,7 +90,7 @@ export function createOpeningCourseExamRepository(sql: Sql) {
           for (const request of pack.requests) if (expired(request)) request.status = "unknown";
           await tx`UPDATE opening_exam_sprints SET pack_snapshot=${tx.json(pack)},updated_at=now() WHERE id=${String(row!.id)}`;
         }
-        const prefs = openingAdaptivePrefsSchema.safeParse(c.adaptive_planning), goal = prefs.success ? prefs.data.courseGoals[courseId] : null;
+        const prefs = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(tx, scope, c.adaptive_planning)), goal = prefs.success ? prefs.data.courseGoals[courseId] : null;
         return { courseId, courseTitle: String(c.title), targetDate: goal?.targetDate ?? null,
           dailyMinutes: goal ? Math.round(goal.weeklyMinutes / 7) : null,
           sources: sources.map(source => ({ id: String(source.id), title: String(source.title), version: Number(source.version) })),

@@ -3,6 +3,9 @@ import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
 import { captureOpeningLearnerShadowPredictions } from "./opening-learner-shadow-predictions";
+import { assertOpeningSpanTutorOriginCurrent } from "./opening-span-tutor-origin";
+import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import { courseRouteActivityContextSchema } from "@aistudy/contracts";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
@@ -13,6 +16,7 @@ import { admitLearningSources, learningError, learningIso, lockLearningHistory, 
 export { readOpeningSpanExposureHistory } from "./opening-span-attempt";
 
 export function mapLearningAttempt(row: Record<string, unknown>): LearningAttempt {
+  const routeBinding=(row.evaluation_spec as {courseRequirement?:LearningAttempt["courseRequirement"]}|undefined)?.courseRequirement;
   const matrixExercise = parseCanonicalMatrixExercise(row.evaluation_spec);
   const canonicalSpan = parseOpeningSpanExercise(row.evaluation_spec);
   const restored = canonicalSpan ? null : parseOpeningSpanIntent(row.create_intent);
@@ -28,7 +32,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
     historyRevision: Number(row.history_revision), ...(matrixExercise ? { matrixExercise } : {}), ...(spanExercise ? { spanExercise } : {}),
     ...(typeof row.item_stem_snapshot === "string" ? { stemSnapshot: row.item_stem_snapshot } : {}),
     ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),
-    ...(spanValidation ? { spanValidation } : {}) };
+    ...(spanValidation ? { spanValidation } : {}),...(routeBinding?{courseRequirement:routeBinding}:{}) };
 }
 
 /** Canonical attempt creation, also used by the atomic held-out issuer. Caller owns the transaction. */
@@ -57,6 +61,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   if (input.teachingBlock) {
     if (input.requirementKey || input.problemId) throw learningError("VALIDATION", "teaching block sets its own question and requirement key");
     requirementKey = `teaching:${input.teachingBlock.blockId}:v${input.teachingBlock.contentVersion}`;
+    const [activity] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id=${String(session.activity_id)}
+      AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    const route = (activity?.goal_json as { courseRoute?: unknown } | undefined)?.courseRoute;
+    if (route !== undefined) requirementKey = courseRouteActivityContextSchema.parse(route).requirementKey;
   }
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
@@ -70,6 +78,8 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
   }
+  await assertOpeningSpanTutorOriginCurrent(tx, scope, String(session.activity_id));
+  await assertOpeningCourseRouteCurrent(tx, scope, String(session.activity_id));
   const teachingQuestion = input.teachingBlock ? await readTeachingQuestionForAttempt(tx, scope,
     String(session.activity_id), input.teachingBlock, sourceVersions) : null;
   // An acknowledged attempt remains replayable after pause/completion, but a
@@ -200,7 +210,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   });
   await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json(savedAnchor)} WHERE id=${String(rows[0].id)}`;
   await captureOpeningLearnerShadowPredictions(tx, scope, String(rows[0].id));
-  return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: spanSpec ?? matrixExercise, item_stem_snapshot: itemStem });
+  return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: teachingQuestion?.spec ?? spanSpec ?? matrixExercise, item_stem_snapshot: itemStem });
 
 }
 

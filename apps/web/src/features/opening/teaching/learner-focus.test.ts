@@ -58,7 +58,7 @@ it("does not borrow another course's observations or turn unavailable evidence i
 it("captures the goal strategy and one bounded prerequisite while preserving the original skill and error", () => {
   const value = read("no");
   const source = value.sources.courses[0]!;
-  source.goal = { targetDate: "2026-10-20", weeklyMinutes: 300, learningMode: "auto", priority: 4 };
+  source.goal = { targetDate: "2026-10-20", kind: "final-exam", weeklyMinutes: 300, learningMode: "auto", priority: 4 };
   source.knowledgeNodes = [{ id: "33333333-3333-4333-8333-333333333333", title: "Arithmetic", prerequisiteIds: [] },
     { id: "44444444-4444-4444-8444-444444444444", title: "Linear Algebra", prerequisiteIds: ["33333333-3333-4333-8333-333333333333"] }];
   source.observations = [...source.observations, { ...source.observations[0]!, id: "55555555-5555-4555-8555-555555555555", skillLabel: "Arithmetic" }];
@@ -71,6 +71,14 @@ it("captures the goal strategy and one bounded prerequisite while preserving the
   expect(teachingLearnerFocus(value, courseId, "Linear Algebra", true, undefined, now)).toMatchObject({
     activityKind: "full_explain", goalContext: { mode: "understand" }, prerequisiteRepair: { maxMinutes: 10 },
   });
+});
+
+it("keeps a near-term interest goal in understanding mode instead of inferring an exam", () => {
+  const value = read("no");
+  value.sources.courses[0]!.goal = { targetDate: "2026-10-20", kind: "interest", weeklyMinutes: 300, learningMode: "auto", priority: 4 };
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, new Date("2026-10-16T12:00:00Z")))
+    .toMatchObject({ activityKind: "targeted_explain", focusObservationId: "22222222-2222-4222-8222-222222222222",
+      goalContext: { mode: "understand", daysRemaining: 4, priority: 4, prerequisiteBudgetMinutes: 10 } });
 });
 
 it("keeps local-day goal timing separate from elapsed prerequisite evidence age", () => {

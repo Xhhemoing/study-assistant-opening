@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { proofFeedbackSchema } from "./answer-interpretation";
 
 /** Model output is parsed before it can become a server-owned assessment. */
 export const aiGradingProposalSchema = z.object({
@@ -13,6 +14,7 @@ export const aiGradingProposalSchema = z.object({
     feedback: z.string().trim().min(1).max(2000),
   }).strict()).min(1).max(30),
   transcription: z.string().max(20_000).optional(),
+  proofFeedback: proofFeedbackSchema.optional(),
   /** Checked against the saved question's dictionary by the grading repository. */
   misconceptionId: z.string().regex(/^[a-z][a-z0-9_-]{0,79}$/).nullable().optional(),
   /** A teaching exercise only; its client-side answer never becomes mastery evidence. */

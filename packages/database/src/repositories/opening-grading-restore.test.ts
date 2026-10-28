@@ -15,6 +15,24 @@ const row = (id: string, extra: Record<string, unknown> = {}) => ({ id, workspac
   root_observation_id: root, revises_observation_id: null, answer: "1", source_ids: [source], source_versions: { [source]: 1 }, ...extra });
 const aiIntent = (id: string) => ({ aiGrading: { input: { observationId: id } } });
 
+it("restores photo corrections as versioned facts and rejects a forged original reference", () => {
+  const metadata = { kind: "photo_transcription", version: 1, workSource: photo, originalTranscriptionObservationId: graded,
+    originalTranscription: "x=1", correctedTranscription: "x=-1", previousInterpretationObservationId: null, correctionReason: "漏掉负号" };
+  const rows = [row(root, { answer_revision: 1, grading_operation_id: key(1), grading_work_source: photo }),
+    row(graded, { revises_observation_id: root, answer_revision: 1, grading_operation_id: key(1), grading_work_source: photo,
+      submitted_intent: aiIntent(root), ai_evaluation: { workSource: photo, transcription: "x=1" } }),
+    row(revision, { revises_observation_id: graded, answer: "x=-1", answer_revision: 2, grading_operation_id: key(2), grading_work_source: photo,
+      submitted_intent: { answerInterpretation: metadata } })];
+  const restored = restoreOpeningGradingMetadata(rows, ws, owner);
+  expect(restored[2]!.submitted_intent).toEqual({ answerInterpretation: metadata });
+  expect(restoreOpeningGradingMetadata(restored.map(item => normalizeOpeningImportedEvaluation("opening_learning_observations", item)), ws, owner)[2]!.answer).toBe("x=-1");
+  const unchangedText = structuredClone(rows);
+  unchangedText[0]!.answer = "x=-1"; unchangedText[1]!.answer = "x=-1";
+  expect(restoreOpeningGradingMetadata(unchangedText, ws, owner)[2]).toMatchObject({ answer_revision: 2, grading_operation_id: key(2) });
+  metadata.originalTranscriptionObservationId = source;
+  expect(() => restoreOpeningGradingMetadata(rows, ws, owner)).toThrow(/interpretation/);
+});
+
 describe("grading metadata restore without paid queue replay", () => {
   it("preserves current revision/key and sealed photo but still strips scoring authority", () => {
     const rows = [row(root, { answer_revision: 1, grading_operation_id: key(1), effective_head_id: graded }),

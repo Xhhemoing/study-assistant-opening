@@ -17,6 +17,13 @@ const listeners = new Map<string, Set<() => void>>();
 const publish = (key: string) => listeners.get(key)?.forEach(listener => listener());
 const storageKey = (context: StudyConversationContext, scope?: string) => `aistudy.study-note.v1:${scope ? `${scope}:` : ""}${studyConversationIdentity(context)}`;
 
+/** The new atomic saver must not replay or overwrite a pre-existing legacy create. */
+export function hasExistingStudyNote(context: StudyConversationContext): boolean {
+  const key = storageKey(context);
+  if (memory.has(key)) return true;
+  try { return sessionStorage.getItem(key) !== null; } catch { return false; }
+}
+
 export function subscribeStudyNote(context: StudyConversationContext, listener: () => void, scope?: string) {
   const key = storageKey(context, scope);
   const entries = listeners.get(key) ?? new Set<() => void>();

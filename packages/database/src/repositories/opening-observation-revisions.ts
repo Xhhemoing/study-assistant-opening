@@ -3,7 +3,8 @@ import { refreshOpeningLearningEligibility } from "./opening-learning-eligibilit
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
-import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, observationRevisionInputSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
+import { answerInterpretationMetadataSchema,aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, observationRevisionInputSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ObservationRevisionInput, type ObservationRevisionResult, type Scope } from "@aistudy/contracts";
+import { readOpeningAnswerInterpretationState } from "./opening-answer-interpretation-state";
 import { admitLearningSources, learnerVerdictSource, learningError, lockLearningHistory, lockLearningOwner, lockLearningSession, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
@@ -13,12 +14,13 @@ export { readOpeningObservationHistory } from "./opening-observation-revision-hi
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
 export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, raw: ObservationRevisionInput,
-  options: { aiGrading?: { input: AiGradingInput; proposal: AiGradingProposal; modelLabel: string | null } } = {},
+  options: { aiGrading?: { input: AiGradingInput; proposal: AiGradingProposal; modelLabel: string | null };answerInterpretation?:AnswerInterpretationMetadata } = {},
 ): Promise<ObservationRevisionResult> {
   const input = observationRevisionInputSchema.parse(raw);
   const grading = options.aiGrading ? { input: aiGradingInputSchema.parse(options.aiGrading.input),
     proposal: aiGradingProposalSchema.parse(options.aiGrading.proposal), modelLabel: options.aiGrading.modelLabel } : null;
-  const intent = JSON.parse(JSON.stringify({ ...input, ...(grading ? { aiGrading: grading } : {}) }));
+  const interpretation=options.answerInterpretation?answerInterpretationMetadataSchema.parse(options.answerInterpretation):null;
+  const intent = JSON.parse(JSON.stringify({ ...input, ...(grading ? { aiGrading: grading } : {}),...(interpretation?{answerInterpretation:interpretation}:{}) }));
   return sql.begin(async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
     await lockLearningOwner(tx, scope);
@@ -54,6 +56,15 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND COALESCE(root_observation_id,id)=${root.id}`;
     if (!head || !courseIds.includes(String(head.course_id))) throw learningError("CONFLICT", "observation attribution changed");
     const previous = await qualifyObservationRevision(tx, scope, head);
+    if(interpretation){
+      const state=await readOpeningAnswerInterpretationState(tx,scope,headId),prior=state.versions.at(-1);
+      if(grading||input.revisionKind!=="replace"||!state.workSource||!state.original||previous.revisionKind==="retract"
+        ||interpretation.originalTranscriptionObservationId!==state.original.id||interpretation.originalTranscription!==state.originalText
+        ||!isDeepStrictEqual(interpretation.workSource,state.workSource)||interpretation.version!==state.versions.length+1
+        ||interpretation.previousInterpretationObservationId!==(prior?.observationId??null)||replacement?.answer!==interpretation.correctedTranscription
+        ||replacement.outcome!=="unverified"||replacement.assistance!==previous.assistance||replacement.courseId!==undefined||replacement.skillLabel!==undefined
+        ||replacement.requirementKey!==undefined||replacement.referenceCheck!==undefined)throw learningError("VALIDATION","转写校正只能修改原照片的识别文字，不能重置作答身份、帮助情况或判分。");
+    }
     const gradingContext = grading ? await readOpeningAiGradingContext(tx, scope, grading.input) : null;
     if (grading && (input.revisionKind !== "replace" || grading.input.observationId !== headId
       || replacement?.answer !== previous.answer || replacement.assistance !== previous.assistance
@@ -122,7 +133,7 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     if (!record) throw learningError("CONFLICT", "revision clientKey already used");
     // Replacement cannot change the sealed photo. Only changed answer text is a
     // new paid input; judgement, attribution, help and retraction retain its ledger.
-    const answerChanged = !grading && replacement !== null && replacement.answer !== previous.answer;
+    const answerChanged = !grading && replacement !== null && (replacement.answer !== previous.answer||interpretation!==null);
     const answerRevision = Number(head.answer_revision) + (answerChanged ? 1 : 0);
     const workSource = gradingContext?.workSource ?? head.grading_work_source ?? previous.aiEvaluation?.workSource ?? null;
     await tx`UPDATE opening_learning_observations SET answer_revision=${answerRevision},

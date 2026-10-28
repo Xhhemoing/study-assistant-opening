@@ -3,13 +3,17 @@ import type { CourseGoal, CourseMilestone } from "@aistudy/contracts";
 import { localDateKeyInZone } from "../daily-draft";
 import { goalPlanningPriority, goalPlanningReason, resolveGoalLearningContext } from "./goal-policy";
 
-const goal = (changes: Partial<CourseGoal> = {}): CourseGoal => ({ targetDate: null, weeklyMinutes: 180, ...changes });
+const goal = (changes: Partial<CourseGoal> = {}): CourseGoal => ({ targetDate: null, weeklyMinutes: 180, kind: "final-exam", ...changes });
 const milestone = (targetDate: string, status: CourseMilestone["status"] = "planned"): CourseMilestone => ({
   id: "00000000-0000-4000-8000-000000000001", title: "测验", successCriteria: "完成独立测验",
   targetDate, status, revision: 1, confirmedAt: null, evidenceRefs: [], history: [],
 });
 
 describe("goal execution policy", () => {
+  it("keeps ordinary deadlines out of automatic exam mode", () => {
+    expect(resolveGoalLearningContext(goal({ kind: "custom", targetDate: "2026-10-18" }), "2026-10-17").mode).toBe("understand");
+    expect(resolveGoalLearningContext({ targetDate: "2026-10-18", weeklyMinutes: 20 }, "2026-10-17").mode).toBe("understand");
+  });
   it("keeps missing and historical undated goals in understanding mode without priority", () => {
     for (const value of [null, goal()]) {
       const context = resolveGoalLearningContext(value, "2026-10-17");

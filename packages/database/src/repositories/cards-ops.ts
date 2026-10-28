@@ -164,7 +164,7 @@ export async function listCardQueue(
     LEFT JOIN course_asset_memberships m
       ON m.asset_type = 'card' AND m.asset_id = c.id AND m.workspace_id = c.workspace_id
     LEFT JOIN course_goals g
-      ON g.course_id = m.course_id AND g.workspace_id = c.workspace_id
+      ON (g.course_id IN (m.course_id,c.course_id) OR EXISTS (SELECT 1 FROM course_goal_links gl WHERE gl.workspace_id=g.workspace_id AND gl.goal_id=g.id AND gl.course_id IN (m.course_id,c.course_id))) AND g.workspace_id = c.workspace_id
      AND g.active = true AND g.archived_at IS NULL
     WHERE c.workspace_id = ${input.workspaceId}
       AND c.auto_paused = false

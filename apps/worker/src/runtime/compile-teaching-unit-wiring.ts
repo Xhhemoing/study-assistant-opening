@@ -7,6 +7,7 @@ import {
   createOpeningTeachingContentRepository,
   readOpeningTeachingCompilerFocus,
   readOpeningTeachingParentBudget,
+  assertOpeningCourseRouteReady,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
@@ -14,6 +15,7 @@ import {
 import { createCompilerProviderInput } from "@aistudy/ai";
 import { createDbModelGateway, scopeBudget } from "./model-gateway";
 import { createOpeningMaterialRetriever } from "./material-retrieval";
+import { createSourcePageImages, openingPageStorage } from "./source-page-images";
 import {
   createTeachingCompilerPublishInput,
   createTeachingValidationAfterPublish,
@@ -33,6 +35,7 @@ export function createCompileTeachingUnitWorkerDeps(
     budget: OpeningBudgetRepository;
     chunks: ReturnType<typeof createOpeningSourceChunksRepository>;
     privacy: ReturnType<typeof createOpeningPrivacyRepository>;
+    pageImages?: ReturnType<typeof createSourcePageImages>;
   },
 ): CompileTeachingUnitDeps {
   const { budget, chunks, privacy: privacyRepo } = shared;
@@ -45,11 +48,13 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
   const retrieveContext = createOpeningMaterialRetriever(sql, budget);
+  const pageImages = shared.pageImages ?? createSourcePageImages(sql, openingPageStorage());
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
         callModel: (scope, input, options) =>
-          models.call(scope, "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options }),
+          models.call(scope, input.imageParts.length ? "teaching.compile-visual" : "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options,
+            beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } }),
         buildProviderInput: async (scope, payload, options) => {
           const activity = await teachingActivities.get(scope, payload.activityId);
           const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
@@ -58,6 +63,7 @@ export function createCompileTeachingUnitWorkerDeps(
           return createCompilerProviderInput({
             loadChunks,
             retrieveContext,
+            loadPageImages: (ownedScope, input) => pageImages(ownedScope as Scope, input),
             readOutline: () => outline,
             parentBudget: options?.parentBudget,
             intentSummary: activity?.intentSummary,

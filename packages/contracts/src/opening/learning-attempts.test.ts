@@ -93,3 +93,15 @@ it("reads saved question snapshots in database Unicode characters", () => {
   expect(learningAttemptContextReadSchema.safeParse({ attempt, deliveredAssistance: "none" }).success).toBe(true);
   expect(learningAttemptContextReadSchema.safeParse({ attempt: { ...attempt, stemSnapshot: "𝑥".repeat(2001) }, deliveredAssistance: "none" }).success).toBe(false);
 });
+
+it("restores a course-bound teaching attempt only with its saved canonical requirement binding", () => {
+  const binding = { id: sessionId, revision: 1, stableSkillId: sessionId, requirementKey: "course:linear-map" };
+  const attempt = { ...contextAttempt, requirementKey: binding.requirementKey, courseRequirement: binding,
+    contextAnchor: { ...contextAttempt.contextAnchor, sourceId: null, sourceVersion: null, blockId: sessionId, contentVersion: 1 } };
+  const read = (value: unknown) => learningAttemptContextReadSchema.safeParse({ attempt: value, deliveredAssistance: "none" }).success;
+  expect(read(attempt)).toBe(true);
+  expect(read({ ...attempt, courseRequirement: undefined })).toBe(false);
+  expect(read({ ...attempt, courseRequirement: { ...binding, requirementKey: "different" } })).toBe(false);
+  expect(read({ ...attempt, courseRequirement: { ...binding, revision: 0 } })).toBe(false);
+  expect(learningAttemptCreateInputSchema.safeParse({ sessionId, clientKey: "forged-binding", courseRequirement: binding }).success).toBe(false);
+});

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RetestCandidate } from "@aistudy/contracts";
-import { createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
+import { cancelOwnedSpanTutorRetests, createOpeningAdaptivePrefsRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
@@ -82,7 +82,8 @@ it.each(["completed", "cancelled"])("replays the exact original request after %s
   await createOpeningPlansRepository(fixture.sql).updateTaskStatus(fixture.scope, result.taskId,
     { expectedVersion: 1, status: status === "completed" ? "done" : "skipped", at: new Date().toISOString() });
   const before = await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${result.candidateId}`;
-  expect(await service.schedule(fixture.scope, f.request)).toEqual(result);
+  expect(await service.schedule(fixture.scope, f.request)).toMatchObject({ ...result, activityStatus: status,
+    taskStatus: status === "completed" ? "done" : "skipped" });
   expect(await fixture.sql`SELECT payload FROM opening_jobs WHERE id=${result.candidateId}`).toEqual(before);
   const [activity] = await fixture.sql`SELECT status FROM opening_retest_activities WHERE candidate_id=${result.candidateId}`;
   expect(activity!.status).toBe(status);
@@ -137,3 +138,92 @@ it.each(["scan", "schedule"] as const)("serializes scanner and explicit scheduli
     gate.release(); await Promise.allSettled(pending); await closeRace(b.sql); await closeRace(a.sql);
   }
 }, 15_000);
+
+async function tutorGrant(courseId: string, dailyMinutes = 30) {
+  return createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, {
+    spanTutorGrant: { courseId, enabled: true, dailyMinutes, expiresOn: null, expectedRevision: 0 },
+  });
+}
+it("persists an automatic target-day budget in the ordinary acceptance and replays after account shutdown", async () => {
+  const f = await baseline(); await tutorGrant(f.courseId);
+  const service = createSpanDelayedRetestService(fixture.sql), request = { ...f.request, expectedGrantRevision: 1 };
+  const result = await service.scheduleAutomatic(fixture.scope, request);
+  await assertScheduled(f, result);
+  const [activity] = await fixture.sql`SELECT learning_protocol FROM opening_retest_activities WHERE id=${result.activityId}`;
+  expect(activity!.learning_protocol.tutorAutomation).toMatchObject({ minutes: 20, grantRevision: 1, createdTaskVersion: 1, timeZone: "Asia/Shanghai" });
+  await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  const replay = await service.scheduleAutomatic(fixture.scope, request);
+  expect(replay.taskId).toBe(result.taskId);
+  expect(await fixture.sql`SELECT id FROM opening_tasks WHERE candidate_id=${result.candidateId}`).toHaveLength(1);
+});
+
+it("requires current course permission and rejects account-off before creating an automatic task", async () => {
+  const f = await baseline(); await tutorGrant(f.courseId);
+  await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.scope, { ...f.request, expectedGrantRevision: 1 }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await fixture.sql`SELECT id FROM opening_tasks WHERE course_id=${f.courseId}`).toHaveLength(0);
+});
+
+it("serializes two courses against the same target-day balance", async () => {
+  const a = await baseline(), b = await baseline();
+  await tutorGrant(a.courseId); await tutorGrant(b.courseId);
+  const service = createSpanDelayedRetestService(fixture.sql);
+  const results = await Promise.allSettled([a, b].map(f => service.scheduleAutomatic(fixture.scope, { ...f.request, expectedGrantRevision: 1 })));
+  expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+  expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+  const [count] = await fixture.sql`SELECT count(*)::int AS count FROM opening_tasks WHERE course_id IN (${a.courseId},${b.courseId})`;
+  expect(count!.count).toBe(1);
+});
+
+it("includes a manual span activity on the target day in the shared balance", async () => {
+  const f = await baseline(); await tutorGrant(f.courseId);
+  const created = new Date(Math.max(Date.parse(f.record.submittedAt!), Date.parse(f.record.recordedAt!)) + 72 * 3600000);
+  await fixture.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,
+    intent_summary,source_ids,goal_json,client_key,create_intent,created_at)
+    VALUES(${randomUUID()},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${f.courseId},'active','ready','course_continue',
+      'manual span',${[f.sourceId]},'{}'::jsonb,${randomUUID()},${fixture.sql.json({ protocol: "span-lesson-v1", intent: { timeBudgetMinutes: 25 } })},${created})`;
+  await expect(createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.scope, { ...f.request, expectedGrantRevision: 1 }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await fixture.sql`SELECT id FROM opening_tasks WHERE course_id=${f.courseId}`).toHaveLength(0);
+});
+
+it("conditionally closes only untouched unstarted automatically owned tasks with system provenance", async () => {
+  const examples = [await baseline(), await baseline(), await baseline(), await baseline()];
+  const results = [];
+  for (const f of examples) {
+    await tutorGrant(f.courseId, 180);
+    results.push(await createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.scope, { ...f.request, expectedGrantRevision: 1 }));
+  }
+  await fixture.sql`UPDATE opening_tasks SET title='learner edited',version=version+1 WHERE id=${results[1]!.taskId}`;
+  await fixture.sql`UPDATE opening_retest_activities SET started_at=now() WHERE id=${results[2]!.activityId}`;
+  await fixture.sql`INSERT INTO opening_plan_state(workspace_id,day,accepted_version,accepted_blocks)
+    VALUES(${fixture.scope.workspaceId},'2099-01-01',1,${fixture.sql.json([{ taskId: results[3]!.taskId, start: "2099-01-01T01:00:00Z", end: "2099-01-01T01:20:00Z" }])})`;
+  const closed = await fixture.sql.begin(tx => cancelOwnedSpanTutorRetests(tx, fixture.scope, { reason: "tutor_disabled" }));
+  expect(closed).toEqual([results[0]!.taskId]);
+  const rows = await fixture.sql`SELECT id,status,close_source FROM opening_tasks WHERE id IN ${fixture.sql(results.map(result => result.taskId))}`;
+  expect(rows.find(row => row.id === results[0]!.taskId)).toMatchObject({ status: "skipped", close_source: "system" });
+  expect(rows.filter(row => row.status === "pending")).toHaveLength(3);
+  expect((await createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.scope, { ...examples[0]!.request, expectedGrantRevision: 1 })).taskStatus).toBe("skipped");
+});
+
+it("closes only the evidence-invalidated automatic task, preserving edited and unrelated accepted tasks", async () => {
+  const a = await baseline(), b = await baseline(), other = await baseline();
+  const results = [];
+  for (const f of [a, b, other]) {
+    await tutorGrant(f.courseId, 180);
+    results.push(await createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.scope, { ...f.request, expectedGrantRevision: 1 }));
+  }
+  await fixture.sql`UPDATE opening_tasks SET title='learner owns this',version=version+1 WHERE id=${results[1]!.taskId}`;
+  for (const f of [a, b]) await createOpeningLearningRepository(fixture.sql).reviseObservation(fixture.scope, {
+    rootObservationId: f.record.rootObservationId ?? f.record.id, revisesObservationId: f.record.id, expectedHead: f.record.id,
+    revisionKind: "retract", reason: "withdraw incorrect evidence", clientKey: randomUUID(),
+  });
+  const rows = await fixture.sql`SELECT t.id,t.status,t.close_source,r.status AS activity_status FROM opening_tasks t
+    JOIN opening_retest_activities r ON r.task_id=t.id WHERE t.id IN ${fixture.sql(results.map(result => result.taskId))}`;
+  expect(rows.find(row => row.id === results[0]!.taskId)).toMatchObject({ status: "skipped", close_source: "system", activity_status: "cancelled" });
+  expect(rows.find(row => row.id === results[1]!.taskId)).toMatchObject({ status: "pending", activity_status: "invalidated" });
+  expect(rows.find(row => row.id === results[2]!.taskId)).toMatchObject({ status: "pending", activity_status: "accepted" });
+});

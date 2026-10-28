@@ -95,3 +95,28 @@ describe("first learning", () => {
     expect(calls.plans.createTaskWithOutcome).toHaveBeenCalledWith(scope, expect.objectContaining({ clientKey: `first-learning-activity:${id}`, origin: "manual" }));
   });
 });
+
+it.each([null, undefined])("starts an unscheduled activity without a task, draft or schedule write (%s)", async startTime => {
+  const { deps, calls, initialized } = setup();
+  calls.firstLearning.initialize.mockResolvedValue({ ...initialized, firstTaskId: null, tasks: [], endDate: "2026-10-19" });
+  const result = await startFirstLearning(deps, scope, { ...input, startTime, minutes: 20 });
+  expect(result).toMatchObject({ activityId: id, courseId: id, taskId: null, plannedDays: 0, draftCreated: false, scheduleInitialized: false,
+    href: `/opening/courses/${id}/study?activity=${id}` });
+  expect(calls.firstLearning.initialize).toHaveBeenCalledWith(scope, expect.objectContaining({
+    intent: expect.objectContaining({ startTime: null, minutes: 20 }), days: [],
+  }), { replayOnly: false });
+  expect(calls.settings.initialize).not.toHaveBeenCalled();
+  expect(calls.settings.set).not.toHaveBeenCalled();
+  expect(calls.plans.createTaskWithOutcome).not.toHaveBeenCalled();
+  expect(calls.plans.getToday).not.toHaveBeenCalled();
+});
+it("uses the saved workspace day for an unscheduled activity without changing its schedule", async () => {
+  const { deps, calls, initialized } = setup();
+  calls.firstLearning.initialize.mockResolvedValue({ ...initialized, firstTaskId: null, tasks: [], endDate: "2026-10-18" });
+  calls.settings.get.mockResolvedValue({ settings: { ...DEFAULT_OPENING_PLANNING_SETTINGS, timeZone: "America/Los_Angeles" }, saved: true, invalidStoredSettings: false });
+  deps.now = () => new Date("2026-10-19T03:00:00Z");
+  expect(await startFirstLearning(deps, scope, { ...input, startTime: null, dailyMinutes: 45 })).toMatchObject({ planDate: "2026-10-18", taskId: null });
+  expect(calls.firstLearning.initialize).toHaveBeenCalledWith(scope, expect.objectContaining({ planTimeZone: "America/Los_Angeles", startDate: "2026-10-18", days: [] }), { replayOnly: false });
+  expect(calls.settings.initialize).not.toHaveBeenCalled();
+  expect(calls.plans.getToday).not.toHaveBeenCalled();
+});

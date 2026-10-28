@@ -54,7 +54,13 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(39);
+    expect(Object.keys(snapshot.tables)).toHaveLength(45);
+    expect(snapshot.tables).toHaveProperty("course_requirement_evidence_links");
+    expect(snapshot.tables).toHaveProperty("opening_learning_asset_links");
+    expect(snapshot.tables).toHaveProperty("course_goals");
+    expect(snapshot.tables).toHaveProperty("course_goal_links");
+    expect(snapshot.tables).toHaveProperty("goal_time_windows");
+    expect(snapshot.tables).toHaveProperty("course_requirements");
     expect(sql.calls.some((call) => /(?:FROM|JOIN)\s+(?:opening_tutor_jobs|opening_jobs|opening_outbox|opening_budget_reservations|sessions)(?:\s|$)/.test(call.query))).toBe(false);
   });
 
@@ -105,6 +111,19 @@ describe("readOpeningBackupRecords", () => {
     expect(snapshot.tables.opening_retest_activities).toEqual([{ id: "retest-1", candidate_id: null,
       candidate_reference_id: candidateId, task_id: "task-1", accept_client_key: null, learning_protocol: null,
       reason: "learning_protocol_baseline_unavailable" }]);
+  });
+
+  it("removes a course protocol receipt when its origin activity was excluded", async () => {
+    const sql = fakeSql(call => {
+      if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (call.query.includes("FROM opening_learning_observations")) return [{ id: "baseline", source_ids: [] }];
+      if (call.query.includes("FROM opening_retest_activities WHERE")) return [{ id: "retest-1", candidate_id: null,
+        candidate_reference_id: candidateId, task_id: "task-1", accept_client_key: "accepted-request",
+        learning_protocol: { protocolId: "course-route-delayed-v1", baselineObservationId: "baseline", baselineRootId: "baseline", originActivityId: "excluded" }, reason: null }];
+      return [];
+    });
+    const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+    expect(snapshot.tables.opening_retest_activities[0]).toMatchObject({ id: "retest-1", task_id: "task-1", learning_protocol: null, accept_client_key: null });
   });
 
   it("retains an accepted task candidate only when its assistant candidate and source turn are included", async () => {

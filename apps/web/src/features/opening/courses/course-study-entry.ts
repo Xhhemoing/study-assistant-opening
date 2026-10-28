@@ -1,10 +1,11 @@
-import type { TaskItem, TeachingActivity } from "@aistudy/contracts";
+import type { CourseRouteActionResult, TaskItem, TeachingActivity } from "@aistudy/contracts";
+import type { CourseRouteClient } from "./course-route-client";
 import type { OpeningApi } from "../client/api";
 import { buildStartLearningCreateInput } from "../teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
-export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask };
+export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
 
 const TASK_UNAVAILABLE = "这项任务不属于本课程、尚未到开始时间或已结束，请返回课程重新选择。";
 const TARGET_CHANGED = "任务的学习目标已变化或链接不匹配，请返回课程重新选择；原活动仍保留。";
@@ -25,7 +26,7 @@ function assertTaskRequirement(task: TaskItem, activity: TeachingActivity): Teac
 export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity" | "listTeachingActivities" | "listTasks" | "createTeachingActivity">, options: {
   courseId: string; courseTitle: string; activityId?: string; taskId?: string; retestId?: string;
   compilerEnabled: boolean; teachingEnabled?: boolean; archived: boolean; sourceIds: readonly string[];
-}): Promise<CourseStudyEntry> {
+}, routeApi?: Pick<CourseRouteClient, "task" | "start">): Promise<CourseStudyEntry> {
   if (options.archived) return { kind: "practice" };
   const enabled = options.teachingEnabled !== false;
   let task: TaskItem | undefined;
@@ -46,6 +47,20 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     // Client-key prefixes alone are not binding evidence (onboarding also uses a different key).
     const target = task.teachingTarget;
     if (options.activityId && (task.suggestionKind === "review_cards" || target?.activityId !== options.activityId)) throw new Error(TARGET_CHANGED);
+    if (enabled && routeApi && task.suggestionKind !== "review_cards") {
+      const context = await routeApi.task(options.courseId, task.id);
+      if (context.managed) {
+        if (context.courseId !== options.courseId || context.taskId !== task.id) throw new Error(TARGET_CHANGED);
+        if (!context.available) throw new Error(context.reason ?? "这项路线任务暂不可开始，原任务与记录保留。");
+        if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
+        const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
+          requirementId: context.requirementId, expectedRequirementRevision: context.expectedRequirementRevision,
+          taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
+          clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
+        if (result.kind === "choice") return { kind: "route-choice", choice: result };
+        return { kind: "activity", activity: assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)) };
+      }
+    }
     if (target) {
       if (target.courseId !== options.courseId) throw new Error(TARGET_CHANGED);
       const expectedRequirement = taskRequirement(task);

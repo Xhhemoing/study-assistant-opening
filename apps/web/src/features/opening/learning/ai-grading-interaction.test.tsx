@@ -84,7 +84,7 @@ it.each([
   ["daily_cap", "今日自动批改额度已用完", "手动批改"],
   ["budget", "预算不足以覆盖本次预估", "手动批改"],
   ["budget_unavailable", "无法可靠估算本次批改费用", "手动批改"],
-  ["answer_changed", "不会自动重批", "重新批改"],
+  ["answer_changed", "不会自动重批", "重新批改（可能产生费用）"],
 ] as const)("explains %s without auto POST and offers explicit manual grading", async (reason, message, label) => {
   const revision = reason === "answer_changed" ? 2 : 1;
   api.getGradingStatus.mockResolvedValue(status({ jobId: null, answerRevision: revision, autoGradeSkipped: reason }));
@@ -100,7 +100,7 @@ it("keeps regrading reachable when a corrected answer could otherwise complete t
   await renderCard({ record: { ...record, revisionKind: "replace", outcome: "incorrect" }, completionAction: { label: "继续练习", onClick: complete } });
   expect(container.textContent).toContain("重新批改");
   api.gradeObservation.mockResolvedValue(status({ status: "queued", retryable: false }));
-  await click("重新批改"); expect(api.gradeObservation).toHaveBeenCalledTimes(1); expect(complete).not.toHaveBeenCalled();
+  await click("重新批改（可能产生费用）"); expect(api.gradeObservation).toHaveBeenCalledTimes(1); expect(complete).not.toHaveBeenCalled();
 });
 
 it("offers manual grading for an ungraded saved answer even without a skip reason", async () => {

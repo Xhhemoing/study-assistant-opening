@@ -1,10 +1,34 @@
 import { isRecord, isUuid } from "./backup-validation";
+import { spanTutorAutomationSchema } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "./span-teaching-catalog";
 
 type Row = Record<string, unknown>;
 const at = (value: unknown) => value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : NaN;
 const same = (left: unknown, right: unknown) => isUuid(left) && isUuid(right) && left.toLowerCase() === right.toLowerCase();
 const scoped = (left: Row, right: Row) => same(left.workspace_id, right.workspace_id) && same(left.owner_user_id, right.owner_user_id);
+const positiveRevision = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+function validateCourseProtocol(protocol: Row, row: Row, tables: Record<string, Row[]>, errors: string[]): boolean {
+  const keys = ["protocolId", "goalId", "goalRevision", "requirementId", "requirementRevision", "stableSkillId", "baselineObservationId", "baselineRootId", "originActivityId", "minutes"];
+  if (Object.keys(protocol).some(key => !keys.includes(key))
+    || !["goalId", "requirementId", "stableSkillId", "baselineObservationId", "baselineRootId", "originActivityId"].every(key => isUuid(protocol[key]))
+    || !positiveRevision(protocol.goalRevision) || !positiveRevision(protocol.requirementRevision)
+    || typeof protocol.minutes !== "number" || !Number.isInteger(protocol.minutes) || protocol.minutes < 5 || protocol.minutes > 180 || row.purpose !== "retest") {
+    errors.push("retest learning protocol is invalid"); return false;
+  }
+  const goal = tables.course_goals?.find(item => same(item.id, protocol.goalId) && same(item.workspace_id, row.workspace_id));
+  const requirement = tables.course_requirements?.find(item => same(item.id, protocol.requirementId) && scoped(item, row));
+  const activity = tables.opening_teaching_activities?.find(item => same(item.id, protocol.originActivityId) && scoped(item, row));
+  // Older revisions are archive facts. Live restoration never grants their former authority.
+  if (!goal || !requirement || !activity
+    || !same(requirement.course_id, row.course_id) || !same(activity.course_id, row.course_id)
+    || !same(requirement.stable_skill_id, protocol.stableSkillId) || requirement.requirement_key !== row.requirement_key
+    || !positiveRevision(goal.revision) || !positiveRevision(requirement.revision)
+    || protocol.goalRevision > goal.revision || protocol.requirementRevision > requirement.revision
+    || (protocol.requirementRevision === requirement.revision && (!Array.isArray(requirement.goal_ids) || requirement.goal_ids.length > 0 && !requirement.goal_ids.some(id => same(id, goal.id))))) {
+    errors.push("course retest protocol reference is missing or mismatched"); return false;
+  }
+  return true;
+}
 
 /** These receipts preserve learning identity, never imported scoring authority. */
 export function validateBackupRetestProtocols(tables: Record<string, Row[]>, errors: string[]): void {
@@ -39,7 +63,10 @@ export function validateBackupRetestProtocols(tables: Record<string, Row[]>, err
     // Legacy archives cannot establish a formal retention protocol from timing alone.
     if (row.learning_protocol == null) continue;
     const protocol = row.learning_protocol;
-    if (!isRecord(protocol) || Object.keys(protocol).some(key => !["protocolId", "baselineObservationId", "baselineRootId", "priorAnswerPolicy"].includes(key))
+    if (isRecord(protocol) && protocol.protocolId === "course-route-delayed-v1") {
+      if (!validateCourseProtocol(protocol, row, tables, errors)) continue;
+    } else if (!isRecord(protocol) || Object.keys(protocol).some(key => !["protocolId", "baselineObservationId", "baselineRootId", "priorAnswerPolicy", "tutorAutomation"].includes(key))
+      || (protocol.tutorAutomation !== undefined && !spanTutorAutomationSchema.safeParse(protocol.tutorAutomation).success)
       || protocol.protocolId !== "span-delayed-3d-v1" || protocol.priorAnswerPolicy !== "require_unseen_problem"
       || !isUuid(protocol.baselineObservationId) || !isUuid(protocol.baselineRootId)
       || row.purpose !== "retest" || row.skill_label !== SPAN_SKILL_LABEL || row.requirement_key !== SPAN_REQUIREMENT_KEY) {

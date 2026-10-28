@@ -9,6 +9,7 @@ export const NATIVE_BACKUP_TABLES = [
   "library_relations",
   "library_revisions",
   "opening_note_provenance",
+  "opening_learning_asset_links",
   "explorations",
   "promotion_records",
   "cards",

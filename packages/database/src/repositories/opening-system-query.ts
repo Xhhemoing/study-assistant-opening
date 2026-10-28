@@ -1,3 +1,4 @@
+import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import type { Sql, TransactionSql } from "postgres";
 import {
   DEFAULT_OPENING_AI_SETTINGS, openingAdaptivePrefsSchema, openingAiSettingsSchema,
@@ -52,7 +53,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       } else if (request.name === "notes" || request.name === "cards" || request.name === "exam_sprint") {
         await readSystemRecordQuery(tx, scope, request, out);
       } else if (request.name === "courses") {
-        const prefs = openingAdaptivePrefsSchema.safeParse(owner.adaptive_planning);
+        const prefs = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(tx, scope, owner.adaptive_planning));
         const rows = await tx`SELECT id,title,updated_at FROM courses WHERE workspace_id=${scope.workspaceId} AND archived_at IS NULL
           AND ${request.arguments.courseId ? tx`id=${request.arguments.courseId}` : tx`TRUE`}
           AND ${request.arguments.query ? tx`title ILIKE ${literalSearch(request.arguments.query)}` : tx`TRUE`}

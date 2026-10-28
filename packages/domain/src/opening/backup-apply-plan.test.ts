@@ -7,7 +7,7 @@ const sourceId = "11111111-1111-4111-8111-111111111111";
 const courseId = "33333333-3333-4333-8333-333333333333";
 const tables = [
   "cards", "card_review_states", "learning_events",
-  "workspace_preferences", "courses", "course_asset_memberships",
+  "workspace_preferences", "courses", "course_goals", "course_goal_links", "goal_time_windows", "course_requirements", "course_asset_memberships", "course_requirement_evidence_links", "opening_learning_asset_links",
   "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
   "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
   "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
@@ -113,7 +113,8 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    expect(new Set(names).size).toBe(39);
+    expect(new Set(names).size).toBe(tables.length);
+    expect(new Set(names)).toEqual(new Set(tables));
     expect(names.indexOf("opening_sources")).toBeLessThan(names.indexOf("opening_source_chunks"));
     expect(names.indexOf("opening_conversations")).toBeLessThan(names.indexOf("opening_turns"));
     expect(names.indexOf("opening_turns")).toBeLessThan(names.indexOf("opening_assistant_candidates"));
@@ -121,6 +122,10 @@ describe("planOpeningRestoreApply", () => {
     expect(names.indexOf("opening_plan_drafts")).toBeLessThan(names.indexOf("opening_plan_acceptances"));
     expect(result.plan.batches.find((batch) => batch.table === "opening_sources")?.rows).toBe(1);
     expect(result.plan.batches.find((batch) => batch.table === "opening_source_chunks")?.rows).toBe(1);
+    expect(names.indexOf("course_requirements")).toBeLessThan(names.indexOf("course_requirement_evidence_links"));
+    for (const parent of ["course_goals", "course_requirements", "opening_sources", "opening_teaching_activities", "opening_learning_attempts"]) {
+      expect(names.indexOf(parent)).toBeLessThan(names.indexOf("opening_learning_asset_links"));
+    }
     expect(result.plan.objectCount).toBe(1);
   });
 
@@ -129,7 +134,7 @@ describe("planOpeningRestoreApply", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const names = result.plan.batches.map((batch) => batch.table);
-    for (const banned of ["opening_jobs", "opening_outbox", "opening_budget_reservations", "opening_tutor_jobs", "auth_sessions"]) {
+    for (const banned of ["opening_jobs", "opening_outbox", "opening_budget_reservations", "opening_tutor_jobs", "auth_sessions", "opening_source_visual_recognitions"]) {
       expect(names).not.toContain(banned);
     }
     expect(new Set(names)).toEqual(new Set(tables));
@@ -148,5 +153,19 @@ it("plans the normalized legacy counter before observations without changing its
   expect(result.plan.batches).toContainEqual({ table: "opening_workspace_history_revisions", rows: 1 });
   const names = result.plan.batches.map(batch => batch.table);
   expect(names.indexOf("opening_workspace_history_revisions")).toBeLessThan(names.indexOf("opening_learning_observations"));
+  expect(value).toEqual(original);
+});
+
+it("plans absent additive link inventories as empty without mutating legacy backups", () => {
+  const value = backup();
+  delete value.tables.course_requirement_evidence_links;
+  delete value.tables.opening_learning_asset_links;
+  const original = structuredClone(value);
+  const result = planOpeningRestoreApply(value, [], { confirmLocalRestore: true });
+  expect(result.ok).toBe(true);
+  if (!result.ok) return;
+  expect(result.plan.batches).toEqual(expect.arrayContaining([
+    { table: "course_requirement_evidence_links", rows: 0 }, { table: "opening_learning_asset_links", rows: 0 },
+  ]));
   expect(value).toEqual(original);
 });

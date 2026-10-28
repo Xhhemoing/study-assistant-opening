@@ -16,6 +16,12 @@ const evaluation: AiEvaluation = {
   criteria: [{ label: "列式", verdict: "correct", feedback: "两个系数都对应原向量。" }],
 };
 const record: LearningObservation = { ...learningObservation, answer: "我的原答案 <x>\n  不覆盖空格", attemptId, itemVersionId: evaluation.itemVersionId, verdictSource: "ai_graded", aiEvaluation: evaluation };
+it("renders necessary proof steps and the smallest repair without inventing a positive total",()=>{
+  const html=renderToStaticMarkup(createElement(AiGradingResult,{record:{...record,outcome:"unverified",aiEvaluation:{...evaluation,outcome:"unverified",proofFeedback:{coverage:"partial",steps:[
+    {stepIndex:2,claim:"A²v=λv",required:true,verdict:"unverified",feedback:"少一次代入",repairPrompt:"先写A(λv)"}]}}}}));
+  expect(html).toContain("证明步骤核对");expect(html).toContain("必要步骤");expect(html).toContain("尚有步骤未核对");expect(html).toContain("先写A(λv)");
+  expect(html).not.toContain("AI 批改 · 正确");
+});
 
 it("shows the effective uncertain verdict even when the raw model proposed correct", () => {
   const html = renderToStaticMarkup(createElement(AiGradingResult, { record: { ...record, outcome: "unverified", aiEvaluation: { ...evaluation, confidence: 0.4 } } }));

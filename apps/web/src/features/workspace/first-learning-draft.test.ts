@@ -40,3 +40,29 @@ describe("first-learning draft recovery", () => {
     expect(draft.clientKey).toBe(id);
   });
 });
+
+it("starts with a session duration and no recurring time or budget", () => {
+  expect(emptyFirstLearningDraft(id, "Asia/Shanghai")).toMatchObject({ minutes: 20, startTime: "" });
+  expect(emptyFirstLearningDraft(id, "Asia/Shanghai")).not.toHaveProperty("dailyMinutes");
+});
+
+it("submits an unscheduled intention and accepts the actual activity without inventing a task", async () => {
+  const current = { ...emptyFirstLearningDraft(id, "Asia/Shanghai"), topic: "向量张成" };
+  const href = `/opening/courses/${id}/study?activity=${id}`;
+  const fetcher = vi.fn().mockResolvedValue(Response.json({ activityId: id, taskId: null, courseId: id, href }));
+  await expect(submitFirstLearningDraft(current, fetcher)).resolves.toMatchObject({ taskId: null, href });
+  const sent = JSON.parse(fetcher.mock.calls[0]![1].body);
+  expect(sent).toMatchObject({ minutes: 20, startTime: null });
+  expect(sent).not.toHaveProperty("dailyMinutes");
+});
+
+it("recovers an explicit daily budget without turning session minutes into that budget", async () => {
+  const current = { ...draft, startTime: "", dailyMinutes: 45 };
+  const values = new Map<string, string>();
+  const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+  saveFirstLearningDraft(storage, "scope", current);
+  expect(readFirstLearningDraft(storage, "scope")).toEqual(current);
+  const fetcher = vi.fn().mockResolvedValue(Response.json({ activityId: id, taskId: null, courseId: id, href: `/opening/courses/${id}/study?activity=${id}` }));
+  await submitFirstLearningDraft(current, fetcher);
+  expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toMatchObject({ minutes: 30, dailyMinutes: 45, startTime: null });
+});

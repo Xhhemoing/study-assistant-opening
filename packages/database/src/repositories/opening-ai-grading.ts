@@ -1,6 +1,6 @@
 import { aiGradingInputSchema, aiGradingProposalSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
-import { acceptedAiGradingOutcome } from "@aistudy/domain";
+import { acceptedAiGradingOutcome,proofFeedbackRequiredByQuestion } from "@aistudy/domain";
 import { aiGradingClientKey, readOpeningAiGradingContext } from "./opening-ai-grading-context";
 import { reviseOpeningLearningObservation } from "./opening-observation-revisions";
 import { readOpeningAiGradingLedger, readOpeningAiGradingReleasedReservation } from "./opening-ai-grading-ledger";
@@ -19,7 +19,10 @@ export function createOpeningAiGradingRepository(sql: Sql) {
       const current = await context(scope, input);
       if (current.existing) return current.existing;
       // IDs are scoped to the immutable server-owned question, never invented by the model.
-      const proposal: AiGradingProposal = { ...parsed, misconceptionId: acceptedAiGradingOutcome(parsed) === "incorrect"
+      const missingSteps="本题明确要求证明或推导，但本次缺少证明步骤的逐项核对，暂不能确认整体结论。\n";
+      const checked=proofFeedbackRequiredByQuestion(current.stem)&&!parsed.proofFeedback?{...parsed,outcome:"unverified" as const,
+        feedback:missingSteps+parsed.feedback.slice(0,6000-missingSteps.length)}:parsed;
+      const proposal: AiGradingProposal = { ...checked, misconceptionId: acceptedAiGradingOutcome(checked) === "incorrect"
         ? current.misconceptions.some(item => item.id === parsed.misconceptionId) ? parsed.misconceptionId : "other"
         : null };
       const original = current.observation;

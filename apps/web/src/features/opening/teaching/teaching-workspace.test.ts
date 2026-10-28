@@ -287,6 +287,19 @@ describe("asynchronous teaching position updates", () => {
   });
 });
 
+function expectExplorationOnlyInHiddenNoteType(html: string) {
+  const parsed = document.createElement("div");
+  parsed.innerHTML = html;
+  const options = [...parsed.querySelectorAll<HTMLOptionElement>('option[value="exploration"]')];
+  expect(options).toHaveLength(1);
+  expect(options[0]!.textContent).toBe("自由探索");
+  expect(options[0]!.closest('[aria-label="理解与错因笔记"]')).not.toBeNull();
+  expect(options[0]!.closest("[hidden]")).not.toBeNull();
+  expect(options[0]!.selected).toBe(false);
+  expect([...parsed.querySelectorAll('button,a[href],[role="tab"]')]
+    .filter(control => control.textContent?.includes("自由探索"))).toHaveLength(0);
+}
+
 function clientInit(overrides?: Partial<ActivitySpecClientInit>): ActivitySpecClientInit {
   return {
     id: SPEC,
@@ -385,7 +398,7 @@ describe("TeachingWorkspace", () => {
     expect(html).not.toContain("data-teaching-past-collapsed");
     expect(html).toContain("目录");
     expect(html).toContain('data-panel="materials"');
-    expect(html).not.toContain("自由探索");
+    expectExplorationOnlyInHiddenNoteType(html);
     expect(html).not.toContain("学习设置");
     expect(html).toContain('aria-label="选择学习单元"');
     expect(html).not.toContain('data-panel="outline"');
@@ -666,7 +679,7 @@ describe("TeachingContinueEntry", () => {
     expect(html).toContain('data-return-disabled="false"');
     expect(html).toContain('aria-label="选择学习单元"');
     expect(html).not.toContain('data-panel="outline"');
-    expect(html).not.toContain("自由探索");
+    expectExplorationOnlyInHiddenNoteType(html);
   });
 });
 

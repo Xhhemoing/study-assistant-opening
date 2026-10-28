@@ -5,6 +5,8 @@ import type { OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 export async function learningAttemptFixture(fixture: OpeningFixture) {
   const rows = backupRows(fixture.sql, fixture.scope), sourceId = await rows.source(), chunkId = await rows.chunk(sourceId), courseId = randomUUID();
+  // This fixture is a text question; visual cases explicitly attach their original image.
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${chunkId}`;
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Learning attempts',${courseId})`;
   const learning = createOpeningLearningRepository(fixture.sql), attempts = createOpeningLearningAttemptRepository(fixture.sql);
   const session = await learning.createSession(fixture.scope, { courseId, skillLabel: "fractions", sourceIds: [sourceId] });

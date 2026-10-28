@@ -1,5 +1,5 @@
 import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads } from "@aistudy/database";
+import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 
@@ -17,11 +17,12 @@ export function createSpanLessonSessionService(sql: Sql) {
         throw Object.assign(new Error("本次学习不属于当前课程或复测任务。"), { code: "NOT_FOUND" });
       }
       if (!session) return { session: null, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null };
-      const [rows, heads, hintLevels, intentEvent] = await Promise.all([
+      const [rows, heads, hintLevels, intentEvent, originChange] = await Promise.all([
         createOpeningLearningAttemptRepository(sql).listByActivity(scope, session.activityId),
         readOpeningCourseObservationHeads(sql, scope, courseId),
         sessions.deliveredHintLevels(scope, session.activityId),
         createOpeningStudyIntentRepository(sql).latest(scope, session.sessionId),
+        readOpeningSpanTutorOriginChange(sql, scope, session.activityId),
       ]);
       const attempts = rows.filter(row => row.sessionId === session.sessionId && (row.spanExercise || row.requirementKey === SPAN_REQUIREMENT_KEY)).map(({ outcome: _outcome, assistance: _assistance, ...attempt }) => attempt);
       const learning = createOpeningLearningRepository(sql);
@@ -29,7 +30,8 @@ export function createSpanLessonSessionService(sql: Sql) {
         const levels = await learning.listDeliveredExposures(scope, session.sessionId, { attemptId: attempt.id, assessmentDomain: "math" });
         return [attempt.id, levels.includes("revealed") ? "revealed" : levels.includes("hinted") ? "hinted" : "none"];
       })));
-      return { session, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent };
+      return { session, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
+        ...(originChange ? { originChange } : {}) };
     },
   };
 }

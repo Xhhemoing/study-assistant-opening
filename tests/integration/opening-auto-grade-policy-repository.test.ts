@@ -65,7 +65,7 @@ it("real estimator exact balance, explicit fallback, media metadata and PDF cons
   const free = { ...model, billing: "free_tier" as const, dailyRequestCap: 1 };
   expect(await check({ budgetOptions: { envCapCents: 0 }, fallbackModel: free })).toMatchObject({ allowed: true, requiredCents: 0 });
   const photo = { ...context, workSource: { mime: "image/png", bytes: 100 } };
-  const vision = { ...model, modelSnapshot: { ...model.modelSnapshot, mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 100, mediaInputCentsPerMillion: 100 } };
+  const vision = { ...model, supportsVision: true, modelSnapshot: { ...model.modelSnapshot, mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 100, mediaInputCentsPerMillion: 100 } };
   expect(await check({}, photo)).toMatchObject({ allowed: false, reason: "budget_unavailable" });
   expect(await check({ fallbackModel: vision }, photo)).toMatchObject({ allowed: true });
   expect(await check({ primaryModel: vision }, { ...photo, workSource: { mime: "image/png", bytes: 101 } })).toMatchObject({ reason: "budget_unavailable" });

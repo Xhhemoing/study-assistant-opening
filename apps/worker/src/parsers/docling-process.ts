@@ -19,7 +19,10 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     const page = item as Record<string, unknown>;
     if (!Number.isInteger(page.page) || (page.page as number) < 1) throw new RangeError("invalid page number");
     if (typeof page.text !== "string" || !(page.imagePath === null || typeof page.imagePath === "string")) throw new TypeError("invalid page shape");
-    return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null };
+    const kinds = page.visualKinds;
+    if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
+    return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
+      ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;

@@ -16,6 +16,7 @@ import { StudyContextTools } from "../teaching/study-context-tools";
 import { OriginalConversationSlot } from "../assistant/conversation-companion";
 import { studyConversationIdentity } from "../assistant/study-conversation-context";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { AssetLearningLinks } from "../learning-links/asset-learning-links";
 
 export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint, children }: {
   title: string;
@@ -138,6 +139,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
         { id: "text", label: preferExtractedText ? "原件信息" : "提取文字 / OCR 核对", content: preferExtractedText ? <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion} download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading /> : <div className="space-y-3"><SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /></div> },
         ...(originalConversationId ? [{ id: "conversation", label: "原对话", content: <OriginalConversationSlot conversationId={originalConversationId} className="min-h-0 min-w-0 flex-1" /> }] : []),
         { id: "context", label: originalConversationId ? "本材料提问与笔记" : "提问与笔记", content: <StudyContextTools key={`${studyConversationIdentity(context)}:${initialQuestion}`} context={context} initialQuestion={initialQuestion} questionBlockedReason={questionProtected ? "这是当前练习的参考资料。请返回原题下保存自己的答案，并从原题的提问入口继续，以保留实际获得的帮助记录。" : undefined} /> },
+        { id: "learning-links", label: "学习关联", content: <AssetLearningLinks assetType="source" assetId={record.id} assetVersion={requestedVersion} origin={{ purpose: "material_read", sourceId: record.id, sourceVersion: requestedVersion, page: questionPage ?? null, ...(courseId ? { courseId } : {}) }} /> },
       ]}>
         {preferExtractedText ? <SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /> : <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion}
           download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading fillHeight toolsOpen={tool !== null} onExplain={explain} />}

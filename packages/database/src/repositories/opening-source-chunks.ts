@@ -11,6 +11,12 @@ async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, vers
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
   return chunks.some((chunk) => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey?.trim()));
 }
+function chunkContent(chunks: NewSourceChunk[]): string[] {
+  return chunks.map(chunk => JSON.stringify([
+    chunk.page ?? null, chunk.slideLabel ?? null, chunk.startMs ?? null,
+    chunk.endMs ?? null, chunk.text, chunk.imageObjectKey ?? null,
+  ])).sort();
+}
 export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository { return {
   async replaceChunks(scope, input) {
     await sql.begin(async tx => {
@@ -21,9 +27,15 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       if (!row) throw new Error("source not found");
       if (Number(row.version) !== input.sourceVersion || row.upload_state !== "uploaded") throw new Error("CONFLICT: source version changed during parse");
       if (!chunksHaveReadableContent(input.chunks)) throw new Error("source has no readable text; check OCR or upload a text-readable original");
-      await tx`DELETE FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
-      for (const chunk of input.chunks) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
-        VALUES(${input.sourceId},${input.sourceVersion},${chunk.page},${chunk.slideLabel ?? null},${chunk.startMs ?? null},${chunk.endMs ?? null},${chunk.text},${chunk.imageObjectKey ?? null})`;
+      const existing = await tx`SELECT * FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
+      const previousContent = chunkContent(existing.map(row => mapChunk(row)));
+      const nextContent = chunkContent(input.chunks);
+      // Replaying a completed parse must not invalidate already-issued citations.
+      if (previousContent.length !== nextContent.length || previousContent.some((value, index) => value !== nextContent[index])) {
+        await tx`DELETE FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
+        for (const chunk of input.chunks) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
+          VALUES(${input.sourceId},${input.sourceVersion},${chunk.page},${chunk.slideLabel ?? null},${chunk.startMs ?? null},${chunk.endMs ?? null},${chunk.text},${chunk.imageObjectKey ?? null})`;
+      }
       await tx`UPDATE opening_sources SET parse_state='ready',error=NULL,updated_at=now()
         WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} AND version=${input.sourceVersion}`;
       await enqueueOpeningSourceIndex(tx, scope, input.sourceId, input.sourceVersion);

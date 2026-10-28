@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
-import type { Scope } from "@aistudy/contracts";
+import type { OpeningAdaptivePrefsResponse, Scope } from "@aistudy/contracts";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { GET as listTasks, POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { PATCH as patchTask } from "../../../apps/web/src/app/api/opening/tasks/[id]/route";
@@ -177,21 +177,45 @@ describe("adaptive planning data (L0)", () => {
   it("reads default prefs, merges patches and removes a course goal", async () => {
     const initial = await (await getPrefs(req("/api/opening/adaptive-planning", "GET", undefined, owner.cookie))).json();
     expect(initial).toEqual({
-      prefs: { autonomy: "copilot", coachBudgetMinutes: 60, courseGoals: {} }, saved: false, invalidStoredPrefs: false,
+      prefs: { autonomy: "copilot", coachBudgetMinutes: 60, courseGoals: {}, courseGoalRefs: {} }, saved: false, invalidStoredPrefs: false,
     });
 
     const courseId = await createCourse(owner.scope);
-    await patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { autonomy: "coach" }, owner.cookie));
+    expect((await patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { autonomy: "coach" }, owner.cookie))).status).toBe(200);
     const withGoal = await patchPrefs(req("/api/opening/adaptive-planning", "PATCH",
       { courseGoal: { courseId, goal: { targetDate: "2026-11-01", weeklyMinutes: 300 } } }, owner.cookie));
-    expect(await withGoal.json()).toMatchObject({
+    expect(withGoal.status).toBe(200);
+    const saved = await withGoal.json() as OpeningAdaptivePrefsResponse;
+    expect(saved).toMatchObject({
       prefs: { autonomy: "coach", coachBudgetMinutes: 60, courseGoals: { [courseId]: { targetDate: "2026-11-01", weeklyMinutes: 300 } } },
       saved: true,
     });
 
+    const goal = saved.prefs.courseGoals[courseId]!;
+    expect(goal).toMatchObject({ revision: 1, kind: "custom", examDate: null });
+    expect(saved.prefs.courseGoalRefs?.[courseId]).toBe(goal.goalId);
+    const [stored] = await sql`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${owner.scope.workspaceId}`;
+    expect(stored!.adaptive_planning.courseGoalRefs[courseId]).toBe(goal.goalId);
+    expect(stored!.adaptive_planning.courseGoals[courseId]).toBeUndefined();
+    const merge = await patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { coachBudgetMinutes: 90 }, owner.cookie));
+    expect(merge.status).toBe(200);
+    expect(await merge.json()).toMatchObject({ prefs: { autonomy: "coach", coachBudgetMinutes: 90, courseGoals: { [courseId]: goal } } });
+
+    for (const courseGoal of [{ courseId, goal: null }, { courseId, goal: null, expectedRevision: 0 }]) {
+      expect((await patchPrefs(req("/api/opening/adaptive-planning", "PATCH", { courseGoal }, owner.cookie))).status).toBe(409);
+    }
+    expect(await sql`SELECT id,weekly_minutes,revision,lifecycle,active FROM course_goals WHERE id=${goal.goalId!} AND workspace_id=${owner.scope.workspaceId}`)
+      .toEqual([{ id: goal.goalId, weekly_minutes: 300, revision: 1, lifecycle: "active", active: true }]);
+
     const removed = await patchPrefs(req("/api/opening/adaptive-planning", "PATCH",
-      { courseGoal: { courseId, goal: null } }, owner.cookie));
-    expect((await removed.json() as { prefs: { courseGoals: object } }).prefs.courseGoals).toEqual({});
+      { courseGoal: { courseId, goal: null, expectedRevision: goal.revision } }, owner.cookie));
+    expect(removed.status).toBe(200);
+    const removedBody = await removed.json() as OpeningAdaptivePrefsResponse;
+    expect(removedBody).toMatchObject({ prefs: { autonomy: "coach", coachBudgetMinutes: 90, courseGoalRevisions: { [courseId]: 2 } } });
+    expect(removedBody.prefs.courseGoals).toEqual({});
+    expect(removedBody.prefs.courseGoalRefs).toEqual({});
+    expect(await sql`SELECT id,weekly_minutes,revision,lifecycle,active FROM course_goals WHERE id=${goal.goalId!} AND workspace_id=${owner.scope.workspaceId}`)
+      .toEqual([{ id: goal.goalId, weekly_minutes: 300, revision: 2, lifecycle: "stopped", active: false }]);
   });
 
   it("rejects a goal for a course outside the workspace and reports unreadable stored prefs", async () => {

@@ -2,7 +2,7 @@ import { buildAnswerGradingInput } from "./answer-grading";
 import { isBudgetReplayError } from "./budgeted-call";
 import { OpeningModelRoutingError } from "./model-routing";
 import type { ModelGateway } from "./model-gateway";
-import { aiGradingInputSchema, aiGradingProposalSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
@@ -13,7 +13,10 @@ export type OpeningAiGradingServiceDeps = {
       observation: LearningObservation; existing: LearningObservation | null;
       stem: string; referenceText: string; misconceptions: TeachingMisconception[];
       workSource: { id: string; version: number; physicalPage: number } | null;
+      /** Current owned visual evidence from the immutable question/reference binding. */
+      referenceSources?: { sourceId: string; sourceVersion: number; physicalPage: number }[];
       answerRevision: number; operationId: string;
+      interpretation?:AnswerInterpretationMetadata;
     }>;
     apply(scope: Scope, input: AiGradingInput, proposal: AiGradingProposal, modelLabel: string | null): Promise<LearningObservation>;
     ledger(scope: Scope, operationId: string): Promise<"unsent" | "in_flight" | "unknown" | "completed" | "blocked">;
@@ -69,12 +72,29 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
       const input = aiGradingInputSchema.parse(raw);
       const context = await deps.repository.context(scope, input);
       if (context.existing) return context.existing;
-      const imageParts = context.workSource ? await deps.images(scope, {
-        sourceIds: [context.workSource.id], sourceVersions: { [context.workSource.id]: context.workSource.version },
-        physicalPage: context.workSource.physicalPage,
-      }) : [];
-      if (context.workSource && !imageParts.length) throw conflict("暂时无法读取作答照片，请检查图片后重试。原答案已保存。");
-      if (!context.observation.answer.trim() && !imageParts.length) throw conflict("请先填写答案或选择作答照片。");
+      if (!context.observation.answer.trim() && !context.workSource) throw conflict("请先填写答案或选择作答照片。");
+      const pages = new Map<string, { sourceId: string; sourceVersion: number; physicalPage: number; role: "student_work" | "reference_material" }>();
+      if (context.workSource) {
+        const work = context.workSource;
+        pages.set(`${work.id}:${work.version}:${work.physicalPage}`, { sourceId: work.id, sourceVersion: work.version, physicalPage: work.physicalPage, role: "student_work" });
+      }
+      for (const ref of context.referenceSources ?? []) {
+        const key = `${ref.sourceId}:${ref.sourceVersion}:${ref.physicalPage}`;
+        if (!pages.has(key)) pages.set(key, { ...ref, role: "reference_material" });
+      }
+      if (pages.size > 4 || [...pages.values()].filter(page => page.role === "reference_material").length > 3) {
+        throw conflict("批改每次最多核对一页作答与三页参考原图，请缩小材料范围。原答案已保存。");
+      }
+      const imageParts: ProviderInput["imageParts"] = [];
+      const imageRoles: NonNullable<Parameters<typeof buildAnswerGradingInput>[0]["imageRoles"]> = [];
+      for (const page of pages.values()) {
+        const loaded = await deps.images(scope, { sourceIds: [page.sourceId], sourceVersions: { [page.sourceId]: page.sourceVersion }, physicalPage: page.physicalPage });
+        if (loaded.length !== 1 || loaded[0]!.sourceId !== page.sourceId || loaded[0]!.physicalPage !== page.physicalPage) {
+          throw conflict(page.role === "student_work" ? "暂时无法读取作答照片，请检查图片后重试。原答案已保存。" : "暂时无法读取题目或参考材料的对应原图，请检查版本与物理页后重试。原答案已保存。");
+        }
+        imageParts.push(loaded[0]!);
+        imageRoles.push({ role: page.role, sourceId: page.sourceId, physicalPage: page.physicalPage });
+      }
       let result: LearningObservation | null = null;
       let modelLabel: string | null = null;
       try {
@@ -84,7 +104,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
           beforeSend: async () => { await deps.repository.context(scope, input); },
           onModel: model => { modelLabel = model.modelSnapshot.modelName; },
           input: buildAnswerGradingInput({ question: context.stem, answer: context.observation.answer,
-            referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts }),
+            referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts, imageRoles,interpretation:context.interpretation }),
           persistResult: async output => {
             let proposal;
             try { proposal = aiGradingProposalSchema.parse(parseModelJson(output.text)); }

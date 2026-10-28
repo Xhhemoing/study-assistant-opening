@@ -39,8 +39,8 @@ describe("Worker OCR measurements", () => {
     }
   });
   it("versions physical-page extraction separately from the old merged-charspan cache", () => {
-    expect(pdfParserProfile({})).toBe("docling-2.126.0/pdf-segments-v2/text");
-    expect(pdfParserProfile(configured)).toBe("docling-2.126.0/pdf-segments-v2/rapidocr-3.9.2-torch-ppocrv4");
+    expect(pdfParserProfile({})).toBe("docling-2.126.0/pdf-segments-v4-visual/text");
+    expect(pdfParserProfile(configured)).toBe("docling-2.126.0/pdf-segments-v4-visual/rapidocr-3.9.2-torch-ppocrv4");
   });
   it("separates OCR and text caches without embedding private model paths", () => {
     expect(pdfParserProfile(configured)).not.toBe(pdfParserProfile({} as NodeJS.ProcessEnv));

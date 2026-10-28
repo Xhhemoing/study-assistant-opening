@@ -5,6 +5,8 @@ import type { Scope, StudyContextAnchor, StudyExposureReceipt } from "@aistudy/c
 import { learningError, learningIso, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { resolveOpeningStudyContext } from "./opening-study-context";
+import { assertOpeningSpanTutorOriginCurrent } from "./opening-span-tutor-origin";
+import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 
 export type OpeningStudyExposureInput = {
   releaseKey: string;
@@ -62,8 +64,10 @@ export async function releaseOpeningStudyExposure(tx: TransactionSql, scope: Sco
   if (!row) throw learningError("NOT_FOUND", "release receipt not found");
   if (row.released_at != null) return mapOpeningStudyExposure(row);
   // Recheck availability immediately before release, never silently rebind to a newer version.
-  await resolveOpeningStudyContext(tx, scope, row.context_anchor as StudyContextAnchor, { sessionId: row.session_id as string | null, sourceAccess: row.exposure_origin === "assistant" ? "ai" : "human_read",
+  const anchor = await resolveOpeningStudyContext(tx, scope, row.context_anchor as StudyContextAnchor, { sessionId: row.session_id as string | null, sourceAccess: row.exposure_origin === "assistant" ? "ai" : "human_read",
     associationOnly: row.exposure_origin !== "assistant" && (row.release_intent as OpeningStudyExposureInput | null)?.originReference?.possibleOpenAttemptOnly === true });
+  if (anchor.activityId) await assertOpeningSpanTutorOriginCurrent(tx, scope, anchor.activityId);
+  if (anchor.activityId) await assertOpeningCourseRouteCurrent(tx, scope, anchor.activityId);
   const revision = row.course_id == null ? 0 : await nextLearningHistoryRevision(tx, scope, String(row.course_id));
   const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
   const [released] = await tx`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),

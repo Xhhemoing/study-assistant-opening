@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from .physical_pages import texts_by_page
+from .physical_pages import texts_by_page, visual_kinds_by_page
 
 PDF = "application/pdf"
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -41,6 +41,12 @@ def create_converter():
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
     options = PdfPipelineOptions(do_ocr=False)
+    # Page.cells reads parsed_page. Docling otherwise releases it before this
+    # process classifies native/OCR provenance, making every page appear blank.
+    options.generate_parsed_pages = True
+    # Without OCR, scanned body regions can be detected as text but have no
+    # native cells. Retain their real layout so mixed pages still reach vision.
+    options.layout_options.keep_empty_clusters = True
     ocr_dir = os.environ.get("PARSER_OCR_MODEL_DIR")
     if ocr_dir:
         from docling.datamodel.pipeline_options import RapidOcrOptions
@@ -141,11 +147,12 @@ def main(argv=None):
             expected = set(range(args.page_start, args.page_end + 1))
             if set(by_page) != expected:
                 raise ValueError("parser did not preserve the requested physical page range")
+        visual_kinds = visual_kinds_by_page(conversion, by_page) if args.mime == PDF else {}
         for page_number, texts in sorted(by_page.items()):
             text = "\n".join(texts)
             if len(text) > TEXT_CAP:
                 text = text[:TEXT_CAP] + "\n…[truncated]"
-            pages.append({"page": page_number, "text": text, "imagePath": None})
+            pages.append({"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])})
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")
         output = json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":"))

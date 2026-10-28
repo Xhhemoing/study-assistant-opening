@@ -5,6 +5,7 @@ import type { ConversationPlanningContext, SourceChunk, StudyIntentEvent } from 
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
+import type { TutorNextActionService } from "./tutor-next-action";
 
 describe("tutor mode policy", () => {
   it("keeps listening distinct from unsolicited planning", () => {
@@ -59,6 +60,66 @@ describe("tutor turn handler", () => {
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     return { deps, tutorJobs, chunks, budget, provider };
   }
+
+  it("opens a real course-scoped span action before the proposal/model path", async () => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const courseId = claimedJob.conversationId;
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, purpose: "teach", courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    const nextAction: TutorNextActionService = {
+      read: async () => ({ courseId, privacyEpoch: 0, sourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }],
+        decisionInput: { status: "unobserved", observations: [], wantsFullExplanation: false } }),
+      assertCurrent: async () => {},
+      execute: async (_scope, input) => {
+        expect(input.decision.activityKind).toBe("diagnose");
+        expect(input.operationId).toBe(`tutor-next:${claimedJob.userTurnId}`);
+        return { activityId: "actual-activity", sessionId: "actual-session", href: `/opening/courses/${courseId}/study/span?activity=actual-activity` };
+      },
+    };
+    await createTutorTurnHandler({ ...deps, nextAction })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining(`/study/span?activity=actual-activity`), candidates: [],
+      contextSourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }], expectedPrivacyEpoch: 0,
+    }));
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+  });
+
+  it("rejects the prepared action when authorization changes before publication", async () => {
+    const { deps, tutorJobs } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, purpose: "teach", courseId: claimedJob.conversationId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    let checks = 0;
+    const nextAction: TutorNextActionService = {
+      read: async () => ({ courseId: claimedJob.conversationId, privacyEpoch: 0, sourceRefs: [],
+        decisionInput: { status: "unobserved", observations: [], wantsFullExplanation: false } }),
+      assertCurrent: async () => { if (++checks === 2) throw new Error("grant disabled"); },
+      execute: async () => ({ activityId: "activity", sessionId: "session", href: "/opening/courses/course/study/span" }),
+    };
+    await expect(createTutorTurnHandler({ ...deps, nextAction })(claimedJob.id)).rejects.toThrow("grant disabled");
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalled();
+  });
+
+  it("preserves the proposal path when the course has no eligible tutor grant", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, purpose: "teach", courseId: claimedJob.conversationId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    await createTutorTurnHandler({ ...deps,
+      nextAction: { read: async () => null, assertCurrent: async () => { throw new Error("ineligible"); }, execute: async () => { throw new Error("ineligible"); } },
+      proposals: { reply: async () => ({ text: "待确认的原教学建议", proposal: {}, privacyEpoch: 0, contextSourceRefs: [] }) },
+    })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "待确认的原教学建议" }));
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("keeps an attempt-bound teaching question in the original help delivery path", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, purpose: "teach", courseId: claimedJob.conversationId, attemptId: chunkA.id,
+      contextAnchor: { courseId: claimedJob.conversationId, activityId: claimedJob.conversationId, purpose: "learning_help" }, sourceVersions: { [chunkA.sourceId]: 0 } });
+    await createTutorTurnHandler({ ...deps,
+      nextAction: { read: async () => { throw new Error("must not replace an active attempt"); }, assertCurrent: async () => {}, execute: async () => { throw new Error("must not execute"); } },
+    })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "F = ma" }));
+    expect(provider.complete).toHaveBeenCalledOnce();
+  });
 
   it("records one model/Redis observation per execution without blocking first publication", async () => {
     vi.useFakeTimers();

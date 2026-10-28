@@ -1,11 +1,11 @@
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
-import { createParseSourceHandler } from "./parse-source";
+import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
 
 type State = "not_started" | "queued" | "running" | "ready" | "failed" | "unsupported";
 const sourceId = "00000000-0000-4000-8000-000000000001";
@@ -18,7 +18,7 @@ afterEach(async () => { for (const dir of dirs.splice(0)) { expect(await readdir
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: "a".repeat(64), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
-async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; bytes?: Uint8Array } = {}) {
+async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; bytes?: Uint8Array; recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
   const current = input.source ?? source({ bytes: input.bytes?.byteLength ?? 3 });
   const states: State[] = [];
   let replaceInput: unknown;
@@ -36,7 +36,7 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
       chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
       runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? '{"pageCount":2}' : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
-      tempDir,
+      tempDir, recognizePage: input.recognizePage, assertCurrent: input.assertCurrent,
     }),
   }));
   dirs.push(await dirPromise);
@@ -44,6 +44,36 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
 }
 
 describe("parse source handler", () => {
+  it("recognizes only visual PDF pages and preserves native text, physical page and original file", async () => {
+    const recognizePage = vi.fn(async (input: ParseSourceVisualPageInput) => {
+      expect(await readFile(input.localFilePath, "utf8")).toBe("pdf");
+      return {text:"转写：∫₀¹ x² dx；描述：图中箭头向右", imageObjectKey:"trusted/page-2"};
+    });
+    const d = await deps({recognizePage, stdout:JSON.stringify({pages:[
+      {page:1,text:"native prose",imagePath:null,visualKinds:[]},
+      {page:2,text:"original caption",imagePath:null,visualKinds:["formula","picture"]},
+    ]})});
+    await d.handler(job, {sourceId});
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(recognizePage).toHaveBeenCalledWith(expect.objectContaining({scope,job,sourceId,sourceVersion:7,physicalPage:2,nativeText:"original caption",mime:"application/pdf",visualKinds:["formula","picture"],signal:expect.any(AbortSignal)}));
+    expect(d.replaceInput()).toMatchObject({chunks:[
+      {page:1,text:"native prose",imageObjectKey:null},
+      {page:2,text:"[原生提取]\noriginal caption\n\n[视觉转写与描述]\n转写：∫₀¹ x² dx；描述：图中箭头向右",imageObjectKey:"trusted/page-2"},
+    ]});
+  });
+  it("fails closed on a visual or blank PDF page without recognition", async () => {
+    for (const page of [{page:1,text:"caption",imagePath:null,visualKinds:["table"]}, {page:1,text:"",imagePath:null}]) {
+      const d = await deps({stdout:JSON.stringify({pages:[page,{page:2,text:"native",imagePath:null}]})});
+      await expect(d.handler(job, {sourceId})).rejects.toThrow("visual recognition");
+      expect(d.replaceInput()).toBeUndefined();
+    }
+  });
+  it("does not publish recognition returned after the source execution was revoked", async () => {
+    let revoked = false;
+    const d = await deps({source:source({mime:"image/png"}), assertCurrent:async () => {if(revoked) throw new Error("revoked");}, recognizePage:async () => {revoked=true;return {text:"recognized",imageObjectKey:"image"};}});
+    await expect(d.handler(job, {sourceId})).rejects.toThrow("revoked");
+    expect(d.replaceInput()).toBeUndefined();
+  });
   it("passes an absolute temp path so the parser child (cwd=services/parser) finds the input", async () => {
     const d = await deps();
     await d.handler(job, job.payload);
@@ -62,6 +92,28 @@ describe("parse source handler", () => {
     ] });
     expect(d.states).toEqual(["ready"]);
     expect(await readdir(d.tempDir)).toEqual([]);
+  });
+  it("does not use the visual PDF/image execution callback for native PPTX parsing", async () => {
+    const assertCurrent = vi.fn(async () => {throw new Error("visual-only callback");});
+    const d = await deps({source:source({mime:"application/vnd.openxmlformats-officedocument.presentationml.presentation"}), assertCurrent});
+    await expect(d.handler(job, {sourceId})).resolves.toEqual({pages:2});
+    expect(assertCurrent).not.toHaveBeenCalled();
+    expect(d.states).toEqual(["ready"]);
+  });
+  it("preserves native PPTX table and picture text without calling PDF/image recognition", async () => {
+    const recognizePage = vi.fn(async () => { throw new Error("PDF/image recognition cannot render PPTX"); });
+    const d = await deps({ source: source({ mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }), recognizePage,
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Native table\n| x | y |", imagePath: null, visualKinds: ["table"] },
+        { page: 2, text: "Native picture caption", imagePath: null, visualKinds: ["picture"] },
+      ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(recognizePage).not.toHaveBeenCalled();
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "Native table\n| x | y |", imageObjectKey: null },
+      { page: 2, slideLabel: null, startMs: null, endMs: null, text: "Native picture caption", imageObjectKey: null },
+    ] });
+    expect(d.states).toEqual(["ready"]);
   });
   it("marks audio unsupported without calling chunks", async () => {
     const d = await deps({ source: source({ mime: "audio/mpeg" }) });
