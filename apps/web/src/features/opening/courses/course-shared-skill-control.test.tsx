@@ -22,3 +22,21 @@ it("restores an unknown original mapping command across remount without generati
  await act(async()=>root.render(<CourseSharedSkillControl courseId={course} client={client}/>));await act(async()=>button("核对跨课程技能复用").click());await act(async()=>(host.querySelector('input[type="checkbox"]') as HTMLInputElement).click());await act(async()=>button("确认映射并复用有效证据").click());
  const original=vi.mocked(client.command).mock.calls[0];await act(async()=>root.unmount());root=createRoot(host);await act(async()=>root.render(<CourseSharedSkillControl courseId={course} client={client}/>));await act(async()=>button("重新确认原映射操作").click());expect(vi.mocked(client.command).mock.calls[1]).toEqual(original);
 });
+it("retains a timed-out mapping through its HTTP client and a rejected retry",async()=>{
+ const responses=[408,409,200];
+ const transport=vi.fn<typeof fetch>(async(_input,init)=>init?.method==="POST"?Response.json(responses[0]===200?view:{error:{message:"请求尚未确认"}},{status:responses.shift()!}):Response.json(view));
+ vi.stubGlobal("fetch",transport);
+ await act(async()=>root.render(<CourseSharedSkillControl courseId={course}/>));
+ await act(async()=>button("核对跨课程技能复用").click());
+ await act(async()=>(host.querySelector('input[type="checkbox"]') as HTMLInputElement).click());
+ await act(async()=>button("确认映射并复用有效证据").click());
+ expect(host.textContent).toContain("映射保存结果待确认");
+ await act(async()=>root.unmount());root=createRoot(host);
+ await act(async()=>root.render(<CourseSharedSkillControl courseId={course}/>));
+ await act(async()=>button("重新确认原映射操作").click());
+ expect(host.textContent).toContain("映射保存结果待确认");
+ await act(async()=>button("重新确认原映射操作").click());
+ const posts=transport.mock.calls.filter(([,init])=>init?.method==="POST");
+ expect(posts).toHaveLength(3);expect(posts.map(([,init])=>init!.body)).toEqual([posts[0]![1]!.body,posts[0]![1]!.body,posts[0]![1]!.body]);
+ expect(host.textContent).toContain("映射已保存");
+});

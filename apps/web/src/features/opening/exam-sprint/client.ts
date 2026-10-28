@@ -85,7 +85,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       return result;
     } catch (error) {
       if (!isCurrent(operation)) return;
-      const rejected = !recovering && error instanceof HttpError && error.status >= 400 && error.status < 500;
+      const rejected = !recovering && error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 408;
       if (rejected) pending = null;
       publish({ error: rejected ? describeError(error) : `${describeError(error)} ${uncertainMessage}`, uncertain: !rejected });
     } finally { finish(operation); }

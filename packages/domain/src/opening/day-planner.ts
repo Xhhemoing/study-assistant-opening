@@ -43,6 +43,7 @@ export type PlanDayOptions = {
    * Local calendar day (YYYY-MM-DD) with workspace IANA timeZone.
    * When both set (and dayEnd omitted), day end is the exclusive nextDayStart
    * from resolveLocalDayBounds — half-open [dayStart, nextDayStart).
+   * Available slots are clipped to that local day before placing tasks.
    * Priority: dayEnd > localDate+timeZone > UTC free-start fallback.
    */
   localDate?: string;
@@ -73,7 +74,7 @@ function compareTasks(a: TaskItem, b: TaskItem): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-type DayEndResolution = { endMs: number; exclusive: boolean };
+type DayEndResolution = { endMs: number; exclusive: boolean; startMs?: number };
 
 /**
  * Priority: explicit dayEnd (inclusive) > localDate+timeZone (exclusive nextDayStart)
@@ -86,8 +87,8 @@ function resolveDayEnd(free: readonly TimeBlock[], options: PlanDayOptions): Day
     return { endMs, exclusive: false };
   }
   if (options.localDate && options.timeZone) {
-    const { nextDayStart } = resolveLocalDayBounds(options.localDate, options.timeZone);
-    return { endMs: nextDayStart.getTime(), exclusive: true };
+    const { dayStart, nextDayStart } = resolveLocalDayBounds(options.localDate, options.timeZone);
+    return { startMs: dayStart.getTime(), endMs: nextDayStart.getTime(), exclusive: true };
   }
   const freeStarts = free.filter((block) => block.kind === "free").map((block) => Date.parse(block.start));
   if (!freeStarts.length) return { endMs: Infinity, exclusive: false };
@@ -163,7 +164,7 @@ function unscheduledReason(
   const firstStart = originalSlots.length
     ? Math.min(...originalSlots.map((slot) => slot.start))
     : Number.POSITIVE_INFINITY;
-  if (Number.isFinite(due) && (due <= earliest || due <= firstStart)) {
+  if (Number.isFinite(due) && (due <= earliest || (originalSlots.length > 0 && due <= firstStart))) {
     return "deadline_passed";
   }
   const longEnough = originalSlots.some((slot) => slot.end - slot.start >= duration);
@@ -195,7 +196,7 @@ export function planDay(
   free: readonly TimeBlock[],
   options: PlanDayOptions = {},
 ): DayPlanResult {
-  const { endMs: dayEndMs, exclusive: dayEndExclusive } = resolveDayEnd(free, options);
+  const { startMs: dayStartMs, endMs: dayEndMs, exclusive: dayEndExclusive } = resolveDayEnd(free, options);
   const planningNowMs = options.planningNow
     ? Date.parse(options.planningNow)
     : Number.NEGATIVE_INFINITY;
@@ -221,8 +222,9 @@ export function planDay(
     pending.sort(compareTasks);
   }
   const slots: MutableSlot[] = availableTimeSlots(free).map((slot) => ({
-    start: Date.parse(slot.start), end: Date.parse(slot.end),
-  }));
+    start: Math.max(Date.parse(slot.start), dayStartMs ?? Number.NEGATIVE_INFINITY),
+    end: Math.min(Date.parse(slot.end), dayStartMs === undefined ? Number.POSITIVE_INFINITY : dayEndMs),
+  })).filter(slot => slot.start < slot.end);
   const originalSlots = slots.map((slot) => ({ ...slot }));
   const result: DayPlanResult = { blocks: [], unscheduledTaskIds: [], unscheduled: [] };
   for (const task of pending) {

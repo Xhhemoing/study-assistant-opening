@@ -5,20 +5,24 @@ export function htmlText(value: string): string {
   const withoutHidden = value
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ");
-  const withBreaks = withoutHidden
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, "\n");
-  const text = withBreaks
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-  return text;
+  return withoutHidden.split(/(<pre\b[^>]*>[\s\S]*?<\/pre\s*>)/gi).map(part => {
+    const preformatted = /^<pre\b/i.test(part);
+    const text = part
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, "\n")
+      .replace(/<[^>]+>/g, preformatted ? "" : " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">");
+    // Preformatted content carries code indentation and intentional blank lines.
+    // Keep it separate from ordinary whitespace normalization, without sentinels.
+    return preformatted ? text : text
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }).filter(part => part.trim()).join("\n");
 }
 
 export function htmlChunks(value: string): Array<{ page: number; text: string }> {

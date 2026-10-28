@@ -3,6 +3,13 @@ import { expandWeekSessions, normalizeWeekSessions } from "./timetable";
 
 const row = { courseName: "数学I", weekday: 6, weeks: [2], startPeriod: 1, endPeriod: 4 };
 
+it.each(["2026-02-30", "2026-09-08"])("rejects invalid academic Monday %s before generating classes", (weekOneMonday) => {
+  expect(() => expandWeekSessions(
+    [{ ...row, weekday: 1, weeks: [1], endPeriod: 1 }],
+    { weekOneMonday, periodTimes: { 1: { start: "08:00", end: "08:45" } }, timeZone: "Asia/Shanghai" },
+  )).toThrow(/weekOneMonday/);
+});
+
 it("deduplicates repeated spreadsheet display without removing week differences", () => {
   expect(normalizeWeekSessions([row, row, { ...row, weeks: [3] }])).toHaveLength(2);
 });
