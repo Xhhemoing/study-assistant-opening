@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningObservation, ObservationInput, Scope } from "@aistudy/contracts";
-import { courseRouteActivityContextSchema } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, preAnswerConfidenceSchema } from "@aistudy/contracts";
 import { assertRetestSubmitEarliestAllowed, evaluateEvidenceEligibility, resolveAssistance, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { admitLearningSources, learnerVerdictSource, learningError, learningIso, lockLearningHistory, lockLearningSession, lockWorkspaceLearningHistory, mapLearningObservation, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContext, readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
@@ -20,13 +20,13 @@ import { admitOpeningAiGradingWorkSource, readOpeningAiGradingContext } from "./
 import { checkOpeningAutoGradeBudget } from "./opening-auto-grade-policy";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
-  opts: { autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { preAnswerConfidence?: import("@aistudy/contracts").LearningAttemptSubmitInput["preAnswerConfidence"]; autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
 export async function insertOpeningLearningObservationInTx(tx: TransactionSql, scope: Scope, input: ObservationInput,
-  opts: { autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
+  opts: { preAnswerConfidence?: import("@aistudy/contracts").LearningAttemptSubmitInput["preAnswerConfidence"]; autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
   if (opts.revisesObservationId || input.revisesObservationId) throw learningError("CONFLICT", "observation revision requires the separate revision API");
   await lockWorkspaceLearningHistory(tx, scope);
   // Preserve history -> workspace order; serialize with preference updates
@@ -51,6 +51,8 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   const attempt = attemptRows[0];
   if (input.attemptId && (!attempt || attempt.session_id !== input.sessionId || attempt.course_id !== input.courseId)) throw learningError("VALIDATION", "attempt is outside this session");
   if (attempt && input.problemId && input.problemId !== attempt.problem_id) throw learningError("VALIDATION", "attempt problem mismatch");
+  const preAnswerConfidence = preAnswerConfidenceSchema.nullable().parse(opts.preAnswerConfidence ?? null);
+  if (preAnswerConfidence !== null && !attempt) throw learningError("VALIDATION", "pre-answer confidence requires an attempt");
   const attemptSources = attempt ? await admitLearningSources(tx, scope, attempt.source_ids as string[]) : sources;
   const retestActivities = input.retestId ? await tx`SELECT id, candidate_id, course_id, skill_label, requirement_key, task_id, status,
     not_before_at, recommended_at, scheduled_start_at
@@ -83,6 +85,8 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     referenceCheck: input.referenceCheck ? { referenceSourceId: input.referenceCheck.referenceSourceId, method: input.referenceCheck.method, scope: input.referenceCheck.scope } : null,
     ...(skillNodeId && skillDimension ? { nodeId: skillNodeId, dimension: skillDimension } : {}) };
   if (opts.workSource) Object.assign(intent, { workSource: opts.workSource });
+  // Omit skipped values to preserve pre-upgrade submitted_intent replays.
+  if (preAnswerConfidence !== null) Object.assign(intent, { preAnswerConfidence });
   const existing = await tx`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
   const linkSkillEvidence = async (observationId: string) => {
     if (!skillNodeId || !skillDimension) return;
@@ -186,7 +190,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
      ${opts.sourceTurnIds ?? []},${effectiveVerdictSource},${controlledEvaluation ? null : referenceSourceId},'MASTERY_NOT_ESTABLISHED',${input.attemptId ?? null},${itemVersionId},${attempt?.requirement_key ?? opts.requirementKey ?? null},${attempt?.started_at ?? null},${attempt ? submittedAt : null},${recordedAt},${sourceVersions ? tx.json(sourceVersions as never) : null},${referenceCheck ? tx.json(referenceCheck) : null},${serverEvaluation ? tx.json(serverEvaluation) : null},${tx.json(intent)},${revision},${workspaceRevision},${id},${id},'original',${scope.ownerUserId})
     ON CONFLICT(workspace_id,client_key) DO NOTHING RETURNING *`;
   if (!rows[0]) throw learningError("CONFLICT", "observation clientKey already used");
-  if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id} WHERE id=${input.attemptId!}`;
+  if (attempt) await tx`UPDATE opening_learning_attempts SET submitted_at=${submittedAt},observation_id=${id},pre_answer_confidence=${preAnswerConfidence} WHERE id=${input.attemptId!}`;
   await tx`UPDATE opening_learning_observations SET grading_operation_id=${`ai-grade:${scope.workspaceId}:${id}:1`},
     grading_work_source=${opts.workSource ? tx.json(opts.workSource) : null} WHERE id=${id}`;
   if (opts.workSource) {

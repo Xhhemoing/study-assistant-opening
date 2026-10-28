@@ -198,7 +198,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   opening_learning_attempts: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "requirement_key",
     "problem_id", "item_version_id", "source_ids", "source_versions", "started_at", "submitted_at",
-    "observation_id", "client_key", "create_intent", "history_revision", "context_anchor",
+    "observation_id", "client_key", "create_intent", "history_revision", "context_anchor", "pre_answer_confidence",
   ],
   opening_study_intent_events: ["id", "workspace_id", "owner_user_id", "session_id", "activity_id", "attempt_id", "client_key", "version", "event_kind", "payload", "resulting_intent", "action", "created_at"],
   opening_learning_decisions: ["id", "workspace_id", "owner_user_id", "layer", "target_id", "parent_decision_id", "client_key", "receipt", "created_at"],

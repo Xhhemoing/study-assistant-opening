@@ -20,6 +20,7 @@ export const openingLearningAttempts = pgTable("opening_learning_attempts", {
   sourceIds: uuid("source_ids").array().notNull().default([]), sourceVersions: jsonb("source_versions").notNull().default({}),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(), submittedAt: timestamp("submitted_at", { withTimezone: true }),
   contextAnchor: jsonb("context_anchor"),
+  preAnswerConfidence: text("pre_answer_confidence"),
   observationId: uuid("observation_id"), clientKey: text("client_key").notNull(), createIntent: jsonb("create_intent").notNull(), historyRevision: bigint("history_revision", { mode: "number" }).notNull(),
 }, (t) => ({ key: uniqueIndex("opening_learning_attempts_workspace_owner_key").on(t.workspaceId, t.ownerUserId, t.clientKey) }));
 export const openingSourceVersions = pgTable("opening_source_versions", {

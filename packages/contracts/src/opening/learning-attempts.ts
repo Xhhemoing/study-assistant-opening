@@ -26,12 +26,15 @@ export const learningAttemptCreateInputSchema = z.object({
 }).strict().refine((input) => !(input.problemId && input.problem), "choose an existing problem or a new problem")
   .refine(input => !input.spanExercise || !(input.matrixExercise || input.problemId || input.problem || input.teachingBlock || input.requirementKey), "span exercise sets its own question and requirement")
   .refine(input => !input.matrixExercise || !(input.problemId || input.problem || input.teachingBlock || input.requirementKey), "matrix exercise sets its own question and requirement");
+/** Ordinal learner self-report, not a probability or mastery evidence. */
+export const preAnswerConfidenceSchema = z.enum(["not_confident", "somewhat_confident", "confident"]);
 export const learningAttemptSubmitInputSchema = z.object({
   clientKey: z.string().min(8).max(200), answer: z.string().max(20_000),
   outcome: observationOutcomeSchema, assistance: assistanceLevelSchema,
   verdictSource: publicVerdictSourceSchema.optional(), referenceSourceId: uuidSchema.nullable().optional(),
   referenceCheck: referenceCheckInputSchema.optional(), retestId: uuidSchema.nullable().optional(),
   workSource: aiGradingWorkSourceSchema.optional(),
+  preAnswerConfidence: preAnswerConfidenceSchema.nullable().optional(),
 }).strict();
 export const courseRequirementBindingSchema = z.object({ id: uuidSchema, revision: z.number().int().positive(),
   stableSkillId: uuidSchema, requirementKey: z.string().trim().min(1).max(200) }).strict();
@@ -44,6 +47,7 @@ export const learningAttemptSchema = z.object({
   sourceIds: z.array(uuidSchema), sourceVersions: sourceVersionsSchema,
   startedAt: isoDateTimeSchema, submittedAt: isoDateTimeSchema.nullable(),
   observationId: uuidSchema.nullable(), historyRevision: z.number().int().nonnegative(),
+  preAnswerConfidence: preAnswerConfidenceSchema.nullable().optional(),
   contextAnchor: studyContextAnchorSchema.optional(),
   spanExercise: spanProblemSchema.optional(),
   spanValidation: z.object({ eligible: z.boolean(), firstFamilyExposure: z.boolean(), reasonCode: z.string().nullable() }).strict().optional(),
