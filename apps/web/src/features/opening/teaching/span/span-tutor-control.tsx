@@ -110,7 +110,7 @@ export function SpanTutorControl({ courseId: rawCourseId, api: supplied }: { cou
       setNotice(saved.enabled ? "本课程导师试用设置已保存。账号和课程总开关仍然生效。" : "本课程导师试用已关闭，已有学习记录和任务保留。");
     } catch (reason) {
       if (requestEpoch === epoch.current) {
-        if (!retryOriginal && reason instanceof OpeningApiError && reason.status >= 400 && reason.status < 500) { clearPending(courseId); pendingPatch.current = null; }
+        if (!retryOriginal && reason instanceof OpeningApiError && reason.status >= 400 && reason.status < 500 && reason.status !== 408) { clearPending(courseId); pendingPatch.current = null; }
         setUnconfirmed(Boolean(pendingPatch.current)); setMustReload(true);
         setError(`保存结果未确认。${userFacingMessage(reason, "请先重新读取授权，再决定是否提交。")}`);
       }

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError } from "@aistudy/ai";
 import type { SourceRecord } from "@aistudy/contracts";
+import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
 import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
 import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
@@ -45,6 +46,44 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
 }
 
 describe("parse source handler", () => {
+  it.each(["text/plain", "text/markdown", "text/html"])("cancels an oversized %s response before reading beyond the byte limit", async mime => {
+    const cancel = vi.fn();
+    const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {
+      controller.error(new Error("body read beyond declared limit"));
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(Uint8Array.of(65, 65, 65, 65)); },
+      pull, cancel,
+    }, { highWaterMark: 0 });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
+    try {
+      const d = await deps({ source: source({ mime, bytes: 3 }) });
+      await expect(d.handler(job, { sourceId })).rejects.toThrow("source download exceeds declared bytes");
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(pull).not.toHaveBeenCalled();
+      expect(d.replaceInput()).toBeUndefined();
+      expect(d.runs()).toBe(0);
+    } finally { fetchMock.mockRestore(); }
+  });
+  it.each(["text/plain", "text/markdown", "text/html"])("decodes split UTF-8 and strips a BOM from %s at the exact byte limit", async mime => {
+    const bytes = Buffer.from("\uFEFF第一行\n第二行", "utf8");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 4));
+        controller.enqueue(bytes.subarray(4, 5));
+        controller.enqueue(bytes.subarray(5));
+        controller.close();
+      },
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
+    try {
+      const d = await deps({ source: source({ mime, bytes: bytes.byteLength }) });
+      await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1 });
+      expect(d.replaceInput()).toMatchObject({ chunks: [{ page: 1, text: "第一行\n第二行", imageObjectKey: null }] });
+      expect(d.states).toEqual(["ready"]);
+      expect(d.runs()).toBe(0);
+    } finally { fetchMock.mockRestore(); }
+  });
   it("recognizes only visual PDF pages and preserves native text, physical page and original file", async () => {
     const recognizePage = vi.fn(async (input: ParseSourceVisualPageInput) => {
       expect(await readFile(input.localFilePath, "utf8")).toBe("pdf");
@@ -61,6 +100,29 @@ describe("parse source handler", () => {
       {page:1,text:"native prose",imageObjectKey:null},
       {page:2,text:"[原生提取]\noriginal caption\n\n[视觉转写与描述]\n转写：∫₀¹ x² dx；描述：图中箭头向右",imageObjectKey:"trusted/page-2"},
     ]});
+  });
+  it("publishes a native PDF page and an honestly described blank page together", async () => {
+    const description = "该页为空白页，没有可见文字或图形。";
+    const recognizePage = vi.fn(async () => {
+      const result = parseSourceVisualRecognitionOutput(JSON.stringify({
+        transcription: "", description, uncertainties: [], contentKinds: [],
+      }));
+      return { text: result.description, imageObjectKey: "trusted/page-2" };
+    });
+    const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "native prose", imagePath: null, visualKinds: [] },
+      { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(recognizePage).toHaveBeenCalledWith(expect.objectContaining({
+      physicalPage: 2, nativeText: "", visualKinds: ["scan"],
+    }));
+    expect(d.replaceInput()).toMatchObject({ chunks: [
+      { page: 1, text: "native prose", imageObjectKey: null },
+      { page: 2, text: `[视觉转写与描述]\n${description}`, imageObjectKey: "trusted/page-2" },
+    ] });
+    expect(d.states).toEqual(["ready"]);
   });
   it("fails closed on a visual or blank PDF page without recognition", async () => {
     for (const page of [{page:1,text:"caption",imagePath:null,visualKinds:["table"]}, {page:1,text:"",imagePath:null}]) {

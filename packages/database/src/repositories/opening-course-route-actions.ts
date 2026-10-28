@@ -129,6 +129,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       AND goal_json->'courseRoute'->>'requirementRevision'=${String(selected.requirement.revision)} AND goal_json->'courseRoute'->>'goalRevision'=${String(goal.revision)}
       AND goal_json->'courseRoute'->>'action'=${action} AND goal_json->'courseRoute'->>'originActivityId' IS NOT DISTINCT FROM ${origin?.input.activityId??null}
       AND goal_json->'courseRoute'->>'comprehensiveRunKey' IS NOT DISTINCT FROM ${comprehensiveRunKey??null}
+      AND goal_json->'courseRoute'->>'retestId' IS NOT DISTINCT FROM ${boundRetestId??null}
+      AND lower(create_intent->>'taskId') IS NOT DISTINCT FROM ${"taskId" in input?input.taskId?.toLowerCase()??null:null}
       AND (${origin?.input.activityId??null}::uuid IS NULL OR id<>${origin?.input.activityId??null}::uuid)
       ORDER BY updated_at DESC,id DESC LIMIT 1`;
     if(existing[0]){const context=courseRouteActivityContextSchema.parse((existing[0].goal_json as {courseRoute:unknown}).courseRoute);

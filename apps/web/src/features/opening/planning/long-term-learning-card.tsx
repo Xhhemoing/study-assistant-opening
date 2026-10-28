@@ -46,7 +46,7 @@ function ManagementCard({ date, client: suppliedClient, onChanged }: { date: str
       else if ("href" in result) { window.location.assign(result.href); }
       else { setOverview(result.overview); setDraft(result.draft); if (command.kind === "command" && command.input.action === "settings") { setDaily(String(result.overview.budget?.dailyMinutes ?? daily)); setBuffer(String(result.overview.budget?.bufferMinutes ?? buffer)); setMessage("共同预算已保存。"); } if (command.kind === "command" && command.input.action === "confirm") { setMessage("安排已确认，原学习事实保留。"); onChanged?.(); } }
     } catch (reason) {
-      if (reason instanceof LearningManagementRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { remember(null); setPending(null); setOverview(null); }
+      if (reason instanceof LearningManagementRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { remember(null); setPending(null); setOverview(null); }
       setError(userFacingMessage(reason, "保存结果待确认，请原样重新确认这次操作。"));
     } finally { writing.current = false; setBusy(false); }
   }

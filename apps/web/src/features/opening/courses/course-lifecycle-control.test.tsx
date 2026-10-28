@@ -18,3 +18,13 @@ it("saves an explicit goal state with the exact revision and accepted keep polic
 it("retains an unknown lifecycle request after an old revision reread", async () => { const value = clients(); vi.mocked(value.management.lifecycle).mockRejectedValueOnce(new TypeError("lost")); await render(value); await act(async () => button("确认目标状态").click()); const original = vi.mocked(value.management.lifecycle).mock.calls[0]; await act(async () => button("重新读取目标状态").click()); expect(host.textContent).toContain("状态保存待确认"); await act(async () => button("重新确认这次状态变更").click()); expect(vi.mocked(value.management.lifecycle).mock.calls[1]).toEqual(original); });
 it("asks for and sends a real maintenance interval for a reduced goal", async () => { const value = clients(); await render(value); const select = host.querySelector('select[aria-label="目标状态"]') as HTMLSelectElement; await act(async () => { select.value = "reduced"; select.dispatchEvent(new Event("change", { bubbles: true })); }); expect(host.textContent).toContain("维护间隔（天）"); await act(async () => button("确认目标状态").click()); expect(value.management.lifecycle).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: "reduced", maintenanceIntervalDays: 7 })); });
 it.each([401, 409])("keeps the unknown lifecycle intent after retry status %s", async status => { const { LearningManagementRequestError } = await import("../planning/learning-management-client"); const value = clients(); vi.mocked(value.management.lifecycle).mockRejectedValueOnce(new TypeError("lost")).mockRejectedValueOnce(new LearningManagementRequestError("请核对", status)); await render(value); await act(async () => button("确认目标状态").click()); const original = vi.mocked(value.management.lifecycle).mock.calls[0]; await act(async () => button("重新确认这次状态变更").click()); await act(async () => button("重新读取目标状态").click()); expect(host.textContent).toContain("状态保存待确认"); await act(async () => button("重新确认这次状态变更").click()); expect(vi.mocked(value.management.lifecycle).mock.calls[2]).toEqual(original); });
+it("retains a timed-out lifecycle command across remount", async () => {
+  const { LearningManagementRequestError } = await import("../planning/learning-management-client");
+  const value = clients(); vi.mocked(value.management.lifecycle).mockRejectedValueOnce(new LearningManagementRequestError("请求超时", 408));
+  await render(value); await act(async () => button("确认目标状态").click());
+  const original = vi.mocked(value.management.lifecycle).mock.calls[0];
+  expect(host.textContent).toContain("状态保存待确认");
+  await act(async () => root.unmount()); root = createRoot(host); await render(value);
+  await act(async () => button("重新确认这次状态变更").click());
+  expect(vi.mocked(value.management.lifecycle).mock.calls[1]).toEqual(original);
+});

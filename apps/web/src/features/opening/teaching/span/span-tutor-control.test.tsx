@@ -181,3 +181,30 @@ it("preserves unknown consent in memory when storage writes fail and keeps the r
   expect(api.patchAdaptivePrefs.mock.calls[1]).toEqual(api.patchAdaptivePrefs.mock.calls[0]);
   denied.mockRestore();
 });
+
+it("retains a first HTTP 408 tutor grant across remount and retries its original CAS", async () => {
+  const { OpeningApiError } = await import("../../client/api");
+  const api = await render(grant);
+  api.patchAdaptivePrefs.mockRejectedValueOnce(new OpeningApiError(408, "request timed out"));
+  await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await act(async () => button("确认导师试用设置").click());
+  const original = api.patchAdaptivePrefs.mock.calls[0];
+  expect(JSON.parse(sessionStorage.getItem(`aistudy:span-tutor-pending:${courseId}`)!)).toEqual({ courseId, enabled: false, dailyMinutes: 45, expiresOn: null, expectedRevision: 3 });
+  await act(async () => root.render(null));
+  await act(async () => root.render(<SpanTutorControl courseId={courseId} api={api} />));
+  expect(host.querySelector("summary")?.textContent).toContain("授权保存待确认");
+  api.patchAdaptivePrefs.mockResolvedValue(response({ ...grant, enabled: false, revision: 4 }));
+  await act(async () => button("重新确认原授权").click());
+  expect(api.patchAdaptivePrefs.mock.calls[1]).toEqual(original);
+  expect(sessionStorage.getItem(`aistudy:span-tutor-pending:${courseId}`)).toBeNull();
+});
+
+it("still clears a first definite HTTP 409 tutor grant rejection", async () => {
+  const { OpeningApiError } = await import("../../client/api");
+  const api = await render(grant);
+  api.patchAdaptivePrefs.mockRejectedValueOnce(new OpeningApiError(409, "conflict"));
+  await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+  await act(async () => button("确认导师试用设置").click());
+  expect(sessionStorage.getItem(`aistudy:span-tutor-pending:${courseId}`)).toBeNull();
+  expect(host.querySelector("summary")?.textContent).not.toContain("授权保存待确认");
+});

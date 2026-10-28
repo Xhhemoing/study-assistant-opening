@@ -27,3 +27,31 @@ it.each([401, 409])("keeps an unknown budget command after retry status %s", asy
   await render(api); await act(async () => button("保存共同预算").click()); const original = vi.mocked(api.command).mock.calls[0]; await act(async () => button("重新确认这次操作").click()); await act(async () => button("重新读取长期安排").click()); expect(host.textContent).toContain("保存结果待确认"); await act(async () => button("重新确认这次操作").click()); expect(vi.mocked(api.command).mock.calls[2]).toEqual(original);
 });
 it("offers a shorter real generic route activity rather than limiting recovery to span", async () => { const api = client({ ...overview, budget: { dailyMinutes: 60, bufferMinutes: 10, revision: 2, updatedAt: "2026-10-27T00:00:00Z" }, recovery: { kind: "continue", activityId: id, taskId: null, href: `/opening/courses/${id}/study?activity=${id}` } }); vi.mocked(api.recover).mockResolvedValue({ overview, draft: null }); await render(api); await act(async () => button("选择更短的本次活动").click()); expect(api.recover).toHaveBeenCalledWith(expect.objectContaining({ action: "shorten", activityId: id, minutes: 10 })); });
+
+it("retains a first HTTP 408 plan preview across remount and replays the same command", async () => {
+  const { LearningManagementRequestError } = await import("./learning-management-client");
+  const value = { ...overview, budget: { dailyMinutes: 60, bufferMinutes: 10, revision: 2, updatedAt: "2026-10-27T00:00:00Z" } };
+  const api = client(value);
+  vi.mocked(api.command).mockRejectedValueOnce(new LearningManagementRequestError("request timed out", 408));
+  await render(api);
+  await act(async () => button("预览共同安排").click());
+  const original = vi.mocked(api.command).mock.calls[0];
+  expect(JSON.parse(sessionStorage.getItem(`aistudy:long-term-command:verified-test:${date}`)!)).toEqual({ kind: "command", input: original![0] });
+  expect((button("预览共同安排") as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => root.render(null));
+  await render(api);
+  expect(host.textContent).toContain("保存结果待确认");
+  await act(async () => button("重新确认这次操作").click());
+  expect(vi.mocked(api.command).mock.calls[1]).toEqual(original);
+  expect(sessionStorage.getItem(`aistudy:long-term-command:verified-test:${date}`)).toBeNull();
+});
+
+it("still clears a first definite HTTP 409 plan rejection", async () => {
+  const { LearningManagementRequestError } = await import("./learning-management-client");
+  const api = client(overview);
+  vi.mocked(api.command).mockRejectedValueOnce(new LearningManagementRequestError("conflict", 409));
+  await render(api);
+  await act(async () => button("保存共同预算").click());
+  expect(sessionStorage.getItem(`aistudy:long-term-command:verified-test:${date}`)).toBeNull();
+  expect(host.textContent).not.toContain("保存结果待确认，这次填写的内容已保留");
+});

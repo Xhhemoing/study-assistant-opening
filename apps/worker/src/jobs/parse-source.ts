@@ -52,8 +52,24 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
       const response = await fetch(url);
       if (!response.ok) throw new Error("source download failed");
-      const text = await response.text();
-      if (Buffer.byteLength(text) > source.bytes) throw new Error("source download exceeds declared bytes");
+      const parts: Uint8Array[] = [];
+      let bytes = 0;
+      if (response.body) {
+        const reader = response.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            bytes += value.byteLength;
+            if (bytes > source.bytes) {
+              void reader.cancel().catch(() => undefined);
+              throw new Error("source download exceeds declared bytes");
+            }
+            parts.push(value);
+          }
+        } finally { reader.releaseLock(); }
+      }
+      const text = new TextDecoder().decode(Buffer.concat(parts));
       const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text); // plain text uses markdown chunker
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
       return { pages: chunks.length };

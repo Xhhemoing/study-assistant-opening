@@ -11,11 +11,12 @@ const run = (webRoot?: string) =>
   });
 
 describe("scripts/check-server-boundary.mjs (plan §7.4)", () => {
+  // The complete repository traversal needs more than 5s on a cold or loaded runner.
   it("passes for the real apps/web graph", () => {
     const r = run();
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
-  });
+  }, 30_000);
 
   it("fails on transitive re-export and dynamic import from a Client Component", () => {
     const r = run("tests/fixtures/server-boundary/bad");

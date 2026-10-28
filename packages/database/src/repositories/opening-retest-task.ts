@@ -216,7 +216,10 @@ async function insertQuickAddWithKey(
   if (row.candidate_id !== null && row.candidate_id !== undefined) {
     throw new OpeningPlanError("CONFLICT", "clientKey belongs to another task kind");
   }
-  if (quickAddFingerprint(rowIntent(row)) !== fingerprint) {
+  if (quickAddFingerprint(rowIntent(row)) !== fingerprint
+    || (row.course_id ?? null) !== (planning.courseId?.toLowerCase() ?? null)
+    || (row.skill_label ?? null) !== planning.skillLabel
+    || (row.origin ?? "manual") !== planning.origin) {
     throw new OpeningPlanError("CONFLICT", "clientKey payload differs");
   }
   return { task: mapTask(row), replayed: true };

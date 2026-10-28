@@ -44,7 +44,10 @@ const periodClockSchema = z
 
 export const openingPlanningSettingsSchema = z
   .object({
-    weekOneMonday: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    weekOneMonday: z.iso.date().refine(
+      value => new Date(`${value}T00:00:00Z`).getUTCDay() === 1,
+      "第一周周一必须是有效的星期一日期。",
+    ),
     periodTimes: z.record(z.string().regex(/^\d+$/), periodClockSchema),
     dailyWindow: sameDayRangeSchema,
     lunch: sameDayRangeSchema,

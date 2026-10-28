@@ -32,7 +32,7 @@ function LifecycleControl({ courseId, goalsClient, client: suppliedClient }: { c
     if (writing.current) return;
     const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setMessage(""); setPending(command); setStorageWarning(!remember(command));
     try { const result = await client.lifecycle(command); remember(null); setPending(null); setData(previous => previous ? { ...previous, goals: previous.goals.map(goal => goal.id === result.goal.id ? result.goal : goal) } : previous); choose(result.goal); setMessage(result.message); }
-    catch (reason) { if (reason instanceof LearningManagementRequestError && reason.status >= 400 && reason.status < 500 && !retryingUnknown) { remember(null); setPending(null); setData(null); } setError(userFacingMessage(reason, "状态保存待确认，请原样重新确认。")); }
+    catch (reason) { if (reason instanceof LearningManagementRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { remember(null); setPending(null); setData(null); } setError(userFacingMessage(reason, "状态保存待确认，请原样重新确认。")); }
     finally { writing.current = false; setBusy(false); }
   }
   function save() { if (!goal || locked) return; const days = Number(interval); if (["maintenance", "reduced"].includes(lifecycle) && (!Number.isInteger(days) || days < 1 || days > 365)) { setError("维护间隔须为 1–365 天。"); return; } void execute({ goalId: goal.id, expectedRevision: goal.revision, lifecycle, acceptedPolicy: "keep", ...(["maintenance", "reduced"].includes(lifecycle) ? { maintenanceIntervalDays: days } : {}) }); }

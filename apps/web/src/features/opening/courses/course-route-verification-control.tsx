@@ -33,7 +33,7 @@ function VerificationControl({ courseId, activityId, client: suppliedClient, dis
     const retryingUnknown = pending !== null;
     writing.current = true; setBusy(true); setError(""); setMessage(""); setPending(command); setStorageWarning(!remember(command));
     try { await client.confirmVerification(courseId, command); remember(null); if (active.current) { setPending(null); setReview(null); setSelected([]); setMessage("题目与评分标准已确认可用于后续验证。要求版本已更新；已有答案和评价没有升级。请返回课程路线，明确开始新版本的题目。"); onConfirmed?.(); } }
-    catch (reason) { if (!retryingUnknown && reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500) { remember(null); if (active.current) { setPending(null); setReview(null); } } if (active.current) setError(userFacingMessage(reason, "标准确认结果待核对，请保留本页并重新确认先前选择的题目。")); }
+    catch (reason) { if (!retryingUnknown && reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408) { remember(null); if (active.current) { setPending(null); setReview(null); } } if (active.current) setError(userFacingMessage(reason, "标准确认结果待核对，请保留本页并重新确认先前选择的题目。")); }
     finally { writing.current = false; if (active.current) setBusy(false); }
   }
   const locked = busy || disabled || Boolean(pending);

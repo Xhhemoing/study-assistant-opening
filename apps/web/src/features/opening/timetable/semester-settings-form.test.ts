@@ -9,6 +9,13 @@ import {
 import { DEFAULT_OPENING_PLANNING_SETTINGS } from "@aistudy/contracts";
 
 describe("semester settings defaults", () => {
+  it("rejects a nonexistent date even when Date normalizes it to a Monday", () => {
+    expect(validateSemesterDraft({
+      ...blankSemesterDraft(),
+      weekOneMonday: "2026-02-30",
+    })).not.toBeNull();
+  });
+
   it("uses contract daily/meal/sleep defaults and 45-minute period template", () => {
     const draft = blankSemesterDraft();
     expect(draft.dailyWindow).toEqual(DEFAULT_OPENING_PLANNING_SETTINGS.dailyWindow);
