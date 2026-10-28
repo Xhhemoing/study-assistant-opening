@@ -129,6 +129,11 @@ it.each([
   expect(mocks.provider).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs, idleTimeoutMs: 60_000 }));
 });
 
+it("rejects an unconfigured default photo model instead of silently selecting another vision provider", async () => {
+  await expect(resolveTaskModel({} as never, scope, "practice.grade-photo")).rejects.toThrow(/请先配置 gpt-6-luna/);
+  expect(mocks.provider).not.toHaveBeenCalled();
+});
+
 it("wires stored workspace media bounds into provider options, snapshot and reservation model", async () => {
   const media = { mediaInputTokenUpperBound: 128000, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 9 };
   const custom = { ...model, ...media, id: "workspace-media", providerId: "workspace-provider", supportsAudio: true, createdAt: new Date().toISOString(), vaultConfigBroken: false };

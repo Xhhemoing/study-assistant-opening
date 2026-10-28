@@ -1,3 +1,4 @@
+import { OpeningModelRoutingError } from "@aistudy/ai";
 import { openingJobScope } from "@aistudy/database";
 import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -92,29 +93,39 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
         : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
       signal.throwIfAborted();
       const chunks = [];
+      let visualRecognitionUnavailable = false;
       for (const page of pages) {
         signal.throwIfAborted();
         const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || source.mime === "application/pdf") ? ["scan" as const] : [];
         let text = page.text;
         let imageObjectKey: string | null = null;
-        if ((isImage || source.mime === "application/pdf") && visualKinds.length) {
+        if (!visualRecognitionUnavailable && (isImage || source.mime === "application/pdf") && visualKinds.length) {
           if (!deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
           await assertCurrent?.();
-          const result = await deps.recognizePage({ scope, job, sourceId: source.id, sourceVersion: source.version,
-            physicalPage: page.page, nativeText: page.text, visualKinds, localFilePath: temp, mime: source.mime, signal });
+          let result: ParseSourceVisualPageResult | undefined;
+          try {
+            result = await deps.recognizePage({ scope, job, sourceId: source.id, sourceVersion: source.version,
+              physicalPage: page.page, nativeText: page.text, visualKinds, localFilePath: temp, mime: source.mime, signal });
+          } catch (error) {
+            if (!(error instanceof OpeningModelRoutingError)) throw error;
+            visualRecognitionUnavailable = true;
+          }
           signal.throwIfAborted();
           await assertCurrent?.();
-          if (typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
-          const extractionLabel = visualKinds.includes("scan") ? "本地提取（可能含OCR）" : "原生提取";
-          text = `${page.text ? `[${extractionLabel}]\n${page.text}\n\n` : ""}[视觉转写与描述]\n${result.text}`;
-          imageObjectKey = result.imageObjectKey;
+          if (!visualRecognitionUnavailable) {
+            if (!result || typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
+            const extractionLabel = visualKinds.includes("scan") ? "本地提取（可能含OCR）" : "原生提取";
+            text = `${page.text ? `[${extractionLabel}]\n${page.text}\n\n` : ""}[视觉转写与描述]\n${result.text}`;
+            imageObjectKey = result.imageObjectKey;
+          }
         }
+        if (isImage && visualRecognitionUnavailable) imageObjectKey = deps.storage.finalKey(source.id, source.version);
         chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
       }
       signal.throwIfAborted();
       await assertCurrent?.();
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks });
-      return isImage ? { pages: 1, imageOnly: false } : { pages: pages.length };
+      return isImage ? { pages: 1, imageOnly: visualRecognitionUnavailable } : { pages: pages.length };
     } catch (error) {
       if (error instanceof UnsupportedMimeError) throw new UnsupportedSourceError("unsupported source MIME");
       if (error instanceof ConversionFailedError) throw new Error(`document conversion failed: ${error.message}`);
