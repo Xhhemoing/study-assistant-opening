@@ -4,11 +4,11 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `1b08a37d`，PR #135、[#136](https://github.com/Xhhemoing/study-assistant-opening/pull/136)、[#137](https://github.com/Xhhemoing/study-assistant-opening/pull/137) 已合入，#137 合并提交的主干 push CI 已成功；保留上传回退和三轮缺陷修复 |
+| 开发主干 | `feat/opening-release` @ `4de15f6e`，PR #135、[#136](https://github.com/Xhhemoing/study-assistant-opening/pull/136)、[#137](https://github.com/Xhhemoing/study-assistant-opening/pull/137)、[#138](https://github.com/Xhhemoing/study-assistant-opening/pull/138) 已合入；#138 为真实仓储回归，不把此前 #137 主干 push CI 成功当作新合并提交检查已通过 |
 | 线上版本 | 本轮未部署；此前版本仍为 `4bd1e8b7`。版本字段为空问题尚待使用当前发布 runner 验收，不把代码合并记为线上修复 |
-| 开放 PR | [#138](https://github.com/Xhhemoing/study-assistant-opening/pull/138) 上传回退真实仓储回归、[#139](https://github.com/Xhhemoing/study-assistant-opening/pull/139) 最终计划均在途，尚未合并；本轮仅收口 #138 现有分支 |
-| 候选检查 | #138 原 head `17464bd2` 的 CI 已全绿；与 #137 主干整合后须以精确新 head 的现有 CI 为准，不沿用旧绿色检查冒充新候选通过。下方近邻测试、类型、lint 和独立评审证据保留 |
-| 当前工作 | M0 候选与最终计划收口；#137 三轮修复已合入，#138 保留真实仓储/Worker 回执回归，不新增产品代码或验证切片；整体 M0 尚未完成 |
+| 开放 PR | [#139](https://github.com/Xhhemoing/study-assistant-opening/pull/139) 最终计划文档候选在途，尚未合并；#138 已合并，不再列为开放或待解决冲突 |
+| 候选检查 | #139 前一 head `09591636` 的 CI 已通过；本次架构补充的合并依据仍是该 PR 最新精确 head 的现有 CI。文档范围、空白/冲突、链接及源码引用检查通过，新增附录 D 经 Claude 限定异家族反驳无确定阻塞；不等同产品实现或线上验收 |
+| 当前工作 | 在原总计划附录 D 细化持久状态所有者、导师回合执行与模型/规则边界，并同步 M0 现场；仅文档，无产品代码或新验证切片。#138 真实仓储/Worker 回执回归已合入，整体 M0 尚未完成 |
 | M0 交接 | 部署与迁移 0101–0103 等用户确认；发布时仍需 Worker 实际消费及稳定窗口、合成 PDF 上传解析和真实文本/视觉模型验收，不由本批合并代替 |
 | 待验收 | 浏览器体验、真实模型质量、长期学习效果均待用户验收或尚未测量（unknown）；三轮修复历史及用户复验步骤见下方 |
 
