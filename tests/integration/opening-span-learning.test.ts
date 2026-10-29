@@ -91,6 +91,7 @@ it("releases actual worked/simulation/faded content and excludes demonstrated fa
   expect(replay.exposureReceipt.id).toBe(content.exposureReceipt.id);
   expect(content.exposureReceipt.releasedAt).not.toBeNull();
   const hint = await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: f.attempt.id });
+  expect(hint.exposureReceipt).toMatchObject({ hintStage: 1, initiatedBy: null });
   expect(hint.text).toContain("αv+βw=u");
   const reserved = await createSpanReservedService(fixture.sql).issue(fixture.scope, { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "overview" });
   expect(reserved.spanExercise!.familyId).not.toBe(content.problem.familyId);
@@ -101,6 +102,7 @@ it("does not release a solution before the original answer and keeps later feedb
   await expect(feedback.read(fixture.scope, { attemptId: f.attempt.id })).rejects.toMatchObject({ code: "VALIDATION" });
   const record = await f.submit({ membership: "in_span", coefficients: ["3", "-1/2"], equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: ["3", "-1"] });
   const released = await feedback.read(fixture.scope, { attemptId: f.attempt.id });
+  expect(released.exposureReceipt).toMatchObject({ hintStage: 4, initiatedBy: null });
   expect(released.result.solution).toEqual({ kind: "unique", coefficients: ["3", "-1/2"] });
   expect(Date.parse(released.exposureReceipt.releasedAt!)).toBeGreaterThanOrEqual(Date.parse(record.recordedAt!));
 });

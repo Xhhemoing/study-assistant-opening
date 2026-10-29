@@ -17,7 +17,7 @@ export function createSpanFeedbackService(sql: Sql) {
     const exposureReceipt = await createOpeningStudyExposureRepository(sql).deliver(scope, {
       releaseKey: `span-feedback:${attempt.id}`, contextAnchor: { attemptId: attempt.id, itemVersionId: attempt.itemVersionId,
         courseId: attempt.courseId, purpose: "history_solution" }, sessionId: attempt.sessionId,
-      origin: "history_solution", kind: "solution", level: "revealed",
+      origin: "history_solution", kind: "solution", level: "revealed", hintStage: 4, initiatedBy: null,
     });
     return { attemptId: attempt.id, result, exposureReceipt };
   } };

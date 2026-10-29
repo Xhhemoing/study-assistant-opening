@@ -64,6 +64,8 @@ export function createSpanHintService(sql: Sql) {
     const exposureReceipt = await createOpeningStudyExposureRepository(sql).deliver(scope, {
       releaseKey: `span-hint-v1:${attempt.id}:${level}`, contextAnchor: { attemptId: attempt.id, itemVersionId: attempt.itemVersionId, courseId: attempt.courseId, purpose: "learning_help" },
       sessionId: attempt.sessionId, origin: "assistant", kind: "hint", level: "hinted", supportDomain: "math",
+      // Clicks, automatic fading and resume share this request; the initiator is unknown.
+      hintStage: level, initiatedBy: null,
     });
     return { attemptId, level, text, exposureReceipt };
   } };

@@ -4,6 +4,7 @@ import { createOpeningBudgetRepository, createOpeningLearningDecisionsRepository
   createOpeningTeachingActivitiesRepository, createOpeningStudyIntentRepository, executeOpeningRestoreApply, readOpeningBackupRecords } from "@aistudy/database";
 import { validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 afterAll(async () => { await fixture?.close(); });
@@ -62,6 +63,45 @@ it("round-trips Study release states and immutable decisions without restoring p
   const oldRestored = await readOpeningBackupRecords(sql, scope);
   expect(oldRestored.tables.opening_help_exposures).toEqual(legacy.tables.opening_help_exposures!.map(row => ({ ...row, hint_stage: null, initiated_by: null })));
   expect(await sql`SELECT id FROM opening_parent_interaction_budgets WHERE workspace_id=${scope.workspaceId}`).toHaveLength(1);
+});
+
+it("preserves legacy HelpExposure metadata across replay and backup without backfilling old nulls", async () => {
+  const isolated = await createOpeningFixture();
+  try {
+    const { sql, scope } = isolated;
+    const f = await learningAttemptFixture(isolated), attempt = await f.start();
+    const legacy = await f.help(attempt);
+    const { createdAt: _createdAt, ...input } = legacy;
+    expect(legacy).toMatchObject({ hintStage: null, initiatedBy: null });
+    expect(await f.learning.insertHelpExposure(scope, { ...input, hintStage: 3, initiatedBy: "user" })).toEqual(legacy);
+    await sql`DELETE FROM opening_help_exposures WHERE id=${legacy.id}`;
+    const saved = await f.learning.insertHelpExposure(scope, { ...input, hintStage: 3, initiatedBy: "user" });
+    expect(saved).toMatchObject({ hintStage: 3, initiatedBy: "user" });
+    expect(await f.learning.insertHelpExposure(scope, { ...input, hintStage: 3, initiatedBy: "user" })).toEqual(saved);
+    for (const changed of [{ hintStage: 2, initiatedBy: "user" as const }, { hintStage: 3, initiatedBy: "assistant" as const }]) {
+      await expect(f.learning.insertHelpExposure(scope, { ...input, ...changed })).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    const snapshot = await readOpeningBackupRecords(sql, scope);
+    const backup = { format: "opening-backup", version: 1, workspaceId: scope.workspaceId, privacyEpoch: snapshot.privacyEpoch,
+      deletionJournal: snapshot.deletionJournal, memoryDeletions: snapshot.memoryDeletions, tables: snapshot.tables, objects: [] } satisfies OpeningBackup;
+    expect(validateOpeningRestore(backup, [], snapshot.memoryDeletions)).toMatchObject({ allowed: true });
+    await sql`DELETE FROM opening_help_exposures WHERE id=${saved.id}`;
+    await sql`DELETE FROM opening_conversations WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM opening_learning_sessions WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM opening_source_chunks WHERE source_id=${f.sourceId}`;
+    await sql`DELETE FROM opening_sources WHERE id=${f.sourceId}`;
+    await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM courses WHERE id=${f.courseId}`;
+    await sql`DELETE FROM opening_learning_item_versions WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM opening_source_versions WHERE workspace_id=${scope.workspaceId}`;
+    await sql`DELETE FROM opening_learning_history_revisions WHERE workspace_id=${scope.workspaceId}`;
+    const restored = await executeOpeningRestoreApply(sql, { confirmLocalRestore: true, backup, currentDeletionJournal: [],
+      currentMemoryDeletions: snapshot.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+    expect(restored, JSON.stringify(restored)).toMatchObject({ ok: true });
+    expect((await readOpeningBackupRecords(sql, scope)).tables.opening_help_exposures).toEqual(snapshot.tables.opening_help_exposures);
+    expect(await f.learning.insertHelpExposure(scope, { ...input, hintStage: 3, initiatedBy: "user" })).toEqual(saved);
+  } finally { await isolated.close(); }
 });
 
 it("round-trips all explicit answer-condition events and refuses a truncated intent history", async () => {

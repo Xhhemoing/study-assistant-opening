@@ -256,6 +256,8 @@ describe("tutor turn handler", () => {
     });
     await createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id);
     const generated = streamExposures.generate.mock.calls[0][1];
+    expect(generated).toMatchObject({ hintStage: null, initiatedBy: "user" });
+    expect(tutorJobs.getUserTurn).toHaveBeenCalledWith(claimedJob.userTurnId, claimedJob.workspaceId, claimedJob.id);
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ generatedExposure: generated }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
@@ -1023,7 +1025,7 @@ describe("tutor turn handler", () => {
         turnId: claimed.assistantTurnId,
         kind: "hint",
         level: "hinted",
-        delivered: true,
+        delivered: true, hintStage: null, initiatedBy: "user",
       }),
     }));
   });

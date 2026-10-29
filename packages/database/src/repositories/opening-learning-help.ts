@@ -20,6 +20,8 @@ function mapDeliveredHelp(row: Record<string, unknown>): HelpExposure {
     turnId: String(row.turn_id),
     kind,
     level: row.level as HelpExposure["level"],
+    hintStage: (row.hint_stage ?? null) as HelpExposure["hintStage"],
+    initiatedBy: (row.initiated_by ?? null) as HelpExposure["initiatedBy"],
     delivered: true,
     createdAt: learningIso(row.created_at)!,
     deliveredAt: learningIso(row.delivered_at),
@@ -61,6 +63,8 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
     const saved = mapDeliveredHelp(existing[0]);
     if (saved.sessionId !== input.sessionId || saved.turnId !== input.turnId || saved.level !== input.level
       || saved.kind !== input.kind
+      || (saved.hintStage != null && saved.hintStage !== (input.hintStage ?? null))
+      || (saved.initiatedBy != null && saved.initiatedBy !== (input.initiatedBy ?? null))
       || saved.attemptId !== (input.attemptId ?? null) || saved.problemId !== problemId) {
       throw learningError("CONFLICT", "help exposure ID payload conflict");
     }
@@ -69,9 +73,9 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
   }
   const revision = options.generatedOnly ? 0 : await nextLearningHistoryRevision(tx, scope, String(session.course_id));
   const workspaceRevision = options.generatedOnly ? null : await nextWorkspaceLearningHistoryRevision(tx, scope);
-  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision,kind,activity_id,item_version_id,owner_user_id,course_id,context_anchor,release_key,exposure_origin,support_domain,generated_at,released_at,workspace_history_revision)
+  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision,kind,activity_id,item_version_id,owner_user_id,course_id,context_anchor,release_key,exposure_origin,support_domain,generated_at,released_at,workspace_history_revision,hint_stage,initiated_by)
     VALUES (${input.id},${scope.workspaceId},${input.sessionId},${problemId},${input.turnId},${input.level},${!options.generatedOnly},${input.attemptId ?? null},${options.generatedOnly ? null : tx`clock_timestamp()`},${revision},${input.kind},${activityId},${itemVersionId},${scope.ownerUserId},${session.course_id},${tx.json(contextAnchor)},
-      ${`assistant:${input.turnId}`},'assistant',${input.supportDomain ?? "unknown"},clock_timestamp(),${options.generatedOnly ? null : tx`clock_timestamp()`},${workspaceRevision}) RETURNING *`;
+      ${`assistant:${input.turnId}`},'assistant',${input.supportDomain ?? "unknown"},clock_timestamp(),${options.generatedOnly ? null : tx`clock_timestamp()`},${workspaceRevision},${input.hintStage ?? null},${input.initiatedBy ?? null}) RETURNING *`;
   if (options.generatedOnly) return;
   const affected = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
     JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
