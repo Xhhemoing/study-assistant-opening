@@ -273,7 +273,7 @@ export * from "./study-session-intent";
 
 export * from "./assistant-proposals";
 
-export { studyContextAnchorSchema, studyExposureReceiptSchema, type StudyContextAnchor, type StudyExposureReceipt } from "./tutor";
+export { helpInputSnapshotSchema, type HelpInputSnapshot, studyContextAnchorSchema, studyExposureReceiptSchema, type StudyContextAnchor, type StudyExposureReceipt } from "./tutor";
 export * from "./material-retrieval-evaluation";
 
 export * from "./span-session";

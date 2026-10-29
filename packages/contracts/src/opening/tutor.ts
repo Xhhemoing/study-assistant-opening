@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { composerPurposeSchema } from "./composer-purpose";
+import { helpInputSnapshotSchema } from "./help-input-snapshot";
 import { citationSchema, sourceChunkSchema } from "./sources";
 import { providerToolCallSchema, providerToolSchema, providerToolMessageSchema, systemQueryReceiptSchema } from "./system-query";
 
@@ -24,6 +25,8 @@ export const studyContextAnchorSchema = z.object({
 });
 export type StudyContextAnchor = z.infer<typeof studyContextAnchorSchema>;
 
+export { helpInputSnapshotSchema, type HelpInputSnapshot } from "./help-input-snapshot";
+
 export const studyExposureReceiptSchema = z.object({
   id: uuidSchema,
   releaseKey: z.string().min(8).max(200),
@@ -32,6 +35,7 @@ export const studyExposureReceiptSchema = z.object({
   supportDomain: z.enum(["language", "math", "unknown"]),
   hintStage: z.number().int().min(1).max(4).nullable().optional(),
   initiatedBy: z.enum(["user", "assistant"]).nullable().optional(),
+  helpInputSnapshot: helpInputSnapshotSchema.nullable().optional(),
   generatedAt: isoDateTimeSchema,
   releasedAt: isoDateTimeSchema.nullable(),
   acknowledgedAt: isoDateTimeSchema.nullable(),

@@ -1,4 +1,4 @@
-import { composerPurposeSchema, studyContextAnchorSchema, studyIntentChangeSchema, studySessionIntentSchema } from "@aistudy/contracts";
+import { composerPurposeSchema, helpInputSnapshotSchema, studyContextAnchorSchema, studyIntentChangeSchema, studySessionIntentSchema } from "@aistudy/contracts";
 import { validateLearningDecision, type LearningDecisionInput } from "./learning-decision";
 import { isRecord, isUuid } from "./backup-validation";
 
@@ -24,6 +24,24 @@ export function validateBackupStudy(tables: Tables, errors: string[]): void {
   for (const source of sources.values()) versions.add(`${source.id}/${source.version}`);
   const owner = (row: Row): unknown => row.owner_user_id ?? sessions.get(row.session_id)?.owner_user_id
     ?? conversations.get(turns.get(row.turn_id)?.conversation_id)?.owner_user_id ?? conversations.get(row.conversation_id)?.owner_user_id;
+  const snapshot = (row: Row, isTurn: boolean) => {
+    if (row.help_input_snapshot == null) return;
+    const parsed = helpInputSnapshotSchema.safeParse(row.help_input_snapshot);
+    if (!parsed.success) { errors.push("Help input snapshot is invalid"); return; }
+    const user = turns.get(parsed.data.userTurnId), assistant = turns.get(parsed.data.assistantTurnId);
+    if (!user || user.role !== "user" || user.workspace_id !== row.workspace_id || owner(user) !== owner(row)
+      // Input snapshots survive a failed or privacy-filtered reply. Delivered help still requires its pair.
+      || (!assistant ? !isTurn : assistant.role !== "assistant" || assistant.workspace_id !== row.workspace_id || owner(assistant) !== owner(row)
+        || assistant.conversation_id !== user.conversation_id
+        || (assistant.learning_session_id ?? null) !== (user.learning_session_id ?? null)
+        || (assistant.attempt_id ?? null) !== (user.attempt_id ?? null))
+      || (isTurn ? row.id !== user.id || row.mode !== parsed.data.tutorMode
+        : row.turn_id !== assistant?.id || (row.session_id ?? null) !== (user.learning_session_id ?? null)
+          || (row.attempt_id ?? null) !== (user.attempt_id ?? null)
+          || JSON.stringify(helpInputSnapshotSchema.safeParse(user.help_input_snapshot).data) !== JSON.stringify(parsed.data))) {
+      errors.push("Help input snapshot user turn scope or identity mismatch");
+    }
+  };
   const anchor = (row: Row) => {
     if (row.context_anchor == null) return;
     const parsed = studyContextAnchorSchema.safeParse(row.context_anchor);
@@ -55,6 +73,7 @@ export function validateBackupStudy(tables: Tables, errors: string[]): void {
     }
   };
   for (const row of rows(tables, "opening_turns")) {
+    snapshot(row, true);
     anchor(row);
     if (row.composer_purpose != null && !composerPurposeSchema.safeParse(row.composer_purpose).success) errors.push("Study composer purpose is invalid");
   }
@@ -62,6 +81,7 @@ export function validateBackupStudy(tables: Tables, errors: string[]): void {
   const releaseKeys = new Set<string>();
   const counters = new Map(rows(tables, "opening_workspace_history_revisions").map(row => [`${row.workspace_id}/${row.owner_user_id}`, row.revision]));
   for (const row of rows(tables, "opening_help_exposures")) {
+    snapshot(row, false);
     anchor(row);
     if (row.hint_stage != null && (!Number.isInteger(row.hint_stage) || Number(row.hint_stage) < 1 || Number(row.hint_stage) > 4)) errors.push("Study exposure hint stage is invalid");
     if (row.initiated_by != null && row.initiated_by !== "user" && row.initiated_by !== "assistant") errors.push("Study exposure initiator is invalid");

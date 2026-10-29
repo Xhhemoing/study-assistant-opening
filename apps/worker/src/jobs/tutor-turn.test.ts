@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError, OpeningModelRoutingError } from "@aistudy/ai";
 import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
-import type { ConversationPlanningContext, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
+import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
-import { DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
+import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 import type { TutorNextActionService } from "./tutor-next-action";
 
@@ -58,7 +58,15 @@ describe("tutor turn handler", () => {
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
     const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
-    return { deps, tutorJobs, chunks, budget, provider };
+    const freezeHelpInputSnapshot = vi.fn(async (): Promise<HelpInputSnapshot> => {
+      const selected = jobs.getUserTurn.mock.results.at(-1)?.value;
+      const saved = await selected as typeof turn & { studyIntent?: StudyIntentEvent };
+      const claimed = await jobs.claim.mock.results.at(-1)?.value as typeof claimedJob;
+      return { userTurnId: claimedJob.userTurnId, assistantTurnId: claimedJob.assistantTurnId, tutorMode: claimed.mode as TutorMode,
+        studyIntent: studyIntentForMessage(saved?.studyIntent, composerMessageText(saved?.text ?? turn.text)) };
+    });
+    const jobs = { ...tutorJobs, freezeHelpInputSnapshot };
+    return { deps: { ...deps, tutorJobs: jobs }, tutorJobs: jobs, chunks, budget, provider };
   }
 
   it("opens a real course-scoped span action before the proposal/model path", async () => {
@@ -329,13 +337,15 @@ describe("tutor turn handler", () => {
 
   it("uses the lease-checked typed intent result before constructing the provider instruction", async () => {
     const { deps, tutorJobs, provider } = setup();
-    const applyUserTurnIntent = vi.fn(async () => ({ intent: { purpose: "confused" as const, timeBudgetMinutes: 10,
-      language: "zh" as const, pace: "slow" as const, continuous: false, selfReportedFatigue: "unknown" as const }, action: "diagnose" as const }));
-    await createTutorTurnHandler({ ...deps, tutorJobs: { ...tutorJobs, applyUserTurnIntent } })(claimedJob.id);
-    expect(applyUserTurnIntent).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+    const freezeHelpInputSnapshot = vi.fn(async (): Promise<HelpInputSnapshot> => ({ userTurnId: claimedJob.userTurnId, assistantTurnId: claimedJob.assistantTurnId, tutorMode: "hint",
+      studyIntent: { intent: { purpose: "confused", timeBudgetMinutes: 10,
+      language: "zh", pace: "slow", continuous: false, selfReportedFatigue: "unknown" }, action: "diagnose" } }));
+    await createTutorTurnHandler({ ...deps, tutorJobs: { ...tutorJobs, freezeHelpInputSnapshot } })(claimedJob.id);
+    expect(freezeHelpInputSnapshot).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
       { userTurnId: claimedJob.userTurnId, jobId: claimedJob.id, claimToken: undefined });
     expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("放慢节奏");
     expect(provider.complete.mock.calls[0]?.[0].instruction).toContain("先定位不懂之处");
+    expect(provider.complete.mock.calls[0]?.[0].mode).toBe("hint");
   });
 
   it("applies the actual request's style without treating carried material as an instruction", async () => {

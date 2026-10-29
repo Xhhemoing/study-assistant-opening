@@ -41,7 +41,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_turns = asRows(await tx`
     SELECT t.id, t.workspace_id, t.conversation_id, t.role, t.text, t.mode, t.status, t.client_key,
       t.learning_session_id, t.current_page, t.chunk_id, t.source_ids, t.citations, t.created_at,
-      t.intent_hash, t.source_versions, t.context_source_refs, t.attempt_id,t.query_system,t.system_query,t.context_anchor,t.composer_purpose
+      t.intent_hash, t.source_versions, t.context_source_refs, t.attempt_id,t.query_system,t.system_query,t.context_anchor,t.composer_purpose,t.help_input_snapshot
     FROM opening_turns t
     WHERE ${includedTurn(tx, id, userId, "t")}
     ORDER BY t.id`);
@@ -80,7 +80,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_help_exposures = asRows(await tx`
     SELECT h.id, h.workspace_id, h.session_id, h.problem_id, h.turn_id, h.level, h.delivered, h.created_at, h.attempt_id, h.delivered_at, h.history_revision,
       h.kind, h.activity_id, h.item_version_id, h.owner_user_id, h.course_id, h.release_key, h.release_intent, h.context_anchor,
-      h.exposure_origin, h.support_domain, h.hint_stage, h.initiated_by, h.generated_at, h.released_at, h.acknowledged_at, h.workspace_history_revision
+      h.exposure_origin, h.support_domain, h.hint_stage, h.initiated_by, h.help_input_snapshot, h.generated_at, h.released_at, h.acknowledged_at, h.workspace_history_revision
     FROM opening_help_exposures h
     LEFT JOIN opening_learning_sessions l ON l.id = h.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     WHERE h.workspace_id = ${id}
@@ -255,6 +255,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_turns = tables.opening_turns.filter(row => row.attempt_id === null || attemptIds.has(row.attempt_id));
   const turnIds = new Set(tables.opening_turns.map(row => row.id));
   tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(row.turn_id))
+    && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
     && (row.attempt_id === null || attemptIds.has(row.attempt_id))
     && (row.item_version_id == null || itemIds.has(row.item_version_id)));
   tables.opening_learning_observations = tables.opening_learning_observations.filter(row => versionsIncluded(row.source_versions)
