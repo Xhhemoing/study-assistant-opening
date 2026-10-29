@@ -461,8 +461,8 @@ nextLearningStep（唯一决策入口；domain 无数据库或模型调用）
 
 - **已存在：** `packages/ai/src/opening/grading-evaluation.ts` 已有错答判对/正确判错、拒判/无效输出、分层和分母，不重写评估框架；现有结果 `calibrated: false` 不能因测试通过直接改 true。
 - **主要文件：** `packages/contracts/src/opening/grading-evaluation.ts`、`packages/ai/src/opening/grading-evaluation.ts` 及 `.test.ts`；复用 `scripts/study-grading-collect.ts`、`scripts/study-grading-eval.ts` 及 `tests/fixtures/opening/grading/` 的现有夹具目录，拟新增 `tests/fixtures/opening/grading/calibration-cases.json`。不新增第二个校准运行器。
-- **最小变化：** 采真实开发网关输出、绑定数据/模型/提示/量规版本、计算单侧上界、按题型/模态报告；正确、错误、无法判定均有金标；分别说明正向准入与负向纠错的可信范围，不因 FP 低就认定 FN 可靠，只为可适用的题型形成校准结果。
-- **验收：** 缺失响应不从分母消失；总是拒判不能被称为好批改器；夹具响应不能成为真实模型准确率；照片只用合成清晰图时明确不覆盖真实手写。强证据消费留到 M2-A 同片接线。
+- **最小变化：** 采真实开发 GPT 文本输出，绑定 datasetId/datasetVersion、caseVersion、modelLabel、源码提交、实际 instruction/prompt、rubric 与 protocol 版本；保存实际发出的 instruction。旧产物缺版本时保持 unknown，不用当前版本补写。正确、错误、无法判定均有独立程序或人工金标；pending 只作为候选，不能入准确率分母。按题型/模态/审核来源分别报告 raw 与 accepted 的 FP/FN、拒判、缺失/无效、覆盖率和分子/分母；报告 95% 单侧 Clopper–Pearson 上界，零分母为 null。照片仍列 `photo_not_supported`/unknown，不读取真实手写图。
+- **验收：** 缺失响应不从分母消失；缺失不冒充拒判；总是拒判不能被称为好批改器；夹具响应不能成为真实模型准确率；程序金标仅限其确定性 checker 适用范围，human_reviewed 与 program_verified 分开。真实命令沿用 `scripts/study-grading-collect.ts` → 私有 run/collection sidecar → `scripts/study-grading-eval.ts`，不新增第二个 runner。强证据消费留到 M2-A 同片接线，`calibrated` 保持 false。
 
 #### M2-A：一个决策入口，四种学习模式
 

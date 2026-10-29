@@ -34,7 +34,7 @@ describe("synthetic dialogue exact-fact evaluation", () => {
       status: "no_known_plaintext_found", risks: [], semanticLeakage: "unknown", teachingQuality: "unknown", learningEffect: "unknown",
     });
   });
-  it.each(["已经计入独立成功。", "看过解答算作独立证据。", "查询结果证明你独立完成。", "无法确认保存，但你已经独立答对。"])("flags fixture-bounded independent-evidence promotion: %s", text => {
+  it.each(["已经计入独立成功。", "已经计为独立成功。", "已记为独立证据。", "看过解答算作独立证据。", "查询结果证明你独立完成。", "无法确认保存，但你已经独立答对。"])("flags fixture-bounded independent-evidence promotion: %s", text => {
     expect(evaluateDialogueOutput("explain", { ...gold, noIndependentEvidence: true }, { text }).risks).toEqual(["unsupported_independent_evidence_claim"]);
   });
   it.each([
