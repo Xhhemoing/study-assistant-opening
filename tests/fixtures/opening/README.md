@@ -8,7 +8,18 @@ SHA-256: `d8e4184cb0a01af4df2cdf8e0f36bdd13415b4fd9d85ee7b88b70aaeba5338bb`
 
 `parser-two-slide.pptx` is a committed, synthetic two-slide PowerPoint file. Its only slide text is `Opening slide one` and `Opening slide two`; it contains no real user data. The Node integration test uploads it to S3, invokes the real Python parser, and checks database page numbers, text, source versions, and temporary-file cleanup alongside the PDF fixture.
 
-Generate it with the parser environment's installed `python-pptx` package from the repository root:
+## Tutor L0 offline evaluation
+
+`tutor-l0-cases.json` contains 48 synthetic scenarios with independently written gold results: 10 next-step, 6 thin tutor, 4 adaptive tutor, 12 retest outcome and 16 evidence-eligibility cases. The CLI executes those existing pure owners, records their distinct entry/version labels, and retains missing/error outputs in the denominator. Unversioned owners are explicitly labelled unversioned; supply the checkout SHA alongside any shared report. Gold side-effect prohibitions and expected receipts remain **unknown** because pure functions cannot verify persistence, permissions or budget release.
+
+```sh
+node --import tsx scripts/evaluate-tutor-l0.ts --fixture tests/fixtures/opening/tutor-l0-cases.json --output /tmp/tutor-l0-report.json
+NODE_ENV=test npm test -- --project unit packages/domain/src/opening/tutor-l0-evaluation.test.ts packages/domain/src/opening/adaptive/loop-simulation.test.ts
+```
+
+Output is owner-only (`0600`), created exclusively (`wx`); existing files and fixture overwrites are refused. Failed gold checks or missing outputs cause a nonzero exit. Each row includes input, actual output, gold judgment, entrypoint and policy version. Reports are `synthetic` and `offline`; the five-dimension research scaffold has six groups including day 7/30, draft rubric anchors, null observations, unknown values, planned-slot denominators and exclusion reasons. It reuses the existing `LoopMetric` vocabulary and empty legacy measurement report without replacing the 48h/7d protocol. The existing loop simulation is a scripted synthetic student, not GPT. Real tutor/student calls, teaching/leakage semantic review, human rubric validation and real learning benefit remain unmeasured.
+
+### PPTX generation
 
 ```python
 from pptx import Presentation

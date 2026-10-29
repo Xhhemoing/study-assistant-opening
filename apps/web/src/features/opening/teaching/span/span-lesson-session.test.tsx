@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({ request: vi.fn(), replaceState: vi.fn() }));
 vi.mock("./span-session-client", async original => ({ ...await original<typeof import("./span-session-client")>(), spanLessonRequest: mocks.request }));
 import { SpanLessonSession } from "./span-lesson-session";
 import { SpanLesson } from "./span-lesson";
+import type { LearningAttempt } from "@aistudy/contracts";
 const id = "11111111-1111-4111-8111-111111111111", sourceId = "22222222-2222-4222-8222-222222222222";
 const snapshot: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [sourceId], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 1, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const details = (session: SpanLessonSnapshot | null) => ({ session, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
@@ -26,6 +27,14 @@ function lesson() { return find(render(), element => element.type === SpanLesson
 function unmount() { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); }
 const settle = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };
 beforeEach(() => { unmount(); hooks.values = []; hooks.effects = []; vi.clearAllMocks(); mocks.request.mockReset(); mocks.request.mockResolvedValue(details(snapshot)); vi.stubGlobal("window", { location: { href: `http://example.test/opening/courses/${id}/study/span` }, history: { state: null, replaceState: mocks.replaceState } }); });
+it("keeps worked teaching identity when a new-evidence event filters earlier reserved attempts", async () => {
+  const attempts = ["teaching", "validation", "retest"].map(purpose => ({ id: purpose, startedAt: snapshot.createdAt,
+    spanExercise: { id: `span-reserved-generated-${purpose}-independent-2d-1729-0` } } as LearningAttempt));
+  mocks.request.mockResolvedValueOnce({ ...details(snapshot), attempts,
+    intentEvent: { id, createdAt: "2026-10-22T00:00:00Z", signals: ["copied_answer"] } });
+  render(); await settle();
+  expect(lesson().props.restoredAttempts).toEqual([attempts[0]]);
+});
 it("applies an explicit recovery snapshot to the lesson while ordinary progress saves retain its editing tree", async () => {
   render(); await settle(); const first = lesson();
   expect(first.props.sourceIds).toEqual([sourceId]);

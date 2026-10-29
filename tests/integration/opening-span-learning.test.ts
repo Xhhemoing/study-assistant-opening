@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { readOpeningLearningEvidenceContext, createOpeningStudyIntentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createWorkspacePreferencesRepository } from "@aistudy/database";
+import { readOpeningLearningEvidenceContext, createOpeningSpanSessionRepository, createOpeningStudyIntentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { evaluateEvidenceEligibility, getSpanProblem, solveSpanProblem, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
@@ -30,6 +30,74 @@ async function start(problemId: string) {
     clientKey, answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
   return { sourceId, courseId, learning, attempts, session, input, attempt, submit };
 }
+it.each(["validation", "retest"] as const)("replays a canonical generated %s attempt through the reserved entry", async purpose => {
+  const problem = listSpanReservedProblems(purpose).find(p => p.id.includes(`generated-${purpose}-`))!;
+  const f = await start("span-example-2d");
+  let sessionId = f.session.id;
+  if (purpose === "retest") {
+    await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES (${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'core','course')`;
+    await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope, { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
+    const p = f.attempt.spanExercise!;
+    const baseline = await f.submit({ membership: "in_span", coefficients: ["3", "-1/2"], equation: p, coordinateChecks: p.target });
+    const scheduled = await createSpanDelayedRetestService(fixture.sql).schedule(fixture.scope, { observationId: baseline.id, clientKey: randomUUID() });
+    await fixture.sql`UPDATE opening_retest_activities SET not_before_at=now()-interval '1 hour',recommended_at=now()-interval '1 hour',scheduled_start_at=now()-interval '1 hour' WHERE candidate_id=${scheduled.candidateId}`;
+    const lesson = await createOpeningSpanSessionRepository(fixture.sql).create(fixture.scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+      intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, clientKey: randomUUID(), retestId: scheduled.candidateId });
+    sessionId = lesson.sessionId;
+  }
+  const clientKey = randomUUID();
+  const original = await f.attempts.create(fixture.scope, { sessionId, clientKey, spanExercise: { sourceId: f.sourceId, problemId: problem.id, version: 1 } });
+  const replay = await createSpanReservedService(fixture.sql).issue(fixture.scope, {
+    sessionId, sourceId: f.sourceId, clientKey, mode: "self_study",
+  });
+  expect(replay.id).toBe(original.id);
+  expect(replay.spanExercise).toEqual(original.spanExercise);
+});
+it("delivers generated worked content, replays legacy requests and counts unsubmitted exposure", async () => {
+  const f = await start("span-example-2d"), presenter = createSpanPresentationService(fixture.sql);
+  const request = { sessionId: f.session.id, courseId: f.courseId, sourceId: f.sourceId, kind: "worked", clientKey: randomUUID() };
+  const legacy = await presenter.read(fixture.scope, { ...request, clientKey: f.input.clientKey });
+  expect(legacy.problem).toEqual(f.attempt.spanExercise);
+  const first = await presenter.read(fixture.scope, request);
+  expect(first.problem.id).toContain("generated-teaching-independent-2d-");
+  expect(first.exposureReceipt.releasedAt).not.toBeNull();
+  await expect(createSpanReservedService(fixture.sql).issue(fixture.scope, {
+    sessionId: f.session.id, sourceId: f.sourceId, clientKey: request.clientKey, mode: "self_study",
+  })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await presenter.read(fixture.scope, request)).toEqual(first);
+  await expect(presenter.read(fixture.scope, { ...request, kind: "overview" })).rejects.toMatchObject({ code: "CONFLICT" });
+  const [row] = await fixture.sql`SELECT id FROM opening_learning_attempts WHERE client_key=${request.clientKey}`;
+  const attempt = (await f.attempts.get(fixture.scope, String(row!.id)))!;
+  expect(attempt).toMatchObject({ submittedAt: null, spanExercise: first.problem, spanValidation: { eligible: false, firstFamilyExposure: false } });
+  expect((await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: attempt.id, level: 3 })).text).toContain(first.problem.target[0]);
+  const p = first.problem, solution = first.solution;
+  if (solution.kind !== "unique") throw new Error("expected unique worked example");
+  const record = await createOpeningAttemptService(fixture.sql).submit(fixture.scope, attempt.id, { clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "in_span", equation: p, coefficients: solution.coefficients, coordinateChecks: p.target }), outcome: "unverified", assistance: "independent" });
+  expect(record).toMatchObject({ outcome: "correct", assistance: "revealed", verdictSource: "deterministic" });
+  expect(record.eligibility?.independentAttempt).not.toBe("yes");
+  expect((await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: attempt.id, level: 4 })).text).toContain(`α=${solution.coefficients[0]}`);
+  const seen = new Set([spanProblemContentKey(p)]);
+  for (let i = 1; i < 12; i++) {
+    const next = await presenter.read(fixture.scope, { ...request, clientKey: randomUUID() });
+    expect(seen.has(spanProblemContentKey(next.problem))).toBe(false); seen.add(spanProblemContentKey(next.problem));
+  }
+  await expect(presenter.read(fixture.scope, { ...request, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("不足") });
+  expect(await presenter.read(fixture.scope, request)).toEqual(first);
+  for (const purpose of ["validation", "retest", "research"]) await expect(presenter.read(fixture.scope,
+    { ...request, clientKey: randomUUID(), problemId: p.id.replace("generated-teaching", `generated-${purpose}`) })).rejects.toThrow();
+  const researchId = p.id.replace("generated-teaching", "generated-research");
+  await expect(f.attempts.create(fixture.scope, { ...f.input, clientKey: randomUUID(),
+    spanExercise: { sourceId: f.sourceId, problemId: researchId, version: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
+  // Imported/untrusted identities remain negative history, never hint or presentation authority.
+  await fixture.sql`UPDATE opening_learning_item_versions SET evaluation_spec=NULL WHERE id=${attempt.itemVersionId}`;
+  await fixture.sql`UPDATE opening_learning_attempts SET create_intent=jsonb_set(create_intent,'{spanExercise,problemId}',${fixture.sql.json(researchId)}) WHERE id=${attempt.id}`;
+  expect((await f.attempts.get(fixture.scope, attempt.id))?.spanExercise).toBeUndefined();
+  await expect(createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: attempt.id, level: 1 })).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(presenter.read(fixture.scope, request)).rejects.toMatchObject({ code: "CONFLICT" });
+}, 45000);
+
 it("issues generated same-family content after fixed exhaustion, seals exact grades and rejects other purposes", async () => {
   const f = await start("span-reserved-fraction");
   for (const p of listSpanReservedProblems()) if (p.id !== "span-reserved-fraction") await f.attempts.create(fixture.scope,
@@ -44,7 +112,7 @@ it("issues generated same-family content after fixed exhaustion, seals exact gra
   const next = await issuer.issue(fixture.scope, { ...input, clientKey: randomUUID() });
   expect(spanProblemContentKey(next.spanExercise!)).not.toBe(spanProblemContentKey(p));
   expect(getSpanItemIdentity(p.id)!.purpose).toBe("validation");
-  for (const purpose of ["research", "teaching", "retest"]) await expect(f.attempts.create(fixture.scope,
+  for (const purpose of ["research", "retest"]) await expect(f.attempts.create(fixture.scope,
     { sessionId: f.session.id, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId,
       problemId: p.id.replace("generated-validation", `generated-${purpose}`), version: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
   const solution = solveSpanProblem(p); if (solution.kind !== "unique") throw new Error("expected unique generated solution");

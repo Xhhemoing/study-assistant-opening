@@ -1,5 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
-import { getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
 import { captureOpeningLearnerShadowPredictions } from "./opening-learner-shadow-predictions";
@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { LearningAttempt, LearningAttemptCreateInput, Scope, StudyContextAnchor } from "@aistudy/contracts";
-import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, assertRetestSubmitEarliestAllowed, getSpanProblem, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
+import { SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY, assertRetestSubmitEarliestAllowed, spanProblemStem, createMatrixExerciseSpec, matrixExerciseRequirement, matrixExerciseSkillLabel, matrixExerciseStem, parseCanonicalMatrixExercise } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningHistory, lockWorkspaceLearningHistory, lockLearningOwner, lockLearningSession, nextLearningHistoryRevision } from "./opening-learning-facts";
 
 export { readOpeningSpanExposureHistory } from "./opening-span-attempt";
@@ -20,7 +20,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
   const matrixExercise = parseCanonicalMatrixExercise(row.evaluation_spec);
   const canonicalSpan = parseOpeningSpanExercise(row.evaluation_spec);
   const restored = canonicalSpan ? null : parseOpeningSpanIntent(row.create_intent);
-  const spanExercise = canonicalSpan ?? (restored && (getSpanProblem(restored.problem.id, restored.problem.version) || getSpanReservedProblem(restored.problem.id, restored.problem.version)) && row.item_stem_snapshot === spanProblemStem(restored.problem)
+  const spanExercise = canonicalSpan ?? (restored && (getSpanTeachingProblem(restored.problem.id, restored.problem.version) || getSpanReservedProblem(restored.problem.id, restored.problem.version)) && row.item_stem_snapshot === spanProblemStem(restored.problem)
     && row.item_source_id === restored.sourceId && (row.source_ids as string[]).includes(restored.sourceId) ? restored.problem : null);
   const spanValidation = !canonicalSpan && (restored || row.requirement_key === SPAN_REQUIREMENT_KEY)
     ? { eligible: false, firstFamilyExposure: false, reasonCode: spanExercise ? "restored_identity_unverified" : "restored_identity_unavailable" }
@@ -45,7 +45,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   const sources = await admitLearningSources(tx, scope, session.source_ids as string[]);
   const sourceVersions = Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)]));
   let requirementKey = input.requirementKey ?? null;
-  const spanExercise = input.spanExercise ? (getSpanProblem(input.spanExercise.problemId, input.spanExercise.version) ?? getSpanReservedProblem(input.spanExercise.problemId, input.spanExercise.version)) : null;
+  const spanExercise = input.spanExercise ? (getSpanTeachingProblem(input.spanExercise.problemId, input.spanExercise.version) ?? getSpanReservedProblem(input.spanExercise.problemId, input.spanExercise.version)) : null;
   const spanSpec = spanExercise ? { kind: "span", specVersion: "span-v1", problemId: spanExercise.id, version: Number(spanExercise.version), familyId: spanExercise.familyId, requirementKey: SPAN_REQUIREMENT_KEY, knowledgeComponents: spanExercise.knowledgeComponents, transfer: spanExercise.transfer ?? null } : null;
   if (input.spanExercise) {
     if (!spanExercise) throw learningError("VALIDATION", "span question version unavailable");
@@ -93,7 +93,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   }
   const spanRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
   const spanItemIdentity = spanExercise ? getSpanItemIdentity(spanExercise.id, spanExercise.version) : null;
-  if (spanItemIdentity && spanItemIdentity.purpose !== (spanRetestId ? "retest" : "validation")) {
+  if (spanItemIdentity && spanItemIdentity.purpose !== (spanRetestId ? "retest" : "validation") && (spanRetestId || spanItemIdentity.purpose !== "teaching")) {
     throw learningError("VALIDATION", "span question purpose does not match persisted lesson binding");
   }
   if (spanRetestId) {
@@ -113,7 +113,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     const history = await readOpeningSpanExposureHistory(tx, scope);
     const previous = history.familyIds.has(spanExercise.familyId) || history.unknownHistory;
     const repeatedContent = history.contentKeys.has(spanProblemContentKey(spanExercise));
-    spanValidation = { eligible: !previous && !repeatedContent, firstFamilyExposure: !previous,
+    spanValidation = { eligible: spanItemIdentity?.purpose !== "teaching" && !previous && !repeatedContent, firstFamilyExposure: spanItemIdentity?.purpose !== "teaching" && !previous,
       reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : repeatedContent ? "content_previously_issued" : previous ? "family_previously_issued" : null };
   }
   const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
@@ -222,6 +222,21 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
 
 export function createOpeningLearningAttemptRepository(sql: Sql) {
   return {
+    /** Select and record under the existing workspace history lock, including unsubmitted items. */
+    async createSpanWorked(scope: Scope, input: { sessionId: string; sourceId: string; clientKey: string }): Promise<LearningAttempt> {
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const [existing] = await tx`SELECT create_intent FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
+        const original = (existing?.create_intent as LearningAttemptCreateInput | undefined)?.spanExercise;
+        const history = original ? null : await readOpeningSpanExposureHistory(tx, scope);
+        const problem = original ? getSpanTeachingProblem(original.problemId, original.version)
+          : listSpanWorkedProblems().find(candidate => !history!.unknownHistory && !history!.contentKeys.has(spanProblemContentKey(candidate)));
+        if (!problem) throw learningError("CONFLICT", "未展示的教学示范不足，请保留已有学习记录。");
+        return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey: input.clientKey,
+          spanExercise: { sourceId: input.sourceId, problemId: problem.id, version: Number(problem.version) } });
+      }) as Promise<LearningAttempt>;
+    },
     async get(scope: Scope, id: string): Promise<LearningAttempt | null> {
       const rows = await sql`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a JOIN workspaces w ON w.id=a.workspace_id
         LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id

@@ -38,7 +38,7 @@ import { SpanLesson } from "./span-lesson";
 import { LessonCompanionWorkspace } from "../lesson-companion-workspace";
 const id = "11111111-1111-4111-8111-111111111111";
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", problemId: id, itemVersionId: id,
-  sourceIds: [id], sourceVersions: { [id]: 1 }, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, spanExercise: getSpanProblem("span-independent-3d")! };
+  requirementKey: null, historyRevision: 0, sourceIds: [id], sourceVersions: { [id]: 1 }, startedAt: "2026-10-21T00:00:00Z", submittedAt: null, observationId: null, spanExercise: getSpanProblem("span-independent-3d")! };
 const record = { id, answer: JSON.stringify({ membership: "in_span" }), assistance: "hinted" } as LearningObservation;
 const props: ComponentProps<typeof SpanPractice> = { courseId: id, sourceIds: [id], problemId: "span-independent-3d", intent: { purpose: "self_study", timeBudgetMinutes: 15, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, onRecorded: vi.fn(), onAttempt: vi.fn() };
 function find(node: ReactNode, match: (element: ReactElement<Record<string, unknown>>) => boolean): ReactElement<Record<string, unknown>> | undefined {
@@ -145,6 +145,17 @@ it("restores a server-owned sealed answer and only the exact previously released
   expect(mocks.haptic).not.toHaveBeenCalled();
 });
 
+it.each(["teaching", "validation", "retest"])("restores only reserved %s identities into reserved:auto", async purpose => {
+  const problem = { ...attempt.spanExercise!, id: `span-reserved-generated-${purpose}-independent-2d-1729-0` };
+  const restored = { ...attempt, spanExercise: problem };
+  const input: ComponentProps<typeof SpanPractice> = { ...props, problemId: "reserved:auto", restoredAttempt: restored,
+    session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self_study-reserved", status: "active", revision: 1, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt } };
+  mocks.draft = emptyPracticeDraft(spanPracticeScope(id, undefined, undefined, id, "reserved:auto"), { sourceId: id, spanProblemId: "reserved:auto" });
+  render(input); await settle(); render(input);
+  expect(mocks.readRecord).toHaveBeenCalledTimes(purpose === "teaching" ? 0 : 1);
+  expect(mocks.draft!.attemptId).toBe(purpose === "teaching" ? null : restored.id);
+  expect(fetch).not.toHaveBeenCalled();
+});
 it("isolates a practice draft by lesson, step and exact new-evidence event", () => {
   const activity = "22222222-2222-4222-8222-222222222222";
   const other = "33333333-3333-4333-8333-333333333333";

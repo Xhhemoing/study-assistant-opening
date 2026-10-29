@@ -24,7 +24,7 @@ import { LearnerStatePanel } from "../learner-state-panel";
 import { MathInput } from "../math-input";
 import { nextSpanHintLevel, requestSpanHint, SPAN_HINT_LABELS } from "./span-hint-client";
 import { spanProblemText } from "./span-problem-text";
-import { readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, spanVectorInput, updateSpanDraftAnswer } from "./span-answer";
+import { isSpanReservedProblemId, readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, spanVectorInput, updateSpanDraftAnswer } from "./span-answer";
 import { studentCopy } from "../student-copy";
 import { userFacingMessage } from "../../../../lib/user-facing-error";
 
@@ -55,9 +55,9 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const fields = draft.fields;
-  const differentEntry = fields.spanProblemId !== problemId && !(problemId === "reserved:auto" && fields.spanProblemId.startsWith("span-reserved-"));
+  const differentEntry = fields.spanProblemId !== problemId && !(problemId === "reserved:auto" && isSpanReservedProblemId(fields.spanProblemId));
   const answer = readSpanDraftAnswer(fields.answer);
-  const belongsToRequested = (value: LearningAttempt) => value.spanExercise?.id === problemId || (problemId === "reserved:auto" && value.spanExercise?.id.startsWith("span-reserved-"));
+  const belongsToRequested = (value: LearningAttempt) => value.spanExercise?.id === problemId || (problemId === "reserved:auto" && isSpanReservedProblemId(value.spanExercise?.id));
   const nextHint = nextSpanHintLevel(hints);
   function acceptHint(hint: SpanHintResponse) {
     setHints(previous => [...previous.filter(existing => existing.level !== hint.level), hint].sort((a, b) => a.level - b.level));
@@ -92,7 +92,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, onRecorded, 
         if (!response.ok) { const problem = z.object({ error: z.object({ message: z.string() }) }).safeParse(planBody); throw new Error(problem.success ? problem.data.error.message : `学习安排未能保存 (${response.status})；原答案保留。`); }
         const plan = z.object({ activityDecision: z.object({ id: z.string().uuid(), reasonCodes: z.array(z.string()), dataAsOf: z.string().datetime() }) }).parse(planBody);
         setWhy(plan.activityDecision);
-        if (fields.spanProblemId === "reserved:auto" || request.createInput?.spanExercise?.problemId.startsWith("span-reserved-")) {
+        if (fields.spanProblemId === "reserved:auto" || isSpanReservedProblemId(request.createInput?.spanExercise?.problemId)) {
           const selected = await fetch("/api/opening/teaching/span/reserved", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: request.sessionId, sourceId: fields.sourceId, clientKey: request.clientKey, mode: intent.purpose === "overview" ? "overview" : intent.purpose === "challenge" ? "challenge" : "self_study" }) });
           if (!selected.ok) throw new Error("这道题还没准备好，请再试一次。");
           const issued = learningAttemptSchema.parse(await selected.json());

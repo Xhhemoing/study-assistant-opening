@@ -6,7 +6,17 @@
 import type { SpanProblem } from "@aistudy/contracts";
 import { listGeneratedSpanItems, parseGeneratedSpanItem, spanProblemContentKey, type SpanItemPurpose } from "./span-generated-items";
 export { spanProblemContentKey } from "./span-generated-items";
-import { copyProblem, SPAN_KNOWLEDGE_COMPONENTS } from "./span-teaching-catalog";
+import { copyProblem, getSpanProblem, SPAN_KNOWLEDGE_COMPONENTS } from "./span-teaching-catalog";
+/** Server-only teaching resolver. Research and reserved purposes are never teaching. */
+export function getSpanTeachingProblem(id: string, version: string | number = "1"): SpanProblem | null {
+  const fixed = getSpanProblem(id, version);
+  if (fixed) return fixed;
+  const item = parseGeneratedSpanItem(id, version);
+  return item?.purpose === "teaching" ? item.problem : null;
+}
+export function listSpanWorkedProblems(): SpanProblem[] {
+  return listGeneratedSpanItems("teaching").filter(problem => problem.familyId === "span:independent-2d");
+}
 const reserved: readonly SpanProblem[] = [
   { id: "span-reserved-fraction", version: "1", familyId: "span:rational-3d", vectors: [["2", "0", "1"], ["0", "3", "-1"]], target: ["1", "-2", "7/6"], knowledgeComponents: [...SPAN_KNOWLEDGE_COMPONENTS] },
   { id: "span-reserved-dependent", version: "1", familyId: "span:dependent-generators", vectors: [["2", "1", "-1"], ["6", "3", "-3"]], target: ["-4", "-2", "2"], knowledgeComponents: [...SPAN_KNOWLEDGE_COMPONENTS] },

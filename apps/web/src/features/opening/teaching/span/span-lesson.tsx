@@ -21,6 +21,7 @@ import { useLessonArrowKeys } from "../lesson-shortcuts";
 import { useDiagnosticsEnabled } from "../../settings/appearance-preferences";
 import { SpanTutorControl } from "./span-tutor-control";
 import { SpanNextActionControl, currentSpanObservationId } from "./span-next-action-control";
+import { isSpanReservedProblemId } from "./span-answer";
 
 const modeLabels = { self_study: "自学 · 例题到独立新题", overview: "串讲 · 连接方程与几何", challenge: "拔高 · 预设迁移" };
 const modeProcess: Record<SpanTeachingMode, string> = {
@@ -29,6 +30,10 @@ const modeProcess: Record<SpanTeachingMode, string> = {
   challenge: "挑战：先预测 → 探索变化 → 独立迁移。目标是在新结构下解释并检验自己的判断。",
 };
 const defaultIntent: StudySessionIntent = { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" };
+/** Identity only: never import the server generator into the lesson runtime. */
+export function isSpanReservedAttempt(attempt: LearningAttempt): boolean {
+  return isSpanReservedProblemId(attempt.spanExercise?.id);
+}
 type SpanLessonProps = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string;
   session?: SpanLessonSnapshot; restoredAttempts?: LearningAttempt[]; restoredObservations?: LearningObservation[]; restoredHintLevels?: Record<string, SpanHintLevel[]>; savingProgress?: boolean;
   onProgress?: (intent: StudySessionIntent, moveId: string, status: "active" | "paused" | "completed") => Promise<boolean>; onSummary?: () => void; onReload?: () => void };
@@ -49,7 +54,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
   const [intentRevision, setIntentRevision] = useState(0);
   const [records, setRecords] = useState<Record<string, LearningObservation>>(() => Object.fromEntries(restoredObservations.flatMap(record => {
     const problem = restoredAttempts.find(attempt => attempt.id === record.attemptId)?.spanExercise?.id;
-    return problem ? [[problem.startsWith("span-reserved-") ? "reserved:auto" : problem, record]] : [];
+    return problem ? [[isSpanReservedAttempt(restoredAttempts.find(attempt => attempt.id === record.attemptId)!) ? "reserved:auto" : problem, record]] : [];
   })));
   const sequence = createSpanTeachingSequence(mode);
   const moves = [...sequence, { ...sequence[sequence.length - 1]!, id: `${mode}-reserved`, presentation: { kind: "independent_item" as const, instructions: "离开示范，用服务器发放的保留题检查" } }];
@@ -61,7 +66,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
   const currentRecord = records[problemId];
   const unavailableRestoredQuestion = restoredAttempts.some(attempt => !attempt.spanExercise);
   const restoredAttempt = problemId === "reserved:auto" && newEvidenceEventId !== initialNewEvidenceEventId ? undefined
-    : [...restoredAttempts].sort((left, right) => right.startedAt.localeCompare(left.startedAt)).find(attempt => problemId === "reserved:auto" ? attempt.spanExercise?.id.startsWith("span-reserved-") : attempt.spanExercise?.id === problemId);
+    : [...restoredAttempts].sort((left, right) => right.startedAt.localeCompare(left.startedAt)).find(attempt => problemId === "reserved:auto" ? isSpanReservedAttempt(attempt) : attempt.spanExercise?.id === problemId);
   const entryKey = spanPracticeEntryKey(courseId, mode, problemId, delayedRetestId, newEvidenceEventId);
   const activeAttempt = !isPresentation ? attempts[entryKey] ?? null : null;
   const onAttempt = useCallback((attempt: LearningAttempt | null) => setAttempts(previous => previous[entryKey] === attempt ? previous : { ...previous, [entryKey]: attempt }), [entryKey]);
