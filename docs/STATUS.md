@@ -4,9 +4,9 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `d5010a13`；#140 首答自评已合并，精确 PR CI `40738223470` 与主干 CI `40743666275` 成功，未部署 |
+| 开发主干 | `feat/opening-release` @ `15d4d457`；#141 普通教学帮助回执已合并，精确 PR CI `40801595016` 与主干 CI `40804873895` 成功；#140 首答自评已合并且 CI 通过，均未部署 |
 | 线上版本 | 本轮未部署；此前版本仍为 `4bd1e8b7`。版本字段为空问题尚待使用当前发布 runner 验收，不把代码合并记为线上修复 |
-| 当前候选 | `feat/m1-a2-help-receipts-20261028`：普通教学提示阶梯/发起方回执；同一候选已由 Claude Opus 5.5 high 和 GPT-6.1-sol high 并行独立检查，双方无确定阻塞，后续按精确 CI 合并 |
+| 当前候选 | `feat/m1-a3-help-entrypoints-20261029`：span/Worker 与旧帮助适配的元数据接线已实现并定向验证，同一候选经 Claude Opus 5.5 high 和 GPT-6.1-sol high 并行独立审查无确定阻塞，后续按精确 CI 合并；M1 尚未完成 |
 | 候选检查 | M1-A1 最近 57 项单元、43 项隔离仓储/备份/自动批改/迁移回归、Contracts/Database/Web 类型、改动测试 leaf 类型与定向 lint 通过。同一冻结候选经 Claude Opus 5.5 high 与 GPT-6.1-sol high 并行独立只读检查，双方无确定阻塞；现有 CI 仍为合并门禁 |
 | 当前工作 | M1-A1 已实现并验证：三档可跳过、原事务首次封存、读取与新旧备份兼容；编辑/改评不覆盖，不影响独立资格或 D-01。初次集成缺配置及 Web 类型中断已补齐，测试 leaf 首次环境类型路径错误已修正后通过。无 UI、未部署；按用户最新要求继续 M1，阶段完成后另请 Claude 提整体意见 |
 | M1-A2 候选 | 普通教学真实提示回执记录阶梯与发起者；保留新旧 release_intent 兼容，仅实际 release 算交付，旧事实不回填。本片 21 项单元、10 项隔离集成及 Contracts/Database/Domain 类型既有证据复用；备份测试以 satisfies 保留行类型后，4 文件测试 leaf 类型与全部 11 个改动 TS 的定向 ESLint 通过。Claude Opus 5.5 high 与 GPT-6.1-sol high 已同时独立只读审查，无确定阻塞；提交后沿精确 CI 收口，未部署。span/Worker 接线、帮助模式/用户覆盖引用和入口决策追踪仍待完成，不宣称整个 M1-A 通过。迁移 0105 回退应保留已记录帮助事实及新增可空列，不直接删列 |
@@ -169,7 +169,7 @@
 - 本轮为研究与文档交付；未实施产品改动、运行应用/测试/浏览器或连接线上，未提交/推送。源代码结论基于本轮读取的 `2e673010` 候选，部署和学习收益未由本轮验证。保留原附档与看板已有修改，后续实施按当前计划与实际候选重新定位。
 ## 全流程学习辅助与学习闭环总计划（2026-10-27）
 
-- **M1-A3 实现候选（未提交、未部署）：** span 的真实 1–3 档提示与完整解答 4 档进入原同表回执；点击、自动提示和恢复共用请求，发起者保持 null。Worker 通过持久 user-role turn/job 关联确认用户请求来源，记 user；mode 不替代阶梯，hintStage 保持 null。旧 HelpExposure 读写新列，已知冲突拒绝、旧 null 回放不补写；generatedOnly 和 generate→readStream/listTurns 的实际释放边界保留。最近 155 项单元、33 项隔离集成（备份夹具清空目标及外键顺序修正后通过）、Contracts/Database/Worker/Web 产品类型、Web/Database/集成测试 leaf 与 12 个 TS 文件定向 lint 通过；Worker 测试 leaf 有 108 条既有夹具类型诊断，与 HEAD 旧测试对当前产品源码的诊断数量及代码分布一致，本片未扩修。同一候选已由 Claude Opus 5.5 high 与 GPT-6.1-sol high 并行独立只读检查，双方无确定阻塞，按精确 CI 收口；单元计数包含原150项中help旧1项被追加完整6项替换，未重复相加。本片不代表整个 M1-A 完成，模式/覆盖快照和决策追踪继续同阶段推进。
+- **M1-A3 已提交候选（尚未合并、未部署）：** span 的真实 1–3 档提示与完整解答 4 档进入原同表回执；点击、自动提示和恢复共用请求，发起者保持 null。Worker 通过持久 user-role turn/job 关联确认用户请求来源，记 user；mode 不替代阶梯，hintStage 保持 null。旧 HelpExposure 读写新列，已知冲突拒绝、旧 null 回放不补写；generatedOnly 和 generate→readStream/listTurns 的实际释放边界保留。最近 155 项单元、33 项隔离集成（备份夹具清空目标及外键顺序修正后通过）、Contracts/Database/Worker/Web 产品类型、Web/Database/集成测试 leaf 与 12 个 TS 文件定向 lint 通过；Worker 测试 leaf 有 108 条既有夹具类型诊断，与 HEAD 旧测试对当前产品源码的诊断数量及代码分布一致，本片未扩修。同一候选已由 Claude Opus 5.5 high 与 GPT-6.1-sol high 并行独立只读检查，双方无确定阻塞，按精确 CI 收口；单元计数包含原150项中help旧1项被追加完整6项替换，未重复相加。本片不代表整个 M1-A 完成，模式/覆盖快照和决策追踪继续同阶段推进。
 
 - 已按用户明确的最终目标补齐[总计划](plans/2026-10-27-full-learning-loop-master-plan.md)：M1保留span基础闭环；M2交付真实课程全范围、资料与目标桥接、读讲练评、复测纠偏、前置返回、跨章综合与目标收尾；M3交付长期保持、多目标共同预算、缺席重排、归档恢复及探索/笔记衔接。M2/M3均为必做，不列入永久暂缓。
 - [原导师计划](plans/2026-10-27-tutor-loop-final-plan.md)已标为M1细节参考并指向总计划；总体范围以新总计划为准，旧Word保留为历史阶段快照。新版下载文件为 `AIstudy-全流程学习辅助与学习闭环总计划-2026-10-27.docx`，12页。
