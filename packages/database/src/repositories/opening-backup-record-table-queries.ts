@@ -80,7 +80,7 @@ export async function readOpeningBackupTableRows(
   tables.opening_help_exposures = asRows(await tx`
     SELECT h.id, h.workspace_id, h.session_id, h.problem_id, h.turn_id, h.level, h.delivered, h.created_at, h.attempt_id, h.delivered_at, h.history_revision,
       h.kind, h.activity_id, h.item_version_id, h.owner_user_id, h.course_id, h.release_key, h.release_intent, h.context_anchor,
-      h.exposure_origin, h.support_domain, h.generated_at, h.released_at, h.acknowledged_at, h.workspace_history_revision
+      h.exposure_origin, h.support_domain, h.hint_stage, h.initiated_by, h.generated_at, h.released_at, h.acknowledged_at, h.workspace_history_revision
     FROM opening_help_exposures h
     LEFT JOIN opening_learning_sessions l ON l.id = h.session_id AND l.workspace_id = ${id} AND l.owner_user_id = ${userId}
     WHERE h.workspace_id = ${id}

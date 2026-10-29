@@ -109,10 +109,10 @@ describe("generic teaching hint ledger", () => {
     const [first, replay] = await Promise.all([f.read(1), f.read(1)]);
     expect(first.text).toBe(generatedHints.direction);
     expect(first.exposureReceipt.id).toBe(replay.exposureReceipt.id);
-    expect(first.exposureReceipt).toMatchObject({ origin: "assistant", supportDomain: "unknown", releasedAt: expect.any(String),
+    expect(first.exposureReceipt).toMatchObject({ hintStage: 1, initiatedBy: "user", origin: "assistant", supportDomain: "unknown", releasedAt: expect.any(String),
       contextAnchor: { activityId: f.activity.id, blockId: f.blockId, contentVersion: 1, attemptId: f.attempt.id, itemVersionId: f.attempt.itemVersionId } });
-    expect((await f.read(2)).text).toBe(generatedHints.concept);
-    expect((await f.read(3)).text).toBe(generatedHints.firstStep);
+    expect(await f.read(2)).toMatchObject({ text: generatedHints.concept, exposureReceipt: { hintStage: 2, initiatedBy: "user" } });
+    expect(await f.read(3)).toMatchObject({ text: generatedHints.firstStep, exposureReceipt: { hintStage: 3, initiatedBy: "user" } });
     const rows = await fixture.sql`SELECT level,kind,delivered,release_key FROM opening_help_exposures WHERE attempt_id=${f.attempt.id}`;
     expect(rows).toHaveLength(3);
     expect(rows.every(row => row.level === "hinted" && row.kind === "hint" && row.delivered === true)).toBe(true);
@@ -121,7 +121,7 @@ describe("generic teaching hint ledger", () => {
     expect(state.features.find(row => row.observationId === observation.id)?.eligibility.independentAttempt).toBe("no");
     const full = await f.read(4);
     expect(full).toMatchObject({ level: 4, referenceSourceId: f.sourceId, text: expect.stringContaining("所以秩为 2"),
-      exposureReceipt: { origin: "history_solution", contextAnchor: { purpose: "history_solution" } } });
+      exposureReceipt: { hintStage: 4, initiatedBy: "user", origin: "history_solution", contextAnchor: { purpose: "history_solution" } } });
     const old = await f.content.getSubmittedAnswerKey(fixture.scope, f.activity.id, f.blockId, f.attempt.id);
     expect(old).toEqual({ answer: full.text, referenceSourceId: f.sourceId });
     const [count] = await fixture.sql`SELECT count(*)::int AS total FROM opening_help_exposures WHERE attempt_id=${f.attempt.id}`;
@@ -139,6 +139,43 @@ describe("generic teaching hint ledger", () => {
     expect((await f.read(4)).text).toContain("所以秩为 2");
     const rows = await fixture.sql`SELECT level FROM opening_help_exposures WHERE attempt_id=${f.attempt.id}`;
     expect(rows.map(row => row.level)).toEqual(["revealed"]);
+  });
+
+  it("keeps generated-only help independent and shares the post-answer receipt with the old answer entry", async () => {
+    const f = await seed(), exposures = createOpeningStudyExposureRepository(fixture.sql);
+    const generated = await exposures.generate(fixture.scope, {
+      releaseKey: randomUUID(), contextAnchor: { attemptId: f.attempt.id, purpose: "learning_help" },
+      origin: "assistant", kind: "hint", level: "hinted", hintStage: 2, initiatedBy: "user",
+    });
+    expect(generated).toMatchObject({ releasedAt: null, hintStage: 2, initiatedBy: "user", historyRevision: 0 });
+    const observation = await f.submit();
+    const state = () => createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
+    expect((await state()).features.find(row => row.observationId === observation.id)?.eligibility.independentAttempt).toBe("yes");
+    await f.content.getSubmittedAnswerKey(fixture.scope, f.activity.id, f.blockId, f.attempt.id);
+    const full = await f.read(4);
+    expect(full.exposureReceipt).toMatchObject({ hintStage: 4, initiatedBy: "user", releasedAt: expect.any(String) });
+    expect(await createOpeningTeachingHintRepository(fixture.sql).readReleased(fixture.scope, { attemptId: f.attempt.id })).toEqual([full]);
+    expect((await f.read(4)).exposureReceipt).toEqual(full.exposureReceipt);
+    expect((await state()).features.find(row => row.observationId === observation.id)?.eligibility.independentAttempt).toBe("yes");
+    expect((await fixture.sql`SELECT delivered,released_at FROM opening_help_exposures WHERE id=${generated.id}`)[0]).toMatchObject({ delivered: false, released_at: null });
+  });
+
+  it("replays pre-upgrade keys without changing their intent or backfilling released facts", async () => {
+    const f = await seed(), exposures = createOpeningStudyExposureRepository(fixture.sql);
+    const input = {
+      releaseKey: `teaching-hint-v1:${f.attempt.id}:1`,
+      contextAnchor: { attemptId: f.attempt.id, itemVersionId: f.attempt.itemVersionId, courseId: f.courseId, activityId: f.activity.id, blockId: f.blockId, contentVersion: 1, purpose: "learning_help" as const },
+      sessionId: f.attempt.sessionId, origin: "assistant" as const, kind: "hint" as const, level: "hinted" as const, supportDomain: "unknown" as const,
+    };
+    const old = await exposures.deliver(fixture.scope, input);
+    expect(old).toMatchObject({ hintStage: null, initiatedBy: null });
+    expect(await exposures.generate(fixture.scope, { ...input, hintStage: null, initiatedBy: null })).toEqual(old);
+    expect((await f.read(1)).exposureReceipt).toEqual(old);
+    const [row] = await fixture.sql`SELECT release_intent,hint_stage,initiated_by FROM opening_help_exposures WHERE id=${old.id}`;
+    expect(row).toMatchObject({ release_intent: input, hint_stage: null, initiated_by: null });
+    const fresh = await exposures.generate(fixture.scope, { ...input, releaseKey: randomUUID(), hintStage: 1, initiatedBy: "user" });
+    await expect(exposures.generate(fixture.scope, { ...input, releaseKey: fresh.releaseKey, hintStage: 2, initiatedBy: "user" })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(exposures.generate(fixture.scope, { ...input, releaseKey: fresh.releaseKey, hintStage: 1, initiatedBy: "assistant" })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("fails closed for foreign ownership and changed source/content versions, including prior receipt replays", async () => {
