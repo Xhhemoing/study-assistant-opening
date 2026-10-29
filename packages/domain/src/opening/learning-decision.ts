@@ -27,7 +27,7 @@ export function validateLearningDecision(input: LearningDecisionInput): void {
       && typeof candidate.eligible === "boolean" && strings(candidate.reasonCodes) && strings(candidate.evidenceRefs))
     || !input.candidates.some(candidate => candidate.action === input.selectedAction && candidate.eligible)
     || !input.sourceVersions || typeof input.sourceVersions !== "object" || Array.isArray(input.sourceVersions)
-    || !Object.values(input.sourceVersions).every(versions => Array.isArray(versions) && versions.every(version => Number.isInteger(version) && version > 0))
+    || !Object.values(input.sourceVersions).every(versions => Array.isArray(versions) && versions.every(version => Number.isInteger(version) && version >= 0))
     || !Array.isArray(input.invalidationConditions) || !input.invalidationConditions.includes("state_changed")
     || !input.invalidationConditions.every(condition => ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"].includes(condition))) fail();
   if (input.layer === "plan" && input.parentDecisionId) throw Object.assign(new Error("Plan decision cannot have a parent"), { code: "VALIDATION" });

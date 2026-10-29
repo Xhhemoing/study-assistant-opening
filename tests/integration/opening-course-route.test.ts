@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { createOpeningLearningDecisionsRepository } from "../../packages/database/src/repositories/opening-learning-decisions";
+import * as decisionWriter from "../../packages/database/src/repositories/opening-learning-decisions";
+import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
 import { afterEach,beforeEach,expect,it,vi } from "vitest";
 import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivity } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository,createOpeningLearningRepository,createOpeningAiGradingRepository,createOpeningSourceChunksRepository,
@@ -19,14 +22,14 @@ let f:OpeningFixture;
 beforeEach(async()=>{f=await createOpeningFixture();vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0");});
 afterEach(async()=>{vi.unstubAllEnvs();await f?.close();});
 const ready=(value:CourseRouteActionResult)=>{expect(value.kind).toBe("ready");if(value.kind!=="ready")throw new Error(JSON.stringify(value));return value;};
-async function seed(count=1){
-  const courseId=randomUUID(),rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
+async function seed(count=1,sourceVersion=1){
+  const courseId=randomUUID(),rows=backupRows(f.sql,f.scope),sourceId=await rows.source("uploaded",sourceVersion),chunkId=await rows.chunk(sourceId,sourceVersion);
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug)VALUES(${courseId},${f.scope.workspaceId},'Course route',${courseId})`;
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   const goals=createOpeningLearningGoalRepository(f.sql),goal=await goals.create(f.scope,{clientKey:randomUUID(),courseIds:[courseId],title:"掌握全课",kind:"custom",targetDate:null,
     examDate:null,weeklyMinutes:120,priority:1,learningMode:"understand",successCriteria:"各要求可独立解释并迁移"});
   const requirements:CourseRouteRequirementInput[]=Array.from({length:count},(_,position)=>({id:randomUUID(),stableSkillId:randomUUID(),knowledgeNodeId:null,requirementKey:`requirement:${position}`,
-    title:`矩阵秩${position}`,position,mandatory:true,goalIds:[goal.id],prerequisiteIds:[],sourceRefs:[{sourceId,sourceVersion:1,chunkId}],
+    title:`矩阵秩${position}`,position,mandatory:true,goalIds:[goal.id],prerequisiteIds:[],sourceRefs:[{sourceId,sourceVersion,chunkId}],
     verification:{kind:"rubric",status:"ready",exerciseKeys:["saved-teaching-question"],rubric:"正确应用秩与零空间维数之和等于列数，并说明依据。",missingReasons:[]},origin:"confirmed"}));
   const repo=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true});
   await repo.confirm(f.scope,courseId,{expectedRevisions:[],requirements,confirmScope:true});
@@ -58,6 +61,64 @@ async function answer(activity:TeachingActivity,index=0,outcome:"correct"|"incor
   const observation=grade?await createOpeningAiGradingRepository(f.sql).apply(f.scope,{observationId:original.id},{outcome,confidence:.99,questionMatch:true,feedback:"按保存的秩与零空间标准核对。",criteria:[{label:"秩与零空间",verdict:outcome,feedback:"核对列数减秩。"}]},"controlled-fixture"):original;
   return {attempt,observation,session};
 }
+async function activityDecision(result:ReturnType<typeof ready>){
+  const decisions=createOpeningLearningDecisionsRepository(f.sql),rows=await decisions.list(f.scope,{layer:"activity",targetId:result.activity.id});
+  expect(rows).toHaveLength(1);const receipt=rows[0]!;
+  expect(receipt).toMatchObject({selectedAction:result.action,parentDecisionId:null,policyVersion:"course-route-1"});
+  expect(receipt.candidates).toContainEqual(expect.objectContaining({action:result.action,eligible:true}));
+  expect(await decisions.get(f.scope,receipt.id)).toEqual(receipt);
+  expect(await decisions.get(f.otherScope,receipt.id)).toBeNull();
+  return receipt;
+}
+it("persists zero source versions through real course start and next without rolling back activities",async()=>{
+  const x=await seed(1,0),one=ready(await x.start());
+  expect((await activityDecision(one)).sourceVersions).toEqual({[x.sourceId]:[0]});
+  expect(one.activity.sourceIds).toContain(x.sourceId);
+  await compile(one.activity);const answered=await answer(one.activity,0,"incorrect");
+  const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id);
+  const next=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,
+    expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:answered.observation.id,clientKey:randomUUID(),minutes:20}));
+  expect(next.action).toBe("targeted_explain");
+  expect((await activityDecision(next)).sourceVersions).toEqual({[x.sourceId]:[0]});
+  expect(next.activity.sourceIds).toContain(x.sourceId);
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(2);
+  const [origin]=await f.sql`SELECT status FROM opening_teaching_activities WHERE id=${one.activity.id}`;
+  expect(origin!.status).toBe("completed");
+});
+it("captures course start inputs before writes and never recomputes or backfills replay receipts",async()=>{
+  const x=await seed(2),key=randomUUID(),state=await f.sql.begin(tx=>readOpeningLearnerState(tx,f.scope,{courseId:x.courseId}));
+  const one=ready(await x.start(0,key)),receipt=await activityDecision(one);
+  expect(receipt.stateVersion).toBe(state.stateVersion);
+  expect(receipt.sourceVersions).toEqual({[x.sourceId]:[1]});
+  expect(receipt.evidenceRefs).toContain(`requirement:${x.requirements[0]!.id}:v1`);
+  expect(receipt.candidates).toContainEqual(expect.objectContaining({eligible:false,reasonCodes:expect.arrayContaining(["explicit_requirement_not_selected"])}));
+  expect(ready(await x.start(0,key)).activity.id).toBe(one.activity.id);
+  expect(ready(await x.start()).activity.id).toBe(one.activity.id);
+  await x.goals.update(f.scope,x.goal.id,{expectedRevision:1,successCriteria:"新标准"});
+  await f.sql`UPDATE opening_sources SET version=2 WHERE id=${x.sourceId}`;
+  expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
+  expect(await x.start(0,key)).toMatchObject({kind:"choice",reason:"evidence_changed"});
+  expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:one.activity.id})).toEqual([receipt]);
+  const old=await seed(),oldKey=randomUUID(),legacy=ready(await old.start(0,oldKey));
+  await f.sql`DELETE FROM opening_learning_decisions WHERE target_id=${legacy.activity.id}`;
+  expect(ready(await old.start(0,oldKey)).activity.id).toBe(legacy.activity.id);
+  expect(ready(await old.start()).activity.id).toBe(legacy.activity.id);
+  expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:legacy.activity.id})).toEqual([]);
+});
+it("rolls back course activity, compile, budget and origin completion when its decision write fails",async()=>{
+  const x=await seed(),one=ready(await x.start());await compile(one.activity);const answered=await answer(one.activity,0,"incorrect");
+  const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id);
+  const before=await f.sql`SELECT id,status,path_version,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId}`;
+  const jobs=await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`;
+  const receipts=await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId}`;
+  const writer=vi.spyOn(decisionWriter,"recordOpeningLearningDecision").mockRejectedValueOnce(new Error("receipt write failed"));
+  try{await expect(x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,
+    expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:answered.observation.id,clientKey:randomUUID(),minutes:20})).rejects.toThrow("receipt write failed");}
+  finally{writer.mockRestore();}
+  expect(await f.sql`SELECT id,status,path_version,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toEqual(jobs);
+  expect(await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual(receipts);
+});
 it("reads all 45 confirmed requirements including material gaps and replays confirmation without revision churn",async()=>{
   const x=await seed(45),snapshot=await x.repo.read(f.scope,x.courseId);expect(snapshot.summary.total).toBe(45);
   const list=x.requirements.map((row,index)=>index===44?{...row,sourceRefs:[],verification:{...row.verification,status:"missing" as const,missingReasons:["缺习题材料"]}}:row);
@@ -73,8 +134,11 @@ it("creates and compiles a real question, keeps canonical requirement identity, 
   const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id);expect(snapshot.observationId).toBe(result.observation.id);
   const request={goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:snapshot.observationId,clientKey:randomUUID(),minutes:20};
   const next=ready(await x.repo.next(f.scope,x.courseId,request));expect(next.action).toBe("targeted_explain");
+  const receipt=await activityDecision(next);expect(receipt.reasonCodes).toContain("entry:course-route-next");
+  expect(receipt.evidenceRefs).toContain(`observation:${result.observation.id}`);
   const refreshed=await x.repo.read(f.scope,x.courseId,one.activity.id);
   expect(ready(await x.repo.next(f.scope,x.courseId,{...request,clientKey:randomUUID(),expectedPathVersion:refreshed.currentActivity!.pathVersion})).activity.id).toBe(next.activity.id);
+  expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:next.activity.id})).toEqual([receipt]);
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(2);
 });
 it("returns configuration without creating an empty activity, and rejects stale formal goal starts",async()=>{
@@ -144,6 +208,8 @@ it("keeps a delayed retest separate from an active ordinary transfer check",asyn
     expectedRequirementRevision:task.expectedRequirementRevision,taskId:task.taskId,expectedTaskVersion:task.expectedTaskVersion,
     clientKey:randomUUID(),minutes:task.minutes};
   const started=ready(await x.repo.start(f.scope,x.courseId,request));
+  const retestDecision=await activityDecision(started);expect(retestDecision.reasonCodes).toContain("accepted_retest_transfer_check");
+  expect(retestDecision.evidenceRefs).toContain(`retest:${receipt.retestId}`);
   expect(started.activity.id).not.toBe(ordinary.activity.id);
   expect(ready(await x.repo.start(f.scope,x.courseId,{...request,clientKey:randomUUID()})).activity.id).toBe(started.activity.id);
   expect(ready(await x.repo.start(f.scope,x.courseId,{...request,taskId:request.taskId.toUpperCase(),clientKey:randomUUID()})).activity.id).toBe(started.activity.id);
@@ -164,7 +230,7 @@ it.each(["passed","failed","assisted","insufficient_evidence"] as const)("connec
   const next=await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:x.started.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,
     observationId:result.observation.id,clientKey:randomUUID(),minutes:20});
   if(branch==="insufficient_evidence")expect(next).toMatchObject({kind:"choice",reason:"evidence_unknown"});
-  else expect(ready(next).action).toBe(branch==="failed"?"targeted_explain":branch==="assisted"?"reduced_help_practice":"comprehensive");
+  else {expect(ready(next).action).toBe(branch==="failed"?"targeted_explain":branch==="assisted"?"reduced_help_practice":"comprehensive");await activityDecision(ready(next));}
   const [fact]=await f.sql`SELECT retest_id FROM opening_learning_observations WHERE id=${result.observation.id}`;expect(fact!.retest_id).toBe(x.receipt.retestId);
   if(branch==="passed"){const snapshot=await readOpeningBackupRecords(f.sql,f.scope),errors:string[]=[];validateBackupRetestProtocols(snapshot.tables,errors);expect(errors).toEqual([]);}
 });
@@ -210,6 +276,8 @@ it("creates a prerequisite repair activity and really returns to its original re
   const basic=ready(await x.start());await compile(basic.activity);await answer(basic.activity,0,"incorrect");
   const repair=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirements[1]!.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
   expect(repair).toMatchObject({requirementId:x.requirements[0]!.id,action:"prerequisite"});
+  const repairDecision=await activityDecision(repair);expect(repairDecision.reasonCodes).toContain("weak_explicit_prerequisite");
+  expect(repairDecision.candidates).toContainEqual(expect.objectContaining({eligible:false,reasonCodes:expect.arrayContaining(["deferred_for_weak_prerequisite"])}));
   await compile(repair.activity,2);const firstCheck=await answer(repair.activity,0);
   const firstSnapshot=await x.repo.read(f.scope,x.courseId,repair.activity.id),practice=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,
     activityId:repair.activity.id,expectedPathVersion:firstSnapshot.currentActivity!.pathVersion,observationId:firstCheck.observation.id,clientKey:randomUUID(),minutes:20}));
@@ -218,6 +286,7 @@ it("creates a prerequisite repair activity and really returns to its original re
   const current=await x.repo.read(f.scope,x.courseId,practice.activity.id),returned=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,
     activityId:practice.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20}));
   expect(returned).toMatchObject({requirementId:x.requirements[1]!.id,action:"return"});expect(returned.activity.id).not.toBe(repair.activity.id);
+  expect((await activityDecision(returned)).reasonCodes).toContain("verified_prerequisite_return");
 });
 it("runs a separate comprehensive check for every requirement before an idempotent current-scope finish",async()=>{
   const x=await seed(2),a=ready(await x.start(0));await compile(a.activity,0);await answer(a.activity,0);await answer(a.activity,1);
@@ -225,8 +294,10 @@ it("runs a separate comprehensive check for every requirement before an idempote
   async function next(activity:TeachingActivity,observationId:string){const current=await x.repo.read(f.scope,x.courseId,activity.id);return x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,
     expectedGoalRevision:1,activityId:activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId,clientKey:randomUUID(),minutes:20});}
   const first=ready(await next(b.activity,result.observation.id));expect(first).toMatchObject({action:"comprehensive",requirementId:x.requirements[0]!.id});
+  expect((await activityDecision(first)).reasonCodes).toContain("current_scope_comprehensive_run");
   await compile(first.activity,3);const checkedA=await answer(first.activity);const second=ready(await next(first.activity,checkedA.observation.id));
   expect(second).toMatchObject({action:"comprehensive",requirementId:x.requirements[1]!.id});
+  await activityDecision(second);
   await compile(second.activity,4);const checkedB=await answer(second.activity);
   expect(await next(second.activity,checkedB.observation.id)).toMatchObject({kind:"choice",reason:"course_complete"});
   expect(await next(second.activity,checkedB.observation.id)).toMatchObject({kind:"choice",reason:"course_complete"});
