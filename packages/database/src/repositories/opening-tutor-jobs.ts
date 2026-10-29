@@ -7,6 +7,7 @@ import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type Opening
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
+import { helpInputSnapshotSchema, type HelpInputSnapshot } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -50,6 +51,58 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
 }
 
 export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJobsRepository>;
+
+type UserTurnIntentInput = { userTurnId: string; jobId: string; claimToken?: string };
+async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput) {
+  await lockWorkspaceLearningHistory(tx, scope);
+  const [row] = await tx`SELECT t.*,j.assistant_turn_id FROM opening_tutor_jobs j
+    JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
+    JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=j.workspace_id AND a.conversation_id=j.conversation_id AND a.role='assistant'
+      AND a.learning_session_id IS NOT DISTINCT FROM t.learning_session_id AND a.attempt_id IS NOT DISTINCT FROM t.attempt_id
+    JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+    WHERE j.id=${input.jobId} AND j.user_turn_id=${input.userTurnId} AND j.workspace_id=${scope.workspaceId}
+      AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
+      AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR SHARE OF j FOR UPDATE OF t`;
+  if (!row) throw new Error("study intent job lease is no longer current");
+  if (row.query_system === true || row.composer_purpose && row.composer_purpose !== "answer" && row.composer_purpose !== "teach"
+    || (row.context_anchor as StudyContextAnchor | null)?.purpose === "language_support") {
+    throw new Error("read-only or proposal composer purpose cannot change study intent");
+  }
+  return row;
+}
+
+async function applyUserTurnIntentInTx(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput,
+  saved?: Record<string, unknown>): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
+  const row = saved ?? await lockIntentUserTurn(tx, scope, input);
+  const attemptId = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId ?? null;
+  const [attempt] = attemptId ? await tx`SELECT id,session_id FROM opening_learning_attempts WHERE id=${String(attemptId)}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
+  const sessionId = attempt?.session_id ?? row.learning_session_id;
+  if (!sessionId) return null;
+  const [session] = await tx`SELECT id FROM opening_learning_sessions WHERE id=${String(sessionId)}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!session || attemptId && !attempt) throw new Error("study intent target is not owned");
+  const latest = await readOpeningStudyIntentInTx(tx, scope, String(sessionId));
+  const clientKey = `tutor-intent:${input.userTurnId}`;
+  const replay = await tx`SELECT id FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} AND (client_key=${clientKey} OR client_key LIKE ${`${clientKey}:signal:%`}) LIMIT 1`;
+  if (replay.length) return latest;
+  const text = composerMessageText(String(row.text)), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
+  const applied = parseExplicitStudyMessage(current, text);
+  if (!applied) return latest;
+  const changed = !isDeepStrictEqual(current, applied.intent);
+  if (!changed && !applied.signals.length && !applied.needsConfirmation) return latest;
+  const target = { sessionId: String(sessionId), ...(attempt ? { attemptId: String(attempt.id) } : {}) };
+  if (text.length <= 2000 && (attempt || !applied.signals.some(signal => signal === "guessed" || signal === "copied_answer"))) {
+    return appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "explicit_request", text } });
+  }
+  if (changed) await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "preference", intent: applied.intent } });
+  for (const signal of applied.signals) {
+    if (!attempt && (signal === "guessed" || signal === "copied_answer")) continue;
+    await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey: `${clientKey}:signal:${signal}`, change: { kind: "signal", signal } });
+  }
+  return studyIntentForMessage(latest, text);
+}
 
 type CompletedCandidateTarget = {
   scope: OpeningScope;
@@ -432,6 +485,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         level: "hinted" | "revealed";
         hintStage?: number | null;
         initiatedBy?: "user" | "assistant" | null;
+        helpInputSnapshot?: HelpInputSnapshot | null;
         delivered: true;
       };
       expectedPrivacyEpoch?: number;
@@ -537,51 +591,25 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       });
     },
 
-    /** Apply the immutable saved user text once, after validating the actual running job and owned target. */
-    async applyUserTurnIntent(scope: OpeningScope, input: { userTurnId: string; jobId: string; claimToken?: string }): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
+    /** Legacy API deliberately returns latest on replay, not the model's frozen inputs. */
+    async applyUserTurnIntent(scope: OpeningScope, input: UserTurnIntentInput): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
+      return sql.begin(tx => applyUserTurnIntentInTx(tx, scope, input));
+    },
+
+    /** Freeze before external calls; first intent application and snapshot commit are atomic. */
+    async freezeHelpInputSnapshot(scope: OpeningScope, input: UserTurnIntentInput): Promise<HelpInputSnapshot> {
       return sql.begin(async tx => {
-        await lockWorkspaceLearningHistory(tx, scope);
-        const [row] = await tx`SELECT t.text,t.attempt_id,t.context_anchor,t.learning_session_id,t.query_system,t.composer_purpose FROM opening_tutor_jobs j
-          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id
-          JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
-          WHERE j.id=${input.jobId} AND j.user_turn_id=${input.userTurnId} AND j.workspace_id=${scope.workspaceId}
-            AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
-            AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR SHARE OF j`;
-        if (!row) throw new Error("study intent job lease is no longer current");
-        if (row.query_system === true || row.composer_purpose && row.composer_purpose !== "answer" && row.composer_purpose !== "teach"
-          || (row.context_anchor as StudyContextAnchor | null)?.purpose === "language_support") {
-          throw new Error("read-only or proposal composer purpose cannot change study intent");
+        const row = await lockIntentUserTurn(tx, scope, input);
+        if (row.help_input_snapshot != null) {
+          const frozen = helpInputSnapshotSchema.parse(row.help_input_snapshot);
+          if (frozen.userTurnId !== input.userTurnId || frozen.assistantTurnId !== row.assistant_turn_id) throw new Error("help input snapshot job pair mismatch");
+          return frozen;
         }
-        const attemptId = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId ?? null;
-        const [attempt] = attemptId ? await tx`SELECT id,session_id FROM opening_learning_attempts WHERE id=${String(attemptId)}
-          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
-        const sessionId = attempt?.session_id ?? row.learning_session_id;
-        if (!sessionId) return null;
-        const [session] = await tx`SELECT id FROM opening_learning_sessions WHERE id=${String(sessionId)}
-          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        if (!session || attemptId && !attempt) throw new Error("study intent target is not owned");
-        const latest = await readOpeningStudyIntentInTx(tx, scope, String(sessionId));
-        const clientKey = `tutor-intent:${input.userTurnId}`;
-        const replay = await tx`SELECT id FROM opening_study_intent_events WHERE workspace_id=${scope.workspaceId}
-          AND owner_user_id=${scope.ownerUserId} AND (client_key=${clientKey} OR client_key LIKE ${`${clientKey}:signal:%`}) LIMIT 1`;
-        // A retry must not reapply an older message over a subsequently confirmed preference.
-        if (replay.length) return latest;
-        const text = composerMessageText(String(row.text)), current = latest?.intent ?? DEFAULT_STUDY_SESSION_INTENT;
-        const applied = parseExplicitStudyMessage(current, text);
-        if (!applied) return latest;
-        const changed = !isDeepStrictEqual(current, applied.intent);
-        if (!changed && !applied.signals.length && !applied.needsConfirmation) return latest;
-        const target = { sessionId: String(sessionId), ...(attempt ? { attemptId: String(attempt.id) } : {}) };
-        if (text.length <= 2000 && (attempt || !applied.signals.some(signal => signal === "guessed" || signal === "copied_answer"))) {
-          return appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "explicit_request", text } });
-        }
-        // Without an actual attempt, answer-condition reports cannot become evidence about an arbitrary question.
-        if (changed) await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey, change: { kind: "preference", intent: applied.intent } });
-        for (const signal of applied.signals) {
-          if (!attempt && (signal === "guessed" || signal === "copied_answer")) continue;
-          await appendOpeningStudyIntentInTx(tx, scope, { ...target, clientKey: `${clientKey}:signal:${signal}`, change: { kind: "signal", signal } });
-        }
-        return studyIntentForMessage(latest, text);
+        const applied = await applyUserTurnIntentInTx(tx, scope, input, row);
+        const snapshot = helpInputSnapshotSchema.parse({ userTurnId: input.userTurnId, assistantTurnId: row.assistant_turn_id, tutorMode: row.mode,
+          studyIntent: applied ? { intent: applied.intent, action: applied.action } : null });
+        await tx`UPDATE opening_turns SET help_input_snapshot=${tx.json(snapshot)} WHERE id=${input.userTurnId} AND workspace_id=${scope.workspaceId}`;
+        return snapshot;
       });
     },
 

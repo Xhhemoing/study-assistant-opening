@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { helpInputSnapshotSchema } from "./tutor";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { evidenceEligibilitySchema, learningObservationFactsShape, referenceCheckInputSchema } from "./learning-evidence";
 
@@ -99,6 +100,7 @@ export const helpExposureSchema = z
     level: z.enum(["hinted", "revealed"]),
     hintStage: z.number().int().min(1).max(4).nullable().optional(),
     initiatedBy: z.enum(["user", "assistant"]).nullable().optional(),
+    helpInputSnapshot: helpInputSnapshotSchema.nullable().optional(),
     delivered: z.literal(true),
     deliveredAt: isoDateTimeSchema.nullable().optional(),
     historyRevision: z.number().int().nonnegative().optional(),

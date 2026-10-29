@@ -1,4 +1,7 @@
 import { resolveOpeningStudyContext } from "./opening-study-context";
+import { isDeepStrictEqual } from "node:util";
+import { helpInputSnapshotSchema } from "@aistudy/contracts";
+import { assertOpeningHelpInputSnapshot } from "./opening-study-exposure";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import type { TransactionSql } from "postgres";
 import type { HelpExposure, Scope, StudyContextAnchor } from "@aistudy/contracts";
@@ -23,6 +26,7 @@ function mapDeliveredHelp(row: Record<string, unknown>): HelpExposure {
     hintStage: (row.hint_stage ?? null) as HelpExposure["hintStage"],
     initiatedBy: (row.initiated_by ?? null) as HelpExposure["initiatedBy"],
     delivered: true,
+    helpInputSnapshot: row.help_input_snapshot == null ? null : helpInputSnapshotSchema.parse(row.help_input_snapshot),
     createdAt: learningIso(row.created_at)!,
     deliveredAt: learningIso(row.delivered_at),
     historyRevision: Number(row.history_revision),
@@ -65,17 +69,19 @@ export async function insertOpeningDeliveredHelp(tx: TransactionSql, scope: Scop
       || saved.kind !== input.kind
       || (saved.hintStage != null && saved.hintStage !== (input.hintStage ?? null))
       || (saved.initiatedBy != null && saved.initiatedBy !== (input.initiatedBy ?? null))
+      || (saved.helpInputSnapshot != null && !isDeepStrictEqual(saved.helpInputSnapshot, input.helpInputSnapshot ?? null))
       || saved.attemptId !== (input.attemptId ?? null) || saved.problemId !== problemId) {
       throw learningError("CONFLICT", "help exposure ID payload conflict");
     }
     if (options.generatedOnly) return;
     return saved;
   }
+  await assertOpeningHelpInputSnapshot(tx, scope, input.helpInputSnapshot, input.turnId);
   const revision = options.generatedOnly ? 0 : await nextLearningHistoryRevision(tx, scope, String(session.course_id));
   const workspaceRevision = options.generatedOnly ? null : await nextWorkspaceLearningHistoryRevision(tx, scope);
-  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision,kind,activity_id,item_version_id,owner_user_id,course_id,context_anchor,release_key,exposure_origin,support_domain,generated_at,released_at,workspace_history_revision,hint_stage,initiated_by)
+  const rows = await tx`INSERT INTO opening_help_exposures(id,workspace_id,session_id,problem_id,turn_id,level,delivered,attempt_id,delivered_at,history_revision,kind,activity_id,item_version_id,owner_user_id,course_id,context_anchor,release_key,exposure_origin,support_domain,generated_at,released_at,workspace_history_revision,hint_stage,initiated_by,help_input_snapshot)
     VALUES (${input.id},${scope.workspaceId},${input.sessionId},${problemId},${input.turnId},${input.level},${!options.generatedOnly},${input.attemptId ?? null},${options.generatedOnly ? null : tx`clock_timestamp()`},${revision},${input.kind},${activityId},${itemVersionId},${scope.ownerUserId},${session.course_id},${tx.json(contextAnchor)},
-      ${`assistant:${input.turnId}`},'assistant',${input.supportDomain ?? "unknown"},clock_timestamp(),${options.generatedOnly ? null : tx`clock_timestamp()`},${workspaceRevision},${input.hintStage ?? null},${input.initiatedBy ?? null}) RETURNING *`;
+      ${`assistant:${input.turnId}`},'assistant',${input.supportDomain ?? "unknown"},clock_timestamp(),${options.generatedOnly ? null : tx`clock_timestamp()`},${workspaceRevision},${input.hintStage ?? null},${input.initiatedBy ?? null},${input.helpInputSnapshot ? tx.json(input.helpInputSnapshot) : null}) RETURNING *`;
   if (options.generatedOnly) return;
   const affected = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
     JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id

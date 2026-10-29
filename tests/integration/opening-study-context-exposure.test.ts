@@ -90,11 +90,12 @@ it.each([false, true])("saved tutor generation stays inert until actual conversa
     text: "Give a hint", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
     attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
   const claimed = await jobs.claim(saved.jobId);
+  const helpInputSnapshot = await jobs.freezeHelpInputSnapshot(fixture.scope, { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken });
   await jobs.completeTurn({ scope: fixture.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
     text: "Use a common denominator", citations: [], candidates: [], claimToken: claimed!.claimToken,
     helpExposure: { id: randomUUID(), sessionId: f.sessionId, attemptId: attempt.id, problemId: attempt.problemId,
       turnId: saved.assistantTurnId, kind: "hint", level: "hinted", delivered: true, contextAnchor: attempt.contextAnchor,
-      hintStage: null, initiatedBy: "user" } });
+      hintStage: null, initiatedBy: "user", helpInputSnapshot } });
   expect(await jobs.getUserTurn(saved.turnId, fixture.scope.workspaceId, saved.jobId)).not.toBeNull();
   expect(await jobs.getUserTurn(saved.turnId, fixture.scope.workspaceId, randomUUID())).toBeNull();
   expect(await jobs.getUserTurn(saved.assistantTurnId, fixture.scope.workspaceId, saved.jobId)).toBeNull();
@@ -108,7 +109,7 @@ it.each([false, true])("saved tutor generation stays inert until actual conversa
   if (readBeforeAnswer) {
     const turns = await conversations.listTurns(fixture.scope, conversation.id);
     expect(turns.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt).toMatchObject({
-      releasedAt: expect.any(String), hintStage: null, initiatedBy: "user" });
+      releasedAt: expect.any(String), hintStage: null, initiatedBy: "user", helpInputSnapshot });
   }
   const answer = await f.submit(attempt);
   const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, answer);
@@ -213,14 +214,19 @@ it("applies saved typed intent and answer reports once with an owned running lea
   };
   const carriedText = "【从学习界面带入的提问背景；尚未作为资料证据核验，也不表示我已掌握】\n抄了答案\n\n我的问题：\n慢一点，我是猜的";
   const typed = await start(carriedText);
+  await expect(jobs.freezeHelpInputSnapshot(fixture.scope, { ...typed, claimToken: randomUUID() })).rejects.toThrow("lease");
+  const frozen = await jobs.freezeHelpInputSnapshot(fixture.scope, typed);
+  expect(frozen).toMatchObject({ userTurnId: typed.userTurnId, tutorMode: "hint", studyIntent: { intent: { pace: "slow" } } });
   await expect(jobs.applyUserTurnIntent(fixture.scope, { ...typed, claimToken: randomUUID() })).rejects.toThrow("lease");
-  expect(await intents.latest(fixture.scope, f.sessionId)).toBeNull();
+  expect(await jobs.freezeHelpInputSnapshot(fixture.scope, typed)).toEqual(frozen);
   expect(await jobs.applyUserTurnIntent(fixture.scope, typed)).toMatchObject({ intent: { pace: "slow" } });
   expect((await jobs.getUserTurn(typed.userTurnId, fixture.scope.workspaceId))?.text).toBe(carriedText);
   expect(await intents.latest(fixture.scope, f.sessionId)).toMatchObject({ version: 1, signals: ["guessed"], attemptId: attempt.id });
   const newer = await intents.append(fixture.scope, { sessionId: f.sessionId, attemptId: attempt.id, clientKey: randomUUID(),
     change: { kind: "explicit_request", text: "用英文，快一点" } });
   expect(await jobs.applyUserTurnIntent(fixture.scope, typed)).toMatchObject({ intent: newer.intent });
+  expect(await jobs.freezeHelpInputSnapshot(fixture.scope, typed)).toEqual(frozen);
+  expect((await fixture.sql`SELECT help_input_snapshot FROM opening_turns WHERE id=${typed.userTurnId}`)[0]!.help_input_snapshot).toEqual(frozen);
   expect((await intents.latest(fixture.scope, f.sessionId))?.version).toBe(2);
   await jobs.applyUserTurnIntent(fixture.scope, await start("“我是猜的”是什么意思"));
   expect((await intents.latest(fixture.scope, f.sessionId))?.version).toBe(2);
@@ -299,6 +305,33 @@ it("does not release a generated stream after cancellation or material exclusion
 });
 
 
+it("rejects a complete snapshot from another round in the same conversation/session/attempt at both help entry points", async () => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const conversations = createOpeningConversationRepository(fixture.sql), jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const conversation = await conversations.create(fixture.scope, { title: "Same-session pair", courseId: f.courseId });
+  const start = async () => {
+    const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
+      text: "提示", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
+      attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
+    const claimed = await jobs.claim(saved.jobId);
+    const snapshot = await jobs.freezeHelpInputSnapshot(fixture.scope, { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken });
+    await jobs.completeTurn({ scope: fixture.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
+      text: "先统一分母", citations: [], candidates: [], claimToken: claimed!.claimToken });
+    return { saved, snapshot };
+  };
+  const first = await start(), second = await start();
+  expect(first.snapshot).toMatchObject({ userTurnId: first.saved.turnId, assistantTurnId: first.saved.assistantTurnId });
+  const releaseKey = randomUUID(), id = randomUUID();
+  await expect(createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, {
+    releaseKey, contextAnchor: { purpose: "learning_help", attemptId: attempt.id }, origin: "assistant",
+    turnId: first.saved.assistantTurnId, sessionId: f.sessionId, kind: "hint", level: "hinted", helpInputSnapshot: second.snapshot,
+  })).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(f.learning.insertHelpExposure(fixture.scope, { id, sessionId: f.sessionId, attemptId: attempt.id,
+    problemId: attempt.problemId, turnId: first.saved.assistantTurnId, kind: "hint", level: "hinted", delivered: true,
+    helpInputSnapshot: second.snapshot })).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE id=${id} OR release_key=${releaseKey}`).toHaveLength(0);
+});
+
 it("a pre-generated streaming receipt stays inert in pending history and releases only with completed answer delivery", async () => {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   const conversations = createOpeningConversationRepository(fixture.sql), jobs = createOpeningTutorJobsRepository(fixture.sql);
@@ -307,10 +340,15 @@ it("a pre-generated streaming receipt stays inert in pending history and release
     text: "提示", mode: "hint", clientKey: randomUUID(), sourceIds: [f.sourceId], learningSessionId: f.sessionId,
     attemptId: attempt.id, currentPage: 1, chunkId: f.chunkId });
   const claimed = await jobs.claim(saved.jobId);
-  const generatedExposure = { releaseKey: `assistant:${saved.assistantTurnId}`,
+  const helpInputSnapshot = await jobs.freezeHelpInputSnapshot(fixture.scope, { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken });
+  const generatedExposure = { releaseKey: `assistant:${saved.assistantTurnId}`, helpInputSnapshot,
     contextAnchor: { purpose: "learning_help" as const, attemptId: attempt.id }, origin: "assistant" as const,
     turnId: saved.assistantTurnId, sessionId: f.sessionId, kind: "hint" as const, level: "hinted" as const };
   const exposure = await createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope, generatedExposure);
+  await expect(createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope,
+    { ...generatedExposure, helpInputSnapshot: { ...helpInputSnapshot, tutorMode: "explain" } })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(createOpeningStudyExposureRepository(fixture.sql).generate(fixture.scope,
+    { ...generatedExposure, releaseKey: randomUUID(), helpInputSnapshot: { ...helpInputSnapshot, userTurnId: saved.assistantTurnId } })).rejects.toMatchObject({ code: "VALIDATION" });
   const pending = await conversations.listTurns(fixture.scope, conversation.id);
   expect(pending.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt?.releasedAt).toBeNull();
   await conversations.releaseReturnedTurnIds(fixture.scope, conversation.id, [saved.assistantTurnId]);
@@ -321,6 +359,7 @@ it("a pre-generated streaming receipt stays inert in pending history and release
   expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
   const complete = await conversations.listTurns(fixture.scope, conversation.id);
   const delivered = complete.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt;
+  expect(delivered?.helpInputSnapshot).toEqual(helpInputSnapshot);
   expect(delivered?.releasedAt).not.toBeNull();
   const repeated = await conversations.listTurns(fixture.scope, conversation.id);
   expect(repeated.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt).toEqual(delivered);

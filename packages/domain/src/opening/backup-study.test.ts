@@ -15,6 +15,37 @@ function tables() {
 function errors(input: ReturnType<typeof tables>) { const result: string[] = []; validateBackupStudy(input, result); return result; }
 
 describe("Study backup history", () => {
+  it("validates frozen help inputs against the original user and assistant scope, retaining unknown legacy inputs", () => {
+    const value = tables(), userId = "70000000-0000-4000-8000-000000000001", assistantId = "80000000-0000-4000-8000-000000000001";
+    const snapshot = { userTurnId: userId, assistantTurnId: assistantId, tutorMode: "hint", studyIntent: null };
+    value.opening_conversations = [{ ...scope, id: decision }];
+    value.opening_turns = [{ ...scope, id: userId, conversation_id: decision, role: "user", mode: "hint", help_input_snapshot: snapshot },
+      { ...scope, id: assistantId, conversation_id: decision, role: "assistant", mode: "hint" }];
+    const row = value.opening_help_exposures![0]!;
+    row.turn_id = assistantId; row.help_input_snapshot = snapshot;
+    expect(errors(value)).toEqual([]);
+    const secondUser = "70000000-0000-4000-8000-000000000002", secondAssistant = "80000000-0000-4000-8000-000000000002";
+    const secondSnapshot = { ...snapshot, userTurnId: secondUser, assistantTurnId: secondAssistant };
+    value.opening_turns.push({ ...scope, id: secondUser, conversation_id: decision, role: "user", mode: "hint", help_input_snapshot: secondSnapshot },
+      { ...scope, id: secondAssistant, conversation_id: decision, role: "assistant", mode: "hint" });
+    row.help_input_snapshot = secondSnapshot;
+    expect(errors(value)).toContain("Help input snapshot user turn scope or identity mismatch");
+    row.help_input_snapshot = snapshot;
+    value.opening_turns![1]!.learning_session_id = activity;
+    expect(errors(value)).toContain("Help input snapshot user turn scope or identity mismatch");
+    delete value.opening_turns![1]!.learning_session_id;
+    value.opening_turns![1]!.attempt_id = attempt;
+    expect(errors(value)).toContain("Help input snapshot user turn scope or identity mismatch");
+    delete value.opening_turns![1]!.attempt_id;
+    expect(errors(value)).toEqual([]);
+    row.help_input_snapshot = { ...snapshot, tutorMode: "invalid" };
+    expect(errors(value)).toContain("Help input snapshot is invalid");
+    row.help_input_snapshot = { ...snapshot, tutorMode: "explain" };
+    expect(errors(value)).toContain("Help input snapshot user turn scope or identity mismatch");
+    row.help_input_snapshot = snapshot;
+    value.opening_turns![0]!.workspace_id = exposure;
+    expect(errors(value)).toContain("Help input snapshot user turn scope or identity mismatch");
+  });
   it.each([null, "release-test-key"])("validates help metadata even without release metadata (%s)", releaseKey => {
     const value = tables(), row = value.opening_help_exposures![0]!;
     row.release_key = releaseKey;

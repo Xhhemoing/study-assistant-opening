@@ -18,7 +18,6 @@ import {
   composerMessageText,
   makeStudyLanguageSupport,
   studyIntentInstruction,
-  studyIntentForMessage,
   instructionWithMemories,
   makeTutorInstruction,
   PageCitationClarifyError,
@@ -245,9 +244,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           citations: [], candidates: [], contextSourceRefs: [], generatedExposure, expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
         return { skipped: false };
       }
-      const currentStudyIntent = deps.tutorJobs.applyUserTurnIntent
-        ? await deps.tutorJobs.applyUserTurnIntent(scope, { userTurnId: claimed.userTurnId, jobId: claimed.id, claimToken: claimed.claimToken })
-        : studyIntentForMessage(turn.studyIntent, composerMessageText(turn.text));
+      const helpInputSnapshot = await deps.tutorJobs.freezeHelpInputSnapshot(scope,
+        { userTurnId: claimed.userTurnId, jobId: claimed.id, claimToken: claimed.claimToken });
+      const currentStudyIntent = helpInputSnapshot.studyIntent;
       const excluded = new Set(
         deps.privacy ? await deps.privacy.listExcludedSourceIds(scope) : [],
       );
@@ -288,7 +287,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
         historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [],
       );
-      const mode = claimed.mode as TutorMode;
+      const mode = helpInputSnapshot.tutorMode;
       const baseInstruction = instructionWithMemories(
         makeTutorInstruction(mode, { text: turn.text }),
         memoryContext.memories,
@@ -328,7 +327,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const streamExposure: OpeningStudyExposureInput | undefined = deps.stream && (turn.contextAnchor || turn.learningSessionId && (turn.attemptId || mode === "hint" || mode === "explain"))
         ? { releaseKey: `assistant:${claimed.assistantTurnId}`,
             contextAnchor: turn.contextAnchor ?? { purpose: "learning_help", attemptId: turn.attemptId ?? null } as StudyContextAnchor,
-            origin: "assistant", turnId: claimed.assistantTurnId, supportDomain: "unknown",
+            origin: "assistant", turnId: claimed.assistantTurnId, supportDomain: "unknown", helpInputSnapshot,
             hintStage: null, initiatedBy: "user",
             kind: turn.learningSessionId
               ? turn.attemptId && mode !== "explain" ? "hint" : classifyTutorHelpKind({ mode, attemptId: turn.attemptId ?? null, problemId: null })
@@ -472,13 +471,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               problemId: null,
             }),
             level: mode === "explain" ? "revealed" as const : "hinted" as const,
-            delivered: true as const,
+            delivered: true as const, helpInputSnapshot,
             hintStage: null, initiatedBy: "user" as const,
           }
         : undefined;
       const generatedExposure = streamExposure ?? (!turn.learningSessionId && turn.contextAnchor ? {
         releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
-        origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "unknown" as const,
+        origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "unknown" as const, helpInputSnapshot,
         hintStage: null, initiatedBy: "user" as const,
         kind: mode === "explain" ? "solution" as const : "hint" as const,
         level: mode === "explain" ? "revealed" as const : "hinted" as const,

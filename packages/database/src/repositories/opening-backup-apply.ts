@@ -207,7 +207,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "id", "workspace_id", "conversation_id", "role", "text", "mode", "status", "client_key",
     "learning_session_id", "current_page", "chunk_id", "source_ids", "citations", "created_at",
     "intent_hash", "source_versions", "context_source_refs", "attempt_id",
-    "query_system", "system_query", "context_anchor", "composer_purpose",
+    "query_system", "system_query", "context_anchor", "composer_purpose", "help_input_snapshot",
   ],
   opening_assistant_candidates: [
     "id", "workspace_id", "conversation_id", "source_turn_id", "source_ids", "payload", "status",
@@ -217,7 +217,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "id", "workspace_id", "session_id", "problem_id", "turn_id", "level", "delivered",
     "created_at", "attempt_id", "delivered_at", "history_revision",
     "kind", "activity_id", "item_version_id", "owner_user_id", "course_id", "release_key", "release_intent", "context_anchor",
-    "exposure_origin", "support_domain", "hint_stage", "initiated_by", "generated_at", "released_at", "acknowledged_at", "workspace_history_revision",
+    "exposure_origin", "support_domain", "hint_stage", "initiated_by", "help_input_snapshot", "generated_at", "released_at", "acknowledged_at", "workspace_history_revision",
   ],
   opening_learning_observations: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "source_ids",
@@ -282,6 +282,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "opening_turns.help_input_snapshot", "opening_help_exposures.help_input_snapshot",
   "opening_retest_activities.learning_protocol",
   "learning_events.payload",
   "workspace_preferences.ai_settings",
