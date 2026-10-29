@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
+import { nextLearningStep } from "@aistudy/domain";
+import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
+import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
+import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
 import { createOpeningLearningDecisionsRepository } from "../../packages/database/src/repositories/opening-learning-decisions";
 import * as decisionWriter from "../../packages/database/src/repositories/opening-learning-decisions";
 import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
 import { afterEach,beforeEach,expect,it,vi } from "vitest";
 import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivity } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository,createOpeningLearningRepository,createOpeningAiGradingRepository,createOpeningSourceChunksRepository,
-  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository } from "@aistudy/database";
+  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository,createOpeningSpanSessionRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
 import { assertOpeningCourseRouteReady } from "../../packages/database/src/repositories/opening-course-route-origin";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
@@ -141,6 +146,72 @@ it("creates and compiles a real question, keeps canonical requirement identity, 
   expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:next.activity.id})).toEqual([receipt]);
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(2);
 });
+it.each([false,true])("replaces same-action revised successors without refunding consumed history (consumed=%s)",async consumed=>{
+  const x=await seed(2),one=ready(await x.start());await compile(one.activity);const first=await answer(one.activity,0,"incorrect");
+  const request={goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:(await x.repo.read(f.scope,x.courseId,one.activity.id)).currentActivity!.pathVersion,
+    observationId:first.observation.id,clientKey:randomUUID(),minutes:20};
+  const old=ready(await x.repo.next(f.scope,x.courseId,request)),receipt=await activityDecision(old);
+  let saved:Awaited<ReturnType<typeof answer>>|undefined;
+  if(consumed){await compile(old.activity,1);saved=await answer(old.activity,0,"incorrect");}
+  const unrelated=ready(await x.start(1));
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(60);
+  const grading=createOpeningAiGradingRepository(f.sql),proposal={outcome:"incorrect" as const,confidence:.99,questionMatch:true,feedback:"重新核对原答案。",criteria:[{label:"秩",verdict:"incorrect" as const,feedback:"仍然错误。"}]};
+  const correction={rootObservationId:first.observation.rootObservationId??first.observation.id,revisesObservationId:first.observation.id,expectedHead:first.observation.id,
+    revisionKind:"replace" as const,reason:"更正原答案",clientKey:randomUUID(),replacement:{answer:"-98",outcome:"unverified" as const,assistance:"independent" as const}};
+  const corrected=await reviseOpeningLearningObservation(f.sql,f.scope,correction);
+  const revised=await grading.apply(f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture");
+  expect(revised.id).not.toBe(first.observation.id);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?60:40);
+  expect((await x.repo.read(f.scope,x.courseId)).currentActivity?.id).not.toBe(old.activity.id);
+  await expect(assertOpeningCourseRouteReady(f.sql,f.scope,old.activity.id)).rejects.toMatchObject({code:"CONFLICT"});
+  await expect(assertOpeningCourseRouteReady(f.sql,f.scope,unrelated.activity.id)).resolves.not.toBeNull();
+  expect(await x.repo.next(f.scope,x.courseId,request)).toMatchObject({kind:"choice",reason:"evidence_changed"});
+  const freshRequest={...request,observationId:revised.id,expectedPathVersion:(await x.repo.read(f.scope,x.courseId,one.activity.id)).currentActivity!.pathVersion};
+  const fresh=ready(await x.repo.next(f.scope,x.courseId,freshRequest));expect(fresh.action).toBe(old.action);expect(fresh.activity.id).not.toBe(old.activity.id);
+  expect((await activityDecision(fresh)).evidenceRefs).toContain(`observation:${revised.id}`);
+  expect(ready(await x.repo.next(f.scope,x.courseId,freshRequest)).activity.id).toBe(fresh.activity.id);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?80:60);
+  expect((await reviseOpeningLearningObservation(f.sql,f.scope,correction)).headObservationId).toBe(corrected.headObservationId);
+  expect(await grading.apply(f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture")).toEqual(revised);
+  expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
+  if(saved)expect((await createOpeningAttemptService(f.sql).getContext(f.scope,saved.attempt.id)).attempt.id).toBe(saved.attempt.id);
+});
+it.each([false,true])("shares released course reservations with the real span tutor budget (consumed=%s)",async consumed=>{
+  const x=await seed(),one=ready(await x.start());await compile(one.activity);const first=await answer(one.activity,0,"incorrect");
+  const old=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,
+    expectedPathVersion:(await x.repo.read(f.scope,x.courseId,one.activity.id)).currentActivity!.pathVersion,
+    observationId:first.observation.id,clientKey:randomUUID(),minutes:20}));
+  const receipt=await activityDecision(old);
+  if(consumed){await compile(old.activity,1);await answer(old.activity,0,"incorrect");}
+  const [original]=await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${old.activity.id}`;
+  await reviseOpeningLearningObservation(f.sql,f.scope,{rootObservationId:first.observation.rootObservationId??first.observation.id,
+    revisesObservationId:first.observation.id,expectedHead:first.observation.id,revisionKind:"replace",reason:"更正原评价",clientKey:randomUUID(),
+    replacement:{answer:"-98",outcome:"unverified",assistance:"independent"}});
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?40:20);
+  await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope,{assessmentEnabled:true,retestSuggestionsEnabled:true,automaticRemindersEnabled:false});
+  const at=new Date().toISOString(),grant={enabled:true,dailyMinutes:40,revision:1,confirmedAt:at,updatedAt:at,expiresOn:null};
+  await f.sql`UPDATE workspace_preferences SET adaptive_planning=${f.sql.json({...DEFAULT_OPENING_ADAPTIVE_PREFS,spanTutorGrants:{[x.courseId]:grant}})}::jsonb WHERE workspace_id=${f.scope.workspaceId}`;
+  const tutor=createOpeningSpanTutorContextRepository(f.sql),request={courseId:x.courseId,sourceIds:[x.sourceId],sourceVersions:{[x.sourceId]:1},question:"继续学习"};
+  const context=(await tutor.read(f.scope,request))!;expect(context).not.toBeNull();expect(context.intent.timeBudgetMinutes).toBe(20);
+  const input={context,decision:nextLearningStep(context.decisionInput),operationId:`tutor-next:${randomUUID()}`};
+  if(consumed){
+    await expect(tutor.execute(f.scope,input)).rejects.toMatchObject({code:"CONFLICT",message:expect.stringContaining("预算不足")});
+    expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
+    expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  }else{
+    const session=await tutor.execute(f.scope,input);
+    const activity=await createOpeningSpanSessionRepository(f.sql).get(f.scope,session.activityId);
+    expect(activity?.activityId).toBe(session.activityId);
+    const [budget]=await f.sql`SELECT goal_json->'tutorBudget' AS receipt FROM opening_teaching_activities WHERE id=${session.activityId}`;
+    expect(budget!.receipt).toMatchObject({minutes:20,grantRevision:1});
+    expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
+    expect((await tutor.execute(f.scope,input)).activityId).toBe(session.activityId);
+    expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:session.activityId})).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(3);
+  }
+  expect((await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${old.activity.id}`)[0]).toEqual(original);
+  expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
+});
 it("returns configuration without creating an empty activity, and rejects stale formal goal starts",async()=>{
   const x=await seed(),repo=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:false});
   expect(await repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirements[0]!.id,expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20})).toMatchObject({kind:"choice",reason:"configuration"});
@@ -245,6 +316,20 @@ it.each(["cancelled","expired"] as const)("keeps a real %s delayed retest termin
   const replay=await x.retests.schedule(f.scope,x.courseId,x.request);expect(replay.retestId).toBe(x.receipt.retestId);
   await expect(assertOpeningCourseRouteReady(f.sql,f.scope,x.started.activity.id)).rejects.toMatchObject({code:"CONFLICT"});
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(2);
+});
+it.each(["cancel","snooze"] as const)("does not restore a %s delayed arrangement after baseline correction",async type=>{
+  const x=await delayedSeed(),activities=createOpeningRetestActivityRepository(f.sql),until=new Date(Date.now()+86400000).toISOString();
+  await activities.transition(f.scope,x.receipt.retestId,type==="cancel"?{type,at:new Date().toISOString()}:{type,until});
+  const before=await f.sql`SELECT status,snoozed_until,task_id FROM opening_retest_activities WHERE id=${x.receipt.retestId}`;
+  const tasks=await f.sql`SELECT status,version FROM opening_tasks WHERE id=${x.receipt.taskId}`;
+  const fact=x.baselineAnswer.observation;
+  await reviseOpeningLearningObservation(f.sql,f.scope,{rootObservationId:fact.rootObservationId??fact.id,revisesObservationId:fact.id,expectedHead:fact.id,
+    revisionKind:"replace",reason:"核对原评价",clientKey:randomUUID(),replacement:{answer:fact.answer,outcome:"unverified",assistance:fact.assistance}});
+  expect(await f.sql`SELECT status,snoozed_until,task_id FROM opening_retest_activities WHERE id=${x.receipt.retestId}`)
+    .toEqual(before.map(row=>({...row,status:type==='snooze'?'invalidated':row.status})));
+  expect(await f.sql`SELECT status,version FROM opening_tasks WHERE id=${x.receipt.taskId}`).toEqual(tasks);
+  expect(await f.sql`SELECT id FROM opening_retest_activities WHERE course_id=${x.courseId}`).toHaveLength(1);
+  expect(await x.retests.schedule(f.scope,x.courseId,x.request)).toMatchObject({retestId:x.receipt.retestId,taskId:x.receipt.taskId});
 });
 it("uses real interval help to choose reduced-help correction even after two prior independent checks",async()=>{
   const x=await delayedSeed(true);

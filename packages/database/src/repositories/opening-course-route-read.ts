@@ -104,8 +104,13 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
     item.delayedCheck=retest?{status:await readOpeningCourseRouteRetestOutcome(db,scope,String(retest.id),observations.projected.find(row=>row.id===head?.id)??null),
       retestId:String(retest.id),taskId:retest.task_id?String(retest.task_id):null,notBeforeAt:learningIso(retest.not_before_at)}:{status:"not_scheduled",retestId:null,taskId:null,notBeforeAt:null};
   }
-  const [current]=await db`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+  const [current]=await db`SELECT * FROM opening_teaching_activities a WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
     AND course_id=${courseId} AND (${activityId??null}::uuid IS NULL AND status IN ('active','paused') OR id=${activityId??null}::uuid)
+    AND (${activityId??null}::uuid IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM opening_learning_observations o JOIN opening_learning_observations root
+        ON root.id=COALESCE(o.root_observation_id,o.id) AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
+      WHERE o.id::text=a.goal_json->'courseRoute'->>'originObservationId'
+        AND o.workspace_id=a.workspace_id AND o.owner_user_id=a.owner_user_id AND COALESCE(root.effective_head_id,root.id)<>o.id))
     AND goal_json ? 'courseRoute' ORDER BY updated_at DESC,id DESC LIMIT 1`;
   if(activityId&&!current)throw learningError("NOT_FOUND","本课程路线活动不存在。");
   const currentRoute=current?courseRouteActivityContextSchema.parse((current.goal_json as {courseRoute:unknown}).courseRoute):null;
