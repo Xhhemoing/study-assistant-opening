@@ -413,12 +413,14 @@ function safeBase(raw) {
   return base.href.replace(/\/+$/,'');
 }
 /** Build {url, init} for one call. messages: [{role:'user'|'assistant', content:string}]. */
-export function buildProviderRequest({protocol='openai-chat',preset,baseURL,apiKey,model,system='',prompt,messages,stream=true,maxTokens,tokenParameter,json=false,headers={}}={}) {
+export function buildProviderRequest({protocol='openai-chat',preset,baseURL,apiKey,model,system='',prompt,messages,stream=true,maxTokens,tokenParameter,json=false,headers={},temperature}={}) {
   if(preset!==undefined){requireContract(Object.hasOwn(OPENAI_COMPATIBLE_PRESETS,preset),'PROVIDER','Unknown OpenAI-compatible preset');protocol='openai-chat';baseURL??=OPENAI_COMPATIBLE_PRESETS[preset];}
   requireContract(REQUEST_PROTOCOLS.includes(protocol),'PROVIDER','Request building supports openai-chat, openai-responses, anthropic, gemini and ollama');
   requireContract(typeof model==='string'&&model.length>0&&model.length<=200,'PROVIDER','model is required');
   requireContract(maxTokens===undefined||Number.isSafeInteger(maxTokens)&&maxTokens>0,'PROVIDER','maxTokens must be a positive integer');
   requireContract(tokenParameter===undefined||['max_tokens','max_completion_tokens'].includes(tokenParameter),'PROVIDER','Unknown OpenAI token parameter');
+  requireContract(temperature===undefined||Number.isFinite(temperature)&&temperature>=0&&temperature<=2,'PROVIDER','temperature must be 0–2');
+  const temp=temperature===undefined?{}:{temperature};
   const base=safeBase(baseURL??NATIVE_BASE[protocol]),json_={'Content-Type':'application/json'};
   // Local servers (Ollama, LM Studio, vLLM on loopback) commonly run without a key.
   requireContract(typeof apiKey==='string'&&apiKey.length>0||apiKey===undefined&&/^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])[:/]/.test(base+'/'),'PROVIDER','apiKey is required for remote endpoints');
@@ -429,10 +431,10 @@ export function buildProviderRequest({protocol='openai-chat',preset,baseURL,apiK
   if(protocol==='openai-chat'){
     url=`${base}/chat/completions`;h={...json_,...bearer};
     const tokenKey=tokenParameter??(new URL(base).hostname==='api.openai.com'?'max_completion_tokens':'max_tokens');
-    body={model,messages:[...(system?[{role:'system',content:system}]:[]),...turns],stream,...(json?{response_format:{type:'json_object'}}:{}),...(maxTokens!==undefined?{[tokenKey]:maxTokens}:{})};
+    body={model,messages:[...(system?[{role:'system',content:system}]:[]),...turns],stream,...temp,...(json?{response_format:{type:'json_object'}}:{}),...(maxTokens!==undefined?{[tokenKey]:maxTokens}:{})};
   }
-  else if(protocol==='openai-responses'){url=`${base}/responses`;h={...json_,...bearer};body={model,...(system?{instructions:system}:{}),input:turns,stream,...(json?{text:{format:{type:'json_object'}}}:{}),...(maxTokens?{max_output_tokens:maxTokens}:{})};}
-  else if(protocol==='anthropic'){url=`${base}/messages`;h={...json_,'x-api-key':apiKey,'anthropic-version':'2023-06-01'};body={model,max_tokens:maxTokens??4096,...(system?{system}:{}),messages:turns,stream};}
+  else if(protocol==='openai-responses'){url=`${base}/responses`;h={...json_,...bearer};body={model,...(system?{instructions:system}:{}),input:turns,stream,...temp,...(json?{text:{format:{type:'json_object'}}}:{}),...(maxTokens?{max_output_tokens:maxTokens}:{})};}
+  else if(protocol==='anthropic'){url=`${base}/messages`;h={...json_,'x-api-key':apiKey,'anthropic-version':'2023-06-01'};body={model,max_tokens:maxTokens??4096,...temp,...(system?{system}:{}),messages:turns,stream};}
   else if(protocol==='gemini'){url=`${base}/models/${encodeURIComponent(model.replace(/^models\//,''))}:${stream?'streamGenerateContent?alt=sse':'generateContent'}`;h={...json_,'x-goog-api-key':apiKey};body={...(system?{systemInstruction:{parts:[{text:system}]}}:{}),contents:turns.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]})),...(maxTokens||json?{generationConfig:{...(maxTokens?{maxOutputTokens:maxTokens}:{}),...(json?{responseMimeType:'application/json'}:{})}}:{})};}
   else {url=`${base}/api/chat`;h={...json_,...bearer};body={model,messages:[...(system?[{role:'system',content:system}]:[]),...turns],stream,...(json?{format:'json'}:{}),...(maxTokens?{options:{num_predict:maxTokens}}:{})};}
   return {url,protocol,init:{method:'POST',headers:{...h,...headers},body:JSON.stringify(body)}};
@@ -457,5 +459,32 @@ export function createProviderSelect({protocol='openai-chat',preset,baseURL,apiK
     const result=extractProviderText(JSON.parse(raw),{protocol:resolved});
     requireContract(result.complete&&!result.refusal,'PROVIDER','Selector response did not finish normally');
     return parseSelection(result.text);
+  };
+}
+
+/**
+ * A ready `propose` for createAIAssist over any request-capable protocol (server-side only; the key
+ * stays in request headers built here). The model's JSON is returned as-is: createAIAssist validates
+ * and grounds every proposal before anything is shown. Usage is reported when the provider sends it.
+ */
+export function createProviderPropose({protocol='openai-chat',preset,baseURL,apiKey,model,headers,tokenParameter,json=true,temperature=0,maxOutputTokens=1200,fetch:fetchImpl=globalThis.fetch}={}) {
+  buildProviderRequest({protocol,preset,baseURL,apiKey,model,tokenParameter,temperature,prompt:'probe',stream:false});
+  requireContract(typeof fetchImpl==='function','PROVIDER','fetch is required');
+  requireContract(Number.isSafeInteger(maxOutputTokens)&&maxOutputTokens>=64&&maxOutputTokens<=8000,'PROVIDER','maxOutputTokens must be 64–8000');
+  const resolved=preset!==undefined?'openai-chat':protocol;
+  return async (request,{signal,onUsage}={})=>{
+    requireContract(isRecord(request)&&typeof request.instruction==='string','ASSIST','Expected an assist request');
+    const {instruction,...payload}=request;
+    const {url,init}=buildProviderRequest({protocol,preset,baseURL,apiKey,model,headers,tokenParameter,json,temperature,stream:false,maxTokens:maxOutputTokens,system:instruction,prompt:JSON.stringify(payload)});
+    const response=await fetchImpl(url,{...init,signal,redirect:'error'});
+    if(!response.ok)throw Object.assign(new Error(`propose HTTP ${response.status}`),{code:'HTTP'});
+    const packet=JSON.parse(await boundedResponseText(response,signal));
+    const u=packet.usage;
+    if(u&&typeof onUsage==='function')onUsage({inputTokens:u.prompt_tokens??u.input_tokens,outputTokens:u.completion_tokens??u.output_tokens,totalTokens:u.total_tokens??((u.prompt_tokens??u.input_tokens??0)+(u.completion_tokens??u.output_tokens??0))});
+    const result=extractProviderText(packet,{protocol:resolved});
+    requireContract(result.complete&&!result.refusal,'PROVIDER','Propose response did not finish normally');
+    const raw=String(result.text).replace(/^\s*```(?:json)?\s*|\s*```\s*$/g,''),start=raw.indexOf('{'),end=raw.lastIndexOf('}');
+    requireContract(start>=0&&end>start,'ASSIST','Model did not return JSON');
+    return JSON.parse(raw.slice(start,end+1));
   };
 }

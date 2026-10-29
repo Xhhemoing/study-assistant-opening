@@ -21,6 +21,9 @@ export async function mountBlock(container, segment, options = {}) {
     for (const [k, v] of Object.entries(themeTokens(options.tokens)))
       element.style.setProperty(k, v);
   if (options.renderInline) element.renderInline = options.renderInline;
+  // Motion/sketch decoration; hosts may pass hints:null to keep blocks static.
+  const hintsOf = seg => options.hints === null ? null : options.hints ?? seg.hints ?? null;
+  element.hints = hintsOf(segment);
   element.sources = normalizeSources(options.sources ?? segment.document.sources ?? []);
   const listener = event => {
     try {
@@ -48,6 +51,7 @@ export async function mountBlock(container, segment, options = {}) {
       if (!next || next.kind !== 'block' || !next.document)
         throw new Error('update expects a block segment');
       element.dataset.segment = next.blockId;
+      element.hints = hintsOf(next);
       element.document = next.document;
     },
     unmount() {

@@ -1,3 +1,4 @@
+import {validateReviewTelemetry} from './usage.mjs';
 import {requireContract, cleanText, CATALOG} from './document.mjs';
 /** Public presentation reasoning is inert metadata, bounded independently of the answer. */
 export function validateDecision(value) {
@@ -20,6 +21,21 @@ export function validateDecision(value) {
   return {state: value.state, task: cleanText(value.task, 40), reason: cleanText(value.reason, 500),
     selected: list(value.selected, 8), alternatives: list(value.alternatives, 6),
     qualityWarnings: value.qualityWarnings.map(s => cleanText(s, 300)), extraModelCalls: value.extraModelCalls,
-    semantic: semantic === null ? null : {status: cleanText(semantic.status, 40), calls: semantic.calls,
-      ...(semantic.reason === undefined ? {} : {reason: cleanText(semantic.reason, 300)})}};
+    semantic: semantic === null ? null : validateReviewTelemetry(semantic),
+    ...presentationSummary(value.presentation), ...aiSummary(value.ai)};
+}
+const PRESETS = ['none', 'reveal', 'stagger', 'draw', 'step-through', 'highlight', 'count-up', 'write'];
+/** Optional, bounded decoration summary (motion preset per block, sketch). Invalid input is dropped, not fatal. */
+function presentationSummary(p) {
+  if (!p || typeof p !== 'object') return {};
+  const motion = {};
+  for (const [id, preset] of Object.entries(p.motion ?? {}).slice(0, 12)) if (typeof id === 'string' && id.length <= 120 && PRESETS.includes(preset)) motion[id] = preset;
+  return {presentation: {motion, sketch: p.sketch === true, sketchBlocks: (Array.isArray(p.sketchBlocks) ? p.sketchBlocks : []).filter(x => typeof x === 'string' && x.length <= 120).slice(0, 12),
+    motionReason: cleanText(String(p.motionReason ?? ''), 300), sketchReason: cleanText(String(p.sketchReason ?? ''), 300)}};
+}
+function aiSummary(a) {
+  if (!a || typeof a !== 'object' || typeof a.status !== 'string') return {};
+  const int = x => Number.isSafeInteger(x) && x >= 0 ? x : 0;
+  return {ai: {status: cleanText(a.status, 40), calls: Math.min(1, int(a.calls)), gateCalls: Math.min(1, int(a.gateCalls)), latencyMs: int(a.latencyMs),
+    ...(typeof a.task === 'string' ? {task: cleanText(a.task, 40)} : {}), accepted: Array.isArray(a.accepted) ? Math.min(8, a.accepted.length) : 0, rejected: Array.isArray(a.rejected) ? Math.min(12, a.rejected.length) : 0}};
 }

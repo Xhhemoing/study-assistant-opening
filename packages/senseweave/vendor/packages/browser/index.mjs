@@ -39,6 +39,7 @@ export async function mountSenseWeave(container, options = {}) {
       const result = runtime.render(message, {...override,sources,context:{...hostContext,...override.context}});
       session?.dispose(); session = null;
       element.showNotice('');
+      element.hints = result.hints ?? null;
       element.document = result.document; updateDecision(result);
       return result;
     },
@@ -51,7 +52,7 @@ export async function mountSenseWeave(container, options = {}) {
         onUpdate(state) {
           if (disposed) return;
           if (state.status === 'streaming') element.setPreview(state.document, state.pending);
-          else {element.document = state.document; updateDecision(state); if (state.reason) element.showNotice(state.reason);}
+          else {element.hints = state.hints ?? null; element.document = state.document; updateDecision(state); if (state.reason) element.showNotice(state.reason);}
           observe(onUpdate,state,onError);
         }
       });

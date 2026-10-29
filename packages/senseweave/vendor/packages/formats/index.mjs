@@ -1,9 +1,10 @@
-/** Lossless adapters from common, explicit data formats to the same validated component IR.
+/** Adapters from explicit data formats to validated IR with declared fidelity.
  * This is intentionally NOT full CommonMark, TeX, Mermaid or a document-file importer.
  */
 import {validateDocument, SCHEMA_VERSION, cleanText, ContractError} from '../core/document.mjs';
 import {validISODate, MAX_TABLE_ROWS} from '../core/extended.mjs';
 import {markdownBlockContext} from '../core/block-context.mjs';
+import {tableInlineCells} from './table-inline.mjs';
 const FORMATS=['auto','markdown','csv','tsv','json','diff','mermaid','latex'];
 // Size checks carry what was measured, so a fallback can name the limit and the real count.
 function need(ok,message,measure,limit,actual){
@@ -18,14 +19,21 @@ function formatFallbackMessage(format,e){
 }
 function pushFormatFallback(diagnostics,format,e,start,end){
   const over=Object.hasOwn(OVER,e?.measure)?{measure:e.measure,limit:e.limit,actual:e.actual}:{};
-  diagnostics.push({code:'FORMAT_FALLBACK',severity:'info',message:formatFallbackMessage(format,e),start,end,...over});
+  diagnostics.push({code:e?.code==='UNIT_CONFLICT'?'UNIT_CONFLICT':'FORMAT_FALLBACK',severity:'info',message:formatFallbackMessage(format,e),start,end,...over});
 }
 // A unit written on every value ("12%", "¥5", "1,234 ms") is as explicit as one in the header.
 // Short whitelist only: ambiguous suffixes (m = metre/minute/million, g, k, M, 万) never count.
 const PLAIN_NUMBER=/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?$/i;
 const AFFIXED=/^(\$|¥|￥|€|£)?\s?([+-]?(?:0|[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)(?:\.\d+)?)\s?(%|％|‰|ms|s|秒|分钟|小时|天|次|个|元|美元|kg|km|cm|mm|米|千米|°C|℃|KB|MB|GB|TB|tokens|人)?$/;
 const AFFIX_ALIAS={'％':'%','￥':'¥','℃':'°C'};
-function affixed(x){const m=typeof x==='string'&&x.trim().match(AFFIXED);if(!m)return null;const affix=m[1]??m[3]??'';return {affix:AFFIX_ALIAS[affix]??affix,value:Number(m[2].replace(/,/g,''))};}
+// Equivalence is explicit; no conversion, guessing or precedence between units.
+const UNIT_EQUIVALENTS={'美元':'$','元':'¥'};
+const unitKey = x => UNIT_EQUIVALENTS[AFFIX_ALIAS[x]??x]??AFFIX_ALIAS[x]??x;
+function affixed(x){
+  const m=typeof x==='string'&&x.trim().match(AFFIXED);if(!m)return null;
+  if(m[1]&&m[3]&&unitKey(m[1])!==unitKey(m[3]))throw new ContractError('UNIT_CONFLICT','Conflicting prefix and suffix units');
+  const affix=m[1]??m[3]??'';return {affix:AFFIX_ALIAS[affix]??affix,value:Number(m[2].replace(/,/g,''))};
+}
 /** The shared affix of a column, or undefined when any non-empty cell lacks it or differs. */
 function valueUnit(values){
   let unit;
@@ -37,7 +45,7 @@ function cellValue(x,c){
     if(x===null||x==='')return null;
     let n;
     if(typeof x==='number'||PLAIN_NUMBER.test(x))n=Number(x);
-    else {const a=affixed(x);need(a&&(a.affix===''||a.affix===c.unit),'Invalid quantitative cell');n=a.value;}
+    else {const a=affixed(x);if(a?.affix&&unitKey(a.affix)!==unitKey(c.unit))throw new ContractError('UNIT_CONFLICT','Cell and declared column units conflict');need(a,'Invalid quantitative cell');n=a.value;}
     need(Number.isFinite(n)&&Math.abs(n)<=1e9,'Number range exceeded');return n;
   }
   if(c.kind==='temporal'){if(x===null||x==='')return null;need(typeof x==='string'&&validISODate(x),'Temporal column requires YYYY-MM-DD');}
@@ -77,42 +85,53 @@ function sequenceRank(x){
   m=x.match(/^(?:周|星期)([一二三四五六日天])$/);
   return m?Math.min(WEEK.indexOf(m[1]),6)+1:null;
 }
+/** Integer years in strictly increasing order under a year-like header are an ordered axis, not categories. */
+function yearKind(label,values){
+  const v=values.filter(x=>x!==null).map(x=>typeof x==='string'&&/^\s*\d{4}\s*$/.test(x)?Number(x):x);
+  if(v.length<3||!/(?:年份|年度|^年$|学年|year)/i.test(label)||!v.every(x=>Number.isInteger(x)&&x>=1000&&x<=2999))return null;
+  return v.every((x,i)=>i===0||x>v[i-1])?'ordinal':null;
+}
 function sequenceKind(values){
   const v=values.filter(x=>x!==null);
   if(v.length<3||!v.every(x=>typeof x==='string'))return 'nominal';
   const ranks=v.map(x=>sequenceRank(x.trim()));
   return ranks.every((r,i)=>r!==null&&(i===0||r>ranks[i-1]))?'ordinal':'nominal';
 }
-function makeTable(header,rows,hints=[]) {
+function makeTable(header,rows,hints=[],inlineCells=null) {
   need(header.length<=12,'More than 12 columns','columns',12,header.length);need(rows.length<=MAX_TABLE_ROWS,'More than '+MAX_TABLE_ROWS+' data rows','rows',MAX_TABLE_ROWS,rows.length);
+  // Check even nominal columns: a contradictory value is never reliable numeric evidence.
+  for(const row of rows)for(const cell of row)affixed(cell);
   const columns=header.map((label,i)=>{
     const h=hints.find(x=>x.key===label||x.key===`c${i}`)||{};
     // Host declarations take precedence. A number is not automatically a measurement.
     const knownUnit=label.match(/[（(\[]([^()[\]（）]{1,30})[）)\]]$/)?.[1];
     const declared=h.unit??(knownUnit&&/^(?:ms|s|秒|分钟|小时|天|次|个|元|美元|%|％|‰|kg|g|m|cm|mm|km|米|千米|摄氏度|°C|℃|分|人|bytes|KB|MB|GB|TB|tokens|m\/s|m\/s²|m\/s\^2|m·s⁻¹|m·s⁻²|km\/h|N|kN|J|kJ|W|kW|Pa|kPa|V|mV|A|mA|Ω|Hz|mol|mol\/L|K|L|mL|克|千克|牛|焦|瓦|题|道|页|篇|周|课时|学时)$/i.test(knownUnit)?AFFIX_ALIAS[knownUnit]??knownUnit:undefined);
-    const unit=declared??(h.kind===undefined||h.kind==='quantitative'?valueUnit(rows.map(r=>r[i])):undefined);
+    const marked=inlineCells?.some(r=>r[i].markup);
+    const unit=declared??(!marked&&(h.kind===undefined||h.kind==='quantitative')?valueUnit(rows.map(r=>r[i])):undefined);
     const numeric=rows.every(r=>r[i]===null||typeof r[i]==='number');
-    const kind=h.kind??(unit?'quantitative':numeric&&!/(?:^id$|编号|代码|年份|year|code)/i.test(label)?'quantitative':sequenceKind(rows.map(r=>r[i])));
+    const kind=marked?'nominal':h.kind??(unit?'quantitative':numeric&&!/(?:^id$|编号|代码|年份|year|code)/i.test(label)?'quantitative':yearKind(label,rows.map(r=>r[i]))??sequenceKind(rows.map(r=>r[i])));
     return {key:`c${i}`,label,kind,...(unit?{unit}:{})};
   });
-  return {columns,rows:rows.map(r=>r.map((x,i)=>cellValue(x,columns[i])))};
+  return {columns,rows:rows.map(r=>r.map((x,i)=>cellValue(x,columns[i]))),...(inlineCells?{inlineRows:inlineCells.map(r=>r.map(c=>c.inline))}:{})};
 }
 function jsonBlock(text,hints) {
   const value=JSON.parse(text);
   if(Array.isArray(value)&&value.length&&value.every(v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.values(v).every(x=>x===null||['string','number','boolean'].includes(typeof x)))){
     const keys=[...new Set(value.flatMap(v=>Object.keys(v)))];
-    if(keys.length) return {type:'table',data:makeTable(keys,value.map(v=>keys.map(k=>Object.hasOwn(v,k)?v[k]:null)),hints)};
+    if(keys.length) return {_formatLosses:value.some(v=>keys.some(k=>!Object.hasOwn(v,k)))?['JSON 中未提供的字段在表中映射为 null；原始 JSON 保留以区分缺失与显式空值']:[],type:'table',data:makeTable(keys,value.map(v=>keys.map(k=>Object.hasOwn(v,k)?v[k]:null)),hints)};
   }
   return {type:'json',data:{value}};
 }
-// Mermaid has no shape/direction/style fields in the current diagram IR.
 // Recognize unsupported syntax so the whole adapter fails rather than erasing it.
+const MERMAID_SHAPES={'[': [']','rect'], '(': [')','round'], '{': ['}','diamond'], '([': ['])','stadium']};
+const MERMAID_STYLES={'-->':'solid','-.->':'dashed','==>':'thick'};
 const MERMAID_NODE=/^([\p{L}\p{N}_]{1,32})(?:(\(\(\(|\(\[|\[\[|\[\(|\(\(|\{\{|\[\/|\[\\|\[|\(|\{|>)([\s\S]*?)(\)\)\)|\]\)|\]\]|\)\]|\)\)|\}\}|\/\]|\\\]|\]|\)|\}))?$/u;
 const MERMAID_TEXT_LINK=/(--|==|-\.)\s*(?![->=.|\s])([^\n]*?)\s*(-{2,}>|={2,}>|\.-+>)/y;
 const MERMAID_LINK=/(<?(?:-{2,}|={2,}|-\.+-|~{3,})[>ox]?)(?:\s*\|([^|\n]*)\|)?/y;
 const MERMAID_RESERVED=/^(?:end|subgraph|click|style|classDef|class|linkStyle|direction|callback|call|href|accTitle|accDescr)$/;
 function mermaidLabel(raw=''){
   let t=raw.trim();if(/^"[\s\S]*"$/.test(t))t=t.slice(1,-1);
+  need(!t.includes('`'),'Unsupported Mermaid node syntax');
   // Mermaid resolves #decimal;/#name; and HTML entities before rendering; our
   // plain-label IR cannot carry that syntax without changing its meaning.
   need(!/(?:#(?:[0-9]+|x[0-9a-f]+|[a-z][a-z0-9]*);|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);)/i.test(t),'Encoded Mermaid labels require the original renderer');
@@ -125,24 +144,29 @@ function splitTop(text,sep){
   for(let i=0;i<text.length;i++){const c=text[i];if(quote){if(c==='"')quote=false;continue;}if(c==='"')quote=true;else if('[({'.includes(c))depth++;else if(')]}'.includes(c))depth=Math.max(0,depth-1);else if(c===sep&&!depth){out.push(text.slice(start,i));start=i+1;}}
   out.push(text.slice(start));return out;
 }
-/** Auditable flowchart subset: rectangular nodes, default/TD/TB direction and -->
- * only, edge labels, chains and `&`. Any unrepresentable shape, direction, line
+/** Auditable flowchart subset: five directions, four shapes, three arrow styles,
+ * edge labels, chains and `&`. Any unrepresentable shape, direction, line
  * style, directive or metadata fails the whole adapter; nothing is dropped.
  */
 export function parseMermaid(text) {
   const statements=[];
   for(const line of text.trim().split(/\r?\n/)){
     const t=line.trim();if(!t)continue;
-    if(t.startsWith('%%')){need(!t.startsWith('%%{'),'Mermaid init directives are not supported');continue;}
+    if(t.startsWith('%%')){need(!t.startsWith('%%{'),'Mermaid init directives are not supported');need(false,'Mermaid comments are not supported');}
     statements.push(...splitTop(t,';').map(s=>s.trim()).filter(Boolean));
   }
-  need(/^(?:flowchart|graph)(?:\s+(?:TD|TB))?$/.test(statements.shift()??''),'Only default/TD/TB Mermaid direction is representable');
-  const labels=new Map(),raw=[];
+  const header=(statements.shift()??'').match(/^(?:flowchart|graph)(?:\s+(TD|TB|LR|RL|BT))?$/);
+  need(header,'Only default/TD/TB Mermaid direction is representable');
+  const labels=new Map(),shapes=new Map(),raw=[];
   const node=src=>{
     const t=src.trim();need(!t.includes(':::')&&!t.includes('@{'),'Mermaid classes and shape metadata are not supported');
     const m=t.match(MERMAID_NODE);need(m&&!MERMAID_RESERVED.test(m[1]),'Unsupported Mermaid node syntax');
     if(m[2]!==undefined){
-      need(m[2]==='['&&m[4]===']','Only rectangular Mermaid nodes are representable');
+      const shape=MERMAID_SHAPES[m[2]];
+      need(shape&&shape[0]===m[4],'Only rectangular Mermaid nodes are representable');
+      need(!/[\[\]{}()<>]/.test(m[3]),'Unsupported Mermaid node syntax');
+      need(!shapes.has(m[1])||shapes.get(m[1])===shape[1],'Conflicting node labels');
+      shapes.set(m[1],shape[1]);
       const label=mermaidLabel(m[3]);need(label,'Empty Mermaid node label');
       const old=labels.get(m[1]);need(old===undefined||old===m[1]||old===label,'Conflicting node labels');labels.set(m[1],label);
     } else if(!labels.has(m[1]))labels.set(m[1],m[1]);
@@ -158,11 +182,12 @@ export function parseMermaid(text) {
       if(!depth&&'-=<~'.includes(c)){
         let m,arrow,label;
         MERMAID_TEXT_LINK.lastIndex=i;
-        if((m=MERMAID_TEXT_LINK.exec(st))){need({'--':'-','==':'=','-.':'.'}[m[1]]===m[3][0],'Mismatched Mermaid link');arrow=m[3][0]==='.'?'-.->':m[3];label=m[2];}
+        if((m=MERMAID_TEXT_LINK.exec(st))){need({'--':'-','==':'=','-.':'.'}[m[1]]===m[3][0],'Mismatched Mermaid link');arrow=m[3]==='.->'?'-.->':m[3];label=m[2];}
         else {MERMAID_LINK.lastIndex=i;if((m=MERMAID_LINK.exec(st))){arrow=m[1];label=m[2];}}
         if(m){
-          need(arrow==='-->','Only ordinary Mermaid arrows are representable');
-          groups.push(st.slice(start,i));links.push(mermaidLabel(label));i=start=m.index+m[0].length;continue;
+          need(Object.hasOwn(MERMAID_STYLES,arrow),'Only ordinary Mermaid arrows are representable');
+          need(!/[<>]/.test(label??''),'Unsupported Mermaid node syntax');
+          groups.push(st.slice(start,i));links.push({label:mermaidLabel(label),style:MERMAID_STYLES[arrow]});i=start=m.index+m[0].length;continue;
         }
       }
       if('[({'.includes(c)||(c==='>'&&!depth))depth++;else if(')]}'.includes(c))depth=Math.max(0,depth-1);
@@ -170,7 +195,7 @@ export function parseMermaid(text) {
     }
     groups.push(st.slice(start));
     const ids=groups.map(g=>splitTop(g,'&').map(node));
-    for(let k=0;k<links.length;k++)for(const from of ids[k])for(const to of ids[k+1])raw.push({from,to,label:links[k]});
+    for(let k=0;k<links.length;k++)for(const from of ids[k])for(const to of ids[k+1])raw.push({from,to,...links[k]});
   }
   // Mermaid IDs may be Chinese; non-ASCII IDs get stable generated IDs, the text stays as label.
   const ascii=new Set([...labels.keys()].filter(k=>/^[A-Za-z0-9][A-Za-z0-9_]{0,31}$/.test(k)));
@@ -178,9 +203,9 @@ export function parseMermaid(text) {
   for(const k of labels.keys()){if(ascii.has(k))ids.set(k,k);else{let id;do id=`n${++n}`;while(ascii.has(id));ids.set(k,id);}}
   need(labels.size<=12,'Too many Mermaid nodes','nodes',12,labels.size);
   const seen=new Set(),edges=[];
-  for(const e of raw){const key=[e.from,e.to,e.label].join('\u0000');if(seen.has(key))continue;seen.add(key);edges.push({from:ids.get(e.from),to:ids.get(e.to),relation:'sequence',...(e.label?{label:e.label}:{})});}
+  for(const e of raw){const key=[e.from,e.to,e.label,e.style].join('\u0000');if(seen.has(key))continue;seen.add(key);edges.push({from:ids.get(e.from),to:ids.get(e.to),relation:'sequence',style:e.style,...(e.label?{label:e.label}:{})});}
   need(edges.length<=20,'Too many Mermaid edges','edges',20,edges.length);
-  return {nodes:[...labels].map(([k,label])=>({id:ids.get(k),label})),edges};
+  return {direction:header[1]??'TD',nodes:[...labels].map(([k,label])=>({id:ids.get(k),label,shape:shapes.get(k)??'rect'})),edges};
 }
 // Closed tables only: a command missing here fails the whole formula (no macros, links or HTML).
 const TEX_SYMBOLS={alpha:'α',beta:'β',gamma:'γ',delta:'δ',epsilon:'ϵ',varepsilon:'ε',zeta:'ζ',eta:'η',theta:'θ',vartheta:'ϑ',iota:'ι',kappa:'κ',lambda:'λ',mu:'μ',nu:'ν',xi:'ξ',omicron:'ο',pi:'π',varpi:'ϖ',rho:'ρ',varrho:'ϱ',sigma:'σ',varsigma:'ς',tau:'τ',upsilon:'υ',phi:'ϕ',varphi:'φ',chi:'χ',psi:'ψ',omega:'ω',
@@ -240,24 +265,6 @@ function fromFormat(format,text,hints) {
   if(format==='diff'){need(/^@@ |^diff --git |^--- /m.test(text),'Expected unified diff');return {type:'diff',data:{patch:text}};}
   throw new Error('Unsupported adapter');
 }
-function tableCells(line){
-  need(!line.includes('`'),'Code spans in table cells remain Markdown');
-  // Bare component cells cannot preserve Markdown emphasis, links, TeX or raw HTML.
-  // Keep these tables in the host renderer rather than expose delimiters as labels.
-  const unescaped=line.replace(/\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g,'');
-  need(!/[`*_~$<>]/.test(unescaped)&&!/&(?:#\d+|#x[0-9a-f]+|[a-z]+);/i.test(unescaped)&&!/[\[\]]/.test(unescaped)&&!/\\[a-zA-Z([]/.test(line),'Inline markup requires the original Markdown renderer');
-  const cells=[],s=line.trim();let value='';
-  for(let i=0;i<s.length;i++){
-    const c=s[i];
-    if(c==='\\'&&i+1<s.length){const next=s[i+1];if(/[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(next)){value+=next;i++;continue;}}
-    if(c==='|'){cells.push(value.trim());value='';}else value+=c;
-  }
-  cells.push(value.trim());
-  if(line.trim().startsWith('|'))cells.shift();
-  // An escaped final pipe belongs to the last cell, not an outer delimiter.
-  if(value===''&&line.trim().endsWith('|'))cells.pop();
-  return cells;
-}
 const SEP=/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}={}) {
   cleanText(text,60000);need(FORMATS.includes(inputFormat),'Unknown inputFormat');need(Array.isArray(columns)&&columns.length<=12,'Invalid column hints');
@@ -266,7 +273,8 @@ export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}=
   const add=(format,source,start,end,raw)=>{
     try {const block=raw??fromFormat(format,source,columns);block.id=`auto_${start}_${format}`;
       const checked=validateDocument({schemaVersion:SCHEMA_VERSION,id:'probe',revision:1,title:'',blocks:[block]}).blocks[0];
-      candidates.push({id:block.id,start,end,format,block:checked,source:text.slice(start,end)});
+      const losses=format==='mermaid'?['节点形状、布局方向和箭头样式未完整保留；所有关系映射为 sequence']:(block._formatLosses??[]);
+      candidates.push({id:block.id,start,end,format,block:checked,source:text.slice(start,end),fidelity:{level:losses.length?'lossy':'exact',losses},sourceRef:{kind:'text',start,end}});
     }catch(e){pushFormatFallback(diagnostics,format,e,start,end);}
   };
   if(!['auto','markdown'].includes(inputFormat)){add(inputFormat,text,0,text.length);return {candidates,diagnostics};}
@@ -291,7 +299,10 @@ export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}=
         // GFM permits body rows without a pipe. We do not pad missing cells or
         // enhance a prefix and reclassify the final row as prose.
         need(!next||!next.text.trim()||next.kind==='fence'||/^ {0,3}#{1,6}\s/.test(next.text),'Ambiguous table continuation');
-        const header=tableCells(l.text),rows=lines.slice(i+2,j).map(x=>tableCells(x.text));need(header.every(Boolean)&&new Set(header).size===header.length,'Invalid headers');need(rows.length>0&&rows.every(r=>r.length===header.length),'Ragged table');add('markdown-table',text.slice(l.start,lines[j-1].end),l.start,lines[j-1].end,{type:'table',data:makeTable(header,rows,columns)});
+        const heads=tableInlineCells(l.text),cells=lines.slice(i+2,j).map(x=>tableInlineCells(x.text));
+        const header=heads.map(c=>c.text),rows=cells.map(r=>r.map(c=>c.text));need(header.every(Boolean)&&new Set(header).size===header.length,'Invalid headers');need(rows.length>0&&rows.every(r=>r.length===header.length),'Ragged table');
+        const data=makeTable(header,rows,columns,cells);data.columns.forEach((c,i)=>{c.inline=heads[i].inline;});
+        add('markdown-table',text.slice(l.start,lines[j-1].end),l.start,lines[j-1].end,{type:'table',data});
       }catch(e){pushFormatFallback(diagnostics,'markdown-table',e,l.start,lines[j-1].end);}i=j-1;continue;
     }
     if(l.text.trim()==='$$'||l.text.trim()==='\\['){const close=l.text.trim()==='$$'?'$$':'\\]';let j=i+1;while(j<lines.length&&lines[j].kind==='root'&&lines[j].text.trim()!==close)j++;if(j<lines.length&&lines[j].kind==='root'&&lines[j].text.trim()===close){add('latex',text.slice(l.end,lines[j].start),l.start,lines[j].end);i=j;}}
@@ -301,3 +312,4 @@ export function discoverFormats(text,{inputFormat='auto',columns=[],final=true}=
   return {candidates,diagnostics};
 }
 export const INPUT_FORMATS=Object.freeze(FORMATS);
+export {discoverProseStructures} from './prose.mjs';

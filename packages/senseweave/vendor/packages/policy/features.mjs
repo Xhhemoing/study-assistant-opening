@@ -31,7 +31,7 @@ export function extractFeatures(candidate, ctx) {
  */
 export function scoreCandidate(candidate,ctx,preferences) {
   const f=extractFeatures(candidate,ctx),type=f.type;
-  const reasons=['已识别完整结构，组件数据可由原文直接获得'];
+  const reasons=[candidate.format==='authored'?'已校验显式组件结构；与正文的事实对应仍需核验':'已识别完整结构，组件数据可由原文直接获得'];
   let value=W.base;
   if(type==='table'){
     value=f.markdownTable?W.markdownTable:W.base;

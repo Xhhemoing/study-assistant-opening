@@ -13,14 +13,14 @@ export function negotiateCapabilities(input = {}) {
   return {schemaVersions: versions.filter(v => v === SCHEMA_VERSION), rich: input.rich !== false && versions.includes(SCHEMA_VERSION), components: [...new Set(['prose', ...types.filter(t => typeof t === 'string' && Object.hasOwn(CATALOG, t))])], maxInteractiveBlocks: max};
 }
 /** Unsupported components become readable text, never disappear. The source envelope remains intact. */
-export function applyCapabilities(input, capabilities, sources = [], {partial = false} = {}) {
+export function applyCapabilities(input, capabilities, sources = [], {partial = false, disabledIds = []} = {}) {
   const registry = normalizeSources(sources);
   const doc = validateDocument(input, {sources: registry, partial});
   const cap = negotiateCapabilities(capabilities);
   const wholeText = () => projectText(doc, {includeOriginal: false});
   if (!cap.rich) return {document: validateDocument({...plainDocument(wholeText(), doc.id, doc.title, {format: 'text'}), originalText:doc.originalText}, {sources: registry}), downgraded: doc.blocks.filter(b => b.type !== 'prose').length};
   let count = 0;
-  const disabled = new Set(doc.blocks.filter(b => b.type !== 'prose' && (!cap.components.includes(b.type) || ++count > cap.maxInteractiveBlocks)).map(b => b.id));
+  const disabled = new Set(doc.blocks.filter(b => b.type !== 'prose' && (disabledIds.includes(b.id) || !cap.components.includes(b.type) || ++count > cap.maxInteractiveBlocks)).map(b => b.id));
   if (!disabled.size) return {document: doc, downgraded: 0};
   const scope = documentScope(doc);
   // Freeze only bindings that depend on downgraded blocks; remaining calculators stay interactive.

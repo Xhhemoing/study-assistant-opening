@@ -1,3 +1,4 @@
+import {validateReviewTelemetry} from './usage.mjs';
 import {validateDecision} from './decision.mjs';
 import {requireContract, validateDocument, cleanText, validId} from './document.mjs';
 export function createRunState(runId) {
@@ -65,7 +66,7 @@ export function reduceEvent(state, event, {sources = []} = {}) {
       requireContract(usage === null || usage &&
         ['prompt_tokens', 'completion_tokens', 'total_tokens'].every(k => Number.isSafeInteger(usage[k]) && usage[k] >= 0), 'METRICS', '用量指标不合法');
       s.metrics = {durationMs: m.durationMs, firstTextMs: m.firstTextMs, componentCount: m.componentCount, warningCount: m.warningCount,
-        usage: usage ? {prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens} : null};
+        usage: usage ? {prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, total_tokens: usage.total_tokens} : null, ...(m.review===undefined?{}:{review:m.review===null?null:validateReviewTelemetry(m.review)})};
       break;
     }
     case 'run.notice':
