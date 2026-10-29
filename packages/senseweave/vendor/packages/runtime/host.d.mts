@@ -11,13 +11,17 @@ export type BlockSegment = {
   type: Exclude<Block['type'], 'prose'>;
   blockId: string;
   reasons: string[];
+  /** Present on supplementary views: shown in place of its span ('replace') or after it ('append', source ''). */
+  placement?: 'replace' | 'append';
+  /** 'replace' only: the verbatim span the block stands in for (equals source); offer it as “查看原文”. */
+  original?: string;
   document: PresentationDocument;
 };
 export type OutputSegment = TextSegment | BlockSegment;
 /** Ordered, lossless split of envelope.content: joining every segment's source returns the content. */
 export function segmentOutput(
   envelope: OutputEnvelope,
-  options?: {sources?: Source[]}
+  options?: {sources?: Source[]; /** Overrides the envelope's own choice for supplementary views. */ placement?: 'replace' | 'append'}
 ): OutputSegment[];
 export type TeachingPresetName =
   | 'hint'
@@ -42,6 +46,8 @@ export interface HostAdapterOptions {
   /** Answers shorter than this stay text (counted as skippedShort). Default 0. */
   minChars?: number;
   sources?: Source[];
+  /** Supplementary views in place of their span ('replace', default) or after it ('append'). */
+  placement?: 'replace' | 'append';
   preferences?: {
     maxEntries?: number;
     initial?: Record<string, {positive: number; negative: number}>;

@@ -31,7 +31,7 @@
 | `OPENING_CHAT_PROSE` | true | 1/1 | 10-13 | 两服务未设；Web 匿名能力 true |
 | `OPENING_CHAT_SENSEWEAVE` | shadow | 1/1 | 10-25 | 两服务未设；匿名响应 off 受身份限制 |
 | `OPENING_CHAT_SENSEWEAVE_BETA_USERS` | 空名单 | 1/1 | 10-25 | Web 启动环境未设；只核验 presence/count，不输出账号 |
-| `OPENING_CHAT_SENSEWEAVE_GATES` | sw-gates-v0-20261024 | 1/1 | 10-25 | Web 未设；公开能力返回该默认版本 |
+| `OPENING_CHAT_SENSEWEAVE_GATES` | sw-gates-v1-20261029 | 1/1 | 10-25 | Web 未设；公开能力返回该默认版本 |
 | `OPENING_ADAPTIVE_PLANNING` | false | 1/1 | 10-15 | 两服务未设；Web 匿名能力 false |
 | `OPENING_SYSTEM_QUERY` | true | 1/1 | 10-21 | 两服务未设；匿名响应 false 受身份限制 |
 | `OPENING_RELEASE` | production 时 true | 4/4 | 10-17 | 两服务启动值 0；公开注册能力 true |

@@ -6,13 +6,15 @@ function rec(x) {need(x && typeof x==='object'&&!Array.isArray(x),'Expected obje
 function num(x) {need(typeof x==='number'&&Number.isFinite(x)&&Math.abs(x)<=1e9,'Invalid number');return x;}
 function scalar(x) {need(x===null||['string','number','boolean'].includes(typeof x),'Only scalar table cells');if(typeof x==='number')num(x);if(typeof x==='string')text(x);return x;}
 export const MAX_TABLE_ROWS=2000;
-export const EXTENDED_CATALOG=Object.freeze({table:'可检索、排序的原始数据表',plot:'有语义和单位的折线/散点图',json:'只读结构化数据树',diff:'只读统一差异（不会应用补丁）',details:'按需展开的补充内容'});
+export const EXTENDED_CATALOG=Object.freeze({table:'可检索、排序的原始数据表',plot:'有语义和单位的折线/散点图',json:'只读结构化数据树',diff:'只读统一差异（不会应用补丁）',details:'按需展开的补充内容',derivation:'逐行板书推导（只展示原文已有的推导行，可能含答案）'});
 export function normalizeExtended(type,d) {
   if(type==='table') {
     const seen=new Set();
     const columns=arr(d.columns,12,1).map(c=>{rec(c);const key=text(c.key,80);need(key&&!seen.has(key)&&!['__proto__','constructor','prototype'].includes(key),'Invalid column key');seen.add(key);const kind=c.kind??'nominal';need(['nominal','ordinal','quantitative','temporal'].includes(kind),'Invalid measurement kind');return {key,label:text(c.label??key,100),kind,...(c.unit===undefined?{}:{unit:text(c.unit,50)})};});
     const rows=arr(d.rows,MAX_TABLE_ROWS,1).map(r=>arr(r,columns.length,columns.length).map((v,i)=>{scalar(v);if(v!==null&&columns[i].kind==='quantitative')num(v);if(v!==null&&columns[i].kind==='temporal')need(typeof v==='string'&&validISODate(v),'Use explicit ISO dates');return v;}));
-    return {columns,rows};
+    columns.forEach((c,i)=>{if(d.columns[i].inline!==undefined)c.inline=text(d.columns[i].inline,2000);});
+    const inlineRows=d.inlineRows===undefined?undefined:arr(d.inlineRows,rows.length,rows.length).map(r=>arr(r,columns.length,columns.length).map(v=>v===null?null:text(v,2000)));
+    return {columns,rows,...(inlineRows===undefined?{}:{inlineRows})};
   }
   if(type==='plot') {
     need(['line','scatter'].includes(d.kind),'Only line or scatter');
@@ -26,6 +28,7 @@ export function normalizeExtended(type,d) {
   }
   if(type==='json') {const s=JSON.stringify(d.value);need(s!==undefined&&s.length<=24000,'JSON viewer budget exceeded');return {value:JSON.parse(s)};}
   if(type==='diff') return {patch:text(d.patch,20000)};
+  if(type==='derivation') return {lines:arr(d.lines,16,2).map(x=>{rec(x);const line={text:text(x.text,400)};need(line.text.trim(),'Empty derivation line');if(x.note!==undefined)line.note=text(x.note,200);return line;})};
   if(type==='details') return {items:arr(d.items,12,1).map(x=>({summary:text(rec(x).summary,200),body:text(x.body,6000)}))};
   return null;
 }
@@ -54,5 +57,6 @@ export function extendedText(type,d) {
   if(type==='json')return JSON.stringify(d.value,null,2);
   if(type==='diff')return d.patch;
   if(type==='details')return d.items.map(i=>`${i.summary}\n${i.body}`).join('\n\n');
+  if(type==='derivation')return d.lines.map(l=>l.text+(l.note?`（${l.note}）`:'')).join('\n');
   return '';
 }

@@ -6,3 +6,5 @@ export * from './policy/index.mjs';
 export * from './formats/index.mjs';
 export * from './runtime/semantic.mjs';
 export * from './runtime/host.mjs';
+export * from './runtime/assist.mjs';
+export * from './policy/motion.mjs';

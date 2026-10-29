@@ -12,11 +12,13 @@ export type MathExpression =
   | {op: 'text' | 'number' | 'symbol'; value: string}
   | {op: 'row' | 'frac' | 'sup' | 'sub' | 'sqrt'; args: MathExpression[]};
 export type BlockData = {
-  table: {columns: {key: string; label: string; kind?: 'nominal' | 'ordinal' | 'quantitative' | 'temporal'; unit?: string}[]; rows: (string | number | boolean | null)[][]};
+  table: {columns: {key: string; label: string; kind?: 'nominal' | 'ordinal' | 'quantitative' | 'temporal'; unit?: string; /** Original Markdown inline source; label stays plain text. */ inline?: string}[]; rows: (string | number | boolean | null)[][]; /** Original inline source, aligned with rows and columns. */ inlineRows?: (string | null)[][]};
   plot: {kind: 'line' | 'scatter'; xKind?: 'quantitative' | 'temporal' | 'ordinal'; xLabel?: string; yLabel?: string; yUnit: string; points: {x: string | number; y: number | null}[]; note?: string};
   json: {value: JSONValue};
   diff: {patch: string};
   details: {items: {summary: string; body: string}[]};
+  /** Line-by-line board derivation. Every line is verbatim answer text; may reveal a final answer, so hint-style hosts should leave it out of capabilities.components. */
+  derivation: {lines: {text: string; note?: string}[]};
   prose: Record<string, never>;
   callout: Record<string, never>;
   steps: {items: string[]};
@@ -26,8 +28,9 @@ export type BlockData = {
   chart: {unit: string; rows: {label: string; value: number}[]; note?: string};
   matrix: {matrix: Matrix2};
   diagram: {
-    nodes: {id: string; label: string}[];
-    edges: {from: string; to: string; relation: 'sequence' | 'dependency' | 'hypothesis'; label?: string}[];
+    direction?: 'TD' | 'TB' | 'LR' | 'RL' | 'BT';
+    nodes: {id: string; label: string; shape?: 'rect' | 'round' | 'diamond' | 'stadium'}[];
+    edges: {from: string; to: string; relation: 'sequence' | 'dependency' | 'hypothesis'; label?: string; style?: 'solid' | 'dashed' | 'thick'}[];
   };
   evidence: {
     claims: {
@@ -69,6 +72,8 @@ export type Block = {
     format?: K extends 'prose' | 'callout' ? 'text' | 'markdown' : never;
     refs?: string[];
     qualifiers?: string[];
+    /** Runtime-only (placement 'replace'): the verbatim answer span this component stands in for. Never honoured on prose. */
+    original?: string;
     data: BlockData[K];
   };
 }[keyof BlockData];
@@ -147,7 +152,7 @@ export function isRecord(input: unknown): input is Record<string, unknown>;
 
 export function validateGraph(data: unknown): BlockData['diagram'];
 export function layoutDiagram(data: BlockData['diagram']): {
-  nodes: {id: string; label: string; x: number; y: number}[];
+  nodes: (BlockData['diagram']['nodes'][number] & {x: number; y: number})[];
   width: number;
   height: number;
   cyclic: boolean;

@@ -343,6 +343,20 @@ input[type='range'] {
 details[open] > summary {
   margin-bottom: 10px;
 }
+/* Placement 'replace': verbatim source of a component, collapsed under it. */
+details.sw-original {
+  margin-top: 8px;
+}
+details.sw-original > summary {
+  font-size: 13px;
+}
+.sw-original-text {
+  white-space: pre-wrap;
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--sw-line);
+  color: var(--sw-muted);
+}
 table {
   border-collapse: collapse;
   width: 100%;
@@ -955,4 +969,195 @@ header .warning {
 :host([chrome='none']) .body > section > h2:first-child {
   font-size: 15px;
   margin-bottom: 6px;
+}
+/*
+ * Controlled motion presets (data-motion set once per block by the runtime hints).
+ * Every rule animates FROM a hidden/plain state TO the normal resting style, so with
+ * reduced motion (rules above) or no animation support the block is simply complete.
+ */
+section[data-motion='reveal'] {
+  animation: sw-in 0.42s ease-out backwards;
+}
+section[data-motion='stagger'] li,
+section[data-motion='stagger'] tbody tr {
+  animation: sw-in 0.36s ease-out backwards;
+  animation-delay: calc(var(--sw-i, 0) * 70ms);
+}
+section[data-motion='step-through'] > ol > li {
+  animation: sw-step 0.9s ease-in-out backwards;
+  animation-delay: calc(var(--sw-i, 0) * 420ms);
+  border-radius: 6px;
+}
+@keyframes sw-step {
+  0% {
+    opacity: 0.25;
+    background: transparent;
+  }
+  35% {
+    opacity: 1;
+    background: color-mix(in srgb, var(--sw-accent) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+section[data-motion='draw'] svg polyline,
+section[data-motion='draw'] svg path.sw-rough,
+section[data-motion='draw'] svg .plot-line {
+  stroke-dasharray: 1;
+  animation: sw-draw 0.9s ease-out backwards;
+}
+section[data-motion='draw'] svg rect[data-value] {
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: sw-grow 0.6s ease-out backwards;
+  animation-delay: calc(var(--sw-i, 0) * 60ms);
+}
+section[data-motion='draw'] svg circle {
+  animation: sw-fade 0.3s ease-out backwards;
+  animation-delay: 0.6s;
+}
+@keyframes sw-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes sw-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+@keyframes sw-fade {
+  from {
+    opacity: 0;
+  }
+}
+section[data-motion='highlight'] .sw-key,
+section[data-motion='highlight'] table th {
+  animation: sw-pulse 1.2s ease-in-out 2 backwards;
+}
+section[data-motion='highlight'] svg rect.sw-key {
+  stroke: var(--sw-accent);
+  stroke-width: 2;
+}
+@keyframes sw-pulse {
+  50% {
+    filter: brightness(1.12);
+    outline: 2px solid color-mix(in srgb, var(--sw-accent) 45%, transparent);
+  }
+}
+section[data-motion='write'] .sw-derivation > li {
+  animation: sw-write 0.7s steps(18, end) backwards;
+  animation-delay: calc(var(--sw-i, 0) * 650ms);
+}
+@keyframes sw-write {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+/* Board derivation (板书推导). Hand font only from the system or the host (--sw-hand-font). */
+.sw-derivation {
+  list-style: none;
+  margin: 8px 0;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--sw-figure-bg);
+  counter-reset: sw-line;
+}
+.sw-derivation > li {
+  position: relative;
+  padding: 3px 0 3px 2.2em;
+  counter-increment: sw-line;
+  font-variant-numeric: tabular-nums;
+}
+.sw-derivation > li::before {
+  content: counter(sw-line);
+  position: absolute;
+  left: 0;
+  color: var(--sw-muted);
+  font-size: 0.8em;
+  line-height: 2.2;
+}
+.sw-math-inline {
+  font-family: 'Cambria Math', 'STIX Two Math', 'Latin Modern Math', 'Times New Roman', serif;
+  font-style: italic;
+}
+.sw-derivation-note {
+  margin-left: 0.8em;
+}
+/* Sketch (hand-drawn) style: deterministic rough strokes from motion.mjs, system fonts only. */
+section[data-sketch] {
+  position: relative;
+  border-color: transparent;
+  font-family: var(
+    --sw-hand-font,
+    'Kaiti SC',
+    'STKaiti',
+    'KaiTi',
+    'Xingkai SC',
+    'Segoe Print',
+    'Bradley Hand',
+    'Comic Sans MS',
+    cursive,
+    inherit
+  );
+}
+section[data-sketch] .sw-sketch-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+section[data-sketch] .sw-sketch-frame path {
+  stroke: var(--sw-muted-line);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+section[data-sketch] svg text {
+  font-family: inherit;
+}
+section[data-sketch] svg .sw-rough,
+section[data-sketch] svg .sw-rough-line {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+section[data-sketch] svg path[data-rough='rect'] {
+  stroke: var(--sw-figure-ink);
+  stroke-width: 1.3;
+}
+section[data-sketch] .sw-derivation {
+  background: color-mix(in srgb, var(--sw-figure-bg) 70%, var(--sw-soft));
+}
+/* The frame uses non-scaling strokes (dash lengths would follow screen space), so it fades in instead of drawing. */
+section[data-sketch][data-motion] .sw-sketch-frame {
+  animation: sw-fade 0.6s ease-out backwards;
+}
+/* Annotations: verbatim phrases, underlined or circled like a teacher's pen. */
+mark.sw-annot {
+  color: inherit;
+  background: linear-gradient(var(--sw-warn-line), var(--sw-warn-line)) no-repeat 0 100% / 100% 2px;
+  padding-bottom: 1px;
+}
+mark.sw-annot[data-kind='circle'] {
+  background: none;
+  border: 1.5px solid var(--sw-warn-line);
+  border-radius: 45% 55% 50% 48% / 60% 45% 55% 40%;
+  padding: 0 3px;
+}
+mark.sw-annot[data-kind='underline'] {
+  animation: sw-underline 0.6s ease-out backwards;
+  animation-delay: calc(0.3s + var(--sw-i, 0) * 250ms);
+}
+@keyframes sw-underline {
+  from {
+    background-size: 0% 2px;
+  }
 }
