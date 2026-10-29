@@ -139,7 +139,7 @@ it("enforces persisted retest timing on direct and reserved issuance while prese
     VALUES (${retestId},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2,clock_timestamp()+interval '2 days')`;
   const lesson = await f.repo.create(fixture.scope, { ...f.input, retestId });
   const attempts = createOpeningLearningAttemptRepository(fixture.sql), reserved = createSpanReservedService(fixture.sql);
-  const problem = listSpanReservedProblems()[0]!;
+  const problem = listSpanReservedProblems("retest")[0]!;
   const direct = { sessionId: lesson.sessionId, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId, problemId: problem.id, version: Number(problem.version) } };
   const issue = { sessionId: lesson.sessionId, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" };
   const tooEarly = { code: "VALIDATION", businessCode: "RETEST_SUBMIT_TOO_EARLY" };
@@ -148,18 +148,37 @@ it("enforces persisted retest timing on direct and reserved issuance while prese
   expect(await attempts.listByActivity(fixture.scope, lesson.activityId)).toEqual([]);
   await fixture.sql`UPDATE opening_retest_activities SET not_before_at=clock_timestamp()-interval '1 day',recommended_at=clock_timestamp()+interval '1 day' WHERE id=${retestId}`;
   await expect(attempts.create(fixture.scope, direct)).rejects.toMatchObject(tooEarly);
+  await expect(reserved.issue(fixture.scope, issue)).rejects.toMatchObject(tooEarly);
+  expect(await attempts.listByActivity(fixture.scope, lesson.activityId)).toEqual([]);
   await fixture.sql`UPDATE opening_retest_activities SET recommended_at=clock_timestamp()-interval '1 day',scheduled_start_at=clock_timestamp()+interval '1 hour' WHERE id=${retestId}`;
   await expect(attempts.create(fixture.scope, direct)).rejects.toMatchObject(tooEarly);
+  await expect(reserved.issue(fixture.scope, issue)).rejects.toMatchObject(tooEarly);
+  expect(await attempts.listByActivity(fixture.scope, lesson.activityId)).toEqual([]);
   await fixture.sql`UPDATE opening_retest_activities SET scheduled_start_at=clock_timestamp()-interval '1 minute' WHERE id=${retestId}`;
   const first = await attempts.create(fixture.scope, direct), second = await reserved.issue(fixture.scope, issue);
   expect(first.sessionId).toBe(lesson.sessionId);
   expect(second.sessionId).toBe(lesson.sessionId);
   await fixture.sql`UPDATE opening_retest_activities SET status='cancelled',not_before_at=clock_timestamp()+interval '2 days' WHERE id=${retestId}`;
-  expect((await attempts.create(fixture.scope, direct)).id).toBe(first.id);
-  expect((await reserved.issue(fixture.scope, issue)).id).toBe(second.id);
+  expect(await attempts.create(fixture.scope, direct)).toEqual(first);
+  expect(await reserved.issue(fixture.scope, issue)).toEqual(second);
   await expect(attempts.create(fixture.scope, { ...direct, clientKey: randomUUID() })).rejects.toMatchObject({ code: "VALIDATION", message: "延迟复测不属于本课程、尚未接受或已结束。" });
   await expect(reserved.issue(fixture.scope, { ...issue, clientKey: randomUUID() })).rejects.toMatchObject({ code: "VALIDATION" });
+  expect((await attempts.listByActivity(fixture.scope, lesson.activityId)).map(attempt => attempt.id).sort()).toEqual([first.id, second.id].sort());
 }, 45_000);
+it("rejects a fixed validation question for a persisted retest lesson even after all timing gates open", async () => {
+  const f = await seed(), retestId = randomUUID();
+  await fixture.sql`INSERT INTO opening_retest_activities
+    (id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,not_before_at,recommended_at,scheduled_start_at)
+    VALUES (${retestId},${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2,clock_timestamp()-interval '1 day',clock_timestamp()-interval '1 day',clock_timestamp()-interval '1 minute')`;
+  const lesson = await f.repo.create(fixture.scope, { ...f.input, retestId });
+  const attempts = createOpeningLearningAttemptRepository(fixture.sql);
+  const problem = listSpanReservedProblems("validation")[0]!;
+  await expect(attempts.create(fixture.scope, {
+    sessionId: lesson.sessionId, clientKey: randomUUID(),
+    spanExercise: { sourceId: f.sourceId, problemId: problem.id, version: Number(problem.version) },
+  })).rejects.toMatchObject({ code: "VALIDATION", message: "span question purpose does not match persisted lesson binding" });
+  expect(await attempts.listByActivity(fixture.scope, lesson.activityId)).toEqual([]);
+});
 it("binds new submissions to the persisted retest while omitted IDs, replacement tasks and rescheduling cannot bypass it", async () => {
   const f = await seed(), retestId = randomUUID(), otherRetestId = randomUUID();
   for (const id of [retestId, otherRetestId]) {
