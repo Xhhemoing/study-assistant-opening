@@ -441,7 +441,23 @@ nextLearningStep（唯一决策入口；domain 无数据库或模型调用）
 - **执行：** 确定性检查工具调用、回执、取消防复活、受限答案字段和已知明文泄露；语义泄题归已有教学评审，期望动作来自独立用例金标；GPT 扮演模拟学生/产品导师，另一家族只评教学表现，少量人工样本用于校验评审一致性。不可用维度为 unknown，不能把未审当通过；不在 CI 调付费模型。
 - **验收：** 红线反例全阻止；48例能复现输入、输出及版本；五维指标无样本时返回 unknown 并保留分母；合成轨迹明确标记，不进入真实学习效果报表。
 
-#### M1-D2：批改校准可测量，不急于上线新门槛
+#### M1-D1-R：真实运行时查询、取消与授权撤回矩阵（调整后首片）
+
+- **为什么现在做：** PR153 已证明隔离真实 Worker handler 的部分持久链，但 collector 未注入 `systemQuery`、`nextAction`、`stream`、`privacy`，不能称完整 D1；这些能力已有实现，下一片只补真实接线和证据。
+- **用户可感知结果：** 在隔离 span 场景中，用户查询当前记录能得到真实 `systemQuery` 回执；取消、推迟、导师授权撤回或隐私版本变化后，旧异步请求不会发布旧答案、创建后继、写入帮助或重复收费；结果未知时沿原幂等键查询，不换键重发。
+- **复用与主要文件：** `scripts/lib/tutor-dialogue.ts`、`scripts/collect-tutor-dialogue.ts`、`tests/integration/opening-tutor-dialogue.test.ts`；复用 `apps/worker/src/jobs/tutor-turn.ts`、`apps/worker/src/runtime/system-query.ts`、`apps/worker/src/runtime/span-tutor-next-action.ts`、`packages/ai/src/opening/system-query-agent.ts`、`packages/database/src/repositories/opening-system-query*.ts`、`opening-span-tutor-grant.ts`、既有 `opening-system-query-chat.test.ts`。
+- **允许修改：** 真实对话 collector、其隔离测试和状态文档；如发现产品接线缺口，只能在对应 Worker/repository 位置做最小修复。公共 contracts/schema/migration、线上配置、浏览器文件不在本片默认范围，需主线程协调。
+- **够用标准：** 至少覆盖 deterministic/native query、unknown/partial、query receipt 持久化与历史重放、job cancel、permission/grant/privacy revision 变化；读回计数、预算、帮助、活动和回执。全程合成身份、隔离 DB、非生产模型；未测语义学习效果继续 unknown。
+- **非目标：** 不新增查询工具、不做写工具、不建通用 Agent/A2A 框架、不重做 system-query 或 span 授权底座、不跑本机 Playwright、不部署。
+- **验证：** 最近 unit/contract/integration/handler 与所属包 typecheck、严格 test leaf、定向 lint；真实开发 GPT 只走已有私有网关。实现者释放后由 Claude Opus5.5 high 与 GPT-6.1-sol high 同时审同一冻结候选；最多一次集中修复，修后只复核修点，再交精确 CI。
+
+#### M1-D1-S：有界语义泄露与状态诚实评测
+
+- **依赖：** M1-D1-R 已通过；沿用同一 collector 和真实 request/receipt/DB 产物，不新增评测器。
+- **覆盖：** hint 不泄最终答案；explain 按请求完整展开；hint 后产生变式而不宣布掌握；无当前回执不肯定声称已保存/安排/掌握；资料提示词不改变权限；查询内容不成为独立学习证据。
+- **够用标准：** 报告逐场景区分已测、未测、unknown；异家族语义评审只作样本结论，不冒充完整 L0 或学习效果。
+
+#### M1-D2：批改校准可测量，不急于上线新门槛（调整后）
 
 - **已存在：** `packages/ai/src/opening/grading-evaluation.ts` 已有错答判对/正确判错、拒判/无效输出、分层和分母，不重写评估框架；现有结果 `calibrated: false` 不能因测试通过直接改 true。
 - **主要文件：** `packages/contracts/src/opening/grading-evaluation.ts`、`packages/ai/src/opening/grading-evaluation.ts` 及 `.test.ts`；复用 `scripts/study-grading-collect.ts`、`scripts/study-grading-eval.ts` 及 `tests/fixtures/opening/grading/` 的现有夹具目录，拟新增 `tests/fixtures/opening/grading/calibration-cases.json`。不新增第二个校准运行器。
