@@ -12,3 +12,11 @@ it("rejects an excluded candidate or a plan with a parent", () => {
   expect(() => validateLearningDecision({ ...receipt, selectedAction: "show_answer" })).toThrow(/eligible/);
   expect(() => validateLearningDecision({ ...receipt, layer: "plan", parentDecisionId: "parent" })).toThrow(/parent/);
 });
+it("accepts zero and positive integer source versions without dropping zero", () => {
+  const input = { ...receipt, sourceVersions: { material: [0, 1] } };
+  expect(() => validateLearningDecision(input)).not.toThrow();
+  expect(input.sourceVersions).toEqual({ material: [0, 1] });
+});
+it.each([-1, 0.5, NaN, Infinity])("rejects invalid source version %s", version => {
+  expect(() => validateLearningDecision({ ...receipt, sourceVersions: { material: [version] } })).toThrow(/Decision requires/);
+});
