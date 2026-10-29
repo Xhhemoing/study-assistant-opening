@@ -54,6 +54,34 @@ it("issues generated same-family content after fixed exhaustion, seals exact gra
   expect(record).toMatchObject({ outcome: "correct", verdictSource: "deterministic", serverEvaluation: { coreEvidenceComplete: true } });
   expect((await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: generated.id, level: 4 })).text).toContain(`α=${solution.coefficients[0]}`);
 });
+it("naturally issues new families as unseen content and seals unique, none and infinite grades", async () => {
+  const f = await start("span-reserved-fraction"), issuer = createSpanReservedService(fixture.sql);
+  const pool = listSpanReservedProblems("validation");
+  const fresh = pool.filter(p => p.id.includes("-1729-0") && p.familyId !== "span:rational-3d");
+  expect(fresh).toHaveLength(6);
+  for (const p of pool) if (p.id !== "span-reserved-fraction" && !fresh.some(q => q.id === p.id)) {
+    await f.attempts.create(fixture.scope, { sessionId: f.session.id, clientKey: randomUUID(),
+      spanExercise: { sourceId: f.sourceId, problemId: p.id, version: 1 } });
+  }
+  const families = new Set<string>(), kinds = new Set<string>();
+  for (const expected of fresh) {
+    const issued = await issuer.issue(fixture.scope, { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" });
+    const p = issued.spanExercise!;
+    expect(p.id).toBe(expected.id); families.add(p.familyId);
+    expect(issued.spanValidation).toMatchObject({ eligible: false, firstFamilyExposure: false });
+    expect(issued.submittedAt).toBeNull();
+    const solution = solveSpanProblem(p); kinds.add(solution.kind);
+    const answer = solution.kind === "none"
+      ? { membership: "not_in_span", equation: p, noSolutionWitness: [String(Number(p.vectors[0]![1]) * Number(p.vectors[1]![2]) - Number(p.vectors[0]![2])), String(-Number(p.vectors[1]![2])), "1"] }
+      : { membership: "in_span", equation: p, coordinateChecks: p.target,
+        coefficients: solution.kind === "unique" ? solution.coefficients : solution.kind === "infinite" ? solution.particular : [] };
+    const record = await createOpeningAttemptService(fixture.sql).submit(fixture.scope, issued.id, { clientKey: randomUUID(),
+      answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent" });
+    expect(record).toMatchObject({ outcome: "correct", verdictSource: "deterministic", serverEvaluation: { coreEvidenceComplete: true } });
+  }
+  expect(families.size).toBe(6); expect(kinds).toEqual(new Set(["unique", "none", "infinite"]));
+  await expect(issuer.issue(fixture.scope, { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" })).rejects.toMatchObject({ code: "CONFLICT" });
+}, 45000);
 it("uses the original attempt chain for exact first-answer storage, replay and shared learner state", async () => {
   const f = await start("span-example-2d"), problem = getSpanProblem("span-example-2d")!;
   const answer = { membership: "in_span", coefficients: ["3", "-1/2"], equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: ["3", "-1"], representations: { system: "unique", geometry: "plane" } };

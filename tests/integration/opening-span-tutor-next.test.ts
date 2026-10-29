@@ -164,7 +164,7 @@ it("allocates the last unseen content atomically and restores the exact issued a
   const restored = await createSpanLessonSessionService(fixture.sql).read(fixture.scope, f.courseId, result.session.activityId);
   expect(restored.attempts).toHaveLength(1);
   const issued = restored.attempts[0]!;
-  expect(issued.spanExercise?.familyId).toBe("span:rational-3d");
+  expect(issued.spanExercise).toEqual(candidates.at(-1));
   const replayed = await createSpanReservedService(fixture.sql).issue(fixture.scope, { sessionId: result.session.sessionId,
     sourceId: f.sourceId, mode: "self_study", clientKey: `span-tutor-issue:span-next:${inputs[winnerIndex]!.activityId}:none` });
   expect(replayed.id).toBe(issued.id);

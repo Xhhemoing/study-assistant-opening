@@ -15,6 +15,17 @@ const expectations: { suffix: string; solution: SpanSolution; witness?: string[]
 ];
 
 describe("new reserved span candidates", () => {
+  it("includes expanded families in both executable pools without relaxing first-family eligibility", () => {
+    for (const purpose of ["validation", "retest"] as const) {
+      const pool = listSpanReservedProblems(purpose);
+      const generated = pool.filter(p => p.id.startsWith("span-reserved-generated-"));
+      expect(generated).toHaveLength(84);
+      for (const p of generated) {
+        expect(getSpanReservedProblem(p.id, p.version)).toEqual(p);
+        expect(spanValidationEligibility(p, [{ itemId: "earlier", itemVersion: "1", familyId: p.familyId, use: "demonstration", releasedAt: "2026-01-01T00:00:00Z" }], true)).toEqual({ eligible: true, reasons: [], unseenFamily: false });
+      }
+    }
+  });
   it.each(expectations)("matches independently calculated coefficients or contradiction witness for $suffix", ({ suffix, solution, witness }) => {
     const problem = getSpanReservedProblem(`span-reserved-20261021-${suffix}`)!;
     expect(problem).not.toBeNull();
