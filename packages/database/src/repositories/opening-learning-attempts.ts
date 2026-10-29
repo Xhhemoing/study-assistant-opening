@@ -1,5 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
-import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
 import { captureOpeningLearnerShadowPredictions } from "./opening-learner-shadow-predictions";
@@ -20,7 +20,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
   const matrixExercise = parseCanonicalMatrixExercise(row.evaluation_spec);
   const canonicalSpan = parseOpeningSpanExercise(row.evaluation_spec);
   const restored = canonicalSpan ? null : parseOpeningSpanIntent(row.create_intent);
-  const spanExercise = canonicalSpan ?? (restored && row.item_stem_snapshot === spanProblemStem(restored.problem)
+  const spanExercise = canonicalSpan ?? (restored && (getSpanProblem(restored.problem.id, restored.problem.version) || getSpanReservedProblem(restored.problem.id, restored.problem.version)) && row.item_stem_snapshot === spanProblemStem(restored.problem)
     && row.item_source_id === restored.sourceId && (row.source_ids as string[]).includes(restored.sourceId) ? restored.problem : null);
   const spanValidation = !canonicalSpan && (restored || row.requirement_key === SPAN_REQUIREMENT_KEY)
     ? { eligible: false, firstFamilyExposure: false, reasonCode: spanExercise ? "restored_identity_unverified" : "restored_identity_unavailable" }
@@ -92,6 +92,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     throw learningError("CONFLICT", "paused or completed span lesson cannot accept new attempts");
   }
   const spanRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
+  const spanItemIdentity = spanExercise ? getSpanItemIdentity(spanExercise.id, spanExercise.version) : null;
+  if (spanItemIdentity && spanItemIdentity.purpose !== (spanRetestId ? "retest" : "validation")) {
+    throw learningError("VALIDATION", "span question purpose does not match persisted lesson binding");
+  }
   if (spanRetestId) {
     // Binding and timing come from the persisted lesson, so callers cannot skip
     // preparation or omit a retestId to issue the reserved question early.
@@ -108,8 +112,9 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   if (spanExercise) {
     const history = await readOpeningSpanExposureHistory(tx, scope);
     const previous = history.familyIds.has(spanExercise.familyId) || history.unknownHistory;
-    spanValidation = { eligible: !previous, firstFamilyExposure: !previous,
-      reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : previous ? "family_previously_issued" : null };
+    const repeatedContent = history.contentKeys.has(spanProblemContentKey(spanExercise));
+    spanValidation = { eligible: !previous && !repeatedContent, firstFamilyExposure: !previous,
+      reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : repeatedContent ? "content_previously_issued" : previous ? "family_previously_issued" : null };
   }
   const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
   let problemId = input.problemId ?? null, itemVersionId: string | null = null, itemStem: string | null = null;

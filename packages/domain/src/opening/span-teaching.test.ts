@@ -55,10 +55,11 @@ describe("span teaching and intent rules", () => {
     teaching[0]!.vectors[0][0] = "999";
     expect(getSpanProblem("span-example-2d")!.vectors[0][0]).toBe("1");
   });
-  it("excludes exposed/debugged item versions and does not claim transfer for new IDs", () => {
+  it("rejects exposed content under new IDs but allows genuinely new same-family content without claiming transfer", () => {
     const item = listSpanReservedProblems()[0]!;
     expect(spanValidationEligibility(item, [{ itemId: item.id, itemVersion: item.version, familyId: item.familyId, use: "debug", releasedAt: "2026-10-19T00:00:00Z" }], true)).toEqual({ eligible: false, reasons: ["previous_debug"], unseenFamily: false });
-    expect(spanValidationEligibility({ ...item, id: "new-number-id" }, [{ itemId: item.id, itemVersion: item.version, familyId: item.familyId, use: "demonstration", releasedAt: "2026-10-19T00:00:00Z" }], true)).toEqual({ eligible: true, reasons: [], unseenFamily: false });
+    expect(spanValidationEligibility({ ...item, id: "new-number-id" }, [{ itemId: item.id, itemVersion: item.version, familyId: item.familyId, use: "demonstration", releasedAt: "2026-10-19T00:00:00Z" }], true)).toEqual({ eligible: false, reasons: ["previous_demonstration"], unseenFamily: false });
+    expect(spanValidationEligibility({ ...item, id: "new-content-id", target: ["2", "-4", "7/3"] }, [{ itemId: item.id, itemVersion: item.version, familyId: item.familyId, use: "demonstration", releasedAt: "2026-10-19T00:00:00Z" }], true)).toEqual({ eligible: true, reasons: [], unseenFamily: false });
     expect(spanValidationEligibility(item, [])).toEqual({ eligible: false, reasons: ["exposure_history_unknown"], unseenFamily: false });
   });
 });

@@ -4,6 +4,8 @@
  * The actual delivery/debug ledger decides eligibility for each learner and protocol.
  */
 import type { SpanProblem } from "@aistudy/contracts";
+import { listGeneratedSpanItems, parseGeneratedSpanItem, spanProblemContentKey, type SpanItemPurpose } from "./span-generated-items";
+export { spanProblemContentKey } from "./span-generated-items";
 import { copyProblem, SPAN_KNOWLEDGE_COMPONENTS } from "./span-teaching-catalog";
 const reserved: readonly SpanProblem[] = [
   { id: "span-reserved-fraction", version: "1", familyId: "span:rational-3d", vectors: [["2", "0", "1"], ["0", "3", "-1"]], target: ["1", "-2", "7/6"], knowledgeComponents: [...SPAN_KNOWLEDGE_COMPONENTS] },
@@ -20,16 +22,25 @@ const reserved: readonly SpanProblem[] = [
   { id: "span-reserved-20261021-q07", version: "1", familyId: "span:geometry-line", vectors: [["1", "2", "-1"], ["3", "6", "-3"]], target: ["2", "4", "-1"], knowledgeComponents: [...SPAN_KNOWLEDGE_COMPONENTS, "geometry:line-equation", "linear-system:consistency"] },
   { id: "span-reserved-20261021-q08", version: "1", familyId: "span:dependent-generators", vectors: [["0", "0", "0"], ["2", "-4", "6"]], target: ["-1", "2", "-3"], knowledgeComponents: [...SPAN_KNOWLEDGE_COMPONENTS] },
 ];
-export function listSpanReservedProblems(): SpanProblem[] { return reserved.map(copyProblem); }
-export function getSpanReservedProblem(id: string, version: string | number = "1"): SpanProblem | null {
-  const problem = reserved.find((candidate) => candidate.id === id && candidate.version === String(version));
-  return problem ? copyProblem(problem) : null;
+export function listSpanReservedProblems(purpose?: "validation" | "retest"): SpanProblem[] {
+  return purpose ? [...(purpose === "validation" ? reserved.map(copyProblem) : []), ...listGeneratedSpanItems(purpose)] : reserved.map(copyProblem);
 }
-export type SpanValidationExposure = { itemId: string; itemVersion: string; familyId: string; use: "demonstration" | "hint" | "answer" | "debug" | "prompt_tuning" | "independent_answer"; releasedAt: string };
+/** Negative history may recognize every purpose; ordinary execution must not. */
+export function getSpanItemIdentity(id: string, version: string | number = "1"): { problem: SpanProblem; purpose: SpanItemPurpose } | null {
+  const fixed = reserved.find(candidate => candidate.id === id && candidate.version === String(version));
+  return fixed ? { problem: copyProblem(fixed), purpose: "validation" } : parseGeneratedSpanItem(id, version);
+}
+export function getSpanReservedProblem(id: string, version: string | number = "1"): SpanProblem | null {
+  const item = getSpanItemIdentity(id, version);
+  return item && (item.purpose === "validation" || item.purpose === "retest") ? item.problem : null;
+}
+export type SpanValidationExposure = { itemId: string; itemVersion: string; familyId: string; contentKey?: string; use: "demonstration" | "hint" | "answer" | "debug" | "prompt_tuning" | "independent_answer"; releasedAt: string };
 /** ID/number changes alone never establish transfer or an unseen question family. */
 export function spanValidationEligibility(problem: SpanProblem, exposures: readonly SpanValidationExposure[], historyComplete = false): { eligible: boolean; reasons: string[]; unseenFamily: boolean } {
   if (!historyComplete) return { eligible: false, reasons: ["exposure_history_unknown"], unseenFamily: false };
-  const sameItem = exposures.filter((entry) => entry.itemId === problem.id && entry.itemVersion === problem.version);
+  const key = spanProblemContentKey(problem);
+  const sameItem = exposures.filter((entry) => (entry.itemId === problem.id && entry.itemVersion === problem.version)
+    || (entry.contentKey ?? (getSpanItemIdentity(entry.itemId, entry.itemVersion) ? spanProblemContentKey(getSpanItemIdentity(entry.itemId, entry.itemVersion)!.problem) : null)) === key);
   const reasons = sameItem.map((entry) => `previous_${entry.use}`);
   return { eligible: reasons.length === 0, reasons: [...new Set(reasons)], unseenFamily: !exposures.some((entry) => entry.familyId === problem.familyId) };
 }

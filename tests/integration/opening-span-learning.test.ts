@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { readOpeningLearningEvidenceContext, createOpeningStudyIntentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createWorkspacePreferencesRepository } from "@aistudy/database";
-import { evaluateEvidenceEligibility, getSpanProblem, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { evaluateEvidenceEligibility, getSpanProblem, solveSpanProblem, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { createSpanFeedbackService } from "../../apps/web/src/features/opening/teaching/span/feedback-service";
@@ -12,6 +12,7 @@ import { createSpanSessionService } from "../../apps/web/src/features/opening/te
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { listSpanReservedProblems, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 beforeEach(async () => { await fixture.reset(); await fixture.sql`TRUNCATE opening_learning_sessions,opening_conversations CASCADE`; });
@@ -29,6 +30,58 @@ async function start(problemId: string) {
     clientKey, answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
   return { sourceId, courseId, learning, attempts, session, input, attempt, submit };
 }
+it("issues generated same-family content after fixed exhaustion, seals exact grades and rejects other purposes", async () => {
+  const f = await start("span-reserved-fraction");
+  for (const p of listSpanReservedProblems()) if (p.id !== "span-reserved-fraction") await f.attempts.create(fixture.scope,
+    { sessionId: f.session.id, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId, problemId: p.id, version: 1 } });
+  const issuer = createSpanReservedService(fixture.sql);
+  const input = { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" as const };
+  const generated = await issuer.issue(fixture.scope, input), p = generated.spanExercise!;
+  expect(p.id).toContain("generated-validation-");
+  expect(generated).toMatchObject({ submittedAt: null, spanValidation: { eligible: false, firstFamilyExposure: false } });
+  expect(p.transfer).toBeUndefined();
+  expect((await issuer.issue(fixture.scope, input)).id).toBe(generated.id);
+  const next = await issuer.issue(fixture.scope, { ...input, clientKey: randomUUID() });
+  expect(spanProblemContentKey(next.spanExercise!)).not.toBe(spanProblemContentKey(p));
+  expect(getSpanItemIdentity(p.id)!.purpose).toBe("validation");
+  for (const purpose of ["research", "teaching", "retest"]) await expect(f.attempts.create(fixture.scope,
+    { sessionId: f.session.id, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId,
+      problemId: p.id.replace("generated-validation", `generated-${purpose}`), version: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
+  const solution = solveSpanProblem(p); if (solution.kind !== "unique") throw new Error("expected unique generated solution");
+  const record = await createOpeningAttemptService(fixture.sql).submit(fixture.scope, generated.id, { clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "in_span", coefficients: solution.coefficients, equation: p, coordinateChecks: p.target }),
+    outcome: "unverified", assistance: "independent" });
+  expect(record).toMatchObject({ outcome: "correct", verdictSource: "deterministic", serverEvaluation: { coreEvidenceComplete: true } });
+  expect((await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: generated.id, level: 4 })).text).toContain(`α=${solution.coefficients[0]}`);
+});
+it("naturally issues new families as unseen content and seals unique, none and infinite grades", async () => {
+  const f = await start("span-reserved-fraction"), issuer = createSpanReservedService(fixture.sql);
+  const pool = listSpanReservedProblems("validation");
+  const fresh = pool.filter(p => p.id.includes("-1729-0") && p.familyId !== "span:rational-3d");
+  expect(fresh).toHaveLength(6);
+  for (const p of pool) if (p.id !== "span-reserved-fraction" && !fresh.some(q => q.id === p.id)) {
+    await f.attempts.create(fixture.scope, { sessionId: f.session.id, clientKey: randomUUID(),
+      spanExercise: { sourceId: f.sourceId, problemId: p.id, version: 1 } });
+  }
+  const families = new Set<string>(), kinds = new Set<string>();
+  for (const expected of fresh) {
+    const issued = await issuer.issue(fixture.scope, { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" });
+    const p = issued.spanExercise!;
+    expect(p.id).toBe(expected.id); families.add(p.familyId);
+    expect(issued.spanValidation).toMatchObject({ eligible: false, firstFamilyExposure: false });
+    expect(issued.submittedAt).toBeNull();
+    const solution = solveSpanProblem(p); kinds.add(solution.kind);
+    const answer = solution.kind === "none"
+      ? { membership: "not_in_span", equation: p, noSolutionWitness: [String(Number(p.vectors[0]![1]) * Number(p.vectors[1]![2]) - Number(p.vectors[0]![2])), String(-Number(p.vectors[1]![2])), "1"] }
+      : { membership: "in_span", equation: p, coordinateChecks: p.target,
+        coefficients: solution.kind === "unique" ? solution.coefficients : solution.kind === "infinite" ? solution.particular : [] };
+    const record = await createOpeningAttemptService(fixture.sql).submit(fixture.scope, issued.id, { clientKey: randomUUID(),
+      answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent" });
+    expect(record).toMatchObject({ outcome: "correct", verdictSource: "deterministic", serverEvaluation: { coreEvidenceComplete: true } });
+  }
+  expect(families.size).toBe(6); expect(kinds).toEqual(new Set(["unique", "none", "infinite"]));
+  await expect(issuer.issue(fixture.scope, { sessionId: f.session.id, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" })).rejects.toMatchObject({ code: "CONFLICT" });
+}, 45000);
 it("uses the original attempt chain for exact first-answer storage, replay and shared learner state", async () => {
   const f = await start("span-example-2d"), problem = getSpanProblem("span-example-2d")!;
   const answer = { membership: "in_span", coefficients: ["3", "-1/2"], equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: ["3", "-1"], representations: { system: "unique", geometry: "plane" } };
