@@ -4,11 +4,11 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `e6c396d4`；PR153（真实Worker合成对话片）精确CI40883608829双绿并已合入，合并后主干CI40889335837双绿；历史失败保留，未部署 |
+| 开发主干 | `feat/opening-release` @ `2c8a2bc6`；PR153真实Worker合成对话片与PR154 M1-D1-R均已合入；PR154精确CI40919434187、合并后主干CI40924931459均双绿；历史失败保留，未部署 |
 | 线上版本 | 本轮未部署；此前版本仍为 `4bd1e8b7`。版本字段为空问题尚待使用当前发布 runner 验收，不把代码合并记为线上修复 |
-| 当前候选 | M1-D1-R本地冻结候选已接通真实Worker handler + PostgreSQL仓储的system-query/next-action/隐私/授权/预算隔离矩阵；14场景均通过，原教学采集12项仍通过，根typecheck（NODE_OPTIONS 1536）、定向lint、diff通过。当前尚无开放PR，尚未双high复审、提交、推送或合并；完整D1/M1仍未完成 |
+| 当前候选 | 当前无开放功能PR；M1-D1-R已随PR154合入`2c8a2bc6`。14场景隔离矩阵、原教学采集12项、邻近37项、根typecheck/lint/diff、PR精确CI40919434187和合并后主干CI40924931459均通过；D1-S当前候选新增10个有界语义场景，22项集成/23项Domain单元、Domain typecheck、定向lint/diff均通过，Claude Opus5.5 high与GPT-6.1-sol high复审无发布阻塞。仅证明已知风险标记和隔离事实不变，完整D1/M1未完成，未部署 |
 | 候选检查 | M1-A1 最近 57 项单元、43 项隔离仓储/备份/自动批改/迁移回归、Contracts/Database/Web 类型、改动测试 leaf 类型与定向 lint 通过。同一冻结候选经 Claude Opus 5.5 high 与 GPT-6.1-sol high 并行独立只读检查，双方无确定阻塞；现有 CI 仍为合并门禁 |
-| 当前工作 | M1-D1-R已实现并完成本地隔离验证，正在做同一冻结候选的双high发布阻塞复审；通过后才提交/推送/精确CI，失败则只做一次最小修复。随后M1-D1-S语义样本、D1-D2批改校准，再进入M2-A span单课程唯一策略入口。暂不部署，浏览器和真人学习效果待验 |
+| 当前工作 | M1-D1-R已实现、双high复审通过、PR154及合并后主干CI均双绿并已合入；D1-S有界语义评测已完成定向实现、22项集成/23项Domain单元和Claude/GPT双路复审，无发布阻塞；规则误报/漏检仅影响评测标记，不写库、不改权限、不产生费用，转后续。随后进入D2批改校准。暂不部署，浏览器和真人学习效果待验 |
 | M1-A2 候选 | 普通教学真实提示回执记录阶梯与发起者；保留新旧 release_intent 兼容，仅实际 release 算交付，旧事实不回填。本片 21 项单元、10 项隔离集成及 Contracts/Database/Domain 类型既有证据复用；备份测试以 satisfies 保留行类型后，4 文件测试 leaf 类型与全部 11 个改动 TS 的定向 ESLint 通过。Claude Opus 5.5 high 与 GPT-6.1-sol high 已同时独立只读审查，无确定阻塞；提交后沿精确 CI 收口，未部署。span/Worker 接线、帮助模式/用户覆盖引用和入口决策追踪仍待完成，不宣称整个 M1-A 通过。迁移 0105 回退应保留已记录帮助事实及新增可空列，不直接删列 |
 | M1-A6 Worker/span 决策 | 新学习动作在原事务保存标准 session→activity 决策，保留选择前状态、真实规则分支、入口与执行映射版本；原 operation 重放优先读原回执，纯 resume 和旧无记录不补历史，兼容 tutorNextAction 保留。领域/Worker 两文件29项单元、两完整隔离集成文件24项、Domain/Database/Worker 类型、四测试 leaf 类型及十个改动 TS lint 通过；初次共享测试库被另一候选0106迁移阻断，改用既有 scratch 机制验证，不修改共享库。同一冻结候选经 Claude Opus5.5 high 与 GPT-6.1-sol high 并行独立审查，均无确定阻塞；未部署，精确CI作为合并门禁 |
 | M1-A4 课程回执 | 课程 start/next 新活动在原事务保存标准 activity 决策回执：最终实际动作、实际要求候选与排除依据、入口/course-route-1 规则及当时目标/要求/来源/学习状态输入；无 session 不伪造父决策。原请求与活动复用不重写，历史不回填；教学摘要和选择算法保留。集中修复共享决策校验误拒绝合法 sourceVersion=0，来源、chunk 与要求引用保持版本一致，不过滤 0；先红后绿，领域整文件 7 项、完整课程隔离集成 23 项（含 0 版本 start/next 回执保存读回）、Domain 类型、改动测试 leaf 类型及本次 3 个 TS 定向 lint 通过，Database 产品未变复用既有类型证据。回执写入失败回滚活动、compile、预算和原活动完成。同一候选经 Claude Opus5.5 high 与 GPT-6.1-sol high 并行独立初审，唯一0版本阻塞修复后双方并行定点复核通过；未部署，精确 CI 作为合并门禁 |
