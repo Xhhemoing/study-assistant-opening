@@ -26,6 +26,69 @@ async function seed() {
   const request = { courseId, sourceIds: [sourceId], sourceVersions: { [sourceId]: 1 }, question: "继续学习" };
   return { courseId, sourceId, request, repo: createOpeningSpanTutorContextRepository(sql) };
 }
+it("captures standard decisions before execution and replays the original operation without rewriting history", async () => {
+  const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
+  const originalInput = structuredClone(context.decisionInput);
+  const state = await import("../../packages/database/src/repositories/opening-learner-state-read");
+  const before = await state.createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
+  const input = { context, decision: nextLearningStep(context.decisionInput), operationId: `tutor-next:${randomUUID()}` };
+  const session = await f.repo.execute(fixture.scope, input);
+  const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
+  const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+  const receipts = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
+  expect(receipts).toHaveLength(1);
+  const receipt = receipts[0]!;
+  expect(await decisions.get(fixture.scope, receipt.id)).toEqual(receipt);
+  expect(receipt.stateVersion).toBe(before.stateVersion);
+  expect(receipt.policyVersion).toBe("next-learning-step-1/span-tutor-execution-1");
+  expect(JSON.parse(receipt.intentVersion)).toMatchObject({ decisionInput: originalInput, ruleDecision: input.decision,
+    execution: { kind: "create", moveId: "self_study-reserved", problemId: "span-reserved-fraction" } });
+  expect(receipt.parentDecisionId).toBeTruthy();
+  await createOpeningSpanSessionRepository(fixture.sql).save(fixture.scope, session.activityId,
+    { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" });
+  await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  expect((await f.repo.execute(fixture.scope, input)).activityId).toBe(session.activityId);
+  expect(await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId })).toEqual(receipts);
+});
+it("keeps source version zero and does not invent decisions for a legacy resume", async () => {
+  const f = await seed();
+  await fixture.sql`UPDATE opening_sources SET version=0 WHERE id=${f.sourceId}`;
+  await fixture.sql`UPDATE opening_source_chunks SET source_version=0 WHERE source_id=${f.sourceId}`;
+  const request = { ...f.request, sourceVersions: { [f.sourceId]: 0 } };
+  const context = (await f.repo.read(fixture.scope, request))!;
+  const operationId = `tutor-next:${randomUUID()}`;
+  const session = await f.repo.execute(fixture.scope, { context, decision: nextLearningStep(context.decisionInput), operationId });
+  const receipts = await fixture.sql`SELECT receipt FROM opening_learning_decisions WHERE target_id=${session.activityId}`;
+  expect(receipts[0]!.receipt.sourceVersions[f.sourceId]).toEqual([0]);
+  await fixture.sql`DELETE FROM opening_learning_decisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const resume = (await f.repo.read(fixture.scope, request))!;
+  expect(resume.historicalDecision).toBeNull();
+  await f.repo.execute(fixture.scope, { context: resume, decision: nextLearningStep(resume.decisionInput), operationId });
+  expect(await fixture.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${fixture.scope.workspaceId}`).toHaveLength(0);
+});
+it("rolls back the real session, attempt and budget if standard receipt persistence fails", async () => {
+  const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
+  const operationId = `tutor-next:${randomUUID()}`;
+  // The activity creates successfully; only the canonical decision insert is faulted.
+  const failing = new Proxy(fixture.sql, { get(target, key, receiver) {
+    if (key === "begin") return (run: (tx: import("postgres").TransactionSql) => Promise<unknown>) => target.begin(async tx => {
+      const wrapped = new Proxy(tx, { apply(query, thisArg, args: unknown[]) {
+        const text = (args[0] as TemplateStringsArray).join("?");
+        if (text.includes("INSERT INTO opening_learning_decisions")) throw new Error("receipt write failed");
+        return Reflect.apply(query, thisArg, args);
+      } });
+      return run(wrapped);
+    });
+    return Reflect.get(target, key, receiver);
+  } });
+  await expect(createOpeningSpanTutorContextRepository(failing).execute(fixture.scope,
+    { context, decision: nextLearningStep(context.decisionInput), operationId })).rejects.toThrow("receipt write failed");
+  expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(0);
+  expect(await fixture.sql`SELECT id FROM opening_learning_sessions WHERE course_id=${f.courseId}`).toHaveLength(0);
+  expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE course_id=${f.courseId}`).toHaveLength(0);
+  expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
 it("creates a real span activity and resumes it without charging or creating another", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   expect(context).toMatchObject({ courseId: f.courseId, grantRevision: 1, decisionInput: { status: "unobserved" } });

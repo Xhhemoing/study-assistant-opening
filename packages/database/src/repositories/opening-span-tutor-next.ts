@@ -3,7 +3,8 @@ import { nextLearningStep, type NextLearningStep } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory, probeLearningSourcesAvailability } from "./opening-learning-facts";
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
-import { createOpeningSpanTutorContextRepository } from "./opening-span-tutor-context";
+import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision } from "./opening-span-tutor-context";
+import { readOpeningLearningDecisionByClientKey } from "./opening-learning-decisions";
 import { readOpeningSpanTutorOrigin, readOpeningSpanTutorOriginChange, type OpeningSpanTutorOriginReference } from "./opening-span-tutor-origin";
 import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 
@@ -36,7 +37,8 @@ export function createOpeningSpanTutorNextRepository(sql: Sql) {
         if (!session) throw learningError("CONFLICT", "原后续活动回执尚不完整，请保留同一次请求。");
         const changed = await readOpeningSpanTutorOriginChange(db, scope, session.activityId);
         if (changed) return { kind: "choice", reason: changed.reason, courseId: session.courseId, originSession: changed.originSession, historicalSession: session };
-        return { kind: "ready", session, decision: null, replayed: true };
+        const decision = spanTutorReceiptDecision(await readOpeningLearningDecisionByClientKey(tx, scope, `span-tutor-decision:${operationId}`));
+        return { kind: "ready", session, decision, replayed: true };
       }
       const original = await sessions.get(scope, input.activityId);
       if (!original) throw learningError("NOT_FOUND", "原学习活动不存在。");
@@ -60,7 +62,7 @@ export function createOpeningSpanTutorNextRepository(sql: Sql) {
       const authorization = await readSpanTutorAuthorization(tx, scope, original.courseId);
       if (!authorization.authorized) return choice("authorization_required");
       const repository = createOpeningSpanTutorContextRepository(db);
-      const context = await repository.read(scope, { courseId: original.courseId, sourceIds: [], sourceVersions: {}, question: "继续学习", originReference: reference });
+      const context = await repository.read(scope, { courseId: original.courseId, sourceIds: [], sourceVersions: {}, question: "继续学习", originReference: reference, entry: "span-next" });
       if (!context) return choice("authorization_required");
       if (context.unseenUnavailableReason) return choice("unseen_unavailable");
       const decision = nextLearningStep(context.decisionInput);

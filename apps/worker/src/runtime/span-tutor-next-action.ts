@@ -18,7 +18,7 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
   const repository = createOpeningSpanTutorContextRepository(sql);
   return {
     async read(scope, request) {
-      const context = await repository.read(scope, request);
+      const context = await repository.read(scope, { ...request, entry: "worker" });
       const changed = context?.originChange;
       const changeAction = changed ? {
         message: changed.reason === "source_unavailable" ? "原建议的资料已变化；派生活动和已有答案保留，请先核对资料。" : "原建议采用的评价已更正；派生活动保留，请按原活动的最新记录重新选择下一步。",
@@ -26,7 +26,7 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
         href: changed.reason === "evidence_changed" && changed.originSession ? action(changed.originSession).href : `/opening/courses/${context!.courseId}#course-learning-records`,
       } : undefined;
       return context ? { courseId: context.courseId, privacyEpoch: context.privacyEpoch, sourceRefs: context.sourceRefs,
-        decisionInput: context.decisionInput, spanContext: context,
+        decisionInput: context.decisionInput, spanContext: context, historicalDecision: context.historicalDecision,
         ...(changeAction ? { unavailableAction: changeAction } : {}),
         ...(context.needsReservedIssue ? { resumeRequiresExecution: true } : {}),
         ...(context.unseenUnavailableReason ? { unavailableAction: {

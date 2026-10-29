@@ -51,7 +51,7 @@ it("ends only the selected origin and replays the actual next activity after an 
   await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
     { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
   const replay = await f.next.next(fixture.scope, input);
-  expect(replay).toMatchObject({ kind: "ready", replayed: true });
+  expect(replay).toMatchObject({ kind: "ready", replayed: true, decision: { activityKind: "targeted_explain", focusObservationId: observed.id } });
   if (first.kind === "ready" && replay.kind === "ready") expect(replay.session.activityId).toBe(first.session.activityId);
   const refreshedOrigin = (await f.lessons.get(fixture.scope, origin.activityId))!;
   expect(refreshedOrigin.revision).toBeGreaterThan(origin.revision);
