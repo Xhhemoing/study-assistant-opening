@@ -15,7 +15,7 @@ it("round-trips Study release states and immutable decisions without restoring p
   });
   const exposures = createOpeningStudyExposureRepository(sql);
   const input = { releaseKey: randomUUID(), contextAnchor: { activityId: activity.id, purpose: "learning_help" as const },
-    origin: "assistant" as const, kind: "hint" as const, level: "hinted" as const };
+    origin: "assistant" as const, kind: "hint" as const, level: "hinted" as const, hintStage: 2 as const, initiatedBy: "user" as const };
   const generated = await exposures.generate(scope, input);
   const released = await exposures.deliver(scope, { ...input, releaseKey: randomUUID() });
   await exposures.acknowledge(scope, released.id);
@@ -29,14 +29,14 @@ it("round-trips Study release states and immutable decisions without restoring p
   });
   const snapshot = await readOpeningBackupRecords(sql, scope);
   expect(snapshot.tables.opening_help_exposures).toEqual(expect.arrayContaining([
-    expect.objectContaining({ id: generated.id, delivered: false, released_at: null, acknowledged_at: null }),
-    expect.objectContaining({ id: released.id, delivered: true, acknowledged_at: expect.any(Date) }),
+    expect.objectContaining({ id: generated.id, hint_stage: 2, initiated_by: "user", delivered: false, released_at: null, acknowledged_at: null }),
+    expect.objectContaining({ id: released.id, hint_stage: 2, initiated_by: "user", delivered: true, acknowledged_at: expect.any(Date) }),
   ]));
   expect(snapshot.tables.opening_learning_decisions).toEqual([expect.objectContaining({ id: decision.id })]);
   expect(snapshot.tables).not.toHaveProperty("opening_parent_interaction_budgets");
   expect(snapshot.tables).not.toHaveProperty("opening_assistant_proposals");
-  const backup: OpeningBackup = { format: "opening-backup", version: 1, workspaceId: scope.workspaceId, privacyEpoch: snapshot.privacyEpoch,
-    deletionJournal: snapshot.deletionJournal, memoryDeletions: snapshot.memoryDeletions, tables: snapshot.tables, objects: [] };
+  const backup = { format: "opening-backup", version: 1, workspaceId: scope.workspaceId, privacyEpoch: snapshot.privacyEpoch,
+    deletionJournal: snapshot.deletionJournal, memoryDeletions: snapshot.memoryDeletions, tables: snapshot.tables, objects: [] } satisfies OpeningBackup;
   expect(validateOpeningRestore(backup, [], snapshot.memoryDeletions)).toMatchObject({ allowed: true });
   await sql`DELETE FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId}`;
   await sql`DELETE FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}`;
@@ -51,6 +51,16 @@ it("round-trips Study release states and immutable decisions without restoring p
   const restored = await readOpeningBackupRecords(sql, scope);
   expect(restored.tables.opening_help_exposures).toEqual(snapshot.tables.opening_help_exposures);
   expect(restored.tables.opening_learning_decisions).toEqual(snapshot.tables.opening_learning_decisions);
+  const legacy = structuredClone(backup);
+  for (const row of legacy.tables.opening_help_exposures!) { delete row.hint_stage; delete row.initiated_by; }
+  expect(validateOpeningRestore(legacy, [], snapshot.memoryDeletions)).toMatchObject({ allowed: true });
+  await sql`DELETE FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId}`;
+  await sql`DELETE FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}`;
+  await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`;
+  await sql`DELETE FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}`;
+  expect(await executeOpeningRestoreApply(sql, { confirmLocalRestore: true, backup: legacy, currentDeletionJournal: [], currentMemoryDeletions: snapshot.memoryDeletions })).toMatchObject({ ok: true });
+  const oldRestored = await readOpeningBackupRecords(sql, scope);
+  expect(oldRestored.tables.opening_help_exposures).toEqual(legacy.tables.opening_help_exposures!.map(row => ({ ...row, hint_stage: null, initiated_by: null })));
   expect(await sql`SELECT id FROM opening_parent_interaction_budgets WHERE workspace_id=${scope.workspaceId}`).toHaveLength(1);
 });
 

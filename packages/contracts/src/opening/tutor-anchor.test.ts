@@ -1,8 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ephemeralTurnInputSchema, studyContextAnchorSchema, turnInputSchema } from "./tutor";
+import { ephemeralTurnInputSchema, studyContextAnchorSchema, studyExposureReceiptSchema, turnInputSchema } from "./tutor";
 
 describe("Study context selection boundary", () => {
+  it("accepts nullable historical help metadata and validates explicit delivery metadata", () => {
+    const receipt = { id: randomUUID(), releaseKey: "release-test-key", contextAnchor: { purpose: "learning_help" },
+      origin: "assistant", supportDomain: "unknown", generatedAt: "2026-10-28T10:00:00.000Z", releasedAt: null, acknowledgedAt: null, historyRevision: 0 };
+    expect(studyExposureReceiptSchema.safeParse(receipt).success).toBe(true);
+    expect(studyExposureReceiptSchema.parse({ ...receipt, hintStage: null, initiatedBy: null })).toMatchObject({ hintStage: null, initiatedBy: null });
+    for (const hintStage of [1, 2, 3, 4]) for (const initiatedBy of ["user", "assistant"]) {
+      expect(studyExposureReceiptSchema.parse({ ...receipt, hintStage, initiatedBy })).toMatchObject({ hintStage, initiatedBy });
+    }
+    for (const metadata of [{ hintStage: 0 }, { hintStage: 5 }, { hintStage: 1.5 }, { hintStage: "1" }, { initiatedBy: "model" }, { initiatedBy: ["user"] }]) {
+      expect(studyExposureReceiptSchema.safeParse({ ...receipt, ...metadata }).success).toBe(false);
+    }
+  });
   it("accepts automatic routing while still rejecting unknown explicit modes", () => {
     const shared = { text: "只给提示", sourceIds: [] };
     expect(turnInputSchema.parse({ ...shared, conversationId: randomUUID(), clientKey: randomUUID(), privacy: "saved" }).mode).toBeUndefined();

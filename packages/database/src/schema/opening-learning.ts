@@ -44,6 +44,8 @@ export const openingHelpExposures = pgTable("opening_help_exposures", {
   courseId: uuid("course_id"),
   releaseKey: text("release_key"),
   releaseIntent: jsonb("release_intent"),
+  hintStage: integer("hint_stage"),
+  initiatedBy: text("initiated_by"),
   contextAnchor: jsonb("context_anchor"),
   exposureOrigin: text("exposure_origin"),
   supportDomain: text("support_domain").notNull().default("unknown"),

@@ -15,6 +15,9 @@ export type OpeningStudyExposureInput = {
   originReference?: { type: "source" | "note" | "card" | "observation"; id: string; version: string; sourceRefs?: Array<{ sourceId: string; sourceVersion: number | null }>; requirementKey?: string | null; skillLabel?: string | null; possibleOpenAttemptOnly?: boolean };
   /** Server delivery policy only. Never copy an HTTP field into this value. */
   supportDomain?: StudyExposureReceipt["supportDomain"];
+  /** Trusted delivery boundary only; unknown callers must leave these absent. */
+  hintStage?: 1 | 2 | 3 | 4 | null;
+  initiatedBy?: "user" | "assistant" | null;
   kind: "instruction" | "hint" | "solution";
   level: "hinted" | "revealed";
   sessionId?: string | null;
@@ -24,17 +27,22 @@ type Row = Record<string, unknown>;
 export function mapOpeningStudyExposure(row: Row): StudyExposureReceipt {
   return { id: String(row.id), releaseKey: String(row.release_key), contextAnchor: row.context_anchor as StudyContextAnchor,
     origin: row.exposure_origin as StudyExposureReceipt["origin"], supportDomain: row.support_domain as StudyExposureReceipt["supportDomain"],
+    hintStage: row.hint_stage == null ? null : Number(row.hint_stage), initiatedBy: row.initiated_by as StudyExposureReceipt["initiatedBy"] ?? null,
     generatedAt: learningIso(row.generated_at)!, releasedAt: learningIso(row.released_at), acknowledgedAt: learningIso(row.acknowledged_at),
     historyRevision: Number(row.history_revision) };
 }
 
 /** Caller holds the workspace history lock. Publishing and answer submission share this order. */
 export async function generateOpeningStudyExposure(tx: TransactionSql, scope: Scope, input: OpeningStudyExposureInput): Promise<StudyExposureReceipt> {
-  const storedIntent = JSON.parse(JSON.stringify(input)) as OpeningStudyExposureInput;
+  // Keep the original key intent byte-shape compatible. Metadata has its own immutable columns.
+  const { hintStage, initiatedBy, ...originalIntent } = input;
+  const storedIntent = JSON.parse(JSON.stringify(originalIntent)) as OpeningStudyExposureInput;
   const [existing] = await tx`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND release_key=${input.releaseKey} FOR UPDATE`;
   // Replays use the persisted identities. A new material version must not rewrite an old receipt.
   if (existing) {
-    if (existing.owner_user_id !== scope.ownerUserId || !isDeepStrictEqual(existing.release_intent, storedIntent)) {
+    if (existing.owner_user_id !== scope.ownerUserId || !isDeepStrictEqual(existing.release_intent, storedIntent)
+      || existing.hint_stage != null && existing.hint_stage !== (hintStage ?? null)
+      || existing.initiated_by != null && existing.initiated_by !== (initiatedBy ?? null)) {
       throw learningError("CONFLICT", "release receipt intent changed");
     }
     return mapOpeningStudyExposure(existing);
@@ -51,10 +59,10 @@ export async function generateOpeningStudyExposure(tx: TransactionSql, scope: Sc
     problemId = item?.problem_id as string | null;
   }
   const [row] = await tx`INSERT INTO opening_help_exposures(id,workspace_id,owner_user_id,course_id,session_id,attempt_id,problem_id,
-    item_version_id,activity_id,turn_id,kind,level,delivered,release_key,release_intent,context_anchor,exposure_origin,support_domain,generated_at,history_revision)
+    item_version_id,activity_id,turn_id,kind,level,delivered,release_key,release_intent,context_anchor,exposure_origin,support_domain,hint_stage,initiated_by,generated_at,history_revision)
     VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${anchor.courseId ?? null},${input.sessionId ?? null},${anchor.attemptId ?? null},${problemId},
       ${anchor.itemVersionId ?? null},${anchor.activityId ?? null},${input.turnId ?? null},${input.kind},${input.level},FALSE,${input.releaseKey},
-      ${tx.json(storedIntent)},${tx.json(anchor)},${input.origin},${input.supportDomain ?? "unknown"},clock_timestamp(),0) RETURNING *`;
+      ${tx.json(storedIntent)},${tx.json(anchor)},${input.origin},${input.supportDomain ?? "unknown"},${hintStage ?? null},${initiatedBy ?? null},clock_timestamp(),0) RETURNING *`;
   return mapOpeningStudyExposure(row!);
 }
 

@@ -92,6 +92,7 @@ async function release(tx: TransactionSql, scope: Scope, question: Question, lev
       purpose: full ? "history_solution" : "learning_help" },
     sessionId: question.sessionId, origin: full ? "history_solution" : "assistant",
     kind: full ? "solution" : "hint", level: full ? "revealed" : "hinted", supportDomain: "unknown",
+    hintStage: level, initiatedBy: "user",
   });
   return releaseOpeningStudyExposure(tx, scope, generated.id);
 }

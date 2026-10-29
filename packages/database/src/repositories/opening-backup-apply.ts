@@ -217,7 +217,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
     "id", "workspace_id", "session_id", "problem_id", "turn_id", "level", "delivered",
     "created_at", "attempt_id", "delivered_at", "history_revision",
     "kind", "activity_id", "item_version_id", "owner_user_id", "course_id", "release_key", "release_intent", "context_anchor",
-    "exposure_origin", "support_domain", "generated_at", "released_at", "acknowledged_at", "workspace_history_revision",
+    "exposure_origin", "support_domain", "hint_stage", "initiated_by", "generated_at", "released_at", "acknowledged_at", "workspace_history_revision",
   ],
   opening_learning_observations: [
     "id", "workspace_id", "owner_user_id", "session_id", "course_id", "activity_id", "skill_label", "source_ids",

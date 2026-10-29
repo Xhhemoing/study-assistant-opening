@@ -30,6 +30,8 @@ export const studyExposureReceiptSchema = z.object({
   contextAnchor: studyContextAnchorSchema,
   origin: z.enum(["assistant", "material_excerpt", "note", "card_answer", "history_solution"]),
   supportDomain: z.enum(["language", "math", "unknown"]),
+  hintStage: z.number().int().min(1).max(4).nullable().optional(),
+  initiatedBy: z.enum(["user", "assistant"]).nullable().optional(),
   generatedAt: isoDateTimeSchema,
   releasedAt: isoDateTimeSchema.nullable(),
   acknowledgedAt: isoDateTimeSchema.nullable(),

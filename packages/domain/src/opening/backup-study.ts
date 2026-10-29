@@ -63,6 +63,8 @@ export function validateBackupStudy(tables: Tables, errors: string[]): void {
   const counters = new Map(rows(tables, "opening_workspace_history_revisions").map(row => [`${row.workspace_id}/${row.owner_user_id}`, row.revision]));
   for (const row of rows(tables, "opening_help_exposures")) {
     anchor(row);
+    if (row.hint_stage != null && (!Number.isInteger(row.hint_stage) || Number(row.hint_stage) < 1 || Number(row.hint_stage) > 4)) errors.push("Study exposure hint stage is invalid");
+    if (row.initiated_by != null && row.initiated_by !== "user" && row.initiated_by !== "assistant") errors.push("Study exposure initiator is invalid");
     // Pre-upgrade facts have no release metadata. Never manufacture release or acknowledgement.
     if (row.release_key == null) continue;
     if (!isUuid(row.id) || !isUuid(owner(row)) || typeof row.release_key !== "string" || row.release_key.length < 8 || row.release_key.length > 200

@@ -15,6 +15,22 @@ function tables() {
 function errors(input: ReturnType<typeof tables>) { const result: string[] = []; validateBackupStudy(input, result); return result; }
 
 describe("Study backup history", () => {
+  it.each([null, "release-test-key"])("validates help metadata even without release metadata (%s)", releaseKey => {
+    const value = tables(), row = value.opening_help_exposures![0]!;
+    row.release_key = releaseKey;
+    for (const stage of [null, 1, 2, 3, 4]) {
+      row.hint_stage = stage; row.initiated_by = "user";
+      expect(errors(value)).toEqual([]);
+    }
+    row.initiated_by = "assistant";
+    expect(errors(value)).toEqual([]);
+    for (const stage of [0, 5, 1.5, "1"]) {
+      row.hint_stage = stage;
+      expect(errors(value)).toContain("Study exposure hint stage is invalid");
+    }
+    row.hint_stage = null; row.initiated_by = "model";
+    expect(errors(value)).toContain("Study exposure initiator is invalid");
+  });
   it("preserves generated, released and acknowledged receipts without inferring acknowledgement", () => {
     const value = tables(), row = value.opening_help_exposures![0]!;
     expect(errors(value)).toEqual([]);
