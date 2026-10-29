@@ -254,9 +254,11 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         await lockSpanTutorAuthorization(tx, scope, context.courseId, context.grantRevision);
         await lockLearningOwner(tx, scope);
         if (input.jobLease) {
-          const [job] = await tx`SELECT id FROM opening_tutor_jobs WHERE id=${input.jobLease.jobId}
-            AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='running'
-            AND claim_token=${input.jobLease.claimToken} FOR UPDATE`;
+          const [job] = await tx`SELECT j.id FROM opening_tutor_jobs j
+            JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+            WHERE j.id=${input.jobLease.jobId} AND j.workspace_id=${scope.workspaceId}
+              AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
+              AND j.claim_token=${input.jobLease.claimToken} FOR UPDATE OF j`;
           if (!job) throw conflict("教学请求已结束或被取消，未新增学习活动。");
         }
         const db = transactionClient(tx), sessions = createOpeningSpanSessionRepository(db);

@@ -3,22 +3,24 @@ import { open, readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { dialogueFixtureSchema } from "../packages/domain/src/opening/tutor-dialogue-evaluation";
-import { assertDialogueDatabase, collectTutorDialogue } from "./lib/tutor-dialogue";
+import { assertDialogueDatabase, collectTutorDialogue, collectTutorRuntimeSafety } from "./lib/tutor-dialogue";
 
 async function main() {
   const { values } = parseArgs({ options: {
-    fixture: { type: "string" }, model: { type: "string" }, "base-url-env": { type: "string" }, "key-env": { type: "string" },
+    fixture: { type: "string" }, "runtime-safety": { type: "boolean" }, model: { type: "string" }, "base-url-env": { type: "string" }, "key-env": { type: "string" },
     "max-requests": { type: "string" }, output: { type: "string" }, case: { type: "string" },
   }, strict: true });
-  for (const name of ["fixture", "model", "base-url-env", "key-env", "max-requests", "output"] as const) {
+  for (const name of ["model", "base-url-env", "key-env", "max-requests", "output"] as const) {
     if (!values[name]) throw new Error(`Missing --${name}`);
   }
   assertDialogueDatabase();
-  const fixturePath = await realpath(values.fixture!), outputPath = resolve(values.output!);
+  if (!values["runtime-safety"] && !values.fixture) throw new Error("Missing --fixture");
+  if (values["runtime-safety"] && (values.fixture || values.case)) throw new Error("--runtime-safety cannot be combined with --fixture/--case");
+  const fixturePath = values.fixture ? await realpath(values.fixture) : undefined, outputPath = resolve(values.output!);
   if (fixturePath === outputPath) throw new Error("Output cannot overwrite fixture");
-  const fixture = dialogueFixtureSchema.parse(JSON.parse(await readFile(fixturePath, "utf8")));
-  const cases = values.case ? fixture.cases.filter(item => item.caseId === values.case) : fixture.cases;
-  if (!cases.length) throw new Error("Unknown --case");
+  const fixture = fixturePath ? dialogueFixtureSchema.parse(JSON.parse(await readFile(fixturePath, "utf8"))) : undefined;
+  const cases = fixture ? values.case ? fixture.cases.filter(item => item.caseId === values.case) : fixture.cases : [];
+  if (fixture && !cases.length) throw new Error("Unknown --case");
   const baseUrl = process.env[values["base-url-env"]!], apiKey = process.env[values["key-env"]!];
   if (!baseUrl || !apiKey) throw new Error("Provider environment variables are missing");
   const maxRequests = Number(values["max-requests"]);
@@ -30,7 +32,9 @@ async function main() {
     await output.write(data, 0, data.length, 0); await output.truncate(data.length); await output.sync();
   };
   try {
-    const report = await collectTutorDialogue({ cases, fixtureVersion: fixture.version, git, model: values.model!, baseUrl, apiKey, maxRequests, checkpoint: save });
+    const common = { git, model: values.model!, baseUrl, apiKey, maxRequests, checkpoint: save };
+    const report = values["runtime-safety"] ? await collectTutorRuntimeSafety(common)
+      : await collectTutorDialogue({ ...common, cases, fixtureVersion: fixture!.version });
     console.log(JSON.stringify({ output: outputPath, passed: report.passed, requests: report.requests.length, cases: report.cases.length, errors: report.errors }));
     if (!report.passed) process.exitCode = 1;
   } finally { await output.close(); }

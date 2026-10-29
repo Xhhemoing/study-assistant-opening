@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dialogueFixtureSchema } from "../../packages/domain/src/opening/tutor-dialogue-evaluation";
-import { assertDialogueDatabase, collectTutorDialogue } from "../../scripts/lib/tutor-dialogue";
+import { assertDialogueDatabase, collectTutorDialogue, collectTutorRuntimeSafety, RUNTIME_SAFETY_CASES } from "../../scripts/lib/tutor-dialogue";
 
 const load = async () => dialogueFixtureSchema.parse(JSON.parse(await readFile("tests/fixtures/opening/tutor-dialogue-cases.json", "utf8")));
 const base = { git: "controlled-test-checkout", model: "controlled-model", baseUrl: "https://offline.invalid", apiKey: "synthetic-test-key" };
@@ -31,6 +31,26 @@ describe("dialogue database guard without connecting", () => {
   });
 });
 describe("real Worker/database/provider dialogue with fetch-only replacement", () => {
+  it("collects actual query receipts and rejects stale Worker actions across the isolated runtime matrix", async () => {
+    vi.stubEnv("OPENING_SYSTEM_QUERY", "1");
+    try {
+      const report = await collectTutorRuntimeSafety({ ...base, maxRequests: 2,
+        checkpoint: process.env.D1_RUNTIME_REPORT ? async report => { await writeFile(process.env.D1_RUNTIME_REPORT!, JSON.stringify(report, null, 2), { mode: 0o600 }); } : undefined,
+        fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content: string }> };
+        const toolResultPresent = body.messages.some(row => row.role === "tool");
+        const focus = toolResultPresent ? undefined : JSON.parse(body.messages.at(-1)!.content) as { focus: { courseId: string } };
+        return new Response(JSON.stringify({ id: "controlled-native", choices: [{ finish_reason: toolResultPresent ? "stop" : "tool_calls", message: toolResultPresent ? { content: JSON.stringify({ text: "", citedChunkIds: [], candidates: [] }) }
+          : { content: null, tool_calls: [{ id: "learning-read", type: "function", function: { name: "learning", arguments: JSON.stringify({ courseId: focus!.focus.courseId, limit: 5, offset: 0 }) } }] } }],
+          usage: { prompt_tokens: 100, completion_tokens: 30 } }));
+      } });
+      expect(report.errors).toEqual([]);
+      expect(report.passed).toBe(true);
+      expect(report.cases.map(row => [row.caseId, row.status])).toEqual(RUNTIME_SAFETY_CASES.map(id => [id, "passed"]));
+      expect(report.requests).toHaveLength(2);
+      expect(report.requests.every(row => row.output?.requestId === "controlled-native")).toBe(true);
+    } finally { vi.unstubAllEnvs(); }
+  }, 60000);
   it("delivers two real rounds, preserves history/snapshots/help, replays once, and checks all three scenarios", async () => {
     const fixture = await load();
     let calls = 0;
