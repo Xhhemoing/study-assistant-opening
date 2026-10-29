@@ -430,6 +430,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         turnId: string;
         kind: "instruction" | "hint" | "solution";
         level: "hinted" | "revealed";
+        hintStage?: number | null;
+        initiatedBy?: "user" | "assistant" | null;
         delivered: true;
       };
       expectedPrivacyEpoch?: number;
@@ -583,7 +585,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       });
     },
 
-    async getUserTurn(id: string, workspaceId: string): Promise<{
+    async getUserTurn(id: string, workspaceId: string, jobId?: string): Promise<{
       text: string;
       mode: string;
       sourceIds: string[];
@@ -607,7 +609,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         FROM opening_turns t JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
         LEFT JOIN opening_learning_item_versions v ON v.workspace_id=t.workspace_id AND v.owner_user_id=c.owner_user_id
           AND v.id::text=COALESCE(t.context_anchor->>'itemVersionId',(SELECT a.item_version_id::text FROM opening_learning_attempts a WHERE a.id=t.attempt_id AND a.workspace_id=t.workspace_id AND a.owner_user_id=c.owner_user_id))
-        WHERE t.id = ${id} AND t.workspace_id = ${workspaceId} LIMIT 1
+        WHERE t.id = ${id} AND t.workspace_id = ${workspaceId} AND t.role='user'
+          AND (${jobId == null} OR EXISTS (SELECT 1 FROM opening_tutor_jobs j
+            WHERE j.id=${jobId ?? null} AND j.workspace_id=t.workspace_id
+              AND j.conversation_id=t.conversation_id AND j.user_turn_id=t.id)) LIMIT 1
       `;
       if (!rows.length) return null;
       const row = rows[0] as Record<string, unknown>;

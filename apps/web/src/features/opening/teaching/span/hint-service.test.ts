@@ -44,7 +44,7 @@ describe("span hint ladder", () => {
       responses.push(response);
       expect(mocks.deliver).toHaveBeenLastCalledWith(scope, expect.objectContaining({ releaseKey: `span-hint-v1:${id}:${level}`,
         contextAnchor: { attemptId: id, itemVersionId: itemId, courseId: id, purpose: "learning_help" }, sessionId: id,
-        kind: "hint", level: "hinted", origin: "assistant", supportDomain: "math" }));
+        kind: "hint", level: "hinted", origin: "assistant", supportDomain: "math", hintStage: level, initiatedBy: null }));
     }
     expect(new Set(responses.map(response => response.text)).size).toBe(3);
     expect(responses[2]!.text).toContain(`(${problem.vectors[0][0]})α+(${problem.vectors[1][0]})β=${problem.target[0]}`);
@@ -80,7 +80,7 @@ describe("span hint ladder", () => {
     else throw new Error("Known catalog item must have an exact solution");
     expect(mocks.sql).toHaveBeenCalledOnce();
     expect(mocks.deliver).toHaveBeenCalledWith(scope, expect.objectContaining({ releaseKey: `span-feedback:${id}`,
-      kind: "solution", level: "revealed", origin: "history_solution", contextAnchor: { attemptId: id, itemVersionId: itemId, courseId: id, purpose: "history_solution" } }));
+      kind: "solution", level: "revealed", origin: "history_solution", hintStage: 4, initiatedBy: null, contextAnchor: { attemptId: id, itemVersionId: itemId, courseId: id, purpose: "history_solution" } }));
     expect(response).not.toHaveProperty("independent");
     expect(response).not.toHaveProperty("retestScheduled");
   });

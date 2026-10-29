@@ -93,17 +93,22 @@ it.each([false, true])("saved tutor generation stays inert until actual conversa
   await jobs.completeTurn({ scope: fixture.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
     text: "Use a common denominator", citations: [], candidates: [], claimToken: claimed!.claimToken,
     helpExposure: { id: randomUUID(), sessionId: f.sessionId, attemptId: attempt.id, problemId: attempt.problemId,
-      turnId: saved.assistantTurnId, kind: "hint", level: "hinted", delivered: true, contextAnchor: attempt.contextAnchor } });
-  const [generated] = await fixture.sql`SELECT delivered,released_at,acknowledged_at FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
-  expect(generated).toEqual({ delivered: false, released_at: null, acknowledged_at: null });
+      turnId: saved.assistantTurnId, kind: "hint", level: "hinted", delivered: true, contextAnchor: attempt.contextAnchor,
+      hintStage: null, initiatedBy: "user" } });
+  expect(await jobs.getUserTurn(saved.turnId, fixture.scope.workspaceId, saved.jobId)).not.toBeNull();
+  expect(await jobs.getUserTurn(saved.turnId, fixture.scope.workspaceId, randomUUID())).toBeNull();
+  expect(await jobs.getUserTurn(saved.assistantTurnId, fixture.scope.workspaceId, saved.jobId)).toBeNull();
+  const [generated] = await fixture.sql`SELECT delivered,released_at,acknowledged_at,hint_stage,initiated_by FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
+  expect(generated).toEqual({ delivered: false, released_at: null, acknowledged_at: null, hint_stage: null, initiated_by: "user" });
   const history = await conversations.loadContinuityTurns(fixture.scope, conversation.id, { attemptId: attempt.id });
   expect(history.some(turn => turn.id === saved.turnId)).toBe(true);
   expect(await conversations.loadContinuityTurns(fixture.scope, conversation.id, { attemptId: randomUUID() })).toEqual([]);
-  const [afterRoutingRead] = await fixture.sql`SELECT delivered,released_at,acknowledged_at FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
+  const [afterRoutingRead] = await fixture.sql`SELECT delivered,released_at,acknowledged_at,hint_stage,initiated_by FROM opening_help_exposures WHERE turn_id=${saved.assistantTurnId}`;
   expect(afterRoutingRead).toEqual(generated);
   if (readBeforeAnswer) {
     const turns = await conversations.listTurns(fixture.scope, conversation.id);
-    expect(turns.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt?.releasedAt).not.toBeNull();
+    expect(turns.find(turn => turn.id === saved.assistantTurnId)?.exposureReceipt).toMatchObject({
+      releasedAt: expect.any(String), hintStage: null, initiatedBy: "user" });
   }
   const answer = await f.submit(attempt);
   const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, answer);

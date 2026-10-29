@@ -183,7 +183,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
     };
     const parentBudget: ParentInteractionBudget = { id: `study-turn:${claimed.userTurnId}` };
     try {
-      const turn = await deps.tutorJobs.getUserTurn(claimed.userTurnId, claimed.workspaceId);
+      // The repository verifies the persisted user-role turn belongs to this job.
+      // Worker execution and tutor mode are not evidence of a hint-ladder stage.
+      const turn = await deps.tutorJobs.getUserTurn(claimed.userTurnId, claimed.workspaceId, claimed.id);
       if (!turn) throw new Error("user turn for tutor job is missing");
       const jobEpoch = deps.privacy
         ? await deps.privacy.getWorkspaceEpoch(scope)
@@ -237,6 +239,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         const text = makeStudyLanguageSupport(turn.languageSupportQuestion ?? null);
         const generatedExposure = { releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
           origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "language" as const, kind: "hint" as const, level: "hinted" as const,
+          hintStage: null, initiatedBy: "user" as const,
           ...(turn.learningSessionId ? { sessionId: turn.learningSessionId } : {}) };
         await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId, text,
           citations: [], candidates: [], contextSourceRefs: [], generatedExposure, expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
@@ -326,6 +329,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ? { releaseKey: `assistant:${claimed.assistantTurnId}`,
             contextAnchor: turn.contextAnchor ?? { purpose: "learning_help", attemptId: turn.attemptId ?? null } as StudyContextAnchor,
             origin: "assistant", turnId: claimed.assistantTurnId, supportDomain: "unknown",
+            hintStage: null, initiatedBy: "user",
             kind: turn.learningSessionId
               ? turn.attemptId && mode !== "explain" ? "hint" : classifyTutorHelpKind({ mode, attemptId: turn.attemptId ?? null, problemId: null })
               : mode === "explain" ? "solution" : "hint",
@@ -469,11 +473,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             }),
             level: mode === "explain" ? "revealed" as const : "hinted" as const,
             delivered: true as const,
+            hintStage: null, initiatedBy: "user" as const,
           }
         : undefined;
       const generatedExposure = streamExposure ?? (!turn.learningSessionId && turn.contextAnchor ? {
         releaseKey: `assistant:${claimed.assistantTurnId}`, contextAnchor: turn.contextAnchor,
         origin: "assistant" as const, turnId: claimed.assistantTurnId, supportDomain: "unknown" as const,
+        hintStage: null, initiatedBy: "user" as const,
         kind: mode === "explain" ? "solution" as const : "hint" as const,
         level: mode === "explain" ? "revealed" as const : "hinted" as const,
       } : undefined);
