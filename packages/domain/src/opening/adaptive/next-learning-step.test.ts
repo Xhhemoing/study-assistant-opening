@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextLearningStep } from "./next-learning-step";
+import { captureNextLearningStep, nextLearningStep } from "./next-learning-step";
 import type { NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 const observation = (overrides: Partial<SnapshotObservation> = {}): SnapshotObservation => ({
@@ -22,6 +22,15 @@ const input = (overrides: Partial<NextLearningStepInput> = {}): NextLearningStep
 });
 
 describe("nextLearningStep", () => {
+  it("captures only evaluated priority branches and the original rule decision", () => {
+    const captured = captureNextLearningStep(input({ observations: [observation({ verifiedCorrect: "no" })] }));
+    expect(captured.decision).toEqual(nextLearningStep(input({ observations: [observation({ verifiedCorrect: "no" })] })));
+    expect(captured.candidates).toEqual([
+      { action: "full_explain", eligible: false, reasonCodes: ["not_requested_full"], evidenceRefs: [] },
+      { action: "diagnose", eligible: false, reasonCodes: ["has_current_evidence"], evidenceRefs: ["observation:latest-observation"] },
+      { action: "targeted_explain", eligible: true, reasonCodes: ["verified_incorrect"], evidenceRefs: ["observation:latest-observation"] },
+    ]);
+  });
   it.each(["no", "unknown", undefined] as const)("does not teach from an inapplicable error or help (%s)", (usableForCurrentVersion) => {
     expect(nextLearningStep(input({ status: "observed_independent", observations: [
       observation({ verifiedCorrect: "no", assistance: "revealed", usableForCurrentVersion }),

@@ -41,7 +41,7 @@ describe("tutor next action orchestration", () => {
   it("resumes an unfinished activity without replacing it after an earlier error", async () => {
     const resume = { activityId: "unfinished", sessionId: "existing-session", href: "/opening/courses/course/study/span?activity=unfinished" };
     const { deps, executions } = service(context({ resume }));
-    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: resume, resumed: true });
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: resume, resumed: true, decision: null });
     expect(executions).toEqual([]);
   });
 

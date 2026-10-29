@@ -1,11 +1,11 @@
 import type { Scope, SpanLessonSnapshot, StudySessionIntent } from "@aistudy/contracts";
-import { DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
+import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
-import type { SnapshotObservation } from "@aistudy/domain";
+import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
 import { contextSourceRefsIncluded, mergeContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
-import { admitLearningSources, learningError, lockLearningOwner } from "./opening-learning-facts";
+import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
@@ -15,10 +15,14 @@ import { readOpeningSpanReservedChoice } from "./opening-span-reserved-selection
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { readOpeningSpanTutorOrigin, readOpeningSpanTutorOriginChange, type OpeningSpanTutorOriginReference, type OpeningSpanTutorOriginChange } from "./opening-span-tutor-origin";
 import { createOpeningLearningAttemptInTx } from "./opening-learning-attempts";
+import { readOpeningLearnerState } from "./opening-learner-state-read";
+import { recordOpeningLearningDecision, readOpeningLearningDecisionByClientKey, createOpeningLearningDecisionsRepository } from "./opening-learning-decisions";
 
 export type OpeningSpanTutorRequest = {
   courseId: string; sourceIds: readonly string[]; sourceVersions: Record<string, number>; question: string;
   originReference?: OpeningSpanTutorOriginReference;
+  operationId?: string;
+  entry?: "worker" | "span-next";
 };
 export type OpeningSpanTutorContext = {
   courseId: string; grantRevision: number; privacyEpoch: number;
@@ -30,6 +34,9 @@ export type OpeningSpanTutorContext = {
   originSnapshotRevision?: number;
   needsReservedIssue?: boolean;
   originChange?: OpeningSpanTutorOriginChange;
+  historicalDecision?: NextLearningStep | null;
+  historicalOperationId?: string;
+  entry?: "worker" | "span-next";
 };
 export type OpeningSpanTutorExecuteInput = {
   context: OpeningSpanTutorContext; decision: NextLearningStep; operationId: string;
@@ -37,6 +44,11 @@ export type OpeningSpanTutorExecuteInput = {
 };
 
 const conflict = (message: string) => learningError("CONFLICT", message);
+const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}`;
+export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
+  return receipt?.policyVersion === `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-1`
+    ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
+}
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
     || /^(?:请|帮我|我想)?(?:继续(?:学习|上次(?:学习)?|原来的学习)?|下一步|开始(?:本次学习|学习|练习)|出一道题|从哪里开始)[\s。！!？?]*$/u.test(question.trim());
@@ -160,6 +172,16 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
       if (!spanTutorQuestionInScope(request.question)) return null;
       return sql.begin("isolation level repeatable read read only", async tx => {
         const authorization = await readSpanTutorAuthorization(tx, scope, request.courseId);
+        const prior = request.operationId ? await readOpeningLearningDecisionByClientKey(tx, scope, decisionKey(request.operationId)) : null;
+        if (prior) {
+          const captured = JSON.parse(prior.intentVersion) as OpeningSpanTutorContext;
+          if (captured.courseId !== request.courseId) throw conflict("原学习请求不属于本课程。");
+          const session = await createOpeningSpanSessionRepository(transactionClient(tx)).get(scope, prior.targetId);
+          if (!session) throw conflict("原学习回执的活动不存在。");
+          const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          return { ...captured, privacyEpoch: Number(workspace!.privacy_epoch), resumeSession: session,
+            historicalDecision: spanTutorReceiptDecision(prior), historicalOperationId: request.operationId, needsReservedIssue: false };
+        }
         if (!authorization.authorized || !authorization.grant) return null;
         const db = transactionClient(tx);
         const origin = request.originReference ? await readOpeningSpanTutorOrigin(db, scope, request.originReference, request.courseId) : null;
@@ -187,15 +209,44 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           ...(request.originReference ? { originReference: request.originReference, originSnapshotRevision: origin!.session.revision } : {}),
           ...(reserved?.kind === "unavailable" ? { unseenUnavailableReason: reserved.reason } : {}),
           ...(position.resumeSession && reserved?.kind === "available" ? { needsReservedIssue: true } : {}),
-          sourceIds, sourceVersions, intent, ...projection, ...position };
+          sourceIds, sourceVersions, intent, ...projection, ...position, entry: request.entry ?? "worker",
+          ...(position.resumeSession ? { historicalDecision: spanTutorReceiptDecision((await createOpeningLearningDecisionsRepository(db).list(scope,
+            { layer: "activity", targetId: position.resumeSession.activityId }))[0] ?? null) } : {}) };
       }) as Promise<OpeningSpanTutorContext | null>;
     },
     async assertCurrent(scope: Scope, context: OpeningSpanTutorContext): Promise<void> {
+      if (context.historicalOperationId) {
+        await sql.begin("isolation level repeatable read read only", async tx => {
+          const prior = await readOpeningLearningDecisionByClientKey(tx, scope, decisionKey(context.historicalOperationId!));
+          if (!prior || prior.targetId !== context.resumeSession?.activityId) throw conflict("原学习回执身份已变化。");
+          const changed = await readOpeningSpanTutorOriginChange(transactionClient(tx), scope, prior.targetId);
+          if (changed) throw Object.assign(conflict("原评价或材料已变化，请重新选择下一步。"), { originChange: changed });
+        });
+        return;
+      }
       await sql.begin("isolation level repeatable read read only", tx => assertContext(tx, scope, context));
     },
     async execute(scope: Scope, input: OpeningSpanTutorExecuteInput): Promise<SpanLessonSnapshot> {
       return sql.begin(async tx => {
         const { context } = input;
+        // Serialize both the receipt probe and action creation, not only the insert.
+        await lockWorkspaceLearningHistory(tx, scope);
+        await lockLearningOwner(tx, scope);
+        const prior = await readOpeningLearningDecisionByClientKey(tx, scope, decisionKey(input.operationId));
+        if (prior) {
+          const captured = JSON.parse(prior.intentVersion) as OpeningSpanTutorContext;
+          if (captured.courseId !== context.courseId || !isDeepStrictEqual(captured.originReference, context.originReference)) throw conflict("原学习请求身份已变化。");
+          const session = await createOpeningSpanSessionRepository(transactionClient(tx)).get(scope, prior.targetId);
+          if (!session) throw conflict("原学习回执的活动不存在。");
+          return session;
+        }
+        const [legacy] = await tx`SELECT id FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND course_id=${context.courseId} AND client_key=${`span-lesson:${input.operationId}`}`;
+        if (legacy) {
+          const session = await createOpeningSpanSessionRepository(transactionClient(tx)).get(scope, String(legacy.id));
+          if (!session) throw conflict("原学习回执的活动不存在。");
+          return session; // Missing historical decisions remain unknown; never backfill on retry.
+        }
         await lockSpanTutorAuthorization(tx, scope, context.courseId, context.grantRevision);
         await lockLearningOwner(tx, scope);
         if (input.jobLease) {
@@ -218,6 +269,34 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         const availability = await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
         if (availability?.kind === "unavailable") throw Object.assign(conflict("未见题暂不可发放，请保留原进度并核对课程记录；没有新增活动。"),
           { reason: availability.reason, code: "SPAN_UNSEEN_UNAVAILABLE" });
+        // Capture before origin completion, session/attempt creation and budget reservation.
+        const capturedContext = structuredClone(context);
+        const rule = captureNextLearningStep(context.decisionInput);
+        const state = await readOpeningLearnerState(tx, scope, { courseId: context.courseId });
+        const saveDecision = async (session: SpanLessonSnapshot, kind: "create" | "resume_issue") => {
+          const execution = { kind, moveId: session.moveId, retestId: session.retestId,
+            problemId: availability?.kind === "available" ? availability.problem.id : null,
+            problemVersion: availability?.kind === "available" ? Number(availability.problem.version) : null };
+          const selectedAction = `${kind}:${session.moveId}`;
+          const evidenceRefs = context.sourceRefs.map(ref => `source:${ref.sourceId}:v${ref.sourceVersion}`);
+          const sourceVersions = structuredClone(state.sourceVersions);
+          for (const ref of context.sourceRefs) sourceVersions[ref.sourceId] = [...new Set([...(sourceVersions[ref.sourceId] ?? []), ref.sourceVersion])].sort((a, b) => a - b);
+          const reasonCodes = [`entry:${context.entry ?? "worker"}`, `execution:${kind}`, ...(session.retestId ? ["bound_due_retest"] : []), rule.decision.reasonCode];
+          const base = { stateVersion: state.stateVersion, dataAsOf: state.dataAsOf,
+            goalVersion: JSON.stringify({ courseId: context.courseId, requirementKey: SPAN_REQUIREMENT_KEY, grantRevision: context.grantRevision }),
+            intentVersion: JSON.stringify({ ...capturedContext, ruleDecision: rule.decision, execution }),
+            policyVersion: `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-1`, sourceVersions,
+            invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] as LearningDecisionInput["invalidationConditions"],
+            selectedAction, reasonCodes, evidenceRefs,
+            candidates: [...rule.candidates.map(candidate => ({ ...candidate, action: `rule:${candidate.action}`,
+              eligible: false, reasonCodes: [...candidate.reasonCodes, candidate.eligible ? "rule_recommendation_mapped_to_execution" : "rule_branch_not_selected"] })),
+              { action: selectedAction, eligible: true, reasonCodes, evidenceRefs }] };
+          const parents = await createOpeningLearningDecisionsRepository(db).list(scope, { layer: "session", targetId: session.sessionId });
+          const parent = parents[0] ?? (kind === "create" ? await recordOpeningLearningDecision(tx, scope,
+            { ...base, layer: "session", targetId: session.sessionId }, `${decisionKey(input.operationId)}:session`) : null);
+          await recordOpeningLearningDecision(tx, scope, { ...base, layer: "activity", targetId: session.activityId,
+            parentDecisionId: parent?.id ?? null }, decisionKey(input.operationId));
+        };
         if (context.resumeSession) {
           if (availability?.kind === "available") {
             await createOpeningLearningAttemptInTx(tx, scope, { sessionId: context.resumeSession.sessionId,
@@ -226,6 +305,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await reserveSpanTutorActivityBudget(tx, scope, { courseId: context.courseId, activityId: context.resumeSession.activityId,
               minutes: context.intent.timeBudgetMinutes, expectedGrantRevision: context.grantRevision });
             context.resumeSession = (await sessions.get(scope, context.resumeSession.activityId))!;
+            await saveDecision(context.resumeSession, "resume_issue");
           }
           return context.resumeSession;
         }
@@ -253,6 +333,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           ...(context.originReference ? { originReference: context.originReference } : {}) } })}::jsonb
           WHERE id=${session.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         context.resumeSession = (await sessions.get(scope, session.activityId))!;
+        await saveDecision(context.resumeSession, "create");
         return context.resumeSession;
       }) as Promise<SpanLessonSnapshot>;
     },

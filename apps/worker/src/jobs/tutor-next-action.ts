@@ -14,6 +14,7 @@ export type TutorNextActionContext = {
   spanContext?: OpeningSpanTutorContext;
   unavailableAction?: { message: string; label: string; href: string };
   resumeRequiresExecution?: boolean;
+  historicalDecision?: NextLearningStep | null;
 };
 export type TutorNextActionRequest = {
   courseId: string; sourceIds: readonly string[]; sourceVersions: Record<string, number>;
@@ -27,16 +28,20 @@ export type TutorNextActionService = {
   execute(scope: Scope, input: TutorNextActionRequest & { context: TutorNextActionContext; decision: NextLearningStep }): Promise<TutorNextAction>;
 };
 export type PreparedTutorNextAction = {
-  context: TutorNextActionContext; decision: NextLearningStep; resumed: boolean;
-} & ({ action: TutorNextAction; choice?: never } | { action: null; choice: NonNullable<TutorNextActionContext["unavailableAction"]> });
+  context: TutorNextActionContext;
+} & ({ decision: NextLearningStep | null; resumed: true; action: TutorNextAction; choice?: never }
+  | { decision: NextLearningStep; resumed: false; action: TutorNextAction; choice?: never }
+  | { decision: NextLearningStep; resumed: false; action: null; choice: NonNullable<TutorNextActionContext["unavailableAction"]> });
 
 export async function prepareTutorNextAction(service: TutorNextActionService, scope: Scope, request: TutorNextActionRequest): Promise<PreparedTutorNextAction | null> {
   const context = await service.read(scope, request);
   if (!context) return null;
   if (request.expectedPrivacyEpoch !== undefined) assertCurrentEpoch(request.expectedPrivacyEpoch, context.privacyEpoch);
   await service.assertCurrent(scope, context);
+  if (context.resume && !context.resumeRequiresExecution && !context.unavailableAction)
+    return { context, action: context.resume, decision: context.historicalDecision ?? null, resumed: true };
   const decision = nextLearningStep(context.decisionInput);
   if (context.unavailableAction) return { context, action: null, decision, resumed: false, choice: context.unavailableAction };
   const action = context.resume && !context.resumeRequiresExecution ? context.resume : await service.execute(scope, { ...request, context, decision });
-  return { context, action, decision, resumed: context.resume !== undefined };
+  return { context, action, decision, resumed: false };
 }
