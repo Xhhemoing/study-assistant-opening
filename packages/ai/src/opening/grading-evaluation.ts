@@ -2,14 +2,35 @@ import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluat
 import { acceptedAiGradingOutcome, checkArithmeticAnswer, corroborateArithmeticGrade } from "@aistudy/domain";
 import { parseModelJson } from "./latex-json";
 
+/** Solve P(Binomial(n, p) <= k) = 0.05 in log space (one-sided Clopper–Pearson). */
+function upper95(k: number, n: number): number | null {
+  if (!n) return null;
+  if (k === n) return 1;
+  if (!k) return -Math.expm1(Math.log(0.05) / n);
+  let low = k / n, high = 1;
+  for (let iteration = 0; iteration < 60; iteration += 1) {
+    const p = (low + high) / 2;
+    let logTerm = n * Math.log1p(-p), logSum = logTerm;
+    for (let j = 1; j <= k; j += 1) {
+      logTerm += Math.log(n - j + 1) - Math.log(j) + Math.log(p) - Math.log1p(-p);
+      const maximum = Math.max(logSum, logTerm);
+      logSum = maximum + Math.log(Math.exp(logSum - maximum) + Math.exp(logTerm - maximum));
+    }
+    if (logSum > Math.log(0.05)) low = p;
+    else high = p;
+  }
+  return high;
+}
+
 function ratio(numerator: number, denominator: number) {
-  return { numerator, denominator, rate: denominator ? numerator / denominator : null };
+  return { numerator, denominator, rate: denominator ? numerator / denominator : null, upper95: upper95(numerator, denominator) };
 }
 
 /** Offline evaluation only: never imports scores into a learner's history or treats AI labels as truth. */
 export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
   const dataset = gradingEvaluationDatasetSchema.parse(rawDataset), run = gradingEvaluationRunSchema.parse(rawRun);
   if (run.datasetId !== dataset.datasetId || run.datasetVersion !== dataset.datasetVersion) throw new Error("Grading dataset version mismatch");
+  if (run.protocolVersion !== dataset.protocolVersion) throw new Error("Grading protocol version mismatch");
   if (run.results.some(result => !dataset.cases.some(test => test.id === result.caseId))) throw new Error("Unknown grading case");
   const cases = dataset.cases.map(test => {
     const result = run.results.find(row => row.caseId === test.id);
@@ -37,7 +58,7 @@ export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
         acceptedOutcome = acceptedAiGradingOutcome(checked);
       }
     }
-    return { id: test.id, group: test.group, reviewed, reviewStatus: test.review.status,
+    return { id: test.id, group: test.group, modality: test.modality, reviewed, reviewStatus: test.review.status,
       expected: test.review.status !== "pending" ? test.review.outcome : null,
       modelOutcome, acceptedOutcome, reason: reason ?? (reviewed ? null : "human_review_pending") };
   });
@@ -86,8 +107,10 @@ export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {
   }
   return { protocolVersion: dataset.protocolVersion, datasetId: dataset.datasetId, datasetVersion: dataset.datasetVersion,
     modelLabel: run.modelLabel, provenance: run.provenance, completedAt: run.completedAt,
+    sourceCommit: run.sourceCommit, instructionVersion: run.instructionVersion, rubricVersion: run.rubricVersion, promptDigest: run.promptDigest,
     calibrated: false as const, learningEffectMeasured: false as const, summary: metrics(cases),
     groups: Object.fromEntries([...new Set(cases.map(row => row.group))].map(group => [group, metrics(cases.filter(row => row.group === group))])),
+    byModality: Object.fromEntries([...new Set(cases.map(row => row.modality))].map(modality => [modality, metrics(cases.filter(row => row.modality === modality))])),
     byReviewSource: {
       humanReviewed: metrics(cases.filter(row => row.reviewStatus === "human_reviewed")),
       programVerified: metrics(cases.filter(row => row.reviewStatus === "program_verified")),

@@ -15,14 +15,42 @@ const prediction = (caseId: string, outcome: "correct" | "incorrect" | "unverifi
     criteria: [{ label: "求导", verdict: outcome, feedback: "测试步骤" }] }),
 });
 const run = (results: GradingEvaluationRun["results"]): GradingEvaluationRun => ({ datasetId: "test", datasetVersion: "1", modelLabel: "test-fixture",
-  completedAt: "2026-10-21T13:00:00.000Z", provenance: "test_fixture", results });
+  completedAt: "2026-10-21T13:00:00.000Z", provenance: "test_fixture",
+  sourceCommit: "unknown", instructionVersion: "synthetic-v1", rubricVersion: "synthetic-v1",
+  protocolVersion: "grading-evaluation-v1", promptDigest: "unknown", results });
+
+it("rejects missing run metadata and mismatched protocols instead of backfilling current versions", () => {
+  for (const key of ["sourceCommit", "instructionVersion", "rubricVersion", "protocolVersion", "promptDigest"] as const) {
+    const legacy: Partial<GradingEvaluationRun> = { ...run([]) };
+    delete legacy[key];
+    expect(() => evaluateGradingRun(dataset([testCase("a", "correct")]), legacy)).toThrow();
+  }
+  expect(() => evaluateGradingRun(dataset([testCase("a", "correct")]), { ...run([]), protocolVersion: "other-v1" }))
+    .toThrow("protocol version mismatch");
+});
+
+it("reports exact one-sided 95% bounds for zero, interior and all events across strata", () => {
+  const cases = Array.from({ length: 10 }, (_, index) => testCase(`c-${index}`, "correct"));
+  const report = evaluateGradingRun(dataset(cases), run(cases.map((test, index) => prediction(test.id, index ? "correct" : "incorrect"))));
+  for (const metrics of [report.summary, report.groups.equivalent_solution!, report.byReviewSource.humanReviewed]) {
+    expect(metrics.decisionRates.falseIncorrectOnCorrect.upper95).toBeCloseTo(0.3941633024365047, 10);
+    expect(metrics.decisionRates.abstentionOnGradeable.upper95).toBeCloseTo(0.2588655508930523, 10);
+    expect(metrics.rawModel.decisionRates.falseIncorrectOnCorrect.upper95).toBeCloseTo(0.3941633024365047, 10);
+  }
+  expect(report.byReviewSource.programVerified.decisionRates.falseIncorrectOnCorrect.upper95).toBeNull();
+  const all = evaluateGradingRun(dataset(cases), run(cases.map(test => prediction(test.id, "unverified"))));
+  expect(all.summary.decisionRates.abstentionOnGradeable.upper95).toBe(1);
+  expect(all.summary.decisionRates.binaryCoverageOnGradeable.upper95).toBeCloseTo(0.2588655508930523, 10);
+  expect(report).toMatchObject({ sourceCommit: "unknown", instructionVersion: "synthetic-v1", rubricVersion: "synthetic-v1",
+    promptDigest: "unknown", calibrated: false, learningEffectMeasured: false });
+});
 
 it("never turns assistant draft labels or self-reported confidence into accuracy", () => {
   const report = evaluateGradingRun(dataset([{ ...testCase("a", "correct"), review: { status: "pending" } }]), run([prediction("a", "correct")]));
   expect(report.summary).toMatchObject({ humanReviewed: 0, acceptedAccuracy: null, coverage: null });
   expect(report.summary.expectedCounts).toEqual({ correct: 0, incorrect: 0, unverified: 0 });
   for (const metric of Object.values(report.summary.decisionRates)) {
-    expect(metric).toEqual({ numerator: 0, denominator: 0, rate: null });
+    expect(metric).toEqual({ numerator: 0, denominator: 0, rate: null, upper95: null });
   }
   expect(report.calibrated).toBe(false);
 });
@@ -61,21 +89,21 @@ it("reports class-specific denominators when correct answers dominate the datase
     unsafeBinaryOnUnverifiable: { numerator: 1, denominator: 2, rate: 0.5 },
   });
   expect(report.groups.question_mismatch?.decisionRates.binaryCoverageOnGradeable)
-    .toEqual({ numerator: 0, denominator: 0, rate: null });
+    .toMatchObject({ numerator: 0, denominator: 0, rate: null });
   expect(report.groups.question_mismatch?.decisionRates.correctAbstentionOnUnverifiable)
-    .toEqual({ numerator: 1, denominator: 2, rate: 0.5 });
+    .toMatchObject({ numerator: 1, denominator: 2, rate: 0.5 });
   expect(report.byReviewSource.humanReviewed.decisionRates).toEqual(report.summary.decisionRates);
   expect(report.byReviewSource.programVerified.decisionRates.falseCorrectOnIncorrect)
-    .toEqual({ numerator: 0, denominator: 0, rate: null });
+    .toMatchObject({ numerator: 0, denominator: 0, rate: null });
 });
 
 it("shows low effective coverage even when abstaining makes accepted accuracy perfect", () => {
   const cases = Array.from({ length: 20 }, (_, index) => testCase(`correct-${index}`, "correct"));
   const report = evaluateGradingRun(dataset(cases), run(cases.map((test, index) => prediction(test.id, index ? "unverified" : "correct"))));
   expect(report.summary.acceptedAccuracy).toBe(1);
-  expect(report.summary.decisionRates.binaryCoverageOnGradeable).toEqual({ numerator: 1, denominator: 20, rate: 0.05 });
-  expect(report.summary.decisionRates.abstentionOnGradeable).toEqual({ numerator: 19, denominator: 20, rate: 0.95 });
-  expect(report.summary.decisionRates.correctAbstentionOnUnverifiable).toEqual({ numerator: 0, denominator: 0, rate: null });
+  expect(report.summary.decisionRates.binaryCoverageOnGradeable).toMatchObject({ numerator: 1, denominator: 20, rate: 0.05 });
+  expect(report.summary.decisionRates.abstentionOnGradeable).toMatchObject({ numerator: 19, denominator: 20, rate: 0.95 });
+  expect(report.summary.decisionRates.correctAbstentionOnUnverifiable).toMatchObject({ numerator: 0, denominator: 0, rate: null });
 });
 
 it("does not count missing results as abstentions or successful handling", () => {
@@ -115,8 +143,8 @@ it("scores the same arithmetic abstention policy used by persistence, while keep
   expect(report.cases[0]).toMatchObject({ modelOutcome: "incorrect", acceptedOutcome: "unverified" });
   expect(report.summary).toMatchObject({ falseIncorrect: 0, abstentions: 1, acceptedAccuracy: null });
   expect(report.summary.rawModel).toMatchObject({ accuracy: 0, falseIncorrect: 1 });
-  expect(report.summary.decisionRates.abstentionOnGradeable).toEqual({ numerator: 1, denominator: 1, rate: 1 });
-  expect(report.summary.rawModel.decisionRates.falseIncorrectOnCorrect).toEqual({ numerator: 1, denominator: 1, rate: 1 });
+  expect(report.summary.decisionRates.abstentionOnGradeable).toMatchObject({ numerator: 1, denominator: 1, rate: 1 });
+  expect(report.summary.rawModel.decisionRates.falseIncorrectOnCorrect).toMatchObject({ numerator: 1, denominator: 1, rate: 1 });
 });
 
 it("verifies objective labels at evaluation time without calling them human reviews", () => {
@@ -140,6 +168,7 @@ it("runs the objective development fixture and identifies deliberate synthetic m
   const load = (file: string) => JSON.parse(readFileSync(new URL(`../../../../tests/fixtures/opening/grading/${file}`, import.meta.url), "utf8"));
   const report = evaluateGradingRun(load("objective-arithmetic.json"), load("objective-synthetic-run.json"));
   expect(report.provenance).toBe("test_fixture");
+  expect(report).toMatchObject({ sourceCommit: "unknown", instructionVersion: "unknown", rubricVersion: "unknown", promptDigest: "unknown" });
   expect(report.summary).toMatchObject({ total: 8, humanReviewed: 0, programVerified: 8,
     validResults: 8, acceptedBinary: 6, abstentions: 2, coverage: 0.75, acceptedAccuracy: 1,
     rawModel: { accuracy: 0.75, falseCorrect: 1, falseIncorrect: 1 } });

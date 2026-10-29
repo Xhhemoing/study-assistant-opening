@@ -7,7 +7,8 @@ import { collectGradingRun } from "../packages/ai/src/opening/grading-collection
 import type { OpeningFetch } from "../packages/ai/src/opening/provider";
 import { assertOpeningProviderEndpoint } from "../packages/ai/src/opening/provider-network";
 
-const usage = "Usage: node --import tsx scripts/study-grading-collect.ts --dataset FILE --model MODEL --base-url-env ENV_NAME --api-key-env ENV_NAME --max-requests N --output NEW_FILE [--timeout-ms N]";
+const usage = "Usage: node --import tsx scripts/study-grading-collect.ts --dataset FILE --model MODEL --base-url-env ENV_NAME --api-key-env ENV_NAME --max-requests N --source-commit COMMIT --instruction-version VERSION --rubric-version VERSION --protocol-version VERSION --output NEW_FILE [--timeout-ms N]";
+const metadataFlags = ["--source-commit", "--instruction-version", "--rubric-version", "--protocol-version"];
 
 async function writePrivate(file: FileHandle, value: unknown) {
   const text = JSON.stringify(value, null, 2) + "\n";
@@ -26,11 +27,14 @@ export async function runGradingCollectionCli(args: string[], environment: NodeJ
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index]!, value = args[index + 1];
-    if (!["--dataset", "--model", "--base-url-env", "--api-key-env", "--max-requests", "--output", "--timeout-ms"].includes(key)
+    if (!["--dataset", "--model", "--base-url-env", "--api-key-env", "--max-requests", "--output", "--timeout-ms", ...metadataFlags].includes(key)
       || !value || value.startsWith("--") || options.has(key)) throw new Error("Invalid collection options");
     options.set(key, value);
   }
-  if (["--dataset", "--model", "--base-url-env", "--api-key-env", "--max-requests", "--output"].some(key => !options.has(key))) throw new Error("Missing required collection options");
+  if (["--dataset", "--model", "--base-url-env", "--api-key-env", "--max-requests", "--output", ...metadataFlags].some(key => !options.has(key))) throw new Error("Missing required collection options");
+  for (const flag of metadataFlags) {
+    if (!options.get(flag)!.trim() || options.get(flag)!.trim().length > 160) throw new Error("Invalid collection metadata");
+  }
   const readEnvironment = (key: string) => {
     const name = options.get(key)!;
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name) || !environment[name]?.trim()) throw new Error("Missing or invalid provider environment setting");
@@ -48,12 +52,15 @@ export async function runGradingCollectionCli(args: string[], environment: NodeJ
   const collectionPath = `${outputPath}.collection.json`;
   if (inputPath === outputPath || inputPath === collectionPath) throw new Error("Output must not overwrite input");
   const dataset = gradingEvaluationDatasetSchema.parse(JSON.parse(await readFile(inputPath, "utf8")));
+  if (options.get("--protocol-version")!.trim() !== dataset.protocolVersion) throw new Error("Grading protocol version mismatch");
   let resultFile: FileHandle | undefined, collectionFile: FileHandle | undefined;
   try {
     resultFile = await open(outputPath, "wx", 0o600);
     try { collectionFile = await open(collectionPath, "wx", 0o600); }
     catch (error) { await resultFile.close(); resultFile = undefined; await unlink(outputPath); throw error; }
     const output = await collectGradingRun(dataset, { baseUrl, apiKey, model,
+      sourceCommit: options.get("--source-commit")!, instructionVersion: options.get("--instruction-version")!,
+      rubricVersion: options.get("--rubric-version")!, protocolVersion: options.get("--protocol-version")!.trim(),
       maxRequests: Number(limit), ...(timeout ? { timeoutMs: Number(timeout) } : {}), fetchImpl: fixtureTransport,
       onProgress: async snapshot => { await writePrivate(resultFile!, snapshot.run); await writePrivate(collectionFile!, snapshot.collection); },
     });

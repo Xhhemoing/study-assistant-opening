@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluationRunSchema, providerOutputSchema, type GradingEvaluationRun } from "@aistudy/contracts";
 import { buildAnswerGradingInput } from "./answer-grading";
 import { createOpeningProvider, OpeningProviderError, type OpeningFetch } from "./provider";
@@ -12,10 +13,11 @@ type CaseCollection = {
 };
 export type GradingCollection = {
   run: GradingEvaluationRun;
-  collection: { status: "in_progress" | "completed"; textOnly: true; maxRequests: number; requestCount: number; elapsedMs: number; cases: CaseCollection[] };
+  collection: { status: "in_progress" | "completed"; textOnly: true; maxRequests: number; requestCount: number; elapsedMs: number; instruction: string; cases: CaseCollection[] };
 };
 export type GradingCollectionOptions = {
   baseUrl: string; apiKey: string; model: string; maxRequests: number; timeoutMs?: number;
+  sourceCommit: string; instructionVersion: string; rubricVersion: string; protocolVersion: string;
   /** Trusted fixture injection only; runtime configuration never supplies a transport. */
   fetchImpl?: OpeningFetch;
   onProgress?: (snapshot: GradingCollection) => Promise<void>;
@@ -29,11 +31,17 @@ function isGradingJson(text: string): boolean {
 /** Explicit offline collection: no learner writes, fallback models or automatic retries. */
 export async function collectGradingRun(rawDataset: unknown, options: GradingCollectionOptions): Promise<GradingCollection> {
   const dataset = gradingEvaluationDatasetSchema.parse(rawDataset);
+  if (options.protocolVersion !== dataset.protocolVersion) throw new Error("Grading protocol version mismatch");
   if (!Number.isInteger(options.maxRequests) || options.maxRequests < 1 || options.maxRequests > 1000
     || !options.apiKey.trim() || !options.model.trim() || options.model.length > 160
     || options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1000 || options.timeoutMs > 120_000)) {
     throw new Error("Invalid grading collection configuration");
   }
+  // This text-only path uses one shared instruction, built by the production builder.
+  // Only input fields enter ProviderInput; labels and model outputs never enter the digest.
+  const inputs = dataset.cases.map(test => buildAnswerGradingInput({ question: test.input.question,
+    answer: test.input.answer, referenceText: test.input.referenceText, imageParts: [] }));
+  const promptDigest = `sha256:${createHash("sha256").update(inputs[0]!.instruction).digest("hex")}`;
   const startedAt = performance.now();
   let captured: string | null = null;
   let requestCount = 0;
@@ -68,8 +76,11 @@ export async function collectGradingRun(rawDataset: unknown, options: GradingCol
   const snapshot: GradingCollection = {
     run: gradingEvaluationRunSchema.parse({ datasetId: dataset.datasetId, datasetVersion: dataset.datasetVersion,
       modelLabel: options.model, completedAt: new Date().toISOString(), provenance: options.fetchImpl ? "test_fixture" : "real_provider",
+      sourceCommit: options.sourceCommit, instructionVersion: options.instructionVersion, rubricVersion: options.rubricVersion,
+      protocolVersion: options.protocolVersion, promptDigest,
       results: dataset.cases.map(test => ({ caseId: test.id, caseVersion: test.version, input: test.input, rawOutput: "" })) }),
     collection: { status: "in_progress", textOnly: true, maxRequests: options.maxRequests, requestCount: 0, elapsedMs: 0,
+      instruction: inputs[0]!.instruction,
       cases: dataset.cases.map(test => ({ caseId: test.id, caseVersion: test.version, status: "not_started", rawMessageContent: null,
         rawMessageLength: null, requestId: null, inputTokens: null, outputTokens: null, elapsedMs: null })) },
   };
@@ -87,8 +98,7 @@ export async function collectGradingRun(rawDataset: unknown, options: GradingCol
       try {
         // Deliberately select only input fields. Candidate labels, review truth,
         // rationale, error groups and reviewer identities never reach the model.
-        const output = await provider.complete(buildAnswerGradingInput({ question: test.input.question,
-          answer: test.input.answer, referenceText: test.input.referenceText, imageParts: [] }));
+        const output = await provider.complete(inputs[index]!);
         decoded = output.text;
       } catch (error) {
         failed = true;

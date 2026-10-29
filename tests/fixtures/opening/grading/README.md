@@ -16,7 +16,7 @@ node --import tsx scripts/study-grading-eval.ts \
 
 For a real run, capture each case's exact input, case version and raw grading JSON in the `gradingEvaluationRunSchema` format, with an explicit model label, completion time and `real_provider` provenance. Never relabel the synthetic file as a provider run. Versions and inputs must match the dataset; missing, malformed or mismatched results remain in the coverage denominator. Results preserve raw outcomes and accepted outcomes separately, show false correct/incorrect and unsafe binary judgments on unjudgeable cases, and separate human-reviewed from program-verified metrics. Confidence is an uncalibrated model self-report and is never treated as accuracy.
 
-Reports retain the existing `coverage`, `acceptedAccuracy` and error counts. `acceptedAccuracy` describes only accepted binary decisions; it can be perfect when almost every answer is left ungraded. Read it together with the new `expectedCounts` and `decisionRates`, available in the summary, error-group and review-source breakdowns. Each rate includes its `numerator`, `denominator` and `rate`; zero-denominator rates are `null`, not zero.
+Reports retain the existing `coverage`, `acceptedAccuracy` and error counts. `acceptedAccuracy` describes only accepted binary decisions; it can be perfect when almost every answer is left ungraded. Read it together with `expectedCounts` and `decisionRates`, available in the summary, error-group and review-source breakdowns. Each decision rate includes its `numerator`, `denominator`, `rate` and `upper95`: the one-sided 95% Clopper–Pearson exact binomial upper confidence bound, not a two-sided interval. Zero-denominator rates and bounds are `null`, not zero. Zero observed errors do not imply zero population risk. These finite-sample bounds assume binomial sampling; this synthetic, non-independent development set does not establish real-world generalization or a release gate.
 
 | `decisionRates` field | Numerator | Denominator |
 | --- | --- | --- |
@@ -41,6 +41,10 @@ Use `--output NEW_FILE` to create a private report; the script refuses to overwr
 node --import tsx scripts/study-grading-collect.ts \
   --dataset tests/fixtures/opening/grading/review-candidates.json \
   --model YOUR_MODEL \
+  --source-commit YOUR_SOURCE_COMMIT \
+  --instruction-version YOUR_INSTRUCTION_VERSION \
+  --rubric-version YOUR_ACCEPTANCE_RUBRIC_VERSION \
+  --protocol-version grading-evaluation-v1 \
   --base-url-env STUDY_GRADING_BASE_URL \
   --api-key-env STUDY_GRADING_API_KEY \
   --max-requests 2 \
@@ -48,6 +52,8 @@ node --import tsx scripts/study-grading-collect.ts \
 ```
 
 There are no default credentials, model or request budget. Calls are serial, limited to 1–1000 HTTP request attempts, with no retries or fallback models; `--timeout-ms` optionally sets a 1000–120000 ms deadline (default 30000 ms). Requests that enter the transport count toward the limit even if the network fails. The collector uses the existing guarded provider transport. It calls that adapter directly, without an application database or per-user billing ledger: the explicit request/token bounds limit the run, not its monetary cost. It sends only the question, student answer and reference text, never candidate labels, review outcomes, reviewer identities or review rationales.
+
+Run metadata is required: `sourceCommit`, `instructionVersion`, `rubricVersion`, `protocolVersion`, and `promptDigest`. The CLI requires explicit source/instruction/acceptance-rubric/protocol labels; operators must identify the actual checkout (including local changes if any), not an unrelated clean commit. The collector computes `promptDigest` as `sha256:<hex>` over the UTF-8 `ProviderInput.instruction` built by the existing grading builder and reused for text requests. It does not hash outputs, candidate labels, or student data. This digest identifies the grading instruction, not the provider adapter's surrounding system envelope or a probability calibration. Protocol mismatches are rejected before requests. Reports preserve all metadata; legacy files missing fields are rejected, never filled from current versions. The existing synthetic fixture explicitly uses `unknown` for unavailable historical source/instruction/rubric/digest values and retains `test_fixture` provenance; its known dataset protocol is recorded explicitly. No provider was called to migrate that fixture.
 
 The first version does not read or transmit photo assets. Every photo case remains in the output with `photo_not_supported` in the sidecar, even if an image reference exists. Cases after the request limit, request failures and malformed output also remain in the output; they do not vanish from evaluation denominators. Only successfully decoded provider output enters the evaluation run. A valid-looking grading message rejected by the provider envelope stays a failed result, even when its original content looks correct.
 
