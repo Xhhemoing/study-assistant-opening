@@ -1,0 +1,2457 @@
+{
+  "synthetic": true,
+  "offline": true,
+  "cases": [
+    {
+      "caseId": "next-first",
+      "entry": "nextLearningStep",
+      "scenario": "首次无证据不能跳过诊断",
+      "initialFactRefs": [
+        "synthetic:next-first"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "首次无证据不能跳过诊断",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "no_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "unobserved",
+        "wantsFullExplanation": false,
+        "observations": []
+      }
+    },
+    {
+      "caseId": "next-explicit-full",
+      "entry": "nextLearningStep",
+      "scenario": "学生直接要求完整讲解",
+      "initialFactRefs": [
+        "synthetic:next-explicit-full"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "学生直接要求完整讲解",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "full_explain"
+          ],
+          "decision.reasonCode": [
+            "requested_full"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": true,
+        "observations": []
+      }
+    },
+    {
+      "caseId": "next-incorrect",
+      "entry": "nextLearningStep",
+      "scenario": "可信错误应针对错因而非先迁移",
+      "initialFactRefs": [
+        "synthetic:next-incorrect"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "可信错误应针对错因而非先迁移",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "targeted_explain"
+          ],
+          "decision.reasonCode": [
+            "verified_incorrect"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "no",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-unverified",
+      "entry": "nextLearningStep",
+      "scenario": "只有未判定事实不能当通过",
+      "initialFactRefs": [
+        "synthetic:next-unverified"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "只有未判定事实不能当通过",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "unverified_only"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "unknown",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-stale",
+      "entry": "nextLearningStep",
+      "scenario": "更正后的旧版本错误不参与当前决策",
+      "initialFactRefs": [
+        "synthetic:next-stale"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "更正后的旧版本错误不参与当前决策",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "no_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "no",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "no"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-version-unknown",
+      "entry": "nextLearningStep",
+      "scenario": "版本未知不能进入有效头",
+      "initialFactRefs": [
+        "synthetic:next-version-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "版本未知不能进入有效头",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "no_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "unknown"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-assisted-majority",
+      "entry": "nextLearningStep",
+      "scenario": "最近三次多数受助需减帮助",
+      "initialFactRefs": [
+        "synthetic:next-assisted-majority"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "最近三次多数受助需减帮助",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "reduced_help_practice"
+          ],
+          "decision.reasonCode": [
+            "assistance_dependent"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "hinted",
+            "independentAttempt": "no",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "o2",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "revealed",
+            "independentAttempt": "no",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "o3",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-independent",
+      "entry": "nextLearningStep",
+      "scenario": "已观察独立后进入迁移",
+      "initialFactRefs": [
+        "synthetic:next-independent"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已观察独立后进入迁移",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "transfer_check"
+          ],
+          "decision.reasonCode": [
+            "independent"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "observed_independent",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-independence-unknown",
+      "entry": "nextLearningStep",
+      "scenario": "答对但独立资格未知需新核验",
+      "initialFactRefs": [
+        "synthetic:next-independence-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "答对但独立资格未知需新核验",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "transfer_check"
+          ],
+          "decision.reasonCode": [
+            "correct_needs_independent_check"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "unknown",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-tie-not-majority",
+      "entry": "nextLearningStep",
+      "scenario": "受助恰半不能误判多数",
+      "initialFactRefs": [
+        "synthetic:next-tie-not-majority"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "受助恰半不能误判多数",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "needs_check"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "o2",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "hinted",
+            "independentAttempt": "no",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "thin-guided",
+      "entry": "tutor.thin",
+      "scenario": "选定材料页先给引导",
+      "initialFactRefs": [
+        "synthetic:thin-guided"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "选定材料页先给引导",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "guided"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "thin-no-page",
+      "entry": "tutor.thin",
+      "scenario": "未选页要求澄清",
+      "initialFactRefs": [
+        "synthetic:thin-no-page"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "未选页要求澄清",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "clarify"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": null,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "thin-hint-offer",
+      "entry": "tutor.thin",
+      "scenario": "提示后worked只为建议不可当自动执行",
+      "initialFactRefs": [
+        "synthetic:thin-hint-offer"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "提示后worked只为建议不可当自动执行",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "worked_example"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "hinted"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "thin-revealed",
+      "entry": "tutor.thin",
+      "scenario": "已见答案需另题",
+      "initialFactRefs": [
+        "synthetic:thin-revealed"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已见答案需另题",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "revealed"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "thin-assisted-success",
+      "entry": "tutor.thin",
+      "scenario": "受助成功需独立变式",
+      "initialFactRefs": [
+        "synthetic:thin-assisted-success"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "受助成功需独立变式",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": true,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "thin-due-priority",
+      "entry": "tutor.thin",
+      "scenario": "到期优先于本轮帮助",
+      "initialFactRefs": [
+        "synthetic:thin-due-priority"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "到期优先于本轮帮助",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "delayed_retest"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "revealed"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": true,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "adaptive-no-fact",
+      "entry": "tutor.adaptive",
+      "scenario": "无可靠证据澄清",
+      "initialFactRefs": [
+        "synthetic:adaptive-no-fact"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "无可靠证据澄清",
+      "gold": {
+        "allowed": {
+          "$": [
+            "clarify"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": false,
+        "hasAssistance": false,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "adaptive-assisted",
+      "entry": "tutor.adaptive",
+      "scenario": "有帮助无独立核验进入变式",
+      "initialFactRefs": [
+        "synthetic:adaptive-assisted"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "有帮助无独立核验进入变式",
+      "gold": {
+        "allowed": {
+          "$": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": false,
+        "hasAssistance": true,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "adaptive-checked",
+      "entry": "tutor.adaptive",
+      "scenario": "可靠独立证据后换情境",
+      "initialFactRefs": [
+        "synthetic:adaptive-checked"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "可靠独立证据后换情境",
+      "gold": {
+        "allowed": {
+          "$": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": true,
+        "hasAssistance": false,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "adaptive-due",
+      "entry": "tutor.adaptive",
+      "scenario": "到期优先于独立状态",
+      "initialFactRefs": [
+        "synthetic:adaptive-due"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "到期优先于独立状态",
+      "gold": {
+        "allowed": {
+          "$": [
+            "delayed_retest"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": true,
+        "hasAssistance": true,
+        "retestDue": true
+      }
+    },
+    {
+      "caseId": "retest-cancelled",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "cancelled终态即使有合格作答也不复活",
+      "initialFactRefs": [
+        "synthetic:retest-cancelled"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "cancelled终态即使有合格作答也不复活",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "cancelled",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-declined",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "declined终态即使有合格作答也不复活",
+      "initialFactRefs": [
+        "synthetic:retest-declined"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "declined终态即使有合格作答也不复活",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "declined",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-invalidated",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "invalidated终态即使有合格作答也不复活",
+      "initialFactRefs": [
+        "synthetic:retest-invalidated"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "invalidated终态即使有合格作答也不复活",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "invalidated",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-superseded",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "superseded终态即使有合格作答也不复活",
+      "initialFactRefs": [
+        "synthetic:retest-superseded"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "superseded终态即使有合格作答也不复活",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "superseded",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-expired",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "提交晚于截止",
+      "initialFactRefs": [
+        "synthetic:retest-expired"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "提交晚于截止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "expired"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-11T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-passed",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "按时无帮助独立通过",
+      "initialFactRefs": [
+        "synthetic:retest-passed"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "按时无帮助独立通过",
+      "gold": {
+        "allowed": {
+          "$": [
+            "passed"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-help",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "区间真实帮助不算独立通过",
+      "initialFactRefs": [
+        "synthetic:retest-help"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "区间真实帮助不算独立通过",
+      "gold": {
+        "allowed": {
+          "$": [
+            "assisted"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        },
+        "recordedIntervalHelp": true
+      }
+    },
+    {
+      "caseId": "retest-help-wrong",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "受助且错优先错误",
+      "initialFactRefs": [
+        "synthetic:retest-help-wrong"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "受助且错优先错误",
+      "gold": {
+        "allowed": {
+          "$": [
+            "failed"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "no",
+          "assistance": "hinted",
+          "independentAttempt": "no",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-unknown",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "unknown不能升级",
+      "initialFactRefs": [
+        "synthetic:retest-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "unknown不能升级",
+      "gold": {
+        "allowed": {
+          "$": [
+            "insufficient_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "unknown",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "retest-missing",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "完成但无观测不能计通过",
+      "initialFactRefs": [
+        "synthetic:retest-missing"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "完成但无观测不能计通过",
+      "gold": {
+        "allowed": {
+          "$": [
+            "insufficient_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": null
+      }
+    },
+    {
+      "caseId": "retest-practice",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "区间练习不能假装无接触",
+      "initialFactRefs": [
+        "synthetic:retest-practice"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "区间练习不能假装无接触",
+      "gold": {
+        "allowed": {
+          "$": [
+            "insufficient_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        },
+        "recordedIntervalPractice": true
+      }
+    },
+    {
+      "caseId": "retest-deferred",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "推迟到未来不自动恢复或过期",
+      "initialFactRefs": [
+        "synthetic:retest-deferred"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "推迟到未来不自动恢复或过期",
+      "gold": {
+        "allowed": {
+          "$": [
+            "pending"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "status": "deferred",
+        "deadlineAt": "2026-11-10T00:00:00Z",
+        "submittedAt": null,
+        "now": "2026-10-11T00:00:00Z",
+        "observation": null
+      }
+    },
+    {
+      "caseId": "evidence-trusted",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "完整绑定的独立复核允许可信资格",
+      "initialFactRefs": [
+        "synthetic:evidence-trusted"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "完整绑定的独立复核允许可信资格",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "yes"
+          ],
+          "verifiedCorrect": [
+            "yes"
+          ],
+          "usableForCurrentVersion": [
+            "yes"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-self-report",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "自报正确不得升级",
+      "initialFactRefs": [
+        "synthetic:evidence-self-report"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "自报正确不得升级",
+      "gold": {
+        "allowed": {
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "self_report"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-model-suggestion",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "模型建议不得升级",
+      "initialFactRefs": [
+        "synthetic:evidence-model-suggestion"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "模型建议不得升级",
+      "gold": {
+        "allowed": {
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "model_suggestion"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-missing-identity",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "缺attempt身份保留unknown",
+      "initialFactRefs": [
+        "synthetic:evidence-missing-identity"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "缺attempt身份保留unknown",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "unknown"
+          ],
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": null,
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-check-mismatch",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "错题引用不得复核本题",
+      "initialFactRefs": [
+        "synthetic:evidence-check-mismatch"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "错题引用不得复核本题",
+      "gold": {
+        "allowed": {
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p2",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-partial-check",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "只核一部分不得声称整题正确",
+      "initialFactRefs": [
+        "synthetic:evidence-partial-check"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "只核一部分不得声称整题正确",
+      "gold": {
+        "allowed": {
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "partial",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-learner-check",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "学习者自核不等于独立评分",
+      "initialFactRefs": [
+        "synthetic:evidence-learner-check"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "学习者自核不等于独立评分",
+      "gold": {
+        "allowed": {
+          "verifiedCorrect": [
+            "unknown"
+          ]
+        },
+        "forbidden": {
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "learner",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-version-change",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "标准更正不升级旧答案",
+      "initialFactRefs": [
+        "synthetic:evidence-version-change"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "标准更正不升级旧答案",
+      "gold": {
+        "allowed": {
+          "usableForCurrentVersion": [
+            "unknown"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "changed_needs_check",
+            "currentItemVersionId": "v2"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-version-missing",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "缺版本事实保留unknown",
+      "initialFactRefs": [
+        "synthetic:evidence-version-missing"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "缺版本事实保留unknown",
+      "gold": {
+        "allowed": {
+          "usableForCurrentVersion": [
+            "unknown"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": null
+        }
+      }
+    },
+    {
+      "caseId": "evidence-history-missing",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "缺帮助历史不得假定独立",
+      "initialFactRefs": [
+        "synthetic:evidence-history-missing"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "缺帮助历史不得假定独立",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "unknown"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": null,
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-hint-before",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "提交前提示排除独立",
+      "initialFactRefs": [
+        "synthetic:evidence-hint-before"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "提交前提示排除独立",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "no"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": [
+              {
+                "attemptId": "a1",
+                "problemId": "p1",
+                "level": "hinted",
+                "delivered": true,
+                "deliveredAt": 150
+              }
+            ]
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-reveal-before",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "提交前解答排除独立",
+      "initialFactRefs": [
+        "synthetic:evidence-reveal-before"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "提交前解答排除独立",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "no"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": [
+              {
+                "attemptId": "a1",
+                "problemId": "p1",
+                "level": "revealed",
+                "delivered": true,
+                "deliveredAt": 150
+              }
+            ]
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-help-after",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "提交后解答不能改写首答",
+      "initialFactRefs": [
+        "synthetic:evidence-help-after"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "提交后解答不能改写首答",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "yes"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": [
+              {
+                "attemptId": "a1",
+                "problemId": "p1",
+                "level": "revealed",
+                "delivered": true,
+                "deliveredAt": 250
+              }
+            ]
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-help-undelivered",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "未交付建议不算受助",
+      "initialFactRefs": [
+        "synthetic:evidence-help-undelivered"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "未交付建议不算受助",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "yes"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": [
+              {
+                "attemptId": "a1",
+                "problemId": "p1",
+                "level": "hinted",
+                "delivered": false,
+                "deliveredAt": 150
+              }
+            ]
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-help-order-unknown",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "同时间戳且无服务器序保留unknown",
+      "initialFactRefs": [
+        "synthetic:evidence-help-order-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "同时间戳且无服务器序保留unknown",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "unknown"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": [
+              {
+                "attemptId": "a1",
+                "problemId": "p1",
+                "level": "hinted",
+                "delivered": true,
+                "deliveredAt": 200
+              }
+            ]
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          }
+        }
+      }
+    },
+    {
+      "caseId": "evidence-copied",
+      "entry": "evaluateEvidenceEligibility",
+      "scenario": "自报抄答案能降资格不能改评分",
+      "initialFactRefs": [
+        "synthetic:evidence-copied"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "自报抄答案能降资格不能改评分",
+      "gold": {
+        "allowed": {
+          "independentAttempt": [
+            "no"
+          ],
+          "verifiedCorrect": [
+            "yes"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+      },
+      "input": {
+        "observation": {
+          "attemptId": "a1",
+          "problemId": "p1",
+          "itemVersionId": "v1",
+          "observationId": "o1",
+          "startedAt": 100,
+          "submittedAt": 200,
+          "assistance": "independent",
+          "outcome": "correct",
+          "verdictSource": "reference_checked"
+        },
+        "context": {
+          "helpHistory": {
+            "complete": true,
+            "exposures": []
+          },
+          "referenceCheckAuthority": "independent_review",
+          "referenceCheck": {
+            "attemptId": "a1",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "referenceId": "ref1",
+            "method": "independent_review",
+            "scope": "whole_answer",
+            "checkerId": "synthetic-reviewer",
+            "outcome": "correct"
+          },
+          "version": {
+            "applicability": "exact",
+            "currentItemVersionId": "v1"
+          },
+          "selfReportedAnswerConditions": {
+            "copiedAnswer": true,
+            "reportedGuess": false
+          }
+        }
+      }
+    }
+  ]
+}
