@@ -10,6 +10,7 @@ import { SpanSessionSummary } from "./span-session-summary";
 import { userFacingMessage } from "../../../../lib/user-facing-error";
 import { SpanNextActionControl } from "./span-next-action-control";
 import { spanProblemText } from "./span-problem-text";
+import { isSpanReservedProblemId } from "./span-answer";
 
 type Props = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string; initialActivityId?: string };
 const endpoint = "/api/opening/teaching/span/lesson";
@@ -115,7 +116,7 @@ export function SpanLessonSession(props: Props) {
   }
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
-  const restoredAttempts = details?.attempts.filter(attempt => !attempt.spanExercise?.id.startsWith("span-reserved-") ||
+  const restoredAttempts = details?.attempts.filter(attempt => !isSpanReservedProblemId(attempt.spanExercise?.id) ||
     (evidenceEvent ? attempt.startedAt >= evidenceEvent.createdAt : !props.initialNewEvidenceEventId)) ?? [];
   return <div className="h-full min-h-0 min-w-0 text-text">
     {error ? <div role="alert" className="m-4 space-y-2 rounded-lg border border-danger p-3 text-sm"><p>{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => setRevision(value => value + 1)}>继续加载</button></div> : null}

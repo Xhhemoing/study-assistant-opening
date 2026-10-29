@@ -2,6 +2,7 @@ import type { Scope } from "@aistudy/contracts";
 import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
+import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 const inputSchema = z.object({ sessionId: z.string().uuid(), sourceId: z.string().uuid(), clientKey: z.string().min(8).max(160), mode: z.enum(["self_study", "overview", "challenge"]) }).strict();
 
 /** Reserved operands are issued here only. No solution enters a browser bundle or response. */
@@ -17,7 +18,7 @@ export function createSpanReservedService(sql: Sql) {
         AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
       if (replay) {
         const saved = replay.create_intent as { sessionId: string; spanExercise?: { sourceId: string; problemId: string; version: number } };
-        if (saved.sessionId !== input.sessionId || saved.spanExercise?.sourceId !== input.sourceId || !saved.spanExercise.problemId.startsWith("span-reserved-")) throw Object.assign(new Error("保留题请求已改变"), { code: "CONFLICT" });
+        if (saved.sessionId !== input.sessionId || saved.spanExercise?.sourceId !== input.sourceId || !getSpanReservedProblem(saved.spanExercise.problemId, saved.spanExercise.version)) throw Object.assign(new Error("保留题请求已改变"), { code: "CONFLICT" });
         return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey: input.clientKey, spanExercise: saved.spanExercise });
       }
       const [activity] = await tx`SELECT checkpoint_json FROM opening_teaching_activities WHERE id=${String(session.activity_id)}

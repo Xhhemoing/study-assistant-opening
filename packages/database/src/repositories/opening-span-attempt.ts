@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
-import { getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanTeachingProblem, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { spanExerciseInputSchema, type SpanProblem, type Scope } from "@aistudy/contracts";
 
@@ -9,7 +9,7 @@ export function parseOpeningSpanExercise(value: unknown): SpanProblem | null {
   const spec = value as Record<string, unknown>;
   if (spec.kind !== "span" || spec.specVersion !== "span-v1" || typeof spec.problemId !== "string"
     || (typeof spec.version !== "number" && typeof spec.version !== "string")) return null;
-  return getSpanProblem(spec.problemId, spec.version) ?? getSpanReservedProblem(spec.problemId, spec.version);
+  return getSpanTeachingProblem(spec.problemId, spec.version) ?? getSpanReservedProblem(spec.problemId, spec.version);
 }
 
 /** Imported intent can identify a displayed/previously seen question, never an evaluator. */

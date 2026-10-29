@@ -1,6 +1,6 @@
-import { getSpanReservedProblem, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanTeachingProblem, getSpanReservedProblem, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import type { Scope } from "@aistudy/contracts";
-import { getSpanProblem, spanProblemStem, verifySpanAnswer, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { spanProblemStem, verifySpanAnswer, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { readOpeningSpanExposureHistory } from "./opening-span-attempt";
 
@@ -26,7 +26,7 @@ export async function evaluateOpeningSpanAttempt(tx: TransactionSql, scope: Scop
   const item = rows[0];
   const spec = item?.evaluation_spec as { kind?: string; specVersion?: string; problemId?: string; version?: number | string } | null;
   if (!spec || spec.kind !== "span" || spec.specVersion !== "span-v1" || typeof spec.problemId !== "string") return abstain("missing_or_unsupported_spec");
-  const problem = getSpanProblem(spec.problemId, spec.version) ?? getSpanReservedProblem(spec.problemId, spec.version);
+  const problem = getSpanTeachingProblem(spec.problemId, spec.version) ?? getSpanReservedProblem(spec.problemId, spec.version);
   if (!problem) return abstain("missing_or_unsupported_spec");
   if (item!.stem_snapshot !== spanProblemStem(problem) || attempt.requirement_key !== SPAN_REQUIREMENT_KEY) return abstain("spec_identity_mismatch");
   const captured = attempt.source_versions as Record<string, number>;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SpanSolution } from "@aistudy/contracts";
-import { getSpanReservedProblem, listSpanReservedProblems, spanValidationEligibility } from "./span-heldout-catalog";
+import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, listSpanReservedProblems, spanValidationEligibility } from "./span-heldout-catalog";
 import { solveSpanProblem, verifySpanAnswer } from "./span-verifier";
 
 const expectations: { suffix: string; solution: SpanSolution; witness?: string[] }[] = [
@@ -15,6 +15,17 @@ const expectations: { suffix: string; solution: SpanSolution; witness?: string[]
 ];
 
 describe("new reserved span candidates", () => {
+  it("resolves only teaching identities for worked delivery without exposing other purposes", () => {
+    const pool = listSpanWorkedProblems();
+    expect(pool).toHaveLength(12);
+    for (const p of pool) {
+      expect(getSpanTeachingProblem(p.id, p.version)).toEqual(p);
+      expect(solveSpanProblem(p).kind).toBe("unique");
+      expect(getSpanReservedProblem(p.id)).toBeNull();
+      for (const purpose of ["validation", "retest", "research"]) expect(getSpanTeachingProblem(p.id.replace("generated-teaching", `generated-${purpose}`))).toBeNull();
+    }
+    expect(getSpanTeachingProblem("span-example-2d")?.id).toBe("span-example-2d");
+  });
   it("includes expanded families in both executable pools without relaxing first-family eligibility", () => {
     for (const purpose of ["validation", "retest"] as const) {
       const pool = listSpanReservedProblems(purpose);

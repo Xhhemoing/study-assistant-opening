@@ -7,6 +7,7 @@ import { createOpeningSpanTutorContextRepository } from "../../packages/database
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
+import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 
 let fixture: OpeningFixture;
 beforeEach(async () => { fixture = await createOpeningFixture(); });
@@ -26,6 +27,25 @@ async function seed() {
   const request = { courseId, sourceIds: [sourceId], sourceVersions: { [sourceId]: 1 }, question: "继续学习" };
   return { courseId, sourceId, request, repo: createOpeningSpanTutorContextRepository(sql) };
 }
+it("prepares a real reserved question after worked teaching and preserves both identities on resume", async () => {
+  const f = await seed(), lessons = createOpeningSpanSessionRepository(fixture.sql);
+  const intent = { purpose: "self_study" as const, timeBudgetMinutes: 20, language: "zh" as const, pace: "normal" as const, continuous: true, selfReportedFatigue: "unknown" as const };
+  const lesson = await lessons.create(fixture.scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  const presenter = createSpanPresentationService(fixture.sql);
+  const workedRequest = { sessionId: lesson.sessionId, courseId: f.courseId, sourceId: f.sourceId, kind: "worked", clientKey: randomUUID() };
+  const worked = await presenter.read(fixture.scope, workedRequest);
+  await lessons.save(fixture.scope, lesson.activityId, { expectedRevision: lesson.revision, intent, moveId: "self_study-reserved", status: "active" });
+  const context = (await f.repo.read(fixture.scope, f.request))!;
+  expect(context.needsReservedIssue).toBe(true);
+  const resumed = await f.repo.execute(fixture.scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() });
+  expect(resumed.activityId).toBe(lesson.activityId);
+  const attempts = await fixture.sql`SELECT create_intent FROM opening_learning_attempts WHERE session_id=${lesson.sessionId}`;
+  expect(attempts).toHaveLength(2);
+  expect(attempts.map(row => row.create_intent.spanExercise.problemId)).toContain(worked.problem.id);
+  expect(attempts.some(row => row.create_intent.spanExercise.problemId === "span-reserved-fraction")).toBe(true);
+  expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
+  expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
+});
 it("captures standard decisions before execution and replays the original operation without rewriting history", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);

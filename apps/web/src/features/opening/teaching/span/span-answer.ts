@@ -2,6 +2,11 @@ import { z } from "zod";
 import type { SpanAnswer } from "@aistudy/contracts";
 
 export type SpanDraftAnswer = SpanAnswer & { explanation?: string };
+/** Client identity routing only; the server authoritatively parses reserved items. */
+export function isSpanReservedProblemId(id: string | undefined): boolean {
+  return Boolean(id?.startsWith("span-reserved-") && (!id.startsWith("span-reserved-generated-")
+    || id.startsWith("span-reserved-generated-validation-") || id.startsWith("span-reserved-generated-retest-")));
+}
 const vector = z.array(z.string().max(160)).max(8);
 const draftAnswerSchema = z.object({ membership: z.enum(["in_span", "not_in_span"]).optional(),
   coefficients: z.tuple([z.string().max(160), z.string().max(160)]).optional(),

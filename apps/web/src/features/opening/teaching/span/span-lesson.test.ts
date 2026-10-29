@@ -4,7 +4,16 @@ import { beforeEach, expect, it, vi } from "vitest";
 const diagnosticPreference = vi.hoisted(() => ({ enabled: false }));
 vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnosticPreference.enabled }));
 beforeEach(() => { diagnosticPreference.enabled = false; });
-import { SpanLesson } from "./span-lesson";
+import { SpanLesson, isSpanReservedAttempt } from "./span-lesson";
+import type { LearningAttempt } from "@aistudy/contracts";
+it.each([
+  ["span-example-2d", false], ["span-reserved-generated-teaching-independent-2d-1729-0", false],
+  ["span-reserved-dependent", true], ["span-reserved-generated-validation-independent-2d-1729-0", true],
+  ["span-reserved-generated-retest-independent-2d-1729-0", true],
+  ["span-reserved-generated-research-independent-2d-1729-0", false],
+])("restores %s without mixing teaching and reserved attempts", (id, expected) => {
+  expect(isSpanReservedAttempt({ spanExercise: { id } } as LearningAttempt)).toBe(expected);
+});
 it.each(["self_study", "overview", "challenge"] as const)("opens new evidence at the actual reserved step for %s", purpose => {
   const html = renderToStaticMarkup(createElement(SpanLesson, {
     courseId: "11111111-1111-4111-8111-111111111111", sourceIds: [], sourceLoadError: true,

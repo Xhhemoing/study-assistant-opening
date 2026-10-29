@@ -4,6 +4,7 @@ import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESS
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
+import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { contextSourceRefsIncluded, mergeContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
@@ -132,7 +133,10 @@ async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot
     const attempts = await db`SELECT v.evaluation_spec FROM opening_learning_attempts a
       JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
       WHERE a.session_id=${session.sessionId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
-    if (attempts.some(row => parseOpeningSpanExercise(row.evaluation_spec)?.id.startsWith("span-reserved-"))) return null;
+    if (attempts.some(row => {
+      const problem = parseOpeningSpanExercise(row.evaluation_spec);
+      return problem && getSpanReservedProblem(problem.id, problem.version);
+    })) return null;
   } else if (!dueRetestId && ["full_explain", "targeted_explain"].includes(decision.activityKind)) return null;
   return readOpeningSpanReservedChoice(db, scope, spanModeForIntent(intent), (session?.retestId || dueRetestId) ? "retest" : "validation");
 }

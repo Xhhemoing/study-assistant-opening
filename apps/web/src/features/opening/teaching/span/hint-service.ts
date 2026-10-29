@@ -1,13 +1,13 @@
 import { spanHintRequestSchema, type Scope, type SpanHintLevel, type SpanHintResponse, type SpanProblem } from "@aistudy/contracts";
 import { createOpeningLearningAttemptRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
-import { getSpanProblem, solveSpanProblemWithSteps, type SpanRowOperation, type SpanWorkedSolution } from "@aistudy/domain";
-import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
+import { solveSpanProblemWithSteps, type SpanRowOperation, type SpanWorkedSolution } from "@aistudy/domain";
+import { getSpanTeachingProblem, getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import type { Sql } from "postgres";
 import { createSpanFeedbackService } from "./feedback-service";
 
 /** Only the server's canonical, immutable catalog can authorize hint content. */
 function canonicalProblem(problem: SpanProblem): SpanProblem {
-  const known = getSpanProblem(problem.id, problem.version) ?? getSpanReservedProblem(problem.id, problem.version);
+  const known = getSpanTeachingProblem(problem.id, problem.version) ?? getSpanReservedProblem(problem.id, problem.version);
   const same = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((value, index) => value === right[index]);
   if (!known || problem.familyId !== known.familyId || !same(problem.target, known.target) ||
       !same(problem.vectors[0], known.vectors[0]) || !same(problem.vectors[1], known.vectors[1]) ||

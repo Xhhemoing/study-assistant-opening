@@ -14,6 +14,7 @@ import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
 import { readOpeningBackupArchive } from "../../packages/database/src/storage/opening-backup-archive";
 import { createSpanDelayedRetestService } from "../../apps/web/src/features/opening/teaching/span/delayed-retest-service";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
+import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
 import { backupRows, sourceBytes, sourceHash } from "./opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -62,12 +63,17 @@ async function seed() {
     { sessionId: lesson.sessionId, clientKey: randomUUID(), spanExercise: { sourceId, problemId: p.id, version: Number(p.version) } });
   const generated = await createSpanReservedService(sql).issue(scope, { ...pendingInput, clientKey: randomUUID() });
   expect(generated.spanExercise?.id).toContain("generated-validation-");
+  const workedInput = { sessionId: lesson.sessionId, courseId, sourceId, kind: "worked", clientKey: randomUUID() };
+  const workedContent = await createSpanPresentationService(sql).read(scope, workedInput);
+  const [workedRow] = await sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND client_key=${workedInput.clientKey}`;
+  const worked = (await attempts.get(scope, String(workedRow!.id)))!;
+  expect(worked.spanExercise?.id).toContain("generated-teaching-independent-2d-");
   const paused = await lessons.save(scope, lesson.activityId, { expectedRevision: lesson.revision, intent,
     moveId: "self-independent", status: "paused" });
   const request = { observationId: record.id, clientKey: randomUUID() };
   const scheduled = await createSpanDelayedRetestService(sql).schedule(scope, request);
   const delayed = await lessons.create(scope, { courseId, sourceIds: [sourceId], intent, clientKey: randomUUID(), retestId: scheduled.candidateId });
-  return { sourceId, key, courseId, attempt, answer, record, pendingInput, pending, generated, paused, request, scheduled, delayed };
+  return { sourceId, key, courseId, attempt, answer, record, pendingInput, pending, generated, worked, workedContent, workedInput, paused, request, scheduled, delayed };
 }
 
 /** Clear only this guarded fixture workspace, in the production restore dependency order. */
@@ -128,13 +134,14 @@ it.each(["completed", "cancelled"] as const)("restores a real archive and preven
     // Imported data keeps the answer but never grants itself server grading authority.
     expect(restoredAnswer).toEqual({ id: f.record.id, answer: f.answer, outcome: "unverified", verdict_source: "unknown", server_evaluation: null });
     const attempts = createOpeningLearningAttemptRepository(sql);
-    for (const original of [f.attempt, f.pending, f.generated]) {
+    for (const original of [f.attempt, f.pending, f.generated, f.worked]) {
       expect(await attempts.get(scope, original.id)).toMatchObject({ id: original.id, spanExercise: original.spanExercise,
         spanValidation: { eligible: false, firstFamilyExposure: false, reasonCode: "restored_identity_unverified" } });
       expect(await sql`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${original.itemVersionId}`).toEqual([{ evaluation_spec: null }]);
     }
     expect(await createSpanReservedService(sql).issue(scope, f.pendingInput)).toMatchObject({ id: f.pending.id, submittedAt: null, observationId: null,
       spanExercise: f.pending.spanExercise, spanValidation: { eligible: false, firstFamilyExposure: false } });
+    expect((await createSpanPresentationService(sql).read(scope, f.workedInput)).problem).toEqual(f.workedContent.problem);
     const beforeHelp = await sql`SELECT id,released_at FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
     expect(await lessons.deliveredHintLevels(scope, f.paused.activityId)).toEqual({ [f.attempt.id]: [1] });
     expect(await sql`SELECT id,released_at FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`).toEqual(beforeHelp);
