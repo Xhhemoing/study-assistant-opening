@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { helpInputSnapshotSchema } from "./tutor";
+import { helpInputSnapshotSchema } from "./help-input-snapshot";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 import { evidenceEligibilitySchema, learningObservationFactsShape, referenceCheckInputSchema } from "./learning-evidence";
 
