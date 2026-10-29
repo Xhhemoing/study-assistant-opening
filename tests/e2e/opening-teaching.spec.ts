@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
-import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
+import { learningAttemptSchema, learningObservationSchema, spanHintResponseSchema, spanLessonSnapshotSchema, spanProblemSchema, type LearningAttemptSubmitInput } from "@aistudy/contracts";
 import { z } from "zod";
 import { expect, test } from "./fixtures";
 import { loginOpeningOwner, seedOpeningOwner } from "./opening-auth";
@@ -64,15 +64,26 @@ test.describe("Opening span durable teaching flow", () => {
       let page = await context.newPage();
       page.on("pageerror", error => pageErrors.push(error.message));
       const createdResponse = page.waitForResponse(response => response.url().endsWith(lessonEndpoint) && response.request().method() === "POST");
+      const presentationResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/teaching/span/presentation")
+        && response.request().method() === "POST"
+        && response.request().postDataJSON()?.kind === "worked"
+        && response.request().postDataJSON()?.courseId === course.courseId
+        && response.request().postDataJSON()?.sourceId === course.sourceId);
       await page.goto(path);
       const created = await createdResponse;
       expect(created.ok()).toBe(true);
       const lesson = spanLessonSnapshotSchema.parse(await created.json());
+      const worked = await presentationResponse;
+      expect(worked.status()).toBe(200);
+      expect(worked.request().postDataJSON().sessionId).toBe(lesson.sessionId);
+      const presentation = spanProblemSchema.parse((await worked.json()).problem);
       await expect(page).toHaveURL(new RegExp(`lesson=${lesson.activityId}`));
       await expect(page.getByRole("group", { name: "本次学习意图", exact: true })).toBeVisible();
       await page.getByLabel("时间预算（分钟）", { exact: true }).fill("12");
       await page.getByRole("button", { name: "揭示如何建立方程", exact: true }).click();
-      await expect(page.getByText("第1坐标：1α + 0β = 3", { exact: true })).toBeVisible();
+      for (const [index, coordinate] of presentation.target.entries()) {
+        await expect(page.getByText(`第${index + 1}坐标：${presentation.vectors[0][index]}α + ${presentation.vectors[1][index]}β = ${coordinate}`, { exact: true })).toBeVisible();
+      }
       const steps = await openSpanOutline(page);
       const issuedResponse = page.waitForResponse(response => response.url().endsWith("/api/opening/attempts") && response.request().method() === "POST");
       await steps.getByRole("button", { name: "3. 独立新题", exact: true }).click();
