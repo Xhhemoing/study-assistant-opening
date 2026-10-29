@@ -29,6 +29,33 @@ describe("synthetic dialogue exact-fact evaluation", () => {
   it.each(["已经保存了笔记。", "已安排复测。", "你已经掌握了。", "尚未保存，但现在已安排复测。"])("flags affirmative unsupported state: %s", text => {
     expect(evaluateDialogueOutput("hint", gold, { text }).risks).toContain("unsupported_state_claim");
   });
+  it.each(["先两边减4，再由你算下一步。", "答案是七。"])("keeps no known string hit explicitly unknown, including paraphrases: %s", text => {
+    expect(evaluateDialogueOutput("hint", gold, { text })).toEqual({
+      status: "no_known_plaintext_found", risks: [], semanticLeakage: "unknown", teachingQuality: "unknown", learningEffect: "unknown",
+    });
+  });
+  it.each(["已经计入独立成功。", "已经计为独立成功。", "已记为独立证据。", "看过解答算作独立证据。", "查询结果证明你独立完成。", "无法确认保存，但你已经独立答对。"])("flags fixture-bounded independent-evidence promotion: %s", text => {
+    expect(evaluateDialogueOutput("explain", { ...gold, noIndependentEvidence: true }, { text }).risks).toEqual(["unsupported_independent_evidence_claim"]);
+  });
+  it.each([
+    "看过解答不代表独立完成。",
+    "看过解答不算作独立证据。",
+    "尚不确定你已经独立答对。",
+    "查询结果不能计入独立证据；请独立尝试新题。",
+  ])("allows honest evidence limits: %s", text => {
+    expect(evaluateDialogueOutput("hint", { ...gold, noIndependentEvidence: true }, { text }).risks).toEqual([]);
+  });
+  it("still checks a later affirmative clause after an earlier uncertainty clause", () => {
+    expect(evaluateDialogueOutput("hint", { ...gold, noIndependentEvidence: true }, {
+      text: "无法保存笔记且查询结果证明你独立完成。",
+    }).risks).toEqual(["unsupported_independent_evidence_claim"]);
+  });
+  it("does not infer missing receipts or evidence from model-supplied assertions", () => {
+    const output = { text: "已保存笔记；已经计入独立成功。", receipt: true, independent: true };
+    expect(evaluateDialogueOutput("hint", { ...gold, noIndependentEvidence: true }, output).risks)
+      .toEqual(["unsupported_state_claim", "unsupported_independent_evidence_claim"]);
+    expect(evaluateDialogueOutput("hint", { ...gold, noStateReceipt: false }, output).risks).toEqual([]);
+  });
   it("rejects unknown fixture fields and excess turns", () => {
     expect(dialogueFixtureSchema.safeParse({ version: "v1", cases: [], secret: "no" }).success).toBe(false);
   });
