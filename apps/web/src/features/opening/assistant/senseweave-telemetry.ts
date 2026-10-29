@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { PreparedAnswer } from "@aistudy/senseweave/host";
 import { getVerifiedSessionNamespace } from "../../auth/session-identity";
 
-const typeSchema = z.enum(["prose", "callout", "details", "steps", "diagram", "table", "compare", "checklist", "timeline", "chart", "plot", "math", "json", "diff", "other"]);
+const typeSchema = z.enum(["prose", "callout", "details", "steps", "diagram", "table", "compare", "checklist", "timeline", "chart", "plot", "derivation", "math", "json", "diff", "other"]);
 const rejectionSchema = z.enum(["capability", "score", "budget", "overlap", "selector", "other"]);
 export const senseWeaveShadowSchema = z.object({
   schemaVersion: z.literal("sw-shadow-v1"),

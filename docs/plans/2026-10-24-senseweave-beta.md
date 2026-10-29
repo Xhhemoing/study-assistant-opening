@@ -4,7 +4,7 @@
 
 ## 已接线
 
-- 受控 vendor：已更新为上游安全版 `5953f0731cf39558df634385b6b800e1bf818b17`，58文件来源/本地双向校验通过。后续仍须先提交上游，再运行上游 `scripts/vendor.mjs packages/senseweave/vendor`；本库 `node scripts/check-senseweave-vendor.mjs` 在 CI 核对所有文件与 clean commit。
+- 受控 vendor：2026-10-29 更新为上游 `2c90e838834258bf3089b59be8499ef97ed22271`（含上游 PR #6 隐式结构/逐字溯源/动画/板书与 PR #7 组件替代原句），72 文件来源/本地双向校验通过（上一版 `5953f07`）。宿主适配：`placement: "replace"`（补充视图替代其逐字原句，“查看原文”可展开；shadow 界面不变）；板书推导 derivation 只进入 explain/derive（门控表 `sw-gates-v1-20261029` 的 explain 格子），hint/review/plan/data 不含；手绘仅 explain/review 且门控 `sketch:false` 可关；动画沿用默认（尊重减少动态）；`createAIAssist` 不接入、无额外模型调用。后续仍须先提交上游，再运行上游 `scripts/vendor.mjs packages/senseweave/vendor`；本库 `node scripts/check-senseweave-vendor.mjs` 在 CI 核对所有文件与 clean commit。
 - SW1：回答完成后一次决策；纯元数据影子缓冲留在当前标签页，最多500条。同页稳定消息身份用于有界内存去重，不进入日志或导出；超过去重窗口的重访不构成全局去重保证。诊断模式可显式导出 JSON。无原文、问题、身份、消息ID、偏移、自由文本诊断、时间戳或网络发送。窗口/账号切换会清空，不是服务端集中遥测。
 - SW2：`OPENING_CHAT_SENSEWEAVE` 默认 shadow；即使设 on，也只对 `OPENING_CHAT_SENSEWEAVE_BETA_USERS` 中的账号渲染，其余仍 shadow；匿名 off；关闭 prose 时 off。白名单不下发浏览器。
 - 门控：`packages/config/src/public/senseweave-gates.v0.json` 是版本化初始表，通过 capabilities 下发并与 runtime 教学能力取交集；`OPENING_CHAT_SENSEWEAVE_GATES` 可覆盖，hint 绝不扩展到答案型组件。compare/derive 沿既有预设并额外受 explain 格子约束。
