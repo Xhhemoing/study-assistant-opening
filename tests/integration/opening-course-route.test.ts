@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
+import { nextLearningStep } from "@aistudy/domain";
+import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
 import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
 import { createOpeningLearningDecisionsRepository } from "../../packages/database/src/repositories/opening-learning-decisions";
@@ -7,7 +10,7 @@ import { readOpeningLearnerState } from "../../packages/database/src/repositorie
 import { afterEach,beforeEach,expect,it,vi } from "vitest";
 import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivity } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository,createOpeningLearningRepository,createOpeningAiGradingRepository,createOpeningSourceChunksRepository,
-  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository } from "@aistudy/database";
+  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository,createOpeningSpanSessionRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
 import { assertOpeningCourseRouteReady } from "../../packages/database/src/repositories/opening-course-route-origin";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
@@ -172,6 +175,42 @@ it.each([false,true])("replaces same-action revised successors without refunding
   expect(await grading.apply(f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture")).toEqual(revised);
   expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
   if(saved)expect((await createOpeningAttemptService(f.sql).getContext(f.scope,saved.attempt.id)).attempt.id).toBe(saved.attempt.id);
+});
+it.each([false,true])("shares released course reservations with the real span tutor budget (consumed=%s)",async consumed=>{
+  const x=await seed(),one=ready(await x.start());await compile(one.activity);const first=await answer(one.activity,0,"incorrect");
+  const old=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,
+    expectedPathVersion:(await x.repo.read(f.scope,x.courseId,one.activity.id)).currentActivity!.pathVersion,
+    observationId:first.observation.id,clientKey:randomUUID(),minutes:20}));
+  const receipt=await activityDecision(old);
+  if(consumed){await compile(old.activity,1);await answer(old.activity,0,"incorrect");}
+  const [original]=await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${old.activity.id}`;
+  await reviseOpeningLearningObservation(f.sql,f.scope,{rootObservationId:first.observation.rootObservationId??first.observation.id,
+    revisesObservationId:first.observation.id,expectedHead:first.observation.id,revisionKind:"replace",reason:"更正原评价",clientKey:randomUUID(),
+    replacement:{answer:"-98",outcome:"unverified",assistance:"independent"}});
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?40:20);
+  await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope,{assessmentEnabled:true,retestSuggestionsEnabled:true,automaticRemindersEnabled:false});
+  const at=new Date().toISOString(),grant={enabled:true,dailyMinutes:40,revision:1,confirmedAt:at,updatedAt:at,expiresOn:null};
+  await f.sql`UPDATE workspace_preferences SET adaptive_planning=${f.sql.json({...DEFAULT_OPENING_ADAPTIVE_PREFS,spanTutorGrants:{[x.courseId]:grant}})}::jsonb WHERE workspace_id=${f.scope.workspaceId}`;
+  const tutor=createOpeningSpanTutorContextRepository(f.sql),request={courseId:x.courseId,sourceIds:[x.sourceId],sourceVersions:{[x.sourceId]:1},question:"继续学习"};
+  const context=(await tutor.read(f.scope,request))!;expect(context).not.toBeNull();expect(context.intent.timeBudgetMinutes).toBe(20);
+  const input={context,decision:nextLearningStep(context.decisionInput),operationId:`tutor-next:${randomUUID()}`};
+  if(consumed){
+    await expect(tutor.execute(f.scope,input)).rejects.toMatchObject({code:"CONFLICT",message:expect.stringContaining("预算不足")});
+    expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
+    expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  }else{
+    const session=await tutor.execute(f.scope,input);
+    const activity=await createOpeningSpanSessionRepository(f.sql).get(f.scope,session.activityId);
+    expect(activity?.activityId).toBe(session.activityId);
+    const [budget]=await f.sql`SELECT goal_json->'tutorBudget' AS receipt FROM opening_teaching_activities WHERE id=${session.activityId}`;
+    expect(budget!.receipt).toMatchObject({minutes:20,grantRevision:1});
+    expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
+    expect((await tutor.execute(f.scope,input)).activityId).toBe(session.activityId);
+    expect(await createOpeningLearningDecisionsRepository(f.sql).list(f.scope,{layer:"activity",targetId:session.activityId})).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(3);
+  }
+  expect((await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${old.activity.id}`)[0]).toEqual(original);
+  expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
 });
 it("returns configuration without creating an empty activity, and rejects stale formal goal starts",async()=>{
   const x=await seed(),repo=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:false});

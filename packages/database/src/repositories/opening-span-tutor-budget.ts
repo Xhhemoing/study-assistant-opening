@@ -1,4 +1,5 @@
 import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
+import { readUnusedStaleCourseRouteReservations } from "./opening-course-route-reservations";
 import { assertOpeningWorkspaceCapacity, normalizeLearningCapacityActivities } from "./opening-learning-capacity";
 export { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
 import { spanTutorAutomationSchema, spanTutorBudgetSchema, plannedBlockSchema, openingAdaptivePrefsSchema,
@@ -35,7 +36,9 @@ async function assertBudget(tx: TransactionSql, scope: Scope, input: { courseId:
   const requestedActivities = input.excludeActivityId ? activities.map(activity => activity.id === input.excludeActivityId
     ? { ...activity, goal_json: { ...object(activity.goal_json), tutorBudget: reservation } } : activity) : activities;
   if (input.excludeActivityId && !requestedActivities.some(activity => activity.id === input.excludeActivityId)) throw conflict("导师活动不在当前预算日，请恢复原活动。");
-  const used = calculateSpanTutorBudgetUsage(reservation, normalizeLearningCapacityActivities(requestedActivities), tasks, blocks.data);
+  const released = new Set((await readUnusedStaleCourseRouteReservations(tx, scope)).map(row => String(row.id)));
+  const budgetActivities = requestedActivities.filter(activity => !released.has(String(activity.id)));
+  const used = calculateSpanTutorBudgetUsage(reservation, normalizeLearningCapacityActivities(budgetActivities), tasks, blocks.data);
   const requestedMinutes = input.excludeActivityId ? 0 : input.minutes;
   const [preferences] = await tx`SELECT adaptive_planning FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
   const adaptive = openingAdaptivePrefsSchema.safeParse(preferences?.adaptive_planning);
