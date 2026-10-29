@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import type { GradingEvaluationDataset } from "@aistudy/contracts";
 import { runGradingCollectionCli } from "../../../../scripts/study-grading-collect";
 import { collectGradingRun, type GradingCollectionOptions } from "./grading-collection";
 import { evaluateGradingRun } from "./grading-evaluation";
+import { buildAnswerGradingInput } from "./answer-grading";
 
 const privateAnswer = "private-student-answer";
 const input = { question: "求 f(x)=x² 的导数。", answer: privateAnswer, referenceText: "f'(x)=2x", imageEvidenceRef: null };
@@ -21,9 +23,31 @@ const grading = JSON.stringify({ outcome: "correct", confidence: 0.9, questionMa
 const response = (content = grading, usage: unknown = undefined) => Response.json({ id: "fixture-response",
   choices: [{ message: { content } }], ...(usage ? { usage } : {}) });
 const options = (fetchImpl: typeof fetch, extra: Partial<GradingCollectionOptions> = {}): GradingCollectionOptions => ({
-  baseUrl: "https://model.example/v1", model: "fixture-model", apiKey: "private-key", maxRequests: 2, fetchImpl, ...extra,
+  baseUrl: "https://model.example/v1", model: "fixture-model", apiKey: "private-key", maxRequests: 2, fetchImpl,
+  sourceCommit: "test-source", instructionVersion: "test-instruction-v1", rubricVersion: "test-rubric-v1",
+  protocolVersion: "grading-evaluation-v1", ...extra,
 });
 const temporary: string[] = [];
+it("persists explicit versions and hashes the actual grading instruction, not labels or output", async () => {
+  const instructions: string[] = [];
+  const transport = vi.fn<typeof fetch>(async (_url, init) => {
+    instructions.push(JSON.parse(String(init?.body)).messages[0].content);
+    return response();
+  });
+  const result = await collectGradingRun(dataset(), options(transport));
+  const actual = buildAnswerGradingInput({ ...input, imageParts: [] }).instruction;
+  const digest = `sha256:${createHash("sha256").update(actual).digest("hex")}`;
+  expect(instructions[0]).toContain(actual);
+  expect(result.run).toMatchObject({ sourceCommit: "test-source", instructionVersion: "test-instruction-v1",
+    rubricVersion: "test-rubric-v1", protocolVersion: "grading-evaluation-v1", promptDigest: digest });
+  const changed = dataset();
+  changed.cases[0]!.candidateRationale = "different candidate label";
+  const other = await collectGradingRun(changed, options(async () => response("not JSON")));
+  expect(other.run.promptDigest).toBe(digest);
+  transport.mockClear();
+  await expect(collectGradingRun(dataset(), options(transport, { protocolVersion: "other" }))).rejects.toThrow("protocol version mismatch");
+  expect(transport).not.toHaveBeenCalled();
+});
 afterEach(async () => { await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true }))); vi.restoreAllMocks(); });
 
 it("reuses grading instructions, omits reviewer truth and makes only serial bounded calls", async () => {
@@ -127,7 +151,8 @@ async function files() {
   const directory = await mkdtemp(join(tmpdir(), "study-grading-collect-")); temporary.push(directory);
   const datasetPath = join(directory, "dataset.json"), output = join(directory, "run.json");
   await writeFile(datasetPath, JSON.stringify(dataset()));
-  const args = ["--dataset", datasetPath, "--model", "fixture-model", "--base-url-env", "TEST_BASE", "--api-key-env", "TEST_KEY", "--max-requests", "1", "--output", output];
+  const args = ["--dataset", datasetPath, "--model", "fixture-model", "--base-url-env", "TEST_BASE", "--api-key-env", "TEST_KEY", "--max-requests", "1", "--output", output,
+    "--source-commit", "test-source", "--instruction-version", "test-instruction-v1", "--rubric-version", "test-rubric-v1", "--protocol-version", "grading-evaluation-v1"];
   return { datasetPath, output, args, environment: { TEST_BASE: "https://model.example/v1", TEST_KEY: "private-key" } };
 }
 
@@ -139,7 +164,9 @@ it("writes private new result/checkpoint files without printing answers or crede
   expect(log).not.toHaveBeenCalled();
   const result = JSON.parse(await readFile(output, "utf8"));
   const details = JSON.parse(await readFile(`${output}.collection.json`, "utf8"));
-  expect(result).toMatchObject({ provenance: "test_fixture", results: [{ input, rawOutput: grading }] });
+  expect(result).toMatchObject({ provenance: "test_fixture", sourceCommit: "test-source", instructionVersion: "test-instruction-v1",
+    rubricVersion: "test-rubric-v1", protocolVersion: "grading-evaluation-v1", promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    results: [{ input, rawOutput: grading }] });
   expect(details.status).toBe("completed");
   expect(JSON.stringify(result)).not.toContain("private-key");
   if (process.platform !== "win32") {

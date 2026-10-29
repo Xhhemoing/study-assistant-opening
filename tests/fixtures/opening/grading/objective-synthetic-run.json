@@ -4,6 +4,11 @@
   "modelLabel": "synthetic-fixture-not-a-model",
   "completedAt": "2026-10-22T00:00:00.000Z",
   "provenance": "test_fixture",
+  "sourceCommit": "unknown",
+  "instructionVersion": "unknown",
+  "rubricVersion": "unknown",
+  "protocolVersion": "grading-evaluation-v1",
+  "promptDigest": "unknown",
   "results": [
     {
       "caseId": "fraction-equivalent",

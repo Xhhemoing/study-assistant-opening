@@ -39,6 +39,12 @@ export const gradingEvaluationDatasetSchema = z.object({
 export const gradingEvaluationRunSchema = z.object({
   datasetId: identity, datasetVersion: identity, modelLabel: identity, completedAt: isoDateTimeSchema,
   provenance: z.enum(["real_provider", "test_fixture"]),
+  /** Explicit unknown is allowed for historical fixtures; never infer current versions. */
+  sourceCommit: identity,
+  instructionVersion: identity,
+  rubricVersion: identity,
+  protocolVersion: identity,
+  promptDigest: identity,
   results: z.array(z.object({ caseId: identity, caseVersion: identity, input: gradingCaseInputSchema,
     /** Keep invalid output as a failed result, rather than silently dropping the case. */
     rawOutput: z.string().max(80_000),
