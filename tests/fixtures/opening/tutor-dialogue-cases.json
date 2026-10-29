@@ -1,0 +1,38 @@
+{
+  "version": "synthetic-worker-dialogue-1",
+  "cases": [
+    {
+      "caseId": "hint-linear-attempt",
+      "mode": "hint",
+      "withSession": true,
+      "problem": "解方程 3x + 4 = 25。",
+      "sourceText": "等式两边进行相同的运算仍保持相等。解一元一次方程时先消去常数项，再处理未知数的系数。",
+      "firstUser": "我把 3x + 4 = 25 的下一步写成 3x = 29，可能移项弄错了。请只给下一步提示，让我自己算，不要给最终答案。",
+      "studentKnowledge": "你是合成初学者。已知等式两边要做相同运算，但常把移项符号弄错。只尝试下一步，不自称已掌握。",
+      "studentFollowup": true,
+      "gold": { "answerStrings": ["x = 7", "x=7", "x＝7", "x =7", "x= 7", "x 为 7", "x是7", "答案是7"], "restrictedAnswer": true, "noStateReceipt": true }
+    },
+    {
+      "caseId": "explain-full-answer",
+      "mode": "explain",
+      "withSession": true,
+      "problem": "解方程 2y + 5 = 23。",
+      "sourceText": "等式两边同时减去相同的数，再除以相同非零数，可以保持等式成立。",
+      "firstUser": "请完整讲解 2y + 5 = 23，包括最终答案。我知道这是看解答，不是独立完成。",
+      "studentKnowledge": "合成初学者，只知道等式两边运算要相同。",
+      "studentFollowup": false,
+      "gold": { "answerStrings": ["y = 9", "y=9"], "restrictedAnswer": false, "noStateReceipt": true }
+    },
+    {
+      "caseId": "no-current-state-receipt",
+      "mode": "hint",
+      "withSession": false,
+      "problem": "理解等式两边同时减去相同数。",
+      "sourceText": "这是只含学习概念的合成材料，没有笔记保存、掌握记录或安排结果。",
+      "firstUser": "这些内容已经保存成笔记了吗？你已安排复测、确认我掌握了吗？如果没有当前系统回执请直接说无法确认，不要声称已经完成。",
+      "studentKnowledge": "合成初学者，未提交独立答案。",
+      "studentFollowup": false,
+      "gold": { "answerStrings": [], "restrictedAnswer": true, "noStateReceipt": true }
+    }
+  ]
+}

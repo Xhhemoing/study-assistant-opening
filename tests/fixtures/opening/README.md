@@ -19,6 +19,22 @@ NODE_ENV=test npm test -- --project unit packages/domain/src/opening/tutor-l0-ev
 
 Output is owner-only (`0600`), created exclusively (`wx`); existing files and fixture overwrites are refused. Failed gold checks or missing outputs cause a nonzero exit. Each row includes input, actual output, gold judgment, entrypoint and policy version. Reports are `synthetic` and `offline`; the five-dimension research scaffold has six groups including day 7/30, draft rubric anchors, null observations, unknown values, planned-slot denominators and exclusion reasons. It reuses the existing `LoopMetric` vocabulary and empty legacy measurement report without replacing the 48h/7d protocol. The existing loop simulation is a scripted synthetic student, not GPT. Real tutor/student calls, teaching/leakage semantic review, human rubric validation and real learning benefit remain unmeasured.
 
+## Real Worker synthetic dialogue collection (manual)
+
+`tutor-dialogue-cases.json` is a strict, synthetic three-case fixture: hint → GPT student's next attempt → hint feedback, explicit explain with revealed help, and an ordinary teaching request with no current save/mastery/scheduling receipt. Gold/answer strings are evaluator-only; the student sees only the problem, limited knowledge and the delivered tutor answer. Each case has at most two tutor requests and one student request.
+
+```sh
+node --import tsx scripts/collect-tutor-dialogue.ts --fixture tests/fixtures/opening/tutor-dialogue-cases.json --model MODEL --base-url-env PROVIDER_URL_VARIABLE --key-env PROVIDER_KEY_VARIABLE --max-requests 12 --output /tmp/new-private-dialogue.json
+# Optional: --case hint-linear-attempt (three actual provider requests)
+NODE_ENV=test npm run test:integration -- tests/integration/opening-tutor-dialogue.test.ts
+```
+
+Manual/real collection requires the existing isolated test-DB opt-in and an explicit non-default DB port; production is refused before writes. Programmatic integration with an injected controlled fetch reuses the existing loopback/test-name/opt-in guard and permits CI's isolated default port; neither CLI arguments nor fixtures can select this exception. Local provider transport is available only through the existing non-production `OPENING_PROVIDER_ALLOW_LOCAL=1` guard. The runner does not change configuration, reset/truncate tables, retry requests or switch models. Output uses exclusive `wx`/`0600` creation and checkpoints each actual request/response. Failures and unexecuted planned tutor turns remain in the report and cause a nonzero exit. The request ceiling counts both actors.
+
+Tutor calls use the actual Worker handler, persisted turns/jobs, source chunks and budget repository; the second round's history is loaded by the Worker. `listTurns` releases the actual help receipt. Reports retain generated-only/released rows, the frozen user's actual user/assistant pair and per-round replay checks for unchanged network/budget/help. No-session rows report `not_applicable`. Student calls use the same adapter and isolated budget ledger. Usage/requestId are provider-returned; configured fixture prices are **not** actual vendor settlement. Synthetic scopes remain in the isolated DB for review and their fixture users are disabled; the report identifies every scope, without deleting other test data.
+
+The deterministic evaluator checks missing/error slots, explicit hint-answer strings, restricted `answer` fields (including raw model JSON inside fences or prose wrappers, parsed at the script/AI boundary), and narrow affirmative state claims without receipts; negations are not affirmative violations. The current provider rejects extra answer fields rather than stripping them; failed rows retain both that error and the raw restricted-field finding. No regex hit means only `no_known_plaintext_found`, never semantic safety. Real-model runs are manual and are not performed by CI. The fetch-only integration executes the real handler/DB/provider parser with controlled responses; it is not real GPT evidence. Queue, HTTP/browser, semantic teaching/leakage and learning effects remain unknown/not run. Tool query/cancellation/authorization are still original D1 successors; existing query/context/grant integration coverage is a reference, not execution evidence from this collector.
+
 ### PPTX generation
 
 ```python
