@@ -131,6 +131,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       AND status IN ('active','paused') AND goal_json->'courseRoute'->>'goalId'=${goal.id} AND goal_json->'courseRoute'->>'requirementId'=${selected.requirement.id}
       AND goal_json->'courseRoute'->>'requirementRevision'=${String(selected.requirement.revision)} AND goal_json->'courseRoute'->>'goalRevision'=${String(goal.revision)}
       AND goal_json->'courseRoute'->>'action'=${action} AND goal_json->'courseRoute'->>'originActivityId' IS NOT DISTINCT FROM ${origin?.input.activityId??null}
+      AND goal_json->'courseRoute'->>'originObservationId' IS NOT DISTINCT FROM ${origin?.input.observationId??null}
       AND goal_json->'courseRoute'->>'comprehensiveRunKey' IS NOT DISTINCT FROM ${comprehensiveRunKey??null}
       AND goal_json->'courseRoute'->>'retestId' IS NOT DISTINCT FROM ${boundRetestId??null}
       AND lower(create_intent->>'taskId') IS NOT DISTINCT FROM ${"taskId" in input?input.taskId?.toLowerCase()??null:null}

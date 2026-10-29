@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readUnusedStaleCourseRouteReservations } from "./opening-course-route-reservations";
 import { cancelOwnedSpanTutorRetests } from "./opening-span-tutor-budget";
 import { z } from "zod";
 import type { Sql, TransactionSql } from "postgres";
@@ -240,6 +241,10 @@ export type RetestEvidenceRevision = {
 
 /** Nested helper: the observation revision transaction owns semantic revision and history/root locks. */
 export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: OpeningScope, input: RetestEvidenceRevision): Promise<void> {
+  // Keep original inputs/decisions intact. Only untouched future reservations leave the active route.
+  const unused = await readUnusedStaleCourseRouteReservations(tx, scope);
+  if (unused.length) await tx`UPDATE opening_teaching_activities SET status='skipped',updated_at=now()
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id IN ${tx(unused.map(row=>String(row.id)))}`;
   const identities = [input.previousIdentity, ...(input.currentIdentity ? [input.currentIdentity] : [])];
   const courseIds = [...new Set(identities.map((identity) => identity.courseId))];
   const jobs = await tx`SELECT id,payload FROM opening_jobs WHERE workspace_id=${scope.workspaceId}
@@ -261,7 +266,7 @@ export async function reconcileOpeningRetestEvidence(tx: TransactionSql, scope: 
       : { invalidated: true, invalidationReason: "observation_revised", evidenceChanged: true };
     await tx`UPDATE opening_jobs SET payload=payload || ${tx.json(change)},updated_at=now() WHERE id=${job.id}`;
     const invalidated = await tx`UPDATE opening_retest_activities
-      SET status='invalidated', reason='evidence_changed', invalidated_at=now(), snoozed_until=NULL,
+      SET status='invalidated', reason='evidence_changed', invalidated_at=now(),
         version=version + 1, updated_at=now()
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND candidate_id=${job.id} AND status IN ('proposed','accepted','in_progress') RETURNING id`;

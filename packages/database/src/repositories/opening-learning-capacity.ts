@@ -2,6 +2,7 @@ import { learningActivityBudgetSchema, learningManagementSettingsSchema, opening
 import { localDateKeyInZone, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
+import { readUnusedStaleCourseRouteReservations } from "./opening-course-route-reservations";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 type Row = Record<string, unknown>;
@@ -35,7 +36,8 @@ export async function readOpeningLearningCapacity(db: Sql | TransactionSql, scop
   const plans = await db`SELECT accepted_blocks FROM opening_plan_state WHERE workspace_id=${scope.workspaceId} AND accepted_version>0
     AND EXISTS(SELECT 1 FROM jsonb_array_elements(accepted_blocks) b WHERE (b->>'start')::timestamptz<${bounds.nextDayStart} AND (b->>'end')::timestamptz>${bounds.dayStart})`;
   const blocks = plans.flatMap(plan => plannedBlockSchema.array().max(200).parse(plan.accepted_blocks));
-  const normalized = normalizeLearningCapacityActivities(activities);
+  const released = new Set((await readUnusedStaleCourseRouteReservations(db, scope)).map(row=>String(row.id)));
+  const normalized = normalizeLearningCapacityActivities(activities.filter(row=>!released.has(String(row.id))));
   const usedMinutes = calculateSpanTutorBudgetUsage({ localDate, timeZone }, normalized, tasks, blocks);
   return { budget, settings, localDate, timeZone, bounds, activities: normalized, tasks, blocks, usedMinutes };
 }
