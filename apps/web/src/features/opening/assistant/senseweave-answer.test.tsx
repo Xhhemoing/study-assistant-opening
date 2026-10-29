@@ -49,3 +49,18 @@ it("a mount that settles after unmount is immediately cleaned up", async () => {
   await act(async () => settle({ unmount: mounts.unmount }));
   expect(mounts.unmount).toHaveBeenCalledTimes(1);
 });
+it("placement replace: the chart stands in for its sentence and 改回文字 restores the exact answer once", async () => {
+  const sentence = "四次测验的成绩：第一次 60 分，第二次 70 分，第三次 80 分，第四次 90 分。";
+  const answer = `请先通读题目，标出已知量、未知量和隐含条件，再决定使用哪个公式。这一题的思路是先把已知条件整理清楚，再逐步代入，每一步都检查单位和符号，避免把中间量弄混。${sentence}整体是稳步上升的。`;
+  const prepared = prepareSenseWeave({ id: "replace", text: answer }, "成绩趋势");
+  await act(async () => { root.render(createElement(SenseWeaveAnswer, { text: answer, prepared })); });
+  expect(mounts.mount).toHaveBeenCalledTimes(1);
+  expect(mounts.mount.mock.calls[0]![1].placement).toBe("replace");
+  expect(container.textContent).not.toContain("第一次 60 分");
+  const [before, after] = answer.split(sentence);
+  expect(container.textContent).toBe(`${before}改回文字${after}`);
+  const button = Array.from(container.querySelectorAll("button")).find(el => el.textContent === "改回文字")!;
+  await act(async () => button.click());
+  expect(container.textContent).toBe(answer);
+  expect(container.textContent!.split(sentence)).toHaveLength(2);
+});

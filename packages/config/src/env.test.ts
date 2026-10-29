@@ -37,6 +37,20 @@ it("SenseWeave beta allowlist and gating configuration fail closed", () => {
   }
 });
 
+it("SenseWeave gates v1: board derivation is explanation-only, hint stays answer-free, sketch is switchable", () => {
+  expect(SENSEWEAVE_INITIAL_GATES.version).toBe("sw-gates-v1-20261029");
+  expect(SENSEWEAVE_INITIAL_GATES.presets.explain).toContain("derivation");
+  for (const preset of ["hint", "review", "plan", "data"] as const) expect(SENSEWEAVE_INITIAL_GATES.presets[preset]).not.toContain("derivation");
+  expect(SENSEWEAVE_INITIAL_GATES.sketch).toBe(true);
+  const hintDerivation = structuredClone(SENSEWEAVE_INITIAL_GATES);
+  hintDerivation.presets.hint = ["prose", "derivation"];
+  expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_GATES: JSON.stringify(hintDerivation) })).toThrow(/OPENING_CHAT_SENSEWEAVE_GATES/);
+  const noSketch = { ...structuredClone(SENSEWEAVE_INITIAL_GATES), version: "sw-gates-test-no-sketch", sketch: false };
+  expect(resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_GATES: JSON.stringify(noSketch) }), "u").senseWeaveGates.sketch).toBe(false);
+  const { sketch: _omitted, ...legacy } = { ...structuredClone(SENSEWEAVE_INITIAL_GATES), version: "sw-gates-test-legacy" };
+  expect(resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_GATES: JSON.stringify(legacy) }), "u").senseWeaveGates.sketch).toBeUndefined();
+});
+
 it("strictly validates startup budgets, cache TTL, and bounded backoff", () => {
   expect(loadWorkerStartupConfig({}).parserTimeoutMs).toBe(120000);
   expect(loadWorkerStartupConfig({}).ocrTimeoutMs).toBe(120000);

@@ -18,6 +18,20 @@ import {parseMarkdown} from '../core/markdown.mjs';
 import {composeText} from '../core/compose.mjs';
 import {ELEMENT_CSS} from './style.mjs';
 import {renderExtended} from './extended.mjs';
+import {applyMotion, sketchify, annotate, sketchable} from './motion.mjs';
+import {diagramShape, diagramEdge, diagramShapeNames, diagramStyleNames, diagramDirectionNames} from './diagram.mjs';
+/**
+ * Placement 'replace': the component stands in for a verbatim answer span. A native
+ * <details> keeps the original one keyboard/screen-reader step away, collapsed by default.
+ */
+function originalDisclosure(b) {
+  const details = el('details', undefined, {class: 'sw-original', 'data-original-for': b.id});
+  details.append(
+    el('summary', '查看原文', {'aria-label': '查看原文：组件依据的逐字原文'}),
+    el('p', b.original, {class: 'sw-original-text', lang: 'zh-CN'})
+  );
+  return details;
+}
 function el(tag, text, attrs = {}) {
   const n = document.createElement(tag);
   if (text !== undefined) n.textContent = text;
@@ -336,6 +350,43 @@ export class SenseWeave extends HTMLElement {
     this.motionButton?.setAttribute('aria-pressed', String(this._motion));
     if (this._motion) this.stopMotion();
   }
+  /**
+   * Presentation hints from the runtime (envelope.hints): motion presets, sketch style and
+   * verbatim annotations. Decoration only; ignored for a different document id.
+   */
+  get hints() {
+    return this._hints ? structuredClone(this._hints) : null;
+  }
+  set hints(value) {
+    this._hints = value && typeof value === 'object' ? structuredClone(value) : null;
+    if (!this._ready || !this._doc) return;
+    for (const b of this._doc.blocks) {
+      const node = this.nodes.get(b.id);
+      if (node) this.decorate(node, b);
+    }
+  }
+  hintsFor(b) {
+    const h = this._hints;
+    if (!h || !this._doc || h.documentId && h.documentId !== this._doc.id) return null;
+    return {
+      motion: h.motion?.enabled ? h.motion.blocks?.[b.id]?.preset ?? 'none' : 'none',
+      sketch: !!h.sketch?.enabled && (Array.isArray(h.sketch.blocks) && h.sketch.blocks.includes(b.id) || b.type === 'derivation') && sketchable(b.type),
+      annotations: (h.annotations ?? []).filter(a => a.blockId === b.id).slice(0, 5)
+    };
+  }
+  decorate(node, b) {
+    const h = this.hintsFor(b);
+    if (!h) return;
+    if (h.sketch) sketchify(node, b.id);
+    if (h.annotations.length && !node.querySelector('mark.sw-annot')) annotate(node, h.annotations);
+    // Play once per block content, never while composing/streaming, never for reduced motion.
+    this._played ??= new Set();
+    const key = `${this._doc.id}:${b.id}:${node.dataset.signature ?? ''}`;
+    if (h.motion === 'none' || this._composing || this._played.has(key) || node.dataset.motion) return;
+    this._played.add(key);
+    if (this._played.size > 200) this._played.delete(this._played.values().next().value);
+    applyMotion(node, h.motion, {isReduced: () => this._motion === true || !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches});
+  }
   get sources() {
     return structuredClone(this._sources);
   }
@@ -616,8 +667,10 @@ export class SenseWeave extends HTMLElement {
           node._swCaptureState?.();
         }
         const next = this.renderBlock(b);
+        if (b.original) next.append(originalDisclosure(b));
         next.dataset.signature = signature;
         next.dataset.block = b.id;
+        this.decorate(next, b);
         if (node) node.replaceWith(next);
         node = next;
         this.nodes.set(b.id, node);
@@ -765,6 +818,22 @@ export class SenseWeave extends HTMLElement {
       section.append(ol);
     }
     if (b.type === 'compare') section.append(tableOf(data.columns, data.rows, inline, b.id));
+    if (b.type === 'derivation') {
+      // Board derivation: each line is verbatim answer text. $…$ spans are set in a math face only.
+      const ol = el('ol', undefined, {class: 'sw-derivation', 'aria-label': '逐行推导'});
+      data.lines.forEach(line => {
+        const li = el('li');
+        const host = inline(line.text, {blockId: b.id, type: 'derivation', role: 'item'});
+        if (host) li.append(...host);
+        else for (const [i, part] of line.text.split(/(\$[^$\n]{1,200}\$)/).entries()) {
+          if (!part) continue;
+          li.append(i % 2 ? el('span', part.slice(1, -1), {class: 'sw-math-inline'}) : document.createTextNode(part));
+        }
+        if (line.note) li.append(el('span', line.note, {class: 'meta sw-derivation-note'}));
+        ol.append(li);
+      });
+      section.append(ol);
+    }
     if (b.type === 'code') {
       const pre = el('pre');
       pre.append(el('code', data.code));
@@ -1080,7 +1149,8 @@ export class SenseWeave extends HTMLElement {
           width: Math.max(0, Math.abs(scale(r.value) - scale(0))),
           height: 26,
           rx: 3,
-          fill: r.value < 0 ? 'var(--sw-negative)' : 'var(--sw-positive)'
+          fill: r.value < 0 ? 'var(--sw-negative)' : 'var(--sw-positive)',
+          'data-value': r.value
         });
         // Full label and value on hover/focus; the visible label is truncated at 13 characters.
         const tip = svgEl('title');
@@ -1090,7 +1160,8 @@ export class SenseWeave extends HTMLElement {
           x: Math.min(470, Math.max(scale(0), scale(r.value)) + 6),
           y: i * 47 + 33,
           fill: 'var(--sw-figure-ink)',
-          'font-size': 12
+          'font-size': 12,
+          class: 'sw-value'
         });
         n.textContent = r.value;
         sv.append(t, bar, n);
@@ -1152,24 +1223,32 @@ export class SenseWeave extends HTMLElement {
       defs.append(marker);
       sv.append(defs);
       const nodes = new Map(layout.nodes.map(n => [n.id, n]));
+      const lanes = new Map();
       for (const edge of d.edges) {
+        const key = `${edge.from}\u0000${edge.to}`;
+        if (!lanes.has(key)) lanes.set(key, []);
+        lanes.get(key).push(edge);
+      }
+      for (const edge of d.edges) {
+        const group = lanes.get(`${edge.from}\u0000${edge.to}`);
+        const offset = (group.indexOf(edge) - (group.length - 1) / 2) * Math.min(24, 96 / Math.max(1, group.length - 1));
         const a = nodes.get(edge.from),
           z = nodes.get(edge.to),
-          from = a.y + 30,
-          to = z.y - 30;
+          geometry = diagramEdge(a, z, d.direction, offset),
+          style = edge.style ?? (edge.relation === 'hypothesis' ? 'dashed' : 'solid');
         sv.append(
           svgEl('path', {
-            d: `M${a.x},${from} C${a.x},${(from + to) / 2} ${z.x},${(from + to) / 2} ${z.x},${to}`,
+            d: geometry.d,
             fill: 'none',
             stroke: 'var(--sw-edge)',
-            'stroke-width': 2,
-            'stroke-dasharray': edge.relation === 'hypothesis' ? '5 5' : 'none',
+            'stroke-width': style === 'thick' ? 4 : 2,
+            'stroke-dasharray': style === 'dashed' ? '5 5' : 'none',
             'marker-end': `url(#arrow-${b.id})`
           })
         );
         const label = svgEl('text', {
-          x: (a.x + z.x) / 2 + 6,
-          y: (from + to) / 2 - 3,
+          x: geometry.x,
+          y: geometry.y,
           fill: 'var(--sw-muted)',
           'font-size': 11
         });
@@ -1178,17 +1257,8 @@ export class SenseWeave extends HTMLElement {
         sv.append(label);
       }
       for (const n of layout.nodes) {
-        sv.append(
-          svgEl('rect', {
-            x: n.x - 76,
-            y: n.y - 28,
-            width: 152,
-            height: 56,
-            rx: 10,
-            fill: 'var(--sw-soft)',
-            stroke: 'var(--sw-node-line)'
-          })
-        );
+        const shape = diagramShape(n);
+        sv.append(svgEl(shape.tag, shape.attrs));
         const text = svgEl('text', {
           x: n.x,
           y: n.y - 3,
@@ -1226,18 +1296,20 @@ export class SenseWeave extends HTMLElement {
         state.diagramTextOpen = holder.open;
       });
     }
+    if (d.direction !== undefined) holder.append(el('p', `方向：${d.direction}（${diagramDirectionNames[d.direction]}）`));
+    const shaped = d.nodes.some(n => n.shape !== undefined);
     holder.append(
       tableOf(
-        ['节点', '完整名称'],
-        d.nodes.map(n => [n.id, n.label])
+        shaped ? ['节点', '完整名称', '形状'] : ['节点', '完整名称'],
+        d.nodes.map(n => [n.id, n.label, ...(shaped ? [diagramShapeNames[n.shape] ?? '默认圆角矩形'] : [])])
       )
     );
     if (d.edges.length) {
-      const labelled = d.edges.some(e => e.label);
+      const labelled = d.edges.some(e => e.label), styled = d.edges.some(e => e.style !== undefined);
       holder.append(
         tableOf(
-          labelled ? ['从', '到', '关系', '标签'] : ['从', '到', '关系'],
-          d.edges.map(e => [e.from, e.to, relation[e.relation], ...(labelled ? [e.label ?? ''] : [])])
+          ['从', '到', '关系', ...(labelled ? ['标签'] : []), ...(styled ? ['线型'] : [])],
+          d.edges.map(e => [e.from, e.to, relation[e.relation], ...(labelled ? [e.label ?? ''] : []), ...(styled ? [diagramStyleNames[e.style ?? (e.relation === 'hypothesis' ? 'dashed' : 'solid')]] : [])])
         )
       );
     }

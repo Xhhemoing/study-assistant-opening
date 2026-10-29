@@ -69,6 +69,13 @@ describe("SenseWeave beta privacy and isolation", () => {
     expect(prepareSenseWeave({ id: "legacy-study", text }, undefined, SENSEWEAVE_INITIAL_GATES, true).preset).toBe("hint");
     expect(prepareSenseWeave({ id: "explained", text, mode: "explain" }, undefined, SENSEWEAVE_INITIAL_GATES, true).enhanced).toBe(true);
   });
+  it("derivation is a known shadow type, not folded into other", () => {
+    const answer = `请先通读题目，标出已知量、未知量和隐含条件，再决定使用哪个公式。这一题的思路是先把已知条件整理清楚，再逐步代入，每一步都检查单位和符号，避免把中间量弄混。下面是完整的推导过程，请逐行核对。先写出 a=1。再代入得到 b=a+1=2。最后得到 c=b+1=3。`;
+    const record = shadowRecord(prepareSenseWeave({ id: "derivation", text: answer, mode: "explain" }, undefined), answer.length, SENSEWEAVE_INITIAL_GATES.version);
+    expect(record.selected.map(row => row.type)).toEqual(["derivation"]);
+    expect(record.gateVersion).toBe("sw-gates-v1-20261029");
+    expect(senseWeaveShadowSchema.safeParse(record).success).toBe(true);
+  });
   it("storage exceptions degrade to per-tab feedback without throwing or leaking", () => {
     vi.stubGlobal("window", { get localStorage() { throw new Error("denied"); } });
     publishVerifiedSessionIdentity({ id: "storage-denied", workspaceId: "W" });

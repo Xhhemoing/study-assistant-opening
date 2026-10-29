@@ -183,7 +183,11 @@ export function validateGraph(data) {
   requireContract(isRecord(data), 'GRAPH', '图关系必须是对象');
   const nodes = array(data.nodes, 12, 1);
   uniqueIds(nodes);
-  nodes.forEach(n => cleanText(n.label, 80));
+  nodes.forEach(n => {
+    cleanText(n.label, 80);
+    if (n.shape !== undefined) requireContract(['rect', 'round', 'diamond', 'stadium'].includes(n.shape), 'GRAPH', '节点形状不合法');
+  });
+  if (data.direction !== undefined) requireContract(['TD', 'TB', 'LR', 'RL', 'BT'].includes(data.direction), 'GRAPH', '图方向不合法');
   const ids = new Set(nodes.map(n => n.id)),
     seen = new Set();
   array(data.edges, 20).forEach(e => {
@@ -198,13 +202,15 @@ export function validateGraph(data) {
     );
     // Optional edge label (e.g. a decision branch "是/否"); two branches between one pair stay distinct.
     if (e.label !== undefined) requireContract(cleanText(e.label, 80).trim() !== '', 'GRAPH', '关系标签不能为空');
-    const key = [e.from, e.to, e.relation, e.label ?? ''].join('|');
+    if (e.style !== undefined) requireContract(['solid', 'dashed', 'thick'].includes(e.style), 'GRAPH', '关系线型不合法');
+    const key = [e.from, e.to, e.relation, e.label ?? '', e.style ?? (e.relation === 'hypothesis' ? 'dashed' : 'solid')].join('|');
     requireContract(!seen.has(key), 'DUPLICATE', '关系重复');
     seen.add(key);
   });
   return {
-    nodes: nodes.map(n => ({id: n.id, label: n.label})),
-    edges: data.edges.map(e => ({from: e.from, to: e.to, relation: e.relation, ...(e.label === undefined ? {} : {label: e.label})}))
+    ...(data.direction === undefined ? {} : {direction: data.direction}),
+    nodes: nodes.map(n => ({id: n.id, label: n.label, ...(n.shape === undefined ? {} : {shape: n.shape})})),
+    edges: data.edges.map(e => ({from: e.from, to: e.to, relation: e.relation, ...(e.style === undefined ? {} : {style: e.style}), ...(e.label === undefined ? {} : {label: e.label})}))
   };
 }
 /** Deterministic DAG layering. Cycles/dense layers retain tables instead of pretending to be a readable flow. */
@@ -232,14 +238,18 @@ export function layoutDiagram(data) {
     layers.get(l).push(node);
   }
   const dense = [...layers.values()].some(nodes => nodes.length > 3);
-  const width = 560,
-    height = (Math.max(...level.values()) + 1) * 112 + 36;
+  const horizontal = ['LR', 'RL'].includes(data.direction),
+    reverse = ['RL', 'BT'].includes(data.direction),
+    count = Math.max(...level.values()) + 1,
+    width = horizontal ? count * 224 + 36 : 560,
+    height = horizontal ? 360 : count * 112 + 36;
   const nodes = data.nodes.map(n => {
     const siblings = layers.get(level.get(n.id));
+    const layer = reverse ? count - 1 - level.get(n.id) : level.get(n.id);
     return {
       ...n,
-      x: ((siblings.indexOf(n) + 1) * width) / (siblings.length + 1),
-      y: level.get(n.id) * 112 + 42
+      x: horizontal ? layer * 224 + 112 : ((siblings.indexOf(n) + 1) * width) / (siblings.length + 1),
+      y: horizontal ? ((siblings.indexOf(n) + 1) * height) / (siblings.length + 1) : layer * 112 + 42
     };
   });
   return {nodes, width, height, cyclic, dense};
@@ -263,6 +273,12 @@ function validateBlock(block, sourceIds, warnings) {
     return x;
   });
   b.qualifiers = array(block.qualifiers ?? [], 8).map(x => cleanText(x, 1000));
+  // Verbatim answer span this component stands in for (placement 'replace'). Shown behind
+  // "查看原文" and used by every text projection instead of the component's own rendering.
+  if (block.original !== undefined && b.type !== 'prose') {
+    const original = cleanText(block.original, 60000);
+    if (original.trim()) b.original = original;
+  }
   // Opt-in Markdown subset for the body text of prose/callout; anything else stays literal text.
   if (block.format !== undefined) {
     requireContract(
@@ -275,6 +291,7 @@ function validateBlock(block, sourceIds, warnings) {
   if (!Object.hasOwn(CATALOG, b.type)) {
     warnings.push(`未知组件 ${b.type} 已保留文字回退。`);
     b.type = 'prose';
+    delete b.original;
     b.body = block.fallback ?? b.body;
     b.data = {};
     cleanText(b.body);
@@ -673,6 +690,12 @@ export function projectText(doc, {includeAnswers = false, includeOriginal = true
     ...(doc.checks ?? []).map(x => '一致性检查：' + x)
   ];
   for (const b of doc.blocks) {
+    // A component that replaced its source span projects that span verbatim: plain text,
+    // copy and downgrade read the answer itself, never a second rendering of it.
+    if (typeof b.original === 'string' && b.original) {
+      lines.push('', b.original);
+      continue;
+    }
     lines.push('', b.title, bindText(b.body, scope), ...b.qualifiers.map(x => '条件：' + x));
     const d = b.data ?? {};
     if (Object.hasOwn(EXTENDED_CATALOG, b.type)) lines.push(extendedText(b.type, d));
@@ -693,8 +716,9 @@ export function projectText(doc, {includeAnswers = false, includeOriginal = true
     if (b.type === 'code') lines.push(d.code);
     if (b.type === 'math') lines.push(mathText(d.expression));
     if (b.type === 'diagram') {
-      lines.push(...d.nodes.map(n => `${n.id}: ${n.label}`));
-      lines.push(...d.edges.map(e => `${e.from} → ${e.to} [${e.relation}]${e.label ? ` ${e.label}` : ''}`));
+      if (d.direction !== undefined) lines.push(`方向: ${d.direction}`);
+      lines.push(...d.nodes.map(n => `${n.id}: ${n.label}${n.shape === undefined ? '' : ` [${n.shape}]`}`));
+      lines.push(...d.edges.map(e => `${e.from} → ${e.to} [${e.relation}]${e.label ? ` ${e.label}` : ''}${e.style === undefined ? '' : ` [${e.style}]`}`));
     }
     if (b.type === 'matrix') {
       const f = matrixFrame(d.matrix);

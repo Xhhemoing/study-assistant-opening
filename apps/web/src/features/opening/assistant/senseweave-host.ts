@@ -23,10 +23,20 @@ function writePreferences(key: string | null, snapshot: Preferences) {
   catch { /* Storage denial only loses cross-reload persistence; feedback still applies in memory. */ }
 }
 const gatePreset = (name: TeachingPresetName): keyof SenseWeaveGates["presets"] => name === "compare" || name === "derive" ? "explain" : name;
+/**
+ * Components AIstudy adds on top of the runtime teaching preset. Board derivation (verbatim
+ * equation lines) is explanation-only: never hint, review, plan or data. Gates can still remove it.
+ */
+const HOST_CEILING: Partial<Record<TeachingPresetName, readonly string[]>> = { explain: ["derivation"], derive: ["derivation"] };
 export function senseWeaveComponents(name: TeachingPresetName, gates: SenseWeaveGates) {
   const allowed = gates.presets[gatePreset(name)];
-  // Runtime teaching presets are a hard ceiling; host gates can only remove components.
-  return (TEACHING_PRESETS[name].capabilities.components ?? []).filter(type => allowed.some(value => value === type));
+  // Runtime teaching presets (plus the explicit host additions above) are a hard ceiling; gates only remove.
+  const ceiling = [...(TEACHING_PRESETS[name].capabilities.components ?? []), ...(name === "hint" ? [] : HOST_CEILING[name] ?? [])];
+  return [...new Set(ceiling)].filter(type => allowed.some(value => value === type));
+}
+/** Hand-drawn decoration only for explain/review answers, and only while the gate table allows it. */
+export function senseWeaveSketch(name: TeachingPresetName, gates: SenseWeaveGates): boolean {
+  return (name === "explain" || name === "review") && gates.sketch !== false;
 }
 let owner: string | null | undefined;
 const adapters = new Map<string, HostAdapter>();
@@ -34,12 +44,16 @@ export function senseWeaveAdapter(preset: TeachingPresetName = "explain", gates:
   const namespace = getVerifiedSessionNamespace();
   if (owner !== namespace) { adapters.clear(); owner = namespace; }
   const components = senseWeaveComponents(preset, gates);
-  const identity = JSON.stringify([preset, gates.version, components]);
+  const sketch = senseWeaveSketch(preset, gates);
+  const identity = JSON.stringify([preset, gates.version, components, sketch]);
   const create = () => {
     // Never adopt unowned v1 data from a previous login. Late callbacks keep their captured owner.
     const key = namespace ? `${PREFS_KEY}:${encodeURIComponent(namespace)}:${preset}` : null;
-    return createHostAdapter({ preset, minChars: SENSEWEAVE_MIN_CHARS,
-      options: { capabilities: { components } },
+    // placement "replace": a chart/compare read verbatim from one sentence stands in for it, with the
+    // sentence behind "查看原文". No AI assist (no extra model call); motion stays the runtime default
+    // (off for reduced motion); sketch is turned off explicitly outside explain/review.
+    return createHostAdapter({ preset, minChars: SENSEWEAVE_MIN_CHARS, placement: "replace",
+      options: { capabilities: { components, ...(sketch ? {} : { sketch: false }) } },
       preferences: { initial: readPreferences(key), onChange: snapshot => writePreferences(key, snapshot) },
     });
   };

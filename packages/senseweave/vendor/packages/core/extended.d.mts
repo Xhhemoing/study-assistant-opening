@@ -1,5 +1,5 @@
 import type {BlockData} from './document.mjs';
-export const EXTENDED_CATALOG: Readonly<Record<'table'|'plot'|'json'|'diff'|'details', string>>;
+export const EXTENDED_CATALOG: Readonly<Record<'table'|'plot'|'json'|'diff'|'details'|'derivation', string>>;
 export function normalizeExtended(type: string, data: unknown): unknown;
 export function extendedText(type: string, data: unknown): string;
 export function validISODate(value: string): boolean;

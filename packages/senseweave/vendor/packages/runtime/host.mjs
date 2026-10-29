@@ -7,14 +7,19 @@ import {
 } from '../core/document.mjs';
 import {compileMessage} from './index.mjs';
 import {createInstructions} from './instructions.mjs';
-import {createPreferenceStore} from '../policy/index.mjs';
+import {createPreferenceStore, normalizePlacement} from '../policy/index.mjs';
 /**
  * Host kit: lets a chat host keep its own Markdown renderer (math, citations, selection
  * mapping) for ordinary text and hand only the fragments SenseWeave selected to its
  * components. Segments always cover the whole original content in order, so joining
  * every segment's `source` returns `envelope.content` exactly.
  */
-export function segmentOutput(envelope, {sources} = {}) {
+export function segmentOutput(envelope, {sources, placement} = {}) {
+  requireContract(
+    placement === undefined || placement === 'replace' || placement === 'append',
+    'PLACEMENT',
+    "placement must be 'replace' or 'append'"
+  );
   requireContract(
     envelope && typeof envelope === 'object' && typeof envelope.content === 'string',
     'ENVELOPE',
@@ -51,35 +56,53 @@ export function segmentOutput(envelope, {sources} = {}) {
       pick.end <= pick.start
     )
       continue;
-    if (pick.start > at)
+    // A supplementary view (candidate placement "after") is shown either in place of its verbatim
+    // source span ('replace': the segment's source is that span, offered again behind "查看原文")
+    // or after it ('append': the span stays host text and the block segment is zero-length).
+    // Either way joining every segment's source returns the content exactly.
+    const supplementary = pick.placement === 'after';
+    const display = supplementary ? (placement ?? pick.display ?? 'append') : 'inline';
+    const after = display === 'append';
+    const cut = after ? pick.end : pick.start;
+    if (cut > at)
       segments.push({
         kind: 'text',
         start: at,
-        end: pick.start,
-        source: content.slice(at, pick.start)
+        end: cut,
+        source: content.slice(at, cut)
       });
-    const source = content.slice(pick.start, pick.end);
+    const source = after ? '' : content.slice(pick.start, pick.end);
+    // The original travels with the block only when the block stands in for it.
+    const {original: _, ...bare} = block;
+    const shown = display === 'replace' ? {...bare, original: source} : supplementary ? bare : block;
     const document = validateDocument(
       {
         schemaVersion: SCHEMA_VERSION,
         id: `${doc.id}__${block.id}`.slice(0, 120),
         revision: doc.revision ?? 1,
         title: '',
-        blocks: [block],
+        blocks: [shown],
         sources: registry,
-        originalText: source
+        originalText: after ? content.slice(pick.start, pick.end) : source
       },
       {sources: registry}
     );
     segments.push({
       kind: 'block',
-      start: pick.start,
+      start: after ? pick.end : pick.start,
       end: pick.end,
       source,
       type: block.type,
       blockId: block.id,
       reasons: [...(pick.reasons ?? [])],
-      document
+      ...(supplementary ? {placement: display} : {}),
+      ...(display === 'replace' ? {original: source} : {}),
+      document,
+      // Decoration hints for this block only (motion preset, sketch); annotations target host prose.
+      ...(envelope.hints ? {hints: {documentId: document.id,
+        motion: {enabled: !!envelope.hints.motion?.enabled, reason: envelope.hints.motion?.reason ?? '', blocks: envelope.hints.motion?.blocks?.[block.id] ? {[block.id]: envelope.hints.motion.blocks[block.id]} : {}},
+        sketch: {enabled: !!envelope.hints.sketch?.enabled && (envelope.hints.sketch.blocks ?? []).includes(block.id), reason: envelope.hints.sketch?.reason ?? '', blocks: (envelope.hints.sketch?.blocks ?? []).filter(id => id === block.id)},
+        annotations: [], rejected: []}} : {})
     });
     at = pick.end;
   }
@@ -168,8 +191,10 @@ export function createHostAdapter({
   minChars = 0,
   sources,
   preferences: preferenceOptions,
+  placement: defaultPlacement,
   options: baseOptions = {}
 } = {}) {
+  normalizePlacement(defaultPlacement);
   requireContract(
     Object.hasOwn(TEACHING_PRESETS, defaultPreset),
     'PRESET',
@@ -236,6 +261,7 @@ export function createHostAdapter({
       else {
         try {
           const merged = teachingOptions(p, {
+            ...(defaultPlacement ? {placement: defaultPlacement} : {}),
             ...baseOptions,
             ...options,
             preferences,
@@ -243,7 +269,7 @@ export function createHostAdapter({
             context: {...baseOptions.context, ...options.context, ...(prompt ? {prompt} : {})}
           });
           envelope = compileMessage({id, content: text}, merged);
-          segments = segmentOutput(envelope);
+          segments = segmentOutput(envelope, {placement: merged.placement});
           if (envelope.diagnostics.some(d => d.code === 'PRESENTATION_FALLBACK'))
             counts.fallbacks++;
         } catch (e) {

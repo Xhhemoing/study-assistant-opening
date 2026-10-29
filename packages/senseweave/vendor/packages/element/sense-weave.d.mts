@@ -1,4 +1,5 @@
 import type {PresentationDocument, Source} from '../core/document.mjs';
+import type {PresentationHints} from '../runtime/index.mjs';
 export type Interaction = {
   type: string;
   documentId?: string;
@@ -14,7 +15,10 @@ export class SenseWeave extends HTMLElement {
   sources: Source[];
   document: PresentationDocument | null;
   mode: 'rich' | 'plain';
+  /** True means reduced motion (legacy name). */
   motion: boolean;
+  /** envelope.hints from the runtime: motion presets, sketch style, annotations. Decoration only. */
+  hints: PresentationHints | null;
   log: Interaction[];
   setMode(mode: 'rich' | 'plain'): void;
   setStream(text: string): void;

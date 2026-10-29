@@ -36,6 +36,7 @@ function copyButton(label,getText,note,onCopy){
     }
     onCopy?.(ok,snapshot);
   });
+  control.setAttribute('data-sw-action','copy');
   return control;
 }
 // Spreadsheet formula injection: text starting with = + - @ is prefixed with ' on export only.
@@ -66,7 +67,10 @@ export function renderExtended(section,b,state,emit,inline=null){
     const table=el('table'),thead=el('thead'),head=el('tr'),tbody=el('tbody'),tfoot=el('tfoot');const headers=[];
     for(const [i,c]of d.columns.entries()){
       const th=el('th',undefined,{scope:'col','aria-sort':state.sort===i?(state.direction===1?'ascending':'descending'):'none',...(numeric[i]?{class:'num'}:{})});
-      th.append(button(c.label+(c.unit?` [${c.unit}]`:''),()=>{state.direction=state.sortKey===c.key?-state.direction:1;state.sortKey=c.key;state.sort=i;draw();emit('table.sort',{blockId:b.id,column:c.key,direction:state.direction===1?'asc':'desc'});}));headers.push(th);head.append(th);
+      const control=button(c.label+(c.unit?` [${c.unit}]`:''),()=>{state.direction=state.sortKey===c.key?-state.direction:1;state.sortKey=c.key;state.sort=i;draw();emit('table.sort',{blockId:b.id,column:c.key,direction:state.direction===1?'asc':'desc'});});
+      const nodes=inline?.(c.inline??c.label,{blockId:b.id,type:'table',role:'title'});
+      if(nodes){control.replaceChildren(...nodes);if(c.unit)control.append(document.createTextNode(` [${c.unit}]`));}
+      th.append(control);headers.push(th);head.append(th);
     }
     thead.append(head);table.append(thead,tbody);if(numeric.some(Boolean))table.append(tfoot);wrap.append(table);
     const more=button('显示更多',()=>{state.shown=(state.shown??PAGE)+PAGE;draw();if(more.hidden)wrap.focus({preventScroll:true});},{class:'screen-data'});
@@ -77,7 +81,7 @@ export function renderExtended(section,b,state,emit,inline=null){
       if(state.sort>=0){const col=state.sort;rows.sort((a,b)=>{const x=a.r[col],y=b.r[col];if(x===null||y===null)return x===y?a.i-b.i:x===null?1:-1;const cmp=numeric[col]?x-y:String(x).localeCompare(String(y),undefined,{numeric:true});return cmp*state.direction||a.i-b.i;});}
       view=rows;
       const shown=Math.min(state.shown??PAGE,rows.length);
-      const fragment=document.createDocumentFragment();for(const{r}of rows.slice(0,shown)){const tr=el('tr');r.forEach((v,c)=>{if(numeric[c]){tr.append(el('td',grouped(v),{class:'num'}));return;}const nodes=v===null?null:inline?.(String(v),{blockId:b.id,type:'table',role:'cell'});if(!nodes){tr.append(el('td',display(v)));return;}const td=el('td');td.append(...nodes);tr.append(td);});fragment.append(tr);}tbody.replaceChildren(fragment);
+      const fragment=document.createDocumentFragment();for(const{r,i}of rows.slice(0,shown)){const tr=el('tr');r.forEach((v,c)=>{const source=d.inlineRows?.[i]?.[c];const nodes=v===null||numeric[c]&&source==null?null:inline?.(source??String(v),{blockId:b.id,type:'table',role:'cell'});const td=el('td',undefined,numeric[c]?{class:'num'}:{});if(nodes)td.append(...nodes);else td.textContent=numeric[c]?grouped(v):display(v);tr.append(td);});fragment.append(tr);}tbody.replaceChildren(fragment);
       headers.forEach((th,i)=>th.setAttribute('aria-sort',state.sort===i?(state.direction===1?'ascending':'descending'):'none'));
       // Paging only limits drawn rows; the line always states the match count and the full total.
       status.textContent=(shown<rows.length?`显示 前 ${shown} / ${rows.length<d.rows.length?`匹配 ${rows.length} / `:''}共 ${d.rows.length} 行`:`显示 ${rows.length} / ${d.rows.length} 行`)+' · 仅本地筛选与排序，原始数据未修改。';

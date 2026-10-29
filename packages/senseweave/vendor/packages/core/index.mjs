@@ -6,3 +6,4 @@ export * from './events.mjs';
 export * from './adapters.mjs';
 export * from './templates.mjs';
 export * from './extended.mjs';
+export * from './grounding.mjs';
