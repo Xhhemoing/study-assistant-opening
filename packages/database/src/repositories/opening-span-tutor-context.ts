@@ -134,7 +134,7 @@ async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot
       WHERE a.session_id=${session.sessionId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
     if (attempts.some(row => parseOpeningSpanExercise(row.evaluation_spec)?.id.startsWith("span-reserved-"))) return null;
   } else if (!dueRetestId && ["full_explain", "targeted_explain"].includes(decision.activityKind)) return null;
-  return readOpeningSpanReservedChoice(db, scope, spanModeForIntent(intent));
+  return readOpeningSpanReservedChoice(db, scope, spanModeForIntent(intent), (session?.retestId || dueRetestId) ? "retest" : "validation");
 }
 async function assertContext(tx: TransactionSql, scope: Scope, context: OpeningSpanTutorContext) {
   const db = transactionClient(tx);

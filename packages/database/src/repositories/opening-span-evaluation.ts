@@ -1,4 +1,4 @@
-import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanReservedProblem, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import type { Scope } from "@aistudy/contracts";
 import { getSpanProblem, spanProblemStem, verifySpanAnswer, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
@@ -52,5 +52,5 @@ export async function evaluateOpeningSpanAttempt(tx: TransactionSql, scope: Scop
     reasonCodes: [result.outcome === "correct" && !result.coreEvidenceComplete ? "core_steps_unobserved" : result.reason],
     skills: result.skills, coreEvidenceComplete: result.coreEvidenceComplete,
     membershipOutcome: result.membershipOutcome,
-    priorFeedback: prior.length > 0 || problem.id === "span-faded-3d" || history.uncertainProblemIds.has(problem.id) || history.unknownHistory };
+    priorFeedback: prior.length > 0 || problem.id === "span-faded-3d" || history.uncertainContentKeys.has(spanProblemContentKey(problem)) || history.unknownHistory };
 }

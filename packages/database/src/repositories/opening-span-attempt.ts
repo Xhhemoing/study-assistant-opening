@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
-import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { spanExerciseInputSchema, type SpanProblem, type Scope } from "@aistudy/contracts";
 
@@ -17,7 +17,7 @@ export function parseOpeningSpanIntent(value: unknown): { problem: SpanProblem; 
   if (!value || typeof value !== "object") return null;
   const parsed = spanExerciseInputSchema.safeParse((value as Record<string, unknown>).spanExercise);
   if (!parsed.success) return null;
-  const problem = getSpanProblem(parsed.data.problemId, parsed.data.version) ?? getSpanReservedProblem(parsed.data.problemId, parsed.data.version);
+  const problem = getSpanProblem(parsed.data.problemId, parsed.data.version) ?? getSpanItemIdentity(parsed.data.problemId, parsed.data.version)?.problem;
   return problem ? { problem, sourceId: parsed.data.sourceId } : null;
 }
 
@@ -28,13 +28,14 @@ export async function readOpeningSpanExposureHistory(tx: Sql | TransactionSql, s
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
       AND (a.requirement_key=${SPAN_REQUIREMENT_KEY} OR a.create_intent ? 'spanExercise')`;
   const problemIds = new Set<string>(), familyIds = new Set<string>(), uncertainProblemIds = new Set<string>();
+  const contentKeys = new Set<string>(), uncertainContentKeys = new Set<string>();
   let unknownHistory = false;
   for (const row of rows) {
     const canonical = parseOpeningSpanExercise(row.evaluation_spec);
     const problem = canonical ?? parseOpeningSpanIntent(row.create_intent)?.problem;
     if (!problem) { unknownHistory = true; continue; }
-    problemIds.add(problem.id); familyIds.add(problem.familyId);
-    if (!canonical) uncertainProblemIds.add(problem.id);
+    problemIds.add(problem.id); familyIds.add(problem.familyId); contentKeys.add(spanProblemContentKey(problem));
+    if (!canonical) { uncertainProblemIds.add(problem.id); uncertainContentKeys.add(spanProblemContentKey(problem)); }
   }
-  return { problemIds, familyIds, uncertainProblemIds, unknownHistory };
+  return { problemIds, familyIds, contentKeys, uncertainProblemIds, uncertainContentKeys, unknownHistory };
 }

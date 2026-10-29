@@ -78,9 +78,9 @@ it("leaves a refused answer as a correction choice without closing the origin or
   expect((await f.lessons.get(fixture.scope, origin.activityId))?.status).toBe("active");
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
 });
-it("does not create a reserved activity after the actual issuer exhausted every available family", async () => {
+it("does not create a reserved activity after the actual issuer exhausted every available content", async () => {
   const f = await seed(), origin = await f.create();
-  const familyCount = new Set(listSpanReservedProblems().map(problem => problem.familyId)).size;
+  const familyCount = listSpanReservedProblems("validation").length;
   for (let index = 0; index < familyCount; index++) await createSpanReservedService(fixture.sql).issue(fixture.scope,
     { sessionId: origin.sessionId, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" });
   await expect(createSpanReservedService(fixture.sql).issue(fixture.scope,
@@ -130,6 +130,14 @@ it("starts an ordinary correction after a failed retest while preserving its com
     WHERE id=${scheduled.activityId}`;
   const origin = await f.lessons.create(fixture.scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent: DEFAULT_STUDY_SESSION_INTENT,
     clientKey: randomUUID(), retestId: scheduled.activityId });
+  const issued = await createSpanReservedService(fixture.sql).issue(fixture.scope, { sessionId: origin.sessionId,
+    sourceId: f.sourceId, mode: "challenge", clientKey: randomUUID() });
+  expect(issued.spanExercise?.id).toContain("generated-retest-");
+  await expect(createOpeningLearningAttemptRepository(fixture.sql).create(fixture.scope, { sessionId: origin.sessionId,
+    clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId,
+      problemId: issued.spanExercise!.id.replace("generated-retest", "generated-validation"), version: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(createOpeningLearningAttemptRepository(fixture.sql).create(fixture.scope, { sessionId: origin.sessionId,
+    clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId, problemId: "span-reserved-fraction", version: 1 } })).rejects.toMatchObject({ code: "VALIDATION" });
   const failed = await record(f, origin.sessionId, { membership: "not_in_span" });
   expect(failed.outcome).toBe("incorrect");
   const result = await f.next.next(fixture.scope, { activityId: origin.activityId, expectedRevision: origin.revision,
@@ -140,10 +148,10 @@ it("starts an ordinary correction after a failed retest while preserving its com
   expect(prior).toMatchObject({ retest_status: "completed", task_status: "done" });
   expect((await f.lessons.get(fixture.scope, baseline.activityId))?.status).toBe("active");
 });
-it("allocates the last unseen family atomically and restores the exact issued attempt", async () => {
+it("allocates the last unseen content atomically and restores the exact issued attempt", async () => {
   const f = await seed(), a = await f.create(), b = await f.create();
-  const representatives = new Map(listSpanReservedProblems().map(problem => [problem.familyId, problem]));
-  for (const [family, problem] of representatives) if (family !== "span:rational-3d") {
+  const candidates = listSpanReservedProblems("validation");
+  for (const problem of candidates.slice(0, -1)) {
     await createOpeningLearningAttemptRepository(fixture.sql).create(fixture.scope, { sessionId: a.sessionId, clientKey: randomUUID(),
       spanExercise: { sourceId: f.sourceId, problemId: problem.id, version: Number(problem.version) } });
   }

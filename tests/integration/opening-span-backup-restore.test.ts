@@ -10,6 +10,7 @@ import { createOpeningBackupReader, createOpeningLearningAttemptRepository, crea
   executeOpeningRestoreApply, exportOpeningBackup, OPENING_RESTORE_APPLY_ORDER, publishOpeningBackupArchive,
   readLearningPreferences, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "@aistudy/database";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
 import { readOpeningBackupArchive } from "../../packages/database/src/storage/opening-backup-archive";
 import { createSpanDelayedRetestService } from "../../apps/web/src/features/opening/teaching/span/delayed-retest-service";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
@@ -56,12 +57,17 @@ async function seed() {
   const pendingInput = { sessionId: lesson.sessionId, sourceId, clientKey: randomUUID(), mode: "overview" as const };
   const pending = await createSpanReservedService(sql).issue(scope, pendingInput);
   expect(pending.spanExercise?.id).toBe("span-reserved-dependent");
+  // Display every remaining fixed item, then leave a generated question unsubmitted.
+  for (const p of listSpanReservedProblems()) if (p.id !== pending.spanExercise?.id) await attempts.create(scope,
+    { sessionId: lesson.sessionId, clientKey: randomUUID(), spanExercise: { sourceId, problemId: p.id, version: Number(p.version) } });
+  const generated = await createSpanReservedService(sql).issue(scope, { ...pendingInput, clientKey: randomUUID() });
+  expect(generated.spanExercise?.id).toContain("generated-validation-");
   const paused = await lessons.save(scope, lesson.activityId, { expectedRevision: lesson.revision, intent,
     moveId: "self-independent", status: "paused" });
   const request = { observationId: record.id, clientKey: randomUUID() };
   const scheduled = await createSpanDelayedRetestService(sql).schedule(scope, request);
   const delayed = await lessons.create(scope, { courseId, sourceIds: [sourceId], intent, clientKey: randomUUID(), retestId: scheduled.candidateId });
-  return { sourceId, key, courseId, attempt, answer, record, pendingInput, pending, paused, request, scheduled, delayed };
+  return { sourceId, key, courseId, attempt, answer, record, pendingInput, pending, generated, paused, request, scheduled, delayed };
 }
 
 /** Clear only this guarded fixture workspace, in the production restore dependency order. */
@@ -122,7 +128,7 @@ it.each(["completed", "cancelled"] as const)("restores a real archive and preven
     // Imported data keeps the answer but never grants itself server grading authority.
     expect(restoredAnswer).toEqual({ id: f.record.id, answer: f.answer, outcome: "unverified", verdict_source: "unknown", server_evaluation: null });
     const attempts = createOpeningLearningAttemptRepository(sql);
-    for (const original of [f.attempt, f.pending]) {
+    for (const original of [f.attempt, f.pending, f.generated]) {
       expect(await attempts.get(scope, original.id)).toMatchObject({ id: original.id, spanExercise: original.spanExercise,
         spanValidation: { eligible: false, firstFamilyExposure: false, reasonCode: "restored_identity_unverified" } });
       expect(await sql`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${original.itemVersionId}`).toEqual([{ evaluation_spec: null }]);
@@ -155,7 +161,9 @@ it.each(["completed", "cancelled"] as const)("restores a real archive and preven
     const nextReserved = await createSpanReservedService(sql).issue(scope, { sessionId: freshLesson.sessionId,
       sourceId: f.sourceId, clientKey: randomUUID(), mode: "overview" });
     expect(nextReserved.spanExercise?.familyId).toBeTruthy();
-    expect([f.attempt.spanExercise!.familyId, f.pending.spanExercise!.familyId]).not.toContain(nextReserved.spanExercise?.familyId);
+    expect(nextReserved.spanExercise?.id).toContain("generated-validation-");
+    expect(nextReserved.spanExercise?.id).not.toBe(f.generated.spanExercise?.id);
+    expect(nextReserved.spanValidation).toMatchObject({ eligible: false, firstFamilyExposure: false });
     const existingJobs = await sql`SELECT * FROM opening_jobs WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
     const existingOutbox = await sql`SELECT * FROM opening_outbox WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
     expect(existingJobs.some(row => row.id === f.scheduled.candidateId)).toBe(false);
