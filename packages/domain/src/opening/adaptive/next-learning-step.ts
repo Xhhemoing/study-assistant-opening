@@ -1,6 +1,30 @@
 import type { LearningDecisionCandidate } from "../learning-decision";
 import type { NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
 
+export type LegacyAdaptiveTutorInput = {
+  nodeId: string;
+  hasCheckedIndependent: boolean;
+  hasAssistance: boolean;
+  retestDue: boolean;
+};
+export type LegacyAdaptiveTutorKind = "clarify" | "guided" | "worked_example" | "independent_variant" | "delayed_retest";
+export type LegacyThinTutorInput = {
+  skillLabel: string;
+  currentPage: number | null;
+  sourceIds: string[];
+  nodeId?: string | null;
+  problemRef?: string | null;
+  sessionExposures: ReadonlyArray<"hinted" | "revealed">;
+  assistedSuccessOnCurrentItem: boolean;
+  retestDue: boolean;
+  evidenceIds?: string[];
+};
+export type LegacyThinTutorAction = {
+  kind: "clarify" | "guided" | "worked_example" | "independent_variant" | "delayed_retest";
+  skillLabel: string; currentPage: number | null; nodeId: string | null;
+  problemRef: string | null; reason: string; evidenceIds: string[];
+};
+
 export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-1";
 
 /** Capture only branches actually evaluated, in priority order; later rules did not compete. */
@@ -34,6 +58,42 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
 }
 
 /** Select the next activity from effective observation heads, newest first. */
-export function nextLearningStep(input: NextLearningStepInput): NextLearningStep {
+function legacyVariantProblemRef(problemRef: string): string {
+  const suffix = ":variant";
+  const base = problemRef.trim();
+  if (!base) return `variant${suffix}`;
+  if (base.endsWith(suffix)) return `${base}-2`;
+  return `${base}${suffix}`;
+}
+
+function legacyAdaptive(input: LegacyAdaptiveTutorInput): LegacyAdaptiveTutorKind {
+  if (!input.nodeId || !String(input.nodeId).trim()) throw new Error("nodeId is required for adaptive tutor recommendation");
+  if (input.retestDue) return "delayed_retest";
+  if (input.hasAssistance && !input.hasCheckedIndependent) return "independent_variant";
+  if (!input.hasCheckedIndependent) return "clarify";
+  return "independent_variant";
+}
+
+function legacyThin(input: LegacyThinTutorInput): LegacyThinTutorAction {
+  const skillLabel = input.skillLabel.trim();
+  if (!skillLabel) throw new Error("skillLabel is required");
+  const base = { skillLabel, currentPage: input.currentPage, nodeId: input.nodeId ?? null, evidenceIds: input.evidenceIds ?? [] };
+  const problemRef = input.problemRef ?? null;
+  if (input.retestDue) return { ...base, kind: "delayed_retest", problemRef, reason: "L02 delayed retest is due; start a new session with empty exposure." };
+  if (input.assistedSuccessOnCurrentItem && problemRef) return { ...base, kind: "independent_variant", problemRef: legacyVariantProblemRef(problemRef), reason: "Assisted success on the current item; try a new independent variant." };
+  if (input.sessionExposures.includes("revealed")) return { ...base, kind: "independent_variant", problemRef: problemRef ? legacyVariantProblemRef(problemRef) : "variant:1", reason: "Full explain already delivered; next step is a new item." };
+  if (input.sessionExposures.includes("hinted")) return { ...base, kind: "worked_example", problemRef, reason: "Hint delivered; offer a full worked example if still stuck." };
+  if (input.currentPage == null) return { ...base, kind: "clarify", problemRef, reason: "No current page selected; clarify the target material/page first." };
+  return { ...base, kind: "guided", problemRef, reason: "Material page selected; start with a next-step guided hint." };
+}
+
+export function nextLearningStep(input: NextLearningStepInput): NextLearningStep;
+export function nextLearningStep(input: { kind: "adaptive"; input: LegacyAdaptiveTutorInput }): { kind: LegacyAdaptiveTutorKind };
+export function nextLearningStep(input: { kind: "thin"; input: LegacyThinTutorInput }): LegacyThinTutorAction;
+export function nextLearningStep(input: NextLearningStepInput | { kind: "adaptive"; input: LegacyAdaptiveTutorInput } | { kind: "thin"; input: LegacyThinTutorInput }): NextLearningStep | { kind: LegacyAdaptiveTutorKind } | LegacyThinTutorAction {
+  if ("kind" in input) {
+    if (input.kind === "adaptive") return { kind: legacyAdaptive(input.input) };
+    return legacyThin(input.input);
+  }
   return captureNextLearningStep(input).decision;
 }

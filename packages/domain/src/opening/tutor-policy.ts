@@ -1,6 +1,7 @@
 import type { TutorMode } from "@aistudy/contracts";
 import { canBecomeObservedIndependent } from "@aistudy/contracts";
 import { inferLearningMessageIntent, requestsFinalAnswer } from "./composer-intent";
+import { nextLearningStep } from "./adaptive/next-learning-step";
 import {
   isAdaptiveTutorRecommendInput,
   recommendAdaptiveTutorAction,
@@ -193,66 +194,7 @@ export function recommendTutorAction(
   if (isAdaptiveTutorRecommendInput(input)) {
     return recommendAdaptiveTutorAction(input);
   }
-  const skillLabel = input.skillLabel.trim();
-  if (!skillLabel) throw new Error("skillLabel is required");
-  const base = {
-    skillLabel,
-    currentPage: input.currentPage,
-    nodeId: input.nodeId ?? null,
-    evidenceIds: input.evidenceIds ?? [],
-  };
-  const problemRef = input.problemRef ?? null;
-
-  if (input.retestDue) {
-    return {
-      ...base,
-      kind: "delayed_retest",
-      problemRef,
-      reason: "L02 delayed retest is due; start a new session with empty exposure.",
-    };
-  }
-  if (input.assistedSuccessOnCurrentItem && problemRef) {
-    return {
-      ...base,
-      kind: "independent_variant",
-      problemRef: variantProblemRef(problemRef),
-      reason:
-        "Assisted success on the current item; try a new independent variant.",
-    };
-  }
-  if (input.sessionExposures.includes("revealed")) {
-    return {
-      ...base,
-      kind: "independent_variant",
-      problemRef: problemRef ? variantProblemRef(problemRef) : "variant:1",
-      reason: "Full explain already delivered; next step is a new item.",
-    };
-  }
-  // V2-11: escalate-after-hint is a *suggestion* only. Callers must run
-  // decideIntervention / gateTutorRecommendAfterDecision before surface or auto-act;
-  // decision forbids auto `respond` from hint alone (max offer unless user_help_ask).
-  if (input.sessionExposures.includes("hinted")) {
-    return {
-      ...base,
-      kind: "worked_example",
-      problemRef,
-      reason: "Hint delivered; offer a full worked example if still stuck.",
-    };
-  }
-  if (input.currentPage == null) {
-    return {
-      ...base,
-      kind: "clarify",
-      problemRef,
-      reason: "No current page selected; clarify the target material/page first.",
-    };
-  }
-  return {
-    ...base,
-    kind: "guided",
-    problemRef,
-    reason: "Material page selected; start with a next-step guided hint.",
-  };
+  return nextLearningStep({ kind: "thin", input });
 }
 
 export function assertNoMasteryPercentage(

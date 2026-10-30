@@ -476,6 +476,8 @@ nextLearningStep（唯一决策入口；domain 无数据库或模型调用）
 - **最小变化：** 由唯一入口组合课程要求选择、现行有效证据规则及模式；R1测量结果和R3候选不自动替换生产阈值；保留老公开导出作兼容适配，不留另一套默认阶梯。探路短诊断、新学示例渐退、巩固先答后提示、保持先无帮助答题；用户可覆盖且有回执。
 - **验收：** 同一输入在 Web/Worker 得到同一动作；明确“完全不会”可以先学；独立题序列/中途受助/unknown/同题重批/改评按任务卡写明的现行规则处理，三题阈值仅作离线对照；未经校准的模型判断不变成强证据；保持与迁移分开。新阈值是策略版本，不改原始成绩。
 - **最近检查：** `packages/domain/src/opening/adaptive/next-learning-step.test.ts`、`packages/domain/src/opening/tutor-policy.test.ts`、`course-route.test.ts`；`apps/worker/src/jobs/tutor-next-action.test.ts`、`tutor-turn.test.ts`；L0 同精确候选复跑一次。
+- **本轮执行拆分（2026-10-30）：** A1先让旧thin/adaptive推荐经`nextLearningStep`唯一策略所有者，保留各历史输入的信息边界、公开API/错误文本、现有动作与回执版本，验证Web兼容包装和Worker/真实span执行链；不伪造观察来适配旧输入。A1不是四模式和强证据接线全部完成：后继继续收敛未校准AI判断到资格/摘要/快照的消费者，再接探路/新学/巩固/保持及用户覆盖回执；这四种学习阶段不等同hint/explain/listen/think_together四个聊天模式。已共用的span Web/Worker事务、授权、预算与重放不重写，Worker不是唯一执行入口；M2-B议程和M2-C前端不并入A1。 **A1实现进展：** 旧导出已改为显式兼容输入转发，原观察capture函数和next-learning-step-1版本保持；兼容/定向执行验证完成，实际双high静态审查无确定阻塞。默认集成时限的旧用例超时及定点复查分别记录，不声称默认整文件全绿；合并以精确CI为准。
+
 
 #### M2-B：退出能续上，自动操作可说明和撤销
 
