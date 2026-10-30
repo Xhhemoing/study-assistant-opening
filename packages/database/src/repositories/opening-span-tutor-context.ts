@@ -115,7 +115,7 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   // An explicit continuation answers this activity's result. A newer session
   // can inform later course planning, but cannot replace the selected origin.
   const selected = focusObservationId ? current.filter(row => row.id === focusObservationId) : current;
-  const decisionInput: NextLearningStepInput = { observations: selected, wantsFullExplanation,
+  const decisionInput: NextLearningStepInput = { observations: selected, wantsFullExplanation, phaseSource: "automatic",
     status: !selected.length ? "unobserved" : selected[0]!.verifiedCorrect === "yes" && selected[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check" };
   return { sourceRefs, decisionInput };
 }
@@ -207,6 +207,9 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         const intent = origin?.session.intent ?? position.resumeSession?.intent ?? studyIntentForMessage(null, request.question)?.intent ?? { ...DEFAULT_STUDY_SESSION_INTENT };
         const projection = await facts(tx, scope, request.courseId, sourceIds, sourceVersions, intent.explanationStyle === "full", request.originReference?.observationId);
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        projection.decisionInput.learningPhase = intent.learningPhase;
+        projection.decisionInput.phaseSource = intent.learningPhase ? "explicit" : "automatic";
+        projection.decisionInput.dueRetest = Boolean(position.dueRetestId);
         const decision = nextLearningStep(projection.decisionInput);
         const reserved = await reservedChoice(db, scope, position.resumeSession, intent, decision, position.dueRetestId);
         return { courseId: request.courseId, grantRevision: authorization.grant.revision, privacyEpoch: Number(workspace!.privacy_epoch),

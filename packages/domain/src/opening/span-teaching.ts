@@ -33,6 +33,7 @@ export function applyExplicitStudyIntent(current: StudySessionIntent, message: s
   if (/连续推进|继续往下|一直讲/.test(message)) change.continuous = true;
   if (/一步一步等我|每步等我|不要连续/.test(message)) change.continuous = false;
   if (/我(?:很累|累了)|有点累/.test(message)) change.selfReportedFatigue = "high";
+  if (/(?:完全不会|一点也不会|从零开始|先学|先从基础学)/.test(message)) change.learningPhase = "new_learning";
   const minutes = /(?:我只有|我有|时间预算(?:是|为)?|限时)\s*(\d+)\s*分钟/.exec(message);
   if (minutes && Number(minutes[1]) > 0 && Number(minutes[1]) <= 240) change.timeBudgetMinutes = Number(minutes[1]);
   const signals: StudySessionSignal[] = [];

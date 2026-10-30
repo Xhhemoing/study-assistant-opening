@@ -22,6 +22,15 @@ const input = (overrides: Partial<NextLearningStepInput> = {}): NextLearningStep
 });
 
 describe("nextLearningStep", () => {
+  it("selects four phases while keeping the legacy activity decision", () => {
+    expect(nextLearningStep(input({ phaseSource: "automatic" }))).toMatchObject({ phase: "explore", phaseSource: "automatic" });
+    expect(nextLearningStep(input({ phaseSource: "automatic", observations: [observation({ verifiedCorrect: "no" })] }))).toMatchObject({ phase: "new_learning" });
+    expect(nextLearningStep(input({ phaseSource: "automatic", observations: [observation({ assistance: "hinted" })] }))).toMatchObject({ phase: "consolidate" });
+    expect(nextLearningStep(input({ dueRetest: true }))).toMatchObject({ phase: "maintain" });
+    expect(nextLearningStep(input({ learningPhase: "new_learning", phaseSource: "explicit" }))).toMatchObject({ phase: "new_learning", phaseSource: "explicit" });
+    expect(nextLearningStep(input({ learningPhase: "maintain", phaseSource: "explicit" }))).not.toMatchObject({ phase: "maintain" });
+    expect(nextLearningStep(input({}))).not.toHaveProperty("phase");
+  });
   it("owns legacy thin and adaptive decisions without manufacturing observations", () => {
     expect(nextLearningStep({ kind: "adaptive", input: {
       nodeId: "node-1", hasCheckedIndependent: false, hasAssistance: true, retestDue: false,

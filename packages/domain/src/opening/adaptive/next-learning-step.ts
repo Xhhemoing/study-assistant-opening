@@ -1,5 +1,5 @@
 import type { LearningDecisionCandidate } from "../learning-decision";
-import type { NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
+import type { LearningPhase, NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
 
 export type LegacyAdaptiveTutorInput = {
   nodeId: string;
@@ -26,6 +26,27 @@ export type LegacyThinTutorAction = {
 };
 
 export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-1";
+
+/** Four-stage selection is metadata around the existing activity policy. */
+export function learningPhaseForInput(input: Pick<NextLearningStepInput, "observations" | "dueRetest" | "learningPhase" | "phaseSource">): { phase: LearningPhase; source: "automatic" | "explicit" } {
+  if (input.learningPhase === "maintain" && !input.dueRetest) return { phase: "explore", source: input.phaseSource ?? "explicit" };
+  if (input.learningPhase) return { phase: input.learningPhase, source: input.phaseSource ?? "explicit" };
+  if (input.dueRetest) return { phase: "maintain", source: "automatic" };
+  const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
+  if (!observations.length || observations.every(row => row.verifiedCorrect === "unknown")) return { phase: "explore", source: "automatic" };
+  if (observations.some(row => row.verifiedCorrect === "no")) return { phase: "new_learning", source: "automatic" };
+  if (observations.some(row => row.assistance === "hinted" || row.assistance === "revealed")) return { phase: "consolidate", source: "automatic" };
+  return { phase: "explore", source: "automatic" };
+}
+
+export function withLearningPhase(decision: NextLearningStep, input: NextLearningStepInput): NextLearningStep {
+  // Keep the historical shape byte-for-byte for legacy callers and receipts.
+  if (input.learningPhase === undefined && input.dueRetest === undefined && input.phaseSource === undefined) return decision;
+  const phase = learningPhaseForInput(input);
+  const activityKind = phase.source === "explicit" && phase.phase === "new_learning" ? "full_explain" as const
+    : phase.source === "explicit" && phase.phase === "consolidate" ? "reduced_help_practice" as const : decision.activityKind;
+  return { ...decision, activityKind, phase: phase.phase, phaseSource: phase.source };
+}
 
 /** Capture only branches actually evaluated, in priority order; later rules did not compete. */
 export function captureNextLearningStep(input: NextLearningStepInput): {
@@ -95,5 +116,5 @@ export function nextLearningStep(input: NextLearningStepInput | { kind: "adaptiv
     if (input.kind === "adaptive") return { kind: legacyAdaptive(input.input) };
     return legacyThin(input.input);
   }
-  return captureNextLearningStep(input).decision;
+  return withLearningPhase(captureNextLearningStep(input).decision, input);
 }

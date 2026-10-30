@@ -48,9 +48,11 @@ export type {
   SnapshotObservation,
   SnapshotSkillSummary,
   SnapshotTaskRow,
+  LearningPhase,
+  LearningPhaseSource,
 } from "./snapshot-sources";
 export { assembleLearnerSnapshot } from "./assemble-snapshot";
-export { nextLearningStep, captureNextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
+export { nextLearningStep, captureNextLearningStep, learningPhaseForInput, withLearningPhase, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 export { resolveGoalLearningContext, goalPlanningPriority, goalPlanningReason } from "./goal-policy";
 export { toSupportedKnowledgeNodes, selectPrerequisiteRepair } from "./prerequisite-repair";
 export { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";

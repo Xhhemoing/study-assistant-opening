@@ -4,6 +4,8 @@ export const studySessionIntentSchema = z.object({
   timeBudgetMinutes: z.number().int().min(1).max(240), language: z.enum(["zh", "en", "bilingual"]),
   pace: z.enum(["slow", "normal", "fast"]), continuous: z.boolean(), selfReportedFatigue: z.enum(["unknown", "low", "high"]),
   explanationStyle: z.enum(["key_steps", "full"]).optional(),
+  /** Explicit learner phase preference; absent on legacy sessions. */
+  learningPhase: z.enum(["explore", "new_learning", "consolidate", "maintain"]).optional(),
 }).strict();
 export const studyIntentChangeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("preference"), intent: studySessionIntentSchema }).strict(),

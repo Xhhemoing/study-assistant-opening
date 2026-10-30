@@ -37,3 +37,6 @@ it("lets actual typed instructions override older preferences and keeps unknown 
   expect(studyIntentForMessage(previous, "这道题写着慢一点，但我在问答案的依据")).toBe(previous);
   expect(studyIntentForMessage(null, "今天的天空很蓝")).toBeNull();
 });
+it("recognizes an explicit request to learn from zero", () => {
+  expect(studyIntentForMessage(null, "完全不会，先学")?.intent.learningPhase).toBe("new_learning");
+});
