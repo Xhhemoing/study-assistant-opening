@@ -14,7 +14,7 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
   useEffect: (effect: () => unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { deps: unknown[]; cleanup?: () => void } | undefined;
     if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.effects.push(() => { previous?.cleanup?.(); hooks.values[i] = { deps, cleanup: effect() }; }); },
 }));
-const mocks = vi.hoisted(() => ({ draft: null as PracticeDraft | null, readRecord: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), requireSaved: vi.fn(), ack: vi.fn(), haptic: vi.fn() }));
+const mocks = vi.hoisted(() => ({ draft: null as PracticeDraft | null, readRecord: vi.fn(), createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), requireSaved: vi.fn(), ack: vi.fn(), haptic: vi.fn(), initialDraft: vi.fn(), startAnother: vi.fn() }));
 const studyBinding = vi.hoisted(() => ({ set: vi.fn() }));
 const shortcuts = vi.hoisted(() => ({ set: vi.fn() }));
 vi.mock("../../design/haptics", () => ({ successfulInteractionHaptic: mocks.haptic }));
@@ -26,9 +26,9 @@ vi.mock("../../client/learning-client", () => ({ createOpeningLearningClient: ()
 vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
 vi.mock("../../learning/practice-draft", async original => ({ ...await original<typeof import("../../learning/practice-draft")>(),
   readPracticeRecord: mocks.readRecord, readPracticeDraft: () => mocks.draft, runPracticeRequest: (_key: string, work: () => Promise<unknown>) => work(),
-  usePracticeDraft: () => ({ draft: mocks.draft, ready: true, requireSaved: mocks.requireSaved,
+  usePracticeDraft: (_scope: string, initial: Partial<PracticeDraft["fields"]>) => { mocks.initialDraft(initial); return { draft: mocks.draft, ready: true, requireSaved: mocks.requireSaved, startAnother: mocks.startAnother,
     patch: (change: DraftPatch | ((draft: PracticeDraft) => DraftPatch)) => { const draft = mocks.draft!; const update = typeof change === "function" ? change(draft) : change;
-      Object.assign(draft, { ...update, fields: { ...draft.fields, ...update.fields } }); return draft; } }),
+      Object.assign(draft, { ...update, fields: { ...draft.fields, ...update.fields } }); return draft; } }; },
 }));
 import { emptyPracticeDraft, practiceScope } from "../../learning/practice-draft";
 import { getSpanProblem } from "@aistudy/domain";
@@ -66,6 +66,35 @@ beforeEach(() => {
   mocks.createSession.mockResolvedValue({ id }); mocks.createAttempt.mockResolvedValue(attempt); mocks.submitAttempt.mockResolvedValue(record);
   mocks.readRecord.mockResolvedValue({ observation: null, deliveredAssistance: "none" }); mocks.ack.mockResolvedValue(undefined);
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ activityDecision: { id, reasonCodes: [], dataAsOf: "2026-10-21T00:00:00Z" } })));
+});
+it.each(["consolidate", undefined] as const)("faded practice respects phase %s before help and records explicitly requested help", async learningPhase => {
+  const input = { ...props, problemId: "span-faded-3d", intent: { ...props.intent, learningPhase } };
+  mocks.draft = emptyPracticeDraft(practiceScope(id, "span", null), { sourceId: id, spanProblemId: input.problemId, assistance: "independent" });
+  mocks.createAttempt.mockResolvedValue({ ...attempt, spanExercise: getSpanProblem(input.problemId)! });
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json({ activityDecision: { id, reasonCodes: [], dataAsOf: attempt.startedAt } })).mockResolvedValueOnce(response(1));
+  render(input); await settle();
+  const tree = render(input);
+  expect(mocks.initialDraft).toHaveBeenLastCalledWith(expect.objectContaining({ assistance: learningPhase ? "independent" : "hinted" }));
+  const currentLadder = find(tree, node => node.type === HintLadder)!.props as ComponentProps<typeof HintLadder>;
+  expect(currentLadder.delivered).toHaveLength(learningPhase ? 0 : 1);
+  expect(fetch).toHaveBeenCalledTimes(learningPhase ? 1 : 2);
+  expect(mocks.ack).toHaveBeenCalledTimes(learningPhase ? 0 : 1);
+  expect(mocks.draft!.fields.assistance).toBe(learningPhase ? "independent" : "hinted");
+  if (learningPhase) {
+    const independent = find(tree, node => node.type === "option" && node.props.value === "independent")!;
+    expect(independent.props.disabled).toBe(false);
+    currentLadder.next!.request(); await settle();
+    expect(mocks.ack).toHaveBeenCalledOnce();
+    expect(mocks.draft!.fields).toMatchObject({ assistance: "hinted", deliveredAssistance: "hinted" });
+    expect((find(render(input), node => node.type === HintLadder)!.props as ComponentProps<typeof HintLadder>).delivered).toHaveLength(1);
+  }
+});
+it("starts a replacement consolidation draft without prefilled help", () => {
+  const input = { ...props, problemId: "span-faded-3d", intent: { ...props.intent, learningPhase: "consolidate" as const } };
+  const tree = render(input);
+  const replace = find(tree, node => node.type === "button" && node.props.children === "保留原答案，开始本步骤的新题")!;
+  (replace.props.onClick as () => void)();
+  expect(mocks.startAnother).toHaveBeenCalledWith(expect.objectContaining({ assistance: "independent" }));
 });
 it("retains the answer and current level on failed delivery, then records only the accepted hint", async () => {
   await start(); const original = mocks.draft!.fields.answer;
