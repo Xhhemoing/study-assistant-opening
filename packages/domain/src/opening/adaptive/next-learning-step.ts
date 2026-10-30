@@ -1,5 +1,5 @@
 import type { LearningDecisionCandidate } from "../learning-decision";
-import type { NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
+import type { LearningPhase, NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
 
 export type LegacyAdaptiveTutorInput = {
   nodeId: string;
@@ -25,7 +25,26 @@ export type LegacyThinTutorAction = {
   problemRef: string | null; reason: string; evidenceIds: string[];
 };
 
-export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-1";
+export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-2";
+
+/** Four-stage selection is metadata around the existing activity policy. */
+export function learningPhaseForInput(input: Pick<NextLearningStepInput, "observations" | "dueRetest" | "learningPhase" | "phaseSource">): { phase: LearningPhase; source: "automatic" | "explicit" } {
+  if (input.learningPhase === "maintain" && !input.dueRetest) return { phase: "explore", source: input.phaseSource ?? "explicit" };
+  if (input.learningPhase) return { phase: input.learningPhase, source: input.phaseSource ?? "explicit" };
+  if (input.dueRetest) return { phase: "maintain", source: "automatic" };
+  const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
+  if (!observations.length || observations.every(row => row.verifiedCorrect === "unknown")) return { phase: "explore", source: "automatic" };
+  if (observations[0]?.verifiedCorrect === "no") return { phase: "new_learning", source: "automatic" };
+  if (observations[0]?.assistance === "hinted" || observations[0]?.assistance === "revealed") return { phase: "consolidate", source: "automatic" };
+  return { phase: "explore", source: "automatic" };
+}
+
+export function withLearningPhase(decision: NextLearningStep, input: NextLearningStepInput): NextLearningStep {
+  // Keep the historical shape byte-for-byte for legacy callers and receipts.
+  if (input.learningPhase === undefined && input.dueRetest === undefined && input.phaseSource === undefined) return decision;
+  const phase = learningPhaseForInput(input);
+  return { ...decision, phase: phase.phase, phaseSource: phase.source };
+}
 
 /** Capture only branches actually evaluated, in priority order; later rules did not compete. */
 export function captureNextLearningStep(input: NextLearningStepInput): {
@@ -37,7 +56,20 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
     return eligible;
   };
   const result = (activityKind: NextLearningStep["activityKind"], reasonCode: NextLearningStep["reasonCode"], focusObservationId: string | null = null) =>
-    ({ decision: { activityKind, focusObservationId, reasonCode }, candidates });
+    ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode }, input), candidates });
+  const phase = learningPhaseForInput(input);
+  if (input.learningPhase === "new_learning") {
+    check("full_explain", true, "explicit_new_learning", "explicit_new_learning");
+    return result("full_explain", "requested_full");
+  }
+  if (input.dueRetest && phase.phase === "maintain") {
+    check("transfer_check", true, "due_retest", "due_retest");
+    return result("transfer_check", "due_retest");
+  }
+  if (input.learningPhase === "consolidate") {
+    check("reduced_help_practice", true, "explicit_consolidate", "explicit_consolidate");
+    return result("reduced_help_practice", "requested_consolidate");
+  }
   if (check("full_explain", !!input.wantsFullExplanation, "requested_full", "not_requested_full")) return result("full_explain", "requested_full");
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);

@@ -22,6 +22,24 @@ const input = (overrides: Partial<NextLearningStepInput> = {}): NextLearningStep
 });
 
 describe("nextLearningStep", () => {
+  it("captures phase policy once and prioritizes the latest effective head", () => {
+    for (const request of [input({ learningPhase: "new_learning", dueRetest: true }), input({ learningPhase: "consolidate" }), input({ dueRetest: true, wantsFullExplanation: true })]) {
+      expect(captureNextLearningStep(request).decision).toEqual(nextLearningStep(request));
+    }
+    expect(nextLearningStep(input({ learningPhase: "new_learning", dueRetest: true }))).toMatchObject({ activityKind: "full_explain", phase: "new_learning" });
+    expect(nextLearningStep(input({ dueRetest: true, wantsFullExplanation: true }))).toMatchObject({ activityKind: "transfer_check", phase: "maintain" });
+    expect(nextLearningStep(input({ status: "observed_independent", phaseSource: "automatic", observations: [observation(), observation({ verifiedCorrect: "no" })] })))
+      .toMatchObject({ phase: "explore", activityKind: "transfer_check" });
+  });
+  it("selects four phases while keeping the legacy activity decision", () => {
+    expect(nextLearningStep(input({ phaseSource: "automatic" }))).toMatchObject({ phase: "explore", phaseSource: "automatic" });
+    expect(nextLearningStep(input({ phaseSource: "automatic", observations: [observation({ verifiedCorrect: "no" })] }))).toMatchObject({ phase: "new_learning" });
+    expect(nextLearningStep(input({ phaseSource: "automatic", observations: [observation({ assistance: "hinted" })] }))).toMatchObject({ phase: "consolidate" });
+    expect(nextLearningStep(input({ dueRetest: true }))).toMatchObject({ phase: "maintain" });
+    expect(nextLearningStep(input({ learningPhase: "new_learning", phaseSource: "explicit" }))).toMatchObject({ phase: "new_learning", phaseSource: "explicit" });
+    expect(nextLearningStep(input({ learningPhase: "maintain", phaseSource: "explicit" }))).not.toMatchObject({ phase: "maintain" });
+    expect(nextLearningStep(input({}))).not.toHaveProperty("phase");
+  });
   it("owns legacy thin and adaptive decisions without manufacturing observations", () => {
     expect(nextLearningStep({ kind: "adaptive", input: {
       nodeId: "node-1", hasCheckedIndependent: false, hasAssistance: true, retestDue: false,
