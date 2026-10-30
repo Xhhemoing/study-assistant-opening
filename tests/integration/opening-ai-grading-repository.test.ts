@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import type { AiGradingInput, AiGradingProposal, LearningObservation } from "@aistudy/contracts";
-import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, readOpeningBackupRecords, readOpeningCourseEvidence } from "@aistudy/database";
+import { systemQueryRequestSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation } from "@aistudy/contracts";
+import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, createScopedOpeningSystemQueryReader, readOpeningBackupRecords, readOpeningCourseEvidence, readOpeningCourseLearningSummary } from "@aistudy/database";
 import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/repositories/opening-backup-evaluation";
 import { nextLearningStep } from "@aistudy/domain";
 import { reviseOpeningLearningObservation, readOpeningObservationHistory } from "../../packages/database/src/repositories/opening-observation-revisions";
@@ -33,7 +33,7 @@ it("appends an AI assessment for a free answer without changing the original, in
   const graded = await grade(original);
   expect(graded).toMatchObject({ rootObservationId: original.id, revisesObservationId: original.id, answer: "1", verdictSource: "ai_graded",
     outcome: "correct", referenceSourceId: f.sourceId, aiEvaluation: { observationId: graded.id, attemptId: original.attemptId, requirementKey: null, modelLabel: "test-grader" },
-    eligibility: { verifiedCorrect: "yes", independentAttempt: "yes", usableForCurrentVersion: "yes" } });
+    eligibility: { verifiedCorrect: "unknown", independentAttempt: "yes", usableForCurrentVersion: "yes" } });
   const [after] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${original.id}`;
   expect({ ...after, effective_head_id: before!.effective_head_id }).toEqual(before);
   expect((await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId)).observations.map(row => row.id)).toEqual([graded.id]);
@@ -41,19 +41,40 @@ it("appends an AI assessment for a free answer without changing the original, in
   expect(scan).toBeDefined();
 });
 
-it("ten own-material answers become effective results and errors select targeted explanation", async () => {
+it("repairs an old v3 binary projection after real AI grading without rewriting the observation", async () => {
+  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start()), graded = await grade(original);
+  const history = () => fixture.sql`SELECT * FROM opening_learning_observations
+    WHERE workspace_id=${fixture.scope.workspaceId} AND COALESCE(root_observation_id,id)=${original.id} ORDER BY id`;
+  const before = await history();
+  await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='opening-evidence-v3', verified_correct='yes', usable_for_delayed_check='yes' WHERE root_observation_id=${original.id}`;
+  const projection = () => fixture.sql`SELECT * FROM opening_learning_eligibility WHERE root_observation_id=${original.id}`;
+  const stale = await projection();
+  expect(stale[0]).toMatchObject({ policy_version: "opening-evidence-v3", verified_correct: "yes" });
+  const reader = createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope);
+  expect(await reader(systemQueryRequestSchema.parse({ name: "learning", arguments: { courseId: f.courseId } }), new AbortController().signal))
+    .toMatchObject({ status: "unknown", reason: "stale", data: [] });
+  expect(await projection()).toEqual(stale); // Read-only query cannot silently repair old qualification.
+  const summary = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
+  expect(summary.groups[0]).toMatchObject({ independentVerifiedCurrentCount: 0, unverifiedCount: 1 });
+  expect(summary.groups[0]?.representatives[0]?.eligibility).toMatchObject({ policyVersion: "opening-evidence-v4", verifiedCorrect: "unknown" });
+  expect((await projection())[0]).toMatchObject({ policy_version: "opening-evidence-v4", verified_correct: "unknown" });
+  expect(await reader(systemQueryRequestSchema.parse({ name: "learning", arguments: { courseId: f.courseId } }), new AbortController().signal))
+    .toMatchObject({ status: "ok", data: [{ id: graded.id, eligibility: { verifiedCorrect: "unknown", policyVersion: "opening-evidence-v4" } }] });
+  expect(await history()).toEqual(before); // Both original answer and appended AI assessment remain byte-for-byte facts.
+});
+it("ten own-material answers retain AI feedback while uncalibrated results remain diagnostic", async () => {
   const f = await learningAttemptFixture(fixture);
   for (let i = 0; i < 10; i++) {
     const incorrect = i % 2 === 1;
     const original = await f.submit(await f.start(), { outcome: "unverified", answer: incorrect ? "2" : "1" });
     const graded = await grade(original, proposal(incorrect ? "incorrect" : "correct"));
-    expect(graded.eligibility?.verifiedCorrect).toBe(incorrect ? "no" : "yes");
+    expect(graded.eligibility?.verifiedCorrect).toBe("unknown");
     if (incorrect) expect(nextLearningStep({ wantsFullExplanation: false, status: "needs_check", observations: [{
       id: graded.id, skillLabel: graded.skillLabel, attemptedAt: graded.submittedAt ?? graded.occurredAt,
       problemId: graded.problemId ?? null, independentAttempt: graded.eligibility!.independentAttempt,
       assistance: graded.assistance, verifiedCorrect: graded.eligibility!.verifiedCorrect,
       usableForCurrentVersion: graded.eligibility!.usableForCurrentVersion,
-    }] }).activityKind).toBe("targeted_explain");
+    }] }).activityKind).toBe("diagnose");
   }
   expect((await readOpeningCourseEvidence(fixture.sql, fixture.scope, f.courseId)).observations).toHaveLength(10);
 });
@@ -71,7 +92,7 @@ it("keeps hinted work assisted, and earlier AI feedback stays exposure after a u
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   await f.help(attempt);
   const original = await f.submit(attempt), graded = await grade(original);
-  expect(graded.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no" });
+  expect(graded.eligibility).toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "no" });
   const corrected = await correct(original, graded);
   expect(corrected.observation).toMatchObject({ verdictSource: "self_report", eligibility: { verifiedCorrect: "unknown" } });
   expect(corrected.observation?.aiEvaluation).toBeUndefined();
@@ -132,7 +153,7 @@ it("binds an owned photo to the evaluation, keeps its transcription separate and
   const input = { workSourceId: photoId, workSourceVersion: 1, physicalPage: 1 };
   const graded = await grade(original, { ...proposal(), transcription: "1/2 + 1/2 = 1" }, input);
   expect(graded).toMatchObject({ answer: "", assistance: "unknown", aiEvaluation: { transcription: "1/2 + 1/2 = 1", workSource: { id: photoId, version: 1, physicalPage: 1 } },
-    eligibility: { verifiedCorrect: "yes", independentAttempt: "unknown" } });
+    eligibility: { verifiedCorrect: "unknown", independentAttempt: "unknown" } });
   expect(graded.sourceIds).toContain(photoId);
   expect(graded.sourceVersions?.[photoId]).toBe(1);
   const identity = { id: photoId, version: 1, physicalPage: 1 };
@@ -189,7 +210,7 @@ it("does not count an answer edited after AI feedback as an independent first at
   const first = await grade(original, proposal("incorrect"));
   const revision = await correct(original, first, "1");
   const second = await grade(revision.observation!);
-  expect(second).toMatchObject({ outcome: "correct", eligibility: { verifiedCorrect: "yes", independentAttempt: "no" } });
+  expect(second).toMatchObject({ outcome: "correct", eligibility: { verifiedCorrect: "unknown", independentAttempt: "no" } });
   expect(second.eligibility?.reasonCodes).toContain("prior_evaluation_feedback");
 });
 

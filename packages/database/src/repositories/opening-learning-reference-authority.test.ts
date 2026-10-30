@@ -45,7 +45,7 @@ describe("manual reference provenance and exposure", () => {
     const facts = await readOpeningLearningEvidenceContext(database(), scope, forged);
     expect(facts.context.referenceCheckAuthority).toBe("learner");
     expect(evaluateEvidenceEligibility(facts.observation, facts.context)).toMatchObject({
-      independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3",
+      independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v4",
     });
   });
 

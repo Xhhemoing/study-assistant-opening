@@ -45,7 +45,7 @@ it("repairs exact source and policy dependencies without advancing the semantic 
   await fixture.sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${observation.id}`;
   const rebuilt = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
   expect(rebuilt.status).toBe("ready");
-  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v3");
+  expect(rebuilt.groups[0]?.representatives[0]?.eligibility.policyVersion).toBe("opening-evidence-v4");
   expect(rebuilt.groups[0]?.representatives[0]?.eligibility.usableForDelayedCheck).toBe("unknown");
 });
 it("automatically repairs bounded batches before exposing complete group statistics", async () => {
@@ -82,7 +82,7 @@ it.each(["opening-evidence-v1", "opening-evidence-v2"])("invalidates %s manual-c
   expect(before[0]?.fresh).toBe(false);
   const page = await readOpeningCourseLearningSummary(fixture.sql, fixture.scope, { courseId: f.courseId, limit: 10 });
   expect(page.groups[0]).toMatchObject({ independentVerifiedCurrentCount: 0, unverifiedCount: 1 });
-  expect(page.groups[0]?.representatives[0]?.eligibility).toMatchObject({ verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3" });
+  expect(page.groups[0]?.representatives[0]?.eligibility).toMatchObject({ verifiedCorrect: "unknown", policyVersion: "opening-evidence-v4" });
   const [historical] = await fixture.sql`SELECT verdict_source,answer,reference_check FROM opening_learning_observations WHERE id=${observation.id}`;
   expect(historical).toMatchObject({ verdict_source: "reference_checked", answer: observation.answer, reference_check: observation.referenceCheck });
 });

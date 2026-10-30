@@ -4,11 +4,11 @@
 
 | 项目 | 当前状态 |
 | --- | --- |
-| 开发主干 | `feat/opening-release` @ `eca46bf8`；PR159已合并，精确PR CI40998338859和合并后主干CI41001453250均两项成功。PR158的NUL保存修复已包含，原主干CI40995950128也已成功；未部署 |
+| 开发主干 | `feat/opening-release` @ `57a990e9`；M2-A1 PR160已合并，精确PR CI41019060643和合并后主干CI41022203476均两项成功；M1及阶段确认文档已包含。未部署 |
 | 线上版本 | 本轮未部署；此前版本仍为 `4bd1e8b7`。版本字段为空问题尚待使用当前发布 runner 验收，不把代码合并记为线上修复 |
 | 当前候选 | M1工程测量底座及同身份事实链已合并。D2真实18次文本请求、8个程序金标和10个pending文本的历史报告仍绑定原源码；2个照片占位未发，calibrated=false。旧离线accepted不等于NUL修复后的service/实际仓储成绩，不外推通用质量 |
 | 候选检查 | `eca46bf8`同一干净候选已获实际Claude Opus5.5 high与GPT-6.1-sol high同时独立阶段意见，均未发现新的确定产品阻塞；不是全源码重审或人工金标。当前合并候选L0实跑48/48、learningEffect=unknown。Claude将离线gptStudent=false外推为未实现真实模拟学生的误判，已依据collector和原请求记录由原模型定点撤回，不追加采集 |
-| 当前工作 | 用户确认真人审计通过后，M2-A1兼容接线已实现验证：旧thin/adaptive导出转发nextLearningStep，观察策略/版本/旧回执不变；33项领域与119项Web/Worker单元、Domain类型/严格leaf/lint、408组旧Git行为对照与L0 48例通过。两span集成默认时限22通过/4个旧用例超时，后者CLI15秒定点4通过，保留原失败、不改测试/CI。实际Claude/GPT high同候选并行静态审查无确定阻塞；待精确PR/主干CI。四阶段模式、强证据消费者和完整M2-A未完成，不部署 |
+| 当前工作 | M2-A2已实现并完成定向验证、GPT修点审查：AI反馈/成绩照常保存，未校准对/错不授予强证据；旧v3派生资格查询先stale，摘要修复为v4 unknown，原答与修订保留。课程受控资格测试和真实AI-only反例通过，最后两条本机超时已定点复查通过；包类型/lint/L0通过。提交PR后沿原CI合并；四阶段模式和完整M2仍未完成，未部署 |
 | M1-A2 候选 | 普通教学真实提示回执记录阶梯与发起者；保留新旧 release_intent 兼容，仅实际 release 算交付，旧事实不回填。本片 21 项单元、10 项隔离集成及 Contracts/Database/Domain 类型既有证据复用；备份测试以 satisfies 保留行类型后，4 文件测试 leaf 类型与全部 11 个改动 TS 的定向 ESLint 通过。Claude Opus 5.5 high 与 GPT-6.1-sol high 已同时独立只读审查，无确定阻塞；提交后沿精确 CI 收口，未部署。span/Worker 接线、帮助模式/用户覆盖引用和入口决策追踪仍待完成，不宣称整个 M1-A 通过。迁移 0105 回退应保留已记录帮助事实及新增可空列，不直接删列 |
 | M1-A6 Worker/span 决策 | 新学习动作在原事务保存标准 session→activity 决策，保留选择前状态、真实规则分支、入口与执行映射版本；原 operation 重放优先读原回执，纯 resume 和旧无记录不补历史，兼容 tutorNextAction 保留。领域/Worker 两文件29项单元、两完整隔离集成文件24项、Domain/Database/Worker 类型、四测试 leaf 类型及十个改动 TS lint 通过；初次共享测试库被另一候选0106迁移阻断，改用既有 scratch 机制验证，不修改共享库。同一冻结候选经 Claude Opus5.5 high 与 GPT-6.1-sol high 并行独立审查，均无确定阻塞；未部署，精确CI作为合并门禁 |
 | M1-A4 课程回执 | 课程 start/next 新活动在原事务保存标准 activity 决策回执：最终实际动作、实际要求候选与排除依据、入口/course-route-1 规则及当时目标/要求/来源/学习状态输入；无 session 不伪造父决策。原请求与活动复用不重写，历史不回填；教学摘要和选择算法保留。集中修复共享决策校验误拒绝合法 sourceVersion=0，来源、chunk 与要求引用保持版本一致，不过滤 0；先红后绿，领域整文件 7 项、完整课程隔离集成 23 项（含 0 版本 start/next 回执保存读回）、Domain 类型、改动测试 leaf 类型及本次 3 个 TS 定向 lint 通过，Database 产品未变复用既有类型证据。回执写入失败回滚活动、compile、预算和原活动完成。同一候选经 Claude Opus5.5 high 与 GPT-6.1-sol high 并行独立初审，唯一0版本阻塞修复后双方并行定点复核通过；未部署，精确 CI 作为合并门禁 |
