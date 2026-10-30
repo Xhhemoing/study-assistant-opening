@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createOpeningPrivacyRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
+import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
+import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
+import { getTutorService } from "../../apps/web/src/features/opening/runtime";
+import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository, createOpeningPlansRepository, createOpeningLearningAttemptRepository } from "@aistudy/database";
-import { DEFAULT_STUDY_SESSION_INTENT, SPAN_SKILL_LABEL, nextLearningStep } from "@aistudy/domain";
+import { DEFAULT_STUDY_SESSION_INTENT, SPAN_SKILL_LABEL, nextLearningStep, solveSpanProblem } from "@aistudy/domain";
 import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
 import { createOpeningSpanTutorNextRepository } from "../../packages/database/src/repositories/opening-span-tutor-next";
 import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
@@ -214,6 +220,155 @@ it("detects a consumed source version change and leaves metadata-free manual les
     spanExercise: { sourceId: f.sourceId, problemId: "span-example-2d", version: 1 } });
   expect(attempt.sourceVersions[f.sourceId]).toBe(2);
 });
+it("keeps one learner's real help, evaluation, retest, saved query and cancellation replay on the same facts", async () => {
+  // Synthetic learner + exact solver; real services/transactions, no model, queue or retention claim.
+  const f = await seed(), origin = await f.create(), { sql, scope } = fixture;
+  const forbidden = vi.fn(async (): Promise<never> => { throw new Error("unexpected model/RAG/budget call"); });
+  vi.stubEnv("OPENING_SYSTEM_QUERY", "1");
+  vi.stubEnv("OPENING_MODEL_API_KEY", "");
+  vi.stubEnv("OPENING_MODEL_CATALOG", "invalid model catalog");
+  vi.stubGlobal("fetch", forbidden);
+  try {
+    const issuer = createSpanReservedService(sql), learning = createOpeningLearningRepository(sql);
+    const issueInput = { sessionId: origin.sessionId, sourceId: f.sourceId, clientKey: "chain-first-issue", mode: "self_study" };
+    const attempt = await issuer.issue(scope, issueInput), problem = attempt.spanExercise!;
+    const help = await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 });
+    expect(help.text).toContain("αv+βw=u"); expect(help.exposureReceipt).toBeTruthy();
+    const solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("first canonical validation must have a unique solution");
+    const submitInput = { sessionId: origin.sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL,
+      sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId, clientKey: "chain-first-submit",
+      answer: JSON.stringify({ membership: "in_span", coefficients: solution.coefficients,
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }),
+      outcome: "unverified" as const, assistance: "independent" as const, verdictSource: "self_report" as const };
+    const observed = await learning.insertObservation(scope, submitInput);
+    expect(observed).toMatchObject({ outcome: "correct", assistance: "independent", serverEvaluation: { evaluatorVersion: "span-exact-v1" } });
+    // The original self-report stays immutable; delivered help owns effective eligibility.
+    const restored = await createSpanLessonSessionService(sql).read(scope, f.courseId, origin.activityId);
+    expect(restored.assistance[attempt.id]).toBe("hinted");
+    expect(restored.observations.map(row => row.id)).toContain(observed.id);
+    const nextInput = { activityId: origin.activityId, expectedRevision: origin.revision, observationId: observed.id, clientKey: "chain-next" };
+    const next = await f.next.next(scope, nextInput);
+    expect(next).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent" } });
+    if (next.kind !== "ready") throw new Error("expected a real reduced-help successor");
+
+    const oldHelp = await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
+    const oldObservation = await sql`SELECT * FROM opening_learning_observations WHERE id=${observed.id}`;
+    expect(oldHelp).toHaveLength(1); expect(oldObservation).toHaveLength(1);
+    const scheduler = createSpanDelayedRetestService(sql);
+    const due = await scheduler.schedule(scope, { observationId: observed.id, clientKey: "chain-completed-retest-schedule" });
+    expect(due).toMatchObject({ courseId: f.courseId, taskStatus: "pending", activityStatus: "accepted" });
+    expect(Date.parse(due.notBeforeAt)).toBeGreaterThanOrEqual(Date.parse(observed.submittedAt!) + 72 * 60 * 60 * 1000);
+    const dueLesson = await f.lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+      intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: "chain-due-retest-lesson", retestId: due.activityId });
+    const dueIssueInput = { sessionId: dueLesson.sessionId, sourceId: f.sourceId, mode: "challenge", clientKey: "chain-due-retest-issue" };
+    await expect(issuer.issue(scope, dueIssueInput)).rejects.toMatchObject({ businessCode: "RETEST_SUBMIT_TOO_EARLY" });
+    // Only this synthetic retest's time fields advance; no claim of real 72h retention or mastery.
+    await sql`UPDATE opening_retest_activities SET recommended_at=now()-interval '1 minute',
+      not_before_at=now()-interval '1 minute',scheduled_start_at=now()-interval '1 minute' WHERE id=${due.activityId}`;
+    const retestAttempt = await issuer.issue(scope, dueIssueInput), retestProblem = retestAttempt.spanExercise!;
+    expect(retestProblem.id).toContain("generated-retest-");
+    expect(retestAttempt).toMatchObject({ courseId: f.courseId, sourceIds: [f.sourceId], sessionId: dueLesson.sessionId });
+    const retestSolution = solveSpanProblem(retestProblem);
+    if (retestSolution.kind !== "unique") throw new Error("issued retest must have a unique exact solution");
+    const retestSubmitInput = { ...submitInput, sessionId: dueLesson.sessionId, attemptId: retestAttempt.id,
+      problemId: retestAttempt.problemId, retestId: due.activityId, clientKey: "chain-due-retest-submit",
+      answer: JSON.stringify({ membership: "in_span", coefficients: retestSolution.coefficients,
+        equation: { vectors: retestProblem.vectors, target: retestProblem.target }, coordinateChecks: retestProblem.target }) };
+    const retestObserved = await learning.insertObservation(scope, retestSubmitInput);
+    expect(retestObserved).toMatchObject({ outcome: "correct", assistance: "independent", retestId: due.activityId,
+      serverEvaluation: { evaluatorVersion: "span-exact-v1" } });
+    const dueNextInput = { activityId: dueLesson.activityId, expectedRevision: dueLesson.revision,
+      observationId: retestObserved.id, clientKey: "chain-due-retest-next" };
+    const dueNext = await f.next.next(scope, dueNextInput);
+    expect(dueNext).toMatchObject({ kind: "ready", replayed: false, session: { retestId: null, courseId: f.courseId } });
+    if (dueNext.kind !== "ready") throw new Error("expected a real successor after successful retest");
+    const completedRetest = await sql`SELECT * FROM opening_retest_activities WHERE id=${due.activityId}`;
+    const doneTask = await sql`SELECT * FROM opening_tasks WHERE id=${due.taskId}`;
+    expect(completedRetest).toMatchObject([{ status: "completed" }]);
+    expect(doneTask).toMatchObject([{ status: "done" }]);
+    // A second, still-future acceptance uses the real new answer, never cancels the completed cycle.
+    const scheduleInput = { observationId: retestObserved.id, clientKey: "chain-retest-schedule" };
+    const scheduled = await scheduler.schedule(scope, scheduleInput);
+    expect(scheduled).toMatchObject({ courseId: f.courseId, taskStatus: "pending", activityStatus: "accepted" });
+    const retestLesson = await f.lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+      intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: "chain-retest-lesson", retestId: scheduled.activityId });
+    const retestNext = { activityId: retestLesson.activityId, expectedRevision: retestLesson.revision,
+      observationId: null, clientKey: "chain-retest-next" };
+    expect(Date.parse(scheduled.notBeforeAt)).toBeGreaterThanOrEqual(Date.parse(retestObserved.submittedAt!) + 72 * 60 * 60 * 1000);
+    expect(scheduled.activityId).not.toBe(due.activityId);
+    expect(scheduled.taskId).not.toBe(due.taskId);
+    const snapshot = async () => ({
+      observations: await sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      help: await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      attempts: await sql`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      tasks: await sql`SELECT * FROM opening_tasks WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      activities: await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      retests: await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      money: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+      todayMinutes: (await readOpeningLearningCapacity(sql, scope)).usedMinutes,
+      retestDayMinutes: (await readOpeningLearningCapacity(sql, scope, new Date(scheduled.notBeforeAt))).usedMinutes,
+    });
+    const tutor = getTutorService(sql), conversation = await tutor.createConversation(scope, { title: "Synthetic M1 chain", courseId: f.courseId });
+    const process = createTutorTurnHandler({ systemQuery: createDbSystemQueryService(sql, "worker"),
+      tutorJobs: createOpeningTutorJobsRepository(sql), privacy: createOpeningPrivacyRepository(sql),
+      chunks: { listForSources: forbidden, listChunksAtVersion: forbidden }, provider: { complete: forbidden }, resolveModel: forbidden,
+      budget: { reserve: forbidden, release: forbidden, claimExecution: forbidden, settle: forbidden, markUnknown: forbidden },
+      config: { maxContextCharacters: 12000, reservedCents: 1, maxOutputTokens: 100, inputCentsPerMillion: 1, outputCentsPerMillion: 1 } });
+    const queryInput = { conversationId: conversation.id, querySystem: true, text: "我的作答核验了吗", sourceIds: [], mode: "explain", privacy: "saved", clientKey: "chain-query-before" };
+    const beforeQuery = await snapshot();
+    const queued = await tutor.submitTurn(scope, queryInput);
+    expect(await process(queued.jobId)).toEqual({ skipped: false });
+    const turns = await tutor.listTurns(scope, conversation.id), saved = turns.find(turn => turn.role === "assistant")!;
+    expect(saved.status).toBe("complete");
+    expect(saved.systemQuery?.results.find(row => row.name === "learning")?.data).toContainEqual(expect.objectContaining({
+      id: observed.id, attemptId: attempt.id, effectiveAssistance: "hinted", outcome: "correct",
+      eligibility: expect.objectContaining({ independentAttempt: "no" }) }));
+    expect(await snapshot()).toEqual(beforeQuery);
+    expect(beforeQuery.todayMinutes).toBeGreaterThan(0); expect(beforeQuery.retestDayMinutes).toBe(20);
+    expect(beforeQuery.money).toEqual([]);
+
+    const [task] = await sql`SELECT version FROM opening_tasks WHERE id=${scheduled.taskId}`;
+    await createOpeningPlansRepository(sql).updateTaskStatus(scope, scheduled.taskId,
+      { expectedVersion: Number(task!.version), status: "skipped", at: new Date().toISOString() });
+    const cancelled = await snapshot();
+    expect(cancelled.tasks).toContainEqual(expect.objectContaining({ id: scheduled.taskId, status: "skipped" }));
+    expect(cancelled.retests).toContainEqual(expect.objectContaining({ id: scheduled.activityId, status: "cancelled" }));
+    expect(cancelled.retestDayMinutes).toBe(0);
+    expect(cancelled.todayMinutes).toBe(beforeQuery.todayMinutes);
+    expect(cancelled.attempts.filter(row => row.session_id === retestLesson.sessionId)).toEqual([]);
+    expect(await sql`SELECT * FROM opening_retest_activities WHERE id=${due.activityId}`).toEqual(completedRetest);
+    expect(await sql`SELECT * FROM opening_tasks WHERE id=${due.taskId}`).toEqual(doneTask);
+    expect(await issuer.issue(scope, dueIssueInput)).toMatchObject({ id: retestAttempt.id, observationId: retestObserved.id });
+    expect((await learning.insertObservation(scope, retestSubmitInput)).id).toBe(retestObserved.id);
+    expect(await f.next.next(scope, dueNextInput)).toMatchObject({ kind: "ready", replayed: true,
+      session: { activityId: dueNext.session.activityId } });
+    expect(await f.next.next(scope, retestNext)).toMatchObject({ kind: "choice", reason: "cancelled" });
+    await expect(issuer.issue(scope, { sessionId: retestLesson.sessionId, sourceId: f.sourceId,
+      mode: "challenge", clientKey: "chain-cancelled-new-issue" })).rejects.toMatchObject({ code: "VALIDATION", message: "延迟复测不属于本课程、尚未接受或已结束。" });
+    expect(await scheduler.schedule(scope, scheduleInput)).toMatchObject({ activityId: scheduled.activityId,
+      taskId: scheduled.taskId, activityStatus: "cancelled", taskStatus: "skipped" });
+    expect(await issuer.issue(scope, issueInput)).toMatchObject({ id: attempt.id, observationId: observed.id });
+    expect((await learning.insertObservation(scope, submitInput)).id).toBe(observed.id);
+    expect(await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 })).toEqual(help);
+    expect(await f.next.next(scope, nextInput)).toMatchObject({ kind: "ready", replayed: true, session: { activityId: next.session.activityId } });
+    expect(await tutor.submitTurn(scope, queryInput)).toEqual({ ...queued, replayed: true });
+    expect(await process(queued.jobId)).toEqual({ skipped: true });
+    expect((await tutor.listTurns(scope, conversation.id)).find(turn => turn.id === saved.id)).toEqual(saved);
+    const fresh = await tutor.submitTurn(scope, { ...queryInput, clientKey: "chain-query-after" });
+    expect(await process(fresh.jobId)).toEqual({ skipped: false });
+    const afterTurns = await tutor.listTurns(scope, conversation.id);
+    expect(afterTurns).toHaveLength(4);
+    expect(afterTurns.filter(turn => turn.role === "assistant").every(turn => turn.systemQuery?.results.some(result =>
+      result.name === "learning" && result.data.some(row => row.id === observed.id && row.effectiveAssistance === "hinted")))).toBe(true);
+    expect(await snapshot()).toEqual(cancelled);
+    expect(await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`).toEqual(oldHelp);
+    expect(await sql`SELECT * FROM opening_learning_observations WHERE id=${observed.id}`).toEqual(oldObservation);
+    expect(forbidden).not.toHaveBeenCalled();
+  } finally { vi.unstubAllEnvs(); vi.unstubAllGlobals(); }
+// The full persistent lifecycle spans several real transactions; keep its timeout local to this new case.
+}, 45_000);
+
 it("invalidates a stored no-evidence origin only when A itself gains a head", async () => {
   const f = await seed(), a = await f.create(), b = await f.create();
   const reference = { activityId: a.activityId, expectedRevision: a.revision, observationId: null };
