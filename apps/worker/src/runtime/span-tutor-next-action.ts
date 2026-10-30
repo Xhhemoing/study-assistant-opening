@@ -28,7 +28,11 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
       return context ? { courseId: context.courseId, privacyEpoch: context.privacyEpoch, sourceRefs: context.sourceRefs,
         decisionInput: context.decisionInput, spanContext: context, historicalDecision: context.historicalDecision,
         ...(changeAction ? { unavailableAction: changeAction } : {}),
-        ...(context.needsReservedIssue ? { resumeRequiresExecution: true } : {}),
+        ...(context.needsReservedIssue || context.needsIntentUpdate ? { resumeRequiresExecution: true } : {}),
+        ...(context.intentChangeRequiresChoice ? { unavailableAction: {
+          message: "当前题已发放或正在复测；请在原学习进度中明确选择暂停或调整，未覆盖当前题或提供答案。",
+          label: "打开原学习进度调整", href: action(context.resumeSession!).href,
+        } } : {}),
         ...(context.unseenUnavailableReason ? { unavailableAction: {
           message: context.unseenUnavailableReason === "unknown_history" ? "原题曝光记录暂不可核实；先保留当前进度，可核对记录或选择普通练习。" : "本组未见题族已用完；可以继续普通练习，重复练习不会标作未见检查。",
           label: "继续普通练习（不作为未见题验证）", href: `/opening/courses/${context.courseId}/study?${new URLSearchParams({ mode: "practice", skillLabel: SPAN_SKILL_LABEL, requirementKey: SPAN_REQUIREMENT_KEY })}`,

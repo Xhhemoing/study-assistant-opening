@@ -85,6 +85,8 @@ export type LearnerSnapshotSources = {
 };
 
 export type NextStepReasonCode =
+  | "due_retest"
+  | "requested_consolidate"
   | "requested_full"
   | "no_evidence"
   | "unverified_only"

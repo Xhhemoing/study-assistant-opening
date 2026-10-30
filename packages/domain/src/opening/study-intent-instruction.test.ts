@@ -40,3 +40,12 @@ it("lets actual typed instructions override older preferences and keeps unknown 
 it("recognizes an explicit request to learn from zero", () => {
   expect(studyIntentForMessage(null, "完全不会，先学")?.intent.learningPhase).toBe("new_learning");
 });
+it.each(["不要先学", "不想先学", "别先学", "“先学”是什么意思", "为什么先学"])("does not authorize learning or full answers from %s", message => {
+  expect(applyExplicitStudyIntent(DEFAULT_STUDY_SESSION_INTENT, message).intent).toEqual(DEFAULT_STUDY_SESSION_INTENT);
+  expect(studyIntentForMessage(null, message)?.intent.learningPhase).toBeUndefined();
+});
+it("accepts only complete scoped commands", () => {
+  expect(studyIntentForMessage(null, "span，完全不会，先学")?.intent.learningPhase).toBe("new_learning");
+  expect(studyIntentForMessage(null, "先巩固")?.intent.learningPhase).toBe("consolidate");
+  expect(studyIntentForMessage(null, "先学特征值")).toBeNull();
+});

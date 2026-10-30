@@ -12,9 +12,10 @@ export function spanModeForIntent(intent: StudySessionIntent): SpanTeachingMode 
 }
 /** Small, explainable rules for explicit instructions; no inferred scientific weights. */
 export function applyExplicitStudyIntent(current: StudySessionIntent, message: string): { intent: StudySessionIntent; signals: StudySessionSignal[]; needsConfirmation: boolean } {
+  if (/["'“”‘’「」『』`]|为什么|是什么意思|怎么|如何|能否|是否|如果|例如|比如|假如/.test(message)) return { intent: { ...current }, signals: [], needsConfirmation: false };
   // A positive substring inside a denied request/self-report is not consent.
   // Preserve the last confirmed intent until the alternative is made explicit.
-  const denied = /(?:不要|别|不想|不需要|不必|无需|不打算|不是要|不是想|并非要)[^。！？\n]{0,16}(?:英文|中文|双语|快速|加快|讲慢|串讲|拔高|自学|复习|冲刺|关键步骤|完整讲解)|(?:没有|没|不是|并非)[^。！？\n]{0,6}(?:抄(?:了)?答案|猜的|蒙的)/.test(message);
+  const denied = /(?:不要|别|不想|不需要|不必|无需|不打算|不是要|不是想|并非要)[^。！？\n]{0,16}(?:英文|中文|双语|快速|加快|讲慢|串讲|拔高|自学|复习|冲刺|先学|从零开始|先从基础学|巩固|保持|探路|关键步骤|完整讲解)|(?:没有|没|不是|并非)[^。！？\n]{0,6}(?:抄(?:了)?答案|猜的|蒙的)/.test(message);
   if (denied) return { intent: { ...current }, signals: [], needsConfirmation: true };
   const change: Partial<StudySessionIntent> = {};
   const explicitPurposes = ([
@@ -34,6 +35,10 @@ export function applyExplicitStudyIntent(current: StudySessionIntent, message: s
   if (/一步一步等我|每步等我|不要连续/.test(message)) change.continuous = false;
   if (/我(?:很累|累了)|有点累/.test(message)) change.selfReportedFatigue = "high";
   if (/(?:完全不会|一点也不会|从零开始|先学|先从基础学)/.test(message)) change.learningPhase = "new_learning";
+  if (/先巩固/.test(message)) change.learningPhase = "consolidate";
+  if (/先探路/.test(message)) change.learningPhase = "explore";
+  if (/先保持/.test(message)) change.learningPhase = "maintain";
+  if (change.learningPhase === "new_learning" || change.learningPhase === "consolidate") change.purpose = "self_study";
   const minutes = /(?:我只有|我有|时间预算(?:是|为)?|限时)\s*(\d+)\s*分钟/.exec(message);
   if (minutes && Number(minutes[1]) > 0 && Number(minutes[1]) <= 240) change.timeBudgetMinutes = Number(minutes[1]);
   const signals: StudySessionSignal[] = [];
