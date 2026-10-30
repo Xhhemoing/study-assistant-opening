@@ -157,7 +157,9 @@ test.describe("Opening span durable teaching flow", () => {
       expect(pendingResponse.status()).toBe(201);
       const pendingAttempt = learningAttemptSchema.parse(await pendingResponse.json());
       const beforePause = await readLesson(context.request, course.courseId, lesson.activityId);
-      const pauseResponse = page.waitForResponse(response => response.url().includes(lessonEndpoint) && response.request().method() === "PATCH");
+      const pauseResponse = page.waitForResponse(response => response.url().includes(lessonEndpoint)
+        && response.request().method() === "PATCH"
+        && response.request().postDataJSON()?.status === "paused");
       await page.getByRole("button", { name: "暂停并保存", exact: true }).click();
       expect((await pauseResponse).status()).toBe(200);
       await expect(page.getByRole("heading", { name: "本次学习已暂停", exact: true })).toBeVisible();
