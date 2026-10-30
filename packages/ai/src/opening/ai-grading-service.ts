@@ -32,6 +32,24 @@ export type OpeningAiGradingServiceDeps = {
 
 const conflict = (message: string, code = "CONFLICT") => Object.assign(new Error(message), { code });
 const unknownCost = () => conflict("这次批改费用或发送结果尚未确认，原答案已保存。请手动改评，不会再次发送模型请求。", "GRADING_UNKNOWN_COST");
+const unverifiedNullOutputFeedback = "批改输出包含无法保存的字符，本次无法可靠判定；原答案已保存，请核对后手动改评。";
+
+function containsNul(value: unknown): boolean {
+  if (typeof value === "string") return value.includes("\u0000");
+  if (Array.isArray(value)) return value.some(containsNul);
+  if (value !== null && typeof value === "object") return Object.values(value).some(containsNul);
+  return false;
+}
+
+function unverifyUnpersistableProposal(proposal: AiGradingProposal): AiGradingProposal {
+  if (!containsNul(proposal)) return proposal;
+  return {
+    outcome: "unverified", confidence: 0, questionMatch: false,
+    feedback: unverifiedNullOutputFeedback,
+    criteria: [{ label: "批改输出", verdict: "unverified", feedback: unverifiedNullOutputFeedback }],
+    misconceptionId: null,
+  };
+}
 
 /** Follow only ledger-confirmed unsent attempts; never bypass a prior fallback. */
 async function callGrader(deps: OpeningAiGradingServiceDeps, scope: Scope,
@@ -107,9 +125,12 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
             referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts, imageRoles,interpretation:context.interpretation }),
           persistResult: async output => {
             let proposal;
-            try { proposal = aiGradingProposalSchema.parse(parseModelJson(output.text)); }
-            catch { throw conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。"); }
-            result = await deps.repository.apply(scope, input, proposal, modelLabel);
+            try {
+              proposal = aiGradingProposalSchema.parse(parseModelJson(output.text));
+            } catch {
+              throw conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。");
+            }
+            result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },
         });
       } catch (error) {

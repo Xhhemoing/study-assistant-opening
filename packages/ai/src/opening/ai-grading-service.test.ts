@@ -23,7 +23,7 @@ function setup() {
   const repository = {
     context: vi.fn<Repository["context"]>(async () => ({ observation: original, stem: "1/2+1/2?", referenceText: "1", misconceptions: [],
       existing: saved, answerRevision: 1, operationId: base, workSource: null })),
-    apply: vi.fn(async () => { saved = graded; return graded; }),
+    apply: vi.fn<Repository["apply"]>(async () => { saved = graded; return graded; }),
     ledger: vi.fn<Repository["ledger"]>(async () => "unsent"),
     releasedReservation: vi.fn<NonNullable<Repository["releasedReservation"]>>(async () => null),
   };
@@ -45,7 +45,7 @@ it("grades the original work alongside pinned reference images with distinct rol
   f.repository.context.mockResolvedValue({ ...context, workSource: work, referenceSources: [reference], interpretation });
   const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async (_scope, request) => [{ sourceId: request.sourceIds[0]!, physicalPage: request.physicalPage,
     mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
-  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output, { reservationId: "fresh", settledCents: 1 }); return output; });
   const service = createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images });
   await service.grade(scope, input);
   expect(images).toHaveBeenCalledWith(scope, { sourceIds: ["reference"], sourceVersions: { reference: 3 }, physicalPage: 4 });
@@ -82,7 +82,7 @@ it("grades one original work page together with three reference pages without dr
     referenceSources: [1,2,3].map(physicalPage => ({ sourceId: "reference", sourceVersion: 1, physicalPage })) });
   const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async (_scope, request) => [{ sourceId: request.sourceIds[0]!, physicalPage: request.physicalPage,
     mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
-  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output, { reservationId: "fresh", settledCents: 1 }); return output; });
   await createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images }).grade(scope, input);
   expect(images).toHaveBeenCalledTimes(4);
   expect(call.mock.calls[0]![2].input.imageParts).toHaveLength(4);
@@ -94,7 +94,7 @@ it("does not treat a reference image as a missing student answer", async () => {
   f.repository.context.mockResolvedValue({ ...await f.repository.context(scope, input), observation: { ...original, answer: "" },
     referenceSources: [{ sourceId: "reference", sourceVersion: 1, physicalPage: 1 }] });
   const images = vi.fn<OpeningAiGradingServiceDeps["images"]>(async () => [{ sourceId: "reference", physicalPage: 1, mediaType: "image/png", data: "data:image/png;base64,AA==" }]);
-  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output); return output; });
+  const call = vi.fn<OpeningAiGradingServiceDeps["gateway"]["call"]>(async (_scope, _task, options) => { await options.persistResult!(output, { reservationId: "fresh", settledCents: 1 }); return output; });
   const service = createOpeningAiGradingService({ repository: f.repository, gateway: { call }, budget: () => f.budget, images });
   await expect(service.grade(scope, input)).rejects.toThrow("答案");
   expect(call).not.toHaveBeenCalled();
@@ -147,4 +147,54 @@ it("keeps normal reserve conflicts when the key has no confirmed released receip
   f.budget.reserve.mockRejectedValue(Object.assign(new Error("snapshot conflict"), { code: "CONFLICT" }));
   await expect(f.service.grade(scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(f.budget.reserve).toHaveBeenCalledTimes(1); expect(f.complete).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["top-level feedback", { feedback: "结果含\u0000字符" }],
+  ["nested proof step", { proofFeedback: { coverage: "partial", steps: [{ stepIndex: 1, claim: "x\u0000", required: true, verdict: "correct", feedback: "可见", repairPrompt: "核对" }] } }],
+] as const)("converts model output with a real NUL in %s into durable unverified feedback", async (_name, field) => {
+  const f = setup();
+  const nulOutput = { ...proposal, ...field, followUp: { prompt: "不要保存", options: [{ id: "a", label: "1" }, { id: "b", label: "2" }], answerId: "a", explanation: "不要保存" }, transcription: "正常转录，不应保留" };
+  f.complete.mockResolvedValue({ ...output, text: JSON.stringify(nulOutput) });
+  const initialContext = await f.repository.context(scope, input);
+  f.repository.apply.mockImplementation(async (_scope, _input, savedProposal) => {
+    const saved = { ...original, id: graded.id, outcome: savedProposal.outcome, feedback: savedProposal.feedback };
+    f.repository.context.mockResolvedValue({ ...initialContext, existing: saved });
+    return saved;
+  });
+  const result = await f.service.grade(scope, input);
+  expect(result).toMatchObject({ outcome: "unverified", answer: original.answer });
+  expect(f.repository.apply).toHaveBeenCalledTimes(1);
+  expect(f.repository.apply.mock.calls[0]![1]).toEqual(input);
+  const context = await f.repository.context(scope, input);
+  expect(context.observation.answer).toBe(original.answer);
+  const savedProposal = f.repository.apply.mock.calls[0]![2];
+  expect(savedProposal).toMatchObject({ outcome: "unverified", confidence: 0, questionMatch: false,
+    feedback: "批改输出包含无法保存的字符，本次无法可靠判定；原答案已保存，请核对后手动改评。",
+    criteria: [{ verdict: "unverified" }], misconceptionId: null });
+  expect(savedProposal.feedback).not.toContain("\u0000");
+  expect(savedProposal.criteria).toEqual([{ label: "批改输出", verdict: "unverified", feedback: savedProposal.feedback }]);
+  expect(savedProposal.followUp).toBeUndefined();
+  expect(savedProposal.proofFeedback).toBeUndefined();
+  expect(savedProposal.transcription).toBeUndefined();
+  expect(f.complete).toHaveBeenCalledTimes(1);
+  expect(f.budget.settle).toHaveBeenCalledExactlyOnceWith("fresh", 1, { resultRef: `ai-grade:${input.observationId}` });
+  expect(f.budget.markUnknown).not.toHaveBeenCalled();
+  expect(await f.service.grade(scope, input)).toBe(result);
+  expect(f.repository.apply).toHaveBeenCalledTimes(1);
+  expect(f.complete).toHaveBeenCalledTimes(1);
+  expect(f.budget.reserve).toHaveBeenCalledTimes(1);
+  expect(f.budget.settle).toHaveBeenCalledTimes(1);
+  expect(f.budget.markUnknown).not.toHaveBeenCalled();
+});
+
+it("does not mistake a literal backslash-u0000 or safe text for a broken proposal", async () => {
+  const f = setup();
+  const safe = { ...proposal, feedback: "字面量 \\u0000 与中文\n数学 $x^2$" };
+  f.complete.mockResolvedValue({ ...output, text: JSON.stringify(safe) });
+  await f.service.grade(scope, input);
+  expect(f.repository.apply.mock.calls[0]![2]).toEqual(safe);
+  expect(f.complete).toHaveBeenCalledTimes(1);
+  expect(f.budget.settle).toHaveBeenCalledTimes(1);
+  expect(f.budget.markUnknown).not.toHaveBeenCalled();
 });
