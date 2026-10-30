@@ -45,7 +45,7 @@ export async function prepareTutorNextAction(service: TutorNextActionService, sc
         label: "核对原学习记录", href: `/opening/courses/${context.courseId}#course-learning-records` } };
   }
   if (context.resume && !context.resumeRequiresExecution && !context.unavailableAction)
-    return { context, action: context.resume, decision: context.historicalDecision ?? null, resumed: true };
+    return { context, action: context.resume, decision: context.agenda?.decisionCurrent === false ? nextLearningStep(context.decisionInput) : context.historicalDecision ?? null, resumed: true };
   const decision = nextLearningStep(context.decisionInput);
   if (context.unavailableAction) return { context, action: null, decision, resumed: false, choice: context.unavailableAction };
   const action = context.resume && !context.resumeRequiresExecution ? context.resume : await service.execute(scope, { ...request, context, decision });

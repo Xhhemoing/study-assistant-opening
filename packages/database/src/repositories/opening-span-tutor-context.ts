@@ -46,10 +46,11 @@ export type OpeningSpanTutorExecuteInput = {
   jobLease?: { jobId: string; claimToken: string };
 };
 
+export const SPAN_TUTOR_EXECUTION_POLICY_VERSION = `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-2`;
 const conflict = (message: string) => learningError("CONFLICT", message);
 const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}`;
 export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
-  return receipt && ["next-learning-step-1/span-tutor-execution-1", `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-2`].includes(receipt.policyVersion)
+  return receipt && ["next-learning-step-1/span-tutor-execution-1", SPAN_TUTOR_EXECUTION_POLICY_VERSION].includes(receipt.policyVersion)
     ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
 }
 export function spanTutorQuestionInScope(question: string): boolean {
@@ -302,7 +303,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           const base = { stateVersion: state.stateVersion, dataAsOf: state.dataAsOf,
             goalVersion: JSON.stringify({ courseId: context.courseId, requirementKey: SPAN_REQUIREMENT_KEY, grantRevision: context.grantRevision }),
             intentVersion: JSON.stringify({ ...capturedContext, ruleDecision: rule.decision, execution }),
-            policyVersion: `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-2`, sourceVersions,
+            policyVersion: SPAN_TUTOR_EXECUTION_POLICY_VERSION, sourceVersions,
             invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] as LearningDecisionInput["invalidationConditions"],
             selectedAction, reasonCodes, evidenceRefs,
             candidates: [...rule.candidates.map(candidate => ({ ...candidate, action: `rule:${candidate.action}`,
