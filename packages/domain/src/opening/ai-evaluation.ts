@@ -41,5 +41,6 @@ export function evaluateAiCorrectness(observation: EvidenceObservation,
   if (!criteriaAgree(evaluation)||!proofFeedbackAllowsOutcome(evaluation.outcome,evaluation.proofFeedback)) { reasons.add("ai_evaluation_criteria_inconsistent"); return "unknown"; }
   if (evaluation.outcome !== observation.outcome) { reasons.add("ai_evaluation_outcome_conflict"); return "unknown"; }
   reasons.add(evaluation.outcome === "correct" ? "ai_graded_correct" : "ai_graded_incorrect");
-  return evaluation.outcome === "correct" ? "yes" : "no";
+  reasons.add("ai_evaluation_uncalibrated");
+  return "unknown";
 }

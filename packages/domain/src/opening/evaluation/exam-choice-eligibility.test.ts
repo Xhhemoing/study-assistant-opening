@@ -77,7 +77,7 @@ describe("exam choice evidence qualification", () => {
     };
     expect(evaluateEvidenceEligibility(revised, checked)).toMatchObject({
       independentAttempt: "no", verifiedCorrect: "unknown", usableForDelayedCheck: "no",
-      reasonCodes: expect.arrayContaining(["exam_answer_changed", "learner_reference_compare"]), policyVersion: "opening-evidence-v3",
+      reasonCodes: expect.arrayContaining(["exam_answer_changed", "learner_reference_compare"]), policyVersion: "opening-evidence-v4",
     });
     expect(evaluateEvidenceEligibility(revised, { ...checked, examAttempt: { firstFamilyExposure: true, answerUnchanged: true } }))
       .toMatchObject({ independentAttempt: "yes", verifiedCorrect: "unknown" });

@@ -23,9 +23,11 @@ import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runti
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
 import { createOpeningFixture,type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { controlledCourseGrading } from "./opening-controlled-grade-fixture";
 let f:OpeningFixture;
-beforeEach(async()=>{f=await createOpeningFixture();vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0");});
-afterEach(async()=>{vi.unstubAllEnvs();await f?.close();});
+let gradingFixture:ReturnType<typeof controlledCourseGrading>;
+beforeEach(async()=>{f=await createOpeningFixture();gradingFixture=controlledCourseGrading();vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0");});
+afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();await f?.close();});
 const ready=(value:CourseRouteActionResult)=>{expect(value.kind).toBe("ready");if(value.kind!=="ready")throw new Error(JSON.stringify(value));return value;};
 async function seed(count=1,sourceVersion=1){
   const courseId=randomUUID(),rows=backupRows(f.sql,f.scope),sourceId=await rows.source("uploaded",sourceVersion),chunkId=await rows.chunk(sourceId,sourceVersion);
@@ -64,7 +66,7 @@ async function answer(activity:TeachingActivity,index=0,outcome:"correct"|"incor
   const columns=Number(attempt.stemSnapshot!.match(/3×(\d+)/u)![1]);
   if(assistance==="hinted")await createOpeningTeachingHintRepository(f.sql).read(f.scope,{attemptId:attempt.id,level:1});
   const original=await service.submit(f.scope,attempt.id,{clientKey:randomUUID(),answer:outcome==="correct"?String(columns-2):"-99",outcome:"unverified",assistance,verdictSource:"self_report"});
-  const observation=grade?await createOpeningAiGradingRepository(f.sql).apply(f.scope,{observationId:original.id},{outcome,confidence:.99,questionMatch:true,feedback:"按保存的秩与零空间标准核对。",criteria:[{label:"秩与零空间",verdict:outcome,feedback:"核对列数减秩。"}]},"controlled-fixture"):original;
+  const observation=grade?await gradingFixture.apply(createOpeningAiGradingRepository(f.sql),f.scope,{observationId:original.id},{outcome,confidence:.99,questionMatch:true,feedback:"按保存的秩与零空间标准核对。",criteria:[{label:"秩与零空间",verdict:outcome,feedback:"核对列数减秩。"}]},"controlled-fixture"):original;
   return {attempt,observation,session};
 }
 async function activityDecision(result:ReturnType<typeof ready>){
@@ -76,6 +78,21 @@ async function activityDecision(result:ReturnType<typeof ready>){
   expect(await decisions.get(f.otherScope,receipt.id)).toBeNull();
   return receipt;
 }
+it.each(["correct","incorrect"] as const)("keeps actual AI-only %s feedback unknown without new activity or budget",async outcome=>{
+  gradingFixture.restore();
+  const x=await seed(),one=ready(await x.start());await compile(one.activity);
+  const result=await answer(one.activity,0,outcome);
+  expect(result.observation).toMatchObject({outcome,verdictSource:"ai_graded",eligibility:{verifiedCorrect:"unknown",policyVersion:"opening-evidence-v4",reasonCodes:expect.arrayContaining(["ai_evaluation_uncalibrated"])}});
+  const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id),before=await readOpeningLearningCapacity(f.sql,f.scope);
+  const activities=await f.sql`SELECT id,status FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`;
+  const jobs=await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  const request={goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:result.observation.id,clientKey:randomUUID(),minutes:20};
+  expect(await x.repo.next(f.scope,x.courseId,request)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
+  expect(await x.repo.next(f.scope,x.courseId,request)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(before.usedMinutes);
+  expect(await f.sql`SELECT id,status FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`).toEqual(activities);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(jobs);
+});
 it("persists zero source versions through real course start and next without rolling back activities",async()=>{
   const x=await seed(1,0),one=ready(await x.start());
   expect((await activityDecision(one)).sourceVersions).toEqual({[x.sourceId]:[0]});
@@ -160,7 +177,7 @@ it.each([false,true])("replaces same-action revised successors without refunding
   const correction={rootObservationId:first.observation.rootObservationId??first.observation.id,revisesObservationId:first.observation.id,expectedHead:first.observation.id,
     revisionKind:"replace" as const,reason:"更正原答案",clientKey:randomUUID(),replacement:{answer:"-98",outcome:"unverified" as const,assistance:"independent" as const}};
   const corrected=await reviseOpeningLearningObservation(f.sql,f.scope,correction);
-  const revised=await grading.apply(f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture");
+  const revised=await gradingFixture.apply(grading,f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture");
   expect(revised.id).not.toBe(first.observation.id);
   expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?60:40);
   expect((await x.repo.read(f.scope,x.courseId)).currentActivity?.id).not.toBe(old.activity.id);
@@ -173,7 +190,7 @@ it.each([false,true])("replaces same-action revised successors without refunding
   expect(ready(await x.repo.next(f.scope,x.courseId,freshRequest)).activity.id).toBe(fresh.activity.id);
   expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(consumed?80:60);
   expect((await reviseOpeningLearningObservation(f.sql,f.scope,correction)).headObservationId).toBe(corrected.headObservationId);
-  expect(await grading.apply(f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture")).toEqual(revised);
+  expect(await gradingFixture.apply(grading,f.scope,{observationId:corrected.headObservationId},proposal,"controlled-fixture")).toEqual(revised);
   expect(await createOpeningLearningDecisionsRepository(f.sql).get(f.scope,receipt.id)).toEqual(receipt);
   if(saved)expect((await createOpeningAttemptService(f.sql).getContext(f.scope,saved.attempt.id)).attempt.id).toBe(saved.attempt.id);
 });
