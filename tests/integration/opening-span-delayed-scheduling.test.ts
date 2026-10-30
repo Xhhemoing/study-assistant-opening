@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RetestCandidate } from "@aistudy/contracts";
-import { cancelOwnedSpanTutorRetests, createOpeningAdaptivePrefsRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
+import { createOpeningAdaptivePrefsRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningPlansRepository, createOpeningRetestRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
@@ -201,8 +201,13 @@ it("conditionally closes only untouched unstarted automatically owned tasks with
   await fixture.sql`UPDATE opening_retest_activities SET started_at=now() WHERE id=${results[2]!.activityId}`;
   await fixture.sql`INSERT INTO opening_plan_state(workspace_id,day,accepted_version,accepted_blocks)
     VALUES(${fixture.scope.workspaceId},'2099-01-01',1,${fixture.sql.json([{ taskId: results[3]!.taskId, start: "2099-01-01T01:00:00Z", end: "2099-01-01T01:20:00Z" }])})`;
-  const closed = await fixture.sql.begin(tx => cancelOwnedSpanTutorRetests(tx, fixture.scope, { reason: "tutor_disabled" }));
-  expect(closed).toEqual([results[0]!.taskId]);
+  const service = createSpanDelayedRetestService(fixture.sql);
+  await expect(service.cancelAutomatic(fixture.otherScope, { activityId: results[0]!.activityId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await service.cancelAutomatic(fixture.scope, { activityId: results[0]!.activityId })).toEqual({
+    activityId: results[0]!.activityId, cancelled: true, closedTaskIds: [results[0]!.taskId] });
+  expect(await service.cancelAutomatic(fixture.scope, { activityId: results[0]!.activityId })).toMatchObject({ cancelled: true, closedTaskIds: [] });
+  for (const result of results.slice(1)) expect(await service.cancelAutomatic(fixture.scope, { activityId: result.activityId }))
+    .toMatchObject({ cancelled: false, closedTaskIds: [] });
   const rows = await fixture.sql`SELECT id,status,close_source FROM opening_tasks WHERE id IN ${fixture.sql(results.map(result => result.taskId))}`;
   expect(rows.find(row => row.id === results[0]!.taskId)).toMatchObject({ status: "skipped", close_source: "system" });
   expect(rows.filter(row => row.status === "pending")).toHaveLength(3);

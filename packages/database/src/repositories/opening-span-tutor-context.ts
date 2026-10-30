@@ -1,4 +1,4 @@
-import type { Scope, SpanLessonSnapshot, StudySessionIntent } from "@aistudy/contracts";
+import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
 import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
@@ -251,7 +251,11 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           if (!session) throw conflict("原学习回执的活动不存在。");
           return session; // Missing historical decisions remain unknown; never backfill on retry.
         }
-        await lockSpanTutorAuthorization(tx, scope, context.courseId, context.grantRevision);
+        const authorization = await lockSpanTutorAuthorization(tx, scope, context.courseId, context.grantRevision);
+        const tool = context.resumeSession ? "resume_activity" : "next_question";
+        if (controlledLearningToolPermission(tool, { enabled: true, authorized: authorization.authorized }) !== "automatic") {
+          throw conflict("导师工具尚未授权，未新增学习活动。");
+        }
         await lockLearningOwner(tx, scope);
         if (input.jobLease) {
           const [job] = await tx`SELECT j.id FROM opening_tutor_jobs j

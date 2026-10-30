@@ -1,4 +1,4 @@
-import type { SourceChunk } from "@aistudy/contracts";
+import { controlledLearningTools, type SourceChunk } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
@@ -41,7 +41,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       await enqueueOpeningSourceIndex(tx, scope, input.sourceId, input.sourceVersion);
     });
   },
-  async listChunks(scope, sourceId) { const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },
+  async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },
   listChunksAtVersion: (scope, sourceId, version) => fetchChunks(sql, scope, sourceId, version),
   async listForSources(scope, sourceIds) {
     if (!sourceIds.length) return [];

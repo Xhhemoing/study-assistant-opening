@@ -282,6 +282,7 @@ export { firstLearningInputSchema, type FirstLearningInput } from "./first-learn
 
 export * from "./tutor-learner-context";
 export * from "./span-tutor-automation";
+export * from "./controlled-tools";
 export * from "./learning-goals";
 export * from "./learning-management";
 export * from "./course-route";

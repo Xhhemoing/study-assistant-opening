@@ -150,6 +150,20 @@ it("does not start or resume after the account is disabled between reading and e
   expect(await f.repo.read(fixture.scope, f.request)).toBeNull();
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(0);
 });
+it("rejects an unexecuted old grant revision while recovering a committed original receipt after withdrawal", async () => {
+  const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
+  const operationId = `tutor-next:${randomUUID()}`;
+  const input = { context, decision: nextLearningStep(context.decisionInput), operationId };
+  const saved = await f.repo.execute(fixture.scope, input);
+  const { createOpeningAdaptivePrefsRepository } = await import("@aistudy/database");
+  await createOpeningAdaptivePrefsRepository(fixture.sql).patch(fixture.scope, { spanTutorGrant: {
+    courseId: f.courseId, enabled: false, dailyMinutes: 180, expiresOn: null, expectedRevision: 1,
+  } });
+  await expect(f.repo.execute(fixture.scope, { ...input, operationId: `tutor-next:${randomUUID()}` })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await f.repo.execute(fixture.scope, input)).activityId).toBe(saved.activityId);
+  expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await fixture.sql`SELECT id FROM opening_learning_decisions WHERE target_id=${saved.activityId}`).toHaveLength(1);
+});
 it("rejects a source version change before creating the selected activity", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;

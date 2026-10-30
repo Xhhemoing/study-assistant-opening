@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { retestCandidateSchema, spanTutorAutomationSchema, type Scope, type SpanTutorBudget } from "@aistudy/contracts";
-import { assertSpanTutorRetestBudget, createOpeningLearningRepository, createOpeningRetestRepository, lockLearningPreferences, lockOpeningRetestReviewCandidate, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, readOpeningLearningEvidenceContext } from "@aistudy/database";
+import { controlledLearningTools, spanDelayedRetestInputSchema, retestCandidateSchema, spanTutorAutomationSchema, type Scope, type SpanTutorBudget } from "@aistudy/contracts";
+import { cancelOwnedSpanTutorRetests, assertSpanTutorRetestBudget, createOpeningLearningRepository, createOpeningRetestRepository, lockLearningPreferences, lockOpeningRetestReviewCandidate, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision, readOpeningLearningEvidenceContext } from "@aistudy/database";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, suggestRetestAt } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { createOpeningRetestService } from "../../learning/retest-service";
-const inputSchema = z.object({ observationId: z.string().uuid(), clientKey: z.string().min(8).max(160) }).strict();
-const automaticInputSchema = inputSchema.extend({ expectedGrantRevision: z.number().int().nonnegative() });
+const inputSchema = spanDelayedRetestInputSchema;
+const automaticInputSchema = controlledLearningTools.schedule_retest.input;
 const delayedPrompt = "线性组合与 span 延迟复测：离开示范，独立完成服务器发放的新题，建立等式并检查全部坐标。";
 const conflict = (message: string) => Object.assign(new Error(message), { code: "CONFLICT" });
 const protocolSchema = z.object({ protocolId: z.literal("span-delayed-3d-v1"), baselineObservationId: z.string().uuid(),
@@ -169,6 +169,19 @@ export function createSpanDelayedRetestService(sql: Sql, now: () => Date = () =>
     });
   }
   return { schedule: (scope: Scope, raw: unknown) => schedule(scope, raw),
+    async cancelAutomatic(scope: Scope, raw: unknown) {
+      const input = controlledLearningTools.cancel_retest.input.parse(raw);
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const [activity] = await tx`SELECT id,status FROM opening_retest_activities WHERE id=${input.activityId}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND learning_protocol ? 'tutorAutomation' FOR UPDATE`;
+        if (!activity) throw Object.assign(new Error("自动复测不存在。"), { code: "NOT_FOUND" });
+        const closedTaskIds = await cancelOwnedSpanTutorRetests(tx, scope, { activityIds: [input.activityId], reason: "learner_undo_automatic" });
+        return controlledLearningTools.cancel_retest.output.parse({ activityId: input.activityId,
+          cancelled: activity.status === "cancelled" || closedTaskIds.length > 0, closedTaskIds });
+      });
+    },
     scheduleAutomatic: (scope: Scope, raw: unknown) => {
       const { expectedGrantRevision, ...input } = automaticInputSchema.parse(raw);
       return schedule(scope, input, { expectedGrantRevision });
