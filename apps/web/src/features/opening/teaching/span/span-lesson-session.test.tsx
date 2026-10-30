@@ -35,6 +35,12 @@ it("keeps worked teaching identity when a new-evidence event filters earlier res
   render(); await settle();
   expect(lesson().props.restoredAttempts).toEqual([attempts[0]]);
 });
+it("passes the persisted automatic execution phase separately from explicit intent", async () => {
+  mocks.request.mockResolvedValueOnce({ ...details({ ...snapshot, moveId: "self-faded" }), executionPhase: { phase: "consolidate", source: "automatic" } });
+  render(); await settle();
+  expect(lesson().props.executionPhase).toEqual({ phase: "consolidate", source: "automatic" });
+  expect(lesson().props.initialIntent).not.toHaveProperty("learningPhase");
+});
 it("applies an explicit recovery snapshot to the lesson while ordinary progress saves retain its editing tree", async () => {
   render(); await settle(); const first = lesson();
   expect(first.props.sourceIds).toEqual([sourceId]);
