@@ -6,7 +6,9 @@ const originChangeSchema = z.object({
   originSession: spanLessonSnapshotSchema.nullable(),
   observationId: z.string().uuid().nullable(),
 }).strict();
-export const spanLessonDetailsSchema = z.object({ session: spanLessonSnapshotSchema.nullable(), attempts: z.array(learningAttemptSchema), observations: z.array(learningObservationSchema), assistance: z.record(z.string(), z.enum(["none", "hinted", "revealed"])), hintLevels: z.record(z.string(), z.array(spanHintLevelSchema)).default({}), intentEvent: studyIntentEventSchema.nullable().default(null), originChange: originChangeSchema.nullish() });
+export const spanExecutionPhaseSchema = z.object({ phase: z.enum(["explore", "new_learning", "consolidate", "maintain"]), source: z.enum(["automatic", "explicit"]) });
+export type SpanExecutionPhase = z.infer<typeof spanExecutionPhaseSchema>;
+export const spanLessonDetailsSchema = z.object({ session: spanLessonSnapshotSchema.nullable(), executionPhase: spanExecutionPhaseSchema.nullish(), attempts: z.array(learningAttemptSchema), observations: z.array(learningObservationSchema), assistance: z.record(z.string(), z.enum(["none", "hinted", "revealed"])), hintLevels: z.record(z.string(), z.array(spanHintLevelSchema)).default({}), intentEvent: studyIntentEventSchema.nullable().default(null), originChange: originChangeSchema.nullish() });
 export type SpanLessonDetails = z.infer<typeof spanLessonDetailsSchema>;
 export async function spanLessonRequest<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {
   const response = await createSessionFetch(fetch)(path, { ...init, headers: { "content-type": "application/json", ...init?.headers }, cache: "no-store" });
