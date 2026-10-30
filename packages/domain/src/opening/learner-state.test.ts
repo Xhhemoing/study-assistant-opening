@@ -13,6 +13,10 @@ describe("LearnerState projection", () => {
     expect(result.summary[0]?.views.transfer).toBe(0);
     expect(result.summary[0]?.gaps).toContain("retention_intervening_exposure_not_established");
     expect(result.projection.repairTriggered).toBe(false);
+    expect(result.skillProfile).toMatchObject({ profileVersion: "rule-profile:1", stateVersion: "state-1",
+      qualificationVersion: result.policyVersion, scope: { workspaceId: "", ownerUserId: "", courseId: null },
+      items: [{ courseId: learningObservation.courseId, requirementKey: qualifiedInput.observation.requirementKey,
+        state: "independent", observationRefs: [{ observationId: learningObservation.id, sourceIds: learningObservation.sourceIds }] }] });
   });
   it("limits evidence display while preserving the entire ordered predictor sequence", () => {
     const evidence = courseEvidence();
