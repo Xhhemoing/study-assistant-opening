@@ -4,7 +4,8 @@ import { DEFAULT_STUDY_SESSION_INTENT } from "@aistudy/domain";
 import { createSpanTutorNextAction } from "./span-tutor-next-action";
 
 const repository = vi.hoisted(() => ({ read: vi.fn(), execute: vi.fn(), assertCurrent: vi.fn() }));
-vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<object>(), createOpeningSpanTutorContextRepository: () => repository }));
+vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<object>(), createOpeningSpanTutorContextRepository: () => repository,
+  createOpeningLearningAgendaRepository: () => ({ get: async () => null }) }));
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const request = { courseId: "course", sourceIds: ["source"], sourceVersions: { source: 1 }, question: "继续", userTurnId: "turn", operationId: "tutor-next:turn" };
 const session = { activityId: "activity", sessionId: "session", courseId: "course", sourceIds: ["source"], intent: DEFAULT_STUDY_SESSION_INTENT,

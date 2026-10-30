@@ -41,6 +41,14 @@ it("passes the persisted automatic execution phase separately from explicit inte
   expect(lesson().props.executionPhase).toEqual({ phase: "consolidate", source: "automatic" });
   expect(lesson().props.initialIntent).not.toHaveProperty("learningPhase");
 });
+it("keeps the paused view from the authoritative save response", async () => {
+  render(); await settle();
+  mocks.request.mockResolvedValueOnce({ ...snapshot, status: "paused", revision: 2 });
+  await lesson().props.onProgress!(snapshot.intent, "self-independent", "paused");
+  const pausedHeading = find(render(), element => element.type === "h1" && element.props.children === "本次学习已暂停");
+  expect(pausedHeading).toBeDefined();
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+});
 it("applies an explicit recovery snapshot to the lesson while ordinary progress saves retain its editing tree", async () => {
   render(); await settle(); const first = lesson();
   expect(first.props.sourceIds).toEqual([sourceId]);

@@ -104,7 +104,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
           </div>
         </details>
       </fieldset> : null}
-      {activeAttempt || session ? <StudyIntentControls key={activeAttempt?.id ?? session!.sessionId} attempt={activeAttempt ?? { sessionId: session!.sessionId, courseId }} desiredIntent={activeAttempt ? intent : undefined} onApplied={(next, action, evidenceEventId) => {
+      {activeAttempt || session ? <StudyIntentControls key={activeAttempt?.id ?? session!.sessionId} attempt={activeAttempt ?? { sessionId: session!.sessionId, courseId }} currentIntent={session?.intent ?? intent} desiredIntent={activeAttempt ? intent : undefined} onApplied={(next, action, evidenceEventId) => {
         setIntent({ ...next }); setIntentRevision(value => value + 1);
         const nextMode = spanModeForIntent(next);
         if (evidenceEventId) { setRecords(currentRecords => { const remaining = { ...currentRecords }; delete remaining["reserved:auto"]; return remaining; }); setNewEvidenceEventId(evidenceEventId); void goToStep(createSpanTeachingSequence(nextMode).length, next); }

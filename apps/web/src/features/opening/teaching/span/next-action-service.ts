@@ -1,10 +1,9 @@
-import type { Scope } from "@aistudy/contracts";
+import { controlledLearningTools, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { createOpeningSpanTutorNextRepository, type OpeningSpanNextChoiceReason } from "@aistudy/database";
-import { z } from "zod";
+
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
-const inputSchema = z.object({ activityId: z.string().uuid(), expectedRevision: z.number().int().positive(),
-  observationId: z.string().uuid().nullable(), clientKey: z.string().min(8).max(160) }).strict();
+const inputSchema = controlledLearningTools.next_question.input;
 const choiceMessages: Record<OpeningSpanNextChoiceReason, string> = {
   unknown_evidence: "这份答案还不能确定判分；先核对答案或评价，不把它算作不会。原答案和学习位置保留。",
   source_unavailable: "原题或课程材料目前不可用或版本已变化；先恢复或核对材料，原答案保留。",

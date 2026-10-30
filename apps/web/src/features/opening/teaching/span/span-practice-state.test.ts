@@ -35,10 +35,11 @@ import { getSpanProblem, nextLearningStep } from "@aistudy/domain";
 import { spanLessonDetailsSchema } from "./span-session-client";
 import { createSpanLessonSessionService } from "./lesson-session-service";
 import type { Sql } from "postgres";
-const recovery = vi.hoisted(() => ({ get: vi.fn(), list: vi.fn(), deliver: vi.fn(), assertAccess: vi.fn() }));
+const recovery = vi.hoisted(() => ({ get: vi.fn(), agendaGet: vi.fn(), list: vi.fn(), deliver: vi.fn(), assertAccess: vi.fn() }));
 vi.mock("@aistudy/database", async original => ({
   ...await original<typeof import("@aistudy/database")>(),
   createOpeningSpanSessionRepository: () => ({ get: recovery.get, deliveredHintLevels: async () => ({}) }),
+  createOpeningLearningAgendaRepository: () => ({ get: recovery.agendaGet }),
   createOpeningLearningDecisionsRepository: () => ({ list: recovery.list }),
   createOpeningLearningAttemptRepository: () => ({ listByActivity: async () => [], assertAccess: recovery.assertAccess }),
   createOpeningStudyExposureRepository: () => ({ deliver: recovery.deliver }),
@@ -116,8 +117,10 @@ it("restores the executed automatic policy through the lesson into real practice
   expect(decision).toMatchObject({ phase: "consolidate", phaseSource: "automatic", activityKind: "reduced_help_practice" });
   const session = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-faded", status: "active", revision: 2, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt };
   recovery.get.mockResolvedValue(session);
+  recovery.agendaGet.mockResolvedValue(null);
   recovery.list.mockResolvedValue([{ policyVersion: "span-teaching-v2" }, { policyVersion: "next-learning-step-2/span-tutor-execution-2", intentVersion: JSON.stringify({ ruleDecision: decision, execution: { kind: "create", moveId: "self-faded" } }) }]);
   const details = spanLessonDetailsSchema.parse(await createSpanLessonSessionService({} as Sql).read({ workspaceId: id, ownerUserId: id }, id, id));
+  expect(recovery.agendaGet).toHaveBeenCalledExactlyOnceWith({ workspaceId: id, ownerUserId: id }, id, id);
   hooks.cursor = 0;
   const lesson = SpanLesson({ courseId: id, sourceIds: [id], sourceLoadError: false, session: details.session!, initialIntent: details.session!.intent, initialMoveId: details.session!.moveId, executionPhase: details.executionPhase! });
   const input = { ...find(lesson, node => node.type === SpanPractice)!.props, onAttempt: vi.fn(), onRecorded: vi.fn() } as ComponentProps<typeof SpanPractice>;

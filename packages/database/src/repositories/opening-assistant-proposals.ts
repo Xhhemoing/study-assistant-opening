@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
-import { assistantProposalCreateSchema, assistantProposalDecisionSchema, assistantProposalRecordSchema, localReplanMetadataSchema, plannedBlockSchema,
+import { controlledLearningTools, assistantProposalCreateSchema, assistantProposalRecordSchema, localReplanMetadataSchema, plannedBlockSchema,
   type AssistantProposalCreate, type AssistantProposalDecision, type AssistantProposalRecord, type PendingAssistantProposalsQuery, type Scope } from "@aistudy/contracts";
 import { lockWorkspaceLearningHistory, learningError } from "./opening-learning-facts";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
@@ -50,7 +50,7 @@ export function createOpeningAssistantProposalsRepository(sql: Sql, options: { e
     listPending: (scope: Scope, query: PendingAssistantProposalsQuery = {}) => listPendingAssistantProposals(sql, scope, query, map),
     countPending: (scope: Scope) => countPendingAssistantProposals(sql, scope),
     async propose(scope: Scope, raw: AssistantProposalCreate, runtime?: { jobLease?: { jobId: string; claimToken: string }; expectedPrivacyEpoch?: number }): Promise<AssistantProposalRecord> {
-      const intent = assistantProposalCreateSchema.parse(raw);
+      const intent = controlledLearningTools.plan_draft.input.parse(raw);
       return sql.begin(async tx => {
         const owner = await lockProposalScope(tx, scope, intent.tool);
         if (runtime?.expectedPrivacyEpoch !== undefined && Number(owner.privacy_epoch) !== runtime.expectedPrivacyEpoch) throw learningError("CONFLICT", "proposal privacy changed");
@@ -101,7 +101,7 @@ export function createOpeningAssistantProposalsRepository(sql: Sql, options: { e
       return rows.map(map);
     },
     async decide(scope: Scope, id: string, raw: AssistantProposalDecision): Promise<AssistantProposalRecord> {
-      const input = assistantProposalDecisionSchema.parse(raw);
+      const input = controlledLearningTools.accept_proposal.input.parse(raw);
       return sql.begin(async tx => {
         const [preview] = await tx`SELECT * FROM opening_assistant_proposals WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!preview) throw learningError("NOT_FOUND", "proposal not found");

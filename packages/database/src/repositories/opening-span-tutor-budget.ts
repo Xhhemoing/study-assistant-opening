@@ -2,7 +2,7 @@ import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage
 import { readUnusedStaleCourseRouteReservations } from "./opening-course-route-reservations";
 import { assertOpeningWorkspaceCapacity, normalizeLearningCapacityActivities } from "./opening-learning-capacity";
 export { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
-import { spanTutorAutomationSchema, spanTutorBudgetSchema, plannedBlockSchema, openingAdaptivePrefsSchema,
+import { controlledLearningToolPermission, spanTutorAutomationSchema, spanTutorBudgetSchema, plannedBlockSchema, openingAdaptivePrefsSchema,
   type Scope, type SpanTutorBudget } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveLocalDayBounds, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
@@ -16,6 +16,8 @@ async function assertBudget(tx: TransactionSql, scope: Scope, input: { courseId:
   expectedGrantRevision: number; targetAt: Date; excludeActivityId?: string }, now: Date): Promise<SpanTutorBudget> {
   await lockWorkspaceLearningHistory(tx, scope);
   const authorization = await lockSpanTutorAuthorization(tx, scope, input.courseId, input.expectedGrantRevision, now);
+  if (controlledLearningToolPermission(input.excludeActivityId ? "next_question" : "schedule_retest",
+    { enabled: true, authorized: authorization.authorized }) !== "automatic") throw conflict("导师工具尚未授权。");
   if (!authorization.authorized || !authorization.grant) throw conflict(`导师自动安排已停止：${authorization.reason}。请核对课程授权，或手动安排。`);
   const localDate = localDateKeyInZone(input.targetAt, authorization.timeZone);
   if ((authorization.grant.expiresOn && localDate > authorization.grant.expiresOn)

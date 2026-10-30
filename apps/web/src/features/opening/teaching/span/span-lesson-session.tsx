@@ -109,7 +109,10 @@ export function SpanLessonSession(props: Props) {
       const session = await spanLessonRequest(`${endpoint}?activityId=${current.activityId}`, spanLessonSnapshotSchema, { method: "PATCH", body: JSON.stringify({ expectedRevision: current.revision, intent, moveId, status }) });
       if (version !== requestId.current) return false;
       remember(session); setDetails(value => value ? { ...value, session } : value);
-      if (status !== "active") { setShowSummary(true); setRevision(value => value + 1); }
+      // The PATCH response is the authoritative paused/completed snapshot. A
+      // follow-up GET here can race the just-finished write and briefly restore
+      // the active view, so only active step changes need a recovery reload.
+      if (status !== "active") setShowSummary(true);
       return true;
     } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "进度保存未确认。")); return false; }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
