@@ -10,7 +10,7 @@ import { ExplanationActions, explanationActionPrompt } from "./explanation-actio
 import { LessonSelectionAskContext } from "./selection-ask";
 const resultSchema = z.object({ event: studyIntentEventSchema, currentEvent: studyIntentEventSchema, currentIntent: studySessionIntentSchema, currentVersion: z.number().int().positive(),
   move: z.object({ id: z.string(), presentation: z.object({ instructions: z.string() }), studentAction: z.string() }) });
-export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { attempt: Pick<LearningAttempt, "sessionId" | "courseId"> & { id?: string }; desiredIntent?: StudySessionIntent;
+export function StudyIntentControls({ attempt, desiredIntent, currentIntent, onApplied }: { attempt: Pick<LearningAttempt, "sessionId" | "courseId"> & { id?: string }; desiredIntent?: StudySessionIntent; currentIntent?: StudySessionIntent;
   onApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"], newEvidenceEventId?: string) => void }) {
   const diagnostics = useDiagnosticsEnabled();
   const askExplanation = useContext(LessonSelectionAskContext);
@@ -33,10 +33,10 @@ export function StudyIntentControls({ attempt, desiredIntent, onApplied }: { att
     void fetch(`/api/opening/study/intent?sessionId=${attempt.sessionId}`, { signal: controller.signal, cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("学习意图暂不可读取");
       const result = z.object({ event: studyIntentEventSchema.nullable() }).parse(await response.json());
-      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); lastPreference.current = JSON.stringify(result.event.intent); onAppliedRef.current?.(result.event.intent, "continue"); }
+      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); if (currentIntent && JSON.stringify(result.event.intent) === JSON.stringify(currentIntent)) { lastPreference.current = JSON.stringify(currentIntent); onAppliedRef.current?.(result.event.intent, "continue"); } }
     }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "意图暂不可读取")); });
     return () => controller.abort();
-  }, [attempt.sessionId]);
+  }, [attempt.sessionId, currentIntent]);
   const apply = useCallback(async (change: StudyIntentChange) => {
     const identity = JSON.stringify(change);
     if (busy.current || (unresolved.current && unresolved.current !== identity)) {
