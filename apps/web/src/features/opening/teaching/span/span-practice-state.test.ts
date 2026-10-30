@@ -31,7 +31,22 @@ vi.mock("../../learning/practice-draft", async original => ({ ...await original<
       Object.assign(draft, { ...update, fields: { ...draft.fields, ...update.fields } }); return draft; } }; },
 }));
 import { emptyPracticeDraft, practiceScope } from "../../learning/practice-draft";
-import { getSpanProblem } from "@aistudy/domain";
+import { getSpanProblem, nextLearningStep } from "@aistudy/domain";
+import { spanLessonDetailsSchema } from "./span-session-client";
+import { createSpanLessonSessionService } from "./lesson-session-service";
+import type { Sql } from "postgres";
+const recovery = vi.hoisted(() => ({ get: vi.fn(), list: vi.fn(), deliver: vi.fn(), assertAccess: vi.fn() }));
+vi.mock("@aistudy/database", async original => ({
+  ...await original<typeof import("@aistudy/database")>(),
+  createOpeningSpanSessionRepository: () => ({ get: recovery.get, deliveredHintLevels: async () => ({}) }),
+  createOpeningLearningDecisionsRepository: () => ({ list: recovery.list }),
+  createOpeningLearningAttemptRepository: () => ({ listByActivity: async () => [], assertAccess: recovery.assertAccess }),
+  createOpeningStudyExposureRepository: () => ({ deliver: recovery.deliver }),
+  readOpeningCourseObservationHeads: async () => [],
+  createOpeningStudyIntentRepository: () => ({ latest: async () => null }),
+  readOpeningSpanTutorOriginChange: async () => undefined,
+}));
+import { createSpanHintService } from "./hint-service";
 import { HintLadder } from "../hint-ladder";
 import { SpanPractice, spanPracticeScope } from "./span-practice";
 import { SpanLesson } from "./span-lesson";
@@ -89,12 +104,42 @@ it.each(["consolidate", undefined] as const)("faded practice respects phase %s b
     expect((find(render(input), node => node.type === HintLadder)!.props as ComponentProps<typeof HintLadder>).delivered).toHaveLength(1);
   }
 });
-it("starts a replacement consolidation draft without prefilled help", () => {
-  const input = { ...props, problemId: "span-faded-3d", intent: { ...props.intent, learningPhase: "consolidate" as const } };
+it.each(["explicit", "automatic"] as const)("starts a replacement %s consolidation draft without prefilled help", source => {
+  const input = { ...props, problemId: "span-faded-3d", intent: { ...props.intent, ...(source === "explicit" ? { learningPhase: "consolidate" as const } : {}) }, executionPhase: { phase: "consolidate" as const, source } };
   const tree = render(input);
   const replace = find(tree, node => node.type === "button" && node.props.children === "保留原答案，开始本步骤的新题")!;
   (replace.props.onClick as () => void)();
   expect(mocks.startAnother).toHaveBeenCalledWith(expect.objectContaining({ assistance: "independent" }));
+});
+it("restores the executed automatic policy through the lesson into real practice and delivers help only on request", async () => {
+  const decision = nextLearningStep({ observations: [{ id, usableForCurrentVersion: "yes", verifiedCorrect: "yes", assistance: "hinted", independentAttempt: "no" }], status: "observed_assisted", wantsFullExplanation: false, dueRetest: false });
+  expect(decision).toMatchObject({ phase: "consolidate", phaseSource: "automatic", activityKind: "reduced_help_practice" });
+  const session = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-faded", status: "active", revision: 2, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt };
+  recovery.get.mockResolvedValue(session);
+  recovery.list.mockResolvedValue([{ policyVersion: "span-teaching-v2" }, { policyVersion: "next-learning-step-2/span-tutor-execution-2", intentVersion: JSON.stringify({ ruleDecision: decision, execution: { kind: "create", moveId: "self-faded" } }) }]);
+  const details = spanLessonDetailsSchema.parse(await createSpanLessonSessionService({} as Sql).read({ workspaceId: id, ownerUserId: id }, id, id));
+  hooks.cursor = 0;
+  const lesson = SpanLesson({ courseId: id, sourceIds: [id], sourceLoadError: false, session: details.session!, initialIntent: details.session!.intent, initialMoveId: details.session!.moveId, executionPhase: details.executionPhase! });
+  const input = { ...find(lesson, node => node.type === SpanPractice)!.props, onAttempt: vi.fn(), onRecorded: vi.fn() } as ComponentProps<typeof SpanPractice>;
+  expect(input.intent).not.toHaveProperty("learningPhase");
+  expect(input.executionPhase).toEqual({ phase: "consolidate", source: "automatic" });
+  hooks.values = []; hooks.effects = [];
+  const faded = { ...attempt, spanExercise: getSpanProblem("span-faded-3d")! };
+  mocks.draft = emptyPracticeDraft(spanPracticeScope(id, undefined, undefined, id, input.problemId), { sourceId: id, spanProblemId: input.problemId, assistance: "independent" });
+  mocks.createAttempt.mockResolvedValue(faded);
+  recovery.assertAccess.mockResolvedValue(faded);
+  recovery.deliver.mockImplementation(async (_scope, value) => (await response(value.hintStage).json()).exposureReceipt);
+  vi.mocked(fetch).mockImplementation(async (url, init) => String(url).endsWith("/hint") ? Response.json(await createSpanHintService({} as Sql).read({ workspaceId: id, ownerUserId: id }, JSON.parse(String(init?.body)))) : Response.json({ activityDecision: { id, reasonCodes: [], dataAsOf: attempt.startedAt } }));
+  render(input); await settle(); const tree = render(input);
+  expect(mocks.initialDraft).toHaveBeenLastCalledWith(expect.objectContaining({ assistance: "independent" }));
+  expect(fetch).toHaveBeenCalledTimes(1); expect(recovery.deliver).not.toHaveBeenCalled(); expect(mocks.ack).not.toHaveBeenCalled();
+  expect(find(tree, node => node.type === "option" && node.props.value === "independent")!.props.disabled).toBe(false);
+  const next = (find(tree, node => node.type === HintLadder)!.props as ComponentProps<typeof HintLadder>).next!;
+  next.request(); await settle();
+  expect(recovery.deliver).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: id }, expect.objectContaining({ kind: "hint", level: "hinted", supportDomain: "math", hintStage: 1 }));
+  expect(mocks.draft!.fields).toMatchObject({ assistance: "hinted", deliveredAssistance: "hinted" });
+  expect(mocks.ack).toHaveBeenCalledOnce();
+  expect(find(render(input), node => node.type === "option" && node.props.value === "independent")!.props.disabled).toBe(true);
 });
 it("retains the answer and current level on failed delivery, then records only the accepted hint", async () => {
   await start(); const original = mocks.draft!.fields.answer;
@@ -155,7 +200,7 @@ it("registers the sole active span entry and never carries a previous step's att
 
 it("restores a server-owned sealed answer and only the exact previously released hint levels", async () => {
   const secondSource = "22222222-2222-4222-8222-222222222222";
-  const restoredProps: ComponentProps<typeof SpanPractice> = { ...props, restoredAttempt: { ...attempt, observationId: id, sourceIds: [id, secondSource], contextAnchor: { courseId: id, attemptId: id, itemVersionId: id, activityId: id, sourceId: secondSource, purpose: "learning_help" } }, restoredHintLevels: [2],
+  const restoredProps: ComponentProps<typeof SpanPractice> = { ...props, executionPhase: { phase: "consolidate", source: "automatic" }, restoredAttempt: { ...attempt, observationId: id, sourceIds: [id, secondSource], contextAnchor: { courseId: id, attemptId: id, itemVersionId: id, activityId: id, sourceId: secondSource, purpose: "learning_help" } }, restoredHintLevels: [2],
     session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-independent", status: "active", revision: 3, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt } };
   mocks.draft = emptyPracticeDraft(spanPracticeScope(id, undefined, undefined, id, props.problemId), { sourceId: id, spanProblemId: props.problemId });
   mocks.readRecord.mockResolvedValue({ observation: record, originalObservation: { ...record, answer: "sealed first answer" }, deliveredAssistance: "hinted" });
