@@ -276,6 +276,7 @@ export * from "./repositories/opening-study-context";
 export * from "./repositories/opening-learner-state-read";
 
 export * from "./repositories/opening-learning-decisions";
+export * from "./repositories/opening-learning-agenda";
 
 export * from "./schema/opening-learning-decisions";
 

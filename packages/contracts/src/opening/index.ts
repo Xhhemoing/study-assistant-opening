@@ -277,6 +277,7 @@ export { helpInputSnapshotSchema, type HelpInputSnapshot, studyContextAnchorSche
 export * from "./material-retrieval-evaluation";
 
 export * from "./span-session";
+export * from "./learning-agenda";
 
 export { firstLearningInputSchema, type FirstLearningInput } from "./first-learning";
 

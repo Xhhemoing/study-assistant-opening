@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { readOpeningLearningAgenda } from "./opening-learning-agenda";
 import { learningManagementCommandSchema, learningManagementOverviewSchema, learningManagementSettingsSchema,
   learningRecoveryCommandSchema, learningLifecycleCommandSchema, type Scope, type TaskItem } from "@aistudy/contracts";
 import { allocateLearningCapacity, deriveDayBlocks, learningRecoveryChoice, localDateKeyInZone, resolveLocalDayBounds } from "@aistudy/domain";
@@ -56,6 +57,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
     db`SELECT id,version,client_key FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending' AND client_key LIKE 'planner:%:maintenance:%'`,
   ]);
   const activity = active[0], task = selectLearningRecoveryTask(tasks, activity);
+  const agenda = activity ? await readOpeningLearningAgenda(db as unknown as TransactionSql, scope, String(activity.course_id), String(activity.id)) : null;
   const recovery = learningRecoveryChoice({ activityId: activity ? String(activity.id) : null, taskId: task?.id ?? null, pending: Boolean(task) });
   const warnings = ["共同预算包含已接受任务、复测与本次活动。缺席不代表能力下降；已接受安排保持原样。"];
   if (!state.budget) warnings.push("请明确设置工作区每日共同预算后生成计划；课程周预算不会自动相加成可用时间。");
@@ -65,7 +67,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
     acceptedBlocks: accepted?.blocks ?? [], committedMinutes: state.usedMinutes,
     remainingMinutes: state.budget ? Math.max(0, state.budget.dailyMinutes - state.budget.bufferMinutes - state.usedMinutes) : 0,
     overcommittedMinutes: state.budget ? Math.max(0, state.usedMinutes + state.budget.bufferMinutes - state.budget.dailyMinutes) : 0,
-    tasks, recovery: { ...recovery, href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
+    tasks, recovery: { ...recovery, agenda, href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
     maintenanceTasks: maintenance.flatMap(row => { const match = /^planner:\d{4}-\d{2}-\d{2}:maintenance:([a-f0-9-]{36}):([a-f0-9-]{36})$/.exec(String(row.client_key));
       return match ? [{ taskId: row.id, version: Number(row.version), goalId: match[1], requirementId: match[2] }] : []; }) });
 }
@@ -154,7 +156,11 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
         if (input.activityId && !activity || input.taskId && (!task || task.status !== "pending")) throw learningError("NOT_FOUND", "原活动或待办不存在，请重新读取。");
         if (activity && task && selectLearningRecoveryTask(await createOpeningPlansRepository(db).listTasks(scope), activity)?.id !== input.taskId) throw learningError("CONFLICT", "所选任务不属于原活动，请重新读取真实恢复位置。");
         if (activity && await readOpeningSpanTutorOriginChange(db, scope, String(activity.id))) throw learningError("CONFLICT", "原活动依据已变化，请打开原活动按最新记录重新选择。");
-        if (input.action === "continue") return { href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : "/opening/today", activityId: activity?.id ?? null, taskId: task?.id ?? null };
+        if (input.action === "continue") {
+          const agenda = activity ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id)) : null;
+          if (agenda && !agenda.resumable) throw learningError("CONFLICT", `原学习位置需重新确认：${agenda.invalidationReasons.join("、") || agenda.status}`);
+          return { href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : "/opening/today", activityId: activity?.id ?? null, taskId: task?.id ?? null };
+        }
         const capacity = await readOpeningLearningCapacity(tx, scope, now);
         if ((capacity.budget?.revision ?? 0) !== input.expectedBudgetRevision) throw learningError("CONFLICT", "共同预算已变化，请重新读取后选择更短的本次学习。");
         if (!activity) throw learningError("VALIDATION", "请先打开原活动选择更短的本次学习；原任务与已接受时间不会被覆盖。");

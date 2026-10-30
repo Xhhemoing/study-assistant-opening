@@ -45,6 +45,7 @@ export {
 } from "./planning/planner";
 export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
+export { assembleLearningAgenda, type LearningAgendaAssemblyInput } from "./opening/learning-agenda";
 export {
   planDay,
   taskNotBeforeAt,

@@ -1,10 +1,11 @@
-import type { Scope } from "@aistudy/contracts";
+import type { Scope, LearningAgenda } from "@aistudy/contracts";
 import type { ContextSourceRef, OpeningSpanTutorContext } from "@aistudy/database";
 import { nextLearningStep, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
 
 export type TutorNextAction = { activityId: string; sessionId: string; href: string };
 export type TutorNextActionContext = {
+  agenda?: LearningAgenda | null;
   courseId: string;
   privacyEpoch: number;
   sourceRefs: ContextSourceRef[];
@@ -38,8 +39,13 @@ export async function prepareTutorNextAction(service: TutorNextActionService, sc
   if (!context) return null;
   if (request.expectedPrivacyEpoch !== undefined) assertCurrentEpoch(request.expectedPrivacyEpoch, context.privacyEpoch);
   await service.assertCurrent(scope, context);
+  if (context.agenda && !context.agenda.resumable) {
+    return { context, action: null, decision: nextLearningStep(context.decisionInput), resumed: false,
+      choice: { message: `原学习位置需重新确认：${context.agenda.invalidationReasons.join("、") || context.agenda.status}`,
+        label: "核对原学习记录", href: `/opening/courses/${context.courseId}#course-learning-records` } };
+  }
   if (context.resume && !context.resumeRequiresExecution && !context.unavailableAction)
-    return { context, action: context.resume, decision: context.historicalDecision ?? null, resumed: true };
+    return { context, action: context.resume, decision: context.agenda?.decisionCurrent === false ? nextLearningStep(context.decisionInput) : context.historicalDecision ?? null, resumed: true };
   const decision = nextLearningStep(context.decisionInput);
   if (context.unavailableAction) return { context, action: null, decision, resumed: false, choice: context.unavailableAction };
   const action = context.resume && !context.resumeRequiresExecution ? context.resume : await service.execute(scope, { ...request, context, decision });
