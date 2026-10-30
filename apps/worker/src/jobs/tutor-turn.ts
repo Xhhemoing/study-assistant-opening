@@ -201,7 +201,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         if (prepared) {
           await deps.nextAction.assertCurrent(scope, prepared.context);
           if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
-          const label = prepared.resumed ? "继续上次未完成的学习" : {
+          const label = prepared.resumed ? "继续上次未完成的学习" : prepared.decision.phase === "maintain" ? "开始到期独立复测" : {
             full_explain: "先看一个完整示例", targeted_explain: "针对刚才的错误继续学习",
             reduced_help_practice: "用一道新题减少帮助再试一次", transfer_check: "独立完成一道新题",
             diagnose: "从一道短诊断题开始",

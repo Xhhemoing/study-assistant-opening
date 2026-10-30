@@ -85,6 +85,8 @@ export type LearnerSnapshotSources = {
 };
 
 export type NextStepReasonCode =
+  | "due_retest"
+  | "requested_consolidate"
   | "requested_full"
   | "no_evidence"
   | "unverified_only"
@@ -94,6 +96,9 @@ export type NextStepReasonCode =
   | "correct_needs_independent_check"
   | "needs_check";
 
+export type LearningPhase = "explore" | "new_learning" | "consolidate" | "maintain";
+export type LearningPhaseSource = "automatic" | "explicit";
+
 export type NextLearningStepInput = {
   /** Planning status of the skill from the assembled snapshot. */
   status: SkillStatus;
@@ -101,6 +106,10 @@ export type NextLearningStepInput = {
   observations: readonly SnapshotObservation[];
   /** The learner explicitly asked for a full explanation in this activity. */
   wantsFullExplanation: boolean;
+  /** Optional phase controls are additive and keep legacy callers unchanged. */
+  learningPhase?: LearningPhase;
+  phaseSource?: LearningPhaseSource;
+  dueRetest?: boolean;
 };
 
 export type NextLearningStep = {
@@ -108,4 +117,6 @@ export type NextLearningStep = {
   /** The verified-incorrect attempt to explain against; null when there is none. */
   focusObservationId: string | null;
   reasonCode: NextStepReasonCode;
+  phase?: LearningPhase;
+  phaseSource?: LearningPhaseSource;
 };
