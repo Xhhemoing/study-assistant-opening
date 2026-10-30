@@ -20,6 +20,8 @@ export function StudyIntentControls({ attempt, desiredIntent, currentIntent, onA
   const [knownEvent, setKnownEvent] = useState<StudyIntentEvent | null>(null);
   const onAppliedRef = useRef(onApplied); onAppliedRef.current = onApplied;
   const desiredKey = desiredIntent ? JSON.stringify(desiredIntent) : "";
+  // PATCH receipts deserialize a fresh object even when the durable intent is unchanged.
+  const currentKey = currentIntent ? JSON.stringify(currentIntent) : "";
   const lastPreference = useRef(desiredKey);
   const keys = useRef(new Map<string, string>());
   const busy = useRef(false);
@@ -33,10 +35,10 @@ export function StudyIntentControls({ attempt, desiredIntent, currentIntent, onA
     void fetch(`/api/opening/study/intent?sessionId=${attempt.sessionId}`, { signal: controller.signal, cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("学习意图暂不可读取");
       const result = z.object({ event: studyIntentEventSchema.nullable() }).parse(await response.json());
-      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); if (currentIntent && JSON.stringify(result.event.intent) === JSON.stringify(currentIntent)) { lastPreference.current = JSON.stringify(currentIntent); onAppliedRef.current?.(result.event.intent, "continue"); } }
+      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); if (currentKey && JSON.stringify(result.event.intent) === currentKey) { lastPreference.current = currentKey; onAppliedRef.current?.(result.event.intent, "continue"); } }
     }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "意图暂不可读取")); });
     return () => controller.abort();
-  }, [attempt.sessionId, currentIntent]);
+  }, [attempt.sessionId, currentKey]);
   const apply = useCallback(async (change: StudyIntentChange) => {
     const identity = JSON.stringify(change);
     if (busy.current || (unresolved.current && unresolved.current !== identity)) {

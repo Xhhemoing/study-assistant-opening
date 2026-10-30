@@ -37,6 +37,9 @@ it("replays the latest event only when it still matches the current durable sess
     await act(async () => root.render(<StudyIntentControls attempt={{ sessionId: id, courseId: id }} currentIntent={currentIntent} onApplied={applied} />));
     await act(async () => { await Promise.resolve(); });
     expect(applied).toHaveBeenCalledWith(currentIntent, "continue");
+    await act(async () => root.render(<StudyIntentControls attempt={{ sessionId: id, courseId: id }} currentIntent={{ ...currentIntent }} onApplied={applied} />));
+    expect(applied).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
   } finally { await act(async () => root.unmount()); host.remove(); fetch.mockRestore(); }
 });
 
