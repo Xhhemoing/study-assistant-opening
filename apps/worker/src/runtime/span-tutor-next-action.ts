@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import type { SpanLessonSnapshot } from "@aistudy/contracts";
-import { createOpeningSpanTutorContextRepository } from "@aistudy/database";
+import { createOpeningSpanTutorContextRepository, createOpeningLearningAgendaRepository } from "@aistudy/database";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import type { TutorNextAction, TutorNextActionContext, TutorNextActionService } from "../jobs/tutor-next-action";
 
@@ -16,6 +16,7 @@ function storedContext(context: TutorNextActionContext) {
 }
 export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
   const repository = createOpeningSpanTutorContextRepository(sql);
+  const agendaRepository = createOpeningLearningAgendaRepository(sql);
   return {
     async read(scope, request) {
       const context = await repository.read(scope, { ...request, entry: "worker" });
@@ -25,8 +26,10 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
         label: changed.reason === "evidence_changed" && changed.originSession ? "查看原活动的最新记录" : "核对课程资料和记录",
         href: changed.reason === "evidence_changed" && changed.originSession ? action(changed.originSession).href : `/opening/courses/${context!.courseId}#course-learning-records`,
       } : undefined;
+      const agenda = context?.resumeSession ? await agendaRepository.get(scope, context.courseId, context.resumeSession.activityId) : null;
       return context ? { courseId: context.courseId, privacyEpoch: context.privacyEpoch, sourceRefs: context.sourceRefs,
         decisionInput: context.decisionInput, spanContext: context, historicalDecision: context.historicalDecision,
+        agenda,
         ...(changeAction ? { unavailableAction: changeAction } : {}),
         ...(context.needsReservedIssue ? { resumeRequiresExecution: true } : {}),
         ...(context.unseenUnavailableReason ? { unavailableAction: {

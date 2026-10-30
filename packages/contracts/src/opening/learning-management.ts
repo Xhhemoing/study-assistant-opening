@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { learningAgendaSchema } from "./learning-agenda";
 import { calendarDateSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
 import { planDraftSchema, plannedBlockSchema } from "./planning";
 import { taskItemSchema } from "./planning-tasks";
@@ -22,7 +23,7 @@ export const learningCardSessionSchema = z.object({ activityId: uuidSchema, stat
 export const learningManagementOverviewSchema = z.object({
   date: calendarDateSchema, timeZone: z.string(), budget: learningManagementSettingsSchema.nullable(), acceptedVersion: z.number().int().nonnegative(),
   acceptedBlocks: z.array(plannedBlockSchema), committedMinutes: z.number().nonnegative(), remainingMinutes: z.number().nonnegative(), overcommittedMinutes: z.number().nonnegative(),
-  tasks: z.array(taskItemSchema), recovery: z.object({ kind: z.enum(["continue", "replan", "none"]), activityId: uuidSchema.nullable(), taskId: uuidSchema.nullable(), href: z.string().nullable() }).strict(),
+  tasks: z.array(taskItemSchema), recovery: z.object({ kind: z.enum(["continue", "replan", "none"]), activityId: uuidSchema.nullable(), taskId: uuidSchema.nullable(), href: z.string().nullable(), agenda: learningAgendaSchema.nullable().optional() }).strict(),
   warnings: z.array(z.string()), cardSessions: z.array(learningCardSessionSchema),
   maintenanceTasks: z.array(z.object({ taskId: uuidSchema, goalId: uuidSchema, requirementId: uuidSchema, version: z.number().int().positive() }).strict()).default([]),
 }).strict();

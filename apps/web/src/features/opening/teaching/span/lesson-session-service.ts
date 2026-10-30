@@ -1,5 +1,5 @@
 import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange } from "@aistudy/database";
+import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 
@@ -30,7 +30,8 @@ export function createSpanLessonSessionService(sql: Sql) {
         const levels = await learning.listDeliveredExposures(scope, session.sessionId, { attemptId: attempt.id, assessmentDomain: "math" });
         return [attempt.id, levels.includes("revealed") ? "revealed" : levels.includes("hinted") ? "hinted" : "none"];
       })));
-      return { session, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
+      const agenda = await createOpeningLearningAgendaRepository(sql).get(scope, session.courseId, session.activityId);
+      return { session, agenda, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
         ...(originChange ? { originChange } : {}) };
     },
   };

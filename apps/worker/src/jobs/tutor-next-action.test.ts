@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SnapshotObservation } from "@aistudy/domain";
+import { assembleLearningAgenda } from "@aistudy/domain";
 import { prepareTutorNextAction, type TutorNextActionContext, type TutorNextActionService } from "./tutor-next-action";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -26,6 +27,12 @@ function service(read: TutorNextActionContext | null) {
 }
 
 describe("tutor next action orchestration", () => {
+  it.each(["cancelled", "deferred", "completed"] as const)("never executes or claims a resume for a %s agenda", async status => {
+    const agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", status, resumable: false });
+    const { deps, executions } = service(context({ agenda, resume: { activityId: "old", sessionId: "session", href: "/old" } }));
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, resumed: false, choice: { label: "核对原学习记录" } });
+    expect(executions).toEqual([]);
+  });
   it.each([
     { name: "independent pass", row: observation(), kind: "transfer_check", reason: "independent" },
     { name: "verified error", row: observation({ verifiedCorrect: "no" }), kind: "targeted_explain", reason: "verified_incorrect" },
