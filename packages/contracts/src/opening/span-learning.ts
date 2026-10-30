@@ -73,6 +73,7 @@ export type StudySessionIntent = {
   language: "zh" | "en" | "bilingual";
   pace: "slow" | "normal" | "fast";
   explanationStyle?: "full" | "key_steps";
+  learningPhase?: "explore" | "new_learning" | "consolidate" | "maintain";
   continuous: boolean;
   selfReportedFatigue: "unknown" | "low" | "high";
 };

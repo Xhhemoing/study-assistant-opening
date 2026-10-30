@@ -34,6 +34,8 @@ export type OpeningSpanTutorContext = {
   originReference?: OpeningSpanTutorOriginReference;
   originSnapshotRevision?: number;
   needsReservedIssue?: boolean;
+  intentChangeRequiresChoice?: boolean;
+  needsIntentUpdate?: boolean;
   originChange?: OpeningSpanTutorOriginChange;
   historicalDecision?: NextLearningStep | null;
   historicalOperationId?: string;
@@ -47,11 +49,12 @@ export type OpeningSpanTutorExecuteInput = {
 const conflict = (message: string) => learningError("CONFLICT", message);
 const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}`;
 export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
-  return receipt?.policyVersion === `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-1`
+  return receipt && ["next-learning-step-1/span-tutor-execution-1", `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-2`].includes(receipt.policyVersion)
     ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
 }
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
+    || studyIntentForMessage(null, question)?.intent.learningPhase !== undefined
     || /^(?:请|帮我|我想)?(?:继续(?:学习|上次(?:学习)?|原来的学习)?|下一步|开始(?:本次学习|学习|练习)|出一道题|从哪里开始)[\s。！!？?]*$/u.test(question.trim());
 }
 export function spanTutorExactProjection(rows: SnapshotObservation[], evaluations: Array<{ id: string; evaluatorVersion: string | null }>) {
@@ -84,7 +87,7 @@ async function selectedSources(tx: TransactionSql, scope: Scope, courseId: strin
   await admitLearningSources(tx, scope, sourceIds, { readOnly: true, recordVersions: false });
   return { sourceIds, sourceVersions };
 }
-async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[], sourceVersions: Record<string, number>, wantsFullExplanation: boolean, focusObservationId?: string | null) {
+async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent, dueRetestId: string | null, focusObservationId?: string | null) {
   const db = transactionClient(tx);
   await selectedSources(tx, scope, courseId, sourceIds, sourceVersions);
   const all = await readOpeningCourseEvidence(db, scope, courseId);
@@ -115,7 +118,8 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   // An explicit continuation answers this activity's result. A newer session
   // can inform later course planning, but cannot replace the selected origin.
   const selected = focusObservationId ? current.filter(row => row.id === focusObservationId) : current;
-  const decisionInput: NextLearningStepInput = { observations: selected, wantsFullExplanation,
+  const decisionInput: NextLearningStepInput = { observations: selected, wantsFullExplanation: intent.explanationStyle === "full",
+    ...(intent.learningPhase ? { learningPhase: intent.learningPhase } : {}), phaseSource: intent.learningPhase ? "explicit" : "automatic", dueRetest: Boolean(dueRetestId),
     status: !selected.length ? "unobserved" : selected[0]!.verifiedCorrect === "yes" && selected[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check" };
   return { sourceRefs, decisionInput };
 }
@@ -137,7 +141,7 @@ async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot
       const problem = parseOpeningSpanExercise(row.evaluation_spec);
       return problem && getSpanReservedProblem(problem.id, problem.version);
     })) return null;
-  } else if (!dueRetestId && ["full_explain", "targeted_explain"].includes(decision.activityKind)) return null;
+  } else if (!dueRetestId && ["full_explain", "targeted_explain", "reduced_help_practice"].includes(decision.activityKind)) return null;
   return readOpeningSpanReservedChoice(db, scope, spanModeForIntent(intent), (session?.retestId || dueRetestId) ? "retest" : "validation");
 }
 async function assertContext(tx: TransactionSql, scope: Scope, context: OpeningSpanTutorContext) {
@@ -156,7 +160,7 @@ async function assertContext(tx: TransactionSql, scope: Scope, context: OpeningS
     }
   }
   if (context.originReference) await readOpeningSpanTutorOrigin(db, scope, context.originReference, context.courseId, context.originSnapshotRevision);
-  const current = await facts(tx, scope, context.courseId, context.sourceIds, context.sourceVersions, context.decisionInput.wantsFullExplanation, context.originReference?.observationId);
+  const current = await facts(tx, scope, context.courseId, context.sourceIds, context.sourceVersions, context.intent, context.dueRetestId ?? context.resumeSession?.retestId ?? null, context.originReference?.observationId);
   if (!isDeepStrictEqual(current.decisionInput, context.decisionInput) || !isDeepStrictEqual(current.sourceRefs, context.sourceRefs)) throw conflict("有效学习记录或帮助事实已变化，请重新读取后继续。");
   if (context.resumeSession) {
     const session = await createOpeningSpanSessionRepository(db).get(scope, context.resumeSession.activityId);
@@ -184,7 +188,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           if (!session) throw conflict("原学习回执的活动不存在。");
           const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
           return { ...captured, privacyEpoch: Number(workspace!.privacy_epoch), resumeSession: session,
-            historicalDecision: spanTutorReceiptDecision(prior), historicalOperationId: request.operationId, needsReservedIssue: false };
+            historicalDecision: spanTutorReceiptDecision(prior), historicalOperationId: request.operationId, needsReservedIssue: false, needsIntentUpdate: false, intentChangeRequiresChoice: false };
         }
         if (!authorization.authorized || !authorization.grant) return null;
         const db = transactionClient(tx);
@@ -204,16 +208,22 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           : await selectedSources(tx, scope, request.courseId, request.sourceIds, request.sourceVersions);
         const sourceIds = position.resumeSession?.sourceIds ?? selected.sourceIds;
         const sourceVersions = Object.fromEntries(sourceIds.map(id => [id, selected.sourceVersions[id]!]));
-        const intent = origin?.session.intent ?? position.resumeSession?.intent ?? studyIntentForMessage(null, request.question)?.intent ?? { ...DEFAULT_STUDY_SESSION_INTENT };
-        const projection = await facts(tx, scope, request.courseId, sourceIds, sourceVersions, intent.explanationStyle === "full", request.originReference?.observationId);
+        const previousIntent = origin?.session.intent ?? position.resumeSession?.intent ?? { ...DEFAULT_STUDY_SESSION_INTENT };
+        const intent = studyIntentForMessage({ intent: previousIntent, action: "continue" }, request.question)!.intent;
+        const needsIntentUpdate = !!position.resumeSession && !isDeepStrictEqual(intent, previousIntent);
+        const intentChangeRequiresChoice = needsIntentUpdate && (Boolean(position.resumeSession?.retestId) || position.resumeSession!.moveId.endsWith("-reserved"));
+        // Explicit learning leaves an accepted due task untouched for a later check.
+        if (!position.resumeSession && (intent.learningPhase === "new_learning" || intent.learningPhase === "consolidate")) position.dueRetestId = null;
+        const projection = await facts(tx, scope, request.courseId, sourceIds, sourceVersions, intent, position.dueRetestId ?? position.resumeSession?.retestId ?? null, request.originReference?.observationId);
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+
         const decision = nextLearningStep(projection.decisionInput);
         const reserved = await reservedChoice(db, scope, position.resumeSession, intent, decision, position.dueRetestId);
         return { courseId: request.courseId, grantRevision: authorization.grant.revision, privacyEpoch: Number(workspace!.privacy_epoch),
           ...(request.originReference ? { originReference: request.originReference, originSnapshotRevision: origin!.session.revision } : {}),
           ...(reserved?.kind === "unavailable" ? { unseenUnavailableReason: reserved.reason } : {}),
           ...(position.resumeSession && reserved?.kind === "available" ? { needsReservedIssue: true } : {}),
-          sourceIds, sourceVersions, intent, ...projection, ...position, entry: request.entry ?? "worker",
+          sourceIds, sourceVersions, intent, ...projection, ...position, needsIntentUpdate, intentChangeRequiresChoice, entry: request.entry ?? "worker",
           ...(position.resumeSession ? { historicalDecision: spanTutorReceiptDecision((await createOpeningLearningDecisionsRepository(db).list(scope,
             { layer: "activity", targetId: position.resumeSession.activityId }))[0] ?? null) } : {}) };
       }) as Promise<OpeningSpanTutorContext | null>;
@@ -268,13 +278,14 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         const db = transactionClient(tx), sessions = createOpeningSpanSessionRepository(db);
         await assertContext(tx, scope, context);
         if (context.originChange) throw Object.assign(conflict("原评价或材料已变化，请先重新选择下一步；已有学习记录保留。"), { originChange: context.originChange });
+        if (context.intentChangeRequiresChoice) throw conflict("当前题已发放或正在复测，请在原学习进度中明确选择暂停或调整；未覆盖当前题或提供答案。");
         if (!isDeepStrictEqual(input.decision, nextLearningStep(context.decisionInput))) throw conflict("下一活动选择已变化，请重新读取后继续。");
         if (!context.resumeSession && !context.originReference) {
           const position = await nextSession(db, scope, context.courseId);
           if (position.resumeSession) {
             context.resumeSession = position.resumeSession;
             await assertContext(tx, scope, context);
-          } else if (position.dueRetestId !== context.dueRetestId) throw conflict("当前到期复测已变化，请重新读取后继续。");
+          } else if (position.dueRetestId !== context.dueRetestId && context.intent.learningPhase !== "new_learning" && context.intent.learningPhase !== "consolidate") throw conflict("当前到期复测已变化，请重新读取后继续。");
         }
         const availability = await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
         if (availability?.kind === "unavailable") throw Object.assign(conflict("未见题暂不可发放，请保留原进度并核对课程记录；没有新增活动。"),
@@ -295,7 +306,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           const base = { stateVersion: state.stateVersion, dataAsOf: state.dataAsOf,
             goalVersion: JSON.stringify({ courseId: context.courseId, requirementKey: SPAN_REQUIREMENT_KEY, grantRevision: context.grantRevision }),
             intentVersion: JSON.stringify({ ...capturedContext, ruleDecision: rule.decision, execution }),
-            policyVersion: `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-1`, sourceVersions,
+            policyVersion: `${NEXT_LEARNING_STEP_VERSION}/span-tutor-execution-2`, sourceVersions,
             invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] as LearningDecisionInput["invalidationConditions"],
             selectedAction, reasonCodes, evidenceRefs,
             candidates: [...rule.candidates.map(candidate => ({ ...candidate, action: `rule:${candidate.action}`,
@@ -317,6 +328,13 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             context.resumeSession = (await sessions.get(scope, context.resumeSession.activityId))!;
             await saveDecision(context.resumeSession, "resume_issue");
           }
+          if (context.needsIntentUpdate) {
+            const moveId = input.decision.activityKind === "full_explain" ? "self-example"
+              : input.decision.activityKind === "reduced_help_practice" ? "self-faded" : context.resumeSession.moveId;
+            context.resumeSession = await sessions.save(scope, context.resumeSession.activityId, { expectedRevision: context.resumeSession.revision,
+              intent: context.intent, moveId, status: context.resumeSession.status });
+            await saveDecision(context.resumeSession, "resume_issue");
+          }
           return context.resumeSession;
         }
         if (context.originReference) {
@@ -329,7 +347,8 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
           intent: context.intent, clientKey: input.operationId, ...(context.dueRetestId ? { retestId: context.dueRetestId } : {}) });
         const mode = spanModeForIntent(context.intent);
         const explain = input.decision.activityKind === "full_explain" || input.decision.activityKind === "targeted_explain";
-        const moveId = context.dueRetestId || !explain ? `${mode}-reserved` as const
+        const moveId = !context.dueRetestId && input.decision.activityKind === "reduced_help_practice" && mode === "self_study" ? "self-faded"
+          : context.dueRetestId || !explain ? `${mode}-reserved` as const
           : mode === "overview" ? "overview-links" : mode === "challenge" ? "challenge-predict" : "self-example";
         if (session.moveId !== moveId && session.status !== "completed") session = await sessions.save(scope, session.activityId,
           { expectedRevision: session.revision, intent: session.intent, moveId, status: session.status });
