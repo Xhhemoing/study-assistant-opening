@@ -33,7 +33,7 @@ export function StudyIntentControls({ attempt, desiredIntent, currentIntent, onA
     void fetch(`/api/opening/study/intent?sessionId=${attempt.sessionId}`, { signal: controller.signal, cache: "no-store" }).then(async response => {
       if (!response.ok) throw new Error("学习意图暂不可读取");
       const result = z.object({ event: studyIntentEventSchema.nullable() }).parse(await response.json());
-      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); if (currentIntent) { lastPreference.current = JSON.stringify(currentIntent); } else { lastPreference.current = JSON.stringify(result.event.intent); onAppliedRef.current?.(result.event.intent, "continue"); } }
+      if (!controller.signal.aborted && mutation.current === 0 && result.event && result.event.version >= watermark.current) { watermark.current = result.event.version; setKnownEvent(result.event); if (currentIntent && JSON.stringify(result.event.intent) === JSON.stringify(currentIntent)) { lastPreference.current = JSON.stringify(currentIntent); onAppliedRef.current?.(result.event.intent, "continue"); } }
     }).catch(reason => { if (!controller.signal.aborted) setError(userFacingMessage(reason, "意图暂不可读取")); });
     return () => controller.abort();
   }, [attempt.sessionId, currentIntent]);

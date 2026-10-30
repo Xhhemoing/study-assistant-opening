@@ -26,6 +26,20 @@ it("offers the same four explanation actions and prepares an example in the less
   } finally { await act(async () => root.unmount()); host.remove(); fetch.mockRestore(); }
 });
 
+it("replays the latest event only when it still matches the current durable session intent", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const id = "11111111-1111-4111-8111-111111111111";
+  const currentIntent = { purpose: "challenge" as const, timeBudgetMinutes: 25, language: "zh" as const, pace: "fast" as const, continuous: true, selfReportedFatigue: "unknown" as const };
+  const event = { id, sessionId: id, activityId: id, attemptId: null, version: 1, change: { kind: "preference" as const, intent: currentIntent }, intent: currentIntent, signals: [], action: "continue" as const, createdAt: "2026-10-30T00:00:00.000Z" };
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ event }));
+  const applied = vi.fn(); const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(<StudyIntentControls attempt={{ sessionId: id, courseId: id }} currentIntent={currentIntent} onApplied={applied} />));
+    await act(async () => { await Promise.resolve(); });
+    expect(applied).toHaveBeenCalledWith(currentIntent, "continue");
+  } finally { await act(async () => root.unmount()); host.remove(); fetch.mockRestore(); }
+});
+
 it("does not replay a historical event over the current durable session intent", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const id = "11111111-1111-4111-8111-111111111111";
