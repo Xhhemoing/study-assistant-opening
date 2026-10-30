@@ -464,6 +464,9 @@ nextLearningStep（唯一决策入口；domain 无数据库或模型调用）
 - **最小变化：** 采真实开发 GPT 文本输出，绑定 datasetId/datasetVersion、caseVersion、modelLabel、源码提交、实际 instruction/prompt、rubric 与 protocol 版本；保存实际发出的 instruction。旧产物缺版本时保持 unknown，不用当前版本补写。正确、错误、无法判定均有独立程序或人工金标；pending 只作为候选，不能入准确率分母。按题型/模态/审核来源分别报告 raw 与 accepted 的 FP/FN、拒判、缺失/无效、覆盖率和分子/分母；报告 95% 单侧 Clopper–Pearson 上界，零分母为 null。照片仍列 `photo_not_supported`/unknown，不读取真实手写图。
 - **验收：** 缺失响应不从分母消失；缺失不冒充拒判；总是拒判不能被称为好批改器；夹具响应不能成为真实模型准确率；程序金标仅限其确定性 checker 适用范围，human_reviewed 与 program_verified 分开。真实命令沿用 `scripts/study-grading-collect.ts` → 私有 run/collection sidecar → `scripts/study-grading-eval.ts`，不新增第二个 runner。强证据消费留到 M2-A 同片接线，`calibrated` 保持 false。
 
+- **2026-10-30 实测进展：** 已用现有8个程序金标算术样本和10个pending文本样本采集18份真实开发GPT输出，2个照片占位未发送；两组现有eval重算一致。算术raw/accepted均8/8一致，FP0/4、FN0/4，各单侧95%上界52.71%；小样本且非随机，不能外推质量。pending/照片/人工语义金标保持unknown，calibrated=false。真实原始反馈出现C0字符，先判定U+0000持久化影响，只修真实阻塞，不扩新测量框架。
+- **原M1收口的下一最小验收：** 在已有集成测试复用同一合成身份/课程，串作答→真实交付帮助→评价→复测→system-query回执→取消/推迟→原键重放及预算；已有D1-R的14个独立场景和B1六结局证据保留，不冒称它们已覆盖同一条完整历史链。非空旧帮助和原观察全行保留，不重复建立账本；最小定向测试后按指定双模型审查收口。人工审核是证据缺口而非模型可代签项，不把完整M1写成通过。
+
 #### M2-A：一个决策入口，四种学习模式
 
 - **已存在：** `nextLearningStep` 和 `recommendTutorAction` 都在 domain，而非需要再次“下沉”；缺口是两套规则及课程路线选择还没完全合一，模式与连续证据策略尚未统一。
