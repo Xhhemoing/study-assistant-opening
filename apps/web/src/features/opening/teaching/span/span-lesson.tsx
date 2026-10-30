@@ -22,6 +22,7 @@ import { useDiagnosticsEnabled } from "../../settings/appearance-preferences";
 import { SpanTutorControl } from "./span-tutor-control";
 import { SpanNextActionControl, currentSpanObservationId } from "./span-next-action-control";
 import { isSpanReservedProblemId } from "./span-answer";
+import type { SpanExecutionPhase } from "./span-session-client";
 
 const modeLabels = { self_study: "自学 · 例题到独立新题", overview: "串讲 · 连接方程与几何", challenge: "拔高 · 预设迁移" };
 const modeProcess: Record<SpanTeachingMode, string> = {
@@ -35,7 +36,7 @@ export function isSpanReservedAttempt(attempt: LearningAttempt): boolean {
   return isSpanReservedProblemId(attempt.spanExercise?.id);
 }
 type SpanLessonProps = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string;
-  session?: SpanLessonSnapshot; restoredAttempts?: LearningAttempt[]; restoredObservations?: LearningObservation[]; restoredHintLevels?: Record<string, SpanHintLevel[]>; savingProgress?: boolean;
+  session?: SpanLessonSnapshot; executionPhase?: SpanExecutionPhase; restoredAttempts?: LearningAttempt[]; restoredObservations?: LearningObservation[]; restoredHintLevels?: Record<string, SpanHintLevel[]>; savingProgress?: boolean;
   onProgress?: (intent: StudySessionIntent, moveId: string, status: "active" | "paused" | "completed") => Promise<boolean>; onSummary?: () => void; onReload?: () => void };
 /** 步骤短标签；同名步骤（如两道独立新题）第二个起改为「迁移新题」以便区分。 */
 export function stepLabels(moves: readonly { presentation: { kind: string } }[]): string[] {
@@ -43,7 +44,7 @@ export function stepLabels(moves: readonly { presentation: { kind: string } }[])
   return base.map((label, index) => label === "独立新题" && base.indexOf(label) < index ? "迁移新题" : label);
 }
 
-export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, onReload, originalConversationId }: SpanLessonProps) {
+export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, executionPhase, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, onReload, originalConversationId }: SpanLessonProps) {
   const diagnostics = useDiagnosticsEnabled();
   const lessonRoot = useRef<HTMLElement>(null);
   const [intent, setIntent] = useState(initialIntent ?? defaultIntent);
@@ -103,7 +104,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
           </div>
         </details>
       </fieldset> : null}
-      {activeAttempt || session ? <StudyIntentControls key={activeAttempt?.id ?? session!.sessionId} attempt={activeAttempt ?? { sessionId: session!.sessionId, courseId }} desiredIntent={activeAttempt ? intent : undefined} onApplied={(next, action, evidenceEventId) => {
+      {activeAttempt || session ? <StudyIntentControls key={activeAttempt?.id ?? session!.sessionId} attempt={activeAttempt ?? { sessionId: session!.sessionId, courseId }} currentIntent={session?.intent ?? intent} desiredIntent={activeAttempt ? intent : undefined} onApplied={(next, action, evidenceEventId) => {
         setIntent({ ...next }); setIntentRevision(value => value + 1);
         const nextMode = spanModeForIntent(next);
         if (evidenceEventId) { setRecords(currentRecords => { const remaining = { ...currentRecords }; delete remaining["reserved:auto"]; return remaining; }); setNewEvidenceEventId(evidenceEventId); void goToStep(createSpanTeachingSequence(nextMode).length, next); }
@@ -117,7 +118,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
           {mode === "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : <SpanWorkedExample courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} fast={intent.pace === "fast"} />}
           {mode === "overview" ? <SpanOverviewLinks courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : null}
           {mode !== "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : null}
-        </> : unavailableRestoredQuestion ? <p role="alert" className="text-sm leading-7 text-warn">刚才的题目还未恢复。请到<Link className={ui.quiet} href={conversationObjectHref(`/opening/courses/${courseId}#course-learning-records`, originalConversationId)}>课程学习记录</Link>查看原题和答案，再继续学习。</p> : sourceLoadError || !sourceIds.length ? <p role="alert" className="text-sm leading-7 text-warn">课程材料暂时无法读取。请返回课程添加或恢复一份可用材料；你已写下的答案仍保留。</p> : <SpanPractice key={entryKey} session={session} restoredAttempt={restoredAttempt} restoredHintLevels={restoredAttempt ? restoredHintLevels[restoredAttempt.id] : undefined} courseId={courseId} sourceIds={sourceIds} problemId={problemId} intent={intent} intentRevision={intentRevision} newEvidenceEventId={newEvidenceEventId} retestId={delayedRetestId} onAttempt={onAttempt} onIntentApplied={(next, action) => { setIntent(next); const nextMode = spanModeForIntent(next); if (!delayedRetestId && (action === "diagnose" || action === "increase_challenge" || nextMode !== mode)) { setMode(nextMode); setStep(0); } }} onRecorded={record => setRecords(current => ({ ...current, [problemId]: record }))} />}
+        </> : unavailableRestoredQuestion ? <p role="alert" className="text-sm leading-7 text-warn">刚才的题目还未恢复。请到<Link className={ui.quiet} href={conversationObjectHref(`/opening/courses/${courseId}#course-learning-records`, originalConversationId)}>课程学习记录</Link>查看原题和答案，再继续学习。</p> : sourceLoadError || !sourceIds.length ? <p role="alert" className="text-sm leading-7 text-warn">课程材料暂时无法读取。请返回课程添加或恢复一份可用材料；你已写下的答案仍保留。</p> : <SpanPractice key={entryKey} executionPhase={executionPhase} session={session} restoredAttempt={restoredAttempt} restoredHintLevels={restoredAttempt ? restoredHintLevels[restoredAttempt.id] : undefined} courseId={courseId} sourceIds={sourceIds} problemId={problemId} intent={intent} intentRevision={intentRevision} newEvidenceEventId={newEvidenceEventId} retestId={delayedRetestId} onAttempt={onAttempt} onIntentApplied={(next, action) => { setIntent(next); const nextMode = spanModeForIntent(next); if (!delayedRetestId && (action === "diagnose" || action === "increase_challenge" || nextMode !== mode)) { setMode(nextMode); setStep(0); } }} onRecorded={record => setRecords(current => ({ ...current, [problemId]: record }))} />}
         </SelectionAsk>
       </section></ContentBlock>
       {complete || sourceLoadError || !sourceIds.length || !isPresentation && unavailableRestoredQuestion ? <div className="space-y-3 rounded-xl bg-surface-2 p-4"><h3 className="text-sm font-medium">下一步</h3>{complete ? <p className="prose-reading">{currentRecord?.serverEvaluation?.decision === "correct" ? studentCopy.nextCorrect : studentCopy.nextIncorrect}</p> : <p className="text-sm leading-7 text-text-2">原题和记录保留，先核对现在可以继续的学习。</p>}{complete && !delayedRetestId && currentRecord?.serverEvaluation?.decision !== "correct" ? <button type="button" className={ui.secondary} onClick={() => void goToStep(0)}>回看关系与示范</button> : null}{session ? <SpanNextActionControl session={session} observationId={currentSpanObservationId([...restoredObservations, ...Object.values(records)], session)} onReload={onReload} disabled={savingProgress} /> : null}{currentRecord && !delayedRetestId ? <SpanDelayedRetestControl key={currentRecord.id} record={currentRecord} /> : null}</div> : null}

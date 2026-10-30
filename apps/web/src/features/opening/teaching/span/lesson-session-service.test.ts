@@ -3,8 +3,10 @@ import type { LearningAttempt, Scope, SpanLessonSnapshot } from "@aistudy/contra
 import type { Sql } from "postgres";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { learningObservation } from "../../../../../../../packages/domain/src/opening/learning-summary-fixtures";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), agendaGet: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn(), originChange: vi.fn() }));
-vi.mock("@aistudy/database", () => ({
+const mocks = vi.hoisted(() => ({ decisions: vi.fn(), get: vi.fn(), agendaGet: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn(), originChange: vi.fn() }));
+vi.mock("@aistudy/database", async original => ({
+  spanTutorReceiptDecision: (await original<typeof import("@aistudy/database")>()).spanTutorReceiptDecision,
+  createOpeningLearningDecisionsRepository: () => ({ list: mocks.decisions }),
   createOpeningSpanSessionRepository: () => mocks,
   createOpeningLearningAgendaRepository: () => ({ get: mocks.agendaGet }),
   createOpeningLearningAttemptRepository: () => mocks,
@@ -20,7 +22,7 @@ const scope: Scope = { workspaceId: id, ownerUserId: id };
 const session: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-independent", status: "paused", revision: 4, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", requirementKey: null, historyRevision: 0, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")!, startedAt: session.createdAt, submittedAt: null, observationId: null };
 beforeEach(() => { vi.clearAllMocks(); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.agendaGet.mockResolvedValue(null); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
-const service = () => createSpanLessonSessionService({} as Sql);
+const service = () => { mocks.decisions.mockResolvedValue([]); return createSpanLessonSessionService({} as Sql); };
 it("recovers only the exact activity's shared session and effective facts without rewriting first-answer help", async () => {
   const original = { ...learningObservation, courseId: id, sessionId: id, attemptId: id, assistance: "independent" as const };
   mocks.listByActivity.mockResolvedValue([{ ...attempt, outcome: "correct", assistance: "independent" }, { ...attempt, id: other, sessionId: other }]);
