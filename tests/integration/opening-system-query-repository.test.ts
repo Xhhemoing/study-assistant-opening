@@ -147,7 +147,7 @@ describe("owned read-only system query against PostgreSQL", () => {
     const result = await read({ name: "learning", arguments: { courseId: f.courseId } });
     expect(result.status).toBe("ok");
     expect(result.data[0]).toMatchObject({ id: observation.id, attemptId: observation.attemptId, itemVersionId: observation.itemVersionId,
-      answerExcerpt: "1", projectionFresh: true, eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v3" } });
+      answerExcerpt: "1", projectionFresh: true, eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown", policyVersion: "opening-evidence-v4" } });
     expect(result.evidence[0]).toMatchObject({ recordId: observation.id, attemptId: observation.attemptId });
     expect(result.sourceRefs).toContainEqual({ sourceId: f.sourceId, sourceVersion: 1 });
     expect(await read({ name: "learning", arguments: { courseId: randomUUID() } })).toMatchObject({ status: "unknown", reason: "not_available", data: [] });

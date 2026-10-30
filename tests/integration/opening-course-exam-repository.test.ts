@@ -43,7 +43,7 @@ it("publishes a course-specific mock with hidden answers and grades free answers
   expect((await grading.context(fixture.scope, { observationId: original.id })).referenceText).toContain("秩等于2");
   const graded = await grading.apply(fixture.scope, { observationId: original.id }, { outcome: "correct", confidence: 0.93,
     questionMatch: true, feedback: "正确", criteria: [{ label: "矩阵秩", verdict: "correct", feedback: "两列线性无关" }] }, "fixture-model");
-  expect(graded.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "yes" });
+  expect(graded.eligibility).toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "yes" });
   expect(graded.skillLabel).toBe("矩阵秩");
   expect((await f.repo.begin(fixture.scope, f.courseId, f.input)).request.activityId).toBe(activityId);
   expect(await f.repo.complete(fixture.scope, f.courseId, ctx.request.id, proposal(f.chunkId), "fixture-model")).toBe(activityId);

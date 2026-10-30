@@ -5,7 +5,7 @@ import { evaluateEvidenceEligibility, type EvidenceEligibilityContext, type Evid
 import { observation, context, exposure } from "./evidence-eligibility-fixtures";
 import { courseEvidence, learningObservation } from "./learning-summary-fixtures";
 import { toSnapshotEvidence } from "./adaptive/snapshot-evidence";
-import { nextLearningStep } from "./adaptive/next-learning-step";
+
 
 const answer: EvidenceObservation = { ...observation, observationId: learningObservation.id, verdictSource: "ai_graded" };
 const evaluation: AiEvaluation = {
@@ -17,12 +17,20 @@ const evaluation: AiEvaluation = {
 };
 const captured: EvidenceEligibilityContext = { ...context, aiEvaluation: evaluation };
 
-it("accepts a server AI assessment independently of assistance and permits an unknown requirement", () => {
-  expect(evaluateEvidenceEligibility(answer, captured)).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "yes" });
+it("keeps an otherwise valid ai-rubric-v1 assessment uncalibrated", () => {
+  expect(evaluateEvidenceEligibility(answer, captured)).toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "yes" });
+  expect(evaluateEvidenceEligibility(answer, captured).reasonCodes).toEqual(expect.arrayContaining(["ai_graded_correct", "ai_evaluation_uncalibrated"]));
   expect(evaluateEvidenceEligibility({ ...answer, requirementKey: null }, {
     ...captured, aiEvaluation: { ...evaluation, requirementKey: null },
-  }).verifiedCorrect).toBe("yes");
+  }).verifiedCorrect).toBe("unknown");
   expect(acceptedAiGradingOutcome(evaluation)).toBe("correct");
+});
+
+it.each(["correct", "incorrect"] as const)("does not promote confidence=1 AI %s to binary evidence", outcome => {
+  const proposal = { ...evaluation, outcome, confidence: 1, criteria: [{ label: "结果", verdict: outcome, feedback: "核对结果。" }] };
+  const result = evaluateEvidenceEligibility({ ...answer, outcome }, { ...captured, aiEvaluation: proposal });
+  expect(result).toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "yes", usableForDelayedCheck: "unknown" });
+  expect(acceptedAiGradingOutcome(proposal)).toBe(outcome);
 });
 
 it.each(["observationId", "attemptId", "problemId", "itemVersionId", "requirementKey"] as const)("rejects AI assessment attached to another %s", field => {
@@ -71,24 +79,33 @@ it("feeds only current, accepted incorrect criteria into the next lesson", () =>
 
 it("retains assistance and rejects independent credit after a hint or an unknown help history", () => {
   expect(evaluateEvidenceEligibility(answer, { ...captured, helpHistory: { complete: true, exposures: [exposure] } }))
-    .toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForDelayedCheck: "no" });
+    .toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "no", usableForDelayedCheck: "no" });
   expect(evaluateEvidenceEligibility(answer, { ...captured, helpHistory: { complete: false, exposures: [] } }))
-    .toMatchObject({ verifiedCorrect: "yes", independentAttempt: "unknown" });
+    .toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "unknown" });
+});
+
+it("keeps valid AI delayed-check status unknown while retaining definite timing and availability exclusions", () => {
+  expect(evaluateEvidenceEligibility(answer, captured)).toMatchObject({ verifiedCorrect: "unknown", usableForDelayedCheck: "unknown" });
+  expect(evaluateEvidenceEligibility(answer, { ...captured, version: { applicability: "unavailable" } }))
+    .toMatchObject({ verifiedCorrect: "unknown", usableForDelayedCheck: "no" });
+  expect(evaluateEvidenceEligibility(answer, { ...captured,
+    delayedCheck: { ...captured.delayedCheck!, earliestAt: answer.startedAt! + 1 },
+  })).toMatchObject({ verifiedCorrect: "unknown", usableForDelayedCheck: "no" });
 });
 
 it.each([
-  { outcome: "correct" as const, assistance: "hinted" as const, expected: "reduced_help_practice" },
-  { outcome: "incorrect" as const, assistance: "independent" as const, expected: "targeted_explain" },
-  { outcome: "correct" as const, assistance: "independent" as const, expected: "transfer_check" },
-  { outcome: "correct" as const, assistance: "unknown" as const, expected: "transfer_check" },
-])("routes AI $outcome with $assistance to $expected through the actual snapshot", ({ outcome, assistance, expected }) => {
+  { outcome: "correct" as const, assistance: "hinted" as const },
+  { outcome: "incorrect" as const, assistance: "independent" as const },
+  { outcome: "correct" as const, assistance: "independent" as const },
+  { outcome: "correct" as const, assistance: "unknown" as const },
+])("keeps AI $outcome with $assistance out of strong snapshot status", ({ outcome, assistance }) => {
   const facts = { observation: { ...answer, outcome, assistance }, context: { ...captured,
     aiEvaluation: { ...evaluation, outcome, criteria: [{ label: "结果", verdict: outcome, feedback: "计算评阅。" }] },
   } };
   const evidence = courseEvidence(facts);
   evidence.observations[0] = { ...learningObservation, verdictSource: "ai_graded", outcome, assistance };
   const snapshot = toSnapshotEvidence(evidence, new Date("2026-10-21T08:00:00Z"));
-  expect(nextLearningStep({ status: snapshot.summaries[0]!.status, observations: snapshot.observations, wantsFullExplanation: false }).activityKind).toBe(expected);
+  expect(snapshot.summaries[0]!.status).toBe("needs_check");
   expect(isAiGradedEvidence(evaluateEvidenceEligibility(facts.observation, facts.context))).toBe(true);
 });
 
@@ -99,7 +116,6 @@ it("asks for independent practice after a correct photo without inventing a requ
   evidence.observations[0] = { ...learningObservation, requirementKey: null, verdictSource: "ai_graded", assistance: "unknown" };
   const snapshot = toSnapshotEvidence(evidence, new Date("2026-10-21T08:00:00Z"));
   expect(snapshot.summaries[0]).toMatchObject({ requirementKey: null, status: "needs_check" });
-  expect(snapshot.observations[0]).toMatchObject({ requirementKey: null, verifiedCorrect: "yes", independentAttempt: "unknown" });
-  expect(nextLearningStep({ status: snapshot.summaries[0]!.status, observations: snapshot.observations, wantsFullExplanation: false }))
-    .toEqual({ activityKind: "transfer_check", focusObservationId: null, reasonCode: "correct_needs_independent_check" });
+  expect(snapshot.observations[0]).toMatchObject({ requirementKey: null, verifiedCorrect: "unknown", independentAttempt: "unknown" });
+  expect(snapshot.summaries[0]!.status).toBe("needs_check");
 });

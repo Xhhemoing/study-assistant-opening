@@ -21,9 +21,11 @@ import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runti
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
 import { createOpeningFixture,type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { controlledCourseGrading } from "./opening-controlled-grade-fixture";
 let f:OpeningFixture;
-beforeEach(async()=>{f=await createOpeningFixture();vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0");});
-afterEach(async()=>{vi.unstubAllEnvs();await f?.close();});
+let gradingFixture:ReturnType<typeof controlledCourseGrading>;
+beforeEach(async()=>{f=await createOpeningFixture();gradingFixture=controlledCourseGrading();vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0");});
+afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();await f?.close();});
 const ready=(value:CourseRouteActionResult)=>{expect(value.kind).toBe("ready");if(value.kind!=="ready")throw new Error(JSON.stringify(value));return value;};
 async function seed(count=1){
   const courseId=randomUUID(),rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
@@ -61,7 +63,7 @@ async function answer(activity:TeachingActivity,index=0,outcome:"correct"|"incor
   const service=createOpeningAttemptService(f.sql),attempt=await service.create(f.scope,{sessionId:session.id,clientKey:randomUUID(),teachingBlock:{blockId:blocks[index]!.blockId,contentVersion:1}});
   const columns=Number(attempt.stemSnapshot!.match(/3×(\d+)/u)![1]);
   const original=await service.submit(f.scope,attempt.id,{clientKey:randomUUID(),answer:outcome==="correct"?String(columns-2):"-99",outcome:"unverified",assistance,verdictSource:"self_report"});
-  const observation=grade?await createOpeningAiGradingRepository(f.sql).apply(f.scope,{observationId:original.id},{outcome,confidence:.99,questionMatch:true,feedback:"按保存的秩与零空间标准核对。",criteria:[{label:"秩与零空间",verdict:outcome,feedback:"核对列数减秩。"}]},"controlled-fixture"):original;
+  const observation=grade?await gradingFixture.apply(createOpeningAiGradingRepository(f.sql),f.scope,{observationId:original.id},{outcome,confidence:.99,questionMatch:true,feedback:"按保存的秩与零空间标准核对。",criteria:[{label:"秩与零空间",verdict:outcome,feedback:"核对列数减秩。"}]},"controlled-fixture"):original;
   return {attempt,observation,session};
 }
 async function mapped(){

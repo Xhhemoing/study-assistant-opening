@@ -145,7 +145,7 @@ export function evaluateEvidenceEligibility(
     usableForCurrentVersion: "unknown",
     usableForDelayedCheck: "unknown",
     reasonCodes: [],
-    policyVersion: "opening-evidence-v3",
+    policyVersion: "opening-evidence-v4",
   };
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     result.reasonCodes.push("observation_identity_incomplete");

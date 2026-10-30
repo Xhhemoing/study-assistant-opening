@@ -92,7 +92,7 @@ function entryMetadata(entry: TutorL0Case["entry"]) {
     case "tutor.thin": return { entrypoint: "tutor-policy.recommendTutorAction(thin)", policyVersion: "unversioned:thin-existing-rules" };
     case "tutor.adaptive": return { entrypoint: "tutor-policy.recommendTutorAction(adaptive)", policyVersion: "unversioned:adaptive-existing-rules" };
     case "courseRouteRetestOutcome": return { entrypoint: "course-route-retest.courseRouteRetestOutcome", policyVersion: "unversioned:course-route-retest-existing-rules" };
-    case "evaluateEvidenceEligibility": return { entrypoint: "evidence-eligibility.evaluateEvidenceEligibility", policyVersion: "opening-evidence-v3" };
+    case "evaluateEvidenceEligibility": return { entrypoint: "evidence-eligibility.evaluateEvidenceEligibility", policyVersion: "opening-evidence-v4" };
   }
 }
 export function executeTutorL0Case(row: TutorL0Case): unknown {

@@ -86,16 +86,16 @@ describe("generic teaching hint ledger", () => {
     }, "test-grader");
     const state = await createOpeningLearnerStateService(fixture.sql).read(fixture.scope, { courseId: f.courseId });
     const feature = state.features.find(row => row.observationId === graded.id)!;
-    expect(feature.eligibility).toMatchObject({ verifiedCorrect: "yes", usableForCurrentVersion: "yes", independentAttempt: hinted ? "no" : "yes" });
+    expect(feature.eligibility).toMatchObject({ verifiedCorrect: "unknown", usableForCurrentVersion: "yes", independentAttempt: hinted ? "no" : "yes" });
     expect(state.features.some(row => row.observationId === original.id)).toBe(false);
     const summary = state.summary.find(row => row.requirementKey === graded.requirementKey)!;
-    expect(summary).toMatchObject({ sampleCount: 1, status: hinted ? "needs_check" : "observed_independent" });
+    expect(summary).toMatchObject({ sampleCount: 1, status: "needs_check" });
     expect(nextLearningStep({ wantsFullExplanation: false, status: summary.status, observations: [{
       id: graded.id, skillLabel: graded.skillLabel, attemptedAt: graded.submittedAt ?? graded.occurredAt,
       problemId: graded.problemId ?? null, assistance: graded.assistance,
       independentAttempt: feature.eligibility.independentAttempt,
       verifiedCorrect: feature.eligibility.verifiedCorrect, usableForCurrentVersion: feature.eligibility.usableForCurrentVersion,
-    }] }).activityKind).toBe(hinted ? "reduced_help_practice" : "transfer_check");
+    }] }).activityKind).toBe("diagnose");
     const [saved] = await fixture.sql`SELECT answer,outcome FROM opening_learning_observations WHERE id=${original.id}`;
     expect(saved).toMatchObject({ answer: "2", outcome: "unverified" });
   });
