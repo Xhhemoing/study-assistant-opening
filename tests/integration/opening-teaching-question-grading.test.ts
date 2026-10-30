@@ -94,7 +94,7 @@ it.each([false, true])("grades a canonical classroom question and preserves corr
   expect(context.referenceText).toContain("评分要点");
   const graded = await f.grader.apply(fixture.scope, { observationId: original.id }, proposal, "fixture");
   expect(graded).toMatchObject({ verdictSource: "ai_graded", outcome: "correct", eligibility: {
-    independentAttempt: "yes", verifiedCorrect: "yes", usableForCurrentVersion: "yes",
+    independentAttempt: "yes", verifiedCorrect: "unknown", usableForCurrentVersion: "yes",
   } });
   const corrected = await f.learning.reviseObservation(fixture.scope, { rootObservationId: original.id, revisesObservationId: graded.id,
     expectedHead: graded.id, clientKey: randomUUID(), revisionKind: "replace", reason: "判错了",
@@ -149,7 +149,7 @@ it("keeps the same identity and prior help when the learner reopens a question",
   expect(second.problemId).toBe(first.problemId);
   expect(second.itemVersionId).toBe(first.itemVersionId);
   const original = await f.submit(second), graded = await f.grader.apply(fixture.scope, { observationId: original.id }, proposal, "fixture");
-  expect(graded.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes", usableForCurrentVersion: "yes" });
+  expect(graded.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown", usableForCurrentVersion: "yes" });
 });
 
 it("preserves delivered hints from pre-upgrade classroom attempts without a problem identity", async () => {
@@ -162,7 +162,7 @@ it("preserves delivered hints from pre-upgrade classroom attempts without a prob
   const current = await f.start(), original = await f.submit(current);
   expect(current.problemId).not.toBe(legacy.problemId);
   const graded = await f.grader.apply(fixture.scope, { observationId: original.id }, proposal, "fixture");
-  expect(graded.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "yes" });
+  expect(graded.eligibility).toMatchObject({ independentAttempt: "no", verifiedCorrect: "unknown" });
 });
 
 it("rejects copied question IDs, mutable problem upserts, foreign owners and missing source provenance", async () => {

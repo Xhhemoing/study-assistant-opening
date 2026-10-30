@@ -9,8 +9,11 @@ import { backupRows } from "./opening-backup-records-fixture";
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 afterAll(async () => { await fixture?.close(); });
-async function wrongAnswer() {
-  const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start(), { outcome: "unverified", answer: "2" });
+async function wrongAnswer(withHelp = true) {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  // Real delivered help remains usable context even when an AI verdict is uncalibrated.
+  if (withHelp) await f.help(attempt);
+  const original = await f.submit(attempt, { outcome: "unverified", answer: "2" });
   const graded = await createOpeningAiGradingRepository(fixture.sql).apply(fixture.scope, { observationId: original.id }, {
     outcome: "incorrect", questionMatch: true, confidence: 0.95, feedback: "同分母相加只加分子，分母保持不变。",
     criteria: [{ label: "分母", verdict: "incorrect", feedback: "不应把分母相加。" }],
@@ -19,7 +22,7 @@ async function wrongAnswer() {
   return { ...f, original, graded, repository, read: () => repository.read(fixture.scope, { courseId: f.courseId, sourceIds: [f.sourceId] }) };
 }
 
-it("provides course goal, current mistakes and provenance without crossing courses or ignoring material selections", async () => {
+it("provides course goal, actual help and provenance without treating AI-only mistakes as verified", async () => {
   const f = await wrongAnswer(), other = await wrongAnswer();
   await fixture.sql`UPDATE courses SET description='十天后期末，完成基础题' WHERE id=${f.courseId}`;
   const prefs = { ...DEFAULT_OPENING_ADAPTIVE_PREFS, courseGoals: { [f.courseId]: { targetDate: "2026-10-31", weeklyMinutes: 420 } } };
@@ -27,14 +30,21 @@ it("provides course goal, current mistakes and provenance without crossing cours
     ON CONFLICT(workspace_id) DO UPDATE SET adaptive_planning=EXCLUDED.adaptive_planning`;
   const context = await f.read();
   expect(context).toMatchObject({ courseId: f.courseId, goal: { description: "十天后期末，完成基础题", targetDate: "2026-10-31", weeklyMinutes: 420 },
-    weaknesses: [{ skillLabel: "fractions", incorrect: 1, samples: 1 }],
-    recentMistakes: [{ observationId: f.graded.id, feedback: "同分母相加只加分子，分母保持不变。", unmetCriteria: ["分母：不应把分母相加。"] }],
+    weaknesses: [{ skillLabel: "fractions", incorrect: 0, assisted: 1, samples: 1 }],
+    recentMistakes: [], observationIds: [f.graded.id],
     sourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
   expect(context!.observationIds).not.toContain(other.graded.id);
   await expect(f.repository.assertCurrent(fixture.scope, context!)).resolves.toBeUndefined();
   expect(await f.repository.read(fixture.scope, { courseId: f.courseId, sourceIds: [] })).toMatchObject({ weaknesses: [], recentMistakes: [], sourceRefs: [] });
   await expect(f.repository.read(fixture.otherScope, { courseId: f.courseId, sourceIds: [f.sourceId] })).rejects.toMatchObject({ code: "NOT_FOUND" });
   expect(await f.repository.read(fixture.scope, { sourceIds: [] })).toBeNull();
+});
+
+it("keeps unassisted AI-only feedback without declaring a confirmed weakness", async () => {
+  const f = await wrongAnswer(false);
+  expect(f.graded).toMatchObject({ outcome: "incorrect", aiEvaluation: { feedback: "同分母相加只加分子，分母保持不变。" },
+    eligibility: { verifiedCorrect: "unknown", independentAttempt: "yes" } });
+  expect(await f.read()).toMatchObject({ weaknesses: [], recentMistakes: [], observationIds: [], sourceRefs: [] });
 });
 
 it("uses effective heads and refuses a corrected or retracted snapshot before model send", async () => {
@@ -57,7 +67,7 @@ it("excludes unavailable and privacy-blocked evidence, including a change betwee
   expect(await f.read()).toMatchObject({ weaknesses: [], recentMistakes: [], sourceRefs: [] });
 });
 
-it("does not let five recent strong skills hide an earlier current weakness", async () => {
+it("does not let five recent AI-only results hide an earlier delivered-help dependency", async () => {
   const f = await wrongAnswer();
   for (let index = 0; index < 5; index++) {
     const skillLabel = `strong skill ${index}`;
@@ -67,7 +77,7 @@ it("does not let five recent strong skills hide an earlier current weakness", as
       outcome: "correct", questionMatch: true, confidence: 0.95, feedback: "计算正确。", criteria: [{ label: "计算", verdict: "correct", feedback: "相加得一。" }],
     }, "fixture");
   }
-  expect(await f.read()).toMatchObject({ weaknesses: [{ skillLabel: "fractions", incorrect: 1 }], observationIds: [f.graded.id] });
+  expect(await f.read()).toMatchObject({ weaknesses: [{ skillLabel: "fractions", incorrect: 0, assisted: 1 }], recentMistakes: [], observationIds: [f.graded.id] });
 });
 
 it("captures all correction lineage sources and refuses unversioned, unselected or changed ancestors", async () => {
@@ -78,7 +88,7 @@ it("captures all correction lineage sources and refuses unversioned, unselected 
   expect(await f.read()).toMatchObject({ weaknesses: [], recentMistakes: [], sourceRefs: [] });
   const read = () => f.repository.read(fixture.scope, { courseId: f.courseId, sourceIds: [f.sourceId, ancestorSource] });
   const context = await read();
-  expect(context).toMatchObject({ recentMistakes: [{ observationId: f.graded.id }], sourceRefs: expect.arrayContaining([
+  expect(context).toMatchObject({ recentMistakes: [], observationIds: [f.graded.id], sourceRefs: expect.arrayContaining([
     { sourceId: f.sourceId, sourceVersion: 1 }, { sourceId: ancestorSource, sourceVersion: 1 },
   ]) });
   await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${ancestorSource}`;

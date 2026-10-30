@@ -49,7 +49,9 @@ export function toSnapshotEvidence(
       independentAttempt: eligibility.independentAttempt,
       usableForCurrentVersion: eligibility.usableForCurrentVersion,
       problemId: row.problemId ?? null,
-      ...(row.outcome === "incorrect" && eligibility.verifiedCorrect === "no" && eligibility.usableForCurrentVersion === "yes" ? {
+      ...(row.outcome === "incorrect" && eligibility.usableForCurrentVersion === "yes" && (
+        eligibility.verifiedCorrect === "no" || eligibility.reasonCodes.includes("ai_evaluation_uncalibrated")
+      ) ? {
         errors: row.verdictSource === "ai_graded" && row.aiEvaluation
           ? row.aiEvaluation.criteria.filter(criterion => criterion.verdict === "incorrect").slice(0, 3)
             .map(criterion => ({ observationId: row.id, label: criterion.label.slice(0, 200), feedback: criterion.feedback.slice(0, 1000), source: "ai_feedback" as const,

@@ -64,12 +64,12 @@ it("only explicitly regrades the saved correction, with one durable paid key and
   await jobs.enqueue(f.scope,{observationId:corrected.observation.id});
   const context=await x.repository.context(f.scope,{observationId:corrected.observation.id});expect(context.interpretation?.correctedTranscription).toBe(x.input.correctedTranscription);
   x.setOutput(proposal("correct"));const graded=await x.service.grade(f.scope,{observationId:corrected.observation.id});
-  expect(graded).toMatchObject({outcome:"correct",aiEvaluation:{proofFeedback:{coverage:"complete"}},eligibility:{independentAttempt:"no",verifiedCorrect:"yes"}});
+  expect(graded).toMatchObject({outcome:"correct",aiEvaluation:{proofFeedback:{coverage:"complete"}},eligibility:{independentAttempt:"no",verifiedCorrect:"unknown"}});
   expect((await x.service.grade(f.scope,{observationId:corrected.observation.id})).id).toBe(graded.id);expect(x.provider).toHaveBeenCalledTimes(2);
   expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(2);
   const facts=toSnapshotEvidence(await readOpeningCourseEvidence(f.sql,f.scope,x.courseId),new Date());
   expect(facts.observations.map(row=>row.id)).toEqual([graded.id]);
-  expect(nextLearningStep({status:"needs_check",observations:facts.observations,wantsFullExplanation:false}).activityKind).toBe("reduced_help_practice");
+  expect(nextLearningStep({status:"needs_check",observations:facts.observations,wantsFullExplanation:false}).activityKind).toBe("diagnose");
 });
 it("cannot escape an unresolved original-photo charge by saving a correction or enqueueing a new operation",async()=>{
   const x=await seed();await f.sql`UPDATE opening_budget_reservations SET outcome_unknown_at=now(),pending_reconcile_cents=1 WHERE workspace_id=${f.scope.workspaceId}`;

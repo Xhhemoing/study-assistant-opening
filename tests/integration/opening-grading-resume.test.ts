@@ -22,11 +22,17 @@ async function seed() {
   return { ...f, attempt, original, graded, grader, activityId, heads };
 }
 
-it("resumes the effective AI result, and a lost response replay creates no additional score or scan", async () => {
+it("resumes AI-only evidence as unverified, and a lost response replay preserves feedback without an additional score or scan", async () => {
   const f = await seed(), heads = await f.heads();
-  expect(heads).toEqual([{ problemId: f.original.problemId, itemVersionId: f.original.itemVersionId, outcome: "correct" }]);
-  expect(deriveOpenProblems({ attempts: [], observationHeads: heads, checkpointOpenProblemIds: [f.original.problemId!] })).toEqual([]);
+  expect(heads).toEqual([{ problemId: f.original.problemId, itemVersionId: f.original.itemVersionId, outcome: "unverified" }]);
+  expect(deriveOpenProblems({ attempts: [], observationHeads: heads, checkpointOpenProblemIds: [f.original.problemId!] })).toEqual([
+    { problemId: f.original.problemId, itemVersionId: f.original.itemVersionId, reason: "unverified_unresolved" },
+  ]);
   expect((await f.grader.apply(fixture.scope, { observationId: f.original.id }, proposal, "fixture")).id).toBe(f.graded.id);
+  const [stored] = await fixture.sql`SELECT outcome, to_jsonb(o) AS fact FROM opening_learning_observations o WHERE id=${f.graded.id}`;
+  expect(stored!.outcome).toBe("correct");
+  expect(JSON.stringify(stored!.fact)).toContain(proposal.feedback);
+  expect(JSON.stringify(stored!.fact)).toContain(proposal.criteria[0]!.feedback);
   expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE COALESCE(root_observation_id,id)=${f.original.id}`).toHaveLength(2);
   expect(await fixture.sql`SELECT id FROM opening_jobs WHERE key=${`retest-scan:${f.courseId}:${f.graded.id}`}`).toHaveLength(1);
   expect(await listObservationHeadsByActivity(fixture.sql, fixture.otherScope, f.activityId)).toEqual([]);

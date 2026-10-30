@@ -142,6 +142,7 @@ export type EvidenceEligibilityReasonCode =
   | "ai_evaluation_criteria_inconsistent"
   | "ai_graded_correct"
   | "ai_graded_incorrect"
+  | "ai_evaluation_uncalibrated"
   | "reference_check_incomplete"
   | "reference_check_scope_incomplete"
   | "reference_check_identity_mismatch"
@@ -172,5 +173,5 @@ export interface EvidenceEligibility {
   usableForCurrentVersion: EvidenceEligibilityValue;
   usableForDelayedCheck: EvidenceEligibilityValue;
   reasonCodes: EvidenceEligibilityReasonCode[];
-  policyVersion: "opening-evidence-v1" | "opening-evidence-v2" | "opening-evidence-v3";
+  policyVersion: "opening-evidence-v1" | "opening-evidence-v2" | "opening-evidence-v3" | "opening-evidence-v4";
 }
