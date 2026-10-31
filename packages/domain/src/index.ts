@@ -530,3 +530,4 @@ export * from "./opening/course-route-retest";
 export * from "./opening/backup-learning-goals";
 export * from "./opening/course-shared-skill";
 export * from "./opening/proof-feedback";
+export * from "./opening/deidentified-dataset";
