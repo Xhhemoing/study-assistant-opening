@@ -1,6 +1,6 @@
 "use client";
 import { TransitionLink as Link } from "../../v3/motion/view-transition";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { spanLessonSnapshotSchema, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, spanModeForIntent } from "@aistudy/domain";
 import { ui } from "../../design/ui";
@@ -11,6 +11,10 @@ import { userFacingMessage } from "../../../../lib/user-facing-error";
 import { SpanNextActionControl } from "./span-next-action-control";
 import { spanProblemText } from "./span-problem-text";
 import { isSpanReservedProblemId } from "./span-answer";
+
+import { useOpeningCapabilities } from "../../capabilities/capabilities-provider";
+import { createSpanStudySession } from "../../study-session/adapters/span";
+import { StudySession } from "../../study-session/study-session-shell";
 
 type Props = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string; initialActivityId?: string };
 const endpoint = "/api/opening/teaching/span/lesson";
@@ -117,6 +121,9 @@ export function SpanLessonSession(props: Props) {
     } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "进度保存未确认。")); return false; }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
+  const { studySessionV2 } = useOpeningCapabilities();
+  const v2Port = useMemo(() => studySessionV2 && details?.session && !details.originChange && !props.delayedRetestId
+    ? createSpanStudySession(details, save) : null, [studySessionV2, details, props.delayedRetestId]);
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
   const restoredAttempts = details?.attempts.filter(attempt => !isSpanReservedProblemId(attempt.spanExercise?.id) ||
@@ -124,7 +131,7 @@ export function SpanLessonSession(props: Props) {
   return <div className="h-full min-h-0 min-w-0 text-text">
     {error ? <div role="alert" className="m-4 space-y-2 rounded-lg border border-danger p-3 text-sm"><p>{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => setRevision(value => value + 1)}>继续加载</button></div> : null}
     {!details ? <p role="status" className="p-5 text-sm text-text-2">正在准备这节课…</p> : details.originChange ? <SpanOriginChangeView key={`${props.courseId}:${readVersion}`} details={details} courseId={props.courseId} onReload={() => setRevision(value => value + 1)} /> : !session ? <section className="mx-auto max-w-3xl space-y-4 p-5"><h1 className="text-xl font-semibold">线性组合与 span</h1><p className="text-sm leading-7">目标：建立向量等式，求系数并检查所有坐标。</p><p className="text-sm text-text-2">约 {props.initialIntent?.timeBudgetMinutes ?? 20} 分钟；进入后可随时调整或暂停。</p><button type="button" className={ui.primary} disabled={pending || props.sourceLoadError || !props.sourceIds.length} onClick={() => void start()}>{pending ? "正在开始…" : props.delayedRetestId ? "开始本次延迟复测" : "开始本次学习"}</button>{props.sourceLoadError || !props.sourceIds.length ? <p className="text-sm text-warn">请先关联一份可用课程材料，再开始正式学习。</p> : null}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}/study`}>返回课程</Link></section> : <>
-      {session.status === "active" ? <SpanLesson key={`${session.activityId}:${readVersion}`} {...props} sourceIds={session.sourceIds} session={session} initialIntent={session.intent} initialMoveId={session.moveId} initialNewEvidenceEventId={evidenceEvent?.id ?? props.initialNewEvidenceEventId}
+      {session.status === "active" ? v2Port ? <StudySession port={v2Port} /> : <SpanLesson key={`${session.activityId}:${readVersion}`} {...props} sourceIds={session.sourceIds} session={session} initialIntent={session.intent} initialMoveId={session.moveId} initialNewEvidenceEventId={evidenceEvent?.id ?? props.initialNewEvidenceEventId}
         executionPhase={details.executionPhase ?? undefined} restoredAttempts={restoredAttempts} restoredObservations={details.observations} restoredHintLevels={details.hintLevels} onProgress={save} savingProgress={pending} onReload={() => setRevision(value => value + 1)}
         onSummary={() => { setShowSummary(true); setRevision(value => value + 1); }} /> : <div className="mx-auto max-w-4xl space-y-3 p-5"><h1 className="text-xl font-semibold">{session.status === "paused" ? "本次学习已暂停" : "本次学习已结束"}</h1><p className="text-sm text-text-2">下次可以接着这里学。</p><div className="flex flex-wrap gap-2">{session.status === "paused" ? <button className={ui.primary} disabled={pending} onClick={() => void save(session.intent, session.moveId, "active")}>继续原来的步骤</button> : <Link className={ui.primary} href="/opening/today">回到今日，看下一步</Link>}<Link className={ui.quiet} href={`/opening/courses/${props.courseId}`}>返回课程</Link></div></div>}
       {showSummary || session.status !== "active" ? <div className="mx-auto max-w-4xl px-5 pb-8"><SpanSessionSummary key={`${session.activityId}:${readVersion}`} session={session} observations={details.observations} delayed={Boolean(props.delayedRetestId)} onReload={() => setRevision(value => value + 1)} /></div> : null}
