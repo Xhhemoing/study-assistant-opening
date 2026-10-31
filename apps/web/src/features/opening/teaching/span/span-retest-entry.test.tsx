@@ -45,7 +45,7 @@ function fixture(purpose: "self_study" | "overview" | "challenge" = "self_study"
   const attempt: LearningAttempt = { id: uuid(), workspaceId: scope.workspaceId, courseId: session.courseId, sessionId: session.sessionId,
     sourceIds: session.sourceIds, sourceVersions: { [session.sourceIds[0]!]: 1 }, skillLabel: "线性组合与 span", requirementKey: SPAN_REQUIREMENT_KEY,
     historyRevision: 0, problemId: uuid(), itemVersionId: uuid(), startedAt: session.createdAt, submittedAt: null, observationId: null,
-    contextAnchor: { courseId: session.courseId, activityId: session.activityId, sourceId: session.sourceIds[0]! },
+    contextAnchor: { courseId: session.courseId, activityId: session.activityId, sourceId: session.sourceIds[0]!, purpose: "learning_help" },
     spanExercise: { ...getSpanProblem(problemId)!, id: "span-reserved-fraction" } };
   return { session, attempt, alias: uuid() };
 }

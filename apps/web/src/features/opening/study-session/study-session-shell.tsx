@@ -21,8 +21,8 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
   const helpButton = useRef<HTMLButtonElement>(null);
   const primary = primaryAction(view, pending);
   const locked = pending || view.sealed || Boolean(view.result);
-  const isQuestion = view.step.kind === "question";
-  const helpAllowed = isQuestion && !(view.step.purpose === "retest" && !view.result);
+  const questionStep = view.step.kind === "question" ? view.step : null;
+  const helpAllowed = questionStep !== null && !(questionStep.purpose === "retest" && !view.result);
   useEffect(() => { setHelpOpen(false); setMoreOpen(false); }, [view.step.id]);
   useEffect(() => { if (!helpAllowed) setHelpOpen(false); }, [helpAllowed]);
   useEffect(() => {
