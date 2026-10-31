@@ -24,6 +24,7 @@ import { SpanNextActionControl, currentSpanObservationId } from "./span-next-act
 import { isSpanReservedProblemId } from "./span-answer";
 import type { SpanExecutionPhase } from "./span-session-client";
 import { SpanTargetedFocus } from "./targeted-focus";
+import { spanLessonMoves, spanLessonProblemId } from "./span-lesson-moves";
 
 const modeLabels = { self_study: "自学 · 例题到独立新题", overview: "串讲 · 连接方程与几何", challenge: "拔高 · 预设迁移" };
 const modeProcess: Record<SpanTeachingMode, string> = {
@@ -58,13 +59,10 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
     const problem = restoredAttempts.find(attempt => attempt.id === record.attemptId)?.spanExercise?.id;
     return problem ? [[isSpanReservedAttempt(restoredAttempts.find(attempt => attempt.id === record.attemptId)!) ? "reserved:auto" : problem, record]] : [];
   })));
-  const sequence = createSpanTeachingSequence(mode);
-  const moves = [...sequence, { ...sequence[sequence.length - 1]!, id: `${mode}-reserved`, presentation: { kind: "independent_item" as const, instructions: "离开示范，用服务器发放的保留题检查" } }];
+  const moves = spanLessonMoves(mode);
   const current = moves[step]!;
   const isPresentation = !delayedRetestId && step === 0;
-  const problemId = delayedRetestId ? "reserved:auto" : step === moves.length - 1 ? "reserved:auto" : mode === "self_study" ? step === 1 ? "span-faded-3d" : "span-independent-3d"
-    : mode === "overview" ? step === 1 ? "span-contrast-dependent" : "span-geometry-transfer"
-      : "span-geometry-transfer";
+  const problemId = delayedRetestId ? "reserved:auto" : spanLessonProblemId(mode, step, moves.length);
   const currentRecord = records[problemId];
   const unavailableRestoredQuestion = restoredAttempts.some(attempt => !attempt.spanExercise);
   const restoredAttempt = problemId === "reserved:auto" && newEvidenceEventId !== initialNewEvidenceEventId ? undefined
