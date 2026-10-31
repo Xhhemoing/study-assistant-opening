@@ -1,44 +1,123 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import type { StudySessionPort, StudySessionView } from "./model";
-import { reasonLabels, resultLabel } from "./model";
-import { stepRenderers } from "./step-renderers";
+import { useEffect, useId, useRef, useState } from "react";
+import { LearningProse } from "../assistant/learning-prose";
+import { SuccessCheck } from "../v3/motion/feedback";
+import { useTransitionRouter } from "../v3/motion/view-transition";
 import { ui } from "../design/ui";
+import { primaryAction, resultLabel, type StudySessionPort, type StudySessionView } from "./model";
+import { StepRenderer } from "./step-renderers";
 
-export function StudySessionShell({ view, pending = false, error = "", onPrimary, onEdit, onChoosePhoto, onRemovePhoto, onHelp, onPause, onReload, onNavigate }: {
-  view: StudySessionView; pending?: boolean; error?: string;
-  onPrimary: () => void; onEdit: (key: string, value: string) => void; onChoosePhoto: (file: File) => void; onRemovePhoto: () => void; onHelp: () => void; onPause: () => void; onReload: () => void; onNavigate: (action: string) => void;
-}) {
-  const Renderer = stepRenderers[view.step.kind];
+type Handlers = {
+  onPrimary: () => void; onHelp: () => void; onPause: () => void; onReload: () => void;
+  onEdit: Parameters<typeof StepRenderer>[0]["onEdit"]; onChoosePhoto: (file: File) => void; onRemovePhoto: () => void;
+  onSelectGrade?: Parameters<typeof StepRenderer>[0]["onSelectGrade"];
+};
+
+/** One session screen: top bar, the current step, one primary action. Help and "more" open on demand. */
+export function StudySessionShell({ view, pending = false, error = "", ...on }: { view: StudySessionView; pending?: boolean; error?: string } & Handlers) {
   const [helpOpen, setHelpOpen] = useState(false);
-  const label = view.next?.label ?? (view.step.kind === "learn" ? "开始作答" : view.result ? "安排下一步学习" : view.locked ? "确认已提交的答案" : "提交答案");
-  const reason = view.next?.reasonCode ? reasonLabels[view.next.reasonCode] : null;
-  const photo = view.photo ?? { enabled: false, status: "none" as const };
-  return <section className="mx-auto flex h-full max-w-4xl flex-col gap-5 overflow-auto p-5 text-text" aria-label="学习会话">
-    <header className="flex items-center justify-between gap-3"><h1 className="text-lg font-semibold">{view.step.title}</h1><div className="flex items-center gap-2">{view.step.estimateMinutes != null ? <span className="text-sm text-text-2">预计 {view.step.estimateMinutes} 分钟</span> : null}<details><summary className={`${ui.quiet} cursor-pointer`}>更多</summary><div className="space-y-2 rounded-lg border border-line bg-surface p-3"><button type="button" className={ui.quiet} disabled={pending} onClick={onPause}>暂停并保存</button><button type="button" className={ui.quiet} disabled={pending} onClick={onReload}>重新读取</button></div></details></div></header>
-    <main className="flex-1 space-y-5"><Renderer step={view.step} answer={view.answer} photo={photo} locked={pending || view.locked || Boolean(view.result)} onEdit={onEdit} onChoosePhoto={onChoosePhoto} onRemovePhoto={onRemovePhoto} />
-      {view.result ? <section aria-label="作答结果" className="rounded-xl border border-line bg-surface-2 p-4"><h2 className="font-medium">{resultLabel(view.result)}</h2></section> : null}
-      {reason ? <details className="text-sm text-text-2"><summary className="cursor-pointer">为什么</summary><p>{reason}</p></details> : null}
-      {view.next?.alternatives.map(action => <button key={action.action} type="button" className={ui.quiet} onClick={() => onNavigate(action.action)}>{action.label}</button>)}
+  const [moreOpen, setMoreOpen] = useState(false);
+  const helpId = useId(), moreId = useId();
+  const helpButton = useRef<HTMLButtonElement>(null);
+  const primary = primaryAction(view, pending);
+  const locked = pending || view.sealed || Boolean(view.result);
+  const isQuestion = view.step.kind === "question";
+  useEffect(() => { setHelpOpen(false); setMoreOpen(false); }, [view.step.id]);
+  useEffect(() => {
+    if (!helpOpen && !moreOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (helpOpen) { setHelpOpen(false); helpButton.current?.focus(); } else setMoreOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [helpOpen, moreOpen]);
+
+  return <section className="mx-auto flex min-h-full max-w-(--layout-prose) flex-col text-text" aria-label="学习会话">
+    <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/95 px-4 py-2 backdrop-blur">
+      <div className="min-w-0 flex-1">
+        <h1 className="truncate text-sm font-semibold">{view.step.title}</h1>
+        <ol className="mt-1.5 flex max-w-64 gap-1" aria-label={`第 ${view.position.index + 1} 步，共 ${view.position.total} 步`}>
+          {Array.from({ length: view.position.total }, (_, index) => <li key={index}
+            className={`h-1 flex-1 rounded-pill transition-colors duration-(--duration-state) ${index < view.position.index ? "bg-text-3" : index === view.position.index ? "bg-text" : "bg-line"}`} />)}
+        </ol>
+      </div>
+      {view.step.estimateMinutes != null ? <span className="shrink-0 text-xs tabular-nums text-text-2">约 {view.step.estimateMinutes} 分钟</span> : null}
+      <div className="relative">
+        <button type="button" className={ui.icon} aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen} aria-controls={moreId} onClick={() => setMoreOpen(value => !value)}>⋯</button>
+        {moreOpen ? <div id={moreId} role="menu" className="absolute right-0 top-10 z-20 grid min-w-40 rounded-tile border border-line bg-popover p-1 shadow-float motion-safe:animate-pop">
+          {view.step.kind !== "card" ? <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onPause(); }}>暂停并保存</button> : null}
+          <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onReload(); }}>重新读取</button>
+        </div> : null}
+      </div>
+    </header>
+
+    <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
+      <StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
+        onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} />
+      {view.result ? <section aria-live="polite" aria-label="作答结果" className="space-y-2 rounded-tile border border-line bg-surface p-4 motion-safe:animate-pop">
+        <p className="flex items-center gap-2 font-medium">
+          {view.result.outcome === "correct" ? <SuccessCheck play label="" /> : null}{resultLabel(view.result)}
+        </p>
+        {view.result.detail ? <p className="text-sm leading-7 text-text-2">{view.result.detail}</p> : null}
+        {view.next?.reason ? <p className="text-sm leading-7 text-text-2">{view.next.reason}</p> : null}
+      </section> : null}
+      {view.next?.alternatives.length ? <div className="flex flex-wrap gap-2">{view.next.alternatives.map(link =>
+        <a key={link.href} className={ui.quiet} href={link.href}>{link.label}</a>)}</div> : null}
+      {view.blocked ? <p role="alert" className="text-sm text-warn">{view.blocked}</p> : null}
+      {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
     </main>
-    {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
-    <footer className="flex items-center gap-3 border-t border-line pt-4"><button type="button" data-primary-action className={ui.primary} disabled={pending || (view.step.kind === "question" && !view.result && !view.locked && !view.answer.membership)} onClick={view.next ? () => onNavigate(view.next!.action) : onPrimary}>{pending ? "正在保存与核对…" : label}</button>{view.step.kind === "question" ? <button type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls="study-session-help" onClick={() => setHelpOpen(value => !value)}>需要帮助</button> : null}</footer>
-    {helpOpen ? <aside id="study-session-help" aria-label="学习帮助" className="space-y-3 rounded-xl border border-line bg-surface-2 p-4"><div className="flex items-center justify-between"><h2 className="font-medium">先给一点提示</h2><button type="button" className={ui.quiet} onClick={() => setHelpOpen(false)}>收起帮助</button></div>{view.help.texts.map((text, index) => <p key={index} className="whitespace-pre-wrap text-sm leading-7">{text}</p>)}<button type="button" className={ui.secondary} disabled={pending || !view.help.canRequest || view.locked && !view.result} onClick={onHelp}>{view.help.hintsShown >= 3 ? "查看完整示范" : "看下一条提示"}</button></aside> : null}
+
+    <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
+      {isQuestion ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
+        onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
+      <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
+        {pending ? "正在保存…" : primary.label}
+      </button>
+    </footer>
+
+    {helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
+      <div className="flex items-center justify-between"><h2 className="font-medium">提示</h2>
+        <button type="button" className={ui.quiet} onClick={() => { setHelpOpen(false); helpButton.current?.focus(); }}>收起</button></div>
+      {view.help.hints.length ? <ol className="space-y-2">{view.help.hints.map(hint => <li key={hint.level} className="rounded-tile bg-surface-2 p-3 motion-safe:animate-text-in">
+        <p className="text-xs text-text-3">{hint.level}. {hint.label}</p>
+        <div className="prose-reading text-sm leading-7"><LearningProse text={hint.text} /></div>
+      </li>)}</ol> : <p className="text-sm text-text-2">提示一次给一点，你的答案会保留。用过提示，这题会如实记为「用提示后答对」。</p>}
+      {view.help.next ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onHelp}>看第 {view.help.next.level} 步：{view.help.next.label}</button>
+        : view.help.blockedReason ? <p className="text-sm text-text-2">{view.help.blockedReason}</p> : null}
+    </aside> : null}
   </section>;
 }
 
-/** View-model-only state owner. Ports absorb transport and protocol differences. */
+/** State owner. It only talks to the port; every API detail lives in the adapter. */
 export function StudySession({ port }: { port: StudySessionPort }) {
-  const [view, setView] = useState<StudySessionView | null>(null), [pending, setPending] = useState(false), [error, setError] = useState("");
-  const busy = useRef(false), version = useRef(0);
+  const [view, setView] = useState<StudySessionView | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const busy = useRef(false), generation = useRef(0);
+  const router = useTransitionRouter(true);
   async function run(operation: () => Promise<StudySessionView | void>) {
     if (busy.current) return;
-    busy.current = true; const current = version.current; setPending(true); setError("");
-    try { const next = await operation(); if (current === version.current && next) setView(next); }
-    catch (reason) { if (current === version.current) setError(reason instanceof Error ? reason.message : "暂时无法确认，请保留答案后重新读取。"); }
-    finally { if (current === version.current) { busy.current = false; setPending(false); } }
+    busy.current = true; const current = generation.current; setPending(true); setError("");
+    try { const next = await operation(); if (current === generation.current && next) setView(next); }
+    catch (reason) { if (current === generation.current) setError(reason instanceof Error ? reason.message : "这一步还没确认，答案已保留，请重新读取。"); }
+    finally { if (current === generation.current) { busy.current = false; setPending(false); } }
   }
-  useEffect(() => { version.current++; busy.current = false; setView(null); void run(port.load); return () => { version.current++; }; }, [port]);
-  if (!view) return <section className="space-y-3 p-5"><p role="status">正在准备本次学习…</p>{error ? <><p role="alert">{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => void run(port.load)}>重新读取</button></> : null}</section>;
-  return <StudySessionShell view={view} pending={pending} error={error} onPrimary={() => void run(port.primary)} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => { try { setView(port.removePhoto()); } catch (reason) { setError(reason instanceof Error ? reason.message : "照片尚未移除。"); } }} onHelp={() => void run(port.help)} onPause={() => void run(port.pause)} onReload={() => void run(port.load)} onNavigate={port.navigate} onEdit={(key, value) => { try { setView(port.edit(key, value)); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "答案尚未保存。"); } }} />;
+  function sync(operation: () => StudySessionView) {
+    try { setView(operation()); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "答案还没保存。"); }
+  }
+  useEffect(() => {
+    generation.current++; busy.current = false; setView(null);
+    void run(port.load);
+    return () => { generation.current++; };
+  }, [port]);
+  if (!view) return <section className="space-y-3 p-5" aria-label="学习会话">
+    <p role="status" className="text-sm text-text-2">正在准备这一步…</p>
+    {error ? <><p role="alert" className="text-sm text-danger">{error}</p><button type="button" className={ui.secondary} disabled={pending} onClick={() => void run(port.load)}>重新读取</button></> : null}
+  </section>;
+  const go = (href: string) => { if (router) router.push(href); else window.location.assign(href); };
+  return <StudySessionShell view={view} pending={pending} error={error}
+    onPrimary={() => { if (view.next && !view.blocked) go(view.next.href); else void run(port.primary); }}
+    onHelp={() => void run(port.help)} onPause={() => void run(port.pause)} onReload={() => void run(port.load)}
+    onEdit={change => sync(() => port.edit(change))} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => sync(port.removePhoto)} />;
 }

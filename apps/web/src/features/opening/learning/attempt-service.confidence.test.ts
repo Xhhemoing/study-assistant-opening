@@ -38,13 +38,14 @@ it("rejects invalid categories before accessing an attempt", async () => {
   await expect(createOpeningAttemptService(mocks.sql as unknown as Sql).submit(scope, id, { ...body, preAnswerConfidence: 0.9 })).rejects.toThrow();
   expect(mocks.access).not.toHaveBeenCalled();
 });
-it("prepares a course-owned photo without inserting an observation", async () => {
+it("prepares the learner's uploaded photo without course membership or an observation", async () => {
   mocks.access.mockResolvedValue({ id, sessionId: id, courseId: id, sourceIds: [], skillLabel: "fractions", problemId: id, itemVersionId: id });
   mocks.sql.mockResolvedValue([{ id, version: 2, mime: "image/jpeg", parse_state: "queued", upload_state: "uploaded" }]);
   await expect(createOpeningAttemptService(mocks.sql as unknown as Sql).preparePhotoWorkSource(scope, id, { sourceId: id, sourceVersion: 2, physicalPage: 1 })).resolves.toMatchObject({
     attemptId: id, courseId: id, state: "pending", workSource: { id, version: 2, physicalPage: 1 },
   });
   expect(mocks.insert).not.toHaveBeenCalled();
+  expect(String((mocks.sql.mock.calls.at(-1)![0] as TemplateStringsArray).join("?"))).not.toContain("course_asset_memberships");
 });
 it("rejects a stale or unavailable photo identity", async () => {
   mocks.access.mockResolvedValue({ id, sessionId: id, courseId: id, sourceIds: [], skillLabel: "fractions", problemId: id, itemVersionId: id });

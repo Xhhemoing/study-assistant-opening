@@ -1,88 +1,206 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, expect, it, vi } from "vitest";
-import { getSpanProblem } from "@aistudy/domain";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { getSpanProblem, solveSpanProblem, verifySpanAnswer } from "@aistudy/domain";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
-import { createSpanStudySession, adaptSpanLearn } from "./adapters/span";
-import { StudySession } from "./study-session-shell";
-const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(), read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(), uploadFile: vi.fn(), addToCourse: vi.fn() }));
+import { createSpanStudySession } from "./adapters/span";
+import { StudySession, StudySessionShell } from "./study-session-shell";
+import type { StudySessionView } from "./model";
+
+const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
+  read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: mocks.uploadFile }) }));
 vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ addToCourse: mocks.addToCourse }) }));
-vi.mock("../learning/practice-draft", () => ({ readPracticeRecord: mocks.read }));
+vi.mock("../learning/practice-draft", async original => ({ ...await original<typeof import("../learning/practice-draft")>(), readPracticeRecord: mocks.read }));
 vi.mock("../teaching/span/span-session-client", async original => ({ ...await original<typeof import("../teaching/span/span-session-client")>(), spanLessonRequest: mocks.request }));
-vi.mock("../teaching/span/span-hint-client", () => ({ requestSpanHint: mocks.hint }));
+vi.mock("../teaching/span/span-hint-client", async original => ({ ...await original<typeof import("../teaching/span/span-hint-client")>(), requestSpanHint: mocks.hint }));
 vi.mock("../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
-const id = "11111111-1111-4111-8111-111111111111";
-const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, sourceIds: [id], sourceVersions: { [id]: 1 }, skillLabel: "span", requirementKey: null, problemId: id, itemVersionId: id, startedAt: "2026-10-31T00:00:00Z", submittedAt: null, observationId: null, historyRevision: 0, spanExercise: getSpanProblem("span-independent-3d")! };
-const session = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study" as const, timeBudgetMinutes: 20, language: "zh" as const, pace: "normal" as const, continuous: true, selfReportedFatigue: "unknown" as const }, moveId: "self-independent" as const, status: "active" as const, revision: 1, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt };
-afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); sessionStorage.clear(); });
-it.each([undefined, null, 17])("passes backend estimates through details → port → rendered learn step (%s)", async estimateMinutes => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  mocks.request.mockResolvedValue({ problem: getSpanProblem("span-independent-3d"), solution: { kind: "unique", coefficients: ["2", "3"] }, exposureReceipt: { id } });
-  const port = createSpanStudySession({ session: { ...session, moveId: "self-example" }, estimateMinutes, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn());
-  const host = document.createElement("div"), root = createRoot(host);
+vi.mock("../v3/motion/view-transition", () => ({ useTransitionRouter: () => ({ push: mocks.push, replace: vi.fn(), back: vi.fn() }) }));
+
+const problem = getSpanProblem("span-faded-3d")!;
+const solution = solveSpanProblem(problem);
+const uuid = () => crypto.randomUUID();
+function fixture(moveId = "self-faded", problemId = "span-faded-3d") {
+  const exercise = getSpanProblem(problemId)!;
+  const courseId = uuid(), sessionId = uuid(), activityId = uuid(), sourceId = uuid(), attemptId = uuid();
+  const attempt = { id: attemptId, workspaceId: uuid(), sessionId, courseId, sourceIds: [sourceId], sourceVersions: { [sourceId]: 1 }, skillLabel: "span", requirementKey: null,
+    problemId: uuid(), itemVersionId: uuid(), startedAt: "2026-10-31T00:00:00.000Z", submittedAt: null, observationId: null, historyRevision: 0,
+    spanExercise: exercise, contextAnchor: { courseId, activityId, sourceId } } as unknown as LearningAttempt;
+  const session = { activityId, sessionId, courseId, sourceIds: [sourceId], moveId, status: "active", revision: 1, retestId: null, createdAt: "2026-10-31T00:00:00.000Z",
+    intent: { purpose: "self_study" as const, timeBudgetMinutes: 20, language: "zh" as const, pace: "normal" as const, continuous: true, selfReportedFatigue: "unknown" as const } };
+  const details = { session, estimateMinutes: 12, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null } as never;
+  return { attempt, details, courseId, activityId };
+}
+const hintResponse = (level: number) => ({ attemptId: "x", level, text: `提示${level}`, exposureReceipt: { id: uuid() } });
+
+beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); sessionStorage.clear(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+async function mount(port: ReturnType<typeof createSpanStudySession>) {
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => root.render(<StudySession port={port} />));
+  const button = (text: string) => [...host.querySelectorAll("button")].find(node => node.textContent?.includes(text));
+  const click = async (text: string) => { const node = button(text); expect(node, text).toBeDefined(); await act(async () => node!.click()); };
+  const select = async (value: string, label?: string) => {
+    const node = label ? [...host.querySelectorAll("label")].find(row => row.textContent?.startsWith(label))!.querySelector("select")! : host.querySelector("select")!;
+    await act(async () => { node.value = value; node.dispatchEvent(new Event("change", { bubbles: true })); });
+  };
+  const type = async (label: string, value: string) => {
+    const node = [...host.querySelectorAll("label")].find(row => row.textContent?.startsWith(label))!.querySelector("input")!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => { setter.call(node, value); node.dispatchEvent(new Event("input", { bubbles: true })); });
+  };
+  return { host, root, button, click, select, type, unmount: () => act(async () => root.unmount()) };
+}
+
+it("submits a gradable answer through the real form, shows an honest result and follows the successor", async () => {
+  if (solution.kind !== "unique") throw new Error("fixture");
+  const { attempt, details, courseId, activityId } = fixture();
+  const record = { id: uuid(), assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
+  mocks.request.mockImplementation(async (path: string) => path.endsWith("/next")
+    ? { kind: "ready", href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, activityId, sessionId: attempt.sessionId, courseId, label: "下一题", resumed: false } : {});
+  mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValueOnce({ observation: null, deliveredAssistance: "none" }).mockResolvedValue({ observation: record, deliveredAssistance: "hinted" });
+  mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
+  mocks.submitAttempt.mockResolvedValue(record);
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
   try {
-    await act(async () => root.render(<StudySession port={port} />));
-    if (estimateMinutes == null) expect(host.textContent).not.toContain("分钟");
-    else expect(host.textContent).toContain("预计 17 分钟");
-  } finally { await act(async () => root.unmount()); }
-});
-it("runs question → durable answer → saved result → explicit real successor through the shell", async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const record = { id, assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
-  mocks.read.mockResolvedValueOnce({ observation: null, deliveredAssistance: "none" }).mockResolvedValueOnce({ observation: null, deliveredAssistance: "hinted" }).mockResolvedValue({ observation: record, deliveredAssistance: "hinted" });
-  mocks.getAttemptContext.mockResolvedValue({ attempt }); mocks.createAttempt.mockResolvedValue(attempt); mocks.submitAttempt.mockResolvedValue(record);
-  mocks.hint.mockResolvedValue({ level: 1, text: "先写向量等式", exposureReceipt: { id } });
-  mocks.request.mockResolvedValueOnce({}).mockResolvedValueOnce({ kind: "ready", href: `/opening/courses/${id}/study/span?lesson=${id}`, activityId: id, sessionId: id, courseId: id, label: "继续新题", resumed: false });
-  const save = vi.fn(), port = createSpanStudySession({ session, estimateMinutes: 17, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, save);
-  const navigate = vi.fn(); port.navigate = navigate;
-  const host = document.createElement("div"), root = createRoot(host);
-  const click = async (text: string) => { const button = [...host.querySelectorAll("button")].find(node => node.textContent === text); expect(button).toBeDefined(); await act(async () => button!.click()); };
-  try {
-    await act(async () => root.render(<StudySession port={port} />));
-    expect(host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
-    expect(host.textContent).toContain("预计 17 分钟");
-    await click("需要帮助"); await click("看下一条提示"); expect(host.textContent).toContain("先写向量等式");
-    // Port edit is shared by the renderer and durable storage, then reflected by reload.
-    port.edit("membership", "in_span"); port.edit("alpha", "2");
-    await click("重新读取");
-    await click("提交答案");
-    expect(mocks.submitAttempt).toHaveBeenCalledOnce();
-    const input = mocks.submitAttempt.mock.calls[0]![1]; expect(JSON.parse(input.answer)).toMatchObject({ membership: "in_span", coefficients: ["2", ""] }); expect(input.assistance).toBe("hinted");
-    expect(host.textContent).toContain("用提示后答对"); expect(host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
-    await click("安排下一步学习"); expect(navigate).not.toHaveBeenCalled();
-    await click("继续新题"); expect(navigate).toHaveBeenCalledWith(`/opening/courses/${id}/study/span?lesson=${id}`);
-  } finally { await act(async () => root.unmount()); }
-});
-it("adapts a released presentation and advances learning only after progress is saved", async () => {
-  const raw = { problem: getSpanProblem("span-independent-3d"), solution: { kind: "unique", coefficients: ["2", "3"] }, exposureReceipt: { id } };
-  expect(adaptSpanLearn(raw, "self-example")).toMatchObject({ kind: "learn", estimateMinutes: null });
-  mocks.request.mockResolvedValue(raw); const save = vi.fn().mockResolvedValue(true);
-  const port = createSpanStudySession({ session: { ...session, moveId: "self-example" }, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, save);
-  expect((await port.load()).step.kind).toBe("learn"); await port.primary(); expect(save).toHaveBeenCalledWith(session.intent, "self-faded", "active");
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    expect(ui.host.textContent).toContain("约 12 分钟");
+    // Faded example opens with hint 1 exactly once (legacy rule); it is disclosed, not hidden.
+    expect(mocks.hint).toHaveBeenCalledTimes(1);
+    expect(ui.button("提示 · 已看 1")).toBeDefined();
+    expect(mocks.ack).toHaveBeenCalledTimes(1);
+    expect((ui.button("提交") as HTMLButtonElement).disabled).toBe(true);
+    await ui.select("in_span");
+    await ui.type("α", solution.coefficients[0]); await ui.type("β", solution.coefficients[1]);
+    await ui.click("提交");
+    const input = mocks.submitAttempt.mock.calls[0]![1];
+    expect(verifySpanAnswer(problem, JSON.parse(input.answer)).outcome).toBe("correct");
+    expect(input.assistance).toBe("hinted");
+    expect(ui.host.textContent).toContain("用提示后答对");
+    // Help stays reachable after the first answer; that is when the full demonstration opens.
+    expect(ui.button("提示 · 已看 1")).toBeDefined();
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    await ui.click("看下一步安排");
+    await ui.click("下一题");
+    expect(mocks.push).toHaveBeenCalledWith(`/opening/courses/${courseId}/study/span?lesson=${activityId}`);
+  } finally { await ui.unmount(); }
 });
 
-it("removes a failed photo candidate so text submission has no attachment", async () => {
-  sessionStorage.clear();
-  mocks.request.mockResolvedValue({}); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" }); mocks.uploadFile.mockResolvedValue({ phase: "failed", message: "上传失败" });
-  const isolated = { ...session, courseId: crypto.randomUUID(), activityId: crypto.randomUUID(), sessionId: crypto.randomUUID() }; const localAttempt = { ...attempt, courseId: isolated.courseId, sessionId: isolated.sessionId };
-  mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
-  const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn(), { photoEnabled: true });
-  await port.load(); await port.choosePhoto(new File(["bad"], "bad.png", { type: "image/png" })); await port.removePhoto(); port.edit("membership", "in_span");
-  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
-  mocks.submitAttempt.mockResolvedValue(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" }); await port.primary();
+it("reloading never requests a new hint level; it only re-reads released ones", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
+  const port = createSpanStudySession(details, vi.fn());
+  await port.load();
+  expect(mocks.hint).not.toHaveBeenCalled();
+  await port.help();
+  expect(mocks.hint).toHaveBeenLastCalledWith(attempt, 1);
+  // A reload (same tab: the draft remembers the attempt) replays exactly the server's released levels.
+  mocks.getAttemptContext.mockResolvedValue({ attempt });
+  const replay = createSpanStudySession({ ...(details as object), hintLevels: { [attempt.id]: [1] } } as never, vi.fn());
+  mocks.hint.mockClear();
+  const view = await replay.load();
+  expect(mocks.hint.mock.calls.map(call => call[1])).toEqual([1]);
+  expect(view.help.level).toBe("hinted");
+});
+
+it("replays the same sealed request after a network failure", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const port = createSpanStudySession(details, vi.fn());
+  await port.load(); port.edit({ membership: "in_span" });
+  const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved);
+  await expect(port.primary()).rejects.toThrow("network");
+  mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
+  const view = await port.primary();
+  expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
+  expect(view.result?.outcome).toBe("incorrect");
+  expect(() => port.edit({ membership: "not_in_span" })).toThrow();
+});
+
+it("a no-solution answer filled in the real form is graded by the real verifier", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  try {
+    await ui.select("not_in_span");
+    await ui.type("α", "2"); await ui.type("β", "2");
+    await ui.type("代回后", "2, 4, 2");
+    await ui.select("0", "导出系数所用坐标 1"); await ui.select("2", "导出系数所用坐标 2");
+    mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+    await ui.click("提交");
+    const answer = JSON.parse(mocks.submitAttempt.mock.calls[0]![1].answer);
+    expect(verifySpanAnswer(getSpanProblem("span-independent-3d")!, answer)).toMatchObject({ outcome: "correct", reason: "verified_exactly" });
+  } finally { await ui.unmount(); }
+});
+
+it("the reserved step records a teaching move the session service accepts, then asks for the reserved item", async () => {
+  const { attempt: base, details } = fixture("self_study-reserved", "span-independent-3d");
+  const attempt = { ...base, spanExercise: { ...base.spanExercise!, id: "span-reserved-fraction" } } as LearningAttempt;
+  mocks.request.mockImplementation(async (path: string) => path.endsWith("/reserved") ? attempt : {});
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  await createSpanStudySession(details, vi.fn()).load();
+  const session = mocks.request.mock.calls.find(call => String(call[0]).endsWith("/span/session"))!;
+  expect(JSON.parse(session[2].body).moveId).toBe("self-independent");
+  expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/span/reserved"))).toBe(true);
+  expect(mocks.createAttempt).not.toHaveBeenCalled();
+});
+
+it("an uploaded photo is attached to the answer without being added to the course", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const photoId = uuid();
+  mocks.uploadFile.mockResolvedValue({ id: photoId, version: 1 });
+  mocks.preparePhotoWorkSource.mockResolvedValue({ attemptId: attempt.id, courseId: attempt.courseId, state: "ready", parseState: "ready", workSource: { id: photoId, version: 1, physicalPage: 1 } });
+  const port = createSpanStudySession(details, vi.fn(), { photoEnabled: true });
+  await port.load();
+  expect((await port.choosePhoto(Object.assign(new File(["x"], "a.png", { type: "image/png" }), { arrayBuffer: async () => new ArrayBuffer(1) }))).photo?.status).toBe("ready");
+  expect(mocks.addToCourse).not.toHaveBeenCalled();
+  port.edit({ membership: "in_span" });
+  mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+  await port.primary();
+  expect(mocks.submitAttempt.mock.calls[0]![1]).toMatchObject({ workSource: { id: photoId, version: 1, physicalPage: 1 } });
+});
+
+it("a failed photo leaves no attachment on the text answer", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.uploadFile.mockResolvedValue({ phase: "failed", message: "上传失败" });
+  const port = createSpanStudySession(details, vi.fn(), { photoEnabled: true });
+  await port.load();
+  expect((await port.choosePhoto(Object.assign(new File(["x"], "a.png", { type: "image/png" }), { arrayBuffer: async () => new ArrayBuffer(1) }))).photo?.status).toBe("failed");
+  port.removePhoto(); port.edit({ membership: "in_span" });
+  mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+  await port.primary();
   expect(mocks.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("workSource");
 });
 
-it("replays the same sealed payload after a transient network failure", async () => {
-  sessionStorage.clear();
-  mocks.request.mockResolvedValue({}); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
-  const isolated = { ...session, courseId: crypto.randomUUID(), activityId: crypto.randomUUID(), sessionId: crypto.randomUUID() }; const localAttempt = { ...attempt, courseId: isolated.courseId, sessionId: isolated.sessionId };
-  mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
-  const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn()); await port.load(); port.edit("membership", "in_span");
-  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
-  mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
-  await expect(port.primary()).rejects.toThrow("network"); await port.primary(); expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
+it("renders exactly one primary action in every state and no time when the backend has none", () => {
+  const base: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 },
+    position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: { level: 1, label: "方向提示" } }, answer: {}, sealed: false, result: null, next: null, photo: null };
+  const states: StudySessionView[] = [base, { ...base, answer: { membership: "in_span" } }, { ...base, sealed: true },
+    { ...base, result: { outcome: "correct", assistance: "independent" } }, { ...base, result: { outcome: "incorrect", assistance: "hinted" }, next: { href: "/x", label: "再练一题", alternatives: [] } },
+    { ...base, blocked: "资料不可用" }, { ...base, step: { kind: "learn", id: "l", title: "例题", body: "$x$", estimateMinutes: null } }];
+  const host = document.createElement("div"); const root = createRoot(host);
+  const noop = () => {};
+  for (const view of states) {
+    act(() => root.render(<StudySessionShell view={view} onPrimary={noop} onHelp={noop} onPause={noop} onReload={noop} onEdit={noop} onChoosePhoto={noop} onRemovePhoto={noop} />));
+    expect(host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    expect(host.textContent).not.toContain("分钟");
+  }
+  act(() => root.unmount());
 });
