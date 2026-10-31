@@ -3,6 +3,11 @@ import { spanLessonDetailsSchema } from "./span-session-client";
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 3, retestId: null, createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" };
 const base = { session: null, attempts: [], observations: [], assistance: {} };
+it("preserves the optional targeted focus without changing legacy details", () => {
+  const targetedFocus = "系数代入后，第3坐标没对上。";
+  expect(spanLessonDetailsSchema.parse({ ...base, targetedFocus }).targetedFocus).toBe(targetedFocus);
+  expect(spanLessonDetailsSchema.parse(base).targetedFocus).toBeUndefined();
+});
 it("preserves backend estimates, accepts legacy/null and rejects non-minute values", () => {
   expect(spanLessonDetailsSchema.parse({ ...base, estimateMinutes: 17 }).estimateMinutes).toBe(17);
   expect(spanLessonDetailsSchema.parse({ ...base, estimateMinutes: null }).estimateMinutes).toBeNull();
