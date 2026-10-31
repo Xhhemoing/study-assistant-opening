@@ -29,6 +29,7 @@ import { LibraryDocumentList } from "../library/library-document-list";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 
 function revealCourseMaterials() {
   let node: HTMLElement | null = document.getElementById("course-assets");
@@ -225,6 +226,8 @@ const COURSE_DETAIL_PATHS: Record<CourseDetailSurface, {
 export function CourseDetail({ id, surface = "opening", mode, conversationId }: { id: string; surface?: CourseDetailSurface; mode?: "sprint"; conversationId?: string }) {
   const router = useRouter();
   const paths = COURSE_DETAIL_PATHS[surface];
+  const { studySessionV2 } = useOpeningCapabilities();
+  const grouped = paths.openingActions && studySessionV2;
   const objectHref = (href: string) => conversationObjectHref(href, conversationId);
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
   useEffect(() => {
@@ -244,6 +247,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
 
   const studyActions = <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />;
   const settings = <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
+  const goal = <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>;
   const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <h2 className="text-base font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
@@ -255,19 +259,19 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
   const page = <section className="flex h-full min-h-0 flex-col bg-bg text-text">
     {paths.openingActions ? <CourseSpaceHeader courseId={id} title={course.title} archived={Boolean(course.archivedAt)} /> : <PageHeader title={course.title} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />}
     <div className="min-h-0 flex-1 overflow-y-auto"><ContentGrid className="px-5 py-5">
-      {paths.openingActions ? <CourseTabs courseId={id} conversationId={conversationId}>
+      {paths.openingActions ? <CourseTabs courseId={id} conversationId={conversationId} grouped={grouped}>
         <CoursePanel name="overview">
+          {grouped ? <h2 className="text-base font-semibold">学习安排</h2> : null}
           {studyActions}
-          <CourseContents courseId={id} assets={assets} />
-          <Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units`)}>全部单元与学习目录</Link>
+          {grouped ? <>{goal}<CourseExamProgress courseId={id} /></> : <><CourseContents courseId={id} assets={assets} /><Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units`)}>全部单元与学习目录</Link></>}
         </CoursePanel>
-        <CoursePanel name="practice">
+        <CoursePanel name="practice" secondary={grouped}>
           {course.archivedAt ? <p className="text-sm text-text-2">课程已归档。恢复课程后可继续练习，已有记录仍保留。</p> : <div className="flex flex-wrap gap-2"><Link className={ui.primary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/study?mode=practice`)}>开始独立练习</Link><Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(id)}/exam`)}>真题与考前练习</Link><Link className={ui.quiet} href={objectHref(`/opening/sprint?courseId=${encodeURIComponent(id)}`)}>考前冲刺</Link></div>}
-          <CourseExamProgress courseId={id} />
+          {!grouped ? <CourseExamProgress courseId={id} /> : null}
         </CoursePanel>
-        <CoursePanel name="review">
+        <CoursePanel name="review" secondary={grouped}>
           <Link className={ui.primary} href={objectHref("/opening/review")}>开始到期复习</Link>
-          <CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} />
+          {!grouped ? <CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /> : null}
           <p className="text-sm text-text-2">复习页汇集各门课的到期任务。本课的学习与补测也保留在任务列表中。</p>
         </CoursePanel>
         <CoursePanel name="notes">
@@ -275,6 +279,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
           <LibraryDocumentList basePath="/opening/library" courseId={id} documentIds={assets.flatMap(asset => asset.document ? [asset.document.id] : [])} />
         </CoursePanel>
         <CoursePanel name="units">
+          {grouped ? <><h2 className="text-base font-semibold">章节路线</h2><CourseContents courseId={id} assets={assets} /></> : null}
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
           <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} />
           <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
@@ -283,10 +288,10 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="progress">
           <h2 className="text-base font-semibold">学习进展与记录</h2>
           <p className="text-sm leading-6 text-text-2">回顾练习结果、用过的提示和独立完成情况。</p>
-          <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>
-          <LearnerStateCard courseId={id} /><CourseExamProgress courseId={id} /><CourseSummaryPanel courseId={id} />
+          {!grouped ? goal : null}
+          <LearnerStateCard courseId={id} />{!grouped ? <CourseExamProgress courseId={id} /> : null}<CourseSummaryPanel courseId={id} />
         </CoursePanel>
-        <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</CoursePanel>
+        <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{grouped ? <details><summary className="cursor-pointer py-3 text-sm font-medium">课程设置</summary>{settings}</details> : settings}</CoursePanel>
       </CourseTabs> : <>
         {studyActions}<CourseLearningView courseId={id} />
         <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>
