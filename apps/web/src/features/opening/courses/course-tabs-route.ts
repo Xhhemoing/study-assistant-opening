@@ -12,6 +12,19 @@ export const courseTabs = [
 ] as const;
 export type CourseTab = typeof courseTabs[number]["id"];
 
+export const courseSections = [
+  { id: "overview", label: "学习安排" },
+  { id: "units", label: "章节路线" },
+  { id: "progress", label: "记录与资料" },
+] as const;
+
+/** The legacy tab remains the URL identity; grouping is only a display projection. */
+export function courseSection(tab: CourseTab): CourseTab {
+  if (tab === "materials" || tab === "notes") return "progress";
+  if (tab === "practice" || tab === "review") return "overview";
+  return tab;
+}
+
 export function readCourseTab(search: string, hash = ""): CourseTab {
   if (hash === "#course-learning-records") return "progress";
   if (hash === "#course-assets" || hash === "#course-media") return "materials";
