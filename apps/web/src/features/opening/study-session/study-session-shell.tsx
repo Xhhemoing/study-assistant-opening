@@ -62,6 +62,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
           {view.result.outcome === "correct" ? <SuccessCheck play label="" /> : null}{resultLabel(view.result)}
         </p>
         {view.result.detail ? <p className="text-sm leading-7 text-text-2">{view.result.detail}</p> : null}
+        {view.result.nextStep ? <div className="rounded-tile border border-line bg-accent-soft p-3 text-sm leading-7"><p className="font-medium">下一步：{view.result.nextStep.label}</p><p>{view.result.nextStep.action}</p></div> : null}
         {view.next?.reason ? <p className="text-sm leading-7 text-text-2">{view.next.reason}</p> : null}
       </section> : null}
       {view.next?.alternatives.length ? <div className="flex flex-wrap gap-2">{view.next.alternatives.map(link =>

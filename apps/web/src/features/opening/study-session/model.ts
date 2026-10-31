@@ -40,7 +40,7 @@ export type HelpState = {
 
 export type ResultOutcome = "correct" | "incorrect" | "pending" | "needs_manual" | "unknown";
 export type ResultAssistance = "independent" | "hinted" | "revealed" | "unknown";
-export type StepResult = { outcome: ResultOutcome; assistance: ResultAssistance; detail?: string };
+export type StepResult = { outcome: ResultOutcome; assistance: ResultAssistance; detail?: string; nextStep?: { label: string; action: string } };
 
 export type PhotoWorkSource = { id: string; version: number; physicalPage: number };
 export type PhotoState = { status: "none" | "uploading" | "preparing" | "ready" | "pending" | "unavailable" | "failed"; name?: string; workSource?: PhotoWorkSource; message?: string };
