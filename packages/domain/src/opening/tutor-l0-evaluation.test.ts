@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { evaluateTutorL0, judgeTutorL0Output, parseTutorL0Fixture, tutorL0MeasurementSkeleton } from "./tutor-l0-evaluation";
+import { evaluateTutorL0, executeTutorL0Case, judgeTutorL0Output, parseTutorL0Fixture, tutorL0MeasurementSkeleton } from "./tutor-l0-evaluation";
 
 const fixture = () => JSON.parse(readFileSync(new URL("../../../../tests/fixtures/opening/tutor-l0-cases.json", import.meta.url), "utf8"));
 
@@ -27,11 +27,11 @@ describe("offline synthetic L0", () => {
       .toEqual({ status: "fail", violations: ["forbidden:decision.activityKind"] });
     expect(judgeTutorL0Output(first, { decision: { reasonCode: "no_evidence" } }).status).toBe("fail");
     const report = evaluateTutorL0(data, () => undefined);
-    expect(report.summary).toMatchObject({ denominator: 48, passed: 0, failed: 48, missing: 48 });
+    expect(report.summary).toMatchObject({ denominator: 72, passed: 0, failed: 72, missing: 72 });
   });
   it("does not fabricate receipts or turn synthetic results into learning gains", () => {
     const report = evaluateTutorL0(fixture());
-    expect(report.cases).toHaveLength(48);
+    expect(report.cases).toHaveLength(72);
     expect(report.summary.failed, JSON.stringify(report.cases.filter(row => row.judgment.status !== "pass"))).toBe(0);
     for (const row of report.cases) {
       expect(row.scope).toEqual({ toolSideEffects: "unknown", teachingSemantics: "unknown", humanLearningEffect: "unknown" });
@@ -52,10 +52,16 @@ describe("offline synthetic L0", () => {
     const noGold = fixture();
     noGold.cases[0].gold.allowed = [];
     expect(() => parseTutorL0Fixture(noGold)).toThrow();
+    const invalidStop = fixture();
+    invalidStop.cases[0].gold.stopAt = "arbitrary text";
+    expect(() => parseTutorL0Fixture(invalidStop)).toThrow();
+    const invalidWaiting = fixture();
+    invalidWaiting.cases[0].gold.waitingFor = "arbitrary text";
+    expect(() => parseTutorL0Fixture(invalidWaiting)).toThrow();
   });
   it("preserves execution errors and never treats an exception as a pass", () => {
     const report = evaluateTutorL0(fixture(), () => { throw new Error("synthetic failure"); });
-    expect(report.summary).toMatchObject({ denominator: 48, passed: 0, failed: 48, errors: 48 });
+    expect(report.summary).toMatchObject({ denominator: 72, passed: 0, failed: 72, errors: 72 });
     expect(report.cases[0]?.error).toBe("synthetic failure");
   });
   it("keeps both tutor policy overloads separately attributable", () => {
@@ -64,6 +70,13 @@ describe("offline synthetic L0", () => {
     const thin = report.cases.find(row => row.caseId === "thin-hint-offer");
     expect(thin?.actualOutput).toMatchObject({ kind: "worked_example" });
     expect(thin?.scope.toolSideEffects).toBe("unknown");
+  });
+  it("keeps rule replay identical when the model is explicitly disabled", () => {
+    const data = parseTutorL0Fixture(fixture());
+    const baseline = evaluateTutorL0(data);
+    const modelDisabled = evaluateTutorL0(data, row => executeTutorL0Case(row));
+    expect(modelDisabled.summary).toEqual(baseline.summary);
+    expect(modelDisabled.cases.map(row => row.actualOutput)).toEqual(baseline.cases.map(row => row.actualOutput));
   });
   it("retains five dimensions, day 7/30 and all unobserved denominators", () => {
     const measurement = tutorL0MeasurementSkeleton();

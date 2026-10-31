@@ -31,7 +31,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "unobserved",
@@ -68,7 +70,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -105,7 +109,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -154,7 +160,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -203,7 +211,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -252,7 +262,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -301,7 +313,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -372,7 +386,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "observed_independent",
@@ -421,7 +437,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -470,7 +488,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "needs_check",
@@ -527,7 +547,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -567,7 +589,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -607,7 +631,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -649,7 +675,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -691,7 +719,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -731,7 +761,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "skillLabel": "合成向量张成",
@@ -773,7 +805,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "nodeId": "synthetic-node",
@@ -808,7 +842,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "nodeId": "synthetic-node",
@@ -843,7 +879,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "nodeId": "synthetic-node",
@@ -878,7 +916,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "nodeId": "synthetic-node",
@@ -913,7 +953,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "cancelled",
@@ -954,7 +996,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "declined",
@@ -995,7 +1039,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "invalidated",
@@ -1036,7 +1082,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "superseded",
@@ -1077,7 +1125,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1118,7 +1168,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1159,7 +1211,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1201,7 +1255,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1242,7 +1298,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1283,7 +1341,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1319,7 +1379,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "completed",
@@ -1361,7 +1423,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "status": "deferred",
@@ -1403,7 +1467,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1470,7 +1536,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1537,7 +1605,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1607,7 +1677,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1674,7 +1746,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1741,7 +1815,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1808,7 +1884,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1871,7 +1949,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1934,7 +2014,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -1994,7 +2076,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2054,7 +2138,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2125,7 +2211,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2196,7 +2284,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2267,7 +2357,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2338,7 +2430,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2412,7 +2506,9 @@
           "不得从纯建议推断帮助已交付",
           "不得提升掌握或真实学习效果"
         ],
-        "termination": "纯函数返回后终止；持久副作用与教学语义未测"
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
       },
       "input": {
         "observation": {
@@ -2451,6 +2547,1066 @@
             "reportedGuess": false
           }
         }
+      }
+    },
+    {
+      "caseId": "loop-first-no-evidence",
+      "entry": "nextLearningStep",
+      "scenario": "首次无证据：诊断后等待学生回答",
+      "initialFactRefs": [
+        "synthetic:next-first"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "首次无证据：诊断后等待学生回答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "no_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "diagnostic_answer",
+        "waitingFor": "diagnostic_answer"
+      },
+      "input": {
+        "status": "unobserved",
+        "wantsFullExplanation": false,
+        "observations": []
+      }
+    },
+    {
+      "caseId": "loop-trusted-error",
+      "entry": "nextLearningStep",
+      "scenario": "可信错误：定向讲解后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:next-incorrect"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "可信错误：定向讲解后等待学生作答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "targeted_explain"
+          ],
+          "decision.reasonCode": [
+            "verified_incorrect"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "no",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-explicit-explain",
+      "entry": "nextLearningStep",
+      "scenario": "明确请求完整讲解后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:next-explicit-full"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "明确请求完整讲解后等待学生作答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "full_explain"
+          ],
+          "decision.reasonCode": [
+            "requested_full"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": true,
+        "observations": []
+      }
+    },
+    {
+      "caseId": "loop-low-evidence",
+      "entry": "nextLearningStep",
+      "scenario": "低证据：诊断问题后等待学生回答",
+      "initialFactRefs": [
+        "synthetic:next-unverified"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "低证据：诊断问题后等待学生回答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "unverified_only"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "diagnostic_answer",
+        "waitingFor": "diagnostic_answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "unknown",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-helped-majority",
+      "entry": "nextLearningStep",
+      "scenario": "帮助占多数：降低帮助后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:next-assisted-majority"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "帮助占多数：降低帮助后等待学生作答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "reduced_help_practice"
+          ],
+          "decision.reasonCode": [
+            "assistance_dependent"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "hinted",
+            "independentAttempt": "no",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "o2",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "revealed",
+            "independentAttempt": "no",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "o3",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-independent-correct",
+      "entry": "nextLearningStep",
+      "scenario": "独立正确：迁移检查后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:next-independent"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "独立正确：迁移检查后等待学生作答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "transfer_check"
+          ],
+          "decision.reasonCode": [
+            "independent"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "status": "observed_independent",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-correct-unknown-independence",
+      "entry": "nextLearningStep",
+      "scenario": "正确但独立性未知：迁移检查后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:next-independence-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "正确但独立性未知：迁移检查后等待学生作答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "transfer_check"
+          ],
+          "decision.reasonCode": [
+            "correct_needs_independent_check"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "unknown",
+            "usableForCurrentVersion": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-version-unknown",
+      "entry": "nextLearningStep",
+      "scenario": "版本未知：诊断后等待学生回答",
+      "initialFactRefs": [
+        "synthetic:next-version-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "版本未知：诊断后等待学生回答",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "diagnose"
+          ],
+          "decision.reasonCode": [
+            "no_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "diagnostic_answer",
+        "waitingFor": "diagnostic_answer"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "o1",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "p1",
+            "itemVersionId": "v1",
+            "verifiedCorrect": "yes",
+            "assistance": "independent",
+            "independentAttempt": "yes",
+            "usableForCurrentVersion": "unknown"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "loop-material-guided",
+      "entry": "tutor.thin",
+      "scenario": "资料已选：引导动作后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:thin-guided"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "资料已选：引导动作后等待学生作答",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "guided"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-missing-material",
+      "entry": "tutor.thin",
+      "scenario": "资料缺失：澄清后等待学生选择",
+      "initialFactRefs": [
+        "synthetic:thin-no-page"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "资料缺失：澄清后等待学生选择",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "clarify"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_choice",
+        "waitingFor": "choice"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": null,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-hint-followup",
+      "entry": "tutor.thin",
+      "scenario": "已有提示：示例动作后等待学生作答",
+      "initialFactRefs": [
+        "synthetic:thin-hint-offer"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已有提示：示例动作后等待学生作答",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "worked_example"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "hinted"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-revealed-variant",
+      "entry": "tutor.thin",
+      "scenario": "完整讲解后变式题等待学生作答",
+      "initialFactRefs": [
+        "synthetic:thin-revealed"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "完整讲解后变式题等待学生作答",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "revealed"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-assisted-success",
+      "entry": "tutor.thin",
+      "scenario": "受助后正确：独立变式等待学生作答",
+      "initialFactRefs": [
+        "synthetic:thin-assisted-success"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "受助后正确：独立变式等待学生作答",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [],
+        "assistedSuccessOnCurrentItem": true,
+        "retestDue": false,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-thin-due-retest",
+      "entry": "tutor.thin",
+      "scenario": "到期复测优先：复测题等待学生作答",
+      "initialFactRefs": [
+        "synthetic:thin-due-priority"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "到期复测优先：复测题等待学生作答",
+      "gold": {
+        "allowed": {
+          "kind": [
+            "delayed_retest"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "skillLabel": "合成向量张成",
+        "currentPage": 1,
+        "sourceIds": [
+          "synthetic-source"
+        ],
+        "sessionExposures": [
+          "revealed"
+        ],
+        "assistedSuccessOnCurrentItem": false,
+        "retestDue": true,
+        "problemRef": "p1"
+      }
+    },
+    {
+      "caseId": "loop-adaptive-no-evidence",
+      "entry": "tutor.adaptive",
+      "scenario": "自适应无证据：澄清问题后等待学生回答",
+      "initialFactRefs": [
+        "synthetic:adaptive-no-fact"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "自适应无证据：澄清问题后等待学生回答",
+      "gold": {
+        "allowed": {
+          "$": [
+            "clarify"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "diagnostic_answer",
+        "waitingFor": "diagnostic_answer"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": false,
+        "hasAssistance": false,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "loop-adaptive-assisted",
+      "entry": "tutor.adaptive",
+      "scenario": "已有帮助：独立变式等待学生作答",
+      "initialFactRefs": [
+        "synthetic:adaptive-assisted"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已有帮助：独立变式等待学生作答",
+      "gold": {
+        "allowed": {
+          "$": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": false,
+        "hasAssistance": true,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "loop-adaptive-independent",
+      "entry": "tutor.adaptive",
+      "scenario": "已有独立检查：独立变式等待学生作答",
+      "initialFactRefs": [
+        "synthetic:adaptive-checked"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已有独立检查：独立变式等待学生作答",
+      "gold": {
+        "allowed": {
+          "$": [
+            "independent_variant"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": true,
+        "hasAssistance": false,
+        "retestDue": false
+      }
+    },
+    {
+      "caseId": "loop-adaptive-due",
+      "entry": "tutor.adaptive",
+      "scenario": "到期复测：复测题等待学生作答",
+      "initialFactRefs": [
+        "synthetic:adaptive-due"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "到期复测：复测题等待学生作答",
+      "gold": {
+        "allowed": {
+          "$": [
+            "delayed_retest"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "student_answer",
+        "waitingFor": "answer"
+      },
+      "input": {
+        "nodeId": "synthetic-node",
+        "hasCheckedIndependent": true,
+        "hasAssistance": true,
+        "retestDue": true
+      }
+    },
+    {
+      "caseId": "loop-cancelled",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "已取消复测：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-cancelled"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已取消复测：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "cancelled",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "loop-declined",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "已拒绝复测：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-declined"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已拒绝复测：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "declined",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "loop-invalidated",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "结果失效：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-invalidated"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "结果失效：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "cancelled"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "invalidated",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "yes",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "loop-unknown-result",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "结果未知：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-unknown"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "结果未知：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "insufficient_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": {
+          "verifiedCorrect": "unknown",
+          "assistance": "independent",
+          "independentAttempt": "yes",
+          "usableForCurrentVersion": "yes"
+        }
+      }
+    },
+    {
+      "caseId": "loop-paused",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "已暂停/延期：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-deferred"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "已暂停/延期：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "pending"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "deferred",
+        "deadlineAt": "2026-11-10T00:00:00Z",
+        "submittedAt": null,
+        "now": "2026-10-11T00:00:00Z",
+        "observation": null
+      }
+    },
+    {
+      "caseId": "loop-missing-retest-facts",
+      "entry": "courseRouteRetestOutcome",
+      "scenario": "复测资料缺失：纯决策终止",
+      "initialFactRefs": [
+        "synthetic:retest-missing"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "复测资料缺失：纯决策终止",
+      "gold": {
+        "allowed": {
+          "$": [
+            "insufficient_evidence"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "completed",
+        "deadlineAt": "2026-10-10T00:00:00Z",
+        "submittedAt": "2026-10-09T00:00:00Z",
+        "now": "2026-10-11T00:00:00Z",
+        "observation": null
       }
     }
   ]
