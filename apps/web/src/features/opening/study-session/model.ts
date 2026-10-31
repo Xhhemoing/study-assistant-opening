@@ -5,7 +5,7 @@
 import type { ReviewGrade } from "@aistudy/contracts";
 import type { SpanDraftAnswer } from "../teaching/span/span-answer";
 
-export type StudyStepKind = "learn" | "question" | "card";
+export type StudyStepKind = "learn" | "question" | "photo_practice" | "card";
 
 /** Rich text uses the shared LearningProse renderer (Markdown + `$…$` math). */
 export type LearnStep = { kind: "learn"; id: string; title: string; body: string; focus?: string; estimateMinutes: number | null };
@@ -16,12 +16,17 @@ export type QuestionStep = {
   /** Number of coordinates in the problem (for the no-solution proof fields). */
   coordinates: number;
 };
+/** Free-form work remains controlled by the original practice owner. */
+export type PhotoPracticeStep = {
+  kind: "photo_practice"; id: string; title: string; prompt: string; estimateMinutes: null;
+  canSubmit: boolean; recorded: boolean;
+};
 export type CardStep = {
   kind: "card"; id: string; title: string; front: string;
   /** Omitted entirely until the owner reveals the card. */
   back?: string; flipped: boolean; grade: ReviewGrade | null; estimateMinutes: null;
 };
-export type StudyStep = LearnStep | QuestionStep | CardStep;
+export type StudyStep = LearnStep | QuestionStep | PhotoPracticeStep | CardStep;
 
 export type HelpState = {
   /** Strongest help actually delivered for this question. */
@@ -80,6 +85,9 @@ export function resultLabel(result: StepResult): string {
 /** Exactly one primary action per state. The shell renders it; adapters never name buttons. */
 export type PrimaryAction = { kind: "submit" | "continue" | "next" | "none" | "flip"; label: string; disabled: boolean };
 export function primaryAction(view: StudySessionView, pending: boolean): PrimaryAction {
+  if (view.step.kind === "photo_practice") return view.step.recorded
+    ? { kind: "none", label: "", disabled: true }
+    : { kind: "submit", label: view.sealed ? "重试保存同一答案" : "保存并批改", disabled: pending || !view.step.canSubmit };
   if (view.blocked) return { kind: "none", label: "暂时不能继续", disabled: true };
   if (view.step.kind === "card") return view.step.flipped
     ? { kind: "submit", label: "保存回忆情况", disabled: pending || !view.step.grade }

@@ -1,5 +1,5 @@
 "use client";
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { LearningProse } from "../assistant/learning-prose";
 import { MathInput } from "../teaching/math-input";
 import { spanVectorInput, type SpanDraftAnswer } from "../teaching/span/span-answer";
@@ -16,6 +16,8 @@ export type StepRendererProps<S extends StudyStep = StudyStep> = {
   onEdit: (change: Partial<SpanDraftAnswer>) => void;
   onChoosePhoto: (file: File) => void;
   onRemovePhoto: () => void;
+  /** Complex controls and results remain in their original owner. */
+  content?: ReactNode;
   onSelectGrade?: (grade: NonNullable<CardStep["grade"]>) => void;
 };
 
@@ -127,6 +129,10 @@ function PhotoField({ photo, locked, onChoose, onRemove }: { photo: PhotoState; 
 export const stepRenderers: { [K in StudyStepKind]: ComponentType<StepRendererProps<Extract<StudyStep, { kind: K }>>> } = {
   learn: LearnRenderer,
   question: SpanQuestionRenderer,
+  photo_practice: ({ step, content }) => <div className="space-y-4">
+    <div className="prose-reading text-lg leading-8"><LearningProse text={step.prompt} /></div>
+    {content}
+  </div>,
   card: CardRenderer,
 };
 
