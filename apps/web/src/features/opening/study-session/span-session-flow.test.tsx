@@ -204,3 +204,18 @@ it("renders exactly one primary action in every state and no time when the backe
   }
   act(() => root.unmount());
 });
+
+it("hides help before an unanswered retest and closes help when the same shell changes into one", () => {
+  const base: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 },
+    position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: { level: 1, label: "方向提示" } }, answer: {}, sealed: false, result: null, next: null, photo: null };
+  const host = document.createElement("div"); const root = createRoot(host); document.body.append(host);
+  const noop = () => {};
+  act(() => root.render(<StudySessionShell view={base} onPrimary={noop} onHelp={noop} onPause={noop} onReload={noop} onEdit={noop} onChoosePhoto={noop} onRemovePhoto={noop} />));
+  act(() => [...host.querySelectorAll("button")].find(button => button.textContent?.includes("提示"))?.click());
+  expect(host.querySelector("aside[aria-label='提示']")).not.toBeNull();
+  const retest = { ...base, step: { ...base.step, purpose: "retest" as const } };
+  act(() => root.render(<StudySessionShell view={retest} onPrimary={noop} onHelp={noop} onPause={noop} onReload={noop} onEdit={noop} onChoosePhoto={noop} onRemovePhoto={noop} />));
+  expect([...host.querySelectorAll("button")].some(button => button.textContent?.includes("提示"))).toBe(false);
+  expect(host.querySelector("aside[aria-label='提示']")).toBeNull();
+  act(() => root.unmount()); host.remove();
+});
