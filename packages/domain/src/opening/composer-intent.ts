@@ -93,13 +93,19 @@ function requestedMode(clauses: readonly string[]): TutorMode | undefined {
   return undefined;
 }
 
+/** Explicit course creation stays on the proposal route, never the learning-entry shortcut. */
+export function requestsCourseCreation(message: string): boolean {
+  return requestClauses(requestText(message)).some(clause =>
+    /^(?:创建|新建|生成|开始)(?:一节|一个|一次|一堂|个|节)?(?:关于)?.{0,60}(?:课程|课|教学活动)/.test(clause)
+    || /^(?:start|create)\s+(?:a\s+)?(?:lesson|course)\b/i.test(clause));
+}
+
 function requestedPurpose(clauses: readonly string[]): ComposerPurpose {
   if (learningContinuationIntent(clauses.join("，")) === "continue") return "teach";
   for (const clause of clauses) {
     if (/^(?:(?:制定|规划|安排|生成|创建|新建|做|调整|修改|更新).{0,80}(?:学习计划|复习计划|备考计划|计划|日程)|给我(?:一份|一个|个|份)?.{0,60}(?:学习|复习|备考)计划)/.test(clause)
       || /^(?:make|create|plan|schedule)\s+(?:(?:me|a|my|the)\s+){0,3}(?:study|revision|learning)\s+(?:plan|schedule)\b/i.test(clause)) return "plan";
-    if (/^(?:(?:创建|新建|生成|开始)(?:一节|一个|一次|一堂|个|节)?(?:关于)?.{0,60}(?:课程|课|教学活动)|带我(?:开始|学习)|教我学习)/.test(clause)
-      || /^(?:start|create)\s+(?:a\s+)?(?:lesson|course)\b/i.test(clause)) return "teach";
+    if (requestsCourseCreation(clause) || /^(?:带我(?:开始|学习)|教我学习)/.test(clause)) return "teach";
   }
   return "answer";
 }
