@@ -38,6 +38,19 @@ vi.mock("./span-answer", () => ({ isSpanReservedProblemId: () => false }));
 import { SpanLesson } from "./span-lesson";
 import { SpanLessonSession } from "./span-lesson-session";
 import { spanLessonRequest } from "./span-session-client";
+it("renders the targeted focus and hides it when absent", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const host = document.createElement("div"), root = createRoot(host);
+  const props = { courseId: "course", sourceIds: ["source"], sourceLoadError: false };
+  try {
+    await act(async () => root.render(<SpanLesson {...props} targetedFocus="系数代入后，第3坐标没对上。" />));
+    const block = host.querySelector('[aria-label="上次错在这一步"]');
+    expect(block?.textContent).toBe("上次错在这一步系数代入后，第3坐标没对上。");
+    expect(block?.textContent).not.toContain("α=");
+    await act(async () => root.render(<SpanLesson {...props} />));
+    expect(host.querySelector('[aria-label="上次错在这一步"]')).toBeNull();
+  } finally { await act(async () => root.unmount()); }
+});
 
 it("restores matching intent once, then sends pause and renders the paused session", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });

@@ -23,6 +23,7 @@ import { SpanTutorControl } from "./span-tutor-control";
 import { SpanNextActionControl, currentSpanObservationId } from "./span-next-action-control";
 import { isSpanReservedProblemId } from "./span-answer";
 import type { SpanExecutionPhase } from "./span-session-client";
+import { SpanTargetedFocus } from "./targeted-focus";
 
 const modeLabels = { self_study: "自学 · 例题到独立新题", overview: "串讲 · 连接方程与几何", challenge: "拔高 · 预设迁移" };
 const modeProcess: Record<SpanTeachingMode, string> = {
@@ -36,7 +37,7 @@ export function isSpanReservedAttempt(attempt: LearningAttempt): boolean {
   return isSpanReservedProblemId(attempt.spanExercise?.id);
 }
 type SpanLessonProps = { originalConversationId?: string | null; courseId: string; sourceIds: string[]; sourceLoadError: boolean; delayedRetestId?: string; initialIntent?: StudySessionIntent; initialMoveId?: string; initialNewEvidenceEventId?: string;
-  session?: SpanLessonSnapshot; executionPhase?: SpanExecutionPhase; restoredAttempts?: LearningAttempt[]; restoredObservations?: LearningObservation[]; restoredHintLevels?: Record<string, SpanHintLevel[]>; savingProgress?: boolean;
+  session?: SpanLessonSnapshot; targetedFocus?: string; executionPhase?: SpanExecutionPhase; restoredAttempts?: LearningAttempt[]; restoredObservations?: LearningObservation[]; restoredHintLevels?: Record<string, SpanHintLevel[]>; savingProgress?: boolean;
   onProgress?: (intent: StudySessionIntent, moveId: string, status: "active" | "paused" | "completed") => Promise<boolean>; onSummary?: () => void; onReload?: () => void };
 /** 步骤短标签；同名步骤（如两道独立新题）第二个起改为「迁移新题」以便区分。 */
 export function stepLabels(moves: readonly { presentation: { kind: string } }[]): string[] {
@@ -44,7 +45,7 @@ export function stepLabels(moves: readonly { presentation: { kind: string } }[])
   return base.map((label, index) => label === "独立新题" && base.indexOf(label) < index ? "迁移新题" : label);
 }
 
-export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, executionPhase, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, onReload, originalConversationId }: SpanLessonProps) {
+export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, targetedFocus, executionPhase, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, onReload, originalConversationId }: SpanLessonProps) {
   const diagnostics = useDiagnosticsEnabled();
   const lessonRoot = useRef<HTMLElement>(null);
   const [intent, setIntent] = useState(initialIntent ?? defaultIntent);
@@ -115,6 +116,7 @@ export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetest
       {intent.language !== "zh" ? <p className="text-sm leading-7">Span = all linear combinations（所有线性组合）; coefficient = 系数; consistent system = 相容方程组。Language support translates the question; it does not solve it. 深入英文解释可在本题提问中选择语言支持。</p> : null}
       <ContentBlock width={isPresentation ? "wide" : "prose"}><section className="space-y-4"><h2 className="text-lg font-semibold">{current.presentation.instructions}</h2><p className="text-sm leading-7">{current.studentAction}</p><SelectionAsk binding={assistantContext}>
         {isPresentation ? <>
+          <SpanTargetedFocus text={targetedFocus} />
           {mode === "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : <SpanWorkedExample courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} fast={intent.pace === "fast"} />}
           {mode === "overview" ? <SpanOverviewLinks courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : null}
           {mode !== "challenge" ? <SpanExplorer courseId={courseId} sourceId={sourceIds[0]} sessionId={session?.sessionId} /> : null}
