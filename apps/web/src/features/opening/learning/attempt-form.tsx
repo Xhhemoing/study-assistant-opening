@@ -22,6 +22,9 @@ import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeFields, type PracticeStart } from "./practice-draft";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { StudySessionShell } from "../study-session/study-session-shell";
+import { photoPracticeView } from "../study-session/adapters/photo-practice";
 
 
 function readPracticeSkillPrefill(): string {
@@ -72,6 +75,8 @@ function PracticeController(props: Props) {
 }
 
 function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, continuity }: Props & { continuity: PracticeContinuity }) {
+  const { studySessionV2 } = useOpeningCapabilities();
+  const inPhotoShell = Boolean(studySessionV2 && initialProblem);
   const client = useMemo(() => createOpeningLearningClient(), []);
   const diagnostics = useDiagnosticsEnabled();
   const scope = practiceScope(courseId, "ordinary", retest, initialFocus, initialProblem);
@@ -266,10 +271,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   }
 
   if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
-  return (
+  const content = (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
       {!ready ? <p className="text-sm text-text-3" role="status">正在恢复练习…</p> : null}
-      {attempt || recorded ? <h3 className="text-sm font-semibold text-text">{recorded ? "已保存的作答" : "完成自己的尝试"}</h3> : null}
+      {!inPhotoShell && (attempt || recorded) ? <h3 className="text-sm font-semibold text-text">{recorded ? "已保存的作答" : "完成自己的尝试"}</h3> : null}
       {ready && initialMode === "matrix" && !matrixMode && draft.start ? <p className="text-xs text-text-2" role="status">已恢复未完成的练习。也可以保留答案，开始其他练习。</p> : null}
       {storageWarning ? <p className="text-xs text-warn" role="status">答案暂时只在当前页面保留，刷新前请先复制。</p> : null}
       {!attempt && !draft.start && !retest && !initialFocus ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-line px-3 py-2 text-sm text-text">练习内置矩阵题（自动核算）</button> : null}
@@ -447,7 +452,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             {attempt.problemId ? "题目已记录。" : "本次先保存答案；需要评分时，可开始新练习并填写完整题干。"}
             {deliveredAssistance !== "none" ? ` 本次已使用的帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}。` : null}
           </p>
-          {attempt.stemSnapshot ? <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg/50 px-3 py-2 text-sm leading-7 text-text">{attempt.stemSnapshot}</p> : null}
+          {!inPhotoShell && attempt.stemSnapshot ? <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg/50 px-3 py-2 text-sm leading-7 text-text">{attempt.stemSnapshot}</p> : null}
           {draft.submission ? <p className="text-xs text-warn" role="status">正在确认上次保存结果，请先保留原答案。</p> : null}
           <form onSubmit={submit} onKeyDown={event => {
             if (event.key !== "Enter") return;
@@ -538,4 +543,8 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
     </fieldset>
   );
+  if (!inPhotoShell || !attempt) return content;
+  const unused = () => {};
+  return <StudySessionShell view={photoPracticeView({ attemptId: attempt.id, stem: attempt.stemSnapshot ?? stem, answer, saved: Boolean(recorded), locked: pending || Boolean(draft.submission) })}
+    content={content} onPrimary={unused} onEdit={unused} onChoosePhoto={unused} onRemovePhoto={unused} onHelp={unused} onPause={unused} onReload={unused} onNavigate={unused} />;
 }
