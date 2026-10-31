@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { SpanLessonSnapshot } from "@aistudy/contracts";
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, effects: [] as Array<() => void> }));
 vi.mock("react", async original => ({ ...await original<typeof import("react")>(),
+  useMemo: (factory: () => unknown) => factory(),
   useState: (initial: unknown) => { const i = hooks.cursor++; if (!(i in hooks.values)) hooks.values[i] = typeof initial === "function" ? initial() : initial; return [hooks.values[i], (next: unknown) => { hooks.values[i] = typeof next === "function" ? next(hooks.values[i]) : next; }]; },
   useRef: (initial: unknown) => { const i = hooks.cursor++; if (!(i in hooks.values)) hooks.values[i] = { current: initial }; return hooks.values[i]; },
   useCallback: (callback: unknown, deps: unknown[]) => { const i = hooks.cursor++, previous = hooks.values[i] as { value: unknown; deps: unknown[] } | undefined; if (!previous || deps.some((dep, n) => !Object.is(dep, previous.deps[n]))) hooks.values[i] = { value: callback, deps }; return (hooks.values[i] as { value: unknown }).value; },
@@ -10,6 +11,7 @@ vi.mock("react", async original => ({ ...await original<typeof import("react")>(
 }));
 const mocks = vi.hoisted(() => ({ request: vi.fn(), replaceState: vi.fn() }));
 vi.mock("./span-session-client", async original => ({ ...await original<typeof import("./span-session-client")>(), spanLessonRequest: mocks.request }));
+vi.mock("../../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ studySessionV2: false }) }));
 import { SpanLessonSession } from "./span-lesson-session";
 import { SpanLesson } from "./span-lesson";
 import type { LearningAttempt } from "@aistudy/contracts";

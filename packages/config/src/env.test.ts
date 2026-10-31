@@ -282,3 +282,10 @@ describe("optional semantic retrieval configuration", () => {
       .toMatchObject({ billing: "free_tier", dailyRequestCap: 10, requestDimensions: false });
   });
 });
+
+// New UI switch is validated by the shared feature-switch owner.
+it("defaults studySessionV2 closed and rejects malformed values", async () => {
+  const { loadFeatureSwitches } = await import("./server-config");
+  expect(loadFeatureSwitches({}).studySessionV2).toBe(false);
+  expect(() => loadFeatureSwitches({ OPENING_STUDY_SESSION_V2: "enabled" })).toThrow(/OPENING_STUDY_SESSION_V2/);
+});
