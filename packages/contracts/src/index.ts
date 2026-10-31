@@ -400,3 +400,4 @@ export { gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "./op
 export type { GradingEvaluationDataset, GradingEvaluationRun } from "./opening/grading-evaluation";
 export * from "./opening/photo-question-recognition";
 export * from "./opening/source-visual-recognition";
+export * from "./opening/deidentified-dataset";
