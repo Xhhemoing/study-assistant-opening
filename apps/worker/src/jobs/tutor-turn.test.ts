@@ -6,6 +6,7 @@ import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 import type { TutorNextActionService } from "./tutor-next-action";
+import { inferComposerIntent } from "@aistudy/domain";
 
 describe("tutor mode policy", () => {
   it("keeps listening distinct from unsolicited planning", () => {
@@ -69,10 +70,10 @@ describe("tutor turn handler", () => {
     return { deps: { ...deps, tutorJobs: jobs }, tutorJobs: jobs, chunks, budget, provider };
   }
 
-  it("opens a real course-scoped span action before the proposal/model path", async () => {
+  it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("opens a real course-scoped span action for %s before the proposal/model path", async text => {
     const { deps, tutorJobs, provider, budget } = setup();
     const courseId = claimedJob.conversationId;
-    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, purpose: "teach", courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
     const nextAction: TutorNextActionService = {
       read: async () => ({ courseId, privacyEpoch: 0, sourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }],
         decisionInput: { status: "unobserved", observations: [], wantsFullExplanation: false } }),
@@ -90,6 +91,60 @@ describe("tutor turn handler", () => {
     }));
     expect(provider.complete).not.toHaveBeenCalled();
     expect(budget.reserve).not.toHaveBeenCalled();
+  });
+
+  it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("returns a course link without model or proposals when %s is unavailable", async text => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const courseId = claimedJob.conversationId;
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId, sourceVersions: {} });
+    const reply = vi.fn();
+    await createTutorTurnHandler({ ...deps, privacy: { getWorkspaceEpoch: async () => 7 },
+      nextAction: { read: async () => null, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply },
+    })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining(`[打开课程学习](/opening/courses/${courseId}/study)`), expectedPrivacyEpoch: 7, candidates: [] }));
+    expect(reply).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+  });
+
+  it.each(["带我学习", "继续学习", "创建一节 span 课", "安排计划"])("asks for a course without a model for %s", async text => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, sourceVersions: {} });
+    const reply = vi.fn();
+    await createTutorTurnHandler({ ...deps, proposals: { reply } })(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("先选择一门课程"), candidates: [] }));
+    expect(tutorJobs.completeTurn.mock.calls[0][0].text).toContain("/opening/courses");
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unbound practice starter in ordinary question answering", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text: "出一道题", purpose: "answer" }), text: "出一道题", sourceIds: [], sourceVersions: {} });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a bound concept explanation out of next-action and proposals", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const text = "我想理解一个概念。请先问我已经知道什么，再一步步解释。";
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text, purpose: "answer" }), text,
+      courseId: claimedJob.conversationId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    const read = vi.fn(), reply = vi.fn();
+    await createTutorTurnHandler({ ...deps, nextAction: { read, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply } })(claimedJob.id);
+    expect(read).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(provider.complete).toHaveBeenCalledOnce();
+  });
+
+  it.each(["创建一节 span 课", "创建课程", "请帮我创建课程", "create a course", "安排计划"])("preserves explicit proposals for %s with a bound course", async text => {
+    const { deps, tutorJobs } = setup();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId: claimedJob.conversationId, sourceVersions: {} });
+    const read = vi.fn(), reply = vi.fn(async () => ({ text: "教学草稿", proposal: {}, privacyEpoch: 0, contextSourceRefs: [] }));
+    await createTutorTurnHandler({ ...deps, nextAction: { read, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply } })(claimedJob.id);
+    expect(read).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledOnce();
   });
 
   it("rejects the prepared action when authorization changes before publication", async () => {

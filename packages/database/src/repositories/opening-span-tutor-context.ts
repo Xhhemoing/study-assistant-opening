@@ -1,6 +1,6 @@
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
 import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
-  studyIntentForMessage, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
+  studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
@@ -56,7 +56,7 @@ export function spanTutorReceiptDecision(receipt: { intentVersion: string; polic
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
     || studyIntentForMessage(null, question)?.intent.learningPhase !== undefined
-    || /^(?:请|帮我|我想)?(?:继续(?:学习|上次(?:学习)?|原来的学习)?|下一步|开始(?:本次学习|学习|练习)|出一道题|从哪里开始)[\s。！!？?]*$/u.test(question.trim());
+    || learningContinuationIntent(question) !== null;
 }
 export function spanTutorExactProjection(rows: SnapshotObservation[], evaluations: Array<{ id: string; evaluatorVersion: string | null }>) {
   const exact = new Set(evaluations.filter(row => row.evaluatorVersion === "span-exact-v1").map(row => row.id));

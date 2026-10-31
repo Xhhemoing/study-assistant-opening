@@ -1,6 +1,9 @@
 import { expect, it } from "vitest";
 import { spanTutorQuestionInScope, spanTutorExactProjection, spanTutorReceiptDecision } from "./opening-span-tutor-context";
 import type { SnapshotObservation } from "@aistudy/domain";
+it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("accepts shared continuation %s", question => {
+  expect(spanTutorQuestionInScope(question)).toBe(true);
+});
 it("does not hijack unrelated course teaching under a span-only grant", () => {
   expect(spanTutorQuestionInScope("请解释特征值与特征向量")).toBe(false);
   expect(spanTutorQuestionInScope("请讲微积分")).toBe(false);

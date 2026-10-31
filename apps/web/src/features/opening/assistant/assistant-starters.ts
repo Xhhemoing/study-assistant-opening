@@ -9,8 +9,8 @@ export function assistantStarters(study: boolean, queryAvailable: boolean): Assi
     { label: "换个例子", text: "请用一个不同的简单例子说明当前概念，保留这道题让我自己做。", mode: "hint", purpose: "teach" },
   ];
   return [
-    { label: "解释一个概念", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。", mode: "explain", purpose: "teach" },
-    { label: "出一道题", text: "请根据我们正在学习的内容出一道练习题，先不要显示答案。", mode: "hint", purpose: "teach" },
+    { label: "解释一个概念", text: "我想理解一个概念。请先问我已经知道什么，再一步步解释。", mode: "explain", purpose: "answer" },
+    { label: "出一道题", text: "出一道题", mode: "hint", purpose: "answer" },
     queryAvailable
       ? { label: "查我的学习记录", text: "我最近的学习记录有哪些？", mode: "explain", purpose: "query" }
       : { label: "检验我的理解", text: "我想用自己的话讲一遍，请帮我找出理解中的缺口，先不要直接给答案。", mode: "listen", purpose: "answer" },

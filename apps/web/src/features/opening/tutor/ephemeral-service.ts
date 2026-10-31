@@ -14,7 +14,7 @@ import {
   type TutorMode,
   type TutorLearnerContext,
 } from "@aistudy/contracts";
-import { composerMessageText, inferComposerIntent, tutorLearnerContextInstruction, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
+import { composerMessageText, inferComposerIntent, learningContinuationIntent, tutorLearnerContextInstruction, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
 import type { SystemQueryService } from "@aistudy/ai";
 import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
 import { EphemeralServiceError } from "./ephemeral-error";
@@ -136,6 +136,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       }
       const resolved = inferComposerIntent({ ...request,
+        purpose: request.purpose ?? (learningContinuationIntent(request.text) ? "answer" : undefined),
         practiceMode: Boolean(request.contextAnchor?.attemptId || request.contextAnchor?.activityId),
       });
       let input = { ...request, ...resolved };
