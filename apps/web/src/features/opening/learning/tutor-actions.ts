@@ -4,13 +4,17 @@ import { z } from "zod";
 import {
   recommendTutorAction,
   assertNoMasteryPercentage,
+  decideIntervention,
+  gateTutorRecommendAfterDecision,
   type ThinTutorAction,
   type AdaptiveTutorActionKind,
 } from "@aistudy/domain";
+import type { InterventionPrefs, InterventionSettingsResponse } from "@aistudy/contracts";
 import * as openingDatabase from "@aistudy/database";
 import {
   createOpeningLearningRepository,
   createOpeningRetestActivityRepository,
+  createOpeningInterventionSettingsRepository,
 } from "@aistudy/database";
 import { ApiError } from "../../auth/service";
 
@@ -74,6 +78,7 @@ export type TutorActionObservationDeps = {
     courseId: string,
     now: string,
   ): Promise<Array<{ skillLabel?: string | null }>>;
+  getIntervention?(scope: Scope, courseId: string, activityId: string | null): Promise<InterventionSettingsResponse>;
 } & TutorActionSkillEvidenceDeps;
 
 const emptySkillEvidenceDeps: TutorActionSkillEvidenceDeps = {
@@ -85,6 +90,11 @@ const emptySkillEvidenceDeps: TutorActionSkillEvidenceDeps = {
     hasCheckedIndependent: false,
     evidenceIds: [],
   }),
+};
+
+const defaultInterventionPrefs: InterventionPrefs = {
+  proactivity: "balanced", depth: "hint_then_offer", quietMode: false,
+  nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
 };
 
 type SkillEvidenceRepositoryLike = {
@@ -172,6 +182,8 @@ function createDefaultObservationDeps(sql: Sql): TutorActionObservationDeps {
     listDeliveredExposures: (scope, sessionId) =>
       learning.listDeliveredExposures(scope, sessionId),
     listDueRetests: (scope, courseId, now) => retests.listDue(scope, courseId, now),
+    getIntervention: (scope, courseId, activityId) =>
+      createOpeningInterventionSettingsRepository(sql).resolve(scope, { courseId, activityId }),
     ...skillEvidence,
   };
 }
@@ -324,6 +336,7 @@ export async function listTutorActionsForCourse(
 ): Promise<ThinTutorAction[]> {
   const parsed = parseTutorActionsSearchParams(courseId, searchParams);
   await deps.assertOwnedCourse(scope, parsed.courseId);
+  const intervention = deps.getIntervention ? await deps.getIntervention(scope, parsed.courseId, null) : null;
   let exposures: Array<"hinted" | "revealed"> = [];
   if (parsed.query.sessionId) {
     const session = await deps.getSession(scope, parsed.query.sessionId);
@@ -343,10 +356,19 @@ export async function listTutorActionsForCourse(
     (activity) => activity.skillLabel === parsed.query.skillLabel,
   );
 
+  const gate = (actions: ThinTutorAction[], nodeKind: "teach" | "prompt", evidenceStrength: "low" | "ok") => {
+    if (!intervention) return actions;
+    const decision = decideIntervention({ prefs: intervention.effective, trigger: "tutor_recommend", context: {
+      userIsTyping: false, consecutiveProactiveRejects: 0, evidenceStrength, nodeKind,
+      sessionExposures: exposures, proposedKind: actions[0]?.kind,
+    }});
+    return gateTutorRecommendAfterDecision(actions[0]?.kind, decision).allowOffer ? actions : [];
+  };
+
   const nodeId = parsed.query.nodeId ?? null;
   if (nodeId) {
     const flags = await loadNodeFlags(deps, scope, nodeId);
-    return buildTutorActions({
+    return gate(buildTutorActions({
       skillLabel: parsed.query.skillLabel,
       currentPage: parsed.query.currentPage ?? null,
       nodeId,
@@ -356,15 +378,15 @@ export async function listTutorActionsForCourse(
       hasAssistance: flags.hasAssistance,
       hasCheckedIndependent: flags.hasCheckedIndependent,
       evidenceIds: flags.evidenceIds,
-    });
+    }), "prompt", flags.hasAssistance || flags.hasCheckedIndependent ? "ok" : "low");
   }
 
-  return buildTutorActions({
+  return gate(buildTutorActions({
     skillLabel: parsed.query.skillLabel,
     currentPage: parsed.query.currentPage ?? null,
     nodeId: null,
     sourceIds: parsed.sourceIds,
     sessionExposures: exposures,
     retestDue,
-  });
+  }), "teach", "ok");
 }

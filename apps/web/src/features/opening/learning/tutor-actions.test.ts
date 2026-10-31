@@ -29,6 +29,13 @@ function createDeps(
   };
 }
 
+const interventionPrefs = {
+  proactivity: "balanced" as const,
+  depth: "hint_then_offer" as const,
+  quietMode: false,
+  nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
+};
+
 describe("K02a tutor-actions query", () => {
   it("accepts server-observed query fields only", () => {
     const parsed = parseTutorActionsSearchParams(
@@ -235,6 +242,37 @@ describe("createSkillEvidenceDepsFromDatabase", () => {
 });
 
 describe("listTutorActionsForCourse authorization", () => {
+  it("gates the real recommendation consumer with effective intervention preferences", async () => {
+    const deps = createDeps({
+      getIntervention: vi.fn(async () => ({
+        settings: interventionPrefs,
+        courseOverride: null,
+        sessionOverride: null,
+        effective: interventionPrefs,
+        saved: true,
+        invalidStoredSettings: false,
+      })),
+    });
+    const quiet = await listTutorActionsForCourse(
+      {} as never, scope, COURSE,
+      new URLSearchParams({ skillLabel: "chain rule", currentPage: "2" }), deps,
+    );
+    expect(quiet).toHaveLength(1);
+    expect(deps.getIntervention).toHaveBeenCalledWith(scope, COURSE, null);
+
+    deps.getIntervention = vi.fn(async () => ({
+      settings: interventionPrefs,
+      courseOverride: null,
+      sessionOverride: null,
+      effective: { ...interventionPrefs, quietMode: true },
+      saved: true,
+      invalidStoredSettings: false,
+    }));
+    await expect(listTutorActionsForCourse(
+      {} as never, scope, COURSE,
+      new URLSearchParams({ skillLabel: "chain rule", currentPage: "2" }), deps,
+    )).resolves.toEqual([]);
+  });
   it("rejects a course outside the caller workspace", async () => {
     const deps = createDeps({
       assertOwnedCourse: vi.fn(async () => {
