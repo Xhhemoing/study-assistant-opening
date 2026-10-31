@@ -87,16 +87,16 @@ export function createOpeningAttemptService(sql: Sql) {
     async preparePhotoWorkSource(scope: Scope, id: string, raw: unknown) {
       const input = photoWorkSourceInputSchema.parse(raw);
       const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
+      // Same admission rule as submit (admitOpeningAiGradingWorkSource): a workspace upload, never a
+      // course membership. Course membership would turn answer photos into course knowledge sources.
       const [row] = await sql`SELECT s.id,s.version,s.mime,s.parse_state,s.upload_state
         FROM opening_sources s
-        JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.course_id=${attempt.courseId}
-          AND m.asset_type='source' AND m.asset_id=s.id
         WHERE s.id=${input.sourceId} AND s.workspace_id=${scope.workspaceId}
           AND s.upload_state='uploaded'
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
         LIMIT 1`;
       if (!row || Number(row.version) !== input.sourceVersion) {
-        throw Object.assign(new Error("作答照片不属于当前课程、版本已过期或不可读取"), { code: "CONFLICT" as const });
+        throw Object.assign(new Error("作答照片版本已过期或不可读取"), { code: "CONFLICT" as const });
       }
       const parseState = String(row.parse_state) as "not_started" | "queued" | "running" | "ready" | "failed" | "unsupported";
       const mime = String(row.mime);

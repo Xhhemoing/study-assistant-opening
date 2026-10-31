@@ -123,6 +123,24 @@ it("replays the same sealed request after a network failure", async () => {
   expect(() => port.edit({ membership: "not_in_span" })).toThrow();
 });
 
+it("an uploaded photo is attached to the answer without being added to the course", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const photoId = uuid();
+  mocks.uploadFile.mockResolvedValue({ id: photoId, version: 1 });
+  mocks.preparePhotoWorkSource.mockResolvedValue({ attemptId: attempt.id, courseId: attempt.courseId, state: "ready", parseState: "ready", workSource: { id: photoId, version: 1, physicalPage: 1 } });
+  const port = createSpanStudySession(details, vi.fn(), { photoEnabled: true });
+  await port.load();
+  expect((await port.choosePhoto(Object.assign(new File(["x"], "a.png", { type: "image/png" }), { arrayBuffer: async () => new ArrayBuffer(1) }))).photo?.status).toBe("ready");
+  expect(mocks.addToCourse).not.toHaveBeenCalled();
+  port.edit({ membership: "in_span" });
+  mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+  await port.primary();
+  expect(mocks.submitAttempt.mock.calls[0]![1]).toMatchObject({ workSource: { id: photoId, version: 1, physicalPage: 1 } });
+});
+
 it("a failed photo leaves no attachment on the text answer", async () => {
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);

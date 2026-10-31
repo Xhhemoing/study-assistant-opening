@@ -7,7 +7,6 @@ import { learningAttemptSchema, spanProblemSchema, type LearningAttempt, type Le
 import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../../client/learning-client";
 import { createOpeningApi, resolveUploadPutUrl } from "../../client/api";
-import { createMaterialOrganizationClient } from "../../library/material-organization-client";
 import { createUploadClient } from "../../inbox/upload-client";
 import { putPrivateBytes } from "../../inbox/put-private";
 import { spanLessonRequest, type SpanLessonDetails } from "../../teaching/span/span-session-client";
@@ -265,8 +264,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       try {
         const result = await upload.uploadFile({ name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) });
         if ("phase" in result) { photo = { status: "failed", name: file.name, message: result.message }; return refresh(); }
-        const membership = await createMaterialOrganizationClient().addToCourse(session.courseId, [result.id], "reference");
-        if (membership.failed.length) { photo = { status: "unavailable", name: file.name, message: "照片已上传，但没能关联到这门课；可以改用文字作答。" }; return refresh(); }
+        // The photo stays a private upload; it is attached to this answer only, never to the course materials.
         update({ fields: { workSourceId: result.id, workSourceVersion: result.version, workPhysicalPage: 1 } });
         photo = await checkPhoto(current, { id: result.id, version: result.version, physicalPage: 1 }, file.name);
       } catch (reason) {
