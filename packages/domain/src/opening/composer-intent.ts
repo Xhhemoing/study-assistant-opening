@@ -26,6 +26,14 @@ function requestClauses(text: string): string[] {
     .filter(Boolean);
 }
 
+/** Exact entry requests only: combined record lookups and continuation stay on the query route. */
+export function learningContinuationIntent(message: string): "continue" | "practice" | null {
+  const clauses = requestClauses(requestText(message).replace(/[\s。！!？?]+$/u, ""));
+  if (clauses.length !== 1) return null;
+  if (/^出一道题(?:吧)?$/u.test(clauses[0]!)) return "practice";
+  return /^(?:继续(?:学习|上次(?:学习)?|原来的学习)?|下一步|再来一道题|带我继续学(?:习)?|我们继续|开始(?:本次学习|学习|练习)|从哪里开始)(?:吧)?$/u.test(clauses[0]!) ? "continue" : null;
+}
+
 function recordRequestText(text: string): string {
   return text.split(/([，,。.!！?？;；\n]+)/u).map(part =>
     requestClauses(part).some(clause => /^(?:不要|别|不需要|不用|不必|无需|不想|不是要|不是想)/.test(clause)) ? "" : part,
@@ -86,6 +94,7 @@ function requestedMode(clauses: readonly string[]): TutorMode | undefined {
 }
 
 function requestedPurpose(clauses: readonly string[]): ComposerPurpose {
+  if (learningContinuationIntent(clauses.join("，")) === "continue") return "teach";
   for (const clause of clauses) {
     if (/^(?:(?:制定|规划|安排|生成|创建|新建|做|调整|修改|更新).{0,80}(?:学习计划|复习计划|备考计划|计划|日程)|给我(?:一份|一个|个|份)?.{0,60}(?:学习|复习|备考)计划)/.test(clause)
       || /^(?:make|create|plan|schedule)\s+(?:(?:me|a|my|the)\s+){0,3}(?:study|revision|learning)\s+(?:plan|schedule)\b/i.test(clause)) return "plan";

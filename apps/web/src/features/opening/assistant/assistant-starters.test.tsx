@@ -13,6 +13,8 @@ beforeEach(() => { Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 it("offers hints in a study context and only offers system records when available", () => {
+  expect(assistantStarters(false, false)[0]).toMatchObject({ purpose: "answer", mode: "explain" });
+  expect(assistantStarters(false, false)[1]).toMatchObject({ purpose: "answer", mode: "hint", text: "出一道题" });
   expect(assistantStarters(true, true).map(value => value.mode)).toEqual(["hint", "hint", "hint"]);
   expect(assistantStarters(false, false).some(value => value.purpose === "query")).toBe(false);
   expect(assistantStarters(false, true).at(-1)?.purpose).toBe("query");
