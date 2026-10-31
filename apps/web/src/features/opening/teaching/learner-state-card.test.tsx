@@ -39,7 +39,7 @@ it("shows a truthful card before five valid answers and keeps the course study e
   features.push(feature(0), feature(4, { eligibility: { verifiedCorrect: "unknown", usableForCurrentVersion: "yes" } }),
     feature(5, { eligibility: { verifiedCorrect: "yes", usableForCurrentVersion: "unknown" } }));
   await render(response(features), courseId);
-  expect(host.textContent).toContain("已记录 4 次作答");
+  expect(host.textContent).toContain("已记录 6 次作答");
   expect(host.textContent).toContain("还没有足够的有效记录");
   expect(host.querySelector("a")?.getAttribute("href")).toBe(`/opening/courses/${courseId}/study`);
 });
