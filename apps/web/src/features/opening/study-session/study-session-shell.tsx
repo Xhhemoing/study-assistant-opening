@@ -22,7 +22,9 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
   const primary = primaryAction(view, pending);
   const locked = pending || view.sealed || Boolean(view.result);
   const isQuestion = view.step.kind === "question";
+  const helpAllowed = isQuestion && !(view.step.purpose === "retest" && !view.result);
   useEffect(() => { setHelpOpen(false); setMoreOpen(false); }, [view.step.id]);
+  useEffect(() => { if (!helpAllowed) setHelpOpen(false); }, [helpAllowed]);
   useEffect(() => {
     if (!helpOpen && !moreOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -69,14 +71,14 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
     </main>
 
     <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
-      {isQuestion ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
+      {helpAllowed ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
       <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
         {pending ? "正在保存…" : primary.label}
       </button>
     </footer>
 
-    {helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
+    {helpAllowed && helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
       <div className="flex items-center justify-between"><h2 className="font-medium">提示</h2>
         <button type="button" className={ui.quiet} onClick={() => { setHelpOpen(false); helpButton.current?.focus(); }}>收起</button></div>
       {view.help.hints.length ? <ol className="space-y-2">{view.help.hints.map(hint => <li key={hint.level} className="rounded-tile bg-surface-2 p-3 motion-safe:animate-text-in">

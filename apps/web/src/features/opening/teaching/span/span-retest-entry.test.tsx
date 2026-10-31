@@ -160,6 +160,10 @@ it.each(["span-faded-3d", "span-independent-3d"])("restores alias draft, seals %
 it("keeps delivered help without restoring or actively requesting hints before the retest answer", async () => {
   const { session, attempt, alias } = fixture(); configure(session, attempt, alias);
   mocks.levels.mockResolvedValue({ [attempt.id]: [1, 4] }); mocks.exposures.mockResolvedValue(["revealed"]);
+  await render(session, alias);
+  expect([...host.querySelectorAll("button")].some(button => button.textContent?.includes("提示"))).toBe(false);
+  expect(host.querySelector("aside[aria-label='提示']")).toBeNull();
+  expect(mocks.hint).not.toHaveBeenCalled();
   const details = await createSpanLessonSessionService({} as Sql).read(scope, session.courseId, session.activityId, alias);
   const port = createSpanStudySession({ ...details, continuityRetestId: alias }, vi.fn());
   const view = await port.load(); expect(view.step).toMatchObject({ kind: "question", purpose: "retest" }); expect(view.help).toEqual({ level: "revealed", hints: [], next: null });
