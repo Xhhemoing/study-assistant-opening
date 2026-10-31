@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
+import { vi } from "vitest";
+import type { Sql } from "postgres";
+const taskReads = vi.hoisted(() => ({ listTasks: vi.fn() }));
+vi.mock("@aistudy/database", async original => ({ ...await original<typeof import("@aistudy/database")>(), createOpeningPlansRepository: () => taskReads }));
 import { planDay } from "@aistudy/domain";
 import { OpeningPlanError } from "@aistudy/database";
 import type { TaskItem, TimeBlock } from "@aistudy/contracts";
 import {
   buildServerPlanDayOptions,
+  createOpeningPlanService,
   DEFAULT_PLANNING_TIME_ZONE,
   mapRepoError,
   resolvePlanningNowForLocalDay,
 } from "./plan-service";
 
 const SH = "Asia/Shanghai";
+it("projects persisted minutes without replacing the legacy task field", async () => {
+  taskReads.listTasks.mockResolvedValue([task(1)]);
+  expect(await createOpeningPlanService({} as Sql).listTasks({ workspaceId: id(1), ownerUserId: id(1) }))
+    .toEqual([{ ...task(1), estimateMinutes: 30 }]);
+});
 
 it("preserves the conflict reason through the service's HTTP error mapping", () => {
   expect(mapRepoError(new OpeningPlanError("CONFLICT", "selection changed", "selection_mismatch")))

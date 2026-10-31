@@ -30,6 +30,8 @@ export const taskItemSchema = z.object({
   version: z.number().int().positive().optional(),
   title: z.string().min(1).max(240),
   minutes: z.number().int().positive().max(24 * 60),
+  /** Read-only alias of persisted task minutes; absent on legacy responses. Never a budget. */
+  estimateMinutes: z.number().int().positive().max(24 * 60).nullable().optional(),
   dueAt: isoDateTimeSchema.nullable(),
   priority: z.number().finite(),
   status: z.enum(["pending", "done", "skipped"]),

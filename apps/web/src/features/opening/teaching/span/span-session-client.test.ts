@@ -3,6 +3,12 @@ import { spanLessonDetailsSchema } from "./span-session-client";
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 3, retestId: null, createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" };
 const base = { session: null, attempts: [], observations: [], assistance: {} };
+it("preserves backend estimates, accepts legacy/null and rejects non-minute values", () => {
+  expect(spanLessonDetailsSchema.parse({ ...base, estimateMinutes: 17 }).estimateMinutes).toBe(17);
+  expect(spanLessonDetailsSchema.parse({ ...base, estimateMinutes: null }).estimateMinutes).toBeNull();
+  expect(spanLessonDetailsSchema.parse(base).estimateMinutes).toBeUndefined();
+  for (const estimateMinutes of [-1, 0, 1.5, 1441, "20"]) expect(spanLessonDetailsSchema.safeParse({ ...base, estimateMinutes }).success).toBe(false);
+});
 it("preserves an admitted origin change instead of silently dropping it before rendering", () => {
   const originChange = { reason: "evidence_changed", originSession: snapshot, observationId: id };
   expect(spanLessonDetailsSchema.parse({ ...base, originChange })).toHaveProperty("originChange", originChange);

@@ -8,6 +8,13 @@ import { shouldOpenTodayQueue } from "./today-dashboard";
 import { focusTodayTask } from "./today-task-selection";
 import { TaskQueueRefreshContext } from "./task-status-control";
 import { createTaskStatusSession } from "./task-status-action";
+it.each([undefined, null, 17])("renders only the provided estimate (%s), never legacy minutes", estimateMinutes => {
+  const tasks = [{ id: "task", title: "学习", status: "pending" as const, minutes: 99, estimateMinutes, dueAt: null, priority: 1 }];
+  const html = renderToStaticMarkup(createElement(TodayTaskList, { tasks, state: "ready" }));
+  expect(html).not.toContain("99 分钟");
+  if (estimateMinutes == null) expect(html).not.toContain("分钟");
+  else { expect(html).toContain("预计"); expect(html).toContain("17"); }
+});
 
 it("starts the asynchronous Today read as loading rather than empty", () => {
   const html = renderToStaticMarkup(createElement(TodayPlanView));

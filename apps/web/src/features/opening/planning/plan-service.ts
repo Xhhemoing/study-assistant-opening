@@ -332,8 +332,9 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
   }
 
   return {
-    listTasks(scope: Scope) {
-      return repo.listTasks(scope);
+    async listTasks(scope: Scope): Promise<TaskItem[]> {
+      // opening_tasks.minutes is the sole durable estimate owner; no second ledger.
+      return (await repo.listTasks(scope)).map(task => ({ ...task, estimateMinutes: task.minutes }));
     },
 
     async createTask(scope: Scope, raw: unknown): Promise<TaskCreateResult> {
