@@ -2,6 +2,7 @@ import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, typ
 import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository, createOpeningLearningDecisionsRepository, spanTutorReceiptDecision } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { createOpeningPlanService } from "../../planning/plan-service";
 
 export function createSpanLessonSessionService(sql: Sql) {
   const sessions = createOpeningSpanSessionRepository(sql);
@@ -16,7 +17,7 @@ export function createSpanLessonSessionService(sql: Sql) {
         && !await sessions.matchesRetestReference(scope, courseId, session.retestId, retestIdRaw ?? null)))) {
         throw Object.assign(new Error("本次学习不属于当前课程或复测任务。"), { code: "NOT_FOUND" });
       }
-      if (!session) return { session: null, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null };
+      if (!session) return { session: null, estimateMinutes: null, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null };
       const [rows, heads, hintLevels, intentEvent, originChange, decisions] = await Promise.all([
         createOpeningLearningAttemptRepository(sql).listByActivity(scope, session.activityId),
         readOpeningCourseObservationHeads(sql, scope, courseId),
@@ -37,7 +38,11 @@ export function createSpanLessonSessionService(sql: Sql) {
         return [attempt.id, levels.includes("revealed") ? "revealed" : levels.includes("hinted") ? "hinted" : "none"];
       })));
       const agenda = await createOpeningLearningAgendaRepository(sql).get(scope, session.courseId, session.activityId);
-      return { session, agenda, executionPhase, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
+      const tasks = await createOpeningPlanService(sql).listTasks(scope);
+      const task = tasks.find(task => task.courseId === courseId && task.teachingTarget?.courseId === courseId && task.teachingTarget.activityId === session.activityId);
+      // The estimate describes the bound task, not a per-question time prediction.
+      const estimateMinutes = task?.estimateMinutes ?? null;
+      return { session, estimateMinutes, agenda, executionPhase, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
         ...(originChange ? { originChange } : {}) };
     },
   };

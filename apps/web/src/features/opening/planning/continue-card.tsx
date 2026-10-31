@@ -16,7 +16,8 @@ export function continuePosition(activity: ActivityContext | null | undefined, r
   return unitProgress(activity, resume);
 }
 
-export function ContinueCard({ item, activity, courseTitle, course, timeZone, resume, primaryAction, secondaryAction, finished }: {
+export function ContinueCard({ item, activity, courseTitle, course, timeZone, resume, primaryAction, secondaryAction, finished, estimateMinutes }: {
+  estimateMinutes?: number | null;
   /** 今天在当前课程里已学完的最近一节（没有进行中的小节时才展示）。 */
   finished?: { title: string; count: number } | null;
   item?: TodayResumeState["continueItem"];
@@ -44,6 +45,7 @@ export function ContinueCard({ item, activity, courseTitle, course, timeZone, re
         {courseId && title ? <p className="mt-1 text-xs font-medium text-accent">{title}</p> : null}
         <h2 className="mt-1 break-words font-serif text-xl leading-8 text-text">{activity ? `继续学习：${activity.title}` : done ? `已学完：${done.title}` : item ? `上次对话：${item.title}` : currentCourse ? "今天先学一个小节" : "从一个问题、一次练习或一篇笔记开始"}</h2>
         {done ? <p className="mt-2 text-sm leading-6 text-text-2">可以接着学下一节，或者先复习刚学的内容。</p> : null}
+        {estimateMinutes != null ? <p className="mt-2 text-xs text-text-3">预计 {estimateMinutes} 分钟</p> : null}
         {goalSummary ? <p className="mt-2 text-sm leading-6 text-text-2">{goalSummary}</p> : null}
         {position ? <div className="mt-3 space-y-2"><p className="text-xs text-text-2">上次停在第 {position.current} / {position.total} 单元</p><progress className="h-1 w-full max-w-80 overflow-hidden rounded-full accent-accent [&::-webkit-progress-bar]:bg-surface-2 [&::-webkit-progress-value]:bg-accent [&::-moz-progress-bar]:bg-accent" aria-label="上次阅读位置" value={position.current} max={position.total} /></div> : null}
         {!activity && item ? <p className="mt-2 text-xs leading-6 text-text-2">{item.currentPage ? `上次读到第 ${item.currentPage} 页` : "可继续上次保存的对话"}{sourceCount ? ` · 可恢复 ${sourceCount} 份材料` : ""}</p> : null}

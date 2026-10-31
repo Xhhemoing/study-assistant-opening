@@ -25,6 +25,7 @@ const candidate = { id, status: "pending", sourceIds: [], version: 0, candidate:
 const activity = { id, courseId: null as string | null, intentSummary: "线性代数第一节", status: "active", generateStatus: "queued", contentVersion: 0 };
 function makeApi() {
   return { listTeachingActivities: vi.fn(async () => [activity]), getTeachingResume: vi.fn(async () => ({ clientInit: null })),
+    listTasks: vi.fn(async () => ({ tasks: [] as Array<{ courseId: string; minutes: number; estimateMinutes?: number | null; teachingTarget: { courseId: string; activityId: string } }> })),
     listCandidates: vi.fn(async () => [candidate]), listRetestCandidates: vi.fn(async () => []), listSources: vi.fn(async () => []),
     createTask: vi.fn(), discardCandidate: vi.fn(), acceptRetest: vi.fn(), decideMemoryCandidate: vi.fn() };
 }
@@ -38,6 +39,18 @@ async function render(api: ReturnType<typeof makeApi>, extra: Partial<Parameters
   return host;
 }
 function button(host: Element, text: string) { const found = [...host.querySelectorAll("button")].find(node => node.textContent === text); if (!found) throw new Error(`missing ${text}`); return found; }
+it.each([undefined, null, 17])("loads the exact activity estimate into Today's single card (%s)", async estimateMinutes => {
+  const api = makeApi();
+  api.listTeachingActivities.mockResolvedValue([{ ...activity, courseId: "course" }]);
+  api.listTasks.mockResolvedValue({ tasks: [
+    { courseId: "course", minutes: 99, estimateMinutes: 88, teachingTarget: { courseId: "course", activityId: "other" } },
+    { courseId: "course", minutes: 99, estimateMinutes, teachingTarget: { courseId: "course", activityId: id } },
+  ] });
+  const host = await render(api), card = host.querySelector('[data-continue-card="true"]')!;
+  if (estimateMinutes == null) expect(card.textContent).not.toContain("分钟");
+  else expect(card.textContent).toContain("预计 17 分钟");
+  expect(card.textContent).not.toContain("99 分钟"); expect(card.textContent).not.toContain("88 分钟");
+});
 function visibleControls(host: HTMLElement) {
   return [...host.querySelectorAll<HTMLElement>('button,a[href],summary,input,select,textarea,[tabindex]')].filter(control => {
     if (control.hasAttribute("disabled")) return false;

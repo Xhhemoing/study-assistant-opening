@@ -47,7 +47,9 @@ export function TodayLearningContext({
   course,
   timeZone,
   finished,
+  estimateMinutes,
 }: {
+  estimateMinutes?: number | null;
   finished?: { title: string; count: number } | null;
   item?: TodayResumeState["continueItem"];
   activity?: { title: string; courseId: string | null; id?: string; contentVersion?: number } | null;
@@ -60,7 +62,7 @@ export function TodayLearningContext({
   onShowActions?: () => void;
 }) {
   return <div className="min-w-0 px-4 py-5 sm:px-5">
-    <ContinueCard item={item} activity={activity} courseTitle={courseTitle} course={course} timeZone={timeZone} resume={resume} primaryAction={primaryAction} secondaryAction={secondaryAction} finished={finished} />
+    <ContinueCard estimateMinutes={estimateMinutes} item={item} activity={activity} courseTitle={courseTitle} course={course} timeZone={timeZone} resume={resume} primaryAction={primaryAction} secondaryAction={secondaryAction} finished={finished} />
     {onShowActions ? <nav aria-label="学习闭环快捷入口" className="mt-2 flex flex-wrap gap-1" data-today-loop-links="true"><button type="button" className={ui.quiet} onClick={onShowActions}>优先行动</button></nav> : null}
   </div>;
 }

@@ -38,6 +38,7 @@ import type { Sql } from "postgres";
 const recovery = vi.hoisted(() => ({ get: vi.fn(), agendaGet: vi.fn(), list: vi.fn(), deliver: vi.fn(), assertAccess: vi.fn() }));
 vi.mock("@aistudy/database", async original => ({
   ...await original<typeof import("@aistudy/database")>(),
+  createOpeningPlansRepository: () => ({ listTasks: async () => [] }),
   createOpeningSpanSessionRepository: () => ({ get: recovery.get, deliveredHintLevels: async () => ({}) }),
   createOpeningLearningAgendaRepository: () => ({ get: recovery.agendaGet }),
   createOpeningLearningDecisionsRepository: () => ({ list: recovery.list }),

@@ -20,9 +20,9 @@ const fields: AnswerField[] = [
   { key: "geometry", label: "所有组合的几何集合", options: options([["plane", "平面"], ["line", "直线"], ["point", "一个点"]]) },
   { key: "witness", label: "无解时的左零空间证书 y（逗号分隔，可选）" }, { key: "explanation", label: "我的理由" },
 ];
-export function adaptSpanQuestion(attempt: LearningAttempt): Extract<StudyStep, { kind: "question" }> {
+export function adaptSpanQuestion(attempt: LearningAttempt, estimateMinutes: number | null = null): Extract<StudyStep, { kind: "question" }> {
   if (!attempt.spanExercise) throw new Error("原题暂不可读，请到课程记录核对。");
-  return { kind: "question", id: attempt.id, title: "线性组合与 span", prompt: spanProblemText(attempt.spanExercise).chinese, answerModes: ["text"], hintsAvailable: 4, estimateMinutes: null, attemptRef: { id: attempt.id, itemVersionId: attempt.itemVersionId }, fields };
+  return { kind: "question", id: attempt.id, title: "线性组合与 span", prompt: spanProblemText(attempt.spanExercise).chinese, answerModes: ["text"], hintsAvailable: 4, estimateMinutes, attemptRef: { id: attempt.id, itemVersionId: attempt.itemVersionId }, fields };
 }
 export function adaptSpanResult(record: LearningObservation, grading?: string): StepResult {
   const decision = record.serverEvaluation?.decision;
@@ -50,10 +50,10 @@ export function adaptSpanNext(raw: unknown, courseId: string): NextAction {
     : { action: safe(next.primary.href), label: next.primary.label, estimateMinutes: null, reasonCode: next.reason, alternatives: next.secondary ? [{ action: safe(next.secondary.href), label: next.secondary.label }] : [] };
 }
 const presentationSchema = z.object({ problem: spanProblemSchema, exposureReceipt: z.object({ id: z.string().uuid() }), solution: z.object({ kind: z.string(), coefficients: z.tuple([z.string(), z.string()]).optional() }) });
-export function adaptSpanLearn(raw: unknown, id: string): StudyStep {
+export function adaptSpanLearn(raw: unknown, id: string, estimateMinutes: number | null = null): StudyStep {
   const content = presentationSchema.parse(raw), problem = content.problem;
   const solution = content.solution.coefficients;
-  return { kind: "learn", id, title: "线性组合与 span", estimateMinutes: null, body: `${spanProblemText(problem).chinese}\n\nspan 是所有 αv+βw 的集合。先建立向量等式，再让每一个坐标同时成立。\nα(${problem.vectors[0].join(",")})+β(${problem.vectors[1].join(",")})=(${problem.target.join(",")})${solution ? `\n本例 α=${solution[0]}，β=${solution[1]}。将系数代回每个坐标核对。` : ""}` };
+  return { kind: "learn", id, title: "线性组合与 span", estimateMinutes, body: `${spanProblemText(problem).chinese}\n\nspan 是所有 αv+βw 的集合。先建立向量等式，再让每一个坐标同时成立。\nα(${problem.vectors[0].join(",")})+β(${problem.vectors[1].join(",")})=(${problem.target.join(",")})${solution ? `\n本例 α=${solution[0]}，β=${solution[1]}。将系数代回每个坐标核对。` : ""}` };
 }
 
 /** Owns all API shapes and durable request identities; UI receives only the port/model. */
@@ -81,7 +81,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     if (learn) {
       const raw = await spanLessonRequest("/api/opening/teaching/span/presentation", presentationSchema, { method: "POST", body: JSON.stringify({ courseId: session.courseId, sourceId: lessonSourceId, sessionId: session.sessionId, kind: mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked", clientKey: `span-demo:${session.sessionId}:${lessonSourceId}:${mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked"}:v1` }) });
       await acknowledgeStudyExposure(raw.exposureReceipt);
-      return view = { step: adaptSpanLearn(raw, session.moveId), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false };
+      return view = { step: adaptSpanLearn(raw, session.moveId, details.estimateMinutes ?? null), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false };
     }
     initializePracticeDraft(readPracticeDraft(scope, storage()) ?? emptyPracticeDraft(scope, { sourceId: lessonSourceId, spanProblemId: problemId, skillLabel: "线性组合与 span", assistance: "independent" }));
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
@@ -104,7 +104,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
       await requestSpanHint(attempt, 1); levels = [1]; assistance = "hinted";
     }
     texts = await Promise.all(levels.map(async level => (await requestSpanHint(attempt, level)).text));
-    view = { step: adaptSpanQuestion(attempt), help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, next: null, answer: decodeAnswer(draft().fields.answer), locked: Boolean(draft().submission) };
+    view = { step: adaptSpanQuestion(attempt, details.estimateMinutes ?? null), help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, next: null, answer: decodeAnswer(draft().fields.answer), locked: Boolean(draft().submission) };
     return view;
   }
   return { load,
