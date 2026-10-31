@@ -3,6 +3,12 @@ import { inferComposerIntent, inferLearningMessageIntent, repeatsAnswerRequest }
 import { DEFAULT_STUDY_SESSION_INTENT } from "./span-teaching";
 
 describe("composer intent", () => {
+  it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "请继续！"])("routes continuation %s to teaching", text => {
+    expect(inferComposerIntent({ text }).purpose).toBe("teach");
+  });
+  it.each(["看看我上次错在哪然后继续", "不要继续", "解释“继续学习”", "继续讲解矩阵", "出一道题"])("does not infer a teaching proposal for %s", text => {
+    expect(inferComposerIntent({ text }).purpose).not.toBe("teach");
+  });
   it.each([
     ["这题答案是什么", "solve", "hint"], ["求 x：2x + 1 = 5", "solve", "hint"],
     ["帮我解 x + 2 = 4", "solve", "hint"], ["2x+1=5，怎么解？", "solve", "hint"],

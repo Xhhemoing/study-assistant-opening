@@ -90,6 +90,11 @@ function deps(overrides?: {
 }
 
 describe("ephemeral tutor service", () => {
+  it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("keeps %s in temporary question answering", async text => {
+    const f = deps();
+    await f.service.replyEphemeral(scope, { text, sourceIds: [], history: [] });
+    expect(f.complete).toHaveBeenCalledOnce();
+  });
   it("infers a hint without a client mode and keeps an ordinary explanation temporary", async () => {
     const f = deps();
     await f.service.replyEphemeral(scope, { text: "先别给答案，只给提示", sourceIds: [], history: [] });

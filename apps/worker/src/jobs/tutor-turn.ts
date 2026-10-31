@@ -16,6 +16,7 @@ import {
   assertCitationsForPage,
   classifyTutorHelpKind,
   composerMessageText,
+  learningContinuationIntent,
   makeStudyLanguageSupport,
   studyIntentInstruction,
   instructionWithMemories,
@@ -190,7 +191,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ? await deps.privacy.getWorkspaceEpoch(scope)
         : null;
       const nextActionCourseId = turn.courseId ?? turn.contextAnchor?.courseId;
-      if (deps.nextAction && nextActionCourseId && turn.purpose === "teach" && !turn.querySystem
+      const entryRequest = !turn.querySystem && (turn.purpose === "answer" || turn.purpose === "teach")
+        && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support"
+        && learningContinuationIntent(turn.text) !== null;
+      if (deps.nextAction && nextActionCourseId && (entryRequest || turn.purpose === "teach") && !turn.querySystem
+        && !/^(?:(?:请|帮我|我想|麻烦|先)\s*)*(?:(?:创建|新建|生成|开始)(?:一节|一个|一次|一堂|个|节)?(?:关于)?.{0,60}(?:课程|课|教学活动)|(?:start|create)\s+(?:a\s+)?(?:lesson|course)\b)/iu.test(composerMessageText(turn.text))
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
         const prepared = await prepareTutorNextAction(deps.nextAction, scope, {
           courseId: nextActionCourseId, sourceIds: turn.sourceIds, sourceVersions: turn.sourceVersions,
@@ -211,6 +216,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             contextSourceRefs: prepared.context.sourceRefs, expectedPrivacyEpoch: prepared.context.privacyEpoch, claimToken: claimed.claimToken });
           return { skipped: false };
         }
+      }
+      const unboundTeaching = !nextActionCourseId && (turn.purpose === "teach" || turn.purpose === "plan")
+        && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support";
+      if ((entryRequest && nextActionCourseId) || unboundTeaching) {
+        if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+        await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId,
+          text: nextActionCourseId
+            ? `当前课程尚未开启导师试用，或不在 span 导师范围内。请到课程学习页继续。\n\n[打开课程学习](/opening/courses/${nextActionCourseId}/study)`
+            : "请先选择一门课程，再开始学习或创建教学计划。\n\n[先选择一门课程](/opening/courses)",
+          citations: [], candidates: [], contextSourceRefs: [], expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
+        return { skipped: false };
       }
       if (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
         if (!deps.proposals) throw new Error("proposal service unavailable");
