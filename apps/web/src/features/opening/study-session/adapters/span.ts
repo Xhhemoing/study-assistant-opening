@@ -2,6 +2,10 @@ import { z } from "zod";
 import { spanProblemSchema, learningAttemptSchema, type LearningAttempt, type LearningObservation, type SpanHintLevel, type SpanLessonSnapshot } from "@aistudy/contracts";
 import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../../client/learning-client";
+import { createOpeningApi, resolveUploadPutUrl } from "../../client/api";
+import { createMaterialOrganizationClient } from "../../library/material-organization-client";
+import { createUploadClient } from "../../inbox/upload-client";
+import { putPrivateBytes } from "../../inbox/put-private";
 import { spanLessonRequest, type SpanLessonDetails } from "../../teaching/span/span-session-client";
 import { requestSpanHint } from "../../teaching/span/span-hint-client";
 import { spanProblemText } from "../../teaching/span/span-problem-text";
@@ -20,9 +24,9 @@ const fields: AnswerField[] = [
   { key: "geometry", label: "所有组合的几何集合", options: options([["plane", "平面"], ["line", "直线"], ["point", "一个点"]]) },
   { key: "witness", label: "无解时的左零空间证书 y（逗号分隔，可选）" }, { key: "explanation", label: "我的理由" },
 ];
-export function adaptSpanQuestion(attempt: LearningAttempt, estimateMinutes: number | null = null): Extract<StudyStep, { kind: "question" }> {
+export function adaptSpanQuestion(attempt: LearningAttempt, estimateMinutes: number | null = null, photoEnabled = false): Extract<StudyStep, { kind: "question" }> {
   if (!attempt.spanExercise) throw new Error("原题暂不可读，请到课程记录核对。");
-  return { kind: "question", id: attempt.id, title: "线性组合与 span", prompt: spanProblemText(attempt.spanExercise).chinese, answerModes: ["text"], hintsAvailable: 4, estimateMinutes, attemptRef: { id: attempt.id, itemVersionId: attempt.itemVersionId }, fields };
+  return { kind: "question", id: attempt.id, title: "线性组合与 span", prompt: spanProblemText(attempt.spanExercise).chinese, answerModes: photoEnabled ? ["text", "photo"] : ["text"], hintsAvailable: 4, estimateMinutes, attemptRef: { id: attempt.id, itemVersionId: attempt.itemVersionId }, fields };
 }
 export function adaptSpanResult(record: LearningObservation, grading?: string): StepResult {
   const decision = record.serverEvaluation?.decision;
@@ -57,12 +61,14 @@ export function adaptSpanLearn(raw: unknown, id: string, estimateMinutes: number
 }
 
 /** Owns all API shapes and durable request identities; UI receives only the port/model. */
-export function createSpanStudySession(details: SpanLessonDetails, save: (intent: SpanLessonSnapshot["intent"], move: string, status: "active" | "paused" | "completed") => Promise<boolean>): StudySessionPort {
+export function createSpanStudySession(details: SpanLessonDetails, save: (intent: SpanLessonSnapshot["intent"], move: string, status: "active" | "paused" | "completed") => Promise<boolean>, options: { photoEnabled?: boolean } = {}): StudySessionPort {
   const session = details.session!;
   const availableSourceId = session.sourceIds[0];
   if (!availableSourceId) throw new Error("请先恢复课程材料，再继续学习。");
   const lessonSourceId: string = availableSourceId;
   const client = createOpeningLearningClient();
+  const openingApi = createOpeningApi();
+  const upload = createUploadClient({ begin: input => openingApi.beginUpload(input), complete: id => openingApi.completeUpload(id), put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, loaded => onProgress(loaded)), resolvePutUrl: resolveUploadPutUrl, refreshTicket: id => openingApi.refreshUploadTicket(id) });
   const mode = spanModeForIntent(session.intent), sequence = createSpanTeachingSequence(mode);
   const index = sequence.findIndex(move => move.id === session.moveId);
   const learn = index === 0;
@@ -76,12 +82,13 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
   const storage = () => window.sessionStorage;
   const draft = () => readPracticeDraft(scope, storage())!;
   const update = (change: Parameters<typeof patchPracticeDraft>[2]) => { const result = patchPracticeDraft(scope, {}, change, storage()); assertPracticeDraftSaved(scope); return result.draft; };
-  const refresh = () => { view = { ...view, help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, locked: Boolean(draft().submission) }; return view; };
+  let photo = { enabled: options.photoEnabled === true, status: "none" as const };
+  const refresh = () => { view = { ...view, photo, help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, locked: Boolean(draft().submission) }; return view; };
   async function load(): Promise<StudySessionView> {
     if (learn) {
       const raw = await spanLessonRequest("/api/opening/teaching/span/presentation", presentationSchema, { method: "POST", body: JSON.stringify({ courseId: session.courseId, sourceId: lessonSourceId, sessionId: session.sessionId, kind: mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked", clientKey: `span-demo:${session.sessionId}:${lessonSourceId}:${mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked"}:v1` }) });
       await acknowledgeStudyExposure(raw.exposureReceipt);
-      return view = { step: adaptSpanLearn(raw, session.moveId, details.estimateMinutes ?? null), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false };
+      return view = { step: adaptSpanLearn(raw, session.moveId, details.estimateMinutes ?? null), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false, photo };
     }
     initializePracticeDraft(readPracticeDraft(scope, storage()) ?? emptyPracticeDraft(scope, { sourceId: lessonSourceId, spanProblemId: problemId, skillLabel: "线性组合与 span", assistance: "independent" }));
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
@@ -104,7 +111,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
       await requestSpanHint(attempt, 1); levels = [1]; assistance = "hinted";
     }
     texts = await Promise.all(levels.map(async level => (await requestSpanHint(attempt, level)).text));
-    view = { step: adaptSpanQuestion(attempt, details.estimateMinutes ?? null), help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, next: null, answer: decodeAnswer(draft().fields.answer), locked: Boolean(draft().submission) };
+    const savedPhoto = draft().fields.workSourceId ? { id: draft().fields.workSourceId, version: draft().fields.workSourceVersion, physicalPage: draft().fields.workPhysicalPage } : undefined;
+    photo = { enabled: options.photoEnabled === true, status: savedPhoto ? "ready" : "none", workSource: savedPhoto };
+    view = { step: adaptSpanQuestion(attempt, details.estimateMinutes ?? null, options.photoEnabled), help: adaptSpanHelp(assistance, levels, texts, Boolean(record)), result: record ? adaptSpanResult(record) : null, next: null, answer: decodeAnswer(draft().fields.answer), locked: Boolean(draft().submission), photo };
     return view;
   }
   return { load,
@@ -112,12 +121,27 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     async primary() {
       if (learn) { if (!await save(session.intent, sequence[1]!.id, "active")) throw new Error("学习进度尚未保存。"); return view; }
       if (record) { view = { ...view, next: adaptSpanNext(await spanLessonRequest("/api/opening/teaching/span/next", z.unknown(), { method: "POST", body: JSON.stringify({ activityId: session.activityId, expectedRevision: session.revision, observationId: record.id, clientKey: `span-next:${session.activityId}:${session.revision}:${record.id}` }) }), session.courseId) }; return view; }
-      const submission = update(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? "independent" : assistance, outcome: "unverified", verdictSource: "self_report" } } })).submission!;
+      const submission = update(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? "independent" : assistance, outcome: "unverified", verdictSource: "self_report", ...(current.fields.workSourceId ? { workSource: { id: current.fields.workSourceId, version: current.fields.workSourceVersion, physicalPage: current.fields.workPhysicalPage } } : {}) } } })).submission!;
       const saved = await client.submitAttempt(attempt.id, submission.input); update({ observationId: saved.id });
       record = (await readPracticeRecord(client, session.courseId, attempt, saved.id)).observation;
       if (!record) throw new Error("最新结果尚未读取，原答案已保留。");
       return refresh();
     },
+    async choosePhoto(file: File) {
+      if (!photo.enabled) return view;
+      photo = { enabled: true, status: "uploading", name: file.name };
+      view = { ...view, photo };
+      const result = await upload.uploadFile({ name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) });
+      if ("phase" in result) { photo = { enabled: true, status: "failed", name: file.name, message: result.message }; return refresh(); }
+      const membership = await createMaterialOrganizationClient().addToCourse(session.courseId, [result.id], "reference");
+      if (membership.failed.length) { photo = { enabled: true, status: "unavailable", name: file.name, message: "照片已保存，但归入当前课程未完成；文字作答仍可继续。" }; return refresh(); }
+      photo = { enabled: true, status: "preparing", name: file.name };
+      const prepared = await client.preparePhotoWorkSource(attempt.id, { sourceId: result.id, sourceVersion: result.version, physicalPage: 1 });
+      update({ fields: { workSourceId: prepared.workSource.id, workSourceVersion: prepared.workSource.version, workPhysicalPage: prepared.workSource.physicalPage } });
+      photo = { enabled: true, status: prepared.state === "ready" ? "ready" : prepared.state, name: file.name, workSource: prepared.workSource, message: prepared.state === "pending" ? "照片已保存，解析仍在进行。" : prepared.state === "unavailable" ? "照片暂不可用于本题。" : undefined };
+      return refresh();
+    },
+    removePhoto() { update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } }); photo = { enabled: options.photoEnabled === true, status: "none" }; return refresh(); },
     async help() {
       const level = (Math.max(0, ...levels) + 1) as SpanHintLevel;
       if (!view.help.canRequest) return view;

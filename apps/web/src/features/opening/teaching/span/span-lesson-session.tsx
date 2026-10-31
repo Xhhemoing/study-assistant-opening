@@ -121,9 +121,9 @@ export function SpanLessonSession(props: Props) {
     } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "进度保存未确认。")); return false; }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
-  const { studySessionV2 } = useOpeningCapabilities();
+  const { studySessionV2, studySessionV2PhotoAnswer } = useOpeningCapabilities();
   const v2Port = useMemo(() => studySessionV2 && details?.session && !details.originChange && !props.delayedRetestId
-    ? createSpanStudySession(details, save) : null, [studySessionV2, details, props.delayedRetestId]);
+    ? createSpanStudySession(details, save, { photoEnabled: studySessionV2PhotoAnswer }) : null, [studySessionV2, studySessionV2PhotoAnswer, details, props.delayedRetestId]);
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
   const restoredAttempts = details?.attempts.filter(attempt => !isSpanReservedProblemId(attempt.spanExercise?.id) ||
