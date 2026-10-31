@@ -71,7 +71,7 @@ it("removes a failed photo candidate so text submission has no attachment", asyn
   mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
   const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn(), { photoEnabled: true });
   await port.load(); await port.choosePhoto(new File(["bad"], "bad.png", { type: "image/png" })); await port.removePhoto(); port.edit("membership", "in_span");
-  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
+  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
   mocks.submitAttempt.mockResolvedValue(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" }); await port.primary();
   expect(mocks.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("workSource");
 });
@@ -82,7 +82,7 @@ it("replays the same sealed payload after a transient network failure", async ()
   const isolated = { ...session, courseId: crypto.randomUUID(), activityId: crypto.randomUUID(), sessionId: crypto.randomUUID() }; const localAttempt = { ...attempt, courseId: isolated.courseId, sessionId: isolated.sessionId };
   mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
   const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn()); await port.load(); port.edit("membership", "in_span");
-  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
+  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
   mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
   await expect(port.primary()).rejects.toThrow("network"); await port.primary(); expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
 });
