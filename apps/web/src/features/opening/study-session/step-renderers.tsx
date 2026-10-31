@@ -6,7 +6,7 @@ import { spanVectorInput, type SpanDraftAnswer } from "../teaching/span/span-ans
 import { SpanTargetedFocus } from "../teaching/span/targeted-focus";
 import { SpanNoSolutionProof } from "../teaching/span/span-no-solution-proof";
 import { ui } from "../design/ui";
-import type { LearnStep, PhotoState, QuestionStep, StudyStep, StudyStepKind } from "./model";
+import type { CardStep, LearnStep, PhotoState, QuestionStep, StudyStep, StudyStepKind } from "./model";
 
 export type StepRendererProps<S extends StudyStep = StudyStep> = {
   step: S;
@@ -16,7 +16,26 @@ export type StepRendererProps<S extends StudyStep = StudyStep> = {
   onEdit: (change: Partial<SpanDraftAnswer>) => void;
   onChoosePhoto: (file: File) => void;
   onRemovePhoto: () => void;
+  onSelectGrade?: (grade: NonNullable<CardStep["grade"]>) => void;
 };
+
+export const cardGradeOptions = [
+  { grade: "again", label: "重来" }, { grade: "hard", label: "困难" },
+  { grade: "good", label: "记得" }, { grade: "easy", label: "轻松" },
+] as const;
+
+function CardRenderer({ step, locked, onSelectGrade }: StepRendererProps<CardStep>) {
+  return <div className="space-y-6">
+    <div className="prose-reading text-lg leading-8"><LearningProse text={step.front} /></div>
+    {step.flipped ? <>
+      <section aria-label="参考内容" className="prose-reading rounded-tile border border-line p-4"><LearningProse text={step.back ?? ""} /></section>
+      <fieldset disabled={locked} className="space-y-3"><legend className="text-sm text-text-2">这次回忆的情况（选择后再保存）</legend>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{cardGradeOptions.map(({ grade, label }) =>
+          <button key={grade} type="button" className={ui.secondary} aria-pressed={step.grade === grade} onClick={() => onSelectGrade?.(grade)}>{label}</button>)}</div>
+      </fieldset>
+    </> : <p className="text-sm text-text-2">先在心里回忆，再翻面核对。</p>}
+  </div>;
+}
 
 function LearnRenderer({ step }: StepRendererProps<LearnStep>) {
   return <div className="space-y-4">
@@ -108,6 +127,7 @@ function PhotoField({ photo, locked, onChoose, onRemove }: { photo: PhotoState; 
 export const stepRenderers: { [K in StudyStepKind]: ComponentType<StepRendererProps<Extract<StudyStep, { kind: K }>>> } = {
   learn: LearnRenderer,
   question: SpanQuestionRenderer,
+  card: CardRenderer,
 };
 
 export function StepRenderer(props: StepRendererProps) {

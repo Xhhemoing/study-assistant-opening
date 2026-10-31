@@ -10,6 +10,7 @@ import { StepRenderer } from "./step-renderers";
 type Handlers = {
   onPrimary: () => void; onHelp: () => void; onPause: () => void; onReload: () => void;
   onEdit: Parameters<typeof StepRenderer>[0]["onEdit"]; onChoosePhoto: (file: File) => void; onRemovePhoto: () => void;
+  onSelectGrade?: Parameters<typeof StepRenderer>[0]["onSelectGrade"];
 };
 
 /** One session screen: top bar, the current step, one primary action. Help and "more" open on demand. */
@@ -45,7 +46,7 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
       <div className="relative">
         <button type="button" className={ui.icon} aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen} aria-controls={moreId} onClick={() => setMoreOpen(value => !value)}>⋯</button>
         {moreOpen ? <div id={moreId} role="menu" className="absolute right-0 top-10 z-20 grid min-w-40 rounded-tile border border-line bg-popover p-1 shadow-float motion-safe:animate-pop">
-          <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onPause(); }}>暂停并保存</button>
+          {view.step.kind !== "card" ? <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onPause(); }}>暂停并保存</button> : null}
           <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onReload(); }}>重新读取</button>
         </div> : null}
       </div>
@@ -53,7 +54,7 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
 
     <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
       <StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
-        onEdit={on.onEdit} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} />
+        onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} />
       {view.result ? <section aria-live="polite" aria-label="作答结果" className="space-y-2 rounded-tile border border-line bg-surface p-4 motion-safe:animate-pop">
         <p className="flex items-center gap-2 font-medium">
           {view.result.outcome === "correct" ? <SuccessCheck play label="" /> : null}{resultLabel(view.result)}
