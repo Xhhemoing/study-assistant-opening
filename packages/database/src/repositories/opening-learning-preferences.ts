@@ -40,6 +40,18 @@ export async function readLearningPreferences(sql: LearningSql, scope: Scope, co
   return effective(await selectPreferenceRow(sql, scope, courseId));
 }
 
+/** Stored values and effective switches share the original preference owner. No default is reported as configured. */
+export async function readLearningPreferenceSources(sql: LearningSql, scope: Scope, courseId: string) {
+  const row = await selectPreferenceRow(sql, scope, courseId);
+  const configured = (prefix: string, includeAutoGrade: boolean) => Object.fromEntries([
+    ["assessmentEnabled", row[`${prefix}_assessment`]],
+    ["retestSuggestionsEnabled", row[`${prefix}_retest`]],
+    ["automaticRemindersEnabled", row[`${prefix}_reminders`]],
+    ...(includeAutoGrade ? [["autoGradeOnSave", row.account_auto_grade]] : []),
+  ].filter(([, value]) => value != null));
+  return { effective: effective(row), account: configured("account", true), course: configured("course", false) };
+}
+
 export type LearningAutomationState = {
   preferences: LearningPreferences;
   retestSuggestionsEnabledAt: Date | null;
