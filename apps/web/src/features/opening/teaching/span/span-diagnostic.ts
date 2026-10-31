@@ -1,5 +1,6 @@
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import { verifySpanAnswer } from "@aistudy/domain";
+import { readSpanDraftAnswer } from "./span-answer";
 
 export type SpanDiagnosticNextStep = { label: string; action: string };
 
@@ -10,7 +11,9 @@ export function spanDiagnosticNextStep(record: LearningObservation, attempt?: Le
     || attempt.spanValidation?.reasonCode?.startsWith("restored_identity_")) return null;
   const verified = verifySpanAnswer(attempt.spanExercise, record.answer);
   if (verified.outcome === "unknown") return null;
-  const firstCoordinate = verified.failedCoordinates[0];
+  const membership = readSpanDraftAnswer(record.answer).membership;
+  const firstCoordinate = membership === "in_span" && (verified.skills.coefficients === "incorrect" || verified.skills.allCoordinates === "incorrect")
+    ? verified.failedCoordinates[0] : undefined;
   if (firstCoordinate !== undefined) return { label: "先回到原题重算", action: `第${firstCoordinate + 1}个坐标没对上，请回到原题重算这一坐标。` };
   const labels: Partial<Record<keyof typeof verified.skills, string>> = {
     equation: "向量等式还没对上。请先把系数乘到向量后再相加。",

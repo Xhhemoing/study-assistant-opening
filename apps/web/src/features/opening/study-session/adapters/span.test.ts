@@ -71,6 +71,23 @@ it("does not diagnose unknown, revised, or non-span results", () => {
   expect(spanDiagnosticNextStep({ ...record, serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect" } } as LearningObservation, attempt)).toBeNull();
 });
 
+it("uses the real verifier's no-solution skills instead of failed coordinates", () => {
+  const attempt = { id, spanExercise: getSpanProblem("span-independent-3d") } as LearningAttempt;
+  const cases = [
+    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "1"], coefficientDerivationCoordinates: [0, 2] }, skill: "coefficients" },
+    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "4"], coefficientDerivationCoordinates: [0, 1], representations: { geometry: "line" } }, skill: "geometry" },
+  ] as const;
+  for (const { answer, skill } of cases) {
+    const verified = verifySpanAnswer(attempt.spanExercise!, answer);
+    expect(verified.outcome).toBe("incorrect");
+    expect(verified.skills[skill]).toBe("incorrect");
+    const record = { id, answer: JSON.stringify(answer), serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect" } } as unknown as LearningObservation;
+    const next = spanDiagnosticNextStep(record, attempt);
+    expect(next?.action).not.toMatch(/重算第\d+个坐标/);
+    expect(next?.action).toMatch(skill === "coefficients" ? /系数/ : /几何/);
+  }
+});
+
 it("offers the next hint level and holds the full demonstration until the first answer is saved", () => {
   const help = adaptSpanHelp("hinted", [{ level: 1, text: "a" }, { level: 2, text: "b" }, { level: 3, text: "c" }], false, false);
   expect(help.next).toBeNull();
