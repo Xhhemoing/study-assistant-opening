@@ -18,7 +18,7 @@ import { spanPracticeScope, spanStartsWithHint } from "../../teaching/span/span-
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
 import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved } from "../../learning/practice-draft-storage";
-import { readPracticeRecord } from "../../learning/practice-draft";
+import { assertPracticeAttempt, readPracticeRecord } from "../../learning/practice-draft";
 import type { HelpState, NextAction, PhotoState, StepResult, StudySessionPort, StudySessionView, StudyStep } from "../model";
 
 const SKILL = "线性组合与 span";
@@ -76,12 +76,13 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   const sourceId = session.sourceIds[0];
   const mode = spanModeForIntent(session.intent);
   const moves = spanLessonMoves(mode);
-  const index = moves.findIndex(move => move.id === session.moveId);
+  const retestId = session.retestId ? details.continuityRetestId ?? session.retestId : undefined;
+  const index = session.retestId ? moves.length - 1 : moves.findIndex(move => move.id === session.moveId);
   const move = moves[index];
   const problemId = move && index > 0 ? spanLessonProblemId(mode, index, moves.length) : null;
   const position = { index: Math.max(0, index), total: moves.length };
   const client = createOpeningLearningClient();
-  const scope = spanPracticeScope(session.courseId, undefined, undefined, session.activityId, problemId ?? undefined);
+  const scope = spanPracticeScope(session.courseId, retestId, undefined, session.activityId, problemId ?? undefined);
   const storage = () => window.sessionStorage;
   const draft = () => readPracticeDraft(scope, storage());
   const update = (change: Parameters<typeof patchPracticeDraft>[2]) => {
@@ -100,17 +101,18 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   function refresh(next: NextAction | null = view?.next ?? null): StudySessionView {
     const current = draft();
     const sealed = Boolean(current?.submission);
-    view = { ...view, help: adaptSpanHelp(delivered, hints, Boolean(record), sealed), answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
+    const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
+    view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
       sealed, result: record ? adaptSpanResult(record) : null, next, photo };
     return view;
   }
 
   async function loadQuestion(): Promise<StudySessionView> {
-    const step: StudyStep = { kind: "question", id: session.activityId, title: SKILL, prompt: "", purpose: "practice", estimateMinutes: details.estimateMinutes ?? null, photo: Boolean(options.photoEnabled), coordinates: 0 };
+    const step: StudyStep = { kind: "question", id: session.activityId, title: SKILL, prompt: "", purpose: retestId ? "retest" : "practice", estimateMinutes: details.estimateMinutes ?? null, photo: Boolean(options.photoEnabled), coordinates: 0 };
     if (!sourceId) return blockedView(step, "这节课的资料暂时不可用，请先到课程页恢复资料。");
     if (!readPracticeDraft(scope, storage())) {
       initializePracticeDraft(emptyPracticeDraft(scope, { sourceId, spanProblemId: problemId!, skillLabel: SKILL,
-        assistance: spanStartsWithHint(problemId!, session.intent, details.executionPhase ?? undefined) ? "hinted" : "independent" }));
+        assistance: !retestId && spanStartsWithHint(problemId!, session.intent, details.executionPhase ?? undefined) ? "hinted" : "independent" }));
     }
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
     const restored = [...details.attempts]
@@ -126,17 +128,18 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       const start = update(current => ({ start: current.start ?? { clientKey: `span-start:${crypto.randomUUID()}`, sessionId: session.sessionId,
         sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } })).start!;
       await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
-        body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: spanPracticeMoveId(session.intent.purpose, problemId!) }) });
+        body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: spanPracticeMoveId(session.intent.purpose, problemId!), ...(session.retestId ? { retestId: session.retestId } : {}) }) });
       attempt = problemId === "reserved:auto"
         ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId, clientKey: start.clientKey, mode }) })
         : await client.createAttempt({ sessionId: session.sessionId, clientKey: start.clientKey, spanExercise: { sourceId, problemId: problemId!, version: 1 } });
     }
     const current = attempt;
     if (current.courseId !== session.courseId || current.sessionId !== session.sessionId || !current.spanExercise) throw new Error("原题身份已变化，请重新读取。");
+    if (known) assertPracticeAttempt(draft()!, current);
     const attemptSource = current.contextAnchor?.sourceId ?? current.sourceIds[0];
     if (!attemptSource || !current.sourceIds.includes(attemptSource)) throw new Error("原题关联资料暂时无法核实。");
     update(previous => ({ attemptId: current.id,
-      start: { clientKey: previous.start?.clientKey ?? `span-restored:${current.id}`, sessionId: session.sessionId,
+      start: previous.start?.createInput ? previous.start : { clientKey: previous.start?.clientKey ?? `span-restored:${current.id}`, sessionId: session.sessionId,
         sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [attemptSource], skillLabel: SKILL },
         createInput: { sessionId: session.sessionId, clientKey: previous.start?.clientKey ?? `span-restored:${current.id}`,
           spanExercise: { sourceId: attemptSource, problemId: current.spanExercise!.id, version: Number(current.spanExercise!.version) } } },
@@ -147,15 +150,16 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     // Only replay levels the server already released for this attempt (legacy rule). Faded examples
     // open with hint 1 unless the learner is consolidating.
     const levels = [...new Set(details.hintLevels[current.id] ?? [])].sort();
-    if (created && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
+    if (created && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
     // Re-reading a released level is idempotent on the server (same release key), so this never adds help.
-    hints = await Promise.all(levels.map(async level => {
+    hints = await Promise.all((retestId && !record ? [] : levels).map(async level => {
       const hint = await requestSpanHint(current, level);
       void acknowledgeStudyExposure(hint.exposureReceipt).catch(() => undefined);
       return { level, text: hint.text };
     }));
-    delivered = strongest(state.deliveredAssistance, draft()!.fields.deliveredAssistance,
-      hints.some(hint => hint.level === 4) ? "revealed" : hints.length ? "hinted" : "none");
+    delivered = strongest(state.deliveredAssistance, details.assistance[current.id], draft()!.fields.deliveredAssistance,
+      draft()!.fields.assistance === "revealed" ? "revealed" : draft()!.fields.assistance === "hinted" ? "hinted" : "none",
+      levels.includes(4) ? "revealed" : levels.length ? "hinted" : "none");
     if (created && hints.length) update({ fields: { deliveredAssistance: delivered, assistance: delivered === "none" ? "independent" : delivered } });
 
     const saved = draft()!.fields;
@@ -221,7 +225,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       const readyPhoto = photo?.status === "ready" && photo.workSource ? photo.workSource : null;
       if (!sealed && photo && photo.status !== "none" && !readyPhoto) throw new Error("照片还没准备好。可以移除照片后用文字作答，或重新选择照片。");
       const submission = sealed ?? update(previous => ({ submission: { attemptId: current.id, input: {
-        clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: previous.fields.answer,
+        clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: previous.fields.answer, ...(retestId ? { retestId } : {}),
         assistance: delivered === "none" ? "independent" : delivered, outcome: "unverified", verdictSource: "self_report",
         ...(readyPhoto ? { workSource: readyPhoto } : {}) } } })).submission!;
       const saved = await client.submitAttempt(current.id, submission.input);
