@@ -11,6 +11,7 @@ export function StudySessionShell({ view, pending = false, error = "", onPrimary
 }) {
   const Renderer = stepRenderers[view.step.kind];
   const [helpOpen, setHelpOpen] = useState(false);
+  const helpVisible = view.step.kind === "question" && (view.step.purpose !== "retest" || Boolean(view.result));
   const label = view.next?.label ?? (view.step.kind === "learn" ? "开始作答" : view.result ? "安排下一步学习" : view.locked ? "确认已提交的答案" : "提交答案");
   const reason = view.next?.reasonCode ? reasonLabels[view.next.reasonCode] : null;
   const photo = view.photo ?? { enabled: false, status: "none" as const };
@@ -22,8 +23,8 @@ export function StudySessionShell({ view, pending = false, error = "", onPrimary
       {view.next?.alternatives.map(action => <button key={action.action} type="button" className={ui.quiet} onClick={() => onNavigate(action.action)}>{action.label}</button>)}
     </main>
     {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
-    <footer className="flex items-center gap-3 border-t border-line pt-4"><button type="button" data-primary-action className={ui.primary} disabled={pending || (view.step.kind === "question" && !view.result && !view.locked && !view.answer.membership)} onClick={view.next ? () => onNavigate(view.next!.action) : onPrimary}>{pending ? "正在保存与核对…" : label}</button>{view.step.kind === "question" ? <button type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls="study-session-help" onClick={() => setHelpOpen(value => !value)}>需要帮助</button> : null}</footer>
-    {helpOpen ? <aside id="study-session-help" aria-label="学习帮助" className="space-y-3 rounded-xl border border-line bg-surface-2 p-4"><div className="flex items-center justify-between"><h2 className="font-medium">先给一点提示</h2><button type="button" className={ui.quiet} onClick={() => setHelpOpen(false)}>收起帮助</button></div>{view.help.texts.map((text, index) => <p key={index} className="whitespace-pre-wrap text-sm leading-7">{text}</p>)}<button type="button" className={ui.secondary} disabled={pending || !view.help.canRequest || view.locked && !view.result} onClick={onHelp}>{view.help.hintsShown >= 3 ? "查看完整示范" : "看下一条提示"}</button></aside> : null}
+    <footer className="flex items-center gap-3 border-t border-line pt-4"><button type="button" data-primary-action className={ui.primary} disabled={pending || (view.step.kind === "question" && !view.result && !view.locked && !view.answer.membership)} onClick={view.next ? () => onNavigate(view.next!.action) : onPrimary}>{pending ? "正在保存与核对…" : label}</button>{helpVisible ? <button type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls="study-session-help" onClick={() => setHelpOpen(value => !value)}>需要帮助</button> : null}</footer>
+    {helpOpen && helpVisible ? <aside id="study-session-help" aria-label="学习帮助" className="space-y-3 rounded-xl border border-line bg-surface-2 p-4"><div className="flex items-center justify-between"><h2 className="font-medium">先给一点提示</h2><button type="button" className={ui.quiet} onClick={() => setHelpOpen(false)}>收起帮助</button></div>{view.help.texts.map((text, index) => <p key={index} className="whitespace-pre-wrap text-sm leading-7">{text}</p>)}<button type="button" className={ui.secondary} disabled={pending || !view.help.canRequest || view.locked && !view.result} onClick={onHelp}>{view.help.hintsShown >= 3 ? "查看完整示范" : "看下一条提示"}</button></aside> : null}
   </section>;
 }
 

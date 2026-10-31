@@ -122,7 +122,7 @@ export function SpanLessonSession(props: Props) {
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
   const { studySessionV2, studySessionV2PhotoAnswer } = useOpeningCapabilities();
-  const v2Port = useMemo(() => studySessionV2 && details?.session && !details.originChange && !props.delayedRetestId
+  const v2Port = useMemo(() => studySessionV2 && details?.session && !details.originChange
     ? createSpanStudySession(details, save, { photoEnabled: studySessionV2PhotoAnswer }) : null, [studySessionV2, studySessionV2PhotoAnswer, details, props.delayedRetestId]);
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
