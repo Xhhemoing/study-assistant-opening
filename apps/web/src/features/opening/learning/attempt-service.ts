@@ -1,4 +1,4 @@
-import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema, uuidSchema, type Scope } from "@aistudy/contracts";
+import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptContextReadSchema, photoWorkSourceInputSchema, photoWorkSourceResponseSchema, uuidSchema, type Scope } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
   createOpeningLearningAttemptRepository,
@@ -82,6 +82,38 @@ export function createOpeningAttemptService(sql: Sql) {
         deliveredAssistance: highestDeliveredAssistance(exposures) });
       if (!result.success) validation("本次作答缺少可验证的题目或材料版本，请返回原题重新打开。");
       return result.data;
+    },
+    /** Validate an uploaded answer photo for this attempt without submitting or persisting an observation. */
+    async preparePhotoWorkSource(scope: Scope, id: string, raw: unknown) {
+      const input = photoWorkSourceInputSchema.parse(raw);
+      const attempt = await attempts.assertAccess(scope, uuidSchema.parse(id));
+      const [row] = await sql`SELECT s.id,s.version,s.mime,s.parse_state,s.upload_state
+        FROM opening_sources s
+        JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.course_id=${attempt.courseId}
+          AND m.asset_type='source' AND m.asset_id=s.id
+        WHERE s.id=${input.sourceId} AND s.workspace_id=${scope.workspaceId}
+          AND s.upload_state='uploaded'
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+        LIMIT 1`;
+      if (!row || Number(row.version) !== input.sourceVersion) {
+        throw Object.assign(new Error("作答照片不属于当前课程、版本已过期或不可读取"), { code: "CONFLICT" as const });
+      }
+      const parseState = String(row.parse_state) as "not_started" | "queued" | "running" | "ready" | "failed" | "unsupported";
+      const mime = String(row.mime);
+      if (["image/jpeg", "image/png", "image/webp"].includes(mime) && input.physicalPage !== 1) {
+        throw Object.assign(new Error("单张作答照片的页码必须为1"), { code: "VALIDATION" as const });
+      }
+      if (mime !== "application/pdf" && !["image/jpeg", "image/png", "image/webp"].includes(mime)) {
+        throw Object.assign(new Error("作答照片仅支持 JPG、PNG、WebP 或 PDF"), { code: "VALIDATION" as const });
+      }
+      if (mime === "application/pdf" && parseState === "ready") {
+        const [page] = await sql`SELECT id FROM opening_source_chunks WHERE source_id=${input.sourceId}
+          AND source_version=${input.sourceVersion} AND page=${input.physicalPage} LIMIT 1`;
+        if (!page) throw Object.assign(new Error("作答 PDF 的页码不可读取"), { code: "CONFLICT" as const });
+      }
+      const state = parseState === "ready" ? "ready" : parseState === "failed" || parseState === "unsupported" ? "unavailable" : "pending";
+      return photoWorkSourceResponseSchema.parse({ attemptId: attempt.id, courseId: attempt.courseId,
+        workSource: { id: String(row.id), version: Number(row.version), physicalPage: input.physicalPage }, state, parseState });
     },
     async submit(scope: Scope, id: string, raw: unknown) {
       const input = learningAttemptSubmitInputSchema.parse(raw);
