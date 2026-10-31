@@ -22,6 +22,9 @@ import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeFields, type PracticeStart } from "./practice-draft";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { StudySessionShell } from "../study-session/study-session-shell";
+import { photoPracticeView } from "../study-session/adapters/photo-practice";
 
 
 function readPracticeSkillPrefill(): string {
@@ -47,6 +50,8 @@ const ASSISTANCE_OPTIONS: Array<{ value: LearningObservation["assistance"]; labe
 ];
 
 type Props = {
+  /** Only the confirmed PhotoPractice entry opts into the shared presentation. */
+  photoSession?: boolean;
   courseId: string;
   initialFocus?: { skillLabel: string; requirementKey: string | null };
   initialProblem?: { sourceId: string; sourceVersion: number; stem: string };
@@ -71,7 +76,10 @@ function PracticeController(props: Props) {
   return <div className="space-y-3"><PracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.retest && !props.initialFocus} /></div>;
 }
 
-function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, continuity }: Props & { continuity: PracticeContinuity }) {
+function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, continuity, photoSession }: Props & { continuity: PracticeContinuity }) {
+  const { studySessionV2 } = useOpeningCapabilities();
+  const usePhotoShell = Boolean(photoSession && initialProblem && studySessionV2);
+  const answerForm = useRef<HTMLFormElement>(null);
   const client = useMemo(() => createOpeningLearningClient(), []);
   const diagnostics = useDiagnosticsEnabled();
   const scope = practiceScope(courseId, "ordinary", retest, initialFocus, initialProblem);
@@ -266,7 +274,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   }
 
   if (ready && matrixMode && !retest) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
-  return (
+  const content = (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
       {!ready ? <p className="text-sm text-text-3" role="status">正在恢复练习…</p> : null}
       {attempt || recorded ? <h3 className="text-sm font-semibold text-text">{recorded ? "已保存的作答" : "完成自己的尝试"}</h3> : null}
@@ -447,9 +455,9 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
             {attempt.problemId ? "题目已记录。" : "本次先保存答案；需要评分时，可开始新练习并填写完整题干。"}
             {deliveredAssistance !== "none" ? ` 本次已使用的帮助：${deliveredAssistance === "revealed" ? "看过答案或解析" : "提示"}。` : null}
           </p>
-          {attempt.stemSnapshot ? <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg/50 px-3 py-2 text-sm leading-7 text-text">{attempt.stemSnapshot}</p> : null}
+          {!usePhotoShell && attempt.stemSnapshot ? <p className="whitespace-pre-wrap break-words rounded border border-line bg-bg/50 px-3 py-2 text-sm leading-7 text-text">{attempt.stemSnapshot}</p> : null}
           {draft.submission ? <p className="text-xs text-warn" role="status">正在确认上次保存结果，请先保留原答案。</p> : null}
-          <form onSubmit={submit} onKeyDown={event => {
+          <form ref={answerForm} onSubmit={submit} onKeyDown={event => {
             if (event.key !== "Enter") return;
             if (event.nativeEvent.isComposing || event.keyCode === 229) { event.preventDefault(); return; }
             if ((event.ctrlKey || event.metaKey) && event.target instanceof HTMLTextAreaElement) { event.preventDefault(); event.currentTarget.requestSubmit(); }
@@ -504,10 +512,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                 </select>
               </label>
             </details>
-            <StageActionBar stage={pending ? "processing" : error ? "failed" : "draft"}
+            {!usePhotoShell ? <StageActionBar stage={pending ? "processing" : error ? "failed" : "draft"}
               message={pending ? "正在保存原答案…" : undefined}
               primary={{ type: "submit", label: draft.submission ? "重试保存同一答案" : attempt.problemId ? "保存并批改" : "保存当前答案",
-                disabled: pending || Boolean(initialProblem && !answer.trim() && !gradingPhoto.workSourceId) }} />
+                disabled: pending || Boolean(initialProblem && !answer.trim() && !gradingPhoto.workSourceId) }} /> : null}
           </form>
           <div className="border-t border-line pt-3">
             <button
@@ -538,4 +546,9 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
     </fieldset>
   );
+  if (!usePhotoShell || !attempt || restored) return content;
+  return <StudySessionShell view={photoPracticeView({ attemptId: attempt.id, stem: attempt.stemSnapshot ?? stem,
+    canSubmit: Boolean(answer.trim() || gradingPhoto.workSourceId), sealed: Boolean(draft.submission), recorded: Boolean(recorded) })}
+    pending={pending} content={content} onPrimary={() => answerForm.current?.requestSubmit()}
+    onHelp={() => {}} onPause={() => {}} onReload={() => {}} onEdit={() => {}} onChoosePhoto={() => {}} onRemovePhoto={() => {}} />;
 }

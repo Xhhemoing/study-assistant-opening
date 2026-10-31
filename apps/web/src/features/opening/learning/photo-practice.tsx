@@ -123,6 +123,7 @@ function PhotoPracticeContent({ sourceId, conversationId, conversationError }: P
         <img src={sourcePreviewHref(source.id, source.version)} alt="本次练习的题目照片" className="max-h-[60dvh] w-full object-contain [color-scheme:light]" />
       </figure></ContentBlock>
       <ContentBlock width="prose">{prepared ? <LearningAttemptForm courseId={prepared.courseId}
+        photoSession
         initialFocus={{ skillLabel: "随手练习", requirementKey: null }}
         initialProblem={{ sourceId, sourceVersion: prepared.sourceVersion, stem }} onRecorded={() => {}} onAskAttempt={askAttempt} />
         : <form className="space-y-3" onSubmit={event => { event.preventDefault(); void begin(); }}>
