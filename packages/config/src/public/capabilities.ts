@@ -30,6 +30,8 @@ export const openingCapabilitiesSchema = z.object({
   planAgent: z.boolean(),
   systemQuery: z.boolean().default(false),
   studySessionV2: z.boolean().default(false),
+  /** Optional photo answer entrypoint; server routes still enforce the paired V2 gate. */
+  studySessionV2PhotoAnswer: z.boolean().default(false),
 }).strict();
 
 export const openingCapabilitiesResponseSchema = z.object({
@@ -55,6 +57,7 @@ export const CLOSED_CAPABILITIES: OpeningCapabilities = {
   planAgent: false,
   systemQuery: false,
   studySessionV2: false,
+  studySessionV2PhotoAnswer: false,
 };
 
 /**

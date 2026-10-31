@@ -6,8 +6,10 @@ import { getSpanProblem } from "@aistudy/domain";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import { createSpanStudySession, adaptSpanLearn } from "./adapters/span";
 import { StudySession } from "./study-session-shell";
-const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(), read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(), uploadFile: vi.fn(), addToCourse: vi.fn() }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
+vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: mocks.uploadFile }) }));
+vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ addToCourse: mocks.addToCourse }) }));
 vi.mock("../learning/practice-draft", () => ({ readPracticeRecord: mocks.read }));
 vi.mock("../teaching/span/span-session-client", async original => ({ ...await original<typeof import("../teaching/span/span-session-client")>(), spanLessonRequest: mocks.request }));
 vi.mock("../teaching/span/span-hint-client", () => ({ requestSpanHint: mocks.hint }));
@@ -60,4 +62,27 @@ it("adapts a released presentation and advances learning only after progress is 
   mocks.request.mockResolvedValue(raw); const save = vi.fn().mockResolvedValue(true);
   const port = createSpanStudySession({ session: { ...session, moveId: "self-example" }, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, save);
   expect((await port.load()).step.kind).toBe("learn"); await port.primary(); expect(save).toHaveBeenCalledWith(session.intent, "self-faded", "active");
+});
+
+it("removes a failed photo candidate so text submission has no attachment", async () => {
+  sessionStorage.clear();
+  mocks.request.mockResolvedValue({}); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" }); mocks.uploadFile.mockResolvedValue({ phase: "failed", message: "上传失败" });
+  const isolated = { ...session, courseId: crypto.randomUUID(), activityId: crypto.randomUUID(), sessionId: crypto.randomUUID() }; const localAttempt = { ...attempt, courseId: isolated.courseId, sessionId: isolated.sessionId };
+  mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
+  const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn(), { photoEnabled: true });
+  await port.load(); await port.choosePhoto(new File(["bad"], "bad.png", { type: "image/png" })); await port.removePhoto(); port.edit("membership", "in_span");
+  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
+  mocks.submitAttempt.mockResolvedValue(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" }); await port.primary();
+  expect(mocks.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("workSource");
+});
+
+it("replays the same sealed payload after a transient network failure", async () => {
+  sessionStorage.clear();
+  mocks.request.mockResolvedValue({}); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const isolated = { ...session, courseId: crypto.randomUUID(), activityId: crypto.randomUUID(), sessionId: crypto.randomUUID() }; const localAttempt = { ...attempt, courseId: isolated.courseId, sessionId: isolated.sessionId };
+  mocks.createAttempt.mockResolvedValue(localAttempt); mocks.request.mockResolvedValue({});
+  const port = createSpanStudySession({ session: isolated, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null }, vi.fn()); await port.load(); port.edit("membership", "in_span");
+  const saved = { id, assistance: "none", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
+  mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved); mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
+  await expect(port.primary()).rejects.toThrow("network"); await port.primary(); expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
 });

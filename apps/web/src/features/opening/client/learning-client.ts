@@ -5,6 +5,7 @@ import {
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
   learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningAttemptContextReadSchema, learningObservationSchema,
+  photoWorkSourceInputSchema, photoWorkSourceResponseSchema,
   type LearningSessionCreateInput, type LearningAttemptCreateInput, type LearningAttemptSubmitInput,
   observationInputSchema,
   aiGradingInputSchema, aiGradingStatusSchema, type AiGradingInput,
@@ -17,6 +18,7 @@ import { z } from "zod";
 import { OpeningApiError } from "./api";
 
 type FetchLike = typeof fetch;
+
 
 function requestError(body: unknown, status: number): OpeningApiError {
   if (body && typeof body === "object" && "error" in body) {
@@ -130,6 +132,11 @@ export function createOpeningLearningClient(transport: FetchLike = fetch) {
     async submitAttempt(attemptId: string, input: LearningAttemptSubmitInput) {
       const payload = learningAttemptSubmitInputSchema.parse(input);
       return parseOpeningResponse(learningObservationSchema.extend({ allowsIndependent: z.boolean() }), await request(`/api/opening/attempts/${attemptId}/submit`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
+    },
+
+    async preparePhotoWorkSource(attemptId: string, input: { sourceId: string; sourceVersion: number; physicalPage: number }) {
+      const payload = photoWorkSourceInputSchema.parse(input);
+      return parseOpeningResponse(photoWorkSourceResponseSchema, await request(`/api/opening/attempts/${encodeURIComponent(attemptId)}/work-source`, { method: "POST", body: JSON.stringify(payload) }, fetchImpl));
     },
 
     async submitObservation(input: ObservationInput) {

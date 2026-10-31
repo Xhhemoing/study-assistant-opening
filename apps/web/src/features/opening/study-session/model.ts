@@ -1,14 +1,18 @@
 export type StudyStep =
   | { kind: "learn"; id: string; title: string; body: string; estimateMinutes: number | null }
-  | { kind: "question"; id: string; title: string; prompt: string; answerModes: "text"[]; hintsAvailable: number; estimateMinutes: number | null; attemptRef: { id: string; itemVersionId: string | null }; fields: AnswerField[] };
+  | { kind: "question"; id: string; title: string; prompt: string; answerModes: ("text" | "photo")[]; hintsAvailable: number; estimateMinutes: number | null; attemptRef: { id: string; itemVersionId: string | null }; fields: AnswerField[] };
 export type AnswerField = { key: string; label: string; options?: { value: string; label: string }[] };
 export type HelpState = { level: "none" | "hinted" | "revealed"; hintsShown: number; tutorAsked: boolean; texts: string[]; canRequest: boolean };
 export type StepResult = { outcome: "correct" | "incorrect" | "pending" | "needs_manual" | "unknown"; assistance: "independent" | "hinted" | "revealed" | "unknown"; reasonCode?: string };
+export type PhotoWorkSource = { id: string; version: number; physicalPage: number };
+export type PhotoState = { enabled: boolean; status: "none" | "uploading" | "preparing" | "ready" | "pending" | "unavailable" | "failed"; name?: string; workSource?: PhotoWorkSource; message?: string };
 export type NextAction = { action: string; label: string; estimateMinutes: number | null; reasonCode: string | null; alternatives: { action: string; label: string }[] };
-export type StudySessionView = { step: StudyStep; help: HelpState; result: StepResult | null; next: NextAction | null; answer: Record<string, string>; locked: boolean };
+export type StudySessionView = { step: StudyStep; help: HelpState; result: StepResult | null; next: NextAction | null; answer: Record<string, string>; locked: boolean; photo?: PhotoState };
 export type StudySessionPort = {
   load: () => Promise<StudySessionView>;
   edit: (key: string, value: string) => StudySessionView;
+  choosePhoto: (file: File) => Promise<StudySessionView>;
+  removePhoto: () => StudySessionView;
   primary: () => Promise<StudySessionView>;
   help: () => Promise<StudySessionView>;
   pause: () => Promise<void>;

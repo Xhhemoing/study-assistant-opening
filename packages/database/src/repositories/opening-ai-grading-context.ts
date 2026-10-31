@@ -86,7 +86,9 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (isOpeningManualGradingRevision(row)&&!ownInterpretation) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
   if(ownInterpretation&&!interpretation)throw learningError("CONFLICT","校正版来源尚不可核对，未重新发送批改。");
   if(interpretation&&await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(row.id)))throw Object.assign(learningError("CONFLICT","原照片批改费用尚未确认；校正版已保存，不会另换请求重复发送。"),{reasonCode:"GRADING_UNKNOWN_COST"});
-  if (observation.revisionKind === "retract" || observation.verdictSource === "deterministic" || observation.aiEvaluation) {
+  // Deterministic span evaluation is authoritative for the original answer,
+  // but photo admission only seals provenance; it must not reopen grading.
+  if (observation.revisionKind === "retract" || (!options.photoAdmissionOnly && observation.verdictSource === "deterministic") || observation.aiEvaluation) {
     throw learningError("CONFLICT", "请查看已有结果，或先更正作答后再批改");
   }
   const [item] = await tx`SELECT v.*,a.source_ids AS attempt_source_ids FROM opening_learning_item_versions v
