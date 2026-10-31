@@ -250,6 +250,7 @@ export * from "./teaching-resume";
 export * from "./teaching-math-model";
 
 export * from "./matrix-evaluation";
+export * from "./photo-work-source";
 export * from "./ai-evaluation";
 export * from "./photo-work-source";
 export * from "./loop-metrics";

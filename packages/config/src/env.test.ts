@@ -288,4 +288,6 @@ it("defaults studySessionV2 closed and rejects malformed values", async () => {
   const { loadFeatureSwitches } = await import("./server-config");
   expect(loadFeatureSwitches({}).studySessionV2).toBe(false);
   expect(() => loadFeatureSwitches({ OPENING_STUDY_SESSION_V2: "enabled" })).toThrow(/OPENING_STUDY_SESSION_V2/);
+  expect(loadFeatureSwitches({}).studySessionV2PhotoAnswer).toBe(false);
+  expect(() => loadFeatureSwitches({ OPENING_STUDY_SESSION_V2_PHOTO_ANSWER: "enabled" })).toThrow(/OPENING_STUDY_SESSION_V2_PHOTO_ANSWER/);
 });

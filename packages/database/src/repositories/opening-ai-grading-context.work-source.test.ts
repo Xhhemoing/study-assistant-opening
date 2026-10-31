@@ -36,6 +36,11 @@ it("keeps normal grading strict when the same question is ineligible", async () 
   await expect(readOpeningAiGradingContext(tx as never, scope, { observationId: id })).rejects.toMatchObject({ code: "CONFLICT" });
   expect(mocks.photo).not.toHaveBeenCalled();
 });
+it("does not reopen deterministic grading while admitting a photo", async () => {
+  mocks.qualify.mockResolvedValue({ id, attemptId: id, problemId: id, itemVersionId: id, sessionId: id, sourceIds: [original],
+    sourceVersions: { [original]: 2 }, answer: "original answer", eligibility: { usableForCurrentVersion: "yes" }, verdictSource: "deterministic", revisionKind: "original", aiEvaluation: null });
+  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).resolves.toMatchObject({ sourceIds: [original, photo].sort() });
+});
 it.each([{ rows: [] }, { rows: [{ id: photo, mime: "image/png", bytes: 100, version: 2 }] }])("rejects unavailable or changed work photos: %j", async ({ rows }) => {
   mocks.photo.mockReturnValue(rows);
   await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toMatchObject({ code: "CONFLICT" });

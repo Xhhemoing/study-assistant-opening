@@ -21,7 +21,7 @@ it.each(["learn", "question"] as const)("registers %s and renders exactly one pr
   expect(stepRenderers[kind]).toBeTypeOf("function");
   for (const result of [null, { outcome: "correct", assistance: "hinted" }]) {
     const view = { step, result, help: { level: "none", hintsShown: 0, tutorAsked: false, texts: [], canRequest: true }, next: null, answer: {}, locked: false } as StudySessionView;
-    const html = renderToStaticMarkup(createElement(StudySessionShell, { view, onPrimary: noop, onEdit: noop, onHelp: noop, onPause: noop, onReload: noop, onNavigate: noop }));
+    const html = renderToStaticMarkup(createElement(StudySessionShell, { view, onPrimary: noop, onEdit: noop, onChoosePhoto: noop, onRemovePhoto: noop, onHelp: noop, onPause: noop, onReload: noop, onNavigate: noop }));
     expect(html.match(/data-primary-action/g)).toHaveLength(1);
     expect(html).not.toContain("分钟"); expect(html).not.toContain("拍照");
     if (result) expect(html).toContain("用提示后答对");

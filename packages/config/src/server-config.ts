@@ -125,6 +125,7 @@ export type FeatureSwitches = {
   adaptivePlanning: boolean;
   systemQuery: boolean;
   studySessionV2?: boolean;
+  studySessionV2PhotoAnswer?: boolean;
 };
 
 /** Strict, infrastructure-free switches (used per request for re-authorization). */
@@ -157,11 +158,12 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const studySessionV2 = read("OPENING_STUDY_SESSION_V2", false);
+  const studySessionV2PhotoAnswer = read("OPENING_STUDY_SESSION_V2_PHOTO_ANSWER", false);
   const systemQuery = read("OPENING_SYSTEM_QUERY", true);
   if (issues.length) throw new EnvValidationError(issues);
   return {
     teachingLoop: { api, ui }, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
-    adaptivePlanning, systemQuery, studySessionV2,
+    adaptivePlanning, systemQuery, studySessionV2, studySessionV2PhotoAnswer,
     senseWeaveBetaUsers, senseWeaveGates,
   };
 }
@@ -185,6 +187,7 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     planAgent: false,
     systemQuery: userId !== null && switches.systemQuery,
     studySessionV2: api && switches.teachingLoop.ui && switches.studySessionV2 === true,
+    studySessionV2PhotoAnswer: api && switches.teachingLoop.ui && switches.studySessionV2 === true && switches.studySessionV2PhotoAnswer === true,
   };
 }
 

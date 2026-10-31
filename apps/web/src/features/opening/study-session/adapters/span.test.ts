@@ -2,12 +2,19 @@ import { expect, it } from "vitest";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import { getSpanProblem } from "@aistudy/domain";
 import { adaptSpanQuestion, adaptSpanResult, adaptSpanHelp, adaptSpanNext } from "./span";
+import type { PhotoState } from "../model";
 const id = "11111111-1111-4111-8111-111111111111";
 const attempt = { id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")! } as LearningAttempt;
 it("adapts a real span question without inventing time or enabling photos", () => {
   const step = adaptSpanQuestion(attempt);
   expect(step).toMatchObject({ kind: "question", estimateMinutes: null, answerModes: ["text"], attemptRef: { id, itemVersionId: id } });
   expect(step.prompt).toContain("span");
+});
+it("keeps photo states explicit so pending and unavailable cannot be treated as ready", () => {
+  const states: PhotoState["status"][] = ["none", "uploading", "preparing", "ready", "pending", "unavailable", "failed"];
+  expect(states).toContain("pending");
+  expect(states).toContain("unavailable");
+  expect(states.filter(state => state === "ready")).toHaveLength(1);
 });
 it("keeps authoritative evaluation separate from assistance and pending grading", () => {
   const record = { assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
