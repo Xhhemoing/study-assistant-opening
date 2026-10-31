@@ -9,7 +9,7 @@ import {
   type ThinTutorAction,
   type AdaptiveTutorActionKind,
 } from "@aistudy/domain";
-import type { InterventionPrefs, InterventionSettingsResponse } from "@aistudy/contracts";
+import type { InterventionSettingsResponse } from "@aistudy/contracts";
 import * as openingDatabase from "@aistudy/database";
 import {
   createOpeningLearningRepository,
@@ -90,11 +90,6 @@ const emptySkillEvidenceDeps: TutorActionSkillEvidenceDeps = {
     hasCheckedIndependent: false,
     evidenceIds: [],
   }),
-};
-
-const defaultInterventionPrefs: InterventionPrefs = {
-  proactivity: "balanced", depth: "hint_then_offer", quietMode: false,
-  nodes: { allowOnTeach: true, allowOnPrompt: true, allowOnLowEvidence: false },
 };
 
 type SkillEvidenceRepositoryLike = {
