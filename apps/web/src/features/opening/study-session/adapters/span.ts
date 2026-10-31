@@ -54,10 +54,10 @@ export function adaptSpanNext(raw: unknown, courseId: string): NextAction {
     : { action: safe(next.primary.href), label: next.primary.label, estimateMinutes: null, reasonCode: next.reason, alternatives: next.secondary ? [{ action: safe(next.secondary.href), label: next.secondary.label }] : [] };
 }
 const presentationSchema = z.object({ problem: spanProblemSchema, exposureReceipt: z.object({ id: z.string().uuid() }), solution: z.object({ kind: z.string(), coefficients: z.tuple([z.string(), z.string()]).optional() }) });
-export function adaptSpanLearn(raw: unknown, id: string, estimateMinutes: number | null = null): StudyStep {
+export function adaptSpanLearn(raw: unknown, id: string, estimateMinutes: number | null = null, targetedFocus?: string): StudyStep {
   const content = presentationSchema.parse(raw), problem = content.problem;
   const solution = content.solution.coefficients;
-  return { kind: "learn", id, title: "线性组合与 span", estimateMinutes, body: `${spanProblemText(problem).chinese}\n\nspan 是所有 αv+βw 的集合。先建立向量等式，再让每一个坐标同时成立。\nα(${problem.vectors[0].join(",")})+β(${problem.vectors[1].join(",")})=(${problem.target.join(",")})${solution ? `\n本例 α=${solution[0]}，β=${solution[1]}。将系数代回每个坐标核对。` : ""}` };
+  return { kind: "learn", id, title: "线性组合与 span", estimateMinutes, targetedFocus, body: `${spanProblemText(problem).chinese}\n\nspan 是所有 αv+βw 的集合。先建立向量等式，再让每一个坐标同时成立。\nα(${problem.vectors[0].join(",")})+β(${problem.vectors[1].join(",")})=(${problem.target.join(",")})${solution ? `\n本例 α=${solution[0]}，β=${solution[1]}。将系数代回每个坐标核对。` : ""}` };
 }
 
 /** Owns all API shapes and durable request identities; UI receives only the port/model. */
@@ -88,7 +88,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     if (learn) {
       const raw = await spanLessonRequest("/api/opening/teaching/span/presentation", presentationSchema, { method: "POST", body: JSON.stringify({ courseId: session.courseId, sourceId: lessonSourceId, sessionId: session.sessionId, kind: mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked", clientKey: `span-demo:${session.sessionId}:${lessonSourceId}:${mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked"}:v1` }) });
       await acknowledgeStudyExposure(raw.exposureReceipt);
-      return view = { step: adaptSpanLearn(raw, session.moveId, details.estimateMinutes ?? null), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false, photo };
+      return view = { step: adaptSpanLearn(raw, session.moveId, details.estimateMinutes ?? null, details.targetedFocus), help: adaptSpanHelp("none", [], [], false), result: null, next: null, answer: {}, locked: false, photo };
     }
     initializePracticeDraft(readPracticeDraft(scope, storage()) ?? emptyPracticeDraft(scope, { sourceId: lessonSourceId, spanProblemId: problemId, skillLabel: "线性组合与 span", assistance: "independent" }));
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;

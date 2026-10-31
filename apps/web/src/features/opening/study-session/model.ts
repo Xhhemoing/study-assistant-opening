@@ -1,5 +1,5 @@
 export type StudyStep =
-  | { kind: "learn"; id: string; title: string; body: string; estimateMinutes: number | null }
+  | { kind: "learn"; id: string; title: string; body: string; targetedFocus?: string; estimateMinutes: number | null }
   | { kind: "question"; id: string; title: string; prompt: string; answerModes: ("text" | "photo")[]; hintsAvailable: number; estimateMinutes: number | null; attemptRef: { id: string; itemVersionId: string | null }; fields: AnswerField[] };
 export type AnswerField = { key: string; label: string; options?: { value: string; label: string }[] };
 export type HelpState = { level: "none" | "hinted" | "revealed"; hintsShown: number; tutorAsked: boolean; texts: string[]; canRequest: boolean };
