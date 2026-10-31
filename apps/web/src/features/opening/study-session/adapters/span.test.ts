@@ -1,10 +1,11 @@
 import { expect, it } from "vitest";
 import { createSpanTeachingSequence, getSpanProblem, solveSpanProblem, spanModeForIntent, verifySpanAnswer } from "@aistudy/domain";
-import type { LearningObservation, StudySessionIntent } from "@aistudy/contracts";
+import type { LearningAttempt, LearningObservation, StudySessionIntent } from "@aistudy/contracts";
 import { updateSpanDraftAnswer } from "../../teaching/span/span-answer";
 import { adaptSpanHelp, adaptSpanNext, adaptSpanResult } from "./span";
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { spanSessionProblemIds } from "../../teaching/span/session-service";
+import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const intent = (purpose: StudySessionIntent["purpose"]): StudySessionIntent =>
@@ -50,6 +51,41 @@ it("labels results from evaluation and help separately", () => {
   expect(adaptSpanResult(record)).toMatchObject({ outcome: "correct", assistance: "hinted" });
   expect(adaptSpanResult(record).detail).toContain("一致");
   expect(adaptSpanResult({ ...record, serverEvaluation: null } as LearningObservation, "grading").outcome).toBe("pending");
+});
+
+it("selects the first failed coordinate from the real verifier without exposing an answer", () => {
+  const problem = getSpanProblem("span-faded-3d")!;
+  const answer = encode({ membership: "in_span", coefficients: ["9", "9"] });
+  const attempt = { id, spanExercise: problem } as LearningAttempt;
+  const record = { id, answer: JSON.stringify(answer), serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect" } } as unknown as LearningObservation;
+  const next = spanDiagnosticNextStep(record, attempt);
+  expect(next).toMatchObject({ label: "先回到原题重算" });
+  expect(next?.action).toContain("第");
+  expect(next?.action).not.toContain("=");
+});
+
+it("does not diagnose unknown, revised, or non-span results", () => {
+  const record = { id, answer: "{}", serverEvaluation: { evaluatorVersion: "matrix-exact-v1", decision: "incorrect" } } as unknown as LearningObservation;
+  expect(spanDiagnosticNextStep(record, undefined)).toBeNull();
+  const attempt = { id, spanExercise: getSpanProblem("span-faded-3d"), spanValidation: { reasonCode: "restored_identity_unverified" } } as unknown as LearningAttempt;
+  expect(spanDiagnosticNextStep({ ...record, serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect" } } as LearningObservation, attempt)).toBeNull();
+});
+
+it("uses the real verifier's no-solution skills instead of failed coordinates", () => {
+  const attempt = { id, spanExercise: getSpanProblem("span-independent-3d") } as LearningAttempt;
+  const cases = [
+    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "1"], coefficientDerivationCoordinates: [0, 2] }, skill: "coefficients" },
+    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "1"], coefficientDerivationCoordinates: [0, 1], representations: { geometry: "line" } }, skill: "geometry" },
+  ] as const;
+  for (const { answer, skill } of cases) {
+    const verified = verifySpanAnswer(attempt.spanExercise!, answer);
+    expect(verified.outcome).toBe("incorrect");
+    expect(verified.skills[skill]).toBe("incorrect");
+    const record = { id, answer: JSON.stringify(answer), serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect" } } as unknown as LearningObservation;
+    const next = spanDiagnosticNextStep(record, attempt);
+    expect(next?.action).not.toMatch(/重算第\d+个坐标/);
+    expect(next?.action).toMatch(skill === "coefficients" ? /系数/ : /几何/);
+  }
 });
 
 it("offers the next hint level and holds the full demonstration until the first answer is saved", () => {

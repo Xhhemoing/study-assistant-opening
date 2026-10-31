@@ -16,6 +16,7 @@ import { isSpanReservedProblemId, readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, upd
 import { readSpanNextResult } from "../../teaching/span/span-next-action-control";
 import { spanPracticeScope, spanStartsWithHint } from "../../teaching/span/span-practice";
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
+import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
 import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved } from "../../learning/practice-draft-storage";
 import { assertPracticeAttempt, readPracticeRecord } from "../../learning/practice-draft";
@@ -47,6 +48,10 @@ export function adaptSpanResult(record: LearningObservation, grading?: string): 
     : grading === "queued" || grading === "grading" ? "pending" : grading === "needs_manual" ? "needs_manual" : "unknown";
   const reason = record.serverEvaluation?.reasonCodes[0];
   return { outcome, assistance: record.assistance, detail: reason ? SPAN_FEEDBACK_LABELS[reason] : undefined };
+}
+
+export function adaptSpanDiagnosticResult(record: LearningObservation, attempt: LearningAttempt): StepResult {
+  return { ...adaptSpanResult(record), nextStep: spanDiagnosticNextStep(record, attempt) ?? undefined };
 }
 
 /** Hints shown are only those the server already released; the next level follows the legacy ladder. */
@@ -103,7 +108,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const sealed = Boolean(current?.submission);
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
     view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
-      sealed, result: record ? adaptSpanResult(record) : null, next, photo };
+      sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo };
     return view;
   }
 
