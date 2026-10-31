@@ -50,7 +50,7 @@ export function TodayProgress({ api, timeZone, reloadToken }: {
     const href = task.retest ? retest?.href : task.courseId ? `${courseStudyHref(task.courseId)}?task=${encodeURIComponent(task.id)}` : `/opening/settings/planning?task=${encodeURIComponent(task.id)}`;
     return <li key={task.id} className="space-y-2 py-3">
       <p className="text-sm font-medium text-text">{task.title}</p>
-      <p className="text-xs text-text-3">{task.retest ? "到期补测 · " : ""}{task.minutes} 分钟</p>
+      <p className="text-xs text-text-3">{task.retest ? "到期补测" : ""}{task.estimateMinutes != null ? `${task.retest ? " · " : ""}预计 ${task.estimateMinutes} 分钟` : ""}</p>
       {href ? <Link href={href} className={ui.quiet}>{task.retest ? "打开补测" : "打开任务"}</Link> : <p className="text-xs text-warn">补测关联暂时不可用，请到复习页核对。</p>}
       <TaskRowActions task={task} />
       {api.updateTaskStatus ? <TaskStatusControl key={`${task.id}:${task.version ?? "unknown"}`} task={task} api={{ updateTaskStatus: api.updateTaskStatus, deferTask: api.deferTask }} disabled={false} /> : null}

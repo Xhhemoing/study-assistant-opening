@@ -62,7 +62,8 @@ async function renderToday(activities: TeachingActivity[], trialEnabled: boolean
     teachingWorkspaceEnabled: trialEnabled, teachingLoopTrialEnabled: trialEnabled,
   })));
   expect(api.listTeachingActivities).toHaveBeenCalledOnce();
-  expect(api.listTasks).toHaveBeenCalledOnce();
+  // Progress reads tasks once; a course-bound single card also resolves its exact activity estimate.
+  expect(api.listTasks).toHaveBeenCalledTimes(activities.some(row => row.courseId) ? 2 : 1);
   expect(api.getToday).toHaveBeenCalledOnce();
   expect(container.querySelector('[aria-label="今天的进度"]')?.textContent).toContain("复习 · 0 项");
   expect(container.querySelector('a[href^="/opening/library"]')).toBeNull();

@@ -144,6 +144,7 @@ export function TodayDashboard({
       ? teachingLoopEnabled && teachingWorkspaceEnabled
       : capabilities.teachingLoop.api && capabilities.teachingLoop.ui);
   const [task, setTask] = useState<StudyTask | null>(null);
+  const [activityEstimate, setActivityEstimate] = useState<{ activityId: string; minutes: number | null } | null>(null);
   const [queueOpen, setQueueOpen] = useState(() => planning || shouldOpenTodayQueue(focusTaskId));
   const [reloadToken, setReloadToken] = useState(0);
   const dueCardCount = useDueReviewCount(planning ? "/opening/settings/planning" : "/opening/today") ?? 0;
@@ -163,6 +164,17 @@ export function TodayDashboard({
   const timeZone = useMemo(() => resolveTodayTimeZone(workspaceTimeZone), [workspaceTimeZone]);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
+  const estimateActivityId = currentActivity?.id, estimateCourseId = currentActivity?.courseId;
+  useEffect(() => {
+    if (!estimateActivityId || !estimateCourseId) return;
+    let cancelled = false;
+    setActivityEstimate(null);
+    void api.listTasks().then(({ tasks }) => {
+      const bound = tasks.find(row => row.courseId === estimateCourseId && row.teachingTarget?.courseId === estimateCourseId && row.teachingTarget.activityId === estimateActivityId);
+      if (!cancelled) setActivityEstimate({ activityId: estimateActivityId, minutes: bound?.estimateMinutes ?? null });
+    }).catch(() => { if (!cancelled) setActivityEstimate(null); });
+    return () => { cancelled = true; };
+  }, [api, estimateActivityId, estimateCourseId, reloadToken]);
   const noCourses = hasNoTodayCourses(state);
   const currentCourse = currentTodayCourse(state, currentActivity);
   const nextStepMetrics = useNextStepMetrics(currentActivity ? { targetType: "activity", targetId: currentActivity.id }
@@ -374,6 +386,7 @@ export function TodayDashboard({
           if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
         }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
           {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
+            estimateMinutes={activityEstimate?.activityId === currentActivity?.id ? activityEstimate?.minutes : null}
             item={state.continueItem}
             courseTitle={courseTitle}
             course={currentCourse}

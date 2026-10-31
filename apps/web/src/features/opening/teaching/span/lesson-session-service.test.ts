@@ -17,12 +17,20 @@ vi.mock("@aistudy/database", async original => ({
 }));
 import { createSpanLessonSessionService } from "./lesson-session-service";
 import { spanLessonDetailsSchema } from "./span-session-client";
+const taskReads = vi.hoisted(() => ({ listTasks: vi.fn() }));
+vi.mock("../../planning/plan-service", () => ({ createOpeningPlanService: () => taskReads }));
 const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8222-222222222222";
 const scope: Scope = { workspaceId: id, ownerUserId: id };
 const session: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-independent", status: "paused", revision: 4, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", requirementKey: null, historyRevision: 0, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")!, startedAt: session.createdAt, submittedAt: null, observationId: null };
-beforeEach(() => { vi.clearAllMocks(); mocks.decisions.mockResolvedValue([]); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.agendaGet.mockResolvedValue(null); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
+beforeEach(() => { vi.clearAllMocks(); taskReads.listTasks.mockResolvedValue([]); mocks.decisions.mockResolvedValue([]); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.agendaGet.mockResolvedValue(null); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
 const service = () => createSpanLessonSessionService({} as Sql);
+it("uses only the exact bound activity task estimate, not course siblings or the session budget", async () => {
+  taskReads.listTasks.mockResolvedValue([{ courseId: id, estimateMinutes: 25, teachingTarget: { courseId: id, activityId: id } }]);
+  expect(spanLessonDetailsSchema.parse(await service().read(scope, id, id)).estimateMinutes).toBe(25);
+  taskReads.listTasks.mockResolvedValue([{ courseId: id, estimateMinutes: 25, teachingTarget: { courseId: id, activityId: other } }]);
+  expect(spanLessonDetailsSchema.parse(await service().read(scope, id, id)).estimateMinutes).toBeNull();
+});
 it("recovers only the exact activity's shared session and effective facts without rewriting first-answer help", async () => {
   const original = { ...learningObservation, courseId: id, sessionId: id, attemptId: id, assistance: "independent" as const };
   mocks.listByActivity.mockResolvedValue([{ ...attempt, outcome: "correct", assistance: "independent" }, { ...attempt, id: other, sessionId: other }]);
