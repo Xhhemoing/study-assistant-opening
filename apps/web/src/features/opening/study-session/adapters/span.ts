@@ -61,9 +61,10 @@ export function adaptSpanLearn(raw: unknown, id: string, estimateMinutes: number
 }
 
 /** Owns all API shapes and durable request identities; UI receives only the port/model. */
-export function createSpanStudySession(details: SpanLessonDetails, save: (intent: SpanLessonSnapshot["intent"], move: string, status: "active" | "paused" | "completed") => Promise<boolean>, options: { photoEnabled?: boolean } = {}): StudySessionPort {
+export function createSpanStudySession(details: SpanLessonDetails & { continuityRetestId?: string }, save: (intent: SpanLessonSnapshot["intent"], move: string, status: "active" | "paused" | "completed") => Promise<boolean>, options: { photoEnabled?: boolean } = {}): StudySessionPort {
   const session = details.session!;
   const retestId = session.retestId;
+  const continuityRetestId = retestId ? details.continuityRetestId ?? retestId : null;
   const availableSourceId = session.sourceIds[0];
   if (!availableSourceId) throw new Error("请先恢复课程材料，再继续学习。");
   const lessonSourceId: string = availableSourceId;
@@ -75,7 +76,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
   const learn = !retestId && index === 0;
   const problemId = (retestId || index < 0) ? "reserved:auto" : mode === "self_study" ? index === 1 ? "span-faded-3d" : "span-independent-3d" : mode === "overview" ? index === 1 ? "span-contrast-dependent" : "span-geometry-transfer" : "span-geometry-transfer";
   // Match SpanPractice's existing durable scope so switching shells restores the same owner.
-  const scopeParts = JSON.parse(practiceScope(session.courseId, "span", retestId ? { retestId, skillLabel: "线性组合与 span", prompt: "span delayed check", requirementKey: SPAN_REQUIREMENT_KEY } : null)) as unknown[];
+  const scopeParts = JSON.parse(practiceScope(session.courseId, "span", continuityRetestId ? { retestId: continuityRetestId, skillLabel: "线性组合与 span", prompt: "span delayed check", requirementKey: SPAN_REQUIREMENT_KEY } : null)) as unknown[];
   scopeParts[3] = session.activityId; scopeParts[6] = problemId;
   const scope = JSON.stringify(scopeParts);
   let view: StudySessionView, attempt: LearningAttempt, record: LearningObservation | null = null;
@@ -100,7 +101,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     else if (restored) attempt = restored;
     else {
       const start = update(current => ({ start: current.start ?? { clientKey: `span-start:${crypto.randomUUID()}`, sessionId: session.sessionId, sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [lessonSourceId], skillLabel: "线性组合与 span" }, createInput: null } })).start!;
-      await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: session.moveId, ...(retestId ? { retestId } : {}) }) });
+      // The lesson checkpoint stays reserved; prepare uses SpanPractice's existing independent action.
+      const prepareMoveId = retestId ? mode === "overview" ? "overview-mixed" : mode === "challenge" ? "challenge-transfer" : "self-independent" : session.moveId;
+      await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: prepareMoveId, ...(retestId ? { retestId } : {}) }) });
       attempt = problemId === "reserved:auto" ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId: lessonSourceId, clientKey: start.clientKey, mode }) }) : await client.createAttempt({ sessionId: session.sessionId, clientKey: start.clientKey, spanExercise: { sourceId: lessonSourceId, problemId, version: 1 } });
     }
     if (attempt.courseId !== session.courseId || attempt.sessionId !== session.sessionId || !attempt.spanExercise || retestId && !isSpanReservedProblemId(attempt.spanExercise.id)) throw new Error("原题身份已变化，请重新读取。");
@@ -145,7 +148,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
       const savedSubmission = draft().submission;
       const currentPhoto = photo.status === "ready" && photo.workSource ? photo.workSource : null;
       if (!savedSubmission && photo.status !== "none" && !currentPhoto) throw new Error("照片还没准备好；请移除附件后继续文字作答，或重新选择照片。");
-      const submission = savedSubmission ?? update(current => ({ submission: { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? (retestId && current.fields.assistance === "unknown" ? "unknown" : "independent") : assistance, outcome: "unverified", verdictSource: "self_report", ...(retestId ? { retestId } : {}), ...(currentPhoto ? { workSource: currentPhoto } : {}) } } })).submission!;
+      const submission = savedSubmission ?? update(current => ({ submission: { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? (retestId && current.fields.assistance === "unknown" ? "unknown" : "independent") : assistance, outcome: "unverified", verdictSource: "self_report", ...(continuityRetestId ? { retestId: continuityRetestId } : {}), ...(currentPhoto ? { workSource: currentPhoto } : {}) } } })).submission!;
       const saved = await client.submitAttempt(submission.attemptId, submission.input); update({ observationId: saved.id });
       record = (await readPracticeRecord(client, session.courseId, attempt, saved.id)).observation;
       if (!record) throw new Error("最新结果尚未读取，原答案已保留。");

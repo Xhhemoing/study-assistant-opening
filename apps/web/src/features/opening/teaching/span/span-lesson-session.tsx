@@ -39,7 +39,7 @@ function SpanOriginChangeView({ details, courseId, onReload }: { details: SpanLe
   </section>;
 }
 export function SpanLessonSession(props: Props) {
-  const [details, setDetails] = useState<SpanLessonDetails | null>(null);
+  const [details, setDetails] = useState<(SpanLessonDetails & { continuityRetestId?: string }) | null>(null);
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const [showSummary, setShowSummary] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -75,7 +75,7 @@ export function SpanLessonSession(props: Props) {
     recoveryReady.current = false;
     setError("");
     void spanLessonRequest(query(), spanLessonDetailsSchema).then(value => {
-      if (version === requestId.current) { recoveryReady.current = true; setDetails(value); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
+      if (version === requestId.current) { recoveryReady.current = true; setDetails({ ...value, continuityRetestId: value.session?.retestId ? props.delayedRetestId : undefined }); setReadVersion(current => current + 1); if (value.session) activityId.current = value.session.activityId; }
     }).catch(reason => { if (version === requestId.current) setError(userFacingMessage(reason, "无法恢复本次学习。")); });
   }, [query, revision, props.initialActivityId]);
   useEffect(() => {
@@ -101,7 +101,7 @@ export function SpanLessonSession(props: Props) {
       if (moveId && moveId !== session.moveId) session = await spanLessonRequest(`${endpoint}?activityId=${session.activityId}`, spanLessonSnapshotSchema,
         { method: "PATCH", body: JSON.stringify({ expectedRevision: session.revision, intent: session.intent, moveId, status: "active" }) });
       if (version !== requestId.current) return;
-      remember(session); setDetails({ session, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
+      remember(session); setDetails({ session, continuityRetestId: session.retestId ? props.delayedRetestId : undefined, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
     } catch (reason) { if (version === requestId.current) setError(userFacingMessage(reason, "学习暂未开始。")); }
     finally { if (version === requestId.current) { busy.current = false; setPending(false); } }
   }
@@ -123,7 +123,7 @@ export function SpanLessonSession(props: Props) {
   }
   const { studySessionV2, studySessionV2PhotoAnswer } = useOpeningCapabilities();
   const v2Port = useMemo(() => studySessionV2 && details?.session && !details.originChange
-    ? createSpanStudySession(details, save, { photoEnabled: studySessionV2PhotoAnswer }) : null, [studySessionV2, studySessionV2PhotoAnswer, details, props.delayedRetestId]);
+    ? createSpanStudySession(details, save, { photoEnabled: studySessionV2PhotoAnswer }) : null, [studySessionV2, studySessionV2PhotoAnswer, details]);
   const session = details?.session;
   const evidenceEvent = details?.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
   const restoredAttempts = details?.attempts.filter(attempt => !isSpanReservedProblemId(attempt.spanExercise?.id) ||
