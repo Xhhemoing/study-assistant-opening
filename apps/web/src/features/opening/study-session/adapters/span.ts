@@ -134,7 +134,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
       // Replay the durable sealed request before checking the current photo candidate.
       const savedSubmission = draft().submission;
       const currentPhoto = photo.status === "ready" && photo.workSource ? photo.workSource : null;
-      if (!savedSubmission && photo.status !== "none" && !currentPhoto) throw new Error("照片尚未核实可用；请移除附件后继续文字作答，或重新核实照片。");
+      if (!savedSubmission && photo.status !== "none" && !currentPhoto) throw new Error("照片还没准备好；请移除附件后继续文字作答，或重新选择照片。");
       const submission = savedSubmission ?? update(current => ({ submission: { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? "independent" : assistance, outcome: "unverified", verdictSource: "self_report", ...(currentPhoto ? { workSource: currentPhoto } : {}) } } })).submission!;
       const saved = await client.submitAttempt(attempt.id, submission.input); update({ observationId: saved.id });
       record = (await readPracticeRecord(client, session.courseId, attempt, saved.id)).observation;
