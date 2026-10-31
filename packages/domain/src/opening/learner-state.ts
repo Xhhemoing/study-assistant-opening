@@ -82,6 +82,7 @@ export function countValidLearnerObservations(observations: readonly {
 export type LearnerStateEvidence = {
   observationId: string; attemptId: string | null; courseId: string; requirementKey: string | null;
   itemVersionId: string | null; skillLabel: string; attemptedAt: string; recordedAt: string | null;
+  sourceIds: string[];
   sourceVersions: Record<string, number>; eligibility: EvidenceEligibility;
   availability: "available" | "stale" | "unavailable" | "unknown";
   views: LearnerEvidenceView[];
@@ -91,6 +92,18 @@ export type LearnerStateEvidence = {
   gaps: string[];
 };
 export type LearnerStateFeature = LearnerStateEvidence & { outcome: LearningObservation["outcome"]; ordinal: number };
+export const LEARNER_SKILL_PROFILE_VERSION = "rule-profile:1";
+export type LearnerSkillProfileItem = {
+  courseId: string; requirementKey: string; skillLabel: string; state: LearnerEvidenceDisplayState;
+  observationRefs: Array<{ observationId: string; attemptId: string | null; itemVersionId: string | null; sourceIds: string[] }>;
+};
+export type LearnerSkillProfile = {
+  profileVersion: typeof LEARNER_SKILL_PROFILE_VERSION;
+  stateVersion: string; dataAsOf: string; qualificationVersion: string;
+  scope: { workspaceId: string; ownerUserId: string; courseId: string | null };
+  items: LearnerSkillProfileItem[];
+  ungroupedObservationIds: string[];
+};
 export type LearnerMeasurementFeature = { attemptId: string; trialId: string; courseId: string; ordinal: number;
   itemId: string; itemVersion: string; skillId: string; familyId: string; phase: string;
   protocolVersion: string; bankVersion: string; presentedAt: string; answeredAt: string | null;
@@ -98,6 +111,7 @@ export type LearnerMeasurementFeature = { attemptId: string; trialId: string; co
   retractedAt: string | null };
 export type LearnerState = {
   stateVersion: string; dataAsOf: string; policyVersion: string;
+ scope: { workspaceId: string; ownerUserId: string; courseId: string | null };
   sourceVersions: Record<string, number[]>;
   currentSourceVersions: Record<string, number>;
   summary: Array<{ courseId: string; requirementKey: string | null; skillLabel: string;
@@ -105,6 +119,7 @@ export type LearnerState = {
     views: Record<LearnerEvidenceView, number>; gaps: string[] }>;
   /** Mutually exclusive evidence states for recorded requirements, not curriculum coverage. */
   display: LearnerStateDisplay;
+  skillProfile: LearnerSkillProfile;
   evidence: LearnerStateEvidence[];
   /** Full chronological sequence, independent of the UI display limit. */
   features: LearnerStateFeature[];
@@ -117,6 +132,7 @@ export type LearnerState = {
 
 /** No inferred transfer tags or no-review retention claims; those require canonical protocol facts. */
 export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf: string; stateVersion: string;
+  scope?: { workspaceId: string; ownerUserId: string; courseId?: string };
   persistedRows?: number; limit?: number; measurementFeatures?: LearnerMeasurementFeature[]; currentSourceVersions?: Record<string, number>;
   transferSpecifications?: Record<string, TransferSpecification>; observationFamilies?: Record<string, string>;
   dueRetests?: readonly RetestEvidenceIdentity[] }): LearnerState {
@@ -158,6 +174,7 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
     if (eligibility.usableForCurrentVersion !== "yes") gaps.push("current_version_not_established");
     return { observationId: row.id, attemptId: row.attemptId ?? null, courseId: row.courseId,
       requirementKey: facts?.observation.requirementKey ?? null, itemVersionId: row.itemVersionId ?? null,
+      sourceIds: [...row.sourceIds],
       skillLabel: row.skillLabel, attemptedAt: new Date(facts?.observation.submittedAt ?? Date.parse(row.submittedAt ?? row.occurredAt)).toISOString(),
       recordedAt: row.recordedAt ?? null, sourceVersions: row.sourceVersions ?? {}, eligibility, availability, views, transfer, retention, gaps,
       outcome: row.outcome, ordinal };
@@ -179,9 +196,19 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
   for (const [id, version] of Object.entries(input.currentSourceVersions ?? {})) {
     sourceVersions[id] = [...new Set([...(sourceVersions[id] ?? []), version])].sort((a, b) => a - b);
   }
+  const display = projectLearnerDisplay(input.evidence, features, input.dueRetests ?? []);
+  const scope = { workspaceId: input.scope?.workspaceId ?? "", ownerUserId: input.scope?.ownerUserId ?? "", courseId: input.scope?.courseId ?? null };
+  const featureById = new Map(features.map(feature => [feature.observationId, feature]));
+  const skillProfile: LearnerSkillProfile = { profileVersion: LEARNER_SKILL_PROFILE_VERSION, stateVersion: input.stateVersion,
+    dataAsOf: input.dataAsOf, qualificationVersion: features[0]?.eligibility.policyVersion ?? evaluateEvidenceEligibility({}, {}).policyVersion,
+    scope, items: display.requirements.map(requirement => ({ ...requirement,
+      observationRefs: requirement.observationIds.map(observationId => { const feature = featureById.get(observationId)!;
+        return { observationId, attemptId: feature.attemptId, itemVersionId: feature.itemVersionId, sourceIds: feature.sourceIds }; }) })),
+    ungroupedObservationIds: features.filter(feature => !feature.requirementKey).map(feature => feature.observationId) };
   return { stateVersion: input.stateVersion, dataAsOf: input.dataAsOf,
     policyVersion: features[0]?.eligibility.policyVersion ?? evaluateEvidenceEligibility({}, {}).policyVersion,
-    sourceVersions, currentSourceVersions: input.currentSourceVersions ?? {}, summary, display: projectLearnerDisplay(input.evidence, features, input.dueRetests ?? []),
+    scope, sourceVersions, currentSourceVersions: input.currentSourceVersions ?? {}, summary, display,
+    skillProfile,
     evidence, features, measurementFeatures: input.measurementFeatures ?? [],
     projection: { mode: "live_read", persistedRows: input.persistedRows ?? 0, eligibleHeads: features.length, repairTriggered: false },
     completeness: { status: features.length > evidence.length ? "truncated" : "complete", total: features.length,

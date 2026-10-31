@@ -89,7 +89,7 @@ export async function readOpeningLearnerState(tx: TransactionSql, scope: Scope,
   // Source/privacy/help changes can bypass a course history counter. Bind the version to
   // the actual qualified read inputs, so an old decision cannot survive those changes.
   const stateVersion = createHash("sha256").update(JSON.stringify({ observations, evidenceContexts, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies, dueRetests })).digest("hex");
-  return assembleLearnerState({ evidence: { observations, evidenceContexts }, stateVersion,
+  return assembleLearnerState({ evidence: { observations, evidenceContexts }, scope: { ...scope, courseId: input.courseId }, stateVersion,
     dataAsOf, persistedRows: Number(projections[0]?.count ?? 0), limit: input.limit, measurementFeatures, currentSourceVersions, transferSpecifications, observationFamilies, dueRetests });
 }
 
