@@ -4,7 +4,7 @@
  */
 import type { SpanDraftAnswer } from "../teaching/span/span-answer";
 
-export type StudyStepKind = "learn" | "question";
+export type StudyStepKind = "learn" | "question" | "photo_practice";
 
 /** Rich text uses the shared LearningProse renderer (Markdown + `$…$` math). */
 export type LearnStep = { kind: "learn"; id: string; title: string; body: string; focus?: string; estimateMinutes: number | null };
@@ -15,7 +15,12 @@ export type QuestionStep = {
   /** Number of coordinates in the problem (for the no-solution proof fields). */
   coordinates: number;
 };
-export type StudyStep = LearnStep | QuestionStep;
+/** Free-form work remains controlled by the original practice owner. */
+export type PhotoPracticeStep = {
+  kind: "photo_practice"; id: string; title: string; prompt: string; estimateMinutes: null;
+  canSubmit: boolean; recorded: boolean;
+};
+export type StudyStep = LearnStep | QuestionStep | PhotoPracticeStep;
 
 export type HelpState = {
   /** Strongest help actually delivered for this question. */
@@ -74,6 +79,9 @@ export function resultLabel(result: StepResult): string {
 /** Exactly one primary action per state. The shell renders it; adapters never name buttons. */
 export type PrimaryAction = { kind: "submit" | "continue" | "next" | "none"; label: string; disabled: boolean };
 export function primaryAction(view: StudySessionView, pending: boolean): PrimaryAction {
+  if (view.step.kind === "photo_practice") return view.step.recorded
+    ? { kind: "none", label: "", disabled: true }
+    : { kind: "submit", label: view.sealed ? "重试保存同一答案" : "保存并批改", disabled: pending || !view.step.canSubmit };
   if (view.blocked) return { kind: "none", label: "暂时不能继续", disabled: true };
   if (view.step.kind === "learn") return { kind: "continue", label: "开始做题", disabled: pending };
   if (view.next) return { kind: "next", label: view.next.label, disabled: pending };
