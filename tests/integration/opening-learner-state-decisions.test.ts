@@ -53,6 +53,10 @@ describe("LearnerState actual PostgreSQL boundary", () => {
     expect(result.projection).toMatchObject({ mode: "live_read", persistedRows: 0, repairTriggered: false });
     expect(result.display).toMatchObject({ scope: "recorded_requirements", total: 1,
       counts: { independent: 1, hinted: 0, retest: 0, insufficient: 0 } });
+    expect(result.skillProfile).toMatchObject({ profileVersion: "rule-profile:1", stateVersion: result.stateVersion,
+      scope: { workspaceId: fixture.scope.workspaceId, ownerUserId: fixture.scope.ownerUserId, courseId: f.courseId },
+      items: [{ courseId: f.courseId, requirementKey: matrixRequirement, state: "independent",
+        observationRefs: [{ observationId: observation.id, sourceIds: expect.any(Array) }] }] });
     expect(await counts()).toEqual(before);
   });
 
@@ -95,6 +99,7 @@ describe("LearnerState actual PostgreSQL boundary", () => {
     const after = await service.read(fixture.scope, { courseId: f.courseId });
     expect(after.display).toMatchObject({ total: 1, counts: { independent: 0, hinted: 0, retest: 1, insufficient: 0 } });
     expect(after.features.find(row => row.observationId === independent.id)?.eligibility).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+    expect(after.skillProfile.items[0]?.observationRefs[0]?.observationId).toBe(independent.id);
     expect(after.stateVersion).not.toBe(before.stateVersion);
   });
 
