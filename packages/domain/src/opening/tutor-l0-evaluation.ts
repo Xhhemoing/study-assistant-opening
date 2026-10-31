@@ -66,7 +66,11 @@ const metadata = z.object({
   goalOrMode: text, typicalError: text,
   gold: z.object({ allowed: assertions, forbidden: z.record(text, z.array(scalar).min(1)),
     expectedReceipt: z.literal("unknown:pure-function-only"),
-    forbiddenSideEffects: z.array(text).min(1), termination: text }).strict(),
+    forbiddenSideEffects: z.array(text).min(1),
+    termination: text,
+    stopAt: z.enum(["student_answer", "diagnostic_answer", "student_choice", "student_confirmation", "paused", "pure_function_termination"]),
+    waitingFor: z.enum(["answer", "diagnostic_answer", "choice", "confirmation", "pause_resume", "none"]),
+  }).strict(),
 });
 const caseSchema = z.discriminatedUnion("entry", [
   entries[0].extend(metadata.shape).strict(), entries[1].extend(metadata.shape).strict(),
