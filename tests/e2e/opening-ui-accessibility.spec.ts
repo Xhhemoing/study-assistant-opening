@@ -69,7 +69,9 @@ async function openView(page: Page, view: View) {
       if (view === "units") await expect(page.getByRole("heading", { name: "课程单元", exact: true })).toBeVisible();
       if (view === "progress") {
         await expect(page.getByRole("heading", { name: "学习进展与记录", exact: true })).toBeVisible();
-        await expect(page.getByRole("region", { name: "学习进展", exact: true })).toHaveCount(0);
+        const progress = page.getByRole("region", { name: "学习进展", exact: true });
+        await expect(progress).toHaveCount(1);
+        await expect(progress.getByRole("link")).toHaveCount(0);
       }
       break;
     }

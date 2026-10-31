@@ -34,12 +34,48 @@ async function render(value: ReturnType<typeof response>, scopedCourseId?: strin
   await act(async () => root.render(<LearnerStateCard courseId={scopedCourseId} proactive />));
 }
 
-it("stays hidden until five distinct current graded answers are available", async () => {
+it("shows a truthful card before five valid answers and keeps the course study entry", async () => {
   const features = Array.from({ length: 4 }, (_, index) => feature(index));
   features.push(feature(0), feature(4, { eligibility: { verifiedCorrect: "unknown", usableForCurrentVersion: "yes" } }),
     feature(5, { eligibility: { verifiedCorrect: "yes", usableForCurrentVersion: "unknown" } }));
-  await render(response(features));
-  expect(host.childElementCount).toBe(0);
+  await render(response(features), courseId);
+  expect(host.textContent).toContain("已记录 6 次作答");
+  expect(host.textContent).toContain("还没有足够的有效记录");
+  expect(host.querySelector("a")?.getAttribute("href")).toBe(`/opening/courses/${courseId}/study`);
+});
+
+it("distinguishes no answers from recorded answers without usable evidence", async () => {
+  const unknown = feature(10, { eligibility: { verifiedCorrect: "unknown", usableForCurrentVersion: "yes" } });
+  const stale = feature(11, { eligibility: { verifiedCorrect: "yes", usableForCurrentVersion: "unknown" } });
+  await render(response([unknown, stale, unknown]), courseId);
+  expect(host.textContent).toContain("已记录 2 次作答");
+  expect(host.textContent).toContain("已有作答记录，但暂时没有可用的有效证据");
+  expect(host.textContent).not.toContain("已记录 0 次作答");
+});
+
+it("keeps recorded counts for all-unknown and all-stale answers", async () => {
+  const unknown = feature(20, { eligibility: { verifiedCorrect: "unknown", usableForCurrentVersion: "yes" } });
+  const stale = feature(21, { eligibility: { verifiedCorrect: "yes", usableForCurrentVersion: "unknown" } });
+  for (const features of [[unknown, unknown], [stale, stale]]) {
+    await render(response(features), courseId);
+    expect(host.textContent).toContain("已记录 1 次作答");
+    expect(host.textContent).toContain("已有作答记录，但暂时没有可用的有效证据");
+    expect(host.textContent).not.toContain("已记录 0 次作答");
+  }
+});
+
+it("offers course selection when proactive learning has no course yet", async () => {
+  const value = response([]);
+  value.summary = [];
+  await render(value);
+  expect(host.textContent).toContain("还没有作答记录");
+  expect(host.querySelector("a")?.getAttribute("href")).toBe("/opening/courses");
+});
+
+it("does not add a proactive action to the ordinary progress card", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json(response([]))));
+  await act(async () => root.render(<LearnerStateCard />));
+  expect(host.querySelector("a")).toBeNull();
 });
 
 it("shows progress from the full sequence even when displayed evidence is truncated", async () => {
@@ -55,7 +91,9 @@ it("shows progress from the full sequence even when displayed evidence is trunca
 
 it("does not borrow another course's answers to reach the display threshold", async () => {
   await render(response([...Array.from({ length: 4 }, (_, index) => feature(index)), feature(4, { courseId: otherCourseId })]), courseId);
-  expect(host.childElementCount).toBe(0);
+  expect(host.textContent).toContain("已记录 4 次作答");
+  expect(host.textContent).toContain("还没有足够的有效记录");
+  expect(host.querySelector("a")?.getAttribute("href")).toBe(`/opening/courses/${courseId}/study`);
 });
 
 it("shows graded answers without zero-content counters when their learning topics are not grouped yet", async () => {

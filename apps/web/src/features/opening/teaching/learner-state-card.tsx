@@ -37,18 +37,21 @@ export function LearnerStateCard({ courseId, revision = 0, proactive = false }: 
   }, [courseId, revision, retry]);
   if (error) return diagnostics ? <LoadError message={error} onRetry={() => setRetry(value => value + 1)} /> : null;
   if (!state) return null;
-  const validCount = countValidLearnerObservations(courseId ? state.features.filter(row => row.courseId === courseId) : state.features);
-  if (validCount < 5) return null;
+  const scopedFeatures = courseId ? state.features.filter(row => row.courseId === courseId) : state.features;
+  const recordedCount = new Set(scopedFeatures.map(row => row.observationId)).size;
+  const validCount = countValidLearnerObservations(scopedFeatures);
   const relevant = courseId ? state.summary.filter(row => row.courseId === courseId) : state.summary;
   const selected = relevant.find(row => row.status === "needs_review") ?? relevant.find(row => row.status === "needs_check") ?? relevant[0];
+  const studyHref = courseId ? (selected ? `/opening/courses/${selected.courseId}/study` : `/opening/courses/${courseId}/study`) : "/opening/courses";
+  const progressMessage = recordedCount === 0 ? "还没有作答记录。" : validCount === 0 ? "已有作答记录，但暂时没有可用的有效证据。" : validCount < 5 ? "还没有足够的有效记录来给出更具体的建议。" : null;
   return <section className="space-y-3 rounded-xl border border-line bg-surface p-4" aria-label={proactive ? "开始前的学习建议" : "学习进展"}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold">学习进展</h2><span className="text-xs text-text-2">{selected ? labels[selected.status] : "继续练习"}</span></div>
     <div role="group" className="space-y-2" aria-label="练习进展">
-      <p className="text-sm font-medium">已记录 {validCount} 次作答{state.display.total > 0 ? ` · 练习了 ${state.display.total} 项内容` : ""}</p>
+      <p className="text-sm font-medium">已记录 {recordedCount} 次作答{state.display.total > 0 ? ` · 练习了 ${state.display.total} 项内容` : ""}</p>
       {diagnostics && state.display.total > 0 ? <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(Object.keys(displayLabels) as Array<keyof typeof displayLabels>).map(key => <div className="rounded-lg bg-surface-2 p-3" key={key}><dt className="text-xs text-text-2">{displayLabels[key]}</dt><dd className="mt-1 font-serif text-2xl tabular-nums text-text">{state.display.counts[key]}</dd></div>)}</dl> : null}
     </div>
-    <p className="text-sm leading-7">{selected ? `${selected.skillLabel}：${selected.status === "needs_review" ? "先复习出错的步骤，再试一道新题。" : selected.status === "needs_check" || selected.status === "unobserved" ? "再做一道题，看看哪些步骤还需要帮助。" : "试试不同情境的新题，之后再回来复习。"}` : "做一道新题，看看接下来该练什么。"}</p>
-    {proactive && selected ? <Link className={ui.secondary} href={`/opening/courses/${selected.courseId}/study`}>继续学习</Link> : null}
+    <p className="text-sm leading-7">{progressMessage ?? (selected ? `${selected.skillLabel}：${selected.status === "needs_review" ? "先复习出错的步骤，再试一道新题。" : selected.status === "needs_check" || selected.status === "unobserved" ? "再做一道题，看看哪些步骤还需要帮助。" : "试试不同情境的新题，之后再回来复习。"}` : "做一道新题，看看接下来该练什么。")}</p>
+    {proactive ? <Link className={ui.secondary} href={studyHref}>{courseId ? "开始学习" : "选择课程开始学习"}</Link> : null}
     <p className="text-xs leading-6 text-text-2">更新于 {new Date(state.dataAsOf).toLocaleString("zh-CN")}</p>
     {diagnostics ? <details className="space-y-2 border-t border-line pt-3 text-xs leading-6 text-text-2" aria-label="学习证据诊断"><summary className="cursor-pointer font-medium">开发者诊断</summary>
       <p className="text-xs leading-6 text-text-2">每项按最近作答的有效证据归入一类；数学提示 1–3 级均按使用提示记录。已查看本题解法、复核有误或真实复测到期时显示待复测，不表示已自动新增任务。这不是全课程单元覆盖率或掌握率。</p>
