@@ -131,9 +131,11 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     async primary() {
       if (learn) { if (!await save(session.intent, sequence[1]!.id, "active")) throw new Error("学习进度尚未保存。"); return view; }
       if (record) { view = { ...view, next: adaptSpanNext(await spanLessonRequest("/api/opening/teaching/span/next", z.unknown(), { method: "POST", body: JSON.stringify({ activityId: session.activityId, expectedRevision: session.revision, observationId: record.id, clientKey: `span-next:${session.activityId}:${session.revision}:${record.id}` }) }), session.courseId) }; return view; }
+      // Replay the durable sealed request before checking the current photo candidate.
+      const savedSubmission = draft().submission;
       const currentPhoto = photo.status === "ready" && photo.workSource ? photo.workSource : null;
-      if (photo.status !== "none" && !currentPhoto) throw new Error("照片尚未核实可用；请继续使用文字作答，或重新选择照片。");
-      const submission = update(current => ({ submission: current.submission ?? { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? "independent" : assistance, outcome: "unverified", verdictSource: "self_report", ...(currentPhoto ? { workSource: currentPhoto } : {}) } } })).submission!;
+      if (!savedSubmission && photo.status !== "none" && !currentPhoto) throw new Error("照片尚未核实可用；请移除附件后继续文字作答，或重新核实照片。");
+      const submission = savedSubmission ?? update(current => ({ submission: { attemptId: attempt.id, input: { clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: current.fields.answer, assistance: assistance === "none" ? "independent" : assistance, outcome: "unverified", verdictSource: "self_report", ...(currentPhoto ? { workSource: currentPhoto } : {}) } } })).submission!;
       const saved = await client.submitAttempt(attempt.id, submission.input); update({ observationId: saved.id });
       record = (await readPracticeRecord(client, session.courseId, attempt, saved.id)).observation;
       if (!record) throw new Error("最新结果尚未读取，原答案已保留。");
@@ -141,6 +143,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
     },
     async choosePhoto(file: File) {
       if (!photo.enabled) return view;
+      if (draft().submission) throw new Error("原答案已封存，不能更换照片附件。");
       // A replacement must detach the old candidate before any remote work. A
       // failed upload/ownership/prepare can therefore never submit A silently.
       update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
@@ -152,6 +155,8 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
         const membership = await createMaterialOrganizationClient().addToCourse(session.courseId, [result.id], "reference");
         if (membership.failed.length) { photo = { enabled: true, status: "unavailable", name: file.name, message: "照片已保存，但归入当前课程未完成；文字作答仍可继续。" }; return refresh(); }
         photo = { enabled: true, status: "preparing", name: file.name };
+        // Keep the uploaded candidate across refresh even when preparation is pending.
+        update({ fields: { workSourceId: result.id, workSourceVersion: result.version, workPhysicalPage: 1 } });
         const prepared = await client.preparePhotoWorkSource(attempt.id, { sourceId: result.id, sourceVersion: result.version, physicalPage: 1 });
         if (prepared.state === "ready") update({ fields: { workSourceId: prepared.workSource.id, workSourceVersion: prepared.workSource.version, workPhysicalPage: prepared.workSource.physicalPage } });
         photo = { enabled: true, status: prepared.state, name: file.name, workSource: prepared.workSource, message: prepared.state === "pending" ? "照片已保存，解析仍在进行。" : prepared.state === "unavailable" ? "照片暂不可用于本题，文字作答仍可继续。" : undefined };
@@ -160,7 +165,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: (intent
       }
       return refresh();
     },
-    removePhoto() { update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } }); photo = { enabled: options.photoEnabled === true, status: "none" }; return refresh(); },
+    removePhoto() { if (draft().submission) throw new Error("原答案已封存，不能移除照片附件。"); update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } }); photo = { enabled: options.photoEnabled === true, status: "none" }; return refresh(); },
     async help() {
       const level = (Math.max(0, ...levels) + 1) as SpanHintLevel;
       if (!view.help.canRequest) return view;
