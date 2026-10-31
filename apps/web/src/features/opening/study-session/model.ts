@@ -12,6 +12,8 @@ export type LearnStep = { kind: "learn"; id: string; title: string; body: string
 export type QuestionStep = {
   kind: "question"; id: string; title: string; prompt: string; purpose: "practice" | "retest";
   estimateMinutes: number | null; photo: boolean;
+  /** Number of coordinates in the problem (for the no-solution proof fields). */
+  coordinates: number;
 };
 export type StudyStep = LearnStep | QuestionStep;
 

@@ -1,40 +1,48 @@
 import { expect, it } from "vitest";
-import { getSpanProblem, solveSpanProblem, spanModeForIntent, verifySpanAnswer } from "@aistudy/domain";
+import { createSpanTeachingSequence, getSpanProblem, solveSpanProblem, spanModeForIntent, verifySpanAnswer } from "@aistudy/domain";
 import type { LearningObservation, StudySessionIntent } from "@aistudy/contracts";
 import { updateSpanDraftAnswer } from "../../teaching/span/span-answer";
-import { adaptSpanHelp, adaptSpanNext, adaptSpanResult, spanLessonMoves, spanProblemForMove } from "./span";
+import { adaptSpanHelp, adaptSpanNext, adaptSpanResult } from "./span";
+import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { spanSessionProblemIds } from "../../teaching/span/session-service";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const intent = (purpose: StudySessionIntent["purpose"]): StudySessionIntent =>
   ({ purpose, timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" });
 
-it("picks the same problem for every move as the server-issued sequence, ending with the reserved item", () => {
+it("uses the legacy lesson steps, and records only teaching moves the session service accepts", () => {
+  const expected = { self_study: ["span-faded-3d", "span-independent-3d"], overview: ["span-contrast-dependent", "span-geometry-transfer"], challenge: ["span-geometry-transfer"] };
   for (const purpose of ["self_study", "overview", "challenge"] as const) {
     const mode = spanModeForIntent(intent(purpose));
     const moves = spanLessonMoves(mode);
-    const issued = moves.map((_, index) => spanProblemForMove(mode, index, moves.length));
-    expect(issued[0]).toBeNull();
-    expect(issued.at(-1)).toBe("reserved:auto");
-    // Every non-reserved practice problem must be one the server prepares for this intent.
-    const server = spanSessionProblemIds(intent(purpose));
-    for (const problemId of issued.slice(1, -1)) expect(server).toContain(problemId);
+    const problems = moves.slice(1).map((_, index) => spanLessonProblemId(mode, index + 1, moves.length));
+    expect(problems).toEqual([...expected[mode], "reserved:auto"]);
+    // session-service.ts only accepts a move from the teaching sequence ("教学动作不属于本次学习目的" otherwise).
+    const accepted = createSpanTeachingSequence(mode).map(move => move.id);
+    for (const problemId of problems) expect(accepted).toContain(spanPracticeMoveId(purpose, problemId));
+    for (const problemId of problems.slice(0, -1)) expect(spanSessionProblemIds(intent(purpose))).toContain(problemId);
   }
 });
 
-it("serializes answers so the real verifier can grade them (the C1 encoding made every answer unparseable)", () => {
-  const problem = getSpanProblem("span-faded-3d")!;
-  const solution = solveSpanProblem(problem);
-  if (solution.kind !== "unique") throw new Error("fixture must have a unique solution");
-  const [alpha, beta] = solution.coefficients;
-  // Only the judgement and coefficients, the way a learner usually answers.
-  const right = updateSpanDraftAnswer(updateSpanDraftAnswer("", { membership: "in_span" }), { coefficients: [alpha, beta] });
-  expect(verifySpanAnswer(problem, JSON.parse(right)).outcome).toBe("correct");
-  const wrong = updateSpanDraftAnswer(right, { coefficients: ["9", "9"] });
-  expect(verifySpanAnswer(problem, JSON.parse(wrong)).outcome).toBe("incorrect");
+// Minimal answers a learner gives on each lesson problem, encoded by the shared form helper.
+const encode = (change: Parameters<typeof updateSpanDraftAnswer>[1]) => JSON.parse(updateSpanDraftAnswer("", change)) as unknown;
+const gradable: Record<string, { right: Parameters<typeof updateSpanDraftAnswer>[1]; wrong: Parameters<typeof updateSpanDraftAnswer>[1] }> = {
+  "span-faded-3d": { right: { membership: "in_span", coefficients: ["2", "-1"] }, wrong: { membership: "in_span", coefficients: ["9", "9"] } },
+  "span-contrast-dependent": { right: { membership: "in_span", coefficients: ["3", "0"] }, wrong: { membership: "in_span", coefficients: ["1", "1"] } },
+  // No solution: candidate coefficients from two coordinates, all coordinate checks, and which coordinates were used.
+  "span-independent-3d": { right: { membership: "not_in_span", coefficients: ["2", "2"], coordinateChecks: ["2", "4", "2"], coefficientDerivationCoordinates: [0, 2] }, wrong: { membership: "in_span", coefficients: ["2", "2"] } },
+  "span-geometry-transfer": { right: { membership: "not_in_span", coefficients: ["1", "2"], coordinateChecks: ["1", "2", "3"], coefficientDerivationCoordinates: [0, 1] }, wrong: { membership: "in_span", coefficients: ["1", "2"] } },
+};
+
+it("every lesson problem is graded right or wrong by the real verifier from the form's encoding", () => {
+  for (const [problemId, answers] of Object.entries(gradable)) {
+    const problem = getSpanProblem(problemId)!;
+    expect(verifySpanAnswer(problem, encode(answers.right)), problemId).toMatchObject({ outcome: "correct" });
+    expect(verifySpanAnswer(problem, encode(answers.wrong)).outcome, problemId).toBe("incorrect");
+  }
   // Opening the optional working section without filling it must not break grading.
-  const touched = updateSpanDraftAnswer(right, { representations: {} });
-  expect(verifySpanAnswer(problem, JSON.parse(touched)).outcome).toBe("correct");
+  expect(verifySpanAnswer(getSpanProblem("span-faded-3d")!, encode({ ...gradable["span-faded-3d"]!.right, representations: {} })).outcome).toBe("correct");
+  expect(solveSpanProblem(getSpanProblem("span-independent-3d")!).kind).toBe("none");
 });
 
 it("labels results from evaluation and help separately", () => {

@@ -68,7 +68,7 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
     </main>
 
     <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
-      {isQuestion && !view.result ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
+      {isQuestion ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
       <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
         {pending ? "正在保存…" : primary.label}

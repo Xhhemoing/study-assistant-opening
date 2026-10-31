@@ -9,7 +9,7 @@ import { StudySession, StudySessionShell } from "./study-session-shell";
 import type { StudySessionView } from "./model";
 
 const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
-  read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
+  read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: mocks.uploadFile }) }));
 vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ addToCourse: mocks.addToCourse }) }));
@@ -44,8 +44,8 @@ async function mount(port: ReturnType<typeof createSpanStudySession>) {
   await act(async () => root.render(<StudySession port={port} />));
   const button = (text: string) => [...host.querySelectorAll("button")].find(node => node.textContent?.includes(text));
   const click = async (text: string) => { const node = button(text); expect(node, text).toBeDefined(); await act(async () => node!.click()); };
-  const select = async (value: string) => {
-    const node = host.querySelector("select")!;
+  const select = async (value: string, label?: string) => {
+    const node = label ? [...host.querySelectorAll("label")].find(row => row.textContent?.startsWith(label))!.querySelector("select")! : host.querySelector("select")!;
     await act(async () => { node.value = value; node.dispatchEvent(new Event("change", { bubbles: true })); });
   };
   const type = async (label: string, value: string) => {
@@ -73,6 +73,7 @@ it("submits a gradable answer through the real form, shows an honest result and 
     // Faded example opens with hint 1 exactly once (legacy rule); it is disclosed, not hidden.
     expect(mocks.hint).toHaveBeenCalledTimes(1);
     expect(ui.button("提示 · 已看 1")).toBeDefined();
+    expect(mocks.ack).toHaveBeenCalledTimes(1);
     expect((ui.button("提交") as HTMLButtonElement).disabled).toBe(true);
     await ui.select("in_span");
     await ui.type("α", solution.coefficients[0]); await ui.type("β", solution.coefficients[1]);
@@ -81,6 +82,8 @@ it("submits a gradable answer through the real form, shows an honest result and 
     expect(verifySpanAnswer(problem, JSON.parse(input.answer)).outcome).toBe("correct");
     expect(input.assistance).toBe("hinted");
     expect(ui.host.textContent).toContain("用提示后答对");
+    // Help stays reachable after the first answer; that is when the full demonstration opens.
+    expect(ui.button("提示 · 已看 1")).toBeDefined();
     expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
     await ui.click("看下一步安排");
     await ui.click("下一题");
@@ -123,6 +126,36 @@ it("replays the same sealed request after a network failure", async () => {
   expect(() => port.edit({ membership: "not_in_span" })).toThrow();
 });
 
+it("a no-solution answer filled in the real form is graded by the real verifier", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  try {
+    await ui.select("not_in_span");
+    await ui.type("α", "2"); await ui.type("β", "2");
+    await ui.type("代回后", "2, 4, 2");
+    await ui.select("0", "导出系数所用坐标 1"); await ui.select("2", "导出系数所用坐标 2");
+    mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+    await ui.click("提交");
+    const answer = JSON.parse(mocks.submitAttempt.mock.calls[0]![1].answer);
+    expect(verifySpanAnswer(getSpanProblem("span-independent-3d")!, answer)).toMatchObject({ outcome: "correct", reason: "verified_exactly" });
+  } finally { await ui.unmount(); }
+});
+
+it("the reserved step records a teaching move the session service accepts, then asks for the reserved item", async () => {
+  const { attempt: base, details } = fixture("self_study-reserved", "span-independent-3d");
+  const attempt = { ...base, spanExercise: { ...base.spanExercise!, id: "span-reserved-fraction" } } as LearningAttempt;
+  mocks.request.mockImplementation(async (path: string) => path.endsWith("/reserved") ? attempt : {});
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  await createSpanStudySession(details, vi.fn()).load();
+  const session = mocks.request.mock.calls.find(call => String(call[0]).endsWith("/span/session"))!;
+  expect(JSON.parse(session[2].body).moveId).toBe("self-independent");
+  expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/span/reserved"))).toBe(true);
+  expect(mocks.createAttempt).not.toHaveBeenCalled();
+});
+
 it("an uploaded photo is attached to the answer without being added to the course", async () => {
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
@@ -157,7 +190,7 @@ it("a failed photo leaves no attachment on the text answer", async () => {
 });
 
 it("renders exactly one primary action in every state and no time when the backend has none", () => {
-  const base: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false },
+  const base: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 },
     position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: { level: 1, label: "方向提示" } }, answer: {}, sealed: false, result: null, next: null, photo: null };
   const states: StudySessionView[] = [base, { ...base, answer: { membership: "in_span" } }, { ...base, sealed: true },
     { ...base, result: { outcome: "correct", assistance: "independent" } }, { ...base, result: { outcome: "incorrect", assistance: "hinted" }, next: { href: "/x", label: "再练一题", alternatives: [] } },

@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { learningAttemptSchema, spanProblemSchema, type LearningAttempt, type LearningObservation, type SpanHintLevel, type SpanLessonSnapshot } from "@aistudy/contracts";
-import { createSpanTeachingSequence, spanModeForIntent } from "@aistudy/domain";
+import { spanModeForIntent } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../../client/learning-client";
 import { createOpeningApi, resolveUploadPutUrl } from "../../client/api";
 import { createUploadClient } from "../../inbox/upload-client";
@@ -15,30 +15,16 @@ import { spanProblemText } from "../../teaching/span/span-problem-text";
 import { isSpanReservedProblemId, readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, updateSpanDraftAnswer, type SpanDraftAnswer } from "../../teaching/span/span-answer";
 import { readSpanNextResult } from "../../teaching/span/span-next-action-control";
 import { spanPracticeScope, spanStartsWithHint } from "../../teaching/span/span-practice";
+import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
 import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved } from "../../learning/practice-draft-storage";
 import { readPracticeRecord } from "../../learning/practice-draft";
 import type { HelpState, NextAction, PhotoState, StepResult, StudySessionPort, StudySessionView, StudyStep } from "../model";
 
 const SKILL = "线性组合与 span";
-type Move = ReturnType<typeof createSpanTeachingSequence>[number];
-type Mode = ReturnType<typeof spanModeForIntent>;
+type Move = ReturnType<typeof spanLessonMoves>[number];
 
-/** Same move list as the legacy lesson (span-lesson.tsx): the teaching sequence plus the server-issued reserved item. */
-export function spanLessonMoves(mode: Mode): Move[] {
-  const sequence = createSpanTeachingSequence(mode);
-  return [...sequence, { ...sequence[sequence.length - 1]!, id: `${mode}-reserved` }];
-}
 type Save = (intent: SpanLessonSnapshot["intent"], move: string, status: "active" | "paused" | "completed") => Promise<boolean>;
-
-/** Problem for a move index, in the legacy order. Step 0 is the presentation; the last step is the reserved item. */
-export function spanProblemForMove(mode: Mode, index: number, total: number): string | null {
-  if (index <= 0) return null;
-  if (index >= total - 1) return "reserved:auto";
-  return mode === "self_study" ? (index === 1 ? "span-faded-3d" : "span-independent-3d")
-    : mode === "overview" ? (index === 1 ? "span-contrast-dependent" : "span-geometry-transfer")
-      : "span-geometry-transfer";
-}
 
 const presentationSchema = z.object({ problem: spanProblemSchema, exposureReceipt: z.object({ id: z.string().uuid() }),
   solution: z.object({ kind: z.string(), coefficients: z.tuple([z.string(), z.string()]).optional() }) });
@@ -92,7 +78,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   const moves = spanLessonMoves(mode);
   const index = moves.findIndex(move => move.id === session.moveId);
   const move = moves[index];
-  const problemId = move ? spanProblemForMove(mode, index, moves.length) : null;
+  const problemId = move && index > 0 ? spanLessonProblemId(mode, index, moves.length) : null;
   const position = { index: Math.max(0, index), total: moves.length };
   const client = createOpeningLearningClient();
   const scope = spanPracticeScope(session.courseId, undefined, undefined, session.activityId, problemId ?? undefined);
@@ -120,7 +106,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   }
 
   async function loadQuestion(): Promise<StudySessionView> {
-    const step: StudyStep = { kind: "question", id: session.activityId, title: SKILL, prompt: "", purpose: "practice", estimateMinutes: details.estimateMinutes ?? null, photo: Boolean(options.photoEnabled) };
+    const step: StudyStep = { kind: "question", id: session.activityId, title: SKILL, prompt: "", purpose: "practice", estimateMinutes: details.estimateMinutes ?? null, photo: Boolean(options.photoEnabled), coordinates: 0 };
     if (!sourceId) return blockedView(step, "这节课的资料暂时不可用，请先到课程页恢复资料。");
     if (!readPracticeDraft(scope, storage())) {
       initializePracticeDraft(emptyPracticeDraft(scope, { sourceId, spanProblemId: problemId!, skillLabel: SKILL,
@@ -140,7 +126,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       const start = update(current => ({ start: current.start ?? { clientKey: `span-start:${crypto.randomUUID()}`, sessionId: session.sessionId,
         sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } })).start!;
       await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
-        body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: session.moveId }) });
+        body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: spanPracticeMoveId(session.intent.purpose, problemId!) }) });
       attempt = problemId === "reserved:auto"
         ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId, clientKey: start.clientKey, mode }) })
         : await client.createAttempt({ sessionId: session.sessionId, clientKey: start.clientKey, spanExercise: { sourceId, problemId: problemId!, version: 1 } });
@@ -163,7 +149,11 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const levels = [...new Set(details.hintLevels[current.id] ?? [])].sort();
     if (created && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
     // Re-reading a released level is idempotent on the server (same release key), so this never adds help.
-    hints = await Promise.all(levels.map(async level => ({ level, text: (await requestSpanHint(current, level)).text })));
+    hints = await Promise.all(levels.map(async level => {
+      const hint = await requestSpanHint(current, level);
+      void acknowledgeStudyExposure(hint.exposureReceipt).catch(() => undefined);
+      return { level, text: hint.text };
+    }));
     delivered = strongest(state.deliveredAssistance, draft()!.fields.deliveredAssistance,
       hints.some(hint => hint.level === 4) ? "revealed" : hints.length ? "hinted" : "none");
     if (created && hints.length) update({ fields: { deliveredAssistance: delivered, assistance: delivered === "none" ? "independent" : delivered } });
@@ -174,7 +164,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       photo = await checkPhoto(current, candidate, "作答照片");
     }
     const prompt = spanProblemText(current.spanExercise).chinese;
-    view = { step: { ...step, id: current.id, prompt },
+    view = { step: { ...step, id: current.id, prompt, coordinates: current.spanExercise.target.length },
       position, help: adaptSpanHelp(delivered, hints, Boolean(record), false), answer: {}, sealed: false, result: null, next: null, photo };
     return refresh(null);
   }

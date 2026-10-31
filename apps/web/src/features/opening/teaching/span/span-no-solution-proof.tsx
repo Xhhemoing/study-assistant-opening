@@ -1,0 +1,7 @@
+import { ui } from "../../design/ui";
+import { spanVectorInput, type SpanDraftAnswer } from "./span-answer";
+
+/** Fields that let the verifier grade a "not in span" answer. Shared by the legacy form and the v2 session. */
+export function SpanNoSolutionProof({ coordinates, answer, edit }: { coordinates: number; answer: Partial<SpanDraftAnswer>; edit: (change: Partial<SpanDraftAnswer>) => void }) {
+  return <div className="space-y-2 rounded-lg bg-surface-2 p-3"><p className="text-xs leading-6">判断无解时，需要指出矛盾。若你由两个坐标求出唯一候选系数，再在另一个坐标发现矛盾，请选择你用于求系数的两个坐标；并填写上面的候选系数和全部坐标结果。</p><div className="flex flex-wrap gap-3">{[0, 1].map(index => <label key={index} className="text-xs">导出系数所用坐标 {index + 1}<select className={`${ui.input} mt-1`} value={answer.coefficientDerivationCoordinates?.[index] ?? ""} onChange={event => { const previous = answer.coefficientDerivationCoordinates ?? [-1, -1]; edit({ coefficientDerivationCoordinates: index === 0 ? [Number(event.target.value), previous[1]] : [previous[0], Number(event.target.value)] }); }}><option value="" disabled>请选择</option>{Array.from({ length: coordinates }, (_, coordinate) => <option key={coordinate} value={coordinate}>第 {coordinate + 1} 坐标</option>)}</select></label>)}</div><label className="block text-xs">或者提供左零空间证书 y（满足 y·v=y·w=0，但 y·u≠0）<input className={`${ui.input} mt-1`} value={answer.noSolutionWitness?.join(", ") ?? ""} onChange={event => edit({ noSolutionWitness: spanVectorInput(event.target.value) })} /></label></div>;
+}

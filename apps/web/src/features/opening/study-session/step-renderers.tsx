@@ -4,6 +4,7 @@ import { LearningProse } from "../assistant/learning-prose";
 import { MathInput } from "../teaching/math-input";
 import { spanVectorInput, type SpanDraftAnswer } from "../teaching/span/span-answer";
 import { SpanTargetedFocus } from "../teaching/span/targeted-focus";
+import { SpanNoSolutionProof } from "../teaching/span/span-no-solution-proof";
 import { ui } from "../design/ui";
 import type { LearnStep, PhotoState, QuestionStep, StudyStep, StudyStepKind } from "./model";
 
@@ -33,6 +34,9 @@ const vectorText = (values?: string[]) => values?.join(", ") ?? "";
 function SpanQuestionRenderer({ step, answer, locked, photo, onEdit, onChoosePhoto, onRemovePhoto }: StepRendererProps<QuestionStep>) {
   const equation = answer.equation ?? { vectors: [[], []] as [string[], string[]], target: [] as string[] };
   const coefficients = answer.coefficients ?? ["", ""];
+  const checks = <label className="block text-xs">代回后 αv+βw 的各坐标
+    <input className={`${ui.input} mt-1`} maxLength={1400} value={vectorText(answer.coordinateChecks)} onChange={event => onEdit({ coordinateChecks: spanVectorInput(event.target.value) })} />
+  </label>;
   return <div className="space-y-6">
     <div className="prose-reading text-lg leading-8"><LearningProse text={step.prompt} /></div>
     <fieldset disabled={locked} className="space-y-4">
@@ -48,6 +52,10 @@ function SpanQuestionRenderer({ step, answer, locked, photo, onEdit, onChoosePho
             onChange={event => onEdit({ coefficients: index === 0 ? [event.target.value, coefficients[1] ?? ""] : [coefficients[0] ?? "", event.target.value] })} />
         </label>)}
       </div>
+      {answer.membership === "not_in_span" ? <div className="space-y-3">
+        {checks}
+        <SpanNoSolutionProof coordinates={step.coordinates} answer={answer} edit={onEdit} />
+      </div> : null}
       <details className="group rounded-tile border border-line p-3">
         <summary className="cursor-pointer text-sm text-text-2">写出过程（可选，写了能看清卡在哪一步）</summary>
         <div className="mt-3 space-y-3">
@@ -58,9 +66,7 @@ function SpanQuestionRenderer({ step, answer, locked, photo, onEdit, onChoosePho
                 onEdit({ equation: index === 0 ? { ...equation, vectors: [values, equation.vectors[1]] } : index === 1 ? { ...equation, vectors: [equation.vectors[0], values] } : { ...equation, target: values } });
               }} />
           </label>)}</div>
-          <label className="block text-xs">代回后 αv+βw 的各坐标
-            <input className={`${ui.input} mt-1`} maxLength={1400} value={vectorText(answer.coordinateChecks)} onChange={event => onEdit({ coordinateChecks: spanVectorInput(event.target.value) })} />
-          </label>
+          {answer.membership === "not_in_span" ? null : checks}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-xs">方程组的解
               <select className={`${ui.input} mt-1`} value={answer.representations?.system ?? ""} onChange={event => onEdit({ representations: { ...answer.representations, system: event.target.value as "unique" | "infinite" | "none" } })}>
@@ -73,9 +79,6 @@ function SpanQuestionRenderer({ step, answer, locked, photo, onEdit, onChoosePho
               </select>
             </label>
           </div>
-          {answer.membership === "not_in_span" ? <label className="block text-xs">说明矛盾：左零空间证书 y（满足 y·v=y·w=0，但 y·u≠0）
-            <input className={`${ui.input} mt-1`} value={vectorText(answer.noSolutionWitness)} onChange={event => onEdit({ noSolutionWitness: spanVectorInput(event.target.value) })} />
-          </label> : null}
           <MathInput label="我的理由" value={answer.explanation ?? ""} maxLength={6000} disabled={locked} onChange={value => onEdit({ explanation: value })} />
         </div>
       </details>
