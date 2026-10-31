@@ -19,6 +19,9 @@ import {
   type OpeningCardsClient,
 } from "./cards-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
+import { StudySessionShell } from "../study-session/study-session-shell";
+import { cardRecallGrade, cardRecallLabel, cardStudyView } from "../study-session/adapters/card";
 
 const gradeOptions: Array<{ grade: ReviewGrade; label: string; icon: typeof Check }> = [
   { grade: "again", label: "重来", icon: RotateCcw },
@@ -51,6 +54,9 @@ export function advanceGradedCard(state: ReadState, cardId: string, queueRequest
 
 export function CardReviewView({ client: supplied, embedded = false, compact = false, onRemainingChange, onGraded, onBusyChange, returnTo = "/opening/review?tab=cards" }: { client?: OpeningCardsClient; embedded?: boolean; compact?: boolean; onRemainingChange?: (remaining: number | null) => void; onGraded?: (cardId: string, result: GradeReviewResponse) => void; onBusyChange?: (busy: boolean) => void; returnTo?: string }) {
   const client = useMemo(() => supplied ?? createOpeningCardsClient(), [supplied]);
+  const { studySessionV2 } = useOpeningCapabilities();
+  const [selectedGrade, setSelectedGrade] = useState<ReviewGrade | null>(null);
+  const [savedRecall, setSavedRecall] = useState<string | null>(null);
   const [state, setState] = useState<ReadState>({ kind: "loading" });
   const [grading, setGrading] = useState(false);
   const [exiting, setExiting] = useState(false);
@@ -69,6 +75,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
     gradeInFlight.current = false;
     setGradeError("");
     gradeIdentity.current = null;
+    setSelectedGrade(null);
     try {
       const items = await client.listDue("auto");
       if (request !== requestId.current) return;
@@ -122,12 +129,14 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
       successfulInteractionHaptic();
       setEvidenceNotice(cardEvidenceNotice(result.evidence));
       gradeIdentity.current = null;
+      if (studySessionV2) setSavedRecall(cardRecallLabel(grade));
       if (!interactionMotionReduced()) {
         setExiting(true);
         await new Promise<void>(resolve => window.setTimeout(resolve, 200));
         if (queueRequest !== requestId.current) return;
       }
       setState((currentState) => advanceGradedCard(currentState, current.card.id, queueRequest, requestId.current));
+      setSelectedGrade(null);
       onGraded?.(current.card.id, result);
     } catch (error) {
       if (queueRequest !== requestId.current) return;
@@ -140,7 +149,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
       setGrading(false);
       onBusyChange?.(false);
     }
-  }, [client, current, grading, state, onGraded, onBusyChange]);
+  }, [client, current, grading, state, onGraded, onBusyChange, studySessionV2]);
 
   async function classify(reviewKind: "question" | "concept") {
     if (!current || grading || gradeInFlight.current) return;
@@ -188,6 +197,9 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
           />
         ) : null}
         {state.kind === "ready" && state.items.length > 0 && state.index >= state.items.length ? (
+          <>
+          {studySessionV2 && savedRecall ? <p role="status" className="text-sm text-text-2">复习已保存 · 回忆情况：{savedRecall}</p> : null}
+          {studySessionV2 && evidenceNotice ? <p role="status" className="text-xs text-warn">{evidenceNotice}</p> : null}
           <EmptyState
             title="这组记忆卡片已经处理完毕"
             description={`本次完成 ${state.items.length} 张。`}
@@ -197,6 +209,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
               </Link>
             }
           />
+          </>
         ) : null}
         {state.kind === "ready" && current ? (
           <ContentBlock width="wide"><div className={`flex w-full min-w-0 flex-col ${compact ? "gap-2" : "gap-5"}`}>
@@ -231,12 +244,20 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
                 <div className="flex flex-wrap gap-2"><button type="button" className={ui.primary} disabled={grading} onClick={() => void classify("question")}>题目：做新变式</button>
                 <button type="button" className={ui.secondary} disabled={grading} onClick={() => void classify("concept")}>定义或术语：翻卡回忆</button></div>
               </div> : <>
+            {studySessionV2 ? <>
+              <StudySessionShell view={cardStudyView(current, state.flipped, selectedGrade, Boolean(gradeError), savedRecall)} pending={grading} onPrimary={() => {
+                if (!state.flipped) setState(value => value.kind === "ready" ? { ...value, flipped: true } : value);
+                else if (selectedGrade) void gradeCard(selectedGrade);
+              }} onEdit={(_key, value) => { if (!gradeError && !grading) setSelectedGrade(cardRecallGrade(value)); }} onReload={() => setRetryToken(value => value + 1)} onPause={() => {}} onNavigate={() => {}} onHelp={() => {}} onChoosePhoto={() => {}} onRemovePhoto={() => {}} />
+              <Link className={ui.quiet} href={returnTo}>返回复习入口</Link>
+            </> : <>
             <CardStack front={current.card.front} back={current.card.back} flipped={state.flipped} disabled={grading} remaining={state.items.length - state.index} exiting={exiting} entering={state.index > 0}
               onFlip={() => setState(currentState => currentState.kind === "ready" ? { ...currentState, flipped: !currentState.flipped } : currentState)}
               onGrade={gradeCard} />
+            </>}
             {current.card.originObservationRootId ? <CardObservationOrigin key={current.card.id} observationId={current.card.originObservationRootId} onChanged={() => void refresh()} /> : null}
             <Link className={ui.quiet} href={studyConversationHref({ courseId: current.card.courseId ?? undefined, purpose: "card_answer", label: current.card.skillLabel ?? "当前记忆卡片", fragment: `${current.card.front}${state.flipped ? `\n参考内容：${current.card.back}` : ""}`.slice(0, 4000), returnTo })}>围绕这张卡片提问</Link>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {!studySessionV2 ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {gradeOptions.map(({ grade, label, icon: Icon }) => (
                 <button
                   key={grade}
@@ -249,7 +270,7 @@ export function CardReviewView({ client: supplied, embedded = false, compact = f
                   {label}
                 </button>
               ))}
-            </div>
+            </div> : null}
             </>}
           </div></ContentBlock>
         ) : null}

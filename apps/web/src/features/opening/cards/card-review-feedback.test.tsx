@@ -15,6 +15,11 @@ vi.mock("./card-variant-review", () => ({ CardVariantReview: ({ cardId, client, 
 } }, "保存变式复习") }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: { children: React.ReactNode; href: string }) => createElement("a", props, children) }));
 import { CardReviewView } from "./card-review-view";
+import { BudgetCardSession } from "../review/budget-card-session";
+import type { LearningManagementClient } from "../planning/learning-management-client";
+vi.mock("../../auth/session-identity", () => ({ getVerifiedSessionNamespace: () => "card-shell-test" }));
+let sessionV2 = false;
+vi.mock("../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ studySessionV2: sessionV2 }) }));
 
 function item(id: string): ReviewQueueItem {
   const at = "2026-10-15T00:00:00.000Z";
@@ -28,6 +33,8 @@ let root: Root;
 let grade: ReturnType<typeof vi.fn<OpeningCardsClient["grade"]>>;
 let client: OpeningCardsClient;
 beforeEach(() => {
+  sessionV2 = false;
+  sessionStorage.clear();
   vi.useFakeTimers();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   document.documentElement.dataset.motion = "full";
@@ -49,6 +56,87 @@ function card() { return container.querySelector<HTMLButtonElement>('button[aria
 function gradeButton() { return Array.from(container.querySelectorAll("button")).find(button => button.textContent === "记得")!; }
 async function reveal() { await act(async () => card().click()); }
 async function tick(ms = 200) { await act(async () => vi.advanceTimersByTimeAsync(ms)); }
+
+function button(text: string) { return Array.from(container.querySelectorAll("button")).find(node => node.textContent === text)!; }
+function primary() { return container.querySelector<HTMLButtonElement>("[data-primary-action]")!; }
+it("records timed progress only after the real concept owner receives a successful receipt", async () => {
+  sessionV2 = true;
+  const id = "11111111-1111-4111-8111-111111111111";
+  const session = { activityId: id, status: "active", revision: 1, cardIds: [id], reviewedCardIds: [], budgetMinutes: 10, elapsedSeconds: 0, startedAt: "2026-10-27T00:00:00Z", stoppedAt: null, href: `/opening/review?cardSession=${id}` };
+  const management = { cardSessions: vi.fn().mockResolvedValue([session]), cardCommand: vi.fn().mockResolvedValue({ ...session, status: "paused", revision: 2 }) } as unknown as Pick<LearningManagementClient, "cardSessions" | "cardCommand">;
+  grade.mockRejectedValueOnce(new Error("offline"));
+  const timedCards = { ...client, listDue: vi.fn().mockResolvedValue([item(id)]) };
+  await act(async () => root.render(createElement(BudgetCardSession, { initialActivityId: id, client: management, cardsClient: timedCards })));
+  await act(async () => primary().click());
+  await act(async () => button("记得").click());
+  await act(async () => primary().click());
+  expect(container.textContent).toContain("已确认评分 0/1 张");
+  await act(async () => primary().click());
+  expect(button("暂停并保存停止点").disabled).toBe(true);
+  await tick();
+  expect(container.textContent).toContain("已确认评分 1/1 张");
+  await act(async () => button("暂停并保存停止点").click());
+  expect(management.cardCommand).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ action: "stop", activityId: id, reviewedCardIds: [id], reason: "pause" }));
+  expect(grade.mock.calls[1]).toEqual(grade.mock.calls[0]);
+});
+it.each([["again", "重来"], ["hard", "困难"], ["good", "记得"], ["easy", "轻松"]])("saves the original %s grade only through the shell primary action", async (value, label) => {
+  sessionV2 = true;
+  const onGraded = vi.fn();
+  await act(async () => root.render(createElement(CardReviewView, { client, onGraded })));
+  expect(container.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+  expect(primary().textContent).toBe("翻面核对");
+  expect(container.textContent).not.toContain("答案 a");
+  expect(container.textContent).not.toMatch(/需要帮助|照片|预计.*分钟/);
+  await act(async () => primary().click());
+  expect(container.textContent).toContain("答案 a");
+  expect(primary().disabled).toBe(true);
+  await act(async () => button(label).click());
+  expect(grade).not.toHaveBeenCalled();
+  await act(async () => primary().click());
+  expect(grade).toHaveBeenCalledWith({ cardId: "a", grade: value, idempotencyKey: expect.any(String) });
+  expect(onGraded).not.toHaveBeenCalled();
+  await tick();
+  expect(onGraded).toHaveBeenCalledExactlyOnceWith("a", result);
+  expect(container.textContent).toContain(`复习已保存 · 回忆情况：${label}`);
+  expect(container.textContent).not.toContain("独立答对");
+  expect(primary().textContent).toBe("翻面核对");
+});
+
+it("retries a failed shell save with the same request, without advancing or changing the pending grade", async () => {
+  sessionV2 = true;
+  grade.mockRejectedValueOnce(new Error("offline"));
+  const onGraded = vi.fn(), onBusyChange = vi.fn();
+  await act(async () => root.render(createElement(CardReviewView, { client, onGraded, onBusyChange })));
+  await act(async () => primary().click());
+  await act(async () => button("记得").click());
+  await act(async () => primary().click());
+  expect(container.textContent).toContain("评分保存失败");
+  expect(container.textContent).toContain("答案 a");
+  expect(onGraded).not.toHaveBeenCalled();
+  expect(button("困难").disabled).toBe(true);
+  expect(onBusyChange.mock.calls.map(call => call[0])).toEqual([true, false]);
+  await act(async () => primary().click());
+  expect(grade.mock.calls[1]).toEqual(grade.mock.calls[0]);
+  await tick();
+  expect(onGraded).toHaveBeenCalledExactlyOnceWith("a", result);
+  expect(onBusyChange).toHaveBeenLastCalledWith(false);
+  expect(container.textContent).toContain("题目 b");
+});
+
+it("keeps classification and question variants outside the concept shell when enabled", async () => {
+  sessionV2 = true;
+  const unknown = item("unknown"); unknown.card.tags = [];
+  const classify = vi.fn().mockResolvedValue(undefined);
+  await render({ ...client, classify, listDue: vi.fn().mockResolvedValue([unknown]) });
+  expect(container.querySelector("[data-primary-action]")).toBeNull();
+  await act(async () => button("题目：做新变式").click());
+  expect(classify).toHaveBeenCalledExactlyOnceWith("unknown", "question");
+  const question = item("question"); question.card.tags = ["review:question"];
+  await render({ ...client, listDue: vi.fn().mockResolvedValue([question]) });
+  expect(button("保存变式复习")).toBeTruthy();
+  expect(container.querySelector("[data-primary-action]")).toBeNull();
+  expect(grade).not.toHaveBeenCalled();
+});
 
 it("waits for a confirmed grade before sliding left, then raises the next card with one pulse and no repeated request", async () => {
   let confirm!: (value: GradeReviewResponse) => void;

@@ -1,4 +1,5 @@
 export type StudyStep =
+  | { kind: "card"; id: string; title: string; front: string; back: string; flipped: boolean; gradeOptions: { value: string; label: string }[]; selectionLocked: boolean; savedRecall: string | null; estimateMinutes: null }
   | { kind: "learn"; id: string; title: string; body: string; estimateMinutes: number | null }
   | { kind: "question"; id: string; title: string; prompt: string; answerModes: ("text" | "photo")[]; hintsAvailable: number; estimateMinutes: number | null; attemptRef: { id: string; itemVersionId: string | null }; fields: AnswerField[] };
 export type AnswerField = { key: string; label: string; options?: { value: string; label: string }[] };
