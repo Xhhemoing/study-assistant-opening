@@ -75,7 +75,7 @@ it("uses the real verifier's no-solution skills instead of failed coordinates", 
   const attempt = { id, spanExercise: getSpanProblem("span-independent-3d") } as LearningAttempt;
   const cases = [
     { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "1"], coefficientDerivationCoordinates: [0, 2] }, skill: "coefficients" },
-    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "4"], coefficientDerivationCoordinates: [0, 1], representations: { geometry: "line" } }, skill: "geometry" },
+    { answer: { membership: "not_in_span", coefficients: ["2", "1"], coordinateChecks: ["2", "3", "1"], coefficientDerivationCoordinates: [0, 1], representations: { geometry: "line" } }, skill: "geometry" },
   ] as const;
   for (const { answer, skill } of cases) {
     const verified = verifySpanAnswer(attempt.spanExercise!, answer);
