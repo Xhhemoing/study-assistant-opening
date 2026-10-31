@@ -17,6 +17,7 @@ import {
   classifyTutorHelpKind,
   composerMessageText,
   learningContinuationIntent,
+  requestsCourseCreation,
   makeStudyLanguageSupport,
   studyIntentInstruction,
   instructionWithMemories,
@@ -195,7 +196,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support"
         && learningContinuationIntent(turn.text) !== null;
       if (deps.nextAction && nextActionCourseId && (entryRequest || turn.purpose === "teach") && !turn.querySystem
-        && !/^(?:(?:请|帮我|我想|麻烦|先)\s*)*(?:(?:创建|新建|生成|开始)(?:一节|一个|一次|一堂|个|节)?(?:关于)?.{0,60}(?:课程|课|教学活动)|(?:start|create)\s+(?:a\s+)?(?:lesson|course)\b)/iu.test(composerMessageText(turn.text))
+        && !requestsCourseCreation(turn.text)
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
         const prepared = await prepareTutorNextAction(deps.nextAction, scope, {
           courseId: nextActionCourseId, sourceIds: turn.sourceIds, sourceVersions: turn.sourceVersions,
@@ -219,7 +220,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }
       const unboundTeaching = !nextActionCourseId && (turn.purpose === "teach" || turn.purpose === "plan")
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support";
-      if ((entryRequest && nextActionCourseId) || unboundTeaching) {
+      // Preserve authorized learning entry above; otherwise an existing answer can be continued.
+      const continuationHistory = entryRequest && learningContinuationIntent(turn.text) === "continue"
+        ? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId) : null;
+      const priorAnswer = continuationHistory?.history.at(-1);
+      const continueAnswer = priorAnswer?.role === "assistant" && Boolean(priorAnswer.text.trim());
+      if (!continueAnswer && ((entryRequest && nextActionCourseId) || unboundTeaching)) {
         if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
         await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId,
           text: nextActionCourseId
@@ -228,7 +234,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           citations: [], candidates: [], contextSourceRefs: [], expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
         return { skipped: false };
       }
-      if (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
+      if (!continueAnswer && (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support")) {
         if (!deps.proposals) throw new Error("proposal service unavailable");
         const reply = await deps.proposals.reply(scope, { sourceTurnId: claimed.userTurnId, purpose: turn.purpose, question: turn.text,
           courseId: turn.courseId, parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}) });
@@ -292,7 +298,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const context = (deps.retrieveContext
         ? (await deps.retrieveContext(scope, retrievalInput)).chunks
         : selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
-      const { history, sourceRefs: historySourceRefs } = await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const { history, sourceRefs: historySourceRefs } = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
         ? await deps.memories.listContext(scope, contextNow)

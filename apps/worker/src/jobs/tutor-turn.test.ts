@@ -93,8 +93,44 @@ describe("tutor turn handler", () => {
     expect(budget.reserve).not.toHaveBeenCalled();
   });
 
+  it.each([null, "course-without-grant"].flatMap(courseId =>
+    ["继续", "下一步", "我们继续", "继续学习"].map(text => ({ courseId, text })),
+  ))("continues an actual assistant answer through model history: $courseId / $text", async ({ courseId, text }) => {
+    const { deps, tutorJobs, provider } = setup();
+    const history = [
+      { role: "user" as const, text: "解释牛顿第二定律，并举个例子" },
+      { role: "assistant" as const, text: "牛顿第二定律是 F = ma，接下来可以用一个例子说明。" },
+    ];
+    tutorJobs.loadHistoryContext.mockResolvedValue({ history, sourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId,
+      sourceVersions: { [chunkA.sourceId]: 0 } });
+    const read = vi.fn(async () => null), reply = vi.fn();
+    await createTutorTurnHandler({ ...deps,
+      nextAction: { read, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply },
+    })(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(provider.complete.mock.calls[0][0]).toMatchObject({ history, text });
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      text: "F = ma", contextSourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }],
+    }));
+    expect(tutorJobs.loadHistoryContext).toHaveBeenCalledTimes(1);
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it.each([{ history: [] }, { history: [{ role: "user" as const, text: "解释牛顿第二定律" }] },
+    { history: [{ role: "assistant" as const, text: "   " }] }])("keeps a continuation without a usable assistant answer on course selection (%#)", async ({ history }) => {
+    const { deps, tutorJobs, provider } = setup();
+    const text = "继续学习";
+    tutorJobs.loadHistoryContext.mockResolvedValue({ history, sourceRefs: [] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, sourceVersions: {} });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("先选择一门课程") }));
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("returns a course link without model or proposals when %s is unavailable", async text => {
     const { deps, tutorJobs, provider, budget } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [] });
     const courseId = claimedJob.conversationId;
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId, sourceVersions: {} });
     const reply = vi.fn();
@@ -109,6 +145,7 @@ describe("tutor turn handler", () => {
 
   it.each(["带我学习", "继续学习", "创建一节 span 课", "安排计划"])("asks for a course without a model for %s", async text => {
     const { deps, tutorJobs, provider, budget } = setup();
+    if (text === "继续学习") tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [] });
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, sourceVersions: {} });
     const reply = vi.fn();
     await createTutorTurnHandler({ ...deps, proposals: { reply } })(claimedJob.id);
@@ -138,7 +175,7 @@ describe("tutor turn handler", () => {
     expect(provider.complete).toHaveBeenCalledOnce();
   });
 
-  it.each(["创建一节 span 课", "创建课程", "请帮我创建课程", "create a course", "安排计划"])("preserves explicit proposals for %s with a bound course", async text => {
+  it.each(["创建一节 span 课", "创建课程", "请帮我创建课程", "可以替我创建课程", "create a course", "安排计划"])("preserves explicit proposals for %s with a bound course", async text => {
     const { deps, tutorJobs } = setup();
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, courseId: claimedJob.conversationId, sourceVersions: {} });
     const read = vi.fn(), reply = vi.fn(async () => ({ text: "教学草稿", proposal: {}, privacyEpoch: 0, contextSourceRefs: [] }));

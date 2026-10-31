@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { inferComposerIntent, inferLearningMessageIntent, repeatsAnswerRequest } from "./composer-intent";
+import { inferComposerIntent, inferLearningMessageIntent, repeatsAnswerRequest, requestsCourseCreation } from "./composer-intent";
 import { DEFAULT_STUDY_SESSION_INTENT } from "./span-teaching";
 
 describe("composer intent", () => {
+  it.each(["创建课程", "请帮我创建一节 span 课", "可以替我创建课程", "开始一节矩阵课", "please create a course"])("shares explicit course creation recognition for %s", text => {
+    expect(requestsCourseCreation(text)).toBe(true);
+    expect(inferComposerIntent({ text }).purpose).toBe("teach");
+  });
+  it.each(["带我学习", "继续学习", "不要创建课程", "解释“创建课程”", "安排计划"])("does not treat %s as explicit course creation", text => {
+    expect(requestsCourseCreation(text)).toBe(false);
+  });
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "请继续！"])("routes continuation %s to teaching", text => {
     expect(inferComposerIntent({ text }).purpose).toBe("teach");
   });
