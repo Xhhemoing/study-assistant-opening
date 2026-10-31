@@ -37,6 +37,12 @@ it("keeps worked teaching identity when a new-evidence event filters earlier res
   render(); await settle();
   expect(lesson().props.restoredAttempts).toEqual([attempts[0]]);
 });
+it("passes the same details focus to the default lesson on recovery", async () => {
+  const targetedFocus = "系数代入后，第3坐标没对上。";
+  mocks.request.mockResolvedValueOnce({ ...details(snapshot), targetedFocus });
+  render(); await settle();
+  expect(lesson().props.targetedFocus).toBe(targetedFocus);
+});
 it("passes the persisted automatic execution phase separately from explicit intent", async () => {
   mocks.request.mockResolvedValueOnce({ ...details({ ...snapshot, moveId: "self-faded" }), executionPhase: { phase: "consolidate", source: "automatic" } });
   render(); await settle();
