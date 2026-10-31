@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { LearningProse } from "../assistant/learning-prose";
 import { SuccessCheck } from "../v3/motion/feedback";
 import { useTransitionRouter } from "../v3/motion/view-transition";
@@ -14,7 +14,7 @@ type Handlers = {
 };
 
 /** One session screen: top bar, the current step, one primary action. Help and "more" open on demand. */
-export function StudySessionShell({ view, pending = false, error = "", ...on }: { view: StudySessionView; pending?: boolean; error?: string } & Handlers) {
+export function StudySessionShell({ view, pending = false, error = "", content, ...on }: { view: StudySessionView; pending?: boolean; error?: string; content?: ReactNode } & Handlers) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const helpId = useId(), moreId = useId();
@@ -43,18 +43,18 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
         </ol>
       </div>
       {view.step.estimateMinutes != null ? <span className="shrink-0 text-xs tabular-nums text-text-2">约 {view.step.estimateMinutes} 分钟</span> : null}
-      <div className="relative">
+      {view.step.kind !== "photo_practice" ? <div className="relative">
         <button type="button" className={ui.icon} aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen} aria-controls={moreId} onClick={() => setMoreOpen(value => !value)}>⋯</button>
         {moreOpen ? <div id={moreId} role="menu" className="absolute right-0 top-10 z-20 grid min-w-40 rounded-tile border border-line bg-popover p-1 shadow-float motion-safe:animate-pop">
           {view.step.kind !== "card" ? <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onPause(); }}>暂停并保存</button> : null}
           <button type="button" role="menuitem" className={`${ui.quiet} justify-start`} disabled={pending} onClick={() => { setMoreOpen(false); on.onReload(); }}>重新读取</button>
         </div> : null}
-      </div>
+      </div> : null}
     </header>
 
     <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
       <StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
-        onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} />
+        onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} content={content} />
       {view.result ? <section aria-live="polite" aria-label="作答结果" className="space-y-2 rounded-tile border border-line bg-surface p-4 motion-safe:animate-pop">
         <p className="flex items-center gap-2 font-medium">
           {view.result.outcome === "correct" ? <SuccessCheck play label="" /> : null}{resultLabel(view.result)}
@@ -68,13 +68,13 @@ export function StudySessionShell({ view, pending = false, error = "", ...on }: 
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
     </main>
 
-    <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
+    {view.step.kind !== "photo_practice" || primary.kind !== "none" ? <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
       {isQuestion ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
       <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
         {pending ? "正在保存…" : primary.label}
       </button>
-    </footer>
+    </footer> : null}
 
     {helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
       <div className="flex items-center justify-between"><h2 className="font-medium">提示</h2>
