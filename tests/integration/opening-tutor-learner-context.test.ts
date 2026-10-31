@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
-import { createOpeningAiGradingRepository, createOpeningTutorLearnerContextRepository } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningTutorLearnerContextRepository, createOpeningLearningGoalRepository, createOpeningAdaptivePrefsRepository, setCourseLearningPreferences } from "@aistudy/database";
+import { tutorLearnerContextInstruction } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -9,6 +10,64 @@ import { backupRows } from "./opening-backup-records-fixture";
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 afterAll(async () => { await fixture?.close(); });
+async function profileCourse() {
+  const courseId = randomUUID();
+  await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${fixture.scope.workspaceId},'Profile course',${courseId})`;
+  const repository = createOpeningTutorLearnerContextRepository(fixture.sql);
+  return { courseId, repository, read: () => repository.read(fixture.scope, { courseId, sourceIds: [] }) };
+}
+it("reads authoritative goal revisions and preference sources into the tutor instruction on each read", async () => {
+  const f = await profileCourse(), goals = createOpeningLearningGoalRepository(fixture.sql);
+  const formal = await goals.create(fixture.scope, { courseIds: [f.courseId], clientKey: randomUUID(), title: "期末目标", kind: "final-exam",
+    targetDate: "2027-02-01", examDate: "2027-02-02", weeklyMinutes: 90, priority: 2, learningMode: "exam", successCriteria: "独立解释" });
+  await fixture.sql`UPDATE workspace_preferences SET assessment_enabled=true,retest_suggestions_enabled=true,automatic_reminders_enabled=true WHERE workspace_id=${fixture.scope.workspaceId}`;
+  await setCourseLearningPreferences(fixture.sql, fixture.scope, f.courseId, { retestSuggestionsEnabled: false });
+  const first = await f.read();
+  expect(first?.goalPreferenceProfile).toMatchObject({ version: 1, goal: { source: "course_goals", goalId: formal.id, revision: 1, lifecycle: "active",
+    definition: { targetDate: "2027-02-01", examDate: "2027-02-02", weeklyMinutes: 90, learningMode: "exam" } },
+    learningPreferences: { account: { assessmentEnabled: true, retestSuggestionsEnabled: true }, course: { retestSuggestionsEnabled: false },
+      effective: { assessmentEnabled: true, retestSuggestionsEnabled: false } } });
+  expect(tutorLearnerContextInstruction(first)).toContain('"weeklyMinutes":90');
+  await goals.update(fixture.scope, formal.id, { expectedRevision: 1, weeklyMinutes: 30, learningMode: "understand", lifecycle: "paused" });
+  await setCourseLearningPreferences(fixture.sql, fixture.scope, f.courseId, { assessmentEnabled: false });
+  const next = await f.read();
+  expect(next?.goalPreferenceProfile).toMatchObject({ goal: { goalId: formal.id, revision: 2, lifecycle: "paused", definition: { weeklyMinutes: 30, learningMode: "understand" } },
+    learningPreferences: { course: { assessmentEnabled: false }, effective: { assessmentEnabled: false, automaticRemindersEnabled: false } } });
+  expect(tutorLearnerContextInstruction(next)).toContain('"weeklyMinutes":30');
+  await setCourseLearningPreferences(fixture.sql, fixture.scope, f.courseId, { assessmentEnabled: true, retestSuggestionsEnabled: true });
+  const restored = await f.read();
+  expect(restored?.goalPreferenceProfile?.learningPreferences).toMatchObject({ course: {}, effective: { assessmentEnabled: true, retestSuggestionsEnabled: true } });
+  expect(restored?.goalPreferenceProfile?.learningPreferences.course).toEqual({});
+  const other = await profileCourse();
+  await setCourseLearningPreferences(fixture.sql, fixture.scope, f.courseId, { assessmentEnabled: false });
+  const unrelated = await other.read();
+  expect(unrelated?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "missing" });
+  expect(unrelated?.goalPreferenceProfile?.learningPreferences).toMatchObject({ course: {}, effective: { assessmentEnabled: true } });
+  await expect(f.repository.read(fixture.otherScope, { courseId: f.courseId, sourceIds: [] })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await expect(f.repository.read({ ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId }, { courseId: f.courseId, sourceIds: [] })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  // A persisted selection cannot import a goal that belongs to another course.
+  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning=${fixture.sql.json({ ...DEFAULT_OPENING_ADAPTIVE_PREFS, courseGoalRefs: { [other.courseId]: formal.id } })} WHERE workspace_id=${fixture.scope.workspaceId}`;
+  expect((await other.read())?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "unresolved" });
+});
+it("keeps missing, damaged, unresolved and explicitly cleared selections unknown", async () => {
+  const f = await profileCourse();
+  await fixture.sql`DELETE FROM workspace_preferences WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const missing = await f.read();
+  expect(missing?.goalPreferenceProfile).toMatchObject({ goal: { source: "unknown", reason: "missing" }, learningPreferences: {
+    account: {}, course: {}, effective: { assessmentEnabled: false, autoGradeOnSave: true },
+  } });
+  const prefs = createOpeningAdaptivePrefsRepository(fixture.sql);
+  const saved = await prefs.patch(fixture.scope, { courseGoal: { courseId: f.courseId, goal: { targetDate: null, weeklyMinutes: 90 } } });
+  await prefs.patch(fixture.scope, { courseGoal: { courseId: f.courseId, expectedRevision: saved.prefs.courseGoals[f.courseId]!.revision, goal: null } });
+  expect((await f.read())?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "cleared" });
+  await fixture.sql`UPDATE course_goals SET lifecycle='active' WHERE course_id=${f.courseId}`;
+  expect((await f.read())?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "cleared" });
+  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning=${fixture.sql.json({ ...DEFAULT_OPENING_ADAPTIVE_PREFS, courseGoalRefs: { [f.courseId]: randomUUID() } })} WHERE workspace_id=${fixture.scope.workspaceId}`;
+  expect((await f.read())?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "unresolved" });
+  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning='{"broken":true}'::jsonb WHERE workspace_id=${fixture.scope.workspaceId}`;
+  expect((await f.read())?.goalPreferenceProfile?.goal).toEqual({ source: "unknown", reason: "invalid" });
+  await fixture.sql`UPDATE workspace_preferences SET adaptive_planning=${fixture.sql.json(DEFAULT_OPENING_ADAPTIVE_PREFS)} WHERE workspace_id=${fixture.scope.workspaceId}`;
+});
 async function wrongAnswer(withHelp = true) {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   // Real delivered help remains usable context even when an AI verdict is uncalibrated.
@@ -34,6 +93,8 @@ it("provides course goal, actual help and provenance without treating AI-only mi
     recentMistakes: [], observationIds: [f.graded.id],
     sourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
   expect(context!.observationIds).not.toContain(other.graded.id);
+  expect(context!.goalPreferenceProfile?.goal).toMatchObject({ source: "legacy", revision: null, lifecycle: "unknown",
+    definition: { targetDate: "2026-10-31", weeklyMinutes: 420 } });
   await expect(f.repository.assertCurrent(fixture.scope, context!)).resolves.toBeUndefined();
   expect(await f.repository.read(fixture.scope, { courseId: f.courseId, sourceIds: [] })).toMatchObject({ weaknesses: [], recentMistakes: [], sourceRefs: [] });
   await expect(f.repository.read(fixture.otherScope, { courseId: f.courseId, sourceIds: [f.sourceId] })).rejects.toMatchObject({ code: "NOT_FOUND" });

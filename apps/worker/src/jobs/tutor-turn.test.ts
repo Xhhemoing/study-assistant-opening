@@ -415,6 +415,11 @@ describe("tutor turn handler", () => {
     const { deps, provider, tutorJobs } = setup();
     const context = { courseId: claimedJob.conversationId, title: "力学", asOf: "2026-10-21T00:00:00Z", privacyEpoch: 0,
       goal: { description: "期末", targetDate: "2026-10-31", weeklyMinutes: 420 }, weaknesses: [],
+      goalPreferenceProfile: { version: 1 as const, goal: { source: "legacy" as const, revision: null, lifecycle: "unknown" as const,
+        definition: { targetDate: null, weeklyMinutes: 75, learningMode: "understand" as const } },
+      learningPreferences: { account: {}, course: { assessmentEnabled: false }, effective: {
+        assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false, autoGradeOnSave: true,
+      } } },
       recentMistakes: [{ observationId: chunkA.id, skillLabel: "合力", feedback: "先确定受力方向", unmetCriteria: ["方向"], assistance: "independent" as const }],
       observationIds: [chunkA.id], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 0 }] };
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId: context.courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
@@ -423,6 +428,8 @@ describe("tutor turn handler", () => {
     expect(read).toHaveBeenCalledWith(expect.anything(), { courseId: context.courseId, sourceIds: [chunkA.sourceId] });
     expect(assertCurrent).toHaveBeenCalledWith(expect.anything(), context);
     expect(provider.complete.mock.calls[0]![0].instruction).toContain("先确定受力方向");
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain('"weeklyMinutes":75');
+    expect(provider.complete.mock.calls[0]![0].instruction).toContain('"course":{"assessmentEnabled":false}');
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ contextSourceRefs: expect.arrayContaining(context.sourceRefs) }));
     const blocked = setup();
     await expect(createTutorTurnHandler({ ...blocked.deps, learnerContext: { read, assertCurrent: async () => { throw new Error("context changed"); } } })(claimedJob.id)).rejects.toThrow("context changed");
