@@ -117,15 +117,49 @@ describe("tutor turn handler", () => {
     expect(reply).not.toHaveBeenCalled();
   });
 
-  it.each([{ history: [] }, { history: [{ role: "user" as const, text: "解释牛顿第二定律" }] },
-    { history: [{ role: "assistant" as const, text: "   " }] }])("keeps a continuation without a usable assistant answer on course selection (%#)", async ({ history }) => {
+  it.each([null, "course-without-grant"])("keeps repeated continuations after its own course entry reply deterministic: %s", async courseId => {
+    const { deps, tutorJobs, provider, budget } = setup();
+    const text = "继续学习";
+    const history: Array<{ role: "user" | "assistant"; text: string }> = [];
+    tutorJobs.loadHistoryContext.mockImplementation(async () => ({ history: [...history], sourceRefs: [] }));
+    tutorJobs.getUserTurn.mockResolvedValue({ ...turn, ...inferComposerIntent({ text }), text, courseId, sourceVersions: {} });
+    const reply = vi.fn();
+    const handler = createTutorTurnHandler({ ...deps,
+      nextAction: { read: async () => null, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply },
+    });
+    for (let index = 0; index < 3; index++) {
+      await handler(claimedJob.id);
+      const completed = tutorJobs.completeTurn.mock.calls[index][0];
+      expect(completed).toMatchObject({ text: courseId
+        ? `当前课程尚未开启导师试用，或不在 span 导师范围内。请到课程学习页继续。\n\n[打开课程学习](/opening/courses/${courseId}/study)`
+        : "请先选择一门课程，再开始学习或创建教学计划。\n\n[先选择一门课程](/opening/courses)", candidates: [] });
+      // loadTutorHistoryContext returns completed user/assistant exchanges, including fixed replies.
+      history.push({ role: "user", text }, { role: "assistant", text: completed.text });
+    }
+    expect(tutorJobs.completeTurn).toHaveBeenCalledTimes(3);
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(budget.settle).not.toHaveBeenCalled();
+  });
+
+  it("preserves continuation after a completed teaching proposal draft", async () => {
     const { deps, tutorJobs, provider } = setup();
+    const history = [
+      { role: "user" as const, text: "请帮我创建课程" },
+      { role: "assistant" as const, text: "已准备教学活动草稿。请在提案卡中核对并明确接受；当前尚未应用。这不是掌握结论。" },
+    ];
     const text = "继续学习";
     tutorJobs.loadHistoryContext.mockResolvedValue({ history, sourceRefs: [] });
-    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text, sourceVersions: {} });
-    await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("先选择一门课程") }));
-    expect(provider.complete).not.toHaveBeenCalled();
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, ...inferComposerIntent({ text }), text,
+      courseId: "course-without-grant", sourceVersions: { [chunkA.sourceId]: 0 } });
+    const reply = vi.fn();
+    await createTutorTurnHandler({ ...deps,
+      nextAction: { read: async () => null, assertCurrent: vi.fn(), execute: vi.fn() }, proposals: { reply },
+    })(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    expect(provider.complete.mock.calls[0][0]).toMatchObject({ history, text });
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("returns a course link without model or proposals when %s is unavailable", async text => {

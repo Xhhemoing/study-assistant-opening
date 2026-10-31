@@ -118,6 +118,17 @@ export type TutorTurnDeps = {
 
 const MAX_PROVIDER_CHUNKS = 64;
 
+function courseEntryReply(courseId?: string | null): string {
+  return courseId
+    ? `当前课程尚未开启导师试用，或不在 span 导师范围内。请到课程学习页继续。\n\n[打开课程学习](/opening/courses/${courseId}/study)`
+    : "请先选择一门课程，再开始学习或创建教学计划。\n\n[先选择一门课程](/opening/courses)";
+}
+
+function isCourseEntryReply(text: string): boolean {
+  const courseId = text.match(/\[打开课程学习\]\(\/opening\/courses\/([^/\n]+)\/study\)$/)?.[1];
+  return text === courseEntryReply(courseId);
+}
+
 /** True when every chunk is an image page with no usable text (photo sources). */
 export function isImageOnlySourceChunks(chunks: SourceChunk[]): boolean {
   if (!chunks.length) return false;
@@ -224,13 +235,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const continuationHistory = entryRequest && learningContinuationIntent(turn.text) === "continue"
         ? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId) : null;
       const priorAnswer = continuationHistory?.history.at(-1);
-      const continueAnswer = priorAnswer?.role === "assistant" && Boolean(priorAnswer.text.trim());
+      const continueAnswer = priorAnswer?.role === "assistant" && Boolean(priorAnswer.text.trim())
+        && !isCourseEntryReply(priorAnswer.text);
       if (!continueAnswer && ((entryRequest && nextActionCourseId) || unboundTeaching)) {
         if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
         await deps.tutorJobs.completeTurn({ scope, jobId: claimed.id, assistantTurnId: claimed.assistantTurnId,
-          text: nextActionCourseId
-            ? `当前课程尚未开启导师试用，或不在 span 导师范围内。请到课程学习页继续。\n\n[打开课程学习](/opening/courses/${nextActionCourseId}/study)`
-            : "请先选择一门课程，再开始学习或创建教学计划。\n\n[先选择一门课程](/opening/courses)",
+          text: courseEntryReply(nextActionCourseId),
           citations: [], candidates: [], contextSourceRefs: [], expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
         return { skipped: false };
       }
