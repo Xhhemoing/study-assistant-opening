@@ -1,48 +1,60 @@
 import { expect, it } from "vitest";
-import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
-import { getSpanProblem } from "@aistudy/domain";
-import { adaptSpanQuestion, adaptSpanResult, adaptSpanHelp, adaptSpanNext, createSpanStudySession } from "./span";
-import { vi } from "vitest";
-import { spanLessonDetailsSchema, spanLessonRequest } from "../../teaching/span/span-session-client";
-import { renderToStaticMarkup } from "react-dom/server";
-import { createElement } from "react";
-import { stepRenderers } from "../step-renderers";
-vi.mock("../../teaching/span/span-session-client", async original => ({ ...await original<typeof import("../../teaching/span/span-session-client")>(), spanLessonRequest: vi.fn() }));
-vi.mock("../../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: vi.fn() }));
-import type { PhotoState } from "../model";
+import { getSpanProblem, solveSpanProblem, spanModeForIntent, verifySpanAnswer } from "@aistudy/domain";
+import type { LearningObservation, StudySessionIntent } from "@aistudy/contracts";
+import { updateSpanDraftAnswer } from "../../teaching/span/span-answer";
+import { adaptSpanHelp, adaptSpanNext, adaptSpanResult, spanLessonMoves, spanProblemForMove } from "./span";
+import { spanSessionProblemIds } from "../../teaching/span/session-service";
+
 const id = "11111111-1111-4111-8111-111111111111";
-const attempt = { id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")! } as LearningAttempt;
-it("reads the shared details focus through the port into the rendered v2 learn step", async () => {
-  const targetedFocus = "系数代入后，第3坐标没对上。";
-  const details = spanLessonDetailsSchema.parse({ targetedFocus, estimateMinutes: 17, session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 1, retestId: null, createdAt: "2026-10-31T00:00:00Z", updatedAt: "2026-10-31T00:00:00Z" }, attempts: [], observations: [], assistance: {} });
-  vi.mocked(spanLessonRequest).mockResolvedValue({ problem: attempt.spanExercise, solution: { kind: "none" }, exposureReceipt: { id } });
-  const view = await createSpanStudySession(details, vi.fn()).load();
-  expect(view.step).toMatchObject({ targetedFocus, estimateMinutes: 17 });
-  expect(view.photo?.enabled).toBe(false);
-  const html = renderToStaticMarkup(createElement(stepRenderers.learn, { step: view.step, answer: {}, locked: false, onEdit: vi.fn() }));
-  expect(html).toContain(targetedFocus);
-  expect(html.indexOf("上次错在这一步")).toBeLessThan(html.indexOf("span 是所有"));
+const intent = (purpose: StudySessionIntent["purpose"]): StudySessionIntent =>
+  ({ purpose, timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" });
+
+it("picks the same problem for every move as the server-issued sequence, ending with the reserved item", () => {
+  for (const purpose of ["self_study", "overview", "challenge"] as const) {
+    const mode = spanModeForIntent(intent(purpose));
+    const moves = spanLessonMoves(mode);
+    const issued = moves.map((_, index) => spanProblemForMove(mode, index, moves.length));
+    expect(issued[0]).toBeNull();
+    expect(issued.at(-1)).toBe("reserved:auto");
+    // Every non-reserved practice problem must be one the server prepares for this intent.
+    const server = spanSessionProblemIds(intent(purpose));
+    for (const problemId of issued.slice(1, -1)) expect(server).toContain(problemId);
+  }
 });
-it("adapts a real span question without inventing time or enabling photos", () => {
-  const step = adaptSpanQuestion(attempt);
-  expect(step).toMatchObject({ kind: "question", estimateMinutes: null, answerModes: ["text"], attemptRef: { id, itemVersionId: id } });
-  expect(step.prompt).toContain("span");
+
+it("serializes answers so the real verifier can grade them (the C1 encoding made every answer unparseable)", () => {
+  const problem = getSpanProblem("span-faded-3d")!;
+  const solution = solveSpanProblem(problem);
+  if (solution.kind !== "unique") throw new Error("fixture must have a unique solution");
+  const [alpha, beta] = solution.coefficients;
+  // Only the judgement and coefficients, the way a learner usually answers.
+  const right = updateSpanDraftAnswer(updateSpanDraftAnswer("", { membership: "in_span" }), { coefficients: [alpha, beta] });
+  expect(verifySpanAnswer(problem, JSON.parse(right)).outcome).toBe("correct");
+  const wrong = updateSpanDraftAnswer(right, { coefficients: ["9", "9"] });
+  expect(verifySpanAnswer(problem, JSON.parse(wrong)).outcome).toBe("incorrect");
+  // Opening the optional working section without filling it must not break grading.
+  const touched = updateSpanDraftAnswer(right, { representations: {} });
+  expect(verifySpanAnswer(problem, JSON.parse(touched)).outcome).toBe("correct");
 });
-it("keeps photo states explicit so pending and unavailable cannot be treated as ready", () => {
-  const states: PhotoState["status"][] = ["none", "uploading", "preparing", "ready", "pending", "unavailable", "failed"];
-  expect(states).toContain("pending");
-  expect(states).toContain("unavailable");
-  expect(states.filter(state => state === "ready")).toHaveLength(1);
+
+it("labels results from evaluation and help separately", () => {
+  const record = { assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
+  expect(adaptSpanResult(record)).toMatchObject({ outcome: "correct", assistance: "hinted" });
+  expect(adaptSpanResult(record).detail).toContain("一致");
+  expect(adaptSpanResult({ ...record, serverEvaluation: null } as LearningObservation, "grading").outcome).toBe("pending");
 });
-it("keeps authoritative evaluation separate from assistance and pending grading", () => {
-  const record = { assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
-  expect(adaptSpanResult(record)).toEqual({ outcome: "correct", assistance: "hinted", reasonCode: "verified_exactly" });
-  expect(adaptSpanResult({ ...record, serverEvaluation: null }, "grading").outcome).toBe("pending");
-  expect(adaptSpanResult({ ...record, serverEvaluation: null }, "needs_manual").outcome).toBe("needs_manual");
-  expect(adaptSpanHelp("revealed", [1, 2], ["方向", "定义"], false)).toMatchObject({ level: "revealed", hintsShown: 2, canRequest: true });
+
+it("offers the next hint level and holds the full demonstration until the first answer is saved", () => {
+  const help = adaptSpanHelp("hinted", [{ level: 1, text: "a" }, { level: 2, text: "b" }, { level: 3, text: "c" }], false, false);
+  expect(help.next).toBeNull();
+  expect(help.blockedReason).toContain("先提交");
+  expect(adaptSpanHelp("hinted", [{ level: 1, text: "a" }, { level: 2, text: "b" }, { level: 3, text: "c" }], true, true).next).toMatchObject({ level: 4 });
+  expect(adaptSpanHelp("none", [], false, false).next).toMatchObject({ level: 1 });
 });
-it("adapts real successor choices and rejects destinations outside the course", () => {
+
+it("validates successor links with the legacy rule and keeps choices", () => {
   const href = `/opening/courses/${id}/study/span?lesson=${id}`;
-  expect(adaptSpanNext({ kind: "ready", href, activityId: id, sessionId: id, courseId: id, label: "继续新题", resumed: false }, id)).toMatchObject({ action: href, label: "继续新题", estimateMinutes: null, reasonCode: null });
-  expect(() => adaptSpanNext({ kind: "choice", reason: "source_unavailable", primary: { href: "https://evil.test", label: "继续" } }, id)).toThrow();
+  expect(adaptSpanNext({ kind: "ready", href, activityId: id, sessionId: id, courseId: id, label: "继续新题", resumed: false }, id)).toMatchObject({ href, label: "继续新题" });
+  expect(() => adaptSpanNext({ kind: "choice", reason: "source_unavailable", message: "资料不可用", primary: { href: "https://evil.test", label: "继续" } }, id)).toThrow();
+  expect(() => adaptSpanNext({ kind: "ready", href: `/opening/courses/${id}/study/span?lesson=${id}`, activityId: id, sessionId: id, courseId: "22222222-2222-4222-8222-222222222222", label: "x", resumed: false }, id)).toThrow();
 });

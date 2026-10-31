@@ -11,7 +11,8 @@ const resultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("ready"), href: z.string(), activityId: z.string().uuid(), sessionId: z.string().uuid(), courseId: z.string().uuid(), label: z.string().min(1).max(200), resumed: z.boolean() }),
   z.object({ kind: z.literal("choice"), reason: z.enum(["unknown_evidence", "evidence_changed", "source_unavailable", "authorization_required", "cancelled", "expired", "unseen_unavailable"]), message: z.string().min(1).max(3000), primary: linkSchema, secondary: linkSchema.optional() }),
 ]);
-type Result = z.infer<typeof resultSchema>;
+export type SpanNextResult = z.infer<typeof resultSchema>;
+type Result = SpanNextResult;
 type Request = { activityId: string; expectedRevision: number; observationId: string | null; clientKey: string };
 
 /** A correction keeps its attempt time; an old row cannot lend the effective head's identity. */
@@ -27,7 +28,8 @@ function localCourseHref(href: string, courseId: string): URL {
   if (!href.startsWith("/") || href.startsWith("//") || href.includes("\\") || /\s/.test(href) || url.origin !== "https://opening.local" || ![base, `${base}/study`, `${base}/study/span`].includes(url.pathname)) throw new Error("下一步入口与当前课程不一致。");
   return url;
 }
-function readResult(body: unknown, courseId: string): Result {
+/** Shared with the v2 study session: one validation for every successor link. */
+export function readSpanNextResult(body: unknown, courseId: string): Result {
   const result = resultSchema.parse(body);
   if (result.kind === "ready") {
     const url = localCourseHref(result.href, courseId);
@@ -65,7 +67,7 @@ export function SpanNextActionControl({ session, observationId, onNavigate, onRe
       const body: unknown = await response.json();
       if (!alive.current || origin.current !== request.activityId) return;
       if (!response.ok) { const problem = z.object({ error: z.object({ message: z.string() }) }).safeParse(body); throw new Error(problem.success ? problem.data.error.message : "学习位置已变化，请重新读取本节。"); }
-      const next = readResult(body, courseId);
+      const next = readSpanNextResult(body, courseId);
       setResult(next); setStatus("done");
       if (next.kind === "ready") { if (onNavigate) onNavigate(next.href); else window.location.assign(next.href); }
     } catch (reason) {
