@@ -60,7 +60,7 @@ it.each([
   api.submitAttempt.mockImplementation(async (_attemptId, raw) => {
     const input = learningAttemptSubmitInputSchema.parse(raw);
     if (api.submitAttempt.mock.calls.length === 1) throw new Error("暂时无法保存，请重试");
-    observation = { ...attempt, id: observationId, attemptId, answer: input.answer, outcome: input.outcome, assistance: input.assistance, verdictSource: "self_report", occurredAt: "2026-10-22T00:00:00Z", revisionKind: "original", sourceIds: [sourceId, ...(input.workSource ? [workId] : [])], sourceVersions: { [sourceId]: 2, ...(input.workSource ? { [workId]: 2 } : {}) } } as LearningObservation;
+    observation = { ...attempt, id: observationId, attemptId, answer: input.answer, outcome: input.outcome, assistance: input.assistance, clientKey: `photo-practice:${attemptId}`, sourceTurnIds: [], verdictSource: "self_report", referenceSourceId: null, evidenceVerdict: "MASTERY_NOT_ESTABLISHED", occurredAt: "2026-10-22T00:00:00Z", revisionKind: "original", sourceIds: [sourceId, ...(input.workSource ? [workId] : [])], sourceVersions: { [sourceId]: 2, ...(input.workSource ? { [workId]: 2 } : {}) } };
     expect(canGradeObservation(observation)).toBe(true);
     if (input.workSource) expect(input.workSource).toEqual({ id: workId, version: 2, physicalPage: 1 });
     gradingIo.observation.mockResolvedValue({ ...observation, eligibility: { usableForCurrentVersion: "yes" } });
@@ -102,7 +102,7 @@ it.each([
     if (attachment) await change(select, `${workId}:2`);
     await act(async () => button("保存并批改").click());
     expect(api.submitAttempt).toHaveBeenCalledOnce();
-    const original = structuredClone(api.submitAttempt.mock.calls[0]);
+    const original = api.submitAttempt.mock.calls[0]!;
     expect(original[1].answer).toBe(text ? "我的第一行\n我的第二行：2" : "");
     expect(container.textContent).not.toContain("原答案已保存。");
     await act(async () => root.render(null)); await render();
