@@ -162,6 +162,35 @@ it("uses the original attempt chain for exact first-answer storage, replay and s
   expect(state.summary).toEqual(expect.arrayContaining([expect.objectContaining({ requirementKey: SPAN_REQUIREMENT_KEY, sampleCount: 1 })]));
   expect(state.features).toEqual(expect.arrayContaining([expect.objectContaining({ attemptId: f.attempt.id, outcome: "correct" })]));
 });
+it("keeps the wrong first answer immutable when the same lesson question is redone on a new attempt", async () => {
+  const f = await start("span-example-2d");
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES (${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'core','course')`;
+  const lesson = await createOpeningSpanSessionRepository(fixture.sql).create(fixture.scope, {
+    courseId: f.courseId, sourceIds: [f.sourceId], clientKey: randomUUID(),
+    intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" },
+  });
+  const service = createOpeningAttemptService(fixture.sql);
+  const input = { sessionId: lesson.sessionId, spanExercise: { sourceId: f.sourceId, problemId: "span-independent-3d", version: 1 } };
+  const first = await service.create(fixture.scope, { ...input, clientKey: randomUUID() });
+  const wrong = await service.submit(fixture.scope, first.id, { clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "in_span", coefficients: ["9", "9"] }), outcome: "unverified", assistance: "independent" });
+  expect(wrong.serverEvaluation?.decision).toBe("incorrect");
+  const [before] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${wrong.id}`;
+  const redoKey = randomUUID(), redo = await service.create(fixture.scope, { ...input, clientKey: redoKey });
+  expect(redo.id).not.toBe(first.id);
+  expect((await service.create(fixture.scope, { ...input, clientKey: redoKey })).id).toBe(redo.id);
+  expect(redo.itemVersionId).toBe(first.itemVersionId);
+  const corrected = await service.submit(fixture.scope, redo.id, { clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "not_in_span", equation: first.spanExercise, coefficients: ["2", "2"], coordinateChecks: ["2", "4", "2"], coefficientDerivationCoordinates: [0, 2] }),
+    outcome: "unverified", assistance: "hinted" });
+  expect(corrected).toMatchObject({ outcome: "correct", assistance: "hinted", serverEvaluation: { decision: "correct", evaluatorVersion: "span-exact-v1" } });
+  expect(corrected.eligibility?.independentAttempt).not.toBe("yes");
+  const [after] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${wrong.id}`;
+  expect(after).toEqual(before);
+  expect((await f.attempts.get(fixture.scope, first.id))?.observationId).toBe(wrong.id);
+});
+
 it("keeps uncertain input unverified and fades assisted rather than independent", async () => {
   const f = await start("span-faded-3d");
   const record = await f.submit({ membership: "in_span", recognition: "uncertain" });

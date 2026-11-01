@@ -46,6 +46,58 @@ async function record(f: Awaited<ReturnType<typeof seed>>, sessionId: string, an
     { sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
       clientKey: randomUUID(), answer: JSON.stringify(response), outcome: "unverified", assistance, verdictSource: "self_report" });
 }
+it("keeps explicit next scoped to its origin despite two delivered hints and exact errors", async () => {
+  const f = await seed(), { sql, scope } = fixture;
+  const learning = createOpeningLearningRepository(sql);
+  const submit = async () => {
+    const session = await f.create();
+    const attempt = await createSpanReservedService(sql).issue(scope, { sessionId: session.sessionId,
+      sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" });
+    expect((await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 })).exposureReceipt).toBeTruthy();
+    const observed = await learning.insertObservation(scope, { sessionId: session.sessionId, courseId: f.courseId,
+      skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "in_span", coefficients: ["999", "999"] }),
+      outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+    expect(observed).toMatchObject({ outcome: "incorrect", serverEvaluation: { evaluatorVersion: "span-exact-v1", skills: { coefficients: "incorrect" } } });
+    return { session, observed };
+  };
+  await submit();
+  const latest = await submit();
+  // Newer activity facts cannot replace the explicitly selected origin.
+  const unrelated = await f.create();
+  await record(f, unrelated.sessionId, { membership: "not_in_span" });
+  const history = async () => ({
+    observations: await sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    help: await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+  });
+  const before = await history();
+  const input = { activityId: latest.session.activityId, expectedRevision: latest.session.revision,
+    observationId: latest.observed.id, clientKey: "same-error-next" };
+  const result = await f.next.next(scope, input);
+  expect(result).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "targeted_explain",
+    reasonCode: "verified_incorrect", focusObservationId: latest.observed.id }, session: { moveId: "self-example" } });
+  if (result.kind !== "ready") throw new Error("expected same-error successor");
+  const [activity] = await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${result.session.activityId}`;
+  expect(activity!.goal_json.tutorNextAction.observationIds).toEqual([latest.observed.id]);
+  const [receipt] = await sql`SELECT receipt FROM opening_learning_decisions WHERE target_id=${result.session.activityId} AND layer='activity'`;
+  expect(receipt!.receipt.candidates).toContainEqual(expect.objectContaining({ reasonCodes: expect.arrayContaining(["verified_incorrect"]),
+    evidenceRefs: [`observation:${latest.observed.id}`] }));
+  const captured = JSON.parse(receipt!.receipt.intentVersion);
+  expect(captured.decisionInput.observations.map((row: { id: string }) => row.id)).toEqual([latest.observed.id]);
+  const capacity = await readOpeningLearningCapacity(sql, scope);
+  expect(await f.next.next(scope, input)).toMatchObject({ kind: "ready", replayed: true,
+    decision: result.decision, session: { activityId: result.session.activityId } });
+  expect(await readOpeningLearningCapacity(sql, scope)).toEqual(capacity);
+  expect(await history()).toEqual(before);
+  const resumed = await createOpeningSpanTutorContextRepository(sql).read(scope,
+    { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 }, question: "继续学习" });
+  expect(resumed?.resumeSession?.activityId).toBe(result.session.activityId);
+  expect(resumed?.historicalDecision).toEqual(result.decision);
+  await learning.reviseObservation(scope, { rootObservationId: latest.observed.rootObservationId ?? latest.observed.id,
+    revisesObservationId: latest.observed.id, expectedHead: latest.observed.id, revisionKind: "retract", reason: "撤回先前判断", clientKey: randomUUID() });
+  expect(await f.next.next(scope, input)).toMatchObject({ kind: "choice", reason: "evidence_changed" });
+});
+
 it("ends only the selected origin and replays the actual next activity after an unknown response", async () => {
   const f = await seed(), origin = await f.create();
   const observed = await record(f, origin.sessionId, { membership: "not_in_span" });

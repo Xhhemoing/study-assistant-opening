@@ -91,6 +91,7 @@ export type NextStepReasonCode =
   | "no_evidence"
   | "unverified_only"
   | "verified_incorrect"
+  | "repeated_assisted_error"
   | "assistance_dependent"
   | "independent"
   | "correct_needs_independent_check"
