@@ -167,6 +167,7 @@ export {
   type TeachingGenerateReconcileResult,
 } from "./repositories/opening-teaching-generate-reconcile";
 export { readOpeningTeachingTaskFocus, readOpeningTeachingCompilerFocus, type TeachingCompilerFocus } from "./repositories/opening-teaching-focus";
+export { readOpeningCourseRouteEvidenceRefs } from "./repositories/opening-course-route-origin";
 
 export {
   createOpeningTeachingCommandsRepository,
