@@ -19,12 +19,12 @@ import { TeachingActivityEmpty } from "./activity-panel";
 import { TeachingLoopTrialEmpty } from "./teaching-loop-trial-empty";
 import { resolveTeachingLoopTrialGate } from "./teaching-loop-trial";
 import { TodayDashboard } from "../planning/today-dashboard";
-import { StartPage } from "../start/start-page";
+
 import OpeningTodayPage from "../../../app/(opening)/opening/today/page";
 import { loadTodayPage } from "../planning/load-today-page";
 
 vi.mock("../planning/load-today-page", () => ({ loadTodayPage: vi.fn(async () => ({ state: { kind: "empty", courses: { status: "ready", items: [] } }, timeZone: "Etc/UTC" })) }));
-vi.mock("../start/start-page", () => ({ StartPage: () => null }));
+
 vi.mock("../cards/cards-client", () => ({ createOpeningCardsClient: () => ({ listDue: async () => [] }) }));
 vi.mock("../planning/today-view", async importOriginal => ({
   ...await importOriginal<typeof import("../planning/today-view")>(),
@@ -83,8 +83,8 @@ describe("AI 主讲 entry path", () => {
   it("/opening/today passes the authenticated server state to the new learning entry", async () => {
     const page = await OpeningTodayPage({ searchParams: Promise.resolve({}) });
     expect(loadTodayPage).toHaveBeenCalledOnce();
-    expect(page.type).toBe(StartPage);
-    expect(page.props).toEqual({ state: { kind: "empty", courses: { status: "ready", items: [] } }, timeZone: "Etc/UTC" });
+    expect(page.type).toBe(TodayDashboard);
+    expect(page.props).toMatchObject({ state: { kind: "empty", courses: { status: "ready", items: [] } }, timeZone: "Etc/UTC" });
   });
 
   it.each([true, false])("Today keeps unscoped activity continuation honest when the trial gate is %s", async enabled => {

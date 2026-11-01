@@ -13,10 +13,18 @@ async function register(context: BrowserContext, label: string) {
 }
 
 async function expectOpeningTodayEmptySurface(page: import("@playwright/test").Page) {
-  await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeEnabled();
-  await expect(page.getByRole("list", { name: "可以这样问", exact: true }).getByRole("button")).toHaveCount(3);
-  const start = page.getByRole("link", { name: "新建课程", exact: true });
+  await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
+  const question = page.getByRole("textbox", { name: "向 AI 提问", exact: true });
+  await expect(question).toBeEnabled();
+  const continueQuestion = page.getByRole("button", { name: "继续提问", exact: true });
+  await expect(continueQuestion).toBeVisible();
+  await expect(continueQuestion).toBeDisabled();
+  await question.fill("如何开始学习？");
+  await expect(continueQuestion).toBeEnabled();
+  await question.clear();
+  await expect(continueQuestion).toBeDisabled();
+  const start = page.getByRole("link", { name: "添加第一门课", exact: true });
   await expect(start).toBeVisible();
   await expect(start).toHaveAttribute("href", "/opening/courses/new");
   await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
@@ -26,7 +34,7 @@ async function expectOpeningTodayEmptySurface(page: import("@playwright/test").P
   ).toBeVisible();
 }
 
-test("opening start offers optional course creation after register and restores direct questions on return", async ({ browser, baseURL }) => {
+test("opening today offers first-course creation after register and restores the assistant entry on return", async ({ browser, baseURL }) => {
   const context = await browser.newContext({ baseURL });
   try {
     await register(context, "today-plan");
@@ -34,7 +42,7 @@ test("opening start offers optional course creation after register and restores 
     // Closed-loop surface: do not depend on legacy /learn 「今日任务」 + 跳过 mock.
     await page.goto("/opening/today");
     await expectOpeningTodayEmptySurface(page);
-    await page.getByRole("link", { name: "新建课程", exact: true }).click();
+    await page.getByRole("link", { name: "添加第一门课", exact: true }).click();
     await expect(page).toHaveURL(/\/opening\/courses\/new$/);
     await expect(page.getByRole("heading", { name: "新建课程", exact: true })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "课程名称", exact: true })).toBeVisible();
