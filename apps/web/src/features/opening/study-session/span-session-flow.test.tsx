@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getSpanProblem, solveSpanProblem, verifySpanAnswer } from "@aistudy/domain";
-import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
+import { learningAttemptSchema, type LearningAttempt, type LearningObservation } from "@aistudy/contracts";
+import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
 import type { SpanLessonDetails } from "../teaching/span/span-session-client";
 import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
@@ -102,15 +103,17 @@ it("submits a gradable self-study answer and saves the next lesson move without 
 it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real form and verifier while keeping the first observation", async problemId => {
   const { attempt, details } = fixture(problemId === "span-faded-3d" ? "self-faded" : "self-independent", problemId);
   const redoAttempt = { ...attempt, id: uuid() };
+  const variant = learningAttemptSchema.parse({ ...attempt, id: uuid(), contextAnchor: undefined,
+    spanExercise: listSpanReservedProblems("validation").find(p => p.familyId === attempt.spanExercise!.familyId), historyRevision: 3, spanPracticeOriginAttemptId: redoAttempt.id });
   mocks.createAttempt.mockReset();
   const observations = new Map<string, LearningObservation>();
-  mocks.request.mockResolvedValue({});
+  mocks.request.mockImplementation(async (path: string, schema: { parse: (raw: unknown) => unknown }) => schema.parse(path.endsWith("/reserved") ? variant : {}));
   mocks.createAttempt.mockResolvedValueOnce(attempt).mockResolvedValueOnce(redoAttempt);
   mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
   mocks.read.mockImplementation(async (_client, _course, current) => ({ observation: observations.get(current.id) ?? null, deliveredAssistance: "none" }));
   mocks.submitAttempt.mockImplementation(async (attemptId, input) => {
     if (observations.has(attemptId)) throw new Error("first observation must not be overwritten");
-    const result = verifySpanAnswer(attempt.spanExercise!, JSON.parse(input.answer));
+    const result = verifySpanAnswer(attemptId === variant.id ? variant.spanExercise! : attempt.spanExercise!, JSON.parse(input.answer));
     const row = { id: uuid(), attemptId, answer: input.answer, assistance: input.assistance,
       serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: result.outcome === "incorrect" ? "incorrect" : result.outcome === "correct" && result.coreEvidenceComplete ? "correct" : "abstain", reasonCodes: [result.reason] } } as LearningObservation;
     observations.set(attemptId, row); return row;
@@ -150,9 +153,77 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
     const restored = await createSpanStudySession(details, save).load();
     expect(restored.result).toMatchObject({ outcome: "correct", assistance: "hinted" });
     expect(mocks.submitAttempt.mock.calls[1]![1].clientKey).not.toBe(mocks.submitAttempt.mock.calls[0]![1].clientKey);
-    await ui.click("看下一步安排");
-    expect(save).toHaveBeenCalledOnce();
+    const hintCount = mocks.hint.mock.calls.length;
+    await ui.click("同族新题，独立做一次");
+    expect(save).not.toHaveBeenCalled();
+    expect(mocks.hint).toHaveBeenCalledTimes(hintCount);
+    expect(ui.host.querySelector("section[aria-label='作答结果']")).toBeNull();
+    expect(ui.host.querySelector("select")!.value).toBe("");
+    expect(variant.spanExercise!.familyId).toBe(exercise.familyId);
+    expect(variant.spanExercise!.target).not.toEqual(exercise.target);
+    const request = mocks.request.mock.calls.find(call => String(call[0]).endsWith("/reserved"))!;
+    expect(JSON.parse(request[2].body).afterAttemptId).toBe(redoAttempt.id);
+    mocks.getAttemptContext.mockResolvedValue({ attempt: variant });
+    expect((await createSpanStudySession(details, save).load()).step.id).toBe(variant.id);
+    expect(mocks.request.mock.calls.filter(call => String(call[0]).endsWith("/reserved"))).toHaveLength(1);
+    if (problemId === "span-faded-3d") {
+      await ui.click("提示");
+      await ui.click("看第 1 步");
+    }
+    const p = variant.spanExercise!, solved = solveSpanProblem(p);
+    await ui.select(solved.kind === "none" ? "not_in_span" : "in_span");
+    await ui.type("α·v + β·w = u 中的 v", p.vectors[0].join(", "));
+    await ui.type("α·v + β·w = u 中的 w", p.vectors[1].join(", "));
+    await ui.type("α·v + β·w = u 中的 u", p.target.join(", "));
+    if (solved.kind === "unique") {
+      await ui.type("α", solved.coefficients[0]); await ui.type("β", solved.coefficients[1]);
+      await ui.type("代回后", p.target.join(", "));
+    } else {
+      await ui.type("α", "3"); await ui.type("β", "2"); await ui.type("代回后", "3, 2, 4");
+      await ui.select("0", "导出系数所用坐标 1"); await ui.select("1", "导出系数所用坐标 2");
+    }
+    await ui.click("提交");
+    expect(observations.get(variant.id)).toMatchObject({ assistance: problemId === "span-faded-3d" ? "hinted" : "independent", serverEvaluation: { decision: "correct" } });
+    expect(observations.get(attempt.id)).toEqual(first);
+    // A new tab has no active local draft: recover the precise server-owned successor.
+    const resumedDetails = { ...details, session: { ...details.session!, activityId: uuid() },
+      attempts: [attempt, { ...redoAttempt, historyRevision: 2 }, variant], observations: [...observations.values()] };
+    const resumed = await createSpanStudySession(resumedDetails, save).load();
+    expect(resumed.step.id).toBe(variant.id);
+    expect(resumed.result?.outcome).toBe("correct");
   } finally { await ui.unmount(); }
+});
+
+it.each([false, true])("the final reserved step excludes answered practice variants (existing final: %s)", async hasFinal => {
+  const { attempt, details } = fixture("self_study-reserved");
+  const exercise = listSpanReservedProblems("validation").find(row => row.id === "span-reserved-20261021-q02")!;
+  const variant = learningAttemptSchema.parse({ ...attempt, id: uuid(), contextAnchor: undefined,
+    spanExercise: exercise, historyRevision: 5, spanPracticeOriginAttemptId: attempt.id });
+  const final = learningAttemptSchema.parse({ ...attempt, id: uuid(), contextAnchor: undefined,
+    spanExercise: listSpanReservedProblems("validation").find(row => row.id !== exercise.id && row.familyId === exercise.familyId), historyRevision: 4 });
+  const solved = solveSpanProblem(exercise);
+  if (solved.kind !== "unique") throw new Error("expected unique validation fixture");
+  const answer = { membership: "in_span", coefficients: solved.coefficients,
+    vectorEquation: { v: exercise.vectors[0], w: exercise.vectors[1], u: exercise.target }, substitutedVector: exercise.target };
+  expect(verifySpanAnswer(exercise, answer).outcome).toBe("correct");
+  const observation = { id: uuid(), attemptId: variant.id, answer: JSON.stringify(answer), assistance: "independent",
+    serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
+  details.attempts = hasFinal ? [attempt, final, variant] : [attempt, variant];
+  details.observations = [observation];
+  mocks.read.mockImplementation(async (_client, _course, current) => ({ observation: current.id === variant.id ? observation : null, deliveredAssistance: "none" }));
+  mocks.request.mockImplementation(async (path: string, schema: { parse: (raw: unknown) => unknown }) => schema.parse(path.endsWith("/reserved") ? final : {}));
+  const port = createSpanStudySession(details, vi.fn());
+  const view = await port.load();
+  expect(view.step.id).toBe(final.id);
+  expect(view.result).toBeNull();
+  expect(view.answer).toEqual({});
+  expect(view.canPracticeVariant).toBe(false);
+  expect(mocks.read.mock.calls.every(call => call[2].id === final.id)).toBe(true);
+  const requests = mocks.request.mock.calls.filter(call => String(call[0]).endsWith("/reserved"));
+  expect(requests).toHaveLength(hasFinal ? 0 : 1);
+  if (!hasFinal) expect(JSON.parse(requests[0]![2].body)).not.toHaveProperty("afterAttemptId");
+  expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
+  expect(mocks.createAttempt).not.toHaveBeenCalled();
 });
 
 it.each(["correct", "retest"])("does not offer redo for %s", async scenario => {

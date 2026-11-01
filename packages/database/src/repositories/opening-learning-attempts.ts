@@ -33,7 +33,10 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
     historyRevision: Number(row.history_revision), ...(matrixExercise ? { matrixExercise } : {}), ...(spanExercise ? { spanExercise } : {}),
     ...(typeof row.item_stem_snapshot === "string" ? { stemSnapshot: row.item_stem_snapshot } : {}),
     ...(row.context_anchor ? { contextAnchor: row.context_anchor as StudyContextAnchor } : {}),
-    ...(spanValidation ? { spanValidation } : {}),...(routeBinding?{courseRequirement:routeBinding}:{}) };
+    ...(spanValidation ? { spanValidation } : {}),
+    ...(typeof row.client_key === "string" && /^span-variant:[0-9a-f-]{36}$/.test(row.client_key)
+      ? { spanPracticeOriginAttemptId: row.client_key.slice("span-variant:".length) } : {}),
+    ...(routeBinding?{courseRequirement:routeBinding}:{}) };
 }
 
 /** Canonical attempt creation, also used by the atomic held-out issuer. Caller owns the transaction. */
