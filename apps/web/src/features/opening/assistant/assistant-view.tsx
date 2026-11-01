@@ -45,6 +45,7 @@ import { LearnerStateCard } from "../teaching/learner-state-card";
 import { acknowledgeStudyExposure } from "./study-exposure-ack";
 import { pinnedStudySourceProblem, questionWithStudyContext, studyContextAnchor, studyContextReturnHref, studyConversationIdentity, type StudyConversationContext } from "./study-conversation-context";
 import { createConversationReader } from "./conversation-reader";
+import { conversationObjectHref } from "./conversation-links";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
@@ -307,7 +308,7 @@ export function AssistantView(props: Props) {
 }
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, implicitResumeVersion, resumeBoundConversation = false, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false, agent = false, onConversationChange,
-  start, onConversationReady, companion = false, objectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
+  start, onConversationReady, companion = false, objectHref: providedObjectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const capabilities = useOpeningCapabilities();
@@ -323,6 +324,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const [conversationId, setConversationIdState] = useState<string | null>(
     learningAttempt && !resumeBoundConversation ? null : initialConversationId,
   );
+  const objectHref = useCallback((href: string) => providedObjectHref
+    ? providedObjectHref(href)
+    : conversationObjectHref(href, conversationId), [providedObjectHref, conversationId]);
   const boundResumeContext = useRef(studyContext);
   boundResumeContext.current = studyContext;
   const conversationIdRef = useRef(conversationId);

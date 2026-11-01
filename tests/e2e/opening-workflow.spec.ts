@@ -14,7 +14,17 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto("/opening/today");
     await expect(page).toHaveURL(/\/opening\/today$/);
-    const assistant = page.getByRole("region", { name: /^(开始|学习对话)$/ });
+    await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
+    await page.getByRole("textbox", { name: "向 AI 提问", exact: true }).fill("Summarize the selected page.");
+    await page.getByRole("button", { name: "继续提问", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "学习助手", exact: true });
+    await expect(drawer).toBeVisible();
+    const fullPage = drawer.getByRole("link", { name: "在助理全页中打开", exact: true });
+    await expect(fullPage).toHaveAttribute("href", "/opening/agent");
+    await fullPage.click();
+    await expect(page).toHaveURL(/\/opening\/agent$/);
+    // The full-page owner syncs ?conversation= for the in-flight reload below.
+    const assistant = page.locator("[data-agent-workspace]").getByRole("region", { name: /^(开始|学习对话)$/ });
     await expect(assistant).toBeVisible();
     const fixture = path.resolve("tests/fixtures/opening/parser-two-page.pdf");
     await assistant.getByRole("button", { name: "选择参考材料", exact: true }).click();
@@ -32,6 +42,7 @@ test("real upload and PDF parser feed cited tutor transport, then survive an in-
     await assistant.getByRole("button", { name: "发送", exact: true }).click();
     const accepted = await submitted;
     expect(accepted.status()).toBe(201);
+    await expect(page).toHaveURL(/\/opening\/agent\?conversation=[0-9a-f-]{36}$/);
     await page.reload();
     await expect(assistant.getByRole("log").getByText("[测试模型] 已收到原件第一页文本 page one。", { exact: true })).toBeVisible({ timeout: 45_000 });
     await assistant.getByRole("button", { name: "选择参考材料", exact: true }).click();

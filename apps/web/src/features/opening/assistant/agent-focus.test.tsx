@@ -46,6 +46,42 @@ function apiFor(rows: AssistantProposalRecord[] = []) {
   ownedApi.value = api;
   return { api, state };
 }
+it.each([true, false])("carries the restored conversation through real citation links (agent=%s) and clears it for a fresh session", async agent => {
+  const { api } = apiFor();
+  const sourceId = "33333333-3333-4333-8333-333333333333";
+  vi.mocked(api.listTurns).mockResolvedValue([{
+    ...turns[0]!, role: "assistant", text: "向量具有方向和长度 [1]",
+    citations: [{ sourceId, sourceVersion: 2, chunkId: turn, label: "1", page: 3 }],
+  }]);
+  await act(async () => root.render(<AssistantView api={api} agent={agent} initialConversationId={conversation} />));
+  const links = Array.from(host.querySelectorAll<HTMLAnchorElement>('a[href*="source="]'));
+  expect(links.length).toBeGreaterThan(0);
+  for (const link of links) {
+    const url = new URL(link.href);
+    expect(url.searchParams.get("conversation")).toBe(conversation);
+    expect(url.searchParams.get("source")).toBe(sourceId);
+    expect(url.searchParams.get("version")).toBe("2");
+    expect(url.searchParams.get("page")).toBe("3");
+  }
+  await act(async () => root.render(<AssistantView api={api} agent={agent} startFresh />));
+  expect(host.querySelector('a[href*="conversation="]')).toBeNull();
+  expect(host.querySelector('a[href*="source="]')).toBeNull();
+});
+it("keeps an explicitly supplied object link decorator in control of citation identity", async () => {
+  const { api } = apiFor();
+  vi.mocked(api.listTurns).mockResolvedValue([{
+    ...turns[0]!, role: "assistant", text: "材料说明 [1]",
+    citations: [{ sourceId: turn, sourceVersion: 2, chunkId: turn, label: "1", page: 3 }],
+  }]);
+  const objectHref = vi.fn((href: string) => `${href}&conversation=host-owned#selection`);
+  await act(async () => root.render(<AssistantView api={api} agent initialConversationId={conversation} objectHref={objectHref} />));
+  const links = Array.from(host.querySelectorAll<HTMLAnchorElement>('a[href*="source="]'));
+  expect(links.length).toBeGreaterThan(0);
+  for (const link of links) {
+    expect(new URL(link.href).searchParams.get("conversation")).toBe("host-owned");
+    expect(new URL(link.href).hash).toBe("#selection");
+  }
+});
 it("keeps a fresh agent conversation free of a permanent proposal or memory sidebar", async () => {
   const { api } = apiFor();
   await act(async () => root.render(<AssistantView api={api} agent startFresh />));
