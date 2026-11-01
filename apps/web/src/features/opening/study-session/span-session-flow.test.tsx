@@ -99,6 +99,75 @@ it("submits a gradable self-study answer and saves the next lesson move without 
   } finally { await ui.unmount(); }
 });
 
+it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real form and verifier while keeping the first observation", async problemId => {
+  const { attempt, details } = fixture(problemId === "span-faded-3d" ? "self-faded" : "self-independent", problemId);
+  const redoAttempt = { ...attempt, id: uuid() };
+  mocks.createAttempt.mockReset();
+  const observations = new Map<string, LearningObservation>();
+  mocks.request.mockResolvedValue({});
+  mocks.createAttempt.mockResolvedValueOnce(attempt).mockResolvedValueOnce(redoAttempt);
+  mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
+  mocks.read.mockImplementation(async (_client, _course, current) => ({ observation: observations.get(current.id) ?? null, deliveredAssistance: "none" }));
+  mocks.submitAttempt.mockImplementation(async (attemptId, input) => {
+    if (observations.has(attemptId)) throw new Error("first observation must not be overwritten");
+    const result = verifySpanAnswer(attempt.spanExercise!, JSON.parse(input.answer));
+    const row = { id: uuid(), attemptId, answer: input.answer, assistance: input.assistance,
+      serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: result.outcome === "incorrect" ? "incorrect" : result.outcome === "correct" && result.coreEvidenceComplete ? "correct" : "abstain", reasonCodes: [result.reason] } } as LearningObservation;
+    observations.set(attemptId, row); return row;
+  });
+  const save = vi.fn(async () => true), ui = await mount(createSpanStudySession(details, save));
+  try {
+    await ui.select("in_span"); await ui.type("α", "9"); await ui.type("β", "9");
+    await ui.click("提交");
+    const first = structuredClone(observations.get(attempt.id));
+    expect(ui.host.textContent).toContain("还没对");
+    expect(ui.button("看下一步安排")).toBeDefined();
+    await ui.click("改这道题");
+    expect(ui.host.querySelector("select")!.disabled).toBe(false);
+    expect([...ui.host.querySelectorAll("input")].some(input => input.value === "9")).toBe(true);
+    const exercise = attempt.spanExercise!;
+    await ui.type("α·v + β·w = u 中的 v", exercise.vectors[0].join(", "));
+    await ui.type("α·v + β·w = u 中的 w", exercise.vectors[1].join(", "));
+    await ui.type("α·v + β·w = u 中的 u", exercise.target.join(", "));
+    if (problemId === "span-faded-3d") {
+      await ui.type("α", "2"); await ui.type("β", "-1");
+      await ui.type("代回后", exercise.target.join(", "));
+    } else {
+      await ui.select("not_in_span"); await ui.type("α", "2"); await ui.type("β", "2");
+      await ui.type("代回后", "2, 4, 2");
+      await ui.select("0", "导出系数所用坐标 1"); await ui.select("2", "导出系数所用坐标 2");
+    }
+    await ui.click("提交");
+    expect(ui.host.textContent).toContain("用提示后答对");
+    expect(ui.button("改这道题")).toBeUndefined();
+    expect(observations.size).toBe(2);
+    expect(observations.get(attempt.id)).toEqual(first);
+    expect(observations.get(redoAttempt.id)?.assistance).toBe("hinted");
+    const stored = JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(key => key.startsWith("opening-practice:v2:"))!)!);
+    expect(stored.drafts).toHaveLength(2);
+    expect(stored.drafts[0]).toMatchObject({ attemptId: attempt.id, observationId: first!.id, submission: { input: { answer: first!.answer } } });
+    mocks.getAttemptContext.mockResolvedValue({ attempt: redoAttempt });
+    const restored = await createSpanStudySession(details, save).load();
+    expect(restored.result).toMatchObject({ outcome: "correct", assistance: "hinted" });
+    expect(mocks.submitAttempt.mock.calls[1]![1].clientKey).not.toBe(mocks.submitAttempt.mock.calls[0]![1].clientKey);
+    await ui.click("看下一步安排");
+    expect(save).toHaveBeenCalledOnce();
+  } finally { await ui.unmount(); }
+});
+
+it.each(["correct", "retest"])("does not offer redo for %s", async scenario => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  details.attempts = [attempt];
+  if (scenario === "retest") {
+    details.session!.retestId = uuid();
+    attempt.spanExercise = { ...attempt.spanExercise!, id: "span-reserved-fraction" };
+  }
+  const record = { id: uuid(), answer: "{}", assistance: "independent", serverEvaluation: { decision: scenario === "correct" ? "correct" : "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "none" });
+  const view = await createSpanStudySession(details, vi.fn()).load();
+  expect(view.canRedo).toBe(false);
+});
+
 it("the v2 lesson owner PATCHes progress and renders the next question after a submitted self-study result", async () => {
   const { attempt, details, courseId, activityId } = fixture("self-independent", "span-independent-3d");
   const record = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "correct", reasonCodes: [] } } as unknown as LearningObservation;
@@ -237,7 +306,7 @@ it("an uploaded photo is attached to the answer without being added to the cours
   port.edit({ membership: "in_span" });
   mocks.submitAttempt.mockResolvedValue({ id: uuid(), assistance: "independent", serverEvaluation: null });
   mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
-  await port.primary();
+  expect((await port.primary()).canRedo).toBe(false);
   expect(mocks.submitAttempt.mock.calls[0]![1]).toMatchObject({ workSource: { id: photoId, version: 1, physicalPage: 1 } });
 });
 
