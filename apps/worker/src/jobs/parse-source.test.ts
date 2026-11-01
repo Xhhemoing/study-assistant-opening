@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError } from "@aistudy/ai";
-import type { SourceRecord } from "@aistudy/contracts";
+import { sourceRecordSchema, type ApiFailure, type SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
 import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
@@ -46,6 +46,33 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
 }
 
 describe("parse source handler", () => {
+  it.each(["low quality", "discrete failures"])("keeps large PDF %s errors readable by the source contract", async scenario => {
+    const d = await deps();
+    let error: ApiFailure | null = null;
+    const handler = createParseSourceHandler({
+      sources: { get: async () => source(), markParseState: async (_scope, _id, _state, failure) => { error = failure ?? null; return source(); } },
+      chunks: { replaceChunks: async () => {}, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
+      tempDir: d.tempDir,
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: scenario === "low quality" ? 600 : 2000 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const end = Number(argv[argv.indexOf("--page-end") + 1]);
+        if (scenario === "discrete failures" && start % 20 === 1) return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: Array.from({ length: end - start + 1 }, (_, i) => ({ page: start + i, text: "x", imagePath: null })) }) };
+      },
+    });
+    await handler(job, { sourceId });
+    expect(error).toMatchObject({ code: "PARSE_PARTIAL", retryable: scenario === "discrete failures" });
+    expect(sourceRecordSchema.safeParse(source({ parseState: "ready", error })).success).toBe(true);
+    const message = (error as ApiFailure | null)?.message ?? "";
+    expect(message.length).toBeLessThanOrEqual(500);
+    if (scenario === "low quality") expect(message).toBe("第 1–600 页识别质量低");
+    else {
+      expect(message).toContain("等共 1000 页未能识别，可以重新解析");
+      expect(message).toContain("等共 1000 页识别质量低");
+    }
+  });
   it.each(["text/plain", "text/markdown", "text/html"])("cancels an oversized %s response before reading beyond the byte limit", async mime => {
     const cancel = vi.fn();
     const pull = vi.fn((controller: ReadableStreamDefaultController<Uint8Array>) => {
@@ -153,6 +180,18 @@ describe("parse source handler", () => {
     expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: "final" },
     ] });
+  });
+  it("omits blank PDF chunks when visual routing is unavailable while keeping readable pages", async () => {
+    const recognizePage = vi.fn(async () => { throw new OpeningModelRoutingError("请先配置 gpt-6-luna"); });
+    const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "native prose", imagePath: null },
+      { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
+    ] });
+    expect(d.states).toEqual(["ready"]);
   });
   it("propagates provider errors without replacing chunks", async () => {
     const recognizePage = vi.fn(async () => { throw new Error("provider timeout"); });

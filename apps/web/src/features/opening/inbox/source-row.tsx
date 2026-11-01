@@ -87,11 +87,12 @@ export function SourceRow({
           <p className="text-xs tabular-nums text-text-2">已上传 {percent}%</p>
         ) : null}
         {notice ? <p className="text-xs text-warn">{notice}</p> : null}
+        {record.error?.code === "PARSE_PARTIAL" ? <p className="text-xs text-warn">{record.error.message}</p> : null}
       </div>
       <div className="flex flex-wrap items-start gap-2">
         {onRetry && record.error?.retryable !== false ? (
           <button className={ui.secondary} onClick={() => onRetry(record.id)} type="button">
-            <RefreshCw size={14} aria-hidden="true" />{record.parseState === "failed" ? "重新解析" : "重试上传"}
+            <RefreshCw size={14} aria-hidden="true" />{record.uploadState === "pending" ? "重试上传" : "重新解析"}
           </button>
         ) : null}
         {metadata || onAssign || onManage || onReindex || (canDeleteShortcut && onDelete) ? (
