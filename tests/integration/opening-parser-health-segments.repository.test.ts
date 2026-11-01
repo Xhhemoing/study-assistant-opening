@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningJobRepository, createOpeningSourceChunksRepository, openingJobScope, type OpeningStorage } from "@aistudy/database";
+import { createOpeningJobRepository, createOpeningSourceChunksRepository, createOpeningSourceRepository, openingJobScope, type OpeningStorage } from "@aistudy/database";
+import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
+import type { ParserRunner } from "../../apps/worker/src/parsers/types";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningPdfSegmentsRepository } from "../../packages/database/src/repositories/opening-pdf-segments";
 import { createOpeningParserHealthRepository, type ParserOcrHealth } from "../../packages/database/src/repositories/opening-parser-health";
@@ -37,7 +41,7 @@ async function seed() {
       objects.set(to, get(from));
     },
     deleteObject: async key => { objects.delete(key); },
-    presignPut: unused, presignGet: unused, copyObject: unused,
+    presignPut: unused, presignGet: async key => `data:application/pdf;base64,${Buffer.from(get(key)).toString("base64")}`, copyObject: unused,
     putObjectStream: unused, getObjectStream: unused, objectExists: unused,
   };
   const service = createOpeningSourceService(f.sql, storage);
@@ -56,10 +60,71 @@ async function seed() {
   expect(rows[0]!.payload).toEqual({ sourceId: source.id, sourceVersion: 0 });
   const claimed = await jobs.claim(rows[0]!.id as string);
   if (!claimed) throw new Error("fixture job not claimed");
-  return { jobs, claimed, scope: openingJobScope(claimed), identity: { sourceId: source.id, sourceVersion: source.version, parserProfile: "test-docling-v2/text", pageStart: 1, pageEnd: 1 } };
+  return { jobs, claimed, storage, service, principal, scope: openingJobScope(claimed), identity: { sourceId: source.id, sourceVersion: source.version, parserProfile: "test-docling-v2/text", pageStart: 1, pageEnd: 1 } };
 }
 
 describe("0094/0095 PDF segment persistence and execution fencing", () => {
+  it("publishes successful pages after two segment failures and requeues only the failed segment", async () => {
+    const d = await seed(), sources = createOpeningSourceRepository(f.sql);
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "partial-pdf-"));
+    const starts: number[] = [];
+    let fail = true;
+    const runner: ParserRunner = async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      starts.push(start);
+      return fail && start === 2 ? { exitCode: 4, stdout: "" }
+        : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: start, text: `Readable page ${start}`, imagePath: null }] }) };
+    };
+    const handler = createParseSourceHandler({ sources, chunks: createOpeningSourceChunksRepository(f.sql),
+      segments: createOpeningPdfSegmentsRepository(f.sql), storage: d.storage, runner, tempDir, segmentPages: 1 });
+    try {
+      const result = await handler(d.claimed, d.claimed.payload);
+      expect(result).toEqual({ pages: 1 });
+      expect(starts).toEqual([1, 2, 2]);
+      expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready",
+        error: { code: "PARSE_PARTIAL", retryable: true, message: "第 2 页未能识别，可以重新解析" } });
+      expect(await f.sql`SELECT page,text FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
+        .toEqual([{ page: 1, text: "Readable page 1" }]);
+      expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId} ORDER BY page_start`)
+        .toEqual([{ page_start: 1, state: "ready" }, { page_start: 2, state: "failed" }]);
+      await d.jobs.finish(d.claimed.id, "succeeded", result, d.claimed.claimToken);
+      // Exercise the public service as well as retryParseWithJob's real SQL.
+      expect(await d.service.retryParse(d.principal, d.identity.sourceId)).toMatchObject({ parseState: "queued", error: null });
+      const [retry] = await f.sql`SELECT id FROM opening_jobs WHERE kind='parse' AND payload->>'sourceId'=${d.identity.sourceId} AND id<>${d.claimed.id}`;
+      expect(await f.sql`SELECT job_id FROM opening_outbox WHERE job_id=${retry!.id}`).toHaveLength(1);
+      const claimed = await d.jobs.claim(retry!.id as string);
+      expect(claimed).not.toBeNull();
+      fail = false;
+      starts.length = 0;
+      expect(await handler(claimed!, claimed!.payload)).toEqual({ pages: 2 });
+      expect(starts).toEqual([2]);
+      expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready", error: null });
+      expect(await f.sql`SELECT page FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
+        .toEqual([{ page: 1 }, { page: 2 }]);
+    } finally { await rm(tempDir, { recursive: true, force: true }); }
+  });
+
+  it("keeps low-quality-only pages usable but rejects reparsing them", async () => {
+    const d = await seed(), sources = createOpeningSourceRepository(f.sql);
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "low-quality-pdf-"));
+    const handler = createParseSourceHandler({ sources, chunks: createOpeningSourceChunksRepository(f.sql),
+      segments: createOpeningPdfSegmentsRepository(f.sql), storage: d.storage, tempDir,
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf") ? { pageCount: 1 }
+        : { pages: [{ page: 1, text: "����文本", imagePath: null }] }) }) });
+    try {
+      const result = await handler(d.claimed, d.claimed.payload);
+      expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready",
+        error: { code: "PARSE_PARTIAL", retryable: false, message: "第 1 页识别质量低" } });
+      expect(await f.sql`SELECT page,text FROM opening_source_chunks WHERE source_id=${d.identity.sourceId}`)
+        .toEqual([{ page: 1, text: "����文本" }]);
+      await d.jobs.finish(d.claimed.id, "succeeded", result, d.claimed.claimToken);
+      await expect(sources.retryParseWithJob(f.scope, d.identity.sourceId, { key: randomUUID(), payload: d.claimed.payload,
+        privacyEpoch: d.claimed.privacyEpoch })).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(await f.sql`SELECT id FROM opening_jobs WHERE kind='parse' AND payload->>'sourceId'=${d.identity.sourceId}`).toHaveLength(1);
+    } finally { await rm(tempDir, { recursive: true, force: true }); }
+  });
+
   it("reads and saves initial upload version 0 and reuses it on a new job without replacing successful segments", async () => {
     const d = await seed();
     expect(await createOpeningPdfSegmentsRepository(f.sql).read(d.scope, d.identity)).toBeNull();

@@ -15,6 +15,13 @@ const onChanged = async () => {};
 const sources = [source("1", "Visible.pdf"), source("2", "Hidden.pdf")];
 
 describe("inbox material collection rendering", () => {
+  it.each([true, false, undefined])("shows a partial warning and offers re-parse only with explicit retryable=true (%s)", retryable => {
+    const partial = { ...source("partial", "Partial.pdf"), error: { code: "PARSE_PARTIAL", message: "第 2 页识别质量低", retryable } };
+    const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources: [partial], onChanged }));
+    expect(html).toContain("第 2 页识别质量低");
+    expect(html.includes("重新解析")).toBe(retryable === true);
+    expect(html).toContain("可以用于提问");
+  });
   it("renders only the visible page without treating the full collection as empty", () => {
     const html = renderToStaticMarkup(createElement(InboxPanel, { api, sources, onChanged, visibleSources: [sources[0]!] }));
     expect(html).toContain("Visible.pdf");

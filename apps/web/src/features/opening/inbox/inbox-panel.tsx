@@ -292,7 +292,7 @@ export function InboxPanel({
             </LiveTaskCard></div> : <SourceRow
               notice={notice?.sourceId === record.id ? notice.text : undefined}
               onOpen={record.uploadState === "uploaded" ? () => openOriginal(record) : undefined}
-              onRetry={record.uploadState === "pending" || (record.uploadState === "uploaded" && record.parseState === "failed" && record.error?.retryable !== false) ? () => void retrySource(record) : undefined}
+              onRetry={record.uploadState === "pending" || (record.uploadState === "uploaded" && ((record.parseState === "failed" && record.error?.retryable !== false) || (record.parseState === "ready" && record.error?.code === "PARSE_PARTIAL" && record.error.retryable === true))) ? () => void retrySource(record) : undefined}
               record={record}
               onManage={() => {
                 if (managedId === record.id) closeManage();

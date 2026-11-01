@@ -15,6 +15,8 @@ import type { OpeningScope } from "@aistudy/database";
 import type { OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
+import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
+import { createPdfPartialError } from "./pdf-partial-error";
 
 export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED_SOURCE"; }
 const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -103,9 +105,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       let bytes = 0;
       const limited = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; if (bytes > source.bytes) callback(new Error("source download exceeds declared bytes")); else { callback(null, chunk); } } });
       await pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), limited, createWriteStream(temp), { signal });
+      const pdfResult = source.mime === "application/pdf" ? await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
+        segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds }) : undefined;
       const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }] : source.mime === "application/pdf"
-        ? await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
-          segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds })
+        ? pdfResult!
         : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
       signal.throwIfAborted();
       const chunks = [];
@@ -136,11 +139,16 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
           }
         }
         if (isImage && visualRecognitionUnavailable) imageObjectKey = deps.storage.finalKey(source.id, source.version);
-        chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
+        if (text.trim() || imageObjectKey) chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
       }
       signal.throwIfAborted();
       await assertCurrent?.();
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks });
+      const lowQualityPages = source.mime === "application/pdf" ? chunks.filter(chunk => checkPdfPageQuality(chunk.text).quality === "low_quality").map(chunk => chunk.page).filter((page): page is number => page != null) : [];
+      const failedRanges = pdfResult?.failedRanges ?? [];
+      if (failedRanges.length || lowQualityPages.length) {
+        await deps.sources.markParseState(scope, source.id, "ready", createPdfPartialError(failedRanges, lowQualityPages));
+      }
       return isImage ? { pages: 1, imageOnly: visualRecognitionUnavailable } : { pages: pages.length };
     } catch (error) {
       if (error instanceof UnsupportedMimeError) throw new UnsupportedSourceError("unsupported source MIME");
