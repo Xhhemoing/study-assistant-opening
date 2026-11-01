@@ -61,7 +61,7 @@ export async function readSystemLearningQuery(tx: TransactionSql, scope: Scope,
         verifiedCorrect: eligibility.verifiedCorrect, usableForCurrentVersion: eligibility.usableForCurrentVersion };
     }) });
     const activity = ({ diagnose: "诊断", targeted_explain: "针对性讲解", full_explain: "完整讲解", reduced_help_practice: "减少帮助的练习", transfer_check: "迁移检查" })[step.activityKind];
-    const reason = ({ no_evidence: "缺少可用证据", unverified_only: "现有结果尚未核验", verified_incorrect: "最近作答已核验为错误", assistance_dependent: "近期作答多次依赖帮助", independent: "当前记录支持独立完成，需要进一步检查迁移", needs_check: "仍需检查", correct_needs_independent_check: "这次答案正确，接着独立完成一道练习", requested_full: "学习者请求完整讲解", due_retest: "已到合法独立复测时间", requested_consolidate: "学习者请求先巩固" })[step.reasonCode];
+    const reason = ({ no_evidence: "缺少可用证据", unverified_only: "现有结果尚未核验", verified_incorrect: "最近作答已核验为错误", repeated_assisted_error: "获得帮助后仍多次在同一步骤出错", assistance_dependent: "近期作答多次依赖帮助", independent: "当前记录支持独立完成，需要进一步检查迁移", needs_check: "仍需检查", correct_needs_independent_check: "这次答案正确，接着独立完成一道练习", requested_full: "学习者请求完整讲解", due_retest: "已到合法独立复测时间", requested_consolidate: "学习者请求先巩固" })[step.reasonCode];
     return { identity: { courseId, skillLabel: summary.skillLabel, requirementKey: summary.requirementKey }, step, evidenceIds: group.map(row => row.id),
       basis: "nextLearningStep/current-evidence", limitations: ["未读取复测到期状态或教学策略编译结果", "不是已保存或已接受的计划"],
       summary: `${summary.skillLabel}：现有活动规则建议${activity}，因为${reason}。依据 ${group.length} 条当前有效记录；未读取复测到期状态或教学策略编译结果，不代表已确认的计划或已掌握` };

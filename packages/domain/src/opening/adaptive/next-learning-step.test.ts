@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { captureNextLearningStep, nextLearningStep } from "./next-learning-step";
+import { verifySpanAnswer } from "../span-verifier";
+import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "../span-teaching-catalog";
 import type { NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 const observation = (overrides: Partial<SnapshotObservation> = {}): SnapshotObservation => ({
@@ -101,22 +103,43 @@ describe("nextLearningStep", () => {
     },
   );
 
+  const exactError = (id: string, overrides: Partial<SnapshotObservation> = {}) => {
+    const verified = verifySpanAnswer({ id: "fixture", version: "1", familyId: "fixture",
+      vectors: [["1", "0"], ["0", "1"]], target: ["1", "2"], knowledgeComponents: [] },
+    { membership: "in_span", coefficients: ["0", "0"] });
+    expect(verified.outcome).toBe("incorrect");
+    return observation({ id, rootObservationId: id, attemptId: `attempt-${id}`, skillLabel: SPAN_SKILL_LABEL,
+      requirementKey: SPAN_REQUIREMENT_KEY, attemptedAt: id === "older" ? "2026-10-15T07:00:00Z" : "2026-10-16T07:00:00Z",
+      verifiedCorrect: "no", assistance: "hinted", errors: Object.entries(verified.skills)
+        .filter(([, verdict]) => verdict === "incorrect")
+        .map(([label]) => ({ observationId: id, label, feedback: "wrong", source: "verified_steps" as const })), ...overrides });
+  };
+
   it("switches to a full example after two assisted exact errors at the same step", () => {
-    const error = { observationId: "latest-error", label: "coefficient", feedback: "wrong", source: "verified_steps" as const };
-    expect(nextLearningStep(input({ observations: [
-      observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] }),
-      observation({ id: "older-error", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "older-error" }] }),
-    ] }))).toEqual({ activityKind: "full_explain", focusObservationId: "latest-error", reasonCode: "repeated_assisted_error" });
+    expect(nextLearningStep(input({ observations: [exactError("latest"), exactError("older")] })))
+      .toEqual({ activityKind: "full_explain", focusObservationId: "latest", reasonCode: "repeated_assisted_error" });
   });
 
-  it("does not switch route without two distinct usable assisted errors sharing a step", () => {
-    const error = { observationId: "latest-error", label: "coefficient", feedback: "wrong", source: "verified_steps" as const };
-    for (const observations of [
-      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] })],
-      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] }), observation({ id: "different", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "different", label: "membership" }] })],
-      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", usableForCurrentVersion: "no", errors: [error] }), observation({ id: "different", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "different" }] })],
-      [observation({ id: "latest-error", verifiedCorrect: "unknown", assistance: "hinted", errors: [error] }), observation({ id: "different", verifiedCorrect: "unknown", assistance: "revealed", errors: [{ ...error, observationId: "different" }] })],
-    ]) expect(nextLearningStep(input({ observations }))).toMatchObject({ activityKind: "targeted_explain" });
+  it("finds repeated assisted errors across intervening nonqualifying observations", () => {
+    for (const middle of [exactError("middle", { verifiedCorrect: "yes" }), exactError("middle", { verifiedCorrect: "unknown" }),
+      exactError("middle", { assistance: "independent" }), exactError("middle", { errors: [] })]) {
+      expect(nextLearningStep(input({ observations: [exactError("latest"), middle, exactError("older")] })))
+        .toMatchObject({ activityKind: "full_explain", reasonCode: "repeated_assisted_error" });
+      expect(nextLearningStep(input({ observations: [middle, exactError("latest"), exactError("older")] })).reasonCode)
+        .toBe("repeated_assisted_error");
+    }
+  });
+
+  it("requires two usable assisted verified errors sharing a step", () => {
+    for (const older of [exactError("older", { usableForCurrentVersion: "no" }), exactError("older", { assistance: "unknown" }),
+      exactError("older", { errors: [{ observationId: "older", label: "coefficients", feedback: "wrong", source: "ai_feedback" }] }),
+      exactError("older", { errors: [{ observationId: "older", label: "membership", feedback: "wrong", source: "verified_steps" }] })]) {
+      expect(nextLearningStep(input({ observations: [exactError("latest"), older] })))
+        .toMatchObject({ activityKind: "targeted_explain" });
+    }
+    expect(nextLearningStep(input({ observations: [exactError("latest")] })).activityKind).toBe("targeted_explain");
+    expect(nextLearningStep(input({ observations: [exactError("latest", { verifiedCorrect: "unknown" }),
+      exactError("older", { verifiedCorrect: "unknown" })] })).activityKind).toBe("diagnose");
   });
 
   it("diagnoses unverified attempts before interpreting hints or an independent status", () => {
