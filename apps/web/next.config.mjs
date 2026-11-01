@@ -12,7 +12,12 @@ const buildConfigDigest = computeBuildConfigDigest(process.env);
 /** @type {import('next').NextConfig} */
 const useOpeningE2e = process.env.OPENING_E2E === "1";
 const useLocalPreview = !useOpeningE2e && process.env.AISTUDY_WEB_PREVIEW === "1";
+// The managed release builds an exact SHA whose push CI already passed lint and
+// typecheck. Repeating Next's in-build type check on the small release host exceeds
+// its memory, so only that runner opts out; CI and local builds keep both checks.
+const skipVerifiedChecks = process.env.AISTUDY_RELEASE_VERIFIED_SHA === "1";
 const nextConfig = {
+  ...(skipVerifiedChecks ? { typescript: { ignoreBuildErrors: true }, eslint: { ignoreDuringBuilds: true } } : {}),
   // Keep loopback redirects on the request host so host-only auth cookies survive.
   skipMiddlewareUrlNormalize: true,
   // Staging PUTs carry raw PDF bytes (product limit: 50 MiB). Next's default
