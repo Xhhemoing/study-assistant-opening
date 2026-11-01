@@ -41,7 +41,7 @@ test.describe("opening shell", () => {
     }
   });
 
-  test("start page offers direct questions and examples instead of fabricated resume data", async ({
+  test("today offers first-course creation and an assistant entry instead of fabricated resume data", async ({
     browser,
     baseURL,
   }) => {
@@ -50,12 +50,18 @@ test.describe("opening shell", () => {
       await loginOpeningOwner(context.request, baseURL ?? "http://127.0.0.1:3000");
       const page = await context.newPage();
       await page.goto("/opening/today");
-      // A new owner can ask immediately; examples are not invented learning records.
-      await expect(page.getByRole("heading", { name: "你好，今天想学什么？", exact: true })).toBeVisible();
-      await expect(page.getByRole("textbox", { name: "消息输入", exact: true })).toBeEnabled();
-      await expect(page.getByRole("list", { name: "可以这样问", exact: true }).getByRole("button")).toHaveCount(3);
-      await expect(page.getByRole("button", { name: "拍题", exact: true })).toBeVisible();
-      await expect(page.getByRole("button", { name: "上传", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "今日学习", exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "从第一门课程开始", exact: true })).toBeVisible();
+      const firstCourse = page.getByRole("link", { name: "添加第一门课", exact: true });
+      await expect(firstCourse).toBeVisible();
+      await expect(firstCourse).toHaveAttribute("href", "/opening/courses/new");
+      const question = page.getByRole("textbox", { name: "向 AI 提问", exact: true });
+      await expect(question).toBeEnabled();
+      const continueQuestion = page.getByRole("button", { name: "继续提问", exact: true });
+      await expect(continueQuestion).toBeVisible();
+      await expect(continueQuestion).toBeDisabled();
+      await question.fill("如何开始学习？");
+      await expect(continueQuestion).toBeEnabled();
       await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
       await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
       const start = page.getByRole("navigation", { name: "学习工具", exact: true }).filter({ has: page.getByRole("link", { name: "新建课程", exact: true }) }).getByRole("link", { name: "新建课程", exact: true });
