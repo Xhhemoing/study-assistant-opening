@@ -123,6 +123,12 @@ describe("startup validation", () => {
     expect(issuesOf(() => loadServerConfig(env, "web", { compiledBuildDigest: computeBuildConfigDigest({ NEXT_PUBLIC_X: "1" }) })).join()).toMatch(/digest mismatch/);
   });
 
+  it("invalid study session account IDs fail startup without echoing the list", () => {
+    const issues = issuesOf(() => loadServerConfig({ ...devEnv(), OPENING_STUDY_SESSION_V2_USERS: "private-account,*" }, "web"));
+    expect(issues).toContain("OPENING_STUDY_SESSION_V2_USERS: expected at most 100 explicit account IDs (no wildcard)");
+    expect(issues.join("\n")).not.toContain("private-account");
+  });
+
   it("issues never echo secret values", () => {
     const issues = collectEnvIssues({ ...devEnv(), AUTH_SECRET: "short-secret-marker" }, "web");
     expect(issues.join("\n")).not.toContain("short-secret-marker");
@@ -159,6 +165,36 @@ describe("capabilities", () => {
       expect(resolveCapabilities(switches, userId)).toMatchObject({ matrixTransformInteractive: true, planAgent: false,
         teachingLoop: { api: userId !== null, ui: userId !== null } });
     }
+  });
+
+  it("enables study session V2 only for explicit accounts when the global switch is off", () => {
+    const switches = sw({ OPENING_STUDY_SESSION_V2: "0", OPENING_STUDY_SESSION_V2_USERS: " learner-1, Learner_2, ," });
+    expect(resolveCapabilities(switches, "learner-1").studySessionV2).toBe(true);
+    expect(resolveCapabilities(switches, "Learner_2").studySessionV2).toBe(true);
+    for (const userId of ["other", "learner", "learner_2", null]) {
+      expect(resolveCapabilities(switches, userId).studySessionV2).toBe(false);
+    }
+  });
+
+  it("keeps the global study session switch compatible and anonymous access closed", () => {
+    const switches = sw({ OPENING_STUDY_SESSION_V2: "1", OPENING_STUDY_SESSION_V2_USERS: "learner" });
+    for (const userId of ["learner", "other"]) expect(resolveCapabilities(switches, userId).studySessionV2).toBe(true);
+    expect(resolveCapabilities(switches, null).studySessionV2).toBe(false);
+    for (const env of [{ OPENING_TEACHING_LOOP: "0" }, { OPENING_TEACHING_WORKSPACE: "0" }]) {
+      const disabled = sw({ ...env, OPENING_STUDY_SESSION_V2: "1", OPENING_STUDY_SESSION_V2_USERS: "learner", OPENING_STUDY_SESSION_V2_PHOTO_ANSWER: "1" });
+      expect(resolveCapabilities(disabled, "learner")).toMatchObject({ studySessionV2: false, studySessionV2PhotoAnswer: false });
+    }
+  });
+
+  it.each(["0", "1"])("photo answers require per-account V2 access and photo switch=%s", (photo) => {
+    const switches = sw({ OPENING_STUDY_SESSION_V2_USERS: "learner", OPENING_STUDY_SESSION_V2_PHOTO_ANSWER: photo });
+    expect(resolveCapabilities(switches, "learner")).toMatchObject({ studySessionV2: true, studySessionV2PhotoAnswer: photo === "1" });
+    for (const userId of ["other", null]) {
+      expect(resolveCapabilities(switches, userId)).toMatchObject({ studySessionV2: false, studySessionV2PhotoAnswer: false });
+    }
+    const global = sw({ OPENING_STUDY_SESSION_V2: "1", OPENING_STUDY_SESSION_V2_PHOTO_ANSWER: photo });
+    expect(resolveCapabilities(global, "other").studySessionV2PhotoAnswer).toBe(photo === "1");
+    expect(resolveCapabilities(global, null).studySessionV2PhotoAnswer).toBe(false);
   });
 
   it("chat 图解 is off by default and follows OPENING_CHAT_ARTIFACTS", () => {

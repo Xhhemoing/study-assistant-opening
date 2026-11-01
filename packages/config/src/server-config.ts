@@ -114,6 +114,14 @@ export function collectEnvIssues(source: Source, role: ServerRole): string[] {
   return issues;
 }
 
+function parseAccountIds(source: Source, name: string, issues: string[]): string[] {
+  const ids = present(source, name)?.split(",").map(value => value.trim()).filter(Boolean) ?? [];
+  if (ids.length > 100 || ids.some(value => !/^[a-zA-Z0-9_-]{1,128}$/.test(value))) {
+    issues.push(`${name}: expected at most 100 explicit account IDs (no wildcard)`);
+  }
+  return ids;
+}
+
 export type FeatureSwitches = {
   teachingLoop: { api: boolean; ui: boolean };
   chatArtifacts: boolean;
@@ -125,6 +133,7 @@ export type FeatureSwitches = {
   adaptivePlanning: boolean;
   systemQuery: boolean;
   studySessionV2?: boolean;
+  studySessionV2Users?: readonly string[];
   studySessionV2PhotoAnswer?: boolean;
 };
 
@@ -144,11 +153,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "shadow";
   const chatSenseWeave = senseWeaveRaw === "off" || senseWeaveRaw === "shadow" || senseWeaveRaw === "on" ? senseWeaveRaw : "off";
   if (chatSenseWeave !== senseWeaveRaw) issues.push(`OPENING_CHAT_SENSEWEAVE: must be one of off, shadow, on`);
-  const betaUsersRaw = present(source, "OPENING_CHAT_SENSEWEAVE_BETA_USERS");
-  const senseWeaveBetaUsers = betaUsersRaw?.split(",").map(value => value.trim()).filter(Boolean) ?? [];
-  if (senseWeaveBetaUsers.length > 100 || senseWeaveBetaUsers.some(value => !/^[a-zA-Z0-9_-]{1,128}$/.test(value))) {
-    issues.push("OPENING_CHAT_SENSEWEAVE_BETA_USERS: expected at most 100 explicit account IDs (no wildcard)");
-  }
+  const senseWeaveBetaUsers = parseAccountIds(source, "OPENING_CHAT_SENSEWEAVE_BETA_USERS", issues);
   let senseWeaveGates = SENSEWEAVE_INITIAL_GATES;
   const gatesRaw = present(source, "OPENING_CHAT_SENSEWEAVE_GATES");
   if (gatesRaw) {
@@ -158,12 +163,13 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const openingRelease = read("OPENING_RELEASE", present(source, "NODE_ENV") === "production");
   const adaptivePlanning = read("OPENING_ADAPTIVE_PLANNING", false);
   const studySessionV2 = read("OPENING_STUDY_SESSION_V2", false);
+  const studySessionV2Users = parseAccountIds(source, "OPENING_STUDY_SESSION_V2_USERS", issues);
   const studySessionV2PhotoAnswer = read("OPENING_STUDY_SESSION_V2_PHOTO_ANSWER", false);
   const systemQuery = read("OPENING_SYSTEM_QUERY", true);
   if (issues.length) throw new EnvValidationError(issues);
   return {
     teachingLoop: { api, ui }, chatArtifacts, chatProse, chatSenseWeave, openingRelease,
-    adaptivePlanning, systemQuery, studySessionV2, studySessionV2PhotoAnswer,
+    adaptivePlanning, systemQuery, studySessionV2, studySessionV2Users, studySessionV2PhotoAnswer,
     senseWeaveBetaUsers, senseWeaveGates,
   };
 }
@@ -171,6 +177,8 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
 /** Per-user, secret-free capabilities. Anonymous users get the loop closed. */
 export function resolveCapabilities(switches: FeatureSwitches, userId: string | null): OpeningCapabilities {
   const api = userId !== null && switches.teachingLoop.api;
+  const studySessionV2 = api && switches.teachingLoop.ui
+    && (switches.studySessionV2 === true || (userId !== null && switches.studySessionV2Users?.includes(userId) === true));
   return {
     ...CLOSED_CAPABILITIES,
     teachingLoop: { api, ui: api && switches.teachingLoop.ui },
@@ -186,8 +194,8 @@ export function resolveCapabilities(switches: FeatureSwitches, userId: string | 
     adaptivePlanning: switches.adaptivePlanning,
     planAgent: false,
     systemQuery: userId !== null && switches.systemQuery,
-    studySessionV2: api && switches.teachingLoop.ui && switches.studySessionV2 === true,
-    studySessionV2PhotoAnswer: api && switches.teachingLoop.ui && switches.studySessionV2 === true && switches.studySessionV2PhotoAnswer === true,
+    studySessionV2,
+    studySessionV2PhotoAnswer: studySessionV2 && switches.studySessionV2PhotoAnswer === true,
   };
 }
 
