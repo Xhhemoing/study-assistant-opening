@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { CourseRouteRequirementInput, CourseRouteSnapshot } from "@aistudy/contracts";
 import { CourseRoutePanel, parsePhysicalPages } from "./course-route-panel";
+import { createCourseRouteClient } from "./course-route-client";
 import type { CourseRouteClient } from "./course-route-client";
 const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const requirement: CourseRouteRequirementInput = { id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "concept-one", title: "概念一", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "manual", status: "needs_check", exerciseKeys: [], rubric: "独立解释概念", missingReasons: [] }, origin: "confirmed" };
@@ -27,7 +28,9 @@ it.each([["", []], ["3,4,3", [3, 4]] as const])("parses valid physical pages %s"
 it.each(["0", "-1", "3,,4", "3,a"])("rejects invalid physical pages %s", value => { expect(parsePhysicalPages(value)).toBeNull(); });
 it("submits selected pages and an unscoped selected material through the client", async () => {
   const materialB = "22222222-2222-4222-8222-222222222222";
-  const api = client({ ...snapshot, materials: [{ ...snapshot.materials[0], title: "资料 A" }, { ...snapshot.materials[1], sourceId: materialB, title: "资料 B" }], suggestions: [{ ...requirement, sourceRefs: [] }] });
+  let putBody: unknown;
+  const serverSnapshot = { ...snapshot, materials: [{ ...snapshot.materials[0], title: "资料 A" }, { ...snapshot.materials[1], sourceId: materialB, title: "资料 B" }], suggestions: [{ ...requirement, sourceRefs: [] }] };
+  const api = createCourseRouteClient(async (_input, init) => { if (init?.method === "PUT") putBody = JSON.parse(String(init.body)); return new Response(JSON.stringify(serverSnapshot), { status: 200, headers: { "content-type": "application/json" } }); });
   await render(api);
   await act(async () => button("检查与确认课程范围").click());
   const materialChecks = [...host.querySelectorAll('input[type="checkbox"]')].filter(input => (input.parentElement?.textContent ?? "").startsWith("资料 ")) as HTMLInputElement[];
@@ -35,5 +38,18 @@ it("submits selected pages and an unscoped selected material through the client"
   const pageInput = host.querySelector('input[aria-label="资料 A物理页"]') as HTMLInputElement;
   await act(async () => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; setter.call(pageInput, "3,4,3"); pageInput.dispatchEvent(new Event("input", { bubbles: true })); pageInput.dispatchEvent(new Event("change", { bubbles: true })); });
   await act(async () => button("确认这份全课范围").click());
-  expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 0, page: 3 }, { sourceId: id, sourceVersion: 0, page: 4 }] }], confirmScope: true });
+  expect(putBody).toEqual({ expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 0, page: 3 }, { sourceId: id, sourceVersion: 0, page: 4 }] }], confirmScope: true });
+});
+it("does not resurrect pages after their material is unchecked", async () => {
+  const materialB = "22222222-2222-4222-8222-222222222222";
+  const api = client({ ...snapshot, materials: [{ ...snapshot.materials[0], title: "资料 A" }, { ...snapshot.materials[1], sourceId: materialB, title: "资料 B" }], suggestions: [{ ...requirement, sourceRefs: [] }] });
+  await render(api);
+  await act(async () => button("检查与确认课程范围").click());
+  const checks = [...host.querySelectorAll('input[type="checkbox"]')].filter(input => (input.parentElement?.textContent ?? "").startsWith("资料 ")) as HTMLInputElement[];
+  await act(async () => { checks[0].click(); checks[1].click(); });
+  const pageInput = host.querySelector('input[aria-label="资料 A物理页"]') as HTMLInputElement;
+  await act(async () => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; setter.call(pageInput, "3,4"); pageInput.dispatchEvent(new Event("input", { bubbles: true })); pageInput.dispatchEvent(new Event("change", { bubbles: true })); });
+  await act(async () => checks[0].click());
+  await act(async () => button("确认这份全课范围").click());
+  expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }] }], confirmScope: true });
 });
