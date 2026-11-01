@@ -18,7 +18,7 @@ import { spanPracticeScope, spanStartsWithHint } from "../../teaching/span/span-
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
-import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved } from "../../learning/practice-draft-storage";
+import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved, switchPracticeDraft } from "../../learning/practice-draft-storage";
 import { assertPracticeAttempt, readPracticeRecord } from "../../learning/practice-draft";
 import type { HelpState, NextAction, PhotoState, StepResult, StudySessionPort, StudySessionView, StudyStep } from "../model";
 
@@ -108,7 +108,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const sealed = Boolean(current?.submission);
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
     view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
-      sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo };
+      sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo,
+      canRedo: Boolean(record && adaptSpanResult(record).outcome !== "correct" && !retestId && !photo?.workSource
+        && !current?.submission?.input.workSource && !current?.start?.clientKey.startsWith("span-redo:")) };
     return view;
   }
 
@@ -127,14 +129,14 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const known = draft()!.attemptId;
     let created = false;
     if (known) attempt = (await client.getAttemptContext(known)).attempt;
-    else if (restored) attempt = restored;
+    else if (restored && !draft()?.start?.clientKey.startsWith("span-redo:")) attempt = restored;
     else {
       created = true;
       const start = update(current => ({ start: current.start ?? { clientKey: `span-start:${crypto.randomUUID()}`, sessionId: session.sessionId,
         sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } })).start!;
-      await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
+      if (!start.clientKey.startsWith("span-redo:")) await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
         body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: spanPracticeMoveId(session.intent.purpose, problemId!), ...(session.retestId ? { retestId: session.retestId } : {}) }) });
-      attempt = problemId === "reserved:auto"
+      attempt = start.clientKey.startsWith("span-redo:") ? await client.createAttempt(start.createInput!) : problemId === "reserved:auto"
         ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId, clientKey: start.clientKey, mode }) })
         : await client.createAttempt({ sessionId: session.sessionId, clientKey: start.clientKey, spanExercise: { sourceId, problemId: problemId!, version: 1 } });
     }
@@ -152,10 +154,11 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
 
     const state = await readPracticeRecord(client, session.courseId, current, draft()!.observationId);
     record = state.observation;
+    if (record?.answer && !draft()!.fields.answer) update({ fields: { answer: record.answer } });
     // Only replay levels the server already released for this attempt (legacy rule). Faded examples
     // open with hint 1 unless the learner is consolidating.
     const levels = [...new Set(details.hintLevels[current.id] ?? [])].sort();
-    if (created && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
+    if (created && !draft()!.start?.clientKey.startsWith("span-redo:") && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
     // Re-reading a released level is idempotent on the server (same release key), so this never adds help.
     hints = await Promise.all((retestId && !record ? [] : levels).map(async level => {
       const hint = await requestSpanHint(current, level);
@@ -210,6 +213,20 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       if (current.submission) throw new Error("答案已提交，不能再修改。");
       update({ fields: { answer: updateSpanDraftAnswer(current.fields.answer, change) } });
       return refresh();
+    },
+    async redo() {
+      if (draft()?.start?.clientKey.startsWith("span-redo:") && !draft()?.attemptId) return loadQuestion();
+      if (!view.canRedo || !record || !attempt?.spanExercise) return view;
+      const previous = draft()!;
+      const clientKey = `span-redo:${crypto.randomUUID()}`;
+      const next = emptyPracticeDraft(scope, { ...previous.fields, answer: record.answer,
+        assistance: delivered === "revealed" ? "revealed" : "hinted",
+        deliveredAssistance: delivered === "revealed" ? "revealed" : "hinted" });
+      next.start = { clientKey, sessionId: session.sessionId, sessionInput: previous.start!.sessionInput,
+        createInput: { sessionId: session.sessionId, clientKey, spanExercise: { sourceId: previous.fields.sourceId,
+          problemId: attempt.spanExercise.id, version: Number(attempt.spanExercise.version) } } };
+      switchPracticeDraft(scope, previous.id, next, storage());
+      return loadQuestion();
     },
     async primary() {
       if (view.blocked) return view;

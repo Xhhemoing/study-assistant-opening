@@ -83,7 +83,7 @@ describe("0094/0095 PDF segment persistence and execution fencing", () => {
       expect(result).toEqual({ pages: 1 });
       expect(starts).toEqual([1, 2, 2]);
       expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready",
-        error: { code: "PARSE_PARTIAL", retryable: true, message: expect.stringContaining("2-2") } });
+        error: { code: "PARSE_PARTIAL", retryable: true, message: "第 2 页未能识别，可以重新解析" } });
       expect(await f.sql`SELECT page,text FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
         .toEqual([{ page: 1, text: "Readable page 1" }]);
       expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId} ORDER BY page_start`)

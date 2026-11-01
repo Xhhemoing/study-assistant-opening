@@ -58,6 +58,7 @@ export type StudySessionView = {
   /** The session must not submit; a reason is shown instead of the primary action. */
   blocked?: string;
   result: StepResult | null;
+  canRedo?: boolean;
   next: NextAction | null;
   photo: PhotoState | null;
 };
@@ -66,6 +67,7 @@ export type StudySessionPort = {
   load(): Promise<StudySessionView>;
   edit(change: Partial<SpanDraftAnswer>): StudySessionView;
   primary(): Promise<StudySessionView>;
+  redo?(): Promise<StudySessionView>;
   help(): Promise<StudySessionView>;
   choosePhoto(file: File): Promise<StudySessionView>;
   removePhoto(): StudySessionView;

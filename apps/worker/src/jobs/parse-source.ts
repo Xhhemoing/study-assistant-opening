@@ -16,6 +16,7 @@ import type { OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
+import { createPdfPartialError } from "./pdf-partial-error";
 
 export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED_SOURCE"; }
 const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -146,7 +147,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const lowQualityPages = source.mime === "application/pdf" ? chunks.filter(chunk => checkPdfPageQuality(chunk.text).quality === "low_quality").map(chunk => chunk.page).filter((page): page is number => page != null) : [];
       const failedRanges = pdfResult?.failedRanges ?? [];
       if (failedRanges.length || lowQualityPages.length) {
-        await deps.sources.markParseState(scope, source.id, "ready", { code: "PARSE_PARTIAL", message: [failedRanges.length ? `第 ${failedRanges.join("、")} 页未能识别，可以重新解析` : "", lowQualityPages.length ? `第 ${lowQualityPages.join("、")} 页识别质量低` : ""].filter(Boolean).join("；"), retryable: failedRanges.length > 0 });
+        await deps.sources.markParseState(scope, source.id, "ready", createPdfPartialError(failedRanges, lowQualityPages));
       }
       return isImage ? { pages: 1, imageOnly: visualRecognitionUnavailable } : { pages: pages.length };
     } catch (error) {
