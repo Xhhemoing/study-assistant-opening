@@ -6,7 +6,7 @@ import { Suspense, useCallback, useEffect, useState, type ReactNode } from "reac
 import { CommandPalette } from "../search/command-palette";
 import { AssistantDrawer } from "../assistant/assistant-drawer";
 import { ConversationCompanionProvider } from "../assistant/conversation-companion";
-import { OpeningCapabilityNotice } from "../capabilities/capabilities-provider";
+import { OpeningCapabilityNotice, useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 import { AppShell, type ShellNav } from "../v3/shell/app-shell";
 import { FEATURES, type Feature } from "../v3/shell/features";
@@ -22,14 +22,6 @@ import { WorkspaceLayoutContext } from "./workspace-layout-context";
 const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
   ...FEATURES.find(item => item.route === href)!, label, placement,
 });
-const navigation = openingNavigation();
-const OPENING_NAV = {
-  label: "学习工作台导航",
-  mobileLabel: "学习工作台导航（移动端）",
-  core: navigation.filter(item => item.group === "core").map(item => navigationFeature(item.href, item.label, "core")),
-  tools: navigation.filter(item => item.group === "tools").map(item => navigationFeature(item.href, item.label, "tool")),
-  system: [],
-};
 
 /**
  * 生产壳层（UI v3）：v3 AppShell 负责导航、外观层与页面过渡；这里只接业务数据与全局能力：
@@ -48,7 +40,16 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   const [pendingCount, setPendingCount] = useState<number | null>(null);
   const { recent, unavailable: recentUnavailable } = useRecentConversations(pathname);
   const dueCount = useDueReviewCount(pathname);
-  const shellNav: ShellNav = { ...OPENING_NAV, isActive: (item, path) => navigationIsActive(item.route, path, search) };
+  const { studySessionV2 } = useOpeningCapabilities();
+  const navigation = openingNavigation({ studySessionV2 });
+  const shellNav: ShellNav = {
+    label: "学习工作台导航",
+    mobileLabel: "学习工作台导航（移动端）",
+    core: navigation.filter(item => item.group === "core").map(item => navigationFeature(item.href, item.label, "core")),
+    tools: navigation.filter(item => item.group === "tools").map(item => navigationFeature(item.href, item.label, "tool")),
+    system: [],
+    isActive: (item, path) => navigationIsActive(item.route, path, search, { studySessionV2 }),
+  };
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
   const toggleFocus = useCallback(() => setFocusMode(value => !value), []);
