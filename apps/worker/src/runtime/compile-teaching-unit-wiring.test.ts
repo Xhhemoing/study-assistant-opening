@@ -42,6 +42,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   createOpeningTeachingContentRepository: () => content,
   readOpeningTeachingCompilerFocus: readFocus,
   assertOpeningCourseRouteReady: vi.fn(async () => {}),
+  readOpeningCourseRouteEvidenceRefs: vi.fn(async () => null),
   createOpeningSourceEmbeddingsRepository: () => ({
     authorizeChunks: async (_scope: unknown, chunks: SourceChunk[]) => ({ chunks, privacyEpoch: 0 }),
     hasIndex: async () => false,
