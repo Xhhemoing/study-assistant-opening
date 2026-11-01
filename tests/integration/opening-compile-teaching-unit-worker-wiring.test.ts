@@ -163,7 +163,7 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     }
   });
 
-  it("course-route wiring keeps scoped evidence through provider input and durable publish", async () => {
+  it.each([false, true])("course-route wiring excludes relevant next chapters (whole source B: %s)", async (wholeSourceB) => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "0");
     vi.stubEnv("OPENING_PROVIDER_ALLOW_LOCAL", "1");
@@ -180,29 +180,68 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     const hashA = "a".repeat(64), hashB = "b".repeat(64);
     await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
       VALUES (${sourceA},${f.scope.workspaceId},'A','text/plain',1,${hashA},1,'uploaded','ready'),(${sourceB},${f.scope.workspaceId},'B','text/plain',1,${hashB},1,'uploaded','ready')`;
+    // All four excerpts match the actual requirement query. Next chapters must
+    // disappear because of the confirmed scope, not incidental lexical ranking.
     await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES
-      (${chunkA},${sourceA},1,1,'A本章合法范围'),(${chunkANext},${sourceA},1,2,'A下一章范围'),(${chunkB},${sourceB},1,1,'B本章合法范围'),(${chunkBNext},${sourceB},1,2,'B下一章范围')`;
-    const activity = await seedRoute(f, [{ sourceId: sourceA, sourceVersion: 1, chunkId: chunkA }, { sourceId: sourceB, sourceVersion: 1 }]);
+      (${chunkA},${sourceA},1,1,'本章知识：矩阵的秩与零空间。A本章合法范围'),
+      (${chunkANext},${sourceA},1,2,'本章知识：矩阵的秩与零空间。A下一章范围'),
+      (${chunkB},${sourceB},1,1,'本章知识：矩阵的秩与零空间。B本章合法范围'),
+      (${chunkBNext},${sourceB},1,2,'本章知识：矩阵的秩与零空间。B下一章范围')`;
+    const refs = [
+      { sourceId: sourceA, sourceVersion: 1, page: 1, chunkId: chunkA },
+      wholeSourceB ? { sourceId: sourceB, sourceVersion: 1 } : { sourceId: sourceB, sourceVersion: 1, page: 1, chunkId: chunkB },
+    ];
+    const activity = await seedRoute(f, refs);
     const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 }), chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
     const routeEvidence = await (await import("@aistudy/database")).readOpeningCourseRouteEvidenceRefs(f.sql, f.scope, activity.id);
-    expect(routeEvidence?.refs).toHaveLength(2);
-    expect(routeEvidence?.chunkIds).toEqual(expect.arrayContaining([chunkA, chunkB]));
+    const expectedIds = wholeSourceB ? [chunkA, chunkB, chunkBNext] : [chunkA, chunkB];
+    const excludedIds = wholeSourceB ? [chunkANext] : [chunkANext, chunkBNext];
+    expect(routeEvidence?.refs).toEqual(refs);
+    expect(routeEvidence?.chunkIds.slice().sort()).toEqual([...expectedIds].sort());
     const unit = await deps.ensureTeachingUnitId!(f.scope, { mode: "generate", activityId: activity.id, expectedContentVersion: 0, clientKey: randomUUID(), sourceIds: [sourceA, sourceB] });
     const payload = { mode: "generate" as const, activityId: activity.id, teachingUnitId: unit, expectedContentVersion: 0, clientKey: `route-${randomUUID()}`, sourceIds: [sourceA, sourceB] };
+
+    // Positive control: the same intent and sources without route scope pass
+    // all four chunks through the real production provider builder/retriever.
+    const unscoped = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+      clientKey: randomUUID(), intentKind: activity.intentKind, intentSummary: activity.intentSummary, createIntent: { control: true },
+    });
+    const control = await deps.buildProviderInput!(f.scope, { ...payload, activityId: unscoped.id });
+    expect(control.chunks.map(chunk => chunk.id).sort()).toEqual([chunkA, chunkANext, chunkB, chunkBNext].sort());
+    expect(control.chunks.find(chunk => chunk.id === chunkANext)?.text).toContain("A下一章范围");
+    expect(control.chunks.find(chunk => chunk.id === chunkBNext)?.text).toContain("B下一章范围");
+
+    // Spies observe the real builders used by the handler; no replacement implementation.
+    const providerSpy = vi.spyOn(deps, "buildProviderInput");
+    const publishSpy = vi.spyOn(deps, "buildPublishInput");
     modelCitations = [chunkA, chunkB];
     const job: OpeningJobRecord = { id: randomUUID(), workspaceId: f.scope.workspaceId, ownerUserId: f.scope.ownerUserId, key: randomUUID(), kind: "compile-teaching-unit", payload: {}, result: null, state: "running", privacyEpoch: 0 };
     const run = createCompileTeachingUnitHandler(deps);
     await run(job, payload);
+    expect(providerSpy).toHaveBeenCalledTimes(1);
+    const providerInput = await providerSpy.mock.results[0]!.value;
+    expect(providerInput.chunks.map(chunk => chunk.id).sort()).toEqual([...expectedIds].sort());
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    expect(publishSpy.mock.calls[0]![3]).toBe(providerInput);
     expect(modelRequests).toHaveLength(1);
     const prompt = modelRequests[0]!.messages.map(message => message.content).join("\n");
     expect(prompt).toContain("A本章合法范围");
     expect(prompt).toContain("B本章合法范围");
     expect(prompt).not.toContain("A下一章范围");
-    expect(prompt).not.toContain("B下一章范围");
+    if (wholeSourceB) expect(prompt).toContain("B下一章范围");
+    else expect(prompt).not.toContain("B下一章范围");
+    for (const id of excludedIds) {
+      expect(prompt).not.toContain(id);
+      expect(JSON.stringify(providerInput)).not.toContain(id);
+    }
     const published = await createOpeningTeachingContentRepository(f.sql).getActivitySpec(f.scope, activity.id);
-    expect(published?.sourceRefs.map(ref => ref.chunkId)).toEqual(expect.arrayContaining([chunkA, chunkB]));
-    expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(chunkANext);
-    expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(chunkBNext);
+    expect(published?.sourceRefs).toHaveLength(expectedIds.length);
+    expect(published?.sourceRefs).toEqual(expect.arrayContaining([
+      { sourceId: sourceA, version: 1, page: 1, chunkId: chunkA },
+      { sourceId: sourceB, version: 1, page: 1, chunkId: chunkB },
+      ...(wholeSourceB ? [{ sourceId: sourceB, version: 1, page: 2, chunkId: chunkBNext }] : []),
+    ]));
+    for (const id of excludedIds) expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(id);
   });
 
   it("production loader is scope-bound and rejects foreign refs", async () => {
