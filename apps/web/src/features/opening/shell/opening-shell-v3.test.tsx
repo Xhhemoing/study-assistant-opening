@@ -22,7 +22,6 @@ vi.mock("../assistant/assistant-view", () => ({ AssistantView: () => {
   useEffect(() => { data.chatMounts(); }, []);
   return <textarea aria-label="对话草稿" defaultValue="" />;
 } }));
-vi.mock("../capabilities/capabilities-provider", () => ({ OpeningCapabilityNotice: () => null }));
 vi.mock("../inbox/citation-reader-host", () => ({ CitationReaderHost: () => null }));
 vi.mock("./connection-notice", () => ({ ConnectionNotice: () => null }));
 vi.mock("./account-menu", () => ({ OpeningAccountMenu: ({ pendingCount, focusMode, onToggleFocus, recent = [] }: {
@@ -33,6 +32,8 @@ vi.mock("./recent-conversations", () => ({ useRecentConversations: () => ({
 }) }));
 vi.mock("./review-count", () => ({ useDueReviewCount: () => 7 }));
 
+import { CLOSED_CAPABILITIES } from "@aistudy/config/public";
+import { OpeningCapabilitiesContext } from "../capabilities/capabilities-provider";
 import { ConversationSurface } from "../assistant/conversation-companion";
 import { PageHeader } from "../v3/shell/page-header";
 import { OpeningShellV3 } from "./opening-shell-v3";
@@ -55,6 +56,29 @@ async function render(children: ReactNode = <PageHeader title="学习" />) {
 function desktopNavigation() { return host.querySelector('nav[aria-label="学习工作台导航"]')!; }
 
 describe("production V3 shell business wiring", () => {
+  it("updates desktop and mobile navigation with the current account capability", async () => {
+    data.pathname = "/opening/courses/course-a/study";
+    for (const studySessionV2 of [false, true, false]) {
+      await act(async () => root.render(
+        <OpeningCapabilitiesContext.Provider value={{ ...CLOSED_CAPABILITIES, studySessionV2 }}>
+          <OpeningShellV3><p>课程课堂</p></OpeningShellV3>
+        </OpeningCapabilitiesContext.Provider>,
+      ));
+      const expected = studySessionV2
+        ? [["/opening/today", "今日"], ["/opening/courses", "课程"], ["/opening/library", "资料"]]
+        : [["/opening/today", "学习"], ["/opening/review", "复习"], ["/opening/library", "资料"]];
+      for (const label of ["学习工作台导航", "学习工作台导航（移动端）"]) {
+        const nav = host.querySelector(`nav[aria-label="${label}"]`)!;
+        const links = [...nav.querySelectorAll("a[href]")];
+        expect(links.map(link => link.getAttribute("href"))).toEqual(expected.map(([href]) => href));
+        links.forEach((link, index) => {
+          expect(link.textContent).toContain(expected[index]![1]);
+          expect(link.getAttribute("aria-current")).toBe(index === (studySessionV2 ? 1 : 0) ? "page" : null);
+        });
+      }
+    }
+  });
+
   it("retains navigation collapse without exposing width adjustment", async () => {
     await render();
     expect(host.querySelector('[aria-label="调整导航宽度"]')).toBeNull();
