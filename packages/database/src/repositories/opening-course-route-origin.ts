@@ -32,3 +32,23 @@ export async function assertOpeningCourseRouteCurrent(tx:TransactionSql,scope:Sc
 export async function assertOpeningCourseRouteReady(sql:Sql,scope:Scope,activityId:string){
   return sql.begin(async tx=>{await lockWorkspaceLearningHistory(tx,scope);return assertOpeningCourseRouteCurrent(tx,scope,activityId);});
 }
+
+/** Resolve the selected route evidence without widening stale chunk refs to a source. */
+export async function readOpeningCourseRouteEvidenceRefs(sql:Sql,scope:Scope,activityId:string){
+  const context=await assertOpeningCourseRouteReady(sql,scope,activityId);
+  if(!context)return null;
+  const [activity]=await sql`SELECT course_id FROM opening_teaching_activities WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const courseId=String(activity!.course_id);
+  const requirement=(await readCourseRequirements(sql,scope,courseId)).find(item=>item.id===context.requirementId);
+  if(!requirement)throw learningError("CONFLICT","课程要求已变化，请重新读取课程路线；原答案保留。");
+  const refs=requirement.sourceRefs;
+  const chunks=await readCourseRouteSourceChunks(sql,scope,courseId);
+  const constrained=refs.filter(ref=>ref.chunkId!==undefined||ref.page!==undefined);
+  if(!constrained.length)return null;
+  const selected=chunks.filter(chunk=>constrained.some(ref=>ref.sourceId===chunk.sourceId&&ref.sourceVersion===chunk.sourceVersion
+    &&(ref.chunkId===undefined||ref.chunkId===chunk.id)&&(ref.page===undefined||ref.page===chunk.page)));
+  if(!selected.length||constrained.some(ref=>!selected.some(chunk=>chunk.sourceId===ref.sourceId&&chunk.sourceVersion===ref.sourceVersion
+    &&(ref.chunkId===undefined||ref.chunkId===chunk.id)&&(ref.page===undefined||ref.page===chunk.page))))
+    throw learningError("CONFLICT","所选课程材料片段已失效或换版，请重新选择材料后再生成讲义；不会回退整份教材。");
+  return {refs:constrained,chunkIds:selected.map(chunk=>chunk.id)};
+}

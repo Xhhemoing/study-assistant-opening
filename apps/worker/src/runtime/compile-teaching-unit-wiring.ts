@@ -8,6 +8,7 @@ import {
   readOpeningTeachingCompilerFocus,
   readOpeningTeachingParentBudget,
   assertOpeningCourseRouteReady,
+  readOpeningCourseRouteEvidenceRefs,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
@@ -56,12 +57,17 @@ export function createCompileTeachingUnitWorkerDeps(
           models.call(scope, input.imageParts.length ? "teaching.compile-visual" : "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options,
             beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } }),
         buildProviderInput: async (scope, payload, options) => {
+          const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
+          const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
+            const rows = await loadChunks(ownedScope, sourceIds);
+            return routeEvidence ? rows.filter(row => routeEvidence.chunkIds.includes(row.id)) : rows;
+          };
           const activity = await teachingActivities.get(scope, payload.activityId);
           const focus = await readOpeningTeachingCompilerFocus(sql, scope, payload.activityId);
           const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
           const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
           return createCompilerProviderInput({
-            loadChunks,
+            loadChunks: scopedLoadChunks,
             retrieveContext,
             loadPageImages: (ownedScope, input) => pageImages(ownedScope as Scope, input),
             readOutline: () => outline,
@@ -110,12 +116,17 @@ export function createCompileTeachingUnitWorkerDeps(
     },
     buildPublishInput: teachingCompilerOn
       ? async (scope, payload, providerOutput, providerInput) => {
+          const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
+          const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
+            const rows = await loadChunks(ownedScope, sourceIds);
+            return routeEvidence ? rows.filter(row => routeEvidence.chunkIds.includes(row.id)) : rows;
+          };
           const activity = await teachingActivities.get(scope, payload.activityId);
           const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
           const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
           let revisionNumber: number | null = null;
           const build = createTeachingCompilerPublishInput({
-            loadChunks,
+            loadChunks: scopedLoadChunks,
             evidenceChunks: providerInput?.chunks,
             readOutline: () => outline,
             intentSummary: activity?.intentSummary,
