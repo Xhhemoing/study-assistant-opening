@@ -189,6 +189,36 @@ it("keeps the wrong first answer immutable when the same lesson question is redo
   const [after] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${wrong.id}`;
   expect(after).toEqual(before);
   expect((await f.attempts.get(fixture.scope, first.id))?.observationId).toBe(wrong.id);
+  const issuer = createSpanReservedService(fixture.sql);
+  const request = { sessionId: lesson.sessionId, sourceId: f.sourceId, mode: "self_study", clientKey: randomUUID(), afterAttemptId: redo.id };
+  await expect(issuer.issue(fixture.scope, { ...request, afterAttemptId: first.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  const variant = await issuer.issue(fixture.scope, request), p = variant.spanExercise!;
+  expect(p.familyId).toBe(first.spanExercise!.familyId);
+  expect(spanProblemContentKey(p)).not.toBe(spanProblemContentKey(first.spanExercise!));
+  expect(variant).toMatchObject({ sessionId: lesson.sessionId, spanPracticeOriginAttemptId: redo.id, spanValidation: { eligible: false, firstFamilyExposure: false, reasonCode: "family_previously_issued" } });
+  expect(p.transfer).toBeUndefined();
+  expect((await issuer.issue(fixture.scope, { ...request, clientKey: randomUUID() })).id).toBe(variant.id);
+  const [helpCount] = await fixture.sql`SELECT count(*)::int AS n FROM opening_help_exposures WHERE attempt_id=${variant.id}`;
+  expect(helpCount!.n).toBe(0);
+  // New content has no prior answer exposure; an actual first answer is graded exactly.
+  const answer = { membership: "not_in_span", equation: p, noSolutionWitness: ["-2", "1", "1"] };
+  // The first fixed inconsistent candidate uses v=(1,0,2), w=(0,1,-1).
+  const independent = await service.submit(fixture.scope, variant.id, { clientKey: randomUUID(), answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent" });
+  expect(independent).toMatchObject({ outcome: "correct", assistance: "independent", serverEvaluation: { decision: "correct" } });
+  expect(independent.eligibility?.independentAttempt).toBe("yes");
+  await expect(issuer.issue(fixture.scope, { ...request, sessionId: f.session.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(issuer.issue(fixture.scope, { ...request, familyId: "span:rational-3d" })).rejects.toThrow();
+  // A second corrected, same-content attempt remains assisted after real help; a
+  // reserved redo retains content exposure and never becomes held-out validation.
+  const repeated = await service.create(fixture.scope, { sessionId: lesson.sessionId, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId, problemId: p.id, version: 1 } });
+  expect(repeated.spanValidation).toMatchObject({ eligible: false, reasonCode: "content_previously_issued" });
+  await createSpanHintService(fixture.sql).read(fixture.scope, { attemptId: repeated.id, level: 1 });
+  expect(await service.submit(fixture.scope, repeated.id, { clientKey: randomUUID(), answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent" })).toMatchObject({ outcome: "correct", assistance: "hinted" });
+  await fixture.sql`UPDATE opening_teaching_activities SET goal_json=goal_json || ${fixture.sql.json({ tutorNextAction: {} })} WHERE id=${lesson.activityId}`;
+  await expect(issuer.issue(fixture.scope, request)).rejects.toMatchObject({ code: "CONFLICT" });
+  await fixture.sql`UPDATE opening_teaching_activities SET goal_json=goal_json-'tutorNextAction' WHERE id=${lesson.activityId}`;
+  await fixture.sql`UPDATE opening_teaching_activities SET checkpoint_json=jsonb_set(checkpoint_json,'{spanLesson,retestId}',${fixture.sql.json(randomUUID())}) WHERE id=${lesson.activityId}`;
+  await expect(issuer.issue(fixture.scope, request)).rejects.toMatchObject({ code: "CONFLICT" });
 });
 
 it("keeps uncertain input unverified and fades assisted rather than independent", async () => {

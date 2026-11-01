@@ -59,6 +59,7 @@ export type StudySessionView = {
   blocked?: string;
   result: StepResult | null;
   canRedo?: boolean;
+  canPracticeVariant?: boolean;
   next: NextAction | null;
   photo: PhotoState | null;
 };
@@ -96,6 +97,7 @@ export function primaryAction(view: StudySessionView, pending: boolean): Primary
     : { kind: "flip", label: "翻面核对", disabled: pending };
   if (view.step.kind === "learn") return { kind: "continue", label: "开始做题", disabled: pending };
   if (view.next) return { kind: "next", label: view.next.label, disabled: pending };
+  if (view.canPracticeVariant) return { kind: "next", label: "同族新题，独立做一次", disabled: pending };
   if (view.result) return { kind: "next", label: "看下一步安排", disabled: pending };
   if (view.sealed) return { kind: "submit", label: "重新确认提交", disabled: pending };
   const photoBusy = view.photo && ["uploading", "preparing"].includes(view.photo.status);
