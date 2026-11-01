@@ -194,6 +194,38 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
   } finally { await ui.unmount(); }
 });
 
+it.each([false, true])("the final reserved step excludes answered practice variants (existing final: %s)", async hasFinal => {
+  const { attempt, details } = fixture("self_study-reserved");
+  const exercise = listSpanReservedProblems("validation").find(row => row.id === "span-reserved-20261021-q02")!;
+  const variant = learningAttemptSchema.parse({ ...attempt, id: uuid(), contextAnchor: undefined,
+    spanExercise: exercise, historyRevision: 5, spanPracticeOriginAttemptId: attempt.id });
+  const final = learningAttemptSchema.parse({ ...attempt, id: uuid(), contextAnchor: undefined,
+    spanExercise: listSpanReservedProblems("validation").find(row => row.id !== exercise.id && row.familyId === exercise.familyId), historyRevision: 4 });
+  const solved = solveSpanProblem(exercise);
+  if (solved.kind !== "unique") throw new Error("expected unique validation fixture");
+  const answer = { membership: "in_span", coefficients: solved.coefficients,
+    vectorEquation: { v: exercise.vectors[0], w: exercise.vectors[1], u: exercise.target }, substitutedVector: exercise.target };
+  expect(verifySpanAnswer(exercise, answer).outcome).toBe("correct");
+  const observation = { id: uuid(), attemptId: variant.id, answer: JSON.stringify(answer), assistance: "independent",
+    serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as LearningObservation;
+  details.attempts = hasFinal ? [attempt, final, variant] : [attempt, variant];
+  details.observations = [observation];
+  mocks.read.mockImplementation(async (_client, _course, current) => ({ observation: current.id === variant.id ? observation : null, deliveredAssistance: "none" }));
+  mocks.request.mockImplementation(async (path: string, schema: { parse: (raw: unknown) => unknown }) => schema.parse(path.endsWith("/reserved") ? final : {}));
+  const port = createSpanStudySession(details, vi.fn());
+  const view = await port.load();
+  expect(view.step.id).toBe(final.id);
+  expect(view.result).toBeNull();
+  expect(view.answer).toEqual({});
+  expect(view.canPracticeVariant).toBe(false);
+  expect(mocks.read.mock.calls.every(call => call[2].id === final.id)).toBe(true);
+  const requests = mocks.request.mock.calls.filter(call => String(call[0]).endsWith("/reserved"));
+  expect(requests).toHaveLength(hasFinal ? 0 : 1);
+  if (!hasFinal) expect(JSON.parse(requests[0]![2].body)).not.toHaveProperty("afterAttemptId");
+  expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
+  expect(mocks.createAttempt).not.toHaveBeenCalled();
+});
+
 it.each(["correct", "retest"])("does not offer redo for %s", async scenario => {
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   details.attempts = [attempt];

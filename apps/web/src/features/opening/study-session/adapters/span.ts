@@ -131,9 +131,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const restored = [...details.attempts]
       .filter(row => !evidence || !isSpanReservedProblemId(row.spanExercise?.id) || row.startedAt >= evidence.createdAt)
       .sort((a, b) => b.historyRevision - a.historyRevision || b.startedAt.localeCompare(a.startedAt))
-      .find(row => problemId === "reserved:auto" ? isSpanReservedProblemId(row.spanExercise?.id) : row.spanExercise?.id === problemId);
+      .find(row => problemId === "reserved:auto" ? isSpanReservedProblemId(row.spanExercise?.id) && !row.spanPracticeOriginAttemptId : row.spanExercise?.id === problemId);
     const known = draft()!.attemptId;
-    const issuedVariant = restored && !known && !draft()?.start ? restored.spanPracticeOriginAttemptId ? restored : details.attempts
+    const issuedVariant = !retestId && problemId !== "reserved:auto" && restored && !known && !draft()?.start ? restored.spanPracticeOriginAttemptId ? restored : details.attempts
       .filter(row => row.sessionId === session.sessionId && row.spanPracticeOriginAttemptId === restored.id)
       .sort((a, b) => b.historyRevision - a.historyRevision)[0] : undefined;
     if (issuedVariant) update({ start: { clientKey: `span-variant:${issuedVariant.spanPracticeOriginAttemptId}`, sessionId: session.sessionId,
@@ -255,9 +255,11 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       if (record) {
         if (correctedRedo()) {
           const previous = draft()!;
-          const next = emptyPracticeDraft(scope, { sourceId, spanProblemId: problemId!, skillLabel: SKILL, assistance: "independent" });
+          const variantSourceId = previous.fields.sourceId;
+          if (!variantSourceId || !current.sourceIds.includes(variantSourceId)) throw new Error("原题关联资料暂时无法核实。");
+          const next = emptyPracticeDraft(scope, { sourceId: variantSourceId, spanProblemId: problemId!, skillLabel: SKILL, assistance: "independent" });
           next.start = { clientKey: `span-variant:${current.id}`, sessionId: session.sessionId,
-            sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null };
+            sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [variantSourceId], skillLabel: SKILL }, createInput: null };
           switchPracticeDraft(scope, previous.id, next, storage());
           photo = options.photoEnabled ? { status: "none" } : null;
           return loadQuestion();
