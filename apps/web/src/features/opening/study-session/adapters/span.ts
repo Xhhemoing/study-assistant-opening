@@ -100,6 +100,11 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   let hints: { level: SpanHintLevel; text: string }[] = [];
   let delivered: HelpState["level"] = "none";
   let photo: PhotoState | null = options.photoEnabled ? { status: "none" } : null;
+  const variantOrigin = () => draft()?.start?.clientKey.startsWith("span-variant:") ? draft()!.start!.clientKey.slice("span-variant:".length) : null;
+  const correctedRedo = () => Boolean(record && attempt && adaptSpanResult(record).outcome === "correct"
+    && session.intent.purpose === "self_study" && !retestId && !variantOrigin()
+    && (draft()?.start?.clientKey.startsWith("span-redo:") || details.attempts.some(row => row.id !== attempt!.id
+      && row.itemVersionId === attempt!.itemVersionId && details.observations.some(observation => observation.attemptId === row.id && observation.serverEvaluation?.decision === "incorrect"))));
 
   const blockedView = (step: StudyStep, blocked: string): StudySessionView =>
     ({ step, position, help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, blocked, result: null, next: null, photo: null });
@@ -109,6 +114,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
     view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
       sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo,
+      canPracticeVariant: correctedRedo(),
       canRedo: Boolean(record && adaptSpanResult(record).outcome !== "correct" && !retestId && !photo?.workSource
         && !current?.submission?.input.workSource && !current?.start?.clientKey.startsWith("span-redo:")) };
     return view;
@@ -124,19 +130,27 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
     const restored = [...details.attempts]
       .filter(row => !evidence || !isSpanReservedProblemId(row.spanExercise?.id) || row.startedAt >= evidence.createdAt)
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .sort((a, b) => b.historyRevision - a.historyRevision || b.startedAt.localeCompare(a.startedAt))
       .find(row => problemId === "reserved:auto" ? isSpanReservedProblemId(row.spanExercise?.id) : row.spanExercise?.id === problemId);
     const known = draft()!.attemptId;
+    const issuedVariant = restored && !known && !draft()?.start ? restored.spanPracticeOriginAttemptId ? restored : details.attempts
+      .filter(row => row.sessionId === session.sessionId && row.spanPracticeOriginAttemptId === restored.id)
+      .sort((a, b) => b.historyRevision - a.historyRevision)[0] : undefined;
+    if (issuedVariant) update({ start: { clientKey: `span-variant:${issuedVariant.spanPracticeOriginAttemptId}`, sessionId: session.sessionId,
+      sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } });
     let created = false;
     if (known) attempt = (await client.getAttemptContext(known)).attempt;
-    else if (restored && !draft()?.start?.clientKey.startsWith("span-redo:")) attempt = restored;
+    else if (issuedVariant) attempt = issuedVariant;
+    else if (restored && !draft()?.start?.clientKey.startsWith("span-redo:") && !variantOrigin()) attempt = restored;
     else {
       created = true;
       const start = update(current => ({ start: current.start ?? { clientKey: `span-start:${crypto.randomUUID()}`, sessionId: session.sessionId,
         sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } })).start!;
-      if (!start.clientKey.startsWith("span-redo:")) await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
+      if (!start.clientKey.startsWith("span-redo:") && !variantOrigin()) await spanLessonRequest("/api/opening/teaching/span/session", z.unknown(), { method: "POST",
         body: JSON.stringify({ sessionId: session.sessionId, intent: session.intent, clientKey: start.clientKey, moveId: spanPracticeMoveId(session.intent.purpose, problemId!), ...(session.retestId ? { retestId: session.retestId } : {}) }) });
-      attempt = start.clientKey.startsWith("span-redo:") ? await client.createAttempt(start.createInput!) : problemId === "reserved:auto"
+      attempt = variantOrigin()
+        ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId, clientKey: start.clientKey, mode, afterAttemptId: variantOrigin() }) })
+        : start.clientKey.startsWith("span-redo:") ? await client.createAttempt(start.createInput!) : problemId === "reserved:auto"
         ? await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: session.sessionId, sourceId, clientKey: start.clientKey, mode }) })
         : await client.createAttempt({ sessionId: session.sessionId, clientKey: start.clientKey, spanExercise: { sourceId, problemId: problemId!, version: 1 } });
     }
@@ -158,7 +172,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     // Only replay levels the server already released for this attempt (legacy rule). Faded examples
     // open with hint 1 unless the learner is consolidating.
     const levels = [...new Set(details.hintLevels[current.id] ?? [])].sort();
-    if (created && !draft()!.start?.clientKey.startsWith("span-redo:") && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
+    if (created && !variantOrigin() && !draft()!.start?.clientKey.startsWith("span-redo:") && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
     // Re-reading a released level is idempotent on the server (same release key), so this never adds help.
     hints = await Promise.all((retestId && !record ? [] : levels).map(async level => {
       const hint = await requestSpanHint(current, level);
@@ -230,6 +244,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     },
     async primary() {
       if (view.blocked) return view;
+      if (variantOrigin() && !draft()?.attemptId) return loadQuestion();
       if (view.step.kind === "learn") {
         if (!await save(session.intent, moves[index + 1]!.id, "active")) throw new Error("学习进度还没保存，请再试一次。");
         return view;
@@ -238,6 +253,15 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       if (view.next) return view;
       const current = attempt!;
       if (record) {
+        if (correctedRedo()) {
+          const previous = draft()!;
+          const next = emptyPracticeDraft(scope, { sourceId, spanProblemId: problemId!, skillLabel: SKILL, assistance: "independent" });
+          next.start = { clientKey: `span-variant:${current.id}`, sessionId: session.sessionId,
+            sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null };
+          switchPracticeDraft(scope, previous.id, next, storage());
+          photo = options.photoEnabled ? { status: "none" } : null;
+          return loadQuestion();
+        }
         // Ordinary self-study advances within this lesson via its existing progress owner.
         // Adaptive follow-up (including the final/reserved step and retests) keeps /next admission.
         const nextMove = moves[index + 1];

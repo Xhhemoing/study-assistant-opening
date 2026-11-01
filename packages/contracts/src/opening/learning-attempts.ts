@@ -50,6 +50,7 @@ export const learningAttemptSchema = z.object({
   preAnswerConfidence: preAnswerConfidenceSchema.nullable().optional(),
   contextAnchor: studyContextAnchorSchema.optional(),
   spanExercise: spanProblemSchema.optional(),
+  spanPracticeOriginAttemptId: uuidSchema.optional(),
   spanValidation: z.object({ eligible: z.boolean(), firstFamilyExposure: z.boolean(), reasonCode: z.string().nullable() }).strict().optional(),
   matrixExercise: matrixExerciseSpecSchema.optional(),
 }).strict();
