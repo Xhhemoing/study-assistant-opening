@@ -364,7 +364,8 @@ else
   node "$RELEASE/infra/deploy/hermes-health.mjs" capture "$CONFIG" "$OLD_TARGET" "$WORKER_REQUIRED" "$TRANSITION/worker-identity.json"
   cd -- "$RELEASE"
   npm ci --no-audit --no-fund > "$TRANSITION/install.log" 2>&1
-  AISTUDY_COMMIT="$COMMIT" npm run build > "$TRANSITION/build.log" 2>&1
+  # The caller verified this exact SHA's push CI (lint + typecheck) before deploy.
+  AISTUDY_COMMIT="$COMMIT" AISTUDY_RELEASE_VERIFIED_SHA=1 npm run build > "$TRANSITION/build.log" 2>&1
   mkdir -p apps/web/.next/standalone/apps/web/.next/static apps/web/.next/standalone/apps/web/public
   cp -a apps/web/.next/static/. apps/web/.next/standalone/apps/web/.next/static/
   if [[ -d apps/web/public ]]; then cp -a apps/web/public/. apps/web/.next/standalone/apps/web/public/; fi
