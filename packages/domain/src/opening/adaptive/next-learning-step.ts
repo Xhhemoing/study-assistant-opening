@@ -74,6 +74,14 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);
   if (check("diagnose", !latest, "no_evidence", "has_current_evidence", refs)) return result("diagnose", "no_evidence");
+  const assistedErrors = observations.filter(row => row.verifiedCorrect === "no"
+    && (row.assistance === "hinted" || row.assistance === "revealed") && row.errors?.some(error => error.source === "verified_steps"));
+  const [newerError, olderError] = assistedErrors;
+  const sharedError = newerError?.errors?.find(error => error.source === "verified_steps"
+    && olderError?.errors?.some(previous => previous.source === "verified_steps" && previous.label === error.label));
+  if (check("full_explain", Boolean(newerError && olderError && sharedError), "repeated_assisted_error", "not_repeated_assisted_error",
+    newerError && olderError ? [`observation:${newerError.id}`, `observation:${olderError.id}`] : refs))
+    return result("full_explain", "repeated_assisted_error", newerError!.id);
   if (check("targeted_explain", latest!.verifiedCorrect === "no", "verified_incorrect", "latest_not_verified_incorrect", [`observation:${latest!.id}`]))
     return result("targeted_explain", "verified_incorrect", latest!.id);
   if (check("diagnose", observations.every(row => row.verifiedCorrect === "unknown"), "unverified_only", "has_verified_evidence", refs)) return result("diagnose", "unverified_only");

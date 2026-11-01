@@ -58,6 +58,7 @@ describe("nextLearningStep", () => {
     expect(captured.candidates).toEqual([
       { action: "full_explain", eligible: false, reasonCodes: ["not_requested_full"], evidenceRefs: [] },
       { action: "diagnose", eligible: false, reasonCodes: ["has_current_evidence"], evidenceRefs: ["observation:latest-observation"] },
+      { action: "full_explain", eligible: false, reasonCodes: ["not_repeated_assisted_error"], evidenceRefs: ["observation:latest-observation"] },
       { action: "targeted_explain", eligible: true, reasonCodes: ["verified_incorrect"], evidenceRefs: ["observation:latest-observation"] },
     ]);
   });
@@ -99,6 +100,24 @@ describe("nextLearningStep", () => {
       });
     },
   );
+
+  it("switches to a full example after two assisted exact errors at the same step", () => {
+    const error = { observationId: "latest-error", label: "coefficient", feedback: "wrong", source: "verified_steps" as const };
+    expect(nextLearningStep(input({ observations: [
+      observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] }),
+      observation({ id: "older-error", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "older-error" }] }),
+    ] }))).toEqual({ activityKind: "full_explain", focusObservationId: "latest-error", reasonCode: "repeated_assisted_error" });
+  });
+
+  it("does not switch route without two distinct usable assisted errors sharing a step", () => {
+    const error = { observationId: "latest-error", label: "coefficient", feedback: "wrong", source: "verified_steps" as const };
+    for (const observations of [
+      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] })],
+      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", errors: [error] }), observation({ id: "different", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "different", label: "membership" }] })],
+      [observation({ id: "latest-error", verifiedCorrect: "no", assistance: "hinted", usableForCurrentVersion: "no", errors: [error] }), observation({ id: "different", verifiedCorrect: "no", assistance: "revealed", errors: [{ ...error, observationId: "different" }] })],
+      [observation({ id: "latest-error", verifiedCorrect: "unknown", assistance: "hinted", errors: [error] }), observation({ id: "different", verifiedCorrect: "unknown", assistance: "revealed", errors: [{ ...error, observationId: "different" }] })],
+    ]) expect(nextLearningStep(input({ observations }))).toMatchObject({ activityKind: "targeted_explain" });
+  });
 
   it("diagnoses unverified attempts before interpreting hints or an independent status", () => {
     expect(nextLearningStep(input({
