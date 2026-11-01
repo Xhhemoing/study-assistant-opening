@@ -355,11 +355,12 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         const current = mapSource(currentRows[0] as Record<string, unknown>);
         if (current.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "Only uploaded sources can be parsed again");
-        if (current.parseState !== "failed") throw new OpeningSourceError("CONFLICT", "Only failed sources can be parsed again");
+        if (current.parseState !== "failed" && !(current.parseState === "ready" && current.error?.code === "PARSE_PARTIAL" && current.error.retryable === true)) throw new OpeningSourceError("CONFLICT", "Only failed or retryable partial sources can be parsed again");
         if (current.error?.code === "PRIVACY_EXCLUDED") throw new OpeningSourceError("CONFLICT", "Excluded sources cannot be parsed again");
         const sourceRows = await tx`UPDATE opening_sources
           SET parse_state='queued', error=NULL, updated_at=now()
-          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded' AND parse_state='failed'
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded'
+            AND (parse_state='failed' OR (parse_state='ready' AND error->>'code'='PARSE_PARTIAL' AND (error->>'retryable')::boolean))
           RETURNING *`;
         if (!sourceRows.length) throw new OpeningSourceError("CONFLICT", "Source parse state changed; refresh and try again");
         const jobId = randomUUID();
