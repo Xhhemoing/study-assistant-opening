@@ -35,5 +35,5 @@ it("submits selected pages and an unscoped selected material through the client"
   const pageInput = host.querySelector('input[aria-label="资料 A物理页"]') as HTMLInputElement;
   await act(async () => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; setter.call(pageInput, "3,4,3"); pageInput.dispatchEvent(new Event("input", { bubbles: true })); pageInput.dispatchEvent(new Event("change", { bubbles: true })); });
   await act(async () => button("确认这份全课范围").click());
-  expect(api.confirm).toHaveBeenCalledWith(courseId, expect.objectContaining({ requirements: [expect.objectContaining({ sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 0, page: 3 }, { sourceId: id, sourceVersion: 0, page: 4 }] })] }));
+  expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 0, page: 3 }, { sourceId: id, sourceVersion: 0, page: 4 }] }], confirmScope: true });
 });
