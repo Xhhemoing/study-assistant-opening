@@ -47,6 +47,7 @@ async function seedRoute(f: OpeningFixture, refs: CourseRouteRequirementInput["s
 
 let f: OpeningFixture;
 const modelRequests: Array<{ model: string; messages: Array<{ role: string; content: string }> }> = [];
+let modelCitations: string[] = [];
 const modelServer = createServer(async (request, response) => {
   if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
     response.writeHead(404).end();
@@ -60,15 +61,15 @@ const modelServer = createServer(async (request, response) => {
     choices: [{ message: { content: JSON.stringify({
       itemTitles: ["秩与零空间"],
       blocks: [
-        { type: "text", text: "矩阵的秩与零空间维数之和等于列数。" },
-        { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？" },
-        { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", hints: {
+        { type: "text", text: "矩阵的秩与零空间维数之和等于列数。", citedChunkIds: modelCitations },
+        { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: modelCitations },
+        { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", citedChunkIds: modelCitations, hints: {
           direction: "先找矩阵的列数与秩。", concept: "秩与零空间维数之和等于列数。",
           firstStep: "将列数 5 和秩 2 代入 rank(A) + dim N(A) = 5。",
         } },
-        { type: "text", text: "再换一个列数，检查主元与自由变量的关系。" },
-        { type: "prompt", text: "一个 3×4 矩阵的秩为 2，零空间维数是多少？" },
-        { type: "answer_key", ...rankPedagogy, text: "4 − 2 = 2", hints: { direction: "先找列数。", concept: "主元和自由变量合计为列数。", firstStep: "写出 2 + dim N(A) = 4。" } },
+        { type: "text", text: "再换一个列数，检查主元与自由变量的关系。", citedChunkIds: modelCitations },
+        { type: "prompt", text: "一个 3×4 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: modelCitations },
+        { type: "answer_key", ...rankPedagogy, text: "4 − 2 = 2", citedChunkIds: modelCitations, hints: { direction: "先找列数。", concept: "主元和自由变量合计为列数。", firstStep: "写出 2 + dim N(A) = 4。" } },
       ],
     }) }, finish_reason: "stop" }],
     usage: { prompt_tokens: 100, completion_tokens: 100 },
@@ -81,7 +82,7 @@ beforeAll(async () => {
     modelServer.listen(0, "127.0.0.1", resolve);
   });
 });
-beforeEach(async () => { await f.reset(); modelRequests.length = 0; });
+beforeEach(async () => { await f.reset(); modelRequests.length = 0; modelCitations = []; });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 afterAll(async () => {
   await f?.close();
@@ -162,23 +163,46 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     }
   });
 
-  it("course-route wiring keeps mixed scoped and whole-source evidence in provider input", async () => {
+  it("course-route wiring keeps scoped evidence through provider input and durable publish", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "0");
-    const sourceA = randomUUID(), sourceB = randomUUID(), chunkA = randomUUID(), chunkANext = randomUUID(), chunkB = randomUUID();
+    vi.stubEnv("OPENING_PROVIDER_ALLOW_LOCAL", "1");
+    vi.stubEnv("OPENING_MODEL_API_KEY", "test-wiring-key");
+    vi.stubEnv("OPENING_MODEL_DAILY_CAP_CENTS", "100000");
+    vi.stubEnv("OPENING_MODEL_DEFAULT_ID", "wiring-model");
+    vi.stubEnv("OPENING_MODEL_CATALOG", JSON.stringify([{
+      id: "wiring-model", label: "Wiring fixture", providerId: "wiring-provider", providerLabel: "Wiring fixture",
+      modelName: "wiring-model", apiKeyEnv: "OPENING_MODEL_API_KEY",
+      baseUrl: `http://127.0.0.1:${(modelServer.address() as AddressInfo).port}/v1`,
+      inputCentsPerMillion: 10000, outputCentsPerMillion: 10000,
+    }]));
+    const sourceA = randomUUID(), sourceB = randomUUID(), chunkA = randomUUID(), chunkANext = randomUUID(), chunkB = randomUUID(), chunkBNext = randomUUID();
     const hashA = "a".repeat(64), hashB = "b".repeat(64);
     await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
       VALUES (${sourceA},${f.scope.workspaceId},'A','text/plain',1,${hashA},1,'uploaded','ready'),(${sourceB},${f.scope.workspaceId},'B','text/plain',1,${hashB},1,'uploaded','ready')`;
     await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES
-      (${chunkA},${sourceA},1,1,'A本章'),(${chunkANext},${sourceA},1,2,'A下一章'),(${chunkB},${sourceB},1,1,'B合法范围')`;
+      (${chunkA},${sourceA},1,1,'A本章合法范围'),(${chunkANext},${sourceA},1,2,'A下一章范围'),(${chunkB},${sourceB},1,1,'B本章合法范围'),(${chunkBNext},${sourceB},1,2,'B下一章范围')`;
     const activity = await seedRoute(f, [{ sourceId: sourceA, sourceVersion: 1, chunkId: chunkA }, { sourceId: sourceB, sourceVersion: 1 }]);
-    const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql), chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
+    const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 }), chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
     const routeEvidence = await (await import("@aistudy/database")).readOpeningCourseRouteEvidenceRefs(f.sql, f.scope, activity.id);
     expect(routeEvidence?.refs).toHaveLength(2);
     expect(routeEvidence?.chunkIds).toEqual(expect.arrayContaining([chunkA, chunkB]));
-    const input = await deps.buildProviderInput!(f.scope, { mode: "generate", activityId: activity.id, teachingUnitId: randomUUID(), expectedContentVersion: 0, clientKey: randomUUID(), sourceIds: [sourceA, sourceB] }, { parentBudget: undefined, beforeSend: async () => undefined, resultRef: `teaching_activity:${activity.id}` } as never);
-    expect(input.chunks.map(chunk => chunk.id)).toEqual(expect.arrayContaining([chunkA, chunkB]));
-    expect(input.chunks.map(chunk => chunk.id)).not.toContain(chunkANext);
+    const unit = await deps.ensureTeachingUnitId!(f.scope, { mode: "generate", activityId: activity.id, expectedContentVersion: 0, clientKey: randomUUID(), sourceIds: [sourceA, sourceB] });
+    const payload = { mode: "generate" as const, activityId: activity.id, teachingUnitId: unit, expectedContentVersion: 0, clientKey: `route-${randomUUID()}`, sourceIds: [sourceA, sourceB] };
+    modelCitations = [chunkA, chunkB];
+    const job: OpeningJobRecord = { id: randomUUID(), workspaceId: f.scope.workspaceId, ownerUserId: f.scope.ownerUserId, key: randomUUID(), kind: "compile-teaching-unit", payload: {}, result: null, state: "running", privacyEpoch: 0 };
+    const run = createCompileTeachingUnitHandler(deps);
+    await run(job, payload);
+    expect(modelRequests).toHaveLength(1);
+    const prompt = modelRequests[0]!.messages.map(message => message.content).join("\n");
+    expect(prompt).toContain("A本章合法范围");
+    expect(prompt).toContain("B本章合法范围");
+    expect(prompt).not.toContain("A下一章范围");
+    expect(prompt).not.toContain("B下一章范围");
+    const published = await createOpeningTeachingContentRepository(f.sql).getActivitySpec(f.scope, activity.id);
+    expect(published?.sourceRefs.map(ref => ref.chunkId)).toEqual(expect.arrayContaining([chunkA, chunkB]));
+    expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(chunkANext);
+    expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(chunkBNext);
   });
 
   it("production loader is scope-bound and rejects foreign refs", async () => {
