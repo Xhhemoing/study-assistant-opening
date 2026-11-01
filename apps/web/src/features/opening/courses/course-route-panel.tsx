@@ -65,10 +65,10 @@ function RoutePanel({ courseId, archived = false, client: suppliedClient, goalsC
   function confirm() {
     if (!editing || !snapshot) return;
     const selected = (row: CourseRouteRequirementInput, sourceId: string, sourceVersion: number) => row.sourceRefs.some(ref => ref.sourceId === sourceId && ref.sourceVersion === sourceVersion);
-    const activePageInput = (key: string) => { const separator = key.indexOf("|"); const row = editing.find(item => item.id === key.slice(0, separator)); if (!row) return false; const [sourceId, version] = key.slice(separator + 1).split(":"); return selected(row, sourceId, Number(version)); };
-    const invalid = Object.entries(pageInputs).some(([key, value]) => pageTouched[key] && activePageInput(key) && parsePhysicalPages(value) === null);
+    const activePageInputs = new Set(editing.flatMap(row => row.sourceRefs.map(ref => pageInputKey(row.id, ref.sourceId, ref.sourceVersion))));
+    const invalid = Object.entries(pageInputs).some(([key, value]) => pageTouched[key] && activePageInputs.has(key) && parsePhysicalPages(value) === null);
     if (invalid) { setError("请修正资料行内的物理页：仅支持逗号分隔的正整数，例如 3,4,5；不能留空项。"); return; }
-    const requirements = editing.map(row => snapshot.materials.reduce((current, material) => { const key = pageInputKey(row.id, material.sourceId, material.sourceVersion); const value = pageInputs[key]; return pageTouched[key] && selected(current, material.sourceId, material.sourceVersion) && !sourceHasChunk(current, material.sourceId, material.sourceVersion) ? applyPageInput(current, material.sourceId, material.sourceVersion, value) : current; }, row));
+    const requirements = editing.map(row => snapshot.materials.reduce((current, material) => { const key = pageInputKey(row.id, material.sourceId, material.sourceVersion); const value = pageInputs[key]; return pageTouched[key] && typeof value === "string" && selected(current, material.sourceId, material.sourceVersion) && !sourceHasChunk(current, material.sourceId, material.sourceVersion) ? applyPageInput(current, material.sourceId, material.sourceVersion, value) : current; }, row));
     const parsed = courseRouteConfirmSchema.safeParse({ expectedRevisions: snapshot.requirements.map(row => ({ id: row.requirement.id, revision: row.requirement.revision })), requirements, confirmScope: true });
     if (!parsed.success) { setError("请检查范围名称、成功标准和前置关联；至少保留一项课程要求。"); return; }
     void execute({ kind: "confirm", input: parsed.data });

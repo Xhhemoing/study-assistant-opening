@@ -29,12 +29,14 @@ it.each(["0", "-1", "3,,4", "3,a"])("rejects invalid physical pages %s", value =
 it("submits selected pages and an unscoped selected material through the client", async () => {
   const materialB = "22222222-2222-4222-8222-222222222222";
   let putBody: unknown;
-  const serverSnapshot = { ...snapshot, materials: [{ ...snapshot.materials[0], title: "资料 A" }, { ...snapshot.materials[1], sourceId: materialB, title: "资料 B" }], suggestions: [{ ...requirement, sourceRefs: [] }] };
+  const serverSnapshot = { ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: true }, { sourceId: materialB, sourceVersion: 1, title: "资料 B", available: true }], suggestions: [{ ...requirement, sourceRefs: [] }] };
   const api = createCourseRouteClient(async (_input, init) => { if (init?.method === "PUT") putBody = JSON.parse(String(init.body)); return new Response(JSON.stringify(serverSnapshot), { status: 200, headers: { "content-type": "application/json" } }); });
   await render(api);
   await act(async () => button("检查与确认课程范围").click());
   const materialChecks = [...host.querySelectorAll('input[type="checkbox"]')].filter(input => (input.parentElement?.textContent ?? "").startsWith("资料 ")) as HTMLInputElement[];
-  await act(async () => { materialChecks[0].click(); materialChecks[1].click(); });
+  const [materialACheck, materialBCheck] = materialChecks;
+  if (!materialACheck || !materialBCheck) throw new Error("missing material A/B checkboxes");
+  await act(async () => { materialACheck.click(); materialBCheck.click(); });
   const pageInput = host.querySelector('input[aria-label="资料 A物理页"]') as HTMLInputElement;
   await act(async () => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; setter.call(pageInput, "3,4,3"); pageInput.dispatchEvent(new Event("input", { bubbles: true })); pageInput.dispatchEvent(new Event("change", { bubbles: true })); });
   await act(async () => button("确认这份全课范围").click());
@@ -42,14 +44,16 @@ it("submits selected pages and an unscoped selected material through the client"
 });
 it("does not resurrect pages after their material is unchecked", async () => {
   const materialB = "22222222-2222-4222-8222-222222222222";
-  const api = client({ ...snapshot, materials: [{ ...snapshot.materials[0], title: "资料 A" }, { ...snapshot.materials[1], sourceId: materialB, title: "资料 B" }], suggestions: [{ ...requirement, sourceRefs: [] }] });
+  const api = client({ ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: true }, { sourceId: materialB, sourceVersion: 1, title: "资料 B", available: true }], suggestions: [{ ...requirement, sourceRefs: [] }] });
   await render(api);
   await act(async () => button("检查与确认课程范围").click());
   const checks = [...host.querySelectorAll('input[type="checkbox"]')].filter(input => (input.parentElement?.textContent ?? "").startsWith("资料 ")) as HTMLInputElement[];
-  await act(async () => { checks[0].click(); checks[1].click(); });
+  const [materialACheck, materialBCheck] = checks;
+  if (!materialACheck || !materialBCheck) throw new Error("missing material A/B checkboxes");
+  await act(async () => { materialACheck.click(); materialBCheck.click(); });
   const pageInput = host.querySelector('input[aria-label="资料 A物理页"]') as HTMLInputElement;
   await act(async () => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; setter.call(pageInput, "3,4"); pageInput.dispatchEvent(new Event("input", { bubbles: true })); pageInput.dispatchEvent(new Event("change", { bubbles: true })); });
-  await act(async () => checks[0].click());
+  await act(async () => materialACheck.click());
   await act(async () => button("确认这份全课范围").click());
   expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }] }], confirmScope: true });
 });
