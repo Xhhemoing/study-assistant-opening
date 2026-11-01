@@ -40,6 +40,23 @@ describe("GET /api/opening/capabilities (PR-H)", () => {
     }
   });
 
+  it("delivers per-account study session and photo capabilities without exposing the allowlist", async () => {
+    vi.stubEnv("OPENING_TEACHING_LOOP", "1");
+    vi.stubEnv("OPENING_TEACHING_WORKSPACE", "1");
+    vi.stubEnv("OPENING_STUDY_SESSION_V2", "0");
+    vi.stubEnv("OPENING_STUDY_SESSION_V2_USERS", "private-learner");
+    vi.stubEnv("OPENING_STUDY_SESSION_V2_PHOTO_ANSWER", "1");
+    for (const userId of ["private-learner", "other-learner", null]) {
+      if (userId === null) requirePrincipal.mockRejectedValue(new ApiError("UNAUTHENTICATED", "Authentication required", 401));
+      else requirePrincipal.mockResolvedValue({ userId, workspaceId: "w" });
+      const { body, text } = await capabilities();
+      const enabled = userId === "private-learner";
+      expect(body.capabilities).toMatchObject({ studySessionV2: enabled, studySessionV2PhotoAnswer: enabled });
+      expect(text).not.toContain("private-learner");
+      expect(text).not.toContain("OPENING_STUDY_SESSION_V2_USERS");
+    }
+  });
+
   it("retired percentage does not narrow a fully enabled authenticated rollout", async () => {
     vi.stubEnv("OPENING_TEACHING_LOOP", "1");
     vi.stubEnv("OPENING_TEACHING_WORKSPACE", "1");

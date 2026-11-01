@@ -283,10 +283,20 @@ describe("optional semantic retrieval configuration", () => {
   });
 });
 
+it.each(["OPENING_CHAT_SENSEWEAVE_BETA_USERS", "OPENING_STUDY_SESSION_V2_USERS"])("validates explicit account IDs consistently for %s", (name) => {
+  for (const value of ["*", "account.id", "account/user", "a".repeat(129), Array.from({ length: 101 }, (_, i) => `u${i}`).join(",")]) {
+    expect(() => loadFeatureSwitches({ [name]: value })).toThrow(`${name}: expected at most 100 explicit account IDs (no wildcard)`);
+  }
+  const valid = Array.from({ length: 100 }, (_, i) => i === 0 ? "a".repeat(128) : `User_${i}-id`).join(",");
+  expect(() => loadFeatureSwitches({ [name]: valid })).not.toThrow();
+  expect(() => loadFeatureSwitches({ [name]: " , , " })).not.toThrow();
+});
+
 // New UI switch is validated by the shared feature-switch owner.
 it("defaults studySessionV2 closed and rejects malformed values", async () => {
   const { loadFeatureSwitches } = await import("./server-config");
   expect(loadFeatureSwitches({}).studySessionV2).toBe(false);
+  expect(loadFeatureSwitches({}).studySessionV2Users).toEqual([]);
   expect(() => loadFeatureSwitches({ OPENING_STUDY_SESSION_V2: "enabled" })).toThrow(/OPENING_STUDY_SESSION_V2/);
   expect(loadFeatureSwitches({}).studySessionV2PhotoAnswer).toBe(false);
   expect(() => loadFeatureSwitches({ OPENING_STUDY_SESSION_V2_PHOTO_ANSWER: "enabled" })).toThrow(/OPENING_STUDY_SESSION_V2_PHOTO_ANSWER/);
