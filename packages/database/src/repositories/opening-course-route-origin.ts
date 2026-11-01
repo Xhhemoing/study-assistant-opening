@@ -43,12 +43,12 @@ export async function readOpeningCourseRouteEvidenceRefs(sql:Sql,scope:Scope,act
   if(!requirement)throw learningError("CONFLICT","课程要求已变化，请重新读取课程路线；原答案保留。");
   const refs=requirement.sourceRefs;
   const chunks=await readCourseRouteSourceChunks(sql,scope,courseId);
-  const constrained=refs.filter(ref=>ref.chunkId!==undefined||ref.page!==undefined);
+  const constrained=refs.filter(ref=>ref.chunkId!=null||ref.page!=null);
   if(!constrained.length)return null;
-  const selected=chunks.filter(chunk=>constrained.some(ref=>ref.sourceId===chunk.sourceId&&ref.sourceVersion===chunk.sourceVersion
-    &&(ref.chunkId===undefined||ref.chunkId===chunk.id)&&(ref.page===undefined||ref.page===chunk.page)));
-  if(!selected.length||constrained.some(ref=>!selected.some(chunk=>chunk.sourceId===ref.sourceId&&chunk.sourceVersion===ref.sourceVersion
-    &&(ref.chunkId===undefined||ref.chunkId===chunk.id)&&(ref.page===undefined||ref.page===chunk.page))))
+  const matches=(ref:typeof refs[number],chunk:typeof chunks[number])=>ref.sourceId===chunk.sourceId&&ref.sourceVersion===chunk.sourceVersion
+    &&(ref.chunkId==null||ref.chunkId===chunk.id)&&(ref.page==null||ref.page===chunk.page);
+  const selected=chunks.filter(chunk=>refs.some(ref=>matches(ref,chunk)));
+  if(constrained.some(ref=>!selected.some(chunk=>matches(ref,chunk))))
     throw learningError("CONFLICT","所选课程材料片段已失效或换版，请重新选择材料后再生成讲义；不会回退整份教材。");
-  return {refs:constrained,chunkIds:selected.map(chunk=>chunk.id)};
+  return {refs,chunkIds:selected.map(chunk=>chunk.id)};
 }

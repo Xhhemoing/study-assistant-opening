@@ -13,11 +13,37 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import {
   createOpeningBudgetRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository,
   createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository,
+  createOpeningCourseRouteRepository, createOpeningLearningGoalRepository,
 } from "@aistudy/database";
+import type { CourseRouteRequirementInput } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "@aistudy/database";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+
+async function seedRoute(f: OpeningFixture, refs: CourseRouteRequirementInput["sourceRefs"]) {
+  const courseId = randomUUID();
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'路线课程',${courseId})`;
+  const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, {
+    clientKey: `goal-${randomUUID()}`, courseIds: [courseId], title: "路线课程", kind: "custom",
+    targetDate: null, examDate: null, weeklyMinutes: 60, priority: 1, learningMode: "understand", successCriteria: "按材料解释",
+  });
+  const requirements: CourseRouteRequirementInput[] = [{
+    id: randomUUID(), stableSkillId: randomUUID(), knowledgeNodeId: null, requirementKey: "route-requirement",
+    title: "本章知识", position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [], sourceRefs: refs,
+    verification: { kind: "rubric", status: "ready", exerciseKeys: ["route"], rubric: "按材料解释", missingReasons: [] }, origin: "confirmed",
+  }];
+  for (const sourceId of [...new Set(refs.map(ref => ref.sourceId))]) {
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
+  }
+  const repo = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
+  await repo.confirm(f.scope, courseId, { expectedRevisions: [], requirements, confirmScope: true });
+  const started = await repo.start(f.scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirements[0]!.id,
+    expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
+  if (started.kind !== "ready") throw new Error(JSON.stringify(started));
+  return started.activity;
+}
 
 let f: OpeningFixture;
 const modelRequests: Array<{ model: string; messages: Array<{ role: string; content: string }> }> = [];
@@ -134,6 +160,25 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     if (process.env.BUDGET_MATRIX_OUT) {
       appendFileSync(process.env.BUDGET_MATRIX_OUT, `${JSON.stringify({ case: "compile-teaching-unit replay via worker wiring", logicalOps: 2, providerCalls: modelRequests.length, used: after.used, reserved: after.reserved, pending: after.pending, reconcileEvents: "-", outcome: "production loader returned needs_check; no provider/publish" })}\n`);
     }
+  });
+
+  it("course-route wiring keeps mixed scoped and whole-source evidence in provider input", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "0");
+    const sourceA = randomUUID(), sourceB = randomUUID(), chunkA = randomUUID(), chunkANext = randomUUID(), chunkB = randomUUID();
+    const hashA = "a".repeat(64), hashB = "b".repeat(64);
+    await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${sourceA},${f.scope.workspaceId},'A','text/plain',1,${hashA},1,'uploaded','ready'),(${sourceB},${f.scope.workspaceId},'B','text/plain',1,${hashB},1,'uploaded','ready')`;
+    await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES
+      (${chunkA},${sourceA},1,1,'A本章'),(${chunkANext},${sourceA},1,2,'A下一章'),(${chunkB},${sourceB},1,1,'B合法范围')`;
+    const activity = await seedRoute(f, [{ sourceId: sourceA, sourceVersion: 1, chunkId: chunkA }, { sourceId: sourceB, sourceVersion: 1 }]);
+    const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql), chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
+    const routeEvidence = await (await import("@aistudy/database")).readOpeningCourseRouteEvidenceRefs(f.sql, f.scope, activity.id);
+    expect(routeEvidence?.refs).toHaveLength(2);
+    expect(routeEvidence?.chunkIds).toEqual(expect.arrayContaining([chunkA, chunkB]));
+    const input = await deps.buildProviderInput!(f.scope, { mode: "generate", activityId: activity.id, teachingUnitId: randomUUID(), expectedContentVersion: 0, clientKey: randomUUID(), sourceIds: [sourceA, sourceB] }, { parentBudget: undefined, beforeSend: async () => undefined, resultRef: `teaching_activity:${activity.id}` } as never);
+    expect(input.chunks.map(chunk => chunk.id)).toEqual(expect.arrayContaining([chunkA, chunkB]));
+    expect(input.chunks.map(chunk => chunk.id)).not.toContain(chunkANext);
   });
 
   it("production loader is scope-bound and rejects foreign refs", async () => {
