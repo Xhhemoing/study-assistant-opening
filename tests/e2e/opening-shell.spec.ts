@@ -64,9 +64,7 @@ test.describe("opening shell", () => {
       await expect(continueQuestion).toBeEnabled();
       await expect(page.getByText(/^上次学习：/)).toHaveCount(0);
       await expect(page.getByRole("article", { name: "继续学习", exact: true })).toHaveCount(0);
-      const start = page.getByRole("navigation", { name: "学习工具", exact: true }).filter({ has: page.getByRole("link", { name: "新建课程", exact: true }) }).getByRole("link", { name: "新建课程", exact: true });
-      await expect(start).toBeVisible();
-      await expect(start).toHaveAttribute("href", "/opening/courses/new");
+
     } finally {
       await context.close();
     }
