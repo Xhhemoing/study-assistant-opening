@@ -221,6 +221,13 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       if (view.next) return view;
       const current = attempt!;
       if (record) {
+        // Ordinary self-study advances within this lesson via its existing progress owner.
+        // Adaptive follow-up (including the final/reserved step and retests) keeps /next admission.
+        const nextMove = moves[index + 1];
+        if (session.intent.purpose === "self_study" && !retestId && nextMove) {
+          if (!await save(session.intent, nextMove.id, "active")) throw new Error("学习进度还没保存，请再试一次。");
+          return view;
+        }
         const raw = await spanLessonRequest("/api/opening/teaching/span/next", z.unknown(), { method: "POST", body: JSON.stringify({ activityId: session.activityId,
           expectedRevision: session.revision, observationId: record.id, clientKey: `span-next:${session.activityId}:${session.revision}:${record.id}` }) });
         return refresh(adaptSpanNext(raw, session.courseId));

@@ -4,12 +4,15 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getSpanProblem, solveSpanProblem, verifySpanAnswer } from "@aistudy/domain";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
+import type { SpanLessonDetails } from "../teaching/span/span-session-client";
+import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
 import { StudySession, StudySessionShell } from "./study-session-shell";
 import type { StudySessionView } from "./model";
 
 const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
   read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
+vi.mock("../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ studySessionV2: true }) }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => mocks }));
 vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: mocks.uploadFile }) }));
 vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ addToCourse: mocks.addToCourse }) }));
@@ -30,7 +33,7 @@ function fixture(moveId = "self-faded", problemId = "span-faded-3d") {
     spanExercise: exercise, contextAnchor: { courseId, activityId, sourceId } } as unknown as LearningAttempt;
   const session = { activityId, sessionId, courseId, sourceIds: [sourceId], moveId, status: "active", revision: 1, retestId: null, createdAt: "2026-10-31T00:00:00.000Z",
     intent: { purpose: "self_study" as const, timeBudgetMinutes: 20, language: "zh" as const, pace: "normal" as const, continuous: true, selfReportedFatigue: "unknown" as const } };
-  const details = { session, estimateMinutes: 12, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null } as never;
+  const details = { session, estimateMinutes: 12, attempts: [], observations: [], hintLevels: {}, assistance: {}, intentEvent: null } as unknown as SpanLessonDetails;
   return { attempt, details, courseId, activityId };
 }
 const hintResponse = (level: number) => ({ attemptId: "x", level, text: `提示${level}`, exposureReceipt: { id: uuid() } });
@@ -56,17 +59,20 @@ async function mount(port: ReturnType<typeof createSpanStudySession>) {
   return { host, root, button, click, select, type, unmount: () => act(async () => root.unmount()) };
 }
 
-it("submits a gradable answer through the real form, shows an honest result and follows the successor", async () => {
+it("submits a gradable self-study answer and saves the next lesson move without tutor authorization", async () => {
   if (solution.kind !== "unique") throw new Error("fixture");
-  const { attempt, details, courseId, activityId } = fixture();
+  const { attempt, details } = fixture();
   const record = { id: uuid(), assistance: "hinted", serverEvaluation: { decision: "correct", reasonCodes: ["verified_exactly"] } } as unknown as LearningObservation;
-  mocks.request.mockImplementation(async (path: string) => path.endsWith("/next")
-    ? { kind: "ready", href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, activityId, sessionId: attempt.sessionId, courseId, label: "下一题", resumed: false } : {});
+  mocks.request.mockImplementation(async (path: string) => {
+    if (path.endsWith("/next")) throw new Error("Tutor authorization is not available for this course");
+    return {};
+  });
   mocks.createAttempt.mockResolvedValue(attempt);
   mocks.read.mockResolvedValueOnce({ observation: null, deliveredAssistance: "none" }).mockResolvedValue({ observation: record, deliveredAssistance: "hinted" });
   mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
   mocks.submitAttempt.mockResolvedValue(record);
-  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  const save = vi.fn(async () => true);
+  const ui = await mount(createSpanStudySession(details, save));
   try {
     expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
     expect(ui.host.textContent).toContain("约 12 分钟");
@@ -85,10 +91,71 @@ it("submits a gradable answer through the real form, shows an honest result and 
     // Help stays reachable after the first answer; that is when the full demonstration opens.
     expect(ui.button("提示 · 已看 1")).toBeDefined();
     expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    expect(save).not.toHaveBeenCalled();
     await ui.click("看下一步安排");
-    await ui.click("下一题");
-    expect(mocks.push).toHaveBeenCalledWith(`/opening/courses/${courseId}/study/span?lesson=${activityId}`);
+    expect(save).toHaveBeenCalledExactlyOnceWith((details as { session: { intent: unknown } }).session.intent, "self-independent", "active");
+    expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
+    expect(mocks.push).not.toHaveBeenCalled();
   } finally { await ui.unmount(); }
+});
+
+it("the v2 lesson owner PATCHes progress and renders the next question after a submitted self-study result", async () => {
+  const { attempt, details, courseId, activityId } = fixture("self-independent", "span-independent-3d");
+  const record = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "correct", reasonCodes: [] } } as unknown as LearningObservation;
+  details.attempts = [attempt];
+  const reserved = { ...attempt, id: uuid(), spanExercise: { ...attempt.spanExercise!, id: "span-reserved-fraction" } };
+  mocks.read.mockImplementation(async (_client, _course, current) => ({ observation: current.id === attempt.id ? record : null, deliveredAssistance: "none" }));
+  mocks.request.mockImplementation(async (path: string, _schema: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") return { ...details.session, ...JSON.parse(String(init.body)), revision: 2 };
+    if (!init) return details;
+    if (path.endsWith("/session")) return {};
+    if (path.endsWith("/reserved")) return reserved;
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const host = document.createElement("div"), root = createRoot(host); document.body.append(host);
+  try {
+    await act(async () => root.render(<SpanLessonSession courseId={courseId} sourceIds={attempt.sourceIds} sourceLoadError={false} initialActivityId={activityId} />));
+    expect(host.textContent).toContain("独立答对");
+    const next = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("看下一步安排"));
+    expect(next).toBeDefined(); await act(async () => next!.click());
+    const patch = mocks.request.mock.calls.find(call => call[2]?.method === "PATCH")!;
+    expect(patch[0]).toBe(`/api/opening/teaching/span/lesson?activityId=${activityId}`);
+    expect(JSON.parse(patch[2].body)).toEqual({ expectedRevision: 1, intent: details.session!.intent, moveId: "self_study-reserved", status: "active" });
+    expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
+    expect(host.querySelector("ol[aria-label='第 4 步，共 4 步']")).not.toBeNull();
+    expect(host.querySelector("section[aria-label='作答结果']")).toBeNull();
+    expect(host.querySelector("select")).not.toBeNull();
+  } finally { await act(async () => root.unmount()); host.remove(); }
+});
+
+it.each(["last move", "retest", "overview"])("%s keeps the authorized adaptive next path instead of saving a lesson move", async scenario => {
+  const { attempt, details, courseId, activityId } = fixture(scenario === "overview" ? "overview-contrast" : "self_study-reserved", scenario === "overview" ? "span-contrast-dependent" : "span-independent-3d");
+  if (scenario === "overview") details.session!.intent.purpose = "overview";
+  else attempt.spanExercise = { ...attempt.spanExercise!, id: "span-reserved-fraction" };
+  if (scenario === "retest") details.session!.retestId = uuid();
+  details.attempts = [attempt];
+  const record = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "correct", reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "none" });
+  mocks.request.mockResolvedValue({ kind: "choice", reason: "authorization_required", message: "请先授权导师安排。", primary: { href: `/opening/courses/${courseId}`, label: "回到课程" } });
+  const save = vi.fn(async () => true), port = createSpanStudySession(details, save);
+  await port.load();
+  const view = await port.primary();
+  expect(save).not.toHaveBeenCalled();
+  expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), expect.objectContaining({ method: "POST" }));
+  expect(JSON.parse(mocks.request.mock.calls[0]![2].body)).toEqual({ activityId, expectedRevision: 1, observationId: record.id, clientKey: `span-next:${activityId}:1:${record.id}` });
+  expect(view.next).toMatchObject({ reason: "请先授权导师安排。", href: `/opening/courses/${courseId}` });
+});
+
+it("a failed lesson save preserves the result for retry without requesting adaptive next", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  details.attempts = [attempt];
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "independent", serverEvaluation: null }, deliveredAssistance: "none" });
+  const save = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true), port = createSpanStudySession(details, save);
+  await port.load();
+  await expect(port.primary()).rejects.toThrow("学习进度还没保存");
+  expect((await port.primary()).result).not.toBeNull();
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(mocks.request).not.toHaveBeenCalled();
 });
 
 it("reloading never requests a new hint level; it only re-reads released ones", async () => {
