@@ -74,7 +74,10 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);
   if (check("diagnose", !latest, "no_evidence", "has_current_evidence", refs)) return result("diagnose", "no_evidence");
-  const assistedErrors = observations.filter(row => row.verifiedCorrect === "no"
+  const lastCorrectIndex = observations.findIndex(row => row.verifiedCorrect === "yes");
+  // A verified success resolves earlier errors; only inspect the latest unresolved segment.
+  const unresolved = lastCorrectIndex < 0 ? observations : observations.slice(0, lastCorrectIndex);
+  const assistedErrors = unresolved.filter(row => row.verifiedCorrect === "no"
     && (row.assistance === "hinted" || row.assistance === "revealed") && row.errors?.some(error => error.source === "verified_steps"));
   const [newerError, olderError] = assistedErrors;
   const sharedError = newerError?.errors?.find(error => error.source === "verified_steps"

@@ -121,13 +121,33 @@ describe("nextLearningStep", () => {
   });
 
   it("finds repeated assisted errors across intervening nonqualifying observations", () => {
-    for (const middle of [exactError("middle", { verifiedCorrect: "yes" }), exactError("middle", { verifiedCorrect: "unknown" }),
+    for (const middle of [exactError("middle", { verifiedCorrect: "unknown" }),
+      exactError("middle", { verifiedCorrect: "yes", usableForCurrentVersion: "no" }),
       exactError("middle", { assistance: "independent" }), exactError("middle", { errors: [] })]) {
       expect(nextLearningStep(input({ observations: [exactError("latest"), middle, exactError("older")] })))
         .toMatchObject({ activityKind: "full_explain", reasonCode: "repeated_assisted_error" });
       expect(nextLearningStep(input({ observations: [middle, exactError("latest"), exactError("older")] })).reasonCode)
         .toBe("repeated_assisted_error");
     }
+  });
+
+  it("starts a new unresolved segment after a verified correct answer between errors", () => {
+    expect(nextLearningStep(input({ observations: [exactError("latest"),
+      observation({ id: "correct-between" }), exactError("older")] })))
+      .toEqual({ activityKind: "targeted_explain", focusObservationId: "latest", reasonCode: "verified_incorrect" });
+  });
+
+  it("fades help after a verified correct answer following two assisted errors", () => {
+    expect(nextLearningStep(input({ observations: [observation({ id: "correct-after", assistance: "hinted", independentAttempt: "no" }),
+      exactError("latest"), exactError("older")] })))
+      .toEqual({ activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assistance_dependent" });
+  });
+
+  it("restores transfer checks after three independent correct answers following assisted errors", () => {
+    expect(nextLearningStep(input({ status: "observed_independent", observations: [
+      ...["correct-3", "correct-2", "correct-1"].map(id => observation({ id })),
+      exactError("latest"), exactError("older"),
+    ] }))).toEqual({ activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" });
   });
 
   it("requires two usable assisted verified errors sharing a step", () => {
