@@ -7,6 +7,8 @@ export const DEFAULT_PDF_SEGMENT_PAGES = 10;
 export const DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS = 240;
 export const PDF_EXECUTION_POLL_MS = 1_000;
 
+export type PdfSegmentParseResult = PdfSegmentPage[] & { failedRanges: string[] };
+
 /** Serial polling is only a prompt cancellation signal. Each cache/chunk write
  * still locks and checks the execution transactionally, including the last gap. */
 export async function watchPdfExecution(assertCurrent: () => Promise<void>, pollMs = PDF_EXECUTION_POLL_MS) {
@@ -32,7 +34,7 @@ export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
-}): Promise<PdfSegmentPage[]> {
+}): Promise<PdfSegmentParseResult> {
   const size = input.segmentPages ?? DEFAULT_PDF_SEGMENT_PAGES;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS;
   if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new RangeError("invalid PDF segment bounds");
@@ -64,11 +66,15 @@ export async function parsePdfSegments(input: {
       append(validatePdfSegmentPages(cached.pages, start, end));
       continue;
     }
-    let parsed: PdfSegmentPage[];
-    try {
-      parsed = validatePdfSegmentPages(await parser.parseDocument({ path: input.path, mime: "application/pdf", maxPages: 2000,
-        pageStart: start, pageEnd: end, timeoutSeconds }, input.signal), start, end);
-    } catch (error) {
+    let parsed: PdfSegmentPage[] | undefined;
+    let error: unknown;
+    for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+      try {
+        parsed = validatePdfSegmentPages(await parser.parseDocument({ path: input.path, mime: "application/pdf", maxPages: 2000,
+          pageStart: start, pageEnd: end, timeoutSeconds }, input.signal), start, end);
+      } catch (caught) { error = caught; }
+    }
+    if (!parsed) {
       // A cancelled/revoked/old execution must not even write a failed segment.
       input.signal.throwIfAborted();
       const errorCode = error instanceof Error && error.name === "TimeoutError" ? "timeout"
@@ -82,6 +88,7 @@ export async function parsePdfSegments(input: {
     append(parsed);
   }
   input.signal.throwIfAborted();
-  if (failed.length) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")}); retry reuses completed segments`);
-  return pages;
+  if (failed.length && pages.length === 0) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")})`);
+  Object.defineProperty(pages, "failedRanges", { value: failed, enumerable: false });
+  return pages as PdfSegmentParseResult;
 }

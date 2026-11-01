@@ -154,6 +154,18 @@ describe("parse source handler", () => {
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "", imageObjectKey: "final" },
     ] });
   });
+  it("omits blank PDF chunks when visual routing is unavailable while keeping readable pages", async () => {
+    const recognizePage = vi.fn(async () => { throw new OpeningModelRoutingError("请先配置 gpt-6-luna"); });
+    const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "native prose", imagePath: null },
+      { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
+    ] });
+    expect(d.states).toEqual(["ready"]);
+  });
   it("propagates provider errors without replacing chunks", async () => {
     const recognizePage = vi.fn(async () => { throw new Error("provider timeout"); });
     const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [

@@ -65,17 +65,33 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toEqual([]);
   });
 
-  it("defaults to ten physical pages and only retries failed segments after a new invocation", async () => {
+  it("defaults to ten physical pages, retries a failed segment once, and reuses successes on a new invocation", async () => {
     const d = setup();
     d.failures.add(11);
-    await expect(parsePdfSegments(d.input)).rejects.toThrow("11-20");
-    expect(d.ranges).toEqual([[1, 10], [11, 20], [21, 23]]);
+    const partial = await parsePdfSegments(d.input);
+    expect(partial.failedRanges).toEqual(["11-20"]);
+    expect(d.ranges).toEqual([[1, 10], [11, 20], [11, 20], [21, 23]]);
     expect([...d.data.values()].map(s => s.state)).toEqual(["ready", "failed", "ready"]);
     d.failures.clear();
     d.ranges.length = 0;
     const pages = await parsePdfSegments({ ...d.input, scope: { ...scope, jobExecution: { ...scope.jobExecution, id: "retry" } } });
     expect(d.ranges).toEqual([[11, 20]]);
     expect(pages.map(p => p.page)).toEqual(Array.from({ length: 23 }, (_, i) => i + 1));
+  });
+
+  it("recovers a transient segment failure within the same invocation", async () => {
+    const d = setup(1), original = d.input.runner;
+    d.failures.add(1);
+    d.input.runner = async (argv, signal) => {
+      const result = await original(argv, signal);
+      if (!argv.includes("--inspect-pdf")) d.failures.clear();
+      return result;
+    };
+    const result = await parsePdfSegments(d.input);
+    expect(result.map(p => p.page)).toEqual([1]);
+    expect(result.failedRanges).toEqual([]);
+    expect(d.ranges).toEqual([[1, 1], [1, 1]]);
+    expect([...d.data.values()].map(s => s.state)).toEqual(["ready"]);
   });
 
   it("never reuses another source version or non-OCR profile", async () => {
@@ -127,7 +143,8 @@ describe("bounded resumable PDF parser", () => {
       }
       return original(argv, signal);
     };
-    await expect(parsePdfSegments({ ...d.input, timeoutSeconds: 0.02 })).rejects.toThrow("1-10");
+    const partial = await parsePdfSegments({ ...d.input, timeoutSeconds: 0.02 });
+    expect(partial.failedRanges).toEqual(["1-10"]);
     expect([...d.data.values()].map(s => s.state === "failed" ? s.errorCode : s.state)).toEqual(["timeout", "ready"]);
   });
 
