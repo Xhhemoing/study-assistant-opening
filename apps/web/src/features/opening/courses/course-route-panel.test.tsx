@@ -42,6 +42,50 @@ it("submits selected pages and an unscoped selected material through the client"
   await act(async () => button("确认这份全课范围").click());
   expect(putBody).toEqual({ expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 0, page: 3 }, { sourceId: id, sourceVersion: 0, page: 4 }] }], confirmScope: true });
 });
+it.each(["persisted pages", "suggested chunk"] as const)("clears the visible page draft when reselecting %s through the real client", async mode => {
+  const materialB = "22222222-2222-4222-8222-222222222222";
+  const chunkId = "33333333-3333-4333-8333-333333333333";
+  const scopedRequirement: CourseRouteRequirementInput = { ...requirement, sourceRefs: [...(mode === "persisted pages" ? [{ sourceId: id, sourceVersion: 2, page: 3 }, { sourceId: id, sourceVersion: 2, page: 4 }] : [{ sourceId: id, sourceVersion: 2, chunkId, page: 12 }]), { sourceId: materialB, sourceVersion: 1 }] };
+  const serverSnapshot: CourseRouteSnapshot = {
+    ...snapshot,
+    scopeState: mode === "persisted pages" ? "confirmed" : "unconfirmed",
+    materials: [{ sourceId: id, sourceVersion: 2, title: "资料 A", available: true }, { sourceId: materialB, sourceVersion: 1, title: "资料 B", available: true }],
+    requirements: mode === "persisted pages" ? [{ requirement: { ...scopedRequirement, courseId, revision: 7, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [] }] : [],
+    suggestions: mode === "suggested chunk" ? [scopedRequirement] : [],
+    summary: { total: mode === "persisted pages" ? 1 : 0, mandatory: mode === "persisted pages" ? 1 : 0, verified: 0, blocked: 0 },
+  };
+  let putBody: unknown;
+  const api = createCourseRouteClient(async (_input, init) => {
+    if (init?.method === "PUT") putBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify(serverSnapshot), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  await render(api);
+  await act(async () => button("检查与确认课程范围").click());
+  const checks = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].filter(input => (input.parentElement?.textContent ?? "").startsWith("资料 "));
+  const [materialACheck, materialBCheck] = checks;
+  if (!materialACheck || !materialBCheck) throw new Error("missing material A/B checkboxes");
+  expect(materialACheck.checked).toBe(true);
+  expect(materialBCheck.checked).toBe(true);
+  const initialPageInput = host.querySelector<HTMLInputElement>('input[aria-label="资料 A物理页"]');
+  if (mode === "persisted pages") {
+    if (!initialPageInput) throw new Error("missing persisted page input");
+    expect(initialPageInput.value).toBe("3,4");
+  } else {
+    expect(initialPageInput).toBeNull();
+    expect(host.textContent).toContain("已确认片段，保留原范围");
+  }
+  await act(async () => materialACheck.click());
+  expect(materialACheck.checked).toBe(false);
+  await act(async () => materialACheck.click());
+  expect(materialACheck.checked).toBe(true);
+  const pageInput = host.querySelector<HTMLInputElement>('input[aria-label="资料 A物理页"]');
+  if (!pageInput) throw new Error("missing reselected page input");
+  expect(pageInput.value).toBe("");
+  expect(host.textContent).toContain("物理页（留空为整份）");
+  expect(host.textContent).not.toContain("已确认片段，保留原范围");
+  await act(async () => button("确认这份全课范围").click());
+  expect(putBody).toEqual({ expectedRevisions: mode === "persisted pages" ? [{ id, revision: 7 }] : [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }, { sourceId: id, sourceVersion: 2 }] }], confirmScope: true });
+});
 it("does not resurrect pages after their material is unchecked", async () => {
   const materialB = "22222222-2222-4222-8222-222222222222";
   const api = client({ ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: true }, { sourceId: materialB, sourceVersion: 1, title: "资料 B", available: true }], suggestions: [{ ...requirement, sourceRefs: [] }] });
