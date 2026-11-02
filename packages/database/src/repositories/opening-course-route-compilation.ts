@@ -56,6 +56,11 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
             AND m.asset_type='source' AND m.course_id=a.course_id
           WHERE src.id::text=ref->>'sourceId' AND src.workspace_id=a.workspace_id
             AND src.version::text=ref->>'version' AND src.upload_state='uploaded' AND src.parse_state='ready'
+            AND ((ref->>'chunkId' IS NULL AND ref->>'page' IS NULL) OR EXISTS (
+              SELECT 1 FROM opening_source_chunks c
+              WHERE c.source_id=src.id AND c.source_version=src.version
+                AND (ref->>'chunkId' IS NULL OR c.id::text=ref->>'chunkId')
+                AND (ref->>'page' IS NULL OR c.page::text=ref->>'page')))
             AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=src.workspace_id AND e.source_id=src.id)))) AS saved
     FROM opening_teaching_activities a
     LEFT JOIN opening_teaching_activity_specs s ON s.activity_id=a.id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
