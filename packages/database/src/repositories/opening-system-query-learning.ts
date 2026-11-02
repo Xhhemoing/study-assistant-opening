@@ -1,6 +1,6 @@
 import type { TransactionSql } from "postgres";
 import type { Scope, SystemQueryRequest } from "@aistudy/contracts";
-import { nextLearningStep, summarizeObservations, resolveEvidenceAssistance } from "@aistudy/domain";
+import { nextLearningStep, summarizeObservations, resolveEvidenceAssistance, toSnapshotEvidence } from "@aistudy/domain";
 import { openingEligibilityStateQuery, openingEligibilityPolicyVersion } from "./opening-learning-eligibility";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { mapLearningObservation } from "./opening-learning-facts";
@@ -52,13 +52,17 @@ export async function readSystemLearningQuery(tx: TransactionSql, scope: Scope,
     return;
   }
   const summaries = summarizeObservations(mapped, out.asOf, { evidenceContexts: contexts });
+  // Share the teaching projection so verified step errors retain their eligibility/source guards.
+  const projected = new Map(toSnapshotEvidence({ observations: mapped, evidenceContexts: contexts }, new Date(out.asOf))
+    .observations.map(row => [row.id, row]));
   out.data = summaries.map(summary => {
     const group = mapped.filter(row => row.skillLabel === summary.skillLabel && (contexts[row.id]?.observation.requirementKey ?? null) === summary.requirementKey);
     const step = nextLearningStep({ status: summary.status, wantsFullExplanation: false, observations: group.map(row => {
       const eligibility = summary.evidenceEligibility.find(e => e.observationId === row.id)!.eligibility;
       return { id: row.id, skillLabel: row.skillLabel, requirementKey: summary.requirementKey, attemptedAt: row.submittedAt ?? row.occurredAt,
         assistance: effectiveAssistance.get(row.id)!, problemId: row.problemId ?? null, independentAttempt: eligibility.independentAttempt,
-        verifiedCorrect: eligibility.verifiedCorrect, usableForCurrentVersion: eligibility.usableForCurrentVersion };
+        verifiedCorrect: eligibility.verifiedCorrect, usableForCurrentVersion: eligibility.usableForCurrentVersion,
+        errors: projected.get(row.id)!.errors };
     }) });
     const activity = ({ diagnose: "诊断", targeted_explain: "针对性讲解", full_explain: "完整讲解", reduced_help_practice: "减少帮助的练习", transfer_check: "迁移检查" })[step.activityKind];
     const reason = ({ no_evidence: "缺少可用证据", unverified_only: "现有结果尚未核验", verified_incorrect: "最近作答已核验为错误", repeated_assisted_error: "获得帮助后仍多次在同一步骤出错", assistance_dependent: "近期作答多次依赖帮助", independent: "当前记录支持独立完成，需要进一步检查迁移", needs_check: "仍需检查", correct_needs_independent_check: "这次答案正确，接着独立完成一道练习", requested_full: "学习者请求完整讲解", due_retest: "已到合法独立复测时间", requested_consolidate: "学习者请求先巩固" })[step.reasonCode];
