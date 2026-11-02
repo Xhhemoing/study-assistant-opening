@@ -8,6 +8,7 @@ import { courseRequirementProgressSchema, courseRequirementSchema, courseRouteSn
 import { activitySpecSchema } from "../packages/contracts/src/opening/teaching-content";
 import { uuidSchema } from "../packages/contracts/src/opening/foundation";
 import type { createCourseAuditSample } from "./study-course-audit-sample";
+import { createSolverEvidence } from "./study-course-audit-solver-evidence";
 
 const count = z.number().int().nonnegative().safe();
 const identitySchema = z.object({
@@ -45,7 +46,7 @@ function unique(values: readonly string[]) {
 function requireEqual(actual: unknown, expected: unknown) {
   if (!isDeepStrictEqual(actual, expected)) throw new Error("Invalid local audit binding");
 }
-export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown) {
+export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown, rawSolutions?: unknown) {
   const sample = sampleSchema.parse(rawSample) satisfies ReturnType<typeof createCourseAuditSample>;
   const reviews = reviewsSchema.parse(rawReviews);
   // Reject schema coercion/normalization at this exact-version file boundary.
@@ -90,10 +91,12 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown)
   unique(reviews.results.map(result => questionKey(result.identity)));
   for (const result of reviews.results) requireEqual(result.identity, selected.get(questionKey(result.identity)));
   const byQuestion = new Map(reviews.results.map(result => [questionKey(result.identity), result]));
-  const samples = sample.samples.map(item => {
+  const evidence = rawSolutions === undefined ? undefined : createSolverEvidence(rawSolutions, sample);
+  const samples = sample.samples.map((item, index) => {
     const review = byQuestion.get(questionKey(item));
     return { ...item, reviewStatus: review?.outcome ?? "pending", outcome: review?.outcome ?? "pending",
-      ...(review?.note !== undefined ? { note: review.note } : {}) };
+      ...(review?.note !== undefined ? { note: review.note } : {}),
+      ...(evidence ? { solverEvidence: evidence[index]! } : {}) };
   });
   const summarize = (items: typeof samples) => {
     const correct = items.filter(item => item.outcome === "correct").length;
@@ -111,8 +114,12 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown)
 
 export async function runCourseAuditReview(args: string[]) {
   if (args.length === 1 && args[0] === "--help") {
-    console.log(`Usage: node --import tsx scripts/study-course-audit-review.ts --sample FILE --reviews FILE --output NEW_FILE
-Read only the two explicit local JSON files. Sample: course-audit-pending-v1, unchanged sampler output.
+    console.log(`Usage: node --import tsx scripts/study-course-audit-review.ts --sample FILE --reviews FILE --output NEW_FILE [--solutions FILE]
+Read only the explicit local JSON files. Sample: course-audit-pending-v1, unchanged sampler output.
+Optional solutions: course-audit-blind-solve-v1 bound to the entire exact sample, including order and versions.
+Evidence retains every solver status; finite arithmetic checks compare prompt to each answer separately.
+Checks: correct/incorrect/unsupported; unsolved solver answers are unknown. Proofs, units, choice and division by zero are unsupported.
+Model answers are not gold labels; evidence never changes human outcomes or denominators or proves provenance/independence.
 Reviews: {courseId,results:[{identity,outcome:'correct'|'incorrect'|'unjudgeable',note?:string}]}.
 Copy identity fields exactly from the sample: courseId, full requirement, activityId, specId, teachingUnitId,
 contentVersion, documentId, revisionNumber, questionBlockId, answerBlockId. No extra authority fields.
@@ -124,12 +131,14 @@ Human input does not establish independence, whole-course correctness or release
   const options = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]!, value = args[i + 1];
-    if (!["--sample", "--reviews", "--output"].includes(key) || !value || value.startsWith("--") || options.has(key)) throw new Error("Invalid options");
+    if (!["--sample", "--reviews", "--output", "--solutions"].includes(key) || !value || value.startsWith("--") || options.has(key)) throw new Error("Invalid options");
     options.set(key, value);
   }
   const sample = options.get("--sample"), reviews = options.get("--reviews"), output = options.get("--output");
-  if (!sample || !reviews || !output || [sample, reviews].some(input => resolve(input) === resolve(output))) throw new Error("Invalid options");
-  const report = createCourseAuditReview(JSON.parse(await readFile(sample, "utf8")), JSON.parse(await readFile(reviews, "utf8")));
+  const solutions = options.get("--solutions");
+  if (!sample || !reviews || !output || [sample, reviews, ...(solutions ? [solutions] : [])].some(input => resolve(input) === resolve(output))) throw new Error("Invalid options");
+  const report = createCourseAuditReview(JSON.parse(await readFile(sample, "utf8")), JSON.parse(await readFile(reviews, "utf8")),
+    solutions ? JSON.parse(await readFile(solutions, "utf8")) : undefined);
   const file = await open(output, "wx", 0o600);
   try {
     await file.writeFile(JSON.stringify(report, null, 2) + "\n", "utf8");
