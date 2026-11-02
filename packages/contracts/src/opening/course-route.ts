@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
-import { teachingActivitySchema } from "./teaching-activity";
+import { teachingActivitySchema, teachingActivityGenerateStatusSchema } from "./teaching-activity";
+import { teachingVerificationStatusSchema } from "./teaching-content";
 import { retestActivityStatusSchema } from "./retest-activity";
 
 export const courseRequirementSourceRefSchema = z.object({ sourceId:uuidSchema,sourceVersion:z.number().int().nonnegative(),
@@ -31,6 +32,9 @@ export const courseRouteStartSchema=z.object({...actionBase,requirementId:uuidSc
   .refine(value=>(value.taskId===undefined)===(value.expectedTaskVersion===undefined),"Task identity and version must be supplied together");
 export const courseRouteNextSchema=z.object({...actionBase,activityId:uuidSchema,expectedPathVersion:z.number().int().positive(),observationId:uuidSchema.nullable()}).strict();
 export const courseRequirementProgressSchema=z.object({requirement:courseRequirementSchema,
+  compilation:z.object({activityId:uuidSchema.nullable(),generateStatus:teachingActivityGenerateStatusSchema.nullable(),
+    contentVersion:z.number().int().nonnegative(),saved:z.boolean(),
+    documentId:uuidSchema.nullable(),revisionNumber:z.number().int().positive().nullable(),verificationStatus:teachingVerificationStatusSchema.nullable()}).strict().optional(),
   status:z.enum(["unobserved","needs_correction","assisted","needs_verification","verified","blocked"]),
   sharedEvidence:z.array(z.object({linkId:uuidSchema,observationId:uuidSchema,sourceCourseId:uuidSchema,sourceRequirementId:uuidSchema,sourceActivityId:uuidSchema.nullable(),applicableGoalIds:z.array(uuidSchema)}).strict()).optional(),observationId:uuidSchema.nullable(),missingReasons:z.array(z.string()),sourcesAvailable:z.boolean(),
   delayedCheck:z.object({status:z.enum(["not_scheduled","pending","passed","failed","assisted","insufficient_evidence","expired","cancelled"]),
