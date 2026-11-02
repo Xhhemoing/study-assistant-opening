@@ -68,3 +68,46 @@ it("does not erase an ambiguous split when chapter graphs are merged", () => {
   expect(merged.edges).toEqual([]);
   expect(retainKnowledgeIdentities(merged, [source], original).nodes.some(node => node.id === original.nodes[0]!.id)).toBe(false);
 });
+
+
+it("unions complete exact definitions across source versions and pages with NFC/CRLF only", () => {
+  const a = chunk("a", "cafe\u0301\r\nx² + x₁"), b = { ...chunk("b", "café\nx² + x₁", "lecture"), sourceVersion: 7, page: 42 };
+  const first = reconcileExtractedSnapshot("course", 1, graph(a.id), [a]);
+  const second = reconcileExtractedSnapshot("course", 1, graph(b.id), [b]);
+  second.nodes[0]!.status = "needs_check";
+  const merged = mergeKnowledgeBatches("course", 1, [first, second, second], [a, b]);
+  expect(merged.nodes).toHaveLength(1);
+  expect(merged.nodes[0]).toMatchObject({ id: first.nodes[0]!.id, evidenceChunkIds: ["a", "b"], status: "needs_check" });
+  const oldId = first.nodes[0]!.id;
+  const rebuilt = retainKnowledgeIdentities(merged, [a, b], first, [oldId], { [oldId]: knowledgeNodeDefinition(first.nodes[0]!, [a])! });
+  // Production extraction starts with new UUIDs, not the previous graph's UUIDs.
+  const fresh = mergeKnowledgeBatches("course", 2, [reconcileExtractedSnapshot("course", 2, graph(a.id), [a]), second], [a, b]);
+  const retained = retainKnowledgeIdentities(fresh, [a, b], first, [oldId], { [oldId]: knowledgeNodeDefinition(first.nodes[0]!, [a])! });
+  expect(rebuilt.nodes[0]!.evidenceChunkIds).toEqual(["a", "b"]);
+  expect(retained.nodes).toHaveLength(2);
+  expect(retained.nodes.find(node => node.id === oldId)).toMatchObject({ evidenceChunkIds: ["a"], status: "needs_check" });
+  expect(retained.nodes.find(node => node.id !== oldId)!.evidenceChunkIds).toEqual(["a", "b"]);
+});
+
+it.each([
+  { text: "x2 + x₁" }, { text: "x² + x1" }, { text: "x² - x₁" }, { text: "x² + x₁ " },
+  { text: "" }, { imageObjectKey: "figure" }, { startMs: 0, endMs: 100 }, { courseId: "foreign" },
+])("does not infer exact equivalence for changed or unprovable evidence: %j", overrides => {
+  const a = chunk("a", "x² + x₁"), b = { ...chunk("b", "x² + x₁", "lecture"), ...overrides };
+  const first = reconcileExtractedSnapshot("course", 1, graph(a.id), [a]);
+  const second = reconcileExtractedSnapshot("course", 1, graph(b.id), [b]);
+  expect(mergeKnowledgeBatches("course", 1, [first, second], [a, b]).nodes).toHaveLength(2);
+});
+
+it("keeps different labels/kinds, ambiguous definitions, and sliced evidence separate", () => {
+  const a = chunk("a", "same"), b = chunk("b", "same", "lecture");
+  const first = reconcileExtractedSnapshot("course", 1, graph(a.id), [a]);
+  const second = reconcileExtractedSnapshot("course", 1, graph(b.id), [b]);
+  for (const change of [{ label: "other" }, { kind: "procedure" as const }]) {
+    const changed = { ...second, nodes: second.nodes.map(node => ({ ...node, ...change })) };
+    expect(mergeKnowledgeBatches("course", 1, [first, changed], [a, b]).nodes).toHaveLength(2);
+  }
+  expect(mergeKnowledgeBatches("course", 1, [first, second], [a, b], new Set([a.id])).nodes).toHaveLength(2);
+  const ambiguous = reconcileExtractedSnapshot("course", 1, { nodes: [...graph(a.id).nodes, ...graph(a.id).nodes], edges: [] }, [a]);
+  expect(mergeKnowledgeBatches("course", 1, [ambiguous, second], [a, b]).nodes).toHaveLength(3);
+});
