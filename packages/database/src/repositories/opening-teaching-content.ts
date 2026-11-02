@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { assertReferenceTextRevision } from "./opening-teaching-reference-revision";
+
+type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { isDeepStrictEqual } from "node:util";
@@ -340,6 +343,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
     async publishActivitySpec(
       scope: Scope,
       input: ActivitySpecPublishInput,
+      referenceRevision?: ReferenceRevisionInput,
     ): Promise<ActivitySpec> {
       if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
         throw learningError("VALIDATION", "expectedVersion must be a non-negative integer");
@@ -404,6 +408,34 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
           ? mapSpec(existingSpecRows[0] as Record<string, unknown>)
           : null;
 
+        if (referenceRevision) {
+          if (!existingSpec || !sameActivitySpecGraph(existingSpec, {
+            ...desiredGraph, revisionNumber: existingSpec.revisionNumber,
+            verificationStatus: existingSpec.verificationStatus,
+          })) throw learningError("CONFLICT", "teaching spec changed; reread before adopting");
+          if (activity.status === "completed" || ["queued", "generating"].includes(String(activity.generate_status))) {
+            throw learningError("CONFLICT", "teaching activity cannot adopt a reference revision now");
+          }
+          const replay = currentContentVersion === newVersion && existingSpec.revisionNumber === input.revisionNumber;
+          const receipt = (activity.checkpoint_json as Record<string, unknown> | null)?.referenceRevisionAdoption;
+          if (replay ? !isDeepStrictEqual(receipt, referenceRevision)
+            : existingSpec.revisionNumber !== referenceRevision.expectedRevisionNumber) {
+            throw learningError("CONFLICT", "stale pinned reference revision");
+          }
+          const [document] = await tx`SELECT current_revision_number FROM library_documents
+            WHERE id=${existingSpec.documentId} AND workspace_id=${scope.workspaceId} AND deleted_at IS NULL FOR UPDATE`;
+          if (!document || Number(document.current_revision_number) !== input.revisionNumber
+            || input.revisionNumber <= referenceRevision.expectedRevisionNumber) throw learningError("CONFLICT", "saved document revision changed; save and reread before adopting");
+          const revisions = await tx`SELECT revision_number,blocks FROM library_revisions
+            WHERE workspace_id=${scope.workspaceId} AND document_id=${existingSpec.documentId}
+              AND revision_number IN (${referenceRevision.expectedRevisionNumber},${input.revisionNumber})`;
+          const before = revisions.find(row => Number(row.revision_number) === referenceRevision.expectedRevisionNumber);
+          const after = revisions.find(row => Number(row.revision_number) === input.revisionNumber);
+          if (!before || !after) throw learningError("CONFLICT", "saved reference revision not found");
+          assertReferenceTextRevision(existingSpec.blockOrder, before.blocks as RevisionRecord["blocks"], after.blocks as RevisionRecord["blocks"]);
+          await assertOpeningCourseRouteCurrent(tx, scope, input.activityId);
+        }
+
         if (currentContentVersion === newVersion && existingSpec) {
           if (
             sameActivitySpecGraph(existingSpec, {
@@ -449,7 +481,10 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
 
         const bumped = await tx`
           UPDATE opening_teaching_activities
-          SET content_version = ${newVersion}, updated_at = now()
+          SET content_version = ${newVersion}, updated_at = now(),
+              checkpoint_json = CASE WHEN ${Boolean(referenceRevision)} THEN
+                COALESCE(checkpoint_json, '{}'::jsonb) || ${tx.json({ referenceRevisionAdoption: referenceRevision ?? null } as never)}
+                ELSE checkpoint_json END
           WHERE id = ${input.activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}
@@ -466,6 +501,16 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
 
         return mapSpec(upserted[0] as Record<string, unknown>);
       });
+    },
+
+    async adoptReferenceRevision(scope: Scope, activityId: string, input: ReferenceRevisionInput): Promise<ActivitySpec> {
+      const spec = await this.getActivitySpec(scope, activityId);
+      if (!spec) throw learningError("NOT_FOUND", "activity spec not found");
+      return this.publishActivitySpec(scope, {
+        activityId, teachingUnitId: spec.teachingUnitId, expectedVersion: input.expectedContentVersion,
+        revisionNumber: input.revisionNumber, blockOrder: spec.blockOrder, sourceRefs: spec.sourceRefs,
+        goals: spec.goals, generationConfig: spec.generationConfig, verificationStatus: "needs_check",
+      }, input);
     },
 
     async getActivitySpec(scope: Scope, activityId: string): Promise<ActivitySpec | null> {

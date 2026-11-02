@@ -64,6 +64,12 @@ export function createOpeningTeachingContentService(sql: Sql) {
         mapError(error);
       }
     },
+    async adoptReferenceRevision(scope: Scope, activityIdRaw: string, raw: unknown) {
+      const activityId = uuidSchema.parse(activityIdRaw);
+      const input = z.object({ expectedContentVersion: z.number().int().positive(), expectedRevisionNumber: z.number().int().positive(), revisionNumber: z.number().int().positive() }).strict().parse(raw);
+      try { return await repo.adoptReferenceRevision(scope, activityId, input); }
+      catch (error) { mapError(error); }
+    },
     async publishActivitySpec(scope: Scope, raw: unknown) {
       const input = activitySpecPublishInputSchema.parse(raw);
       try {
