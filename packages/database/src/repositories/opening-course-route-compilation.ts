@@ -1,10 +1,40 @@
 import { courseRouteActivityContextSchema, courseRequirementProgressSchema, type CourseRequirementProgress, type Scope } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
+import type { TeachingBlockRef } from "@aistudy/contracts";
+import { teachingQuestionText } from "./opening-teaching-question";
 
-/** Current matching activity only; body/answer data never leaves this query. */
+type Block = { id: string; type: string; content: Record<string, unknown> };
+
+async function readQuestionCoverage(db: Sql | TransactionSql, scope: Scope, courseId: string, activityId: string,
+  revisionId: string, ordered: TeachingBlockRef[], blocks: Block[]) {
+  const issued = await db`SELECT DISTINCT v.teaching_block_id FROM opening_learning_item_versions v
+    WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.course_id=${courseId}
+      AND v.activity_id=${activityId} AND v.teaching_revision_id=${revisionId}
+      AND EXISTS (SELECT 1 FROM opening_learning_attempts a WHERE a.item_version_id=v.id
+        AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id AND a.course_id=v.course_id AND a.activity_id=v.activity_id)`;
+  const issuedIds = new Set(issued.map(row => String(row.teaching_block_id)));
+  const coverage = { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const };
+  const refs = [...ordered].sort((a, b) => a.position - b.position);
+  const seen = new Set<string>();
+  for (const [index, ref] of refs.entries()) {
+    const prompt = blocks.find(block => block.id === ref.blockId);
+    if (seen.has(ref.blockId) || ref.role === "answer_key" || !(ref.role === "prompt" || ["prompt", "question"].includes(ref.blockType))
+      || !prompt || !["prompt", "question"].includes(prompt.type) || !teachingQuestionText(prompt.content)) continue;
+    seen.add(ref.blockId);
+    coverage.savedQuestions++;
+    if (issuedIds.has(ref.blockId)) coverage.issuedQuestions++;
+    const next = refs[index + 1];
+    const answer = next && (next.role === "answer_key" || ["answer_key", "solution"].includes(next.blockType))
+      ? blocks.find(block => block.id === next.blockId && ["answer_key", "solution"].includes(block.type)) : undefined;
+    if (teachingQuestionText(answer?.content)) coverage.withReferenceAnswers++;
+  }
+  return coverage;
+}
+
+/** Current matching activity only; private block bodies stay inside this repository. */
 export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope: Scope, courseId: string, progress: CourseRequirementProgress[]) {
   const rows = await db`SELECT a.id,a.goal_json,a.generate_status,a.content_version,
-    s.document_id,s.revision_number,s.verification_status,
+    s.document_id,s.revision_number,s.verification_status,s.block_order,r.id AS revision_id,r.blocks,
     (s.version=a.content_version AND a.content_version>0 AND jsonb_array_length(s.block_order)>0
       AND r.id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM jsonb_array_elements(s.block_order) b
@@ -36,6 +66,9 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
         && parsed.data.stableSkillId === requirement.stableSkillId && parsed.data.requirementKey === requirement.requirementKey;
     });
     const saved = !!row && row.saved === true && item.sourcesAvailable;
+    item.questionCoverage = saved
+      ? await readQuestionCoverage(db, scope, courseId, String(row!.id), String(row!.revision_id), row!.block_order as TeachingBlockRef[], row!.blocks as Block[])
+      : { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" };
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({
       activityId: row ? String(row.id) : null, generateStatus: row?.generate_status ?? null,
       contentVersion: row ? Number(row.content_version) : 0, saved,

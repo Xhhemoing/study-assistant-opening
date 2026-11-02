@@ -32,6 +32,7 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
   expect(rows[1]!.textContent).toContain("讲义：尚无当前可用讲义 · 排队中");
   expect(rows[2]!.textContent).toContain("讲义：缺失，尚无当前匹配活动");
   expect(rows[3]!.textContent).toContain("讲义：编译事实未收集");
+  expect(rows[3]!.textContent).toContain("题目覆盖未收集 · 未暴露资格未确认");
   expect(rows.every(row => row.textContent?.includes("待开始"))).toBe(true);
   expect(host.textContent).toContain("已确认 4 项要求");
   expect(host.textContent).not.toContain("讲义已核验");
@@ -45,6 +46,18 @@ it("rejects invented compilation states and private bodies at the strict client 
   expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
   for (const invalid of [{ ...compilation, generateStatus: "mastered" }, { ...compilation, verificationStatus: "passed" }, { ...compilation, blocks: [{ answer: "private" }] }]) {
     const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...value.requirements[0], compilation: invalid }] }), { status: 200 }));
+    await expect(api.read(courseId)).rejects.toThrow();
+  }
+});
+it("accepts count-only coverage and rejects private bodies or invented unexposed eligibility", async () => {
+  const coverage = { savedQuestions: Number.MAX_SAFE_INTEGER, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], questionCoverage: coverage };
+  const { courseRouteSnapshotSchema } = await import("@aistudy/contracts");
+  const value = { ...snapshot, requirements: [row] };
+  expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
+  await expect(createCourseRouteClient(async () => new Response(JSON.stringify(value))).read(courseId)).resolves.toMatchObject({ requirements: [{ questionCoverage: coverage }] });
+  for (const invalid of [{ ...coverage, prompt: "private stem" }, { ...coverage, answer: "private answer" }, { ...coverage, answerBlockId: id }, { ...coverage, unexposedEligibility: "eligible" }, { ...coverage, savedQuestions: -1 }]) {
+    const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, questionCoverage: invalid }] })));
     await expect(api.read(courseId)).rejects.toThrow();
   }
 });
