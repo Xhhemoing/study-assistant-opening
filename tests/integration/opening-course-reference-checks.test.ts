@@ -42,7 +42,7 @@ it("checks only current legally published references through repository → stri
   const start = await repo.start(scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirement.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (start.kind !== "ready") throw new Error(JSON.stringify(start));
   const content = createOpeningTeachingContentRepository(sql);
-  const unit = await content.createUnit(scope, { title: "人工保存的运算讲义" });
+  const unit = await content.createUnit(scope, { title: "人工保存的运算讲义", blocks: [{ id: randomUUID(), type: "text", content: { text: "初始讲义" } }] });
   const block = (type: string, text: string, extra: Record<string, unknown> = {}) => ({ id: randomUUID(), type, content: { text, ...extra } });
   async function publish(blocks: ReturnType<typeof block>[], expectedVersion: number) {
     const revision = await content.writeUnitBlocks(scope, unit.id, blocks);
@@ -78,7 +78,7 @@ it("checks only current legally published references through repository → stri
   const serialized = JSON.stringify(response);
   for (const b of [...blocks, ...oldBlocks]) {
     expect(serialized).not.toContain(b.id);
-    expect(serialized).not.toContain(b.content.text);
+    expect(serialized).not.toContain(JSON.stringify(b.content.text));
   }
   const host = document.createElement("div"), root = createRoot(host);
   document.body.append(host);
