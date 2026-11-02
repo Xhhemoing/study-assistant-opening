@@ -6,7 +6,6 @@ import { appendEphemeralResponseIfActive } from "../../../apps/web/src/features/
 import { createOpeningAttemptService } from "../../../apps/web/src/features/opening/learning/attempt-service";
 import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
 import type { OpeningFixture } from "../opening-fixture";
-import { refreshOpeningLearningEligibility } from "../../../packages/database/src/repositories/opening-learning-eligibility";
 import { POST as ephemeralPost } from "../../../apps/web/src/app/api/opening/ephemeral/route";
 import { POST as savedPost } from "../../../apps/web/src/app/api/opening/turns/route";
 import { complete, ephemeralCounts, postEphemeral, resetEphemeralRows, sql, startEphemeralHandler, stopEphemeralHandler, tablesContainingEphemeralMarker, workspaceForCookie } from "./opening-ephemeral-harness";
@@ -47,19 +46,23 @@ it("delivers real recommendation reasons through HTTP, strict client parsing and
   expect(output.text).toContain("这次答案正确，接着独立完成一道练习");
   const messages = appendEphemeralResponseIfActive([], { clientKey: "recommendation", text: input.text, output }, new AbortController().signal);
   expect(messages[1]).toMatchObject({ text: output.text, systemQuery: true, queryEvidenceLinks: expect.arrayContaining([{ href: `/opening/courses/${f.courseId}?tab=records`, label: "实际作答记录" }]) });
+  // A real independent submission must refresh its qualification without rewriting the first answer.
+  const independentAttempt = await service.create(scope, { sessionId: session.id, clientKey: randomUUID(), matrixExercise: { sourceId: f.sourceId, exerciseKey: "multiplication", variant: 1 } });
+  const independentRecord = await service.submit(scope, independentAttempt.id, { clientKey: randomUUID(), answer: "[[4,14],[12,1]]", outcome: "unverified", assistance: "independent" });
+  expect(independentRecord.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "yes", usableForCurrentVersion: "yes" });
+  const independent = await client.replyEphemeral(input);
+  expect(independent.systemQuery!.results.find(row => row.name === "recommendation")?.data[0]).toMatchObject({
+    step: { reasonCode: "independent" }, evidenceIds: expect.arrayContaining([record.id, independentRecord.id]),
+  });
+  expect(independent.text).not.toContain("这次答案正确，接着独立完成一道练习");
+  const [original] = await sql`SELECT assistance,answer FROM opening_learning_observations WHERE id=${record.id}`;
+  expect(original).toMatchObject({ assistance: "unknown", answer: record.answer });
   // A stale qualification is unknown, never a fabricated successful recommendation.
-  await sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${record.id}`;
+  await sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id IN (${record.id},${independentRecord.id})`;
   const unknown = await client.replyEphemeral(input);
   expect(unknown.systemQuery!.results.find(row => row.name === "recommendation")).toMatchObject({ status: "unknown", data: [] });
   expect(unknown.text).toContain("没有可确认的数据");
   expect(unknown.text).not.toContain("这次答案正确，接着独立完成一道练习");
-  // Once independence is known, the special reason must stop applying.
-  await sql.begin(async tx => {
-    await tx`UPDATE opening_learning_observations SET assistance='independent' WHERE id=${record.id}`;
-    await refreshOpeningLearningEligibility(tx, scope, [record.id]);
-  });
-  const independent = await client.replyEphemeral(input);
-  expect(independent.systemQuery!.results.find(row => row.name === "recommendation")?.data[0]).toMatchObject({ step: { reasonCode: "independent" } });
   expect(complete).not.toHaveBeenCalled();
 });
 
