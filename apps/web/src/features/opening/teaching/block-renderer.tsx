@@ -17,6 +17,7 @@ import { InlineAttempt, type InlineAttemptContext } from "./inline-attempt";
 import { teachingQuestionInteractionSchema, teachingVectorDiagramSchema } from "@aistudy/contracts";
 import { VectorDiagram } from "./blocks/vector-diagram";
 import { ProblemCard } from "./problem-card";
+import { TeachingBlockSources } from "./teaching-block-sources";
 import {
   MATRIX_TRANSFORM_CAPABILITY_ID,
   teachingArtifactBlock,
@@ -247,6 +248,9 @@ export function BlockRenderer({
         sourceRefs={decision.catalogId === "evidence" ? sourceRefs : undefined}
         attemptContext={attemptContext}
       />
+      {block.role !== "prompt" && block.role !== "answer_key" &&
+        ["text", "math", "step", "example", "matrix_transform", "vector_diagram"].includes(decision.catalogId)
+        ? <TeachingBlockSources citedChunkIds={decision.params.citedChunkIds} sourceRefs={sourceRefs} /> : null}
     </article>
   );
 }
