@@ -86,7 +86,7 @@ export function resultLabel(result: StepResult): string {
 }
 
 /** Exactly one primary action per state. The shell renders it; adapters never name buttons. */
-export type PrimaryAction = { kind: "submit" | "continue" | "next" | "none" | "flip"; label: string; disabled: boolean };
+export type PrimaryAction = { kind: "submit" | "continue" | "next" | "none" | "flip" | "redo"; label: string; disabled: boolean };
 export function primaryAction(view: StudySessionView, pending: boolean): PrimaryAction {
   if (view.step.kind === "photo_practice") return view.step.recorded
     ? { kind: "none", label: "", disabled: true }
@@ -96,6 +96,7 @@ export function primaryAction(view: StudySessionView, pending: boolean): Primary
     ? { kind: "submit", label: "保存回忆情况", disabled: pending || !view.step.grade }
     : { kind: "flip", label: "翻面核对", disabled: pending };
   if (view.step.kind === "learn") return { kind: "continue", label: "开始做题", disabled: pending };
+  if (view.result?.outcome === "incorrect" && view.canRedo) return { kind: "redo", label: "改这道题", disabled: pending };
   if (view.next) return { kind: "next", label: view.next.label, disabled: pending };
   if (view.canPracticeVariant) return { kind: "next", label: "同族新题，独立做一次", disabled: pending };
   if (view.result) return { kind: "next", label: "看下一步安排", disabled: pending };
