@@ -81,6 +81,8 @@ import {
   teachingActivityCreateInputSchema,
   teachingActivityAssociateCourseInputSchema,
   activitySpecClientInitSchema,
+  activitySpecSchema,
+  type ActivitySpec,
   interventionSettingsResponseSchema,
   interventionPrefsSchema,
   interventionPrefsPatchSchema,
@@ -767,6 +769,27 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(teachingActivitySchema, body);
     },
 
+
+    async adoptTeachingReferenceRevision(
+      activityId: string,
+      input: { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number },
+    ): Promise<ActivitySpec> {
+      const id = z.string().uuid().parse(activityId);
+      const payload = z.object({
+        expectedContentVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - 1),
+        expectedRevisionNumber: z.number().int().positive().safe(),
+        revisionNumber: z.number().int().positive().safe(),
+      }).strict().parse(input);
+      const body = await request(
+        `/api/opening/teaching-activities/${id}/reference-revision`,
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return parseOpeningResponse(activitySpecSchema.refine(spec =>
+        spec.activityId === id && spec.version === payload.expectedContentVersion + 1
+        && spec.revisionNumber === payload.revisionNumber,
+      ), body);
+    },
 
     async getTeachingClientInit(activityId: string): Promise<ActivitySpecClientInit> {
       const body = await readTeaching(
