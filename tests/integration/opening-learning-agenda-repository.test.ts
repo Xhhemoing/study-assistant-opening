@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { createOpeningLearningAgendaRepository, createOpeningSpanTutorContextRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository, createOpeningLongTermPlanningRepository, createOpeningLearningRepository } from "@aistudy/database";
+import type { Sql } from "postgres";
+import { readOpeningLearningAgenda } from "../../packages/database/src/repositories/opening-learning-agenda";
+import { readOpeningCourseEvidence } from "../../packages/database/src/repositories/opening-learning-read";
+import { createOpeningLearningAttemptRepository } from "@aistudy/database";
+import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
+import { solveSpanProblem, toSnapshotEvidence, type NextLearningStepInput } from "@aistudy/domain";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createStudyIntentService } from "../../apps/web/src/features/opening/teaching/span/intent-service";
@@ -27,6 +33,84 @@ async function seed() {
   const lesson = await repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId });
   return { courseId, sourceId, lesson, request, operationId };
 }
+async function agendaEvidence(f: Awaited<ReturnType<typeof seed>>) {
+  return fixture.sql.begin("isolation level repeatable read read only", async tx => {
+    // The loader's nested transaction stays inside this exact snapshot.
+    const db = new Proxy(tx, { get(target, key, receiver) {
+      if (key === "begin") return (...args: unknown[]) => target.savepoint(nested =>
+        (args.at(-1) as (value: typeof nested) => Promise<unknown>)(nested));
+      return Reflect.get(target, key, receiver);
+    } }) as unknown as Sql;
+    const agenda = (await readOpeningLearningAgenda(tx, fixture.scope, f.courseId, f.lesson.activityId))!;
+    const evidence = await readOpeningCourseEvidence(db, fixture.scope, f.courseId);
+    const observations = toSnapshotEvidence(evidence, new Date(agenda.dataAsOf)).observations
+      .filter(row => row.requirementKey === SPAN_REQUIREMENT_KEY)
+      .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || b.id.localeCompare(a.id));
+    const input: NextLearningStepInput = { observations,
+      status: !observations.length ? "unobserved" : observations[0]!.verifiedCorrect === "yes" && observations[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check",
+      wantsFullExplanation: agenda.intent?.explanationStyle === "full",
+      ...(agenda.intent?.learningPhase ? { learningPhase: agenda.intent.learningPhase, phaseSource: "explicit" as const } : {}) };
+    return { agenda, observations, expected: nextLearningStep(input) };
+  });
+}
+async function agendaAttempt(f: Awaited<ReturnType<typeof seed>>, options: { correct?: boolean; help?: boolean; assistance?: "independent" | "unknown" } = {}) {
+  const { sql, scope } = fixture;
+  const attempt = await createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: f.lesson.sessionId, clientKey: randomUUID(),
+    spanExercise: { sourceId: f.sourceId, problemId: options.correct ? "span-reserved-fraction" : "span-example-2d", version: 1 } });
+  if (options.help) expect((await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 })).exposureReceipt).toBeTruthy();
+  let answer: unknown = { membership: "in_span", coefficients: ["999", "999"] };
+  if (options.correct) {
+    const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("fixture expects unique reserved problem");
+    answer = { membership: "in_span", coefficients: solution.coefficients,
+      equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target };
+  }
+  const observation = await createOpeningLearningRepository(sql).insertObservation(scope, { sessionId: f.lesson.sessionId,
+    courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
+    clientKey: randomUUID(), answer: JSON.stringify(answer), outcome: "unverified", assistance: options.assistance ?? "independent", verdictSource: "self_report" });
+  expect(observation).toMatchObject({ outcome: options.correct ? "correct" : "incorrect", serverEvaluation: { evaluatorVersion: "span-exact-v1" } });
+  return observation;
+}
+it("projects repeated real hinted errors into the recovered agenda and resolves them after independent success", async () => {
+  const f = await seed();
+  await agendaAttempt(f, { help: true });
+  const latest = await agendaAttempt(f, { help: true });
+  const repeated = await agendaEvidence(f);
+  expect(repeated.observations.slice(0, 2)).toMatchObject([
+    { assistance: "hinted", errors: expect.arrayContaining([expect.objectContaining({ label: "coefficients", source: "verified_steps" })]) },
+    { assistance: "hinted", errors: expect.arrayContaining([expect.objectContaining({ label: "coefficients", source: "verified_steps" })]) },
+  ]);
+  expect(repeated.expected).toMatchObject({ activityKind: "full_explain", reasonCode: "repeated_assisted_error", focusObservationId: latest.id });
+  console.info("agenda repeated error", { actual: repeated.agenda.suggestion, canonical: repeated.expected, assistance: repeated.observations.map(row => row.assistance) });
+  expect(repeated.agenda).toMatchObject({ resumable: true, invalidationReasons: expect.arrayContaining(["state_changed"]), suggestion: repeated.expected });
+  const success = await agendaAttempt(f, { correct: true });
+  const resolved = await agendaEvidence(f);
+  expect(resolved.observations[0]).toMatchObject({ id: success.id, assistance: "independent", verifiedCorrect: "yes", independentAttempt: "yes" });
+  // Two older hints still form the existing recent assisted majority; the error escalation is resolved.
+  expect(resolved.expected).toMatchObject({ activityKind: "reduced_help_practice", reasonCode: "assistance_dependent" });
+  expect(resolved.agenda.suggestion).toEqual(resolved.expected);
+  console.info("agenda independent success", resolved.agenda.suggestion);
+});
+it("keeps unknown assistance unknown in a real recovered agenda", async () => {
+  const f = await seed();
+  await agendaAttempt(f, { correct: true, assistance: "unknown" });
+  const result = await agendaEvidence(f);
+  expect(result.observations[0]).toMatchObject({ assistance: "unknown", independentAttempt: "unknown", verifiedCorrect: "yes" });
+  expect(result.expected).toMatchObject({ activityKind: "transfer_check", reasonCode: "correct_needs_independent_check" });
+  expect(result.agenda.suggestion).toEqual(result.expected);
+  console.info("agenda unknown assistance", { assistance: result.observations[0]!.assistance, suggestion: result.agenda.suggestion });
+});
+it("does not escalate stale repeated errors in the real agenda consumer", async () => {
+  const f = await seed();
+  await agendaAttempt(f, { help: true }); await agendaAttempt(f, { help: true });
+  await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+  const result = await agendaEvidence(f);
+  expect(result.observations).toHaveLength(2);
+  expect(result.observations.every(row => row.usableForCurrentVersion !== "yes" && !row.errors)).toBe(true);
+  expect(result.expected).toMatchObject({ activityKind: "diagnose", reasonCode: "no_evidence" });
+  expect(result.agenda).toMatchObject({ resumable: false, suggestion: result.expected });
+  console.info("agenda stale errors", result.agenda.suggestion);
+});
 it("reconstructs the same activity, item, parent and original budget across real readers and retry keys without writes", async () => {
   const f = await seed(), { sql, scope } = fixture;
   const before = await sql`SELECT * FROM opening_teaching_activities WHERE id=${f.lesson.activityId}`;
