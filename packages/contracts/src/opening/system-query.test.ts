@@ -30,6 +30,26 @@ describe("read-only query contracts", () => {
       expect(systemQueryResultSchema.safeParse({ ...common, ...row }).success).toBe(false);
     }
   });
+  it("accepts the production independent-check reason without relaxing recommendation fields", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const common = { authorization: { purpose: "system_record_lookup", workspaceId: id, principalId: id, role: "workspace_owner", permissionRevision: "owner-fixture" },
+      name: "recommendation", status: "ok", reason: "read", asOf: "2026-10-19T00:00:00Z", version: "1", evidence: [], sourceRefs: [], nextOffset: null };
+    const recommendation = { identity: { courseId: id, skillLabel: "矩阵乘法", requirementKey: null },
+      step: { activityKind: "transfer_check", focusObservationId: id, reasonCode: "correct_needs_independent_check" },
+      evidenceIds: [id], basis: "nextLearningStep/current-evidence", limitations: [], summary: "这次答案正确，接着独立完成一道练习" };
+    const parse = (data: unknown) => systemQueryResultSchema.safeParse({ ...common, data: [data] });
+    expect(parse(recommendation).success).toBe(true);
+    expect(parse({ ...recommendation, step: { ...recommendation.step, reasonCode: "independent" } }).success).toBe(true);
+    expect(parse({ summary: "无法可靠解释下一学习活动", recommendationStatus: "unknown" }).success).toBe(true);
+    for (const data of [
+      { ...recommendation, step: { ...recommendation.step, reasonCode: "invented_reason" } },
+      { ...recommendation, step: { ...recommendation.step, unexpected: true } },
+      { ...recommendation, identity: { ...recommendation.identity, unexpected: true } },
+      { ...recommendation, unexpected: true },
+      { ...recommendation, step: { activityKind: "transfer_check", reasonCode: "correct_needs_independent_check" } },
+      { summary: "无法可靠解释下一学习活动", recommendationStatus: "unknown", step: recommendation.step },
+    ]) expect(parse(data).success).toBe(false);
+  });
   it.each(systemQueryRequestSchema.options.map(option => option.shape.name.value))("has no model-controlled scope or code for %s", name => {
     expect(systemQueryRequestSchema.safeParse({ name, arguments: { workspaceId: "00000000-0000-4000-8000-000000000001", sql: "SELECT 1" } }).success).toBe(false);
   });

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
-import { ephemeralTurnResponseSchema } from "@aistudy/contracts";
+import { ephemeralTurnResponseSchema, type Scope } from "@aistudy/contracts";
+import { createOpeningApi } from "../../../apps/web/src/features/opening/client/api";
+import { appendEphemeralResponseIfActive } from "../../../apps/web/src/features/opening/assistant/assistant-view";
+import { createOpeningAttemptService } from "../../../apps/web/src/features/opening/learning/attempt-service";
+import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
+import type { OpeningFixture } from "../opening-fixture";
+import { refreshOpeningLearningEligibility } from "../../../packages/database/src/repositories/opening-learning-eligibility";
 import { POST as ephemeralPost } from "../../../apps/web/src/app/api/opening/ephemeral/route";
 import { POST as savedPost } from "../../../apps/web/src/app/api/opening/turns/route";
 import { complete, ephemeralCounts, postEphemeral, resetEphemeralRows, sql, startEphemeralHandler, stopEphemeralHandler, tablesContainingEphemeralMarker, workspaceForCookie } from "./opening-ephemeral-harness";
@@ -21,6 +27,40 @@ it.each(["0", "1"])("HTTP ephemeral query uses current records and stores no bod
   expect(await tablesContainingEphemeralMarker(marker)).toEqual([]);
   const [row] = await sql`SELECT context_source_refs FROM opening_query_ephemeral_provenance WHERE id=${body.provenanceId!}`;
   expect(row!.context_source_refs).toEqual([]);
+});
+
+it("delivers real recommendation reasons through HTTP, strict client parsing and the chat adapter", async () => {
+  const workspaceId = await workspaceForCookie();
+  const [owner] = await sql`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
+  const scope: Scope = { workspaceId, ownerUserId: String(owner!.owner_user_id) };
+  const f = await learningAttemptFixture({ sql, scope } as OpeningFixture);
+  const session = await f.learning.createSession(scope, { courseId: f.courseId, sourceIds: [f.sourceId], skillLabel: "矩阵乘法" });
+  const service = createOpeningAttemptService(sql);
+  const attempt = await service.create(scope, { sessionId: session.id, clientKey: randomUUID(), matrixExercise: { sourceId: f.sourceId, exerciseKey: "multiplication", variant: 0 } });
+  const record = await service.submit(scope, attempt.id, { clientKey: randomUUID(), answer: "[[-3,0],[3,7]]", outcome: "unverified", assistance: "unknown" });
+  expect(record.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "unknown", usableForCurrentVersion: "yes" });
+  const input = { querySystem: true, text: "为什么推荐我继续练习？", courseId: f.courseId, sourceIds: [], mode: "listen" as const, history: [] };
+  const client = createOpeningApi(async (_url, init) => ephemeralPost(postEphemeral(JSON.parse(String(init?.body)))));
+  const output = await client.replyEphemeral(input);
+  const result = output.systemQuery!.results.find(row => row.name === "recommendation");
+  expect(result?.data[0], JSON.stringify(output.systemQuery)).toMatchObject({ step: { activityKind: "transfer_check", reasonCode: "correct_needs_independent_check" }, evidenceIds: [record.id] });
+  expect(output.text).toContain("这次答案正确，接着独立完成一道练习");
+  const messages = appendEphemeralResponseIfActive([], { clientKey: "recommendation", text: input.text, output }, new AbortController().signal);
+  expect(messages[1]).toMatchObject({ text: output.text, systemQuery: true, queryEvidenceLinks: expect.arrayContaining([{ href: `/opening/courses/${f.courseId}?tab=records`, label: "实际作答记录" }]) });
+  // A stale qualification is unknown, never a fabricated successful recommendation.
+  await sql`UPDATE opening_learning_eligibility SET policy_version='old-policy' WHERE root_observation_id=${record.id}`;
+  const unknown = await client.replyEphemeral(input);
+  expect(unknown.systemQuery!.results.find(row => row.name === "recommendation")).toMatchObject({ status: "unknown", data: [] });
+  expect(unknown.text).toContain("没有可确认的数据");
+  expect(unknown.text).not.toContain("这次答案正确，接着独立完成一道练习");
+  // Once independence is known, the special reason must stop applying.
+  await sql.begin(async tx => {
+    await tx`UPDATE opening_learning_observations SET assistance='independent' WHERE id=${record.id}`;
+    await refreshOpeningLearningEligibility(tx, scope, [record.id]);
+  });
+  const independent = await client.replyEphemeral(input);
+  expect(independent.systemQuery!.results.find(row => row.name === "recommendation")?.data[0]).toMatchObject({ step: { reasonCode: "independent" } });
+  expect(complete).not.toHaveBeenCalled();
 });
 
 it("HTTP saved query binds persisted intent and a new intent cannot reuse its client key", async () => {
