@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readStoredTeachingOutline } from "./teaching-outline";
+import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import {
@@ -155,6 +156,7 @@ export function createCompileTeachingUnitWorkerDeps(
             (input.publishInput.sourceRefs ?? []).flatMap((ref) => (ref.chunkId ? [ref.chunkId] : [])),
           );
           return createTeachingValidationAfterPublish({
+            tools: { checkFormula: checkTeachingFormula },
             loadChunks: async (ownedScope, sourceIds) => {
               const rows = await chunks.listForSources(ownedScope, sourceIds);
               return pinned.size ? rows.filter((row) => pinned.has(row.id)) : rows;
