@@ -28,7 +28,8 @@ it.each([
   const courseId = randomUUID(), requirementId = randomUUID();
   const rows = backupRows(f.sql, f.scope);
   const sourceId = await rows.source("uploaded", 1), chunkId = await rows.chunk(sourceId, 1);
-  await f.sql`UPDATE opening_source_chunks SET image_object_key=NULL,text='秩与零空间维数之和等于列数。' WHERE id=${chunkId}`;
+  const sourceText = "秩与零空间维数之和等于列数。一个3×5矩阵的秩为2，零空间维数为5 − 2 = 3。再换一个列数验证。一个3×4矩阵的秩为2，零空间维数为4 − 2 = 2。";
+  await f.sql`UPDATE opening_source_chunks SET image_object_key=NULL,text=${sourceText} WHERE id=${chunkId}`;
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'Formula tool',${courseId})`;
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility) VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, {
@@ -59,10 +60,10 @@ it.each([
       { type: "text", text: "秩与零空间维数之和等于列数。", citedChunkIds: [chunkId] },
       { type: "formula", text: formula, citedChunkIds: [chunkId] },
       { type: "prompt", text: "一个3×5矩阵的秩为2，零空间维数是多少？" },
-      { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", hints: { direction: "先找列数。", concept: "秩与零空间维数之和等于列数。", firstStep: "用5减去2。" } },
-      { type: "text", text: "再换一个列数验证。" },
+      { type: "answer_key", ...rankPedagogy, citedChunkIds: [chunkId], text: "5 − 2 = 3", hints: { direction: "先找列数。", concept: "秩与零空间维数之和等于列数。", firstStep: "用5减去2。" } },
+      { type: "text", text: "再换一个列数验证。", citedChunkIds: [chunkId] },
       { type: "prompt", text: "一个3×4矩阵的秩为2，零空间维数是多少？" },
-      { type: "answer_key", ...rankPedagogy, text: "4 − 2 = 2", hints: { direction: "先找列数。", concept: "秩与零空间维数之和等于列数。", firstStep: "用4减去2。" } },
+      { type: "answer_key", ...rankPedagogy, citedChunkIds: [chunkId], text: "4 − 2 = 2", hints: { direction: "先找列数。", concept: "秩与零空间维数之和等于列数。", firstStep: "用4减去2。" } },
     ] }), citedChunkIds: [], requestId: null, candidates: [], inputTokens: 10, outputTokens: 10 };
   };
   const [row] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND kind='compile-teaching-unit' AND payload->>'activityId'=${activity.id}`;
