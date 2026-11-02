@@ -32,6 +32,8 @@ export const courseRouteStartSchema=z.object({...actionBase,requirementId:uuidSc
   .refine(value=>(value.taskId===undefined)===(value.expectedTaskVersion===undefined),"Task identity and version must be supplied together");
 export const courseRouteNextSchema=z.object({...actionBase,activityId:uuidSchema,expectedPathVersion:z.number().int().positive(),observationId:uuidSchema.nullable()}).strict();
 export const courseRequirementProgressSchema=z.object({requirement:courseRequirementSchema,
+  referenceChecks:z.object({matched:z.number().int().nonnegative(),mismatched:z.number().int().nonnegative(),
+    unsupported:z.number().int().nonnegative()}).strict().optional(),
   questionCoverage:z.object({savedQuestions:z.number().int().nonnegative(),withReferenceAnswers:z.number().int().nonnegative(),
     issuedQuestions:z.number().int().nonnegative(),unexposedEligibility:z.literal("unknown")}).strict().optional(),
   compilation:z.object({activityId:uuidSchema.nullable(),generateStatus:teachingActivityGenerateStatusSchema.nullable(),

@@ -33,6 +33,7 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
   expect(rows[2]!.textContent).toContain("讲义：缺失，尚无当前匹配活动");
   expect(rows[3]!.textContent).toContain("讲义：编译事实未收集");
   expect(rows[3]!.textContent).toContain("题目覆盖未收集 · 未暴露资格未确认");
+  expect(rows[3]!.textContent).toContain("程序算术核对：未收集");
   expect(rows.every(row => row.textContent?.includes("待开始"))).toBe(true);
   expect(host.textContent).toContain("已确认 4 项要求");
   expect(host.textContent).not.toContain("讲义已核验");
@@ -59,6 +60,18 @@ it("accepts count-only coverage and rejects private bodies or invented unexposed
   for (const invalid of [{ ...coverage, prompt: "private stem" }, { ...coverage, answer: "private answer" }, { ...coverage, answerBlockId: id }, { ...coverage, unexposedEligibility: "eligible" }, { ...coverage, savedQuestions: -1 }]) {
     const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, questionCoverage: invalid }] })));
     await expect(api.read(courseId)).rejects.toThrow();
+  }
+});
+it("accepts count-only reference checks and rejects private or invalid aggregates", async () => {
+  const referenceChecks = { matched: Number.MAX_SAFE_INTEGER, mismatched: 0, unsupported: 0 };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], referenceChecks };
+  const { courseRouteSnapshotSchema } = await import("@aistudy/contracts");
+  const value = { ...snapshot, requirements: [row] };
+  expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
+  await expect(createCourseRouteClient(async () => new Response(JSON.stringify(value))).read(courseId)).resolves.toMatchObject({ requirements: [{ referenceChecks }] });
+  for (const invalid of [{ ...referenceChecks, answer: "private" }, { ...referenceChecks, answerBlockId: id }, { ...referenceChecks, matched: -1 }, { ...referenceChecks, unsupported: 0.5 }]) {
+    expect(courseRouteSnapshotSchema.safeParse({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }).success).toBe(false);
+    await expect(createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }))).read(courseId)).rejects.toThrow();
   }
 });
 it("shows the full material inventory while keeping extracted suggestions unconfirmed", async () => { const api = client(); await render(api); expect(host.textContent).toContain("资料 33"); expect(host.textContent).toContain("尚未确认全课范围"); expect(api.confirm).not.toHaveBeenCalled(); expect(api.start).not.toHaveBeenCalled(); });

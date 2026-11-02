@@ -1,4 +1,5 @@
-import { courseRouteActivityContextSchema, courseRequirementProgressSchema, type CourseRequirementProgress, type Scope } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, courseRequirementProgressSchema, teachingQuestionInteractionSchema, type CourseRequirementProgress, type Scope } from "@aistudy/contracts";
+import { checkArithmeticAnswer } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import type { TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionText } from "./opening-teaching-question";
@@ -14,6 +15,7 @@ async function readQuestionCoverage(db: Sql | TransactionSql, scope: Scope, cour
         AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id AND a.course_id=v.course_id AND a.activity_id=v.activity_id)`;
   const issuedIds = new Set(issued.map(row => String(row.teaching_block_id)));
   const coverage = { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const };
+  const referenceChecks = { matched: 0, mismatched: 0, unsupported: 0 };
   const refs = [...ordered].sort((a, b) => a.position - b.position);
   const seen = new Set<string>();
   for (const [index, ref] of refs.entries()) {
@@ -26,9 +28,17 @@ async function readQuestionCoverage(db: Sql | TransactionSql, scope: Scope, cour
     const next = refs[index + 1];
     const answer = next && (next.role === "answer_key" || ["answer_key", "solution"].includes(next.blockType))
       ? blocks.find(block => block.id === next.blockId && ["answer_key", "solution"].includes(block.type)) : undefined;
-    if (teachingQuestionText(answer?.content)) coverage.withReferenceAnswers++;
+    const reference = teachingQuestionText(answer?.content);
+    if (reference) {
+      coverage.withReferenceAnswers++;
+      const interaction = teachingQuestionInteractionSchema.safeParse(prompt.content.interaction);
+      const unsupported = prompt.content.interaction !== undefined && (!interaction.success
+        || interaction.data.kind === "choice" || (interaction.data.kind === "numeric" && Boolean(interaction.data.unit)));
+      const result = unsupported ? null : checkArithmeticAnswer(teachingQuestionText(prompt.content)!, reference);
+      referenceChecks[result === "correct" ? "matched" : result === "incorrect" ? "mismatched" : "unsupported"]++;
+    }
   }
-  return coverage;
+  return { coverage, referenceChecks };
 }
 
 /** Current matching activity only; private block bodies stay inside this repository. */
@@ -66,9 +76,12 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
         && parsed.data.stableSkillId === requirement.stableSkillId && parsed.data.requirementKey === requirement.requirementKey;
     });
     const saved = !!row && row.saved === true && item.sourcesAvailable;
-    item.questionCoverage = saved
+    const facts = saved
       ? await readQuestionCoverage(db, scope, courseId, String(row!.id), String(row!.revision_id), row!.block_order as TeachingBlockRef[], row!.blocks as Block[])
-      : { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" };
+      : { coverage: { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const },
+        referenceChecks: { matched: 0, mismatched: 0, unsupported: 0 } };
+    item.questionCoverage = facts.coverage;
+    item.referenceChecks = facts.referenceChecks;
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({
       activityId: row ? String(row.id) : null, generateStatus: row?.generate_status ?? null,
       contentVersion: row ? Number(row.content_version) : 0, saved,
