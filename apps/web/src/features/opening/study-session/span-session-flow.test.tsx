@@ -9,7 +9,7 @@ import type { SpanLessonDetails } from "../teaching/span/span-session-client";
 import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
 import { StudySession, StudySessionShell } from "./study-session-shell";
-import type { StudySessionView } from "./model";
+import { primaryAction, type StudySessionView } from "./model";
 
 const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
   read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
@@ -124,8 +124,11 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
     await ui.click("提交");
     const first = structuredClone(observations.get(attempt.id));
     expect(ui.host.textContent).toContain("还没对");
-    expect(ui.button("看下一步安排")).toBeDefined();
-    await ui.click("改这道题");
+    expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("改这道题");
+    expect(ui.button("看下一步安排")).toBeUndefined();
+    await act(async () => (ui.host.querySelector("[data-primary-action]") as HTMLButtonElement).click());
+    expect(save).not.toHaveBeenCalled();
+    expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
     expect(ui.host.querySelector("select")!.disabled).toBe(false);
     expect([...ui.host.querySelectorAll("input")].some(input => input.value === "9")).toBe(true);
     const exercise = attempt.spanExercise!;
@@ -399,7 +402,14 @@ it("a failed photo leaves no attachment on the text answer", async () => {
 it("renders exactly one primary action in every state and no time when the backend has none", () => {
   const base: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 },
     position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: { level: 1, label: "方向提示" } }, answer: {}, sealed: false, result: null, next: null, photo: null };
-  const states: StudySessionView[] = [base, { ...base, answer: { membership: "in_span" } }, { ...base, sealed: true },
+  const redo = { ...base, canRedo: true, result: { outcome: "incorrect" as const, assistance: "hinted" as const } };
+  expect(primaryAction(redo, false)).toMatchObject({ kind: "redo", disabled: false });
+  expect(primaryAction(redo, true).disabled).toBe(true);
+  for (const outcome of ["correct", "unknown", "pending", "needs_manual"] as const) {
+    expect(primaryAction({ ...redo, result: { outcome, assistance: "unknown" } }, false).kind).not.toBe("redo");
+  }
+  expect(primaryAction({ ...redo, canRedo: false }, false).kind).not.toBe("redo");
+  const states: StudySessionView[] = [base, redo, { ...base, answer: { membership: "in_span" } }, { ...base, sealed: true },
     { ...base, result: { outcome: "correct", assistance: "independent" } }, { ...base, result: { outcome: "incorrect", assistance: "hinted" }, next: { href: "/x", label: "再练一题", alternatives: [] } },
     { ...base, blocked: "资料不可用" }, { ...base, step: { kind: "learn", id: "l", title: "例题", body: "$x$", estimateMinutes: null } }];
   const host = document.createElement("div"); const root = createRoot(host);

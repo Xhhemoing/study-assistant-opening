@@ -65,7 +65,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
         {view.result.detail ? <p className="text-sm leading-7 text-text-2">{view.result.detail}</p> : null}
         {view.result.nextStep ? <div className="rounded-tile border border-line bg-accent-soft p-3 text-sm leading-7"><p className="font-medium">下一步：{view.result.nextStep.label}</p><p>{view.result.nextStep.action}</p></div> : null}
         {view.next?.reason ? <p className="text-sm leading-7 text-text-2">{view.next.reason}</p> : null}
-        {view.canRedo && on.onRedo ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
+        {view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
       </section> : null}
       {view.next?.alternatives.length ? <div className="flex flex-wrap gap-2">{view.next.alternatives.map(link =>
         <a key={link.href} className={ui.quiet} href={link.href}>{link.label}</a>)}</div> : null}
@@ -122,7 +122,11 @@ export function StudySession({ port }: { port: StudySessionPort }) {
   </section>;
   const go = (href: string) => { if (router) router.push(href); else window.location.assign(href); };
   return <StudySessionShell view={view} pending={pending} error={error}
-    onPrimary={() => { if (view.next && !view.blocked) go(view.next.href); else void run(port.primary); }}
+    onPrimary={() => {
+      if (primaryAction(view, pending).kind === "redo" && port.redo) void run(port.redo);
+      else if (view.next && !view.blocked) go(view.next.href);
+      else void run(port.primary);
+    }}
     onHelp={() => void run(port.help)} onPause={() => void run(port.pause)} onReload={() => void run(port.load)}
     onRedo={port.redo ? () => void run(port.redo!) : undefined}
     onEdit={change => sync(() => port.edit(change))} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => sync(port.removePhoto)} />;
