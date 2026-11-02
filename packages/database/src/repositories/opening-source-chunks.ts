@@ -30,10 +30,19 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       const existing = await tx`SELECT * FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
       const previousContent = chunkContent(existing.map(row => mapChunk(row)));
       const nextContent = chunkContent(input.chunks);
-      // Replaying a completed parse must not invalidate already-issued citations.
+      // Replaying or extending a partial parse must preserve unchanged citations.
       if (previousContent.length !== nextContent.length || previousContent.some((value, index) => value !== nextContent[index])) {
-        await tx`DELETE FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
-        for (const chunk of input.chunks) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
+        const unmatched = existing.map(row => mapChunk(row));
+        const added: NewSourceChunk[] = [];
+        for (const chunk of input.chunks) {
+          const content = chunkContent([chunk])[0];
+          const index = unmatched.findIndex(previous => chunkContent([previous])[0] === content);
+          if (index !== -1) unmatched.splice(index, 1);
+          else added.push(chunk);
+        }
+        // Free changed page keys before inserting replacements in this transaction.
+        if (unmatched.length) await tx`DELETE FROM opening_source_chunks WHERE id IN ${tx(unmatched.map(chunk => chunk.id))}`;
+        for (const chunk of added) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
           VALUES(${input.sourceId},${input.sourceVersion},${chunk.page},${chunk.slideLabel ?? null},${chunk.startMs ?? null},${chunk.endMs ?? null},${chunk.text},${chunk.imageObjectKey ?? null})`;
       }
       await tx`UPDATE opening_sources SET parse_state='ready',error=NULL,updated_at=now()

@@ -112,9 +112,19 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
         : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
       signal.throwIfAborted();
       const chunks = [];
+      // Durable PDF pages already published at this version include any visual
+      // transcription. Reuse them rather than recognizing successful pages again.
+      const published = source.mime === "application/pdf" && deps.segments
+        ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version) : [];
       let visualRecognitionUnavailable = false;
       for (const page of pages) {
         signal.throwIfAborted();
+        const saved = published.filter(chunk => chunk.page === page.page);
+        if (saved.length) {
+          chunks.push(...saved.map(chunk => ({ page: chunk.page, slideLabel: chunk.slideLabel ?? null,
+            startMs: chunk.startMs, endMs: chunk.endMs, text: chunk.text, imageObjectKey: chunk.imageObjectKey })));
+          continue;
+        }
         const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || source.mime === "application/pdf") ? ["scan" as const] : [];
         let text = page.text;
         let imageObjectKey: string | null = null;

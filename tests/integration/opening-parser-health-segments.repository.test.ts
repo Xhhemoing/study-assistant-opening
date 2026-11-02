@@ -10,6 +10,8 @@ import { createOpeningSourceService } from "../../apps/web/src/features/opening/
 import { createOpeningPdfSegmentsRepository } from "../../packages/database/src/repositories/opening-pdf-segments";
 import { createOpeningParserHealthRepository, type ParserOcrHealth } from "../../packages/database/src/repositories/opening-parser-health";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { citationSchema, sourceChunkSchema, sourceRecordSchema } from "@aistudy/contracts";
+import { readOpeningSourceContent } from "../../packages/database/src/repositories/opening-source-content";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -64,7 +66,7 @@ async function seed() {
 }
 
 describe("0094/0095 PDF segment persistence and execution fencing", () => {
-  it("publishes successful pages after two segment failures and requeues only the failed segment", async () => {
+  it.each([false, true])("preserves successful chunks and citations through public retry (still fails: %s)", async stillFails => {
     const d = await seed(), sources = createOpeningSourceRepository(f.sql);
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "partial-pdf-"));
     const starts: number[] = [];
@@ -76,32 +78,67 @@ describe("0094/0095 PDF segment persistence and execution fencing", () => {
       return fail && start === 2 ? { exitCode: 4, stdout: "" }
         : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: start, text: `Readable page ${start}`, imagePath: null }] }) };
     };
-    const handler = createParseSourceHandler({ sources, chunks: createOpeningSourceChunksRepository(f.sql),
-      segments: createOpeningPdfSegmentsRepository(f.sql), storage: d.storage, runner, tempDir, segmentPages: 1 });
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    let recognitions = 0;
+    const recognizedPages: number[] = [];
+    const handler = createParseSourceHandler({ sources, chunks,
+      segments: createOpeningPdfSegmentsRepository(f.sql), storage: d.storage, runner: async (argv, signal) => {
+        const result = await runner(argv, signal);
+        if (!argv.includes("--inspect-pdf") && result.exitCode === 0) {
+          const output = JSON.parse(result.stdout);
+          output.pages[0].visualKinds = ["scan"];
+          return { ...result, stdout: JSON.stringify(output) };
+        }
+        return result;
+      }, tempDir, segmentPages: 1,
+      recognizePage: async input => {
+        recognitions++;
+        recognizedPages.push(input.physicalPage);
+        return { text: `Visual page ${input.physicalPage} call ${recognitions}`, imageObjectKey: `pages/${input.physicalPage}` };
+      } });
     try {
       const result = await handler(d.claimed, d.claimed.payload);
       expect(result).toEqual({ pages: 1 });
       expect(starts).toEqual([1, 2, 2]);
       expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready",
         error: { code: "PARSE_PARTIAL", retryable: true, message: "第 2 页未能识别，可以重新解析" } });
-      expect(await f.sql`SELECT page,text FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
-        .toEqual([{ page: 1, text: "Readable page 1" }]);
+      const [saved] = await chunks.listChunks(f.scope, d.identity.sourceId);
+      const oldChunk = sourceChunkSchema.parse(saved);
+      const citation = citationSchema.parse({ chunkId: oldChunk.id, sourceId: oldChunk.sourceId,
+        sourceVersion: oldChunk.sourceVersion, page: oldChunk.page, label: "saved page" });
+      expect(recognitions).toBe(1);
       expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId} ORDER BY page_start`)
         .toEqual([{ page_start: 1, state: "ready" }, { page_start: 2, state: "failed" }]);
       await d.jobs.finish(d.claimed.id, "succeeded", result, d.claimed.claimToken);
       // Exercise the public service as well as retryParseWithJob's real SQL.
-      expect(await d.service.retryParse(d.principal, d.identity.sourceId)).toMatchObject({ parseState: "queued", error: null });
+      expect(sourceRecordSchema.safeParse(await d.service.retryParse(d.principal, d.identity.sourceId)).success).toBe(true);
+      expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "queued", error: null });
       const [retry] = await f.sql`SELECT id FROM opening_jobs WHERE kind='parse' AND payload->>'sourceId'=${d.identity.sourceId} AND id<>${d.claimed.id}`;
       expect(await f.sql`SELECT job_id FROM opening_outbox WHERE job_id=${retry!.id}`).toHaveLength(1);
       const claimed = await d.jobs.claim(retry!.id as string);
       expect(claimed).not.toBeNull();
-      fail = false;
+      fail = stillFails;
       starts.length = 0;
-      expect(await handler(claimed!, claimed!.payload)).toEqual({ pages: 2 });
-      expect(starts).toEqual([2]);
-      expect(await sources.get(f.scope, d.identity.sourceId)).toMatchObject({ parseState: "ready", error: null });
-      expect(await f.sql`SELECT page FROM opening_source_chunks WHERE source_id=${d.identity.sourceId} ORDER BY page`)
-        .toEqual([{ page: 1 }, { page: 2 }]);
+      expect(await handler(claimed!, claimed!.payload)).toEqual({ pages: stillFails ? 1 : 2 });
+      expect(starts).toEqual(stillFails ? [2, 2] : [2]);
+      expect(recognitions).toBe(stillFails ? 1 : 2);
+      expect(recognizedPages).toEqual(stillFails ? [1] : [1, 2]);
+      expect(await f.sql`SELECT page_start,state FROM opening_pdf_parse_segments WHERE source_id=${d.identity.sourceId} ORDER BY page_start`)
+        .toEqual([{ page_start: 1, state: "ready" }, { page_start: 2, state: stillFails ? "failed" : "ready" }]);
+      const current = sourceRecordSchema.parse(await sources.get(f.scope, d.identity.sourceId));
+      expect(current).toMatchObject({ parseState: "ready", error: stillFails
+        ? { code: "PARSE_PARTIAL", retryable: true, message: "第 2 页未能识别，可以重新解析" } : null });
+      const after = await chunks.listChunksAtVersion(f.scope, citation.sourceId, citation.sourceVersion);
+      expect(after.find(chunk => chunk.id === citation.chunkId)).toEqual(oldChunk);
+      expect(after.map(chunk => chunk.page)).toEqual(stillFails ? [1] : [1, 2]);
+      expect(await chunks.listChunks(f.scope, citation.sourceId)).toEqual(after);
+      expect(await readOpeningSourceContent(f.sql, f.scope, citation.sourceId,
+        { version: citation.sourceVersion, page: citation.page })).toMatchObject({ text: oldChunk.text,
+        version: citation.sourceVersion, pages: stillFails ? [1] : [1, 2], readablePages: stillFails ? 1 : 2 });
+      if (stillFails) await expect(readOpeningSourceContent(f.sql, f.scope, citation.sourceId,
+        { version: citation.sourceVersion, page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      else expect(await readOpeningSourceContent(f.sql, f.scope, citation.sourceId,
+        { version: citation.sourceVersion, page: 2 })).toMatchObject({ text: after[1]!.text, page: 2 });
     } finally { await rm(tempDir, { recursive: true, force: true }); }
   });
 

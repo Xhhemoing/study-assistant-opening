@@ -14,6 +14,19 @@ async function seed() {
 }
 const chunk = (text: string, page = 1) => ({ text, page, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null });
 describe("source chunks usability", () => {
+  it("retains unchanged identities on extension but removes changed or omitted chunks", async () => {
+    const id = await seed(), repo = createOpeningSourceChunksRepository(f.sql);
+    await repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1, chunks: [chunk("saved"), chunk("old", 2)] });
+    const before = await repo.listChunks(f.scope, id);
+    await repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1,
+      chunks: [chunk("saved"), chunk("new", 2), chunk("added", 3)] });
+    const extended = await repo.listChunks(f.scope, id);
+    expect(extended[0]).toEqual(before[0]);
+    expect(extended[1]!.id).not.toBe(before[1]!.id);
+    expect(extended.map(row => row.text)).toEqual(["saved", "new", "added"]);
+    await repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1, chunks: [chunk("saved")] });
+    expect(await repo.listChunks(f.scope, id)).toEqual([before[0]]);
+  });
   it("reads only the requested owned version and page, preserves empty pages and bounds body output", async () => {
     const id = await seed(), repo = createOpeningSourceChunksRepository(f.sql);
     await repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1, chunks: [chunk(""), chunk("B".repeat(21000), 2)] });
