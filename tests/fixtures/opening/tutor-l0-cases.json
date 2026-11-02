@@ -3608,6 +3608,286 @@
         "now": "2026-10-11T00:00:00Z",
         "observation": null
       }
+    },
+    {
+      "caseId": "next-repeated-assisted-error",
+      "entry": "nextLearningStep",
+      "scenario": "同技能两次受助且已核对的相同步骤错误触发完整讲解",
+      "initialFactRefs": [
+        "synthetic:next-repeated-assisted-error"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "同技能两次受助且已核对的相同步骤错误触发完整讲解",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "full_explain"
+          ],
+          "decision.reasonCode": [
+            "repeated_assisted_error"
+          ],
+          "decision.focusObservationId": [
+            "11111111-1111-4111-8111-111111111111"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "needs_check",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-02T00:00:00Z",
+            "problemId": "synthetic:p0",
+            "itemVersionId": "synthetic:v1",
+            "verifiedCorrect": "no",
+            "independentAttempt": "no",
+            "assistance": "hinted",
+            "usableForCurrentVersion": "yes",
+            "errors": [
+              {
+                "observationId": "11111111-1111-4111-8111-111111111111",
+                "label": "coefficients",
+                "feedback": "合成已核对步骤错误",
+                "source": "verified_steps"
+              }
+            ]
+          },
+          {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "synthetic:p1",
+            "itemVersionId": "synthetic:v1",
+            "verifiedCorrect": "no",
+            "independentAttempt": "no",
+            "assistance": "hinted",
+            "usableForCurrentVersion": "yes",
+            "errors": [
+              {
+                "observationId": "22222222-2222-4222-8222-222222222222",
+                "label": "coefficients",
+                "feedback": "合成已核对步骤错误",
+                "source": "verified_steps"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-independent-success-resolves-errors",
+      "entry": "nextLearningStep",
+      "scenario": "最新独立正确解除重复错误，近期受助占多数仍减弱帮助",
+      "initialFactRefs": [
+        "synthetic:next-independent-success-resolves-errors"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "最新独立正确解除重复错误，近期受助占多数仍减弱帮助",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "reduced_help_practice"
+          ],
+          "decision.reasonCode": [
+            "assistance_dependent"
+          ],
+          "decision.focusObservationId": [
+            null
+          ]
+        },
+        "forbidden": {
+          "decision.reasonCode": [
+            "repeated_assisted_error"
+          ],
+          "decision.activityKind": [
+            "full_explain"
+          ]
+        },
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "observed_independent",
+        "wantsFullExplanation": false,
+        "observations": [
+          {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-03T00:00:00Z",
+            "problemId": "synthetic:p2",
+            "itemVersionId": "synthetic:v1",
+            "verifiedCorrect": "yes",
+            "independentAttempt": "yes",
+            "assistance": "independent",
+            "usableForCurrentVersion": "yes"
+          },
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-02T00:00:00Z",
+            "problemId": "synthetic:p0",
+            "itemVersionId": "synthetic:v1",
+            "verifiedCorrect": "no",
+            "independentAttempt": "no",
+            "assistance": "hinted",
+            "usableForCurrentVersion": "yes",
+            "errors": [
+              {
+                "observationId": "11111111-1111-4111-8111-111111111111",
+                "label": "coefficients",
+                "feedback": "合成已核对步骤错误",
+                "source": "verified_steps"
+              }
+            ]
+          },
+          {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "skillLabel": "合成向量张成",
+            "attemptedAt": "2026-10-01T00:00:00Z",
+            "problemId": "synthetic:p1",
+            "itemVersionId": "synthetic:v1",
+            "verifiedCorrect": "no",
+            "independentAttempt": "no",
+            "assistance": "hinted",
+            "usableForCurrentVersion": "yes",
+            "errors": [
+              {
+                "observationId": "22222222-2222-4222-8222-222222222222",
+                "label": "coefficients",
+                "feedback": "合成已核对步骤错误",
+                "source": "verified_steps"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "next-due-retest",
+      "entry": "nextLearningStep",
+      "scenario": "到期复测自动进入维持阶段",
+      "initialFactRefs": [
+        "synthetic:next-due-retest"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "到期复测自动进入维持阶段",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "transfer_check"
+          ],
+          "decision.reasonCode": [
+            "due_retest"
+          ],
+          "decision.focusObservationId": [
+            null
+          ],
+          "decision.phase": [
+            "maintain"
+          ],
+          "decision.phaseSource": [
+            "automatic"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "unobserved",
+        "wantsFullExplanation": false,
+        "observations": [],
+        "dueRetest": true
+      }
+    },
+    {
+      "caseId": "next-explicit-consolidate",
+      "entry": "nextLearningStep",
+      "scenario": "显式巩固阶段覆盖无证据诊断默认值",
+      "initialFactRefs": [
+        "synthetic:next-explicit-consolidate"
+      ],
+      "versionRefs": [
+        "synthetic:item-v1",
+        "synthetic:requirement-v1"
+      ],
+      "goalOrMode": "独立完成合成任务",
+      "typicalError": "显式巩固阶段覆盖无证据诊断默认值",
+      "gold": {
+        "allowed": {
+          "decision.activityKind": [
+            "reduced_help_practice"
+          ],
+          "decision.reasonCode": [
+            "requested_consolidate"
+          ],
+          "decision.focusObservationId": [
+            null
+          ],
+          "decision.phase": [
+            "consolidate"
+          ],
+          "decision.phaseSource": [
+            "explicit"
+          ]
+        },
+        "forbidden": {},
+        "expectedReceipt": "unknown:pure-function-only",
+        "forbiddenSideEffects": [
+          "不得声称保存/安排/释放预算",
+          "不得从纯建议推断帮助已交付",
+          "不得提升掌握或真实学习效果"
+        ],
+        "termination": "纯函数返回后终止；持久副作用与教学语义未测",
+        "stopAt": "pure_function_termination",
+        "waitingFor": "none"
+      },
+      "input": {
+        "status": "unobserved",
+        "wantsFullExplanation": false,
+        "observations": [],
+        "dueRetest": false,
+        "learningPhase": "consolidate",
+        "phaseSource": "explicit"
+      }
     }
   ]
 }

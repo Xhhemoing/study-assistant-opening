@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { LoopMetric } from "@aistudy/contracts";
+import { teachingLearnerFocusSchema, type LoopMetric } from "@aistudy/contracts";
 import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./adaptive/next-learning-step";
 import { recommendTutorAction } from "./tutor-policy";
 import { courseRouteRetestOutcome } from "./course-route-retest";
@@ -42,8 +42,13 @@ const context = z.object({
 const entries = [
   z.object({ entry: z.literal("nextLearningStep"), input: z.object({
     status: z.enum(["unobserved", "needs_check", "observed_independent", "needs_review"]),
-    wantsFullExplanation: z.boolean(), observations: z.array(evidenceState.extend({
+    wantsFullExplanation: z.boolean(),
+    dueRetest: z.boolean().optional(),
+    learningPhase: z.enum(["explore", "new_learning", "consolidate", "maintain"]).optional(),
+    phaseSource: z.enum(["automatic", "explicit"]).optional(),
+    observations: z.array(evidenceState.extend({
       id: text, skillLabel: text, attemptedAt: iso, problemId: text.nullable(), itemVersionId: text.nullish(),
+      errors: teachingLearnerFocusSchema.shape.recentErrors,
     }).strict()),
   }).strict() }),
   z.object({ entry: z.literal("tutor.thin"), input: z.object({ skillLabel: text, currentPage: z.number().int().positive().nullable(),
