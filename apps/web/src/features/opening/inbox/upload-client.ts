@@ -1,6 +1,7 @@
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
 import { resolveUploadMime, unsupportedUploadMessage } from "./upload-state";
 import { uploadErrorMessage } from "./upload-error";
+import type { SessionIdentity } from "../../auth/session-identity";
 
 export type LocalUploadFile = {
   name: string;
@@ -9,6 +10,7 @@ export type LocalUploadFile = {
 };
 
 export type UploadByteProgress = {
+  expectedIdentity?: SessionIdentity | null;
   uploadId?: string;
   onBytes?: (loaded: number, total: number) => void;
   resumeSourceId?: string;
@@ -30,15 +32,16 @@ type PutFn = (
   body: Uint8Array,
   onProgress: (loaded: number) => void,
   mime: string,
+  expectedIdentity?: SessionIdentity | null,
 ) => Promise<void>;
 
 export type UploadClientDeps = {
-  begin: (input: UploadInput) => Promise<UploadTicket>;
-  complete: (sourceId: string) => Promise<SourceRecord>;
+  begin: (input: UploadInput, expectedIdentity?: SessionIdentity | null) => Promise<UploadTicket>;
+  complete: (sourceId: string, expectedIdentity?: SessionIdentity | null) => Promise<SourceRecord>;
   put: PutFn;
   resolvePutUrl?: (ticket: UploadTicket) => string;
   /** Reissue lease for pending source; required for retry (never reuse expired uploadUrl). */
-  refreshTicket?: (sourceId: string) => Promise<UploadTicket>;
+  refreshTicket?: (sourceId: string, expectedIdentity?: SessionIdentity | null) => Promise<UploadTicket>;
 };
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -63,7 +66,7 @@ export function createUploadClient(deps: UploadClientDeps) {
     ): Promise<SourceRecord | UploadRejected> {
       if (progress.resumeSourceId && progress.completionPending) {
         try {
-          const result = await deps.complete(progress.resumeSourceId);
+          const result = await deps.complete(progress.resumeSourceId, progress.expectedIdentity);
           pendingBegins.delete(file);
           return result;
         }
@@ -86,7 +89,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         if (progress.resumeSourceId) {
           // Retry: refresh ticket (same source id) — never reuse expired uploadUrl; never begin a new row.
           ticket = deps.refreshTicket
-            ? await deps.refreshTicket(progress.resumeSourceId)
+            ? await deps.refreshTicket(progress.resumeSourceId, progress.expectedIdentity)
             : progress.ticket;
         } else {
           const uploadId = progress.uploadId ?? pendingBegins.get(file) ?? globalThis.crypto.randomUUID();
@@ -97,7 +100,7 @@ export function createUploadClient(deps: UploadClientDeps) {
             bytes: file.bytes.byteLength,
             sha256: await sha256Hex(file.bytes),
             uploadId,
-          });
+          }, progress.expectedIdentity);
         }
       } catch (error) {
         const detail = rejectionDetail(error);
@@ -121,7 +124,7 @@ export function createUploadClient(deps: UploadClientDeps) {
       try {
         await deps.put(deps.resolvePutUrl?.(ticket) ?? ticket.uploadUrl, file.bytes, (loaded) => {
           progress.onBytes?.(loaded, file.bytes.byteLength);
-        }, mime);
+        }, mime, progress.expectedIdentity);
       } catch (error) {
         const detail = rejectionDetail(error);
         return {
@@ -133,7 +136,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         };
       }
       try {
-        const result = await deps.complete(ticket.source.id);
+        const result = await deps.complete(ticket.source.id, progress.expectedIdentity);
         pendingBegins.delete(file);
         return result;
       } catch (error) {
@@ -147,8 +150,8 @@ export function createUploadClient(deps: UploadClientDeps) {
         };
       }
     },
-    retryComplete(sourceId: string): Promise<SourceRecord> {
-      return deps.complete(sourceId);
+    retryComplete(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<SourceRecord> {
+      return deps.complete(sourceId, expectedIdentity);
     },
   };
 }

@@ -1,4 +1,6 @@
 import { isSessionExpired } from "../../auth/session-expiry";
+import { getVerifiedSessionIdentity, type SessionIdentity } from "../../auth/session-identity";
+import { verifyUploadIdentity } from "./upload-identity";
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import type { LocalUploadFile, UploadByteProgress, UploadRejected } from "./upload-client";
 import { uploadBatchRejection, uploadFileRejection } from "./upload-preflight";
@@ -8,6 +10,7 @@ export type UploadQueueState = "idle" | "uploading" | "saved" | "failed";
 
 export type UploadQueueItem = {
   id: string;
+  expectedIdentity?: SessionIdentity | null;
   file: LocalUploadFile;
   state: UploadQueueState;
   source?: SourceRecord;
@@ -25,7 +28,7 @@ type LegacyUpload = (
   file: LocalUploadFile,
   onBytes?: (loaded: number, total: number) => void,
   resume?: { sourceId: string; ticket: UploadTicket; completionPending?: boolean },
-  operation?: { uploadId: string },
+  operation?: { uploadId: string; expectedIdentity: SessionIdentity | null },
 ) => Promise<SourceRecord | UploadRejected>;
 
 type UploadOperation = UploadQueueClient | LegacyUpload;
@@ -58,6 +61,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     assertRoom(files.map(file => ({ size: file.bytes.byteLength })));
     const added = files.map((file) => ({
       id: globalThis.crypto.randomUUID(),
+      expectedIdentity: getVerifiedSessionIdentity(),
       file,
       state: "idle" as const,
       progress: 0,
@@ -98,6 +102,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     };
     let result: SourceRecord | UploadRejected;
     try {
+      await verifyUploadIdentity(item.expectedIdentity ?? null);
       const unread = unreadFiles.get(item.id);
       if (unread) {
         let bytes: Uint8Array;
@@ -110,17 +115,18 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       if (isClient(client)) {
         result = await client.uploadFile(item.file, item.ticket ? {
           uploadId: item.id,
+          expectedIdentity: item.expectedIdentity,
           resumeSourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
           onBytes,
-        } : { uploadId: item.id, onBytes });
+        } : { uploadId: item.id, expectedIdentity: item.expectedIdentity, onBytes });
       } else {
         result = await client(item.file, onBytes, item.ticket ? {
           sourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
-        } : undefined, { uploadId: item.id });
+        } : undefined, { uploadId: item.id, expectedIdentity: item.expectedIdentity ?? null });
       }
     } catch (error) {
       if (!stillActive(item.id)) return;

@@ -1,5 +1,7 @@
 import { guardSessionRequest } from "../../auth/session-expiry";
 import { UploadUserError } from "./upload-error";
+import type { SessionIdentity } from "../../auth/session-identity";
+import { uploadIdentityHeaders } from "./upload-identity";
 
 export type PutProgress = (loaded: number, total: number) => void;
 
@@ -10,6 +12,7 @@ export function putPrivateBytes(
   mime: string,
   onProgress?: PutProgress,
   xhrFactory: () => XMLHttpRequest = () => new XMLHttpRequest(),
+  expectedIdentity?: SessionIdentity | null,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const guard = guardSessionRequest(url);
@@ -19,6 +22,7 @@ export function putPrivateBytes(
     // Same-origin relative URLs send cookies by default; keep credentials if begin ever returns absolute same-site URL.
     xhr.withCredentials = true;
     xhr.setRequestHeader("content-type", mime);
+    for (const [name, value] of Object.entries(uploadIdentityHeaders(expectedIdentity))) xhr.setRequestHeader(name, value);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress?.(event.loaded, event.total);
     };

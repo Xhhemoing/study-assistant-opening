@@ -47,14 +47,15 @@ export function UploadStrip({ api, onUploaded, sources = [], disabled, courseId 
   const locked = useRef(false);
   const pendingPublication = useRef(new Map<string, UploadQueueItem>());
   const client = useMemo(() => createUploadClient({
-    begin: (input) => api.beginUpload(input),
-    complete: (id) => api.completeUpload(id),
-    put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded)),
+    begin: (input, identity) => api.beginUpload(input, identity),
+    complete: (id, identity) => api.completeUpload(id, identity),
+    put: (url, body, onProgress, mime, identity) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded), undefined, identity),
     resolvePutUrl: resolveUploadPutUrl,
-    refreshTicket: (id) => api.refreshUploadTicket(id),
+    refreshTicket: (id, identity) => api.refreshUploadTicket(id, identity),
   }), [api]);
   const queue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
     uploadId: operation?.uploadId,
+    expectedIdentity: operation?.expectedIdentity,
     onBytes,
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);

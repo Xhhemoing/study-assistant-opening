@@ -1,4 +1,6 @@
 import { parseOpeningResponse } from "./parse-response";
+import type { SessionIdentity } from "../../auth/session-identity";
+import { uploadIdentityHeaders } from "../inbox/upload-identity";
 import { readServerEvents } from "./sse";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { createSessionFetch } from "../../auth/session-expiry";
@@ -386,20 +388,20 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(sourceListSchema, body);
     },
 
-    async beginUpload(input: UploadInput): Promise<UploadTicket> {
+    async beginUpload(input: UploadInput, expectedIdentity?: SessionIdentity | null): Promise<UploadTicket> {
       const payload = uploadInputSchema.parse(input);
       const body = await request(
         "/api/opening/sources",
-        { method: "POST", body: JSON.stringify(payload) },
+        { method: "POST", body: JSON.stringify(payload), headers: uploadIdentityHeaders(expectedIdentity) },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);
     },
 
-    async completeUpload(sourceId: string): Promise<SourceRecord> {
+    async completeUpload(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<SourceRecord> {
       const body = await request(
         `/api/opening/sources/${sourceId}/complete`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity) },
         fetchImpl,
       );
       return parseOpeningResponse(sourceRecordSchema, body);
@@ -418,10 +420,10 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       await request(`/api/opening/sources/${sourceId}/reindex`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
     },
 
-    async refreshUploadTicket(sourceId: string): Promise<UploadTicket> {
+    async refreshUploadTicket(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<UploadTicket> {
       const body = await request(
         `/api/opening/sources/${sourceId}/upload-ticket`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity) },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);

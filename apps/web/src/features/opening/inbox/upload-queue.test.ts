@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setupUploadIdentity, uploadTestIdentity } from "./upload-identity-test-fixture";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
+beforeEach(() => { setupUploadIdentity(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import { createUploadQueue } from "./upload-queue";
 import { createUploadClient, type LocalUploadFile } from "./upload-client";
@@ -22,6 +26,32 @@ function file(name: string): LocalUploadFile {
 }
 
 describe("createUploadQueue", () => {
+  it("does not read a local File under B and resumes the retained A file after switching back", async () => {
+    const upload = vi.fn(async () => source);
+    const queue = createUploadQueue({ uploadFile: upload });
+    const read = vi.fn(async () => new Uint8Array([1, 2]).buffer);
+    const selected = { name: "a.pdf", type: "application/pdf", size: 2, arrayBuffer: read } as unknown as File;
+    const [item] = queue.addFiles([selected]);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user: { ...uploadTestIdentity, id: "B" } })));
+    await queue.start();
+    expect(read).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(item?.state).toBe("failed");
+    setupUploadIdentity();
+    await queue.retry(item!.id);
+    expect(read).toHaveBeenCalledOnce();
+    expect(item?.state).toBe("saved");
+  });
+
+  it("never binds an unknown selection to a later verified account", async () => {
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { location: new URL("http://localhost/opening") }));
+    const upload = vi.fn(async () => source);
+    const queue = createUploadQueue({ uploadFile: upload }, [file("unknown.pdf")]);
+    publishVerifiedSessionIdentity(uploadTestIdentity);
+    await queue.start();
+    expect(upload).not.toHaveBeenCalled();
+    expect(queue.items[0]?.file.bytes).toHaveLength(4);
+  });
   it("retains an unknown begin identity through legacy adapters and gives a new selection a new identity", async () => {
     const begins: string[] = [];
     const client = createUploadClient({

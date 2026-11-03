@@ -29,12 +29,13 @@ export function StartUploads({ api, sources, courseId, disabled, onBusyChange, o
   const [error, setError] = useState("");
   const [rejection, setRejection] = useState("");
   const client = useMemo(() => createUploadClient({
-    begin: input => api.beginUpload(input), complete: id => api.completeUpload(id),
-    put: (url, body, progress, mime) => putPrivateBytes(url, body, mime, loaded => progress(loaded)),
-    resolvePutUrl: resolveUploadPutUrl, refreshTicket: id => api.refreshUploadTicket(id),
+    begin: (input, identity) => api.beginUpload(input, identity), complete: (id, identity) => api.completeUpload(id, identity),
+    put: (url, body, progress, mime, identity) => putPrivateBytes(url, body, mime, loaded => progress(loaded), undefined, identity),
+    resolvePutUrl: resolveUploadPutUrl, refreshTicket: (id, identity) => api.refreshUploadTicket(id, identity),
   }), [api]);
   const queue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
     uploadId: operation?.uploadId,
+    expectedIdentity: operation?.expectedIdentity,
     onBytes, ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
   const published = useRef(new Set<string>());

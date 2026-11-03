@@ -84,7 +84,7 @@ describe("createUploadClient", () => {
       bytes: bytes.byteLength,
       sha256: sha256(bytes),
       uploadId: expect.any(String),
-    });
+    }, undefined);
   });
 
   it("does not complete or invent a second source when the private PUT fails", async () => {
@@ -132,7 +132,7 @@ describe("createUploadClient", () => {
     expect(second).toMatchObject({ id: ID, uploadState: "uploaded" });
     expect(begin).toHaveBeenCalledTimes(1);
     expect(refreshTicket).toHaveBeenCalledTimes(1);
-    expect(refreshTicket).toHaveBeenCalledWith(ID);
+    expect(refreshTicket).toHaveBeenCalledWith(ID, undefined);
     expect(complete).toHaveBeenCalledTimes(1);
     expect(putUrls[1]).toBe(`/api/opening/sources/${ID}/staging`);
     expect(putUrls[1]).not.toBe(first.ticket.uploadUrl);
@@ -154,9 +154,9 @@ describe("createUploadClient", () => {
     const result = await client.uploadFile(file, { resumeSourceId: ID, ticket: expired });
     expect(result).toMatchObject({ id: ID, uploadState: "uploaded" });
     expect(begin).not.toHaveBeenCalled();
-    expect(refreshTicket).toHaveBeenCalledWith(ID);
-    expect(put).toHaveBeenCalledWith(`/api/opening/sources/${ID}/staging`, bytes, expect.any(Function), "application/pdf");
-    expect(complete).toHaveBeenCalledWith(ID);
+    expect(refreshTicket).toHaveBeenCalledWith(ID, undefined);
+    expect(put).toHaveBeenCalledWith(`/api/opening/sources/${ID}/staging`, bytes, expect.any(Function), "application/pdf", undefined);
+    expect(complete).toHaveBeenCalledWith(ID, undefined);
   });
 
   it("retries completion on the same source id", async () => {
@@ -169,8 +169,8 @@ describe("createUploadClient", () => {
     const replay = await client.retryComplete(ID);
     expect(replay.uploadState).toBe("uploaded");
     expect(begin).toHaveBeenCalledTimes(1);
-    expect(complete).toHaveBeenNthCalledWith(1, ID);
-    expect(complete).toHaveBeenNthCalledWith(2, ID);
+    expect(complete).toHaveBeenNthCalledWith(1, ID, undefined);
+    expect(complete).toHaveBeenNthCalledWith(2, ID, undefined);
     expect(put).toHaveBeenCalledTimes(1);
   });
 

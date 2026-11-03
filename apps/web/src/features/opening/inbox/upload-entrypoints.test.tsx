@@ -7,6 +7,7 @@ import type { OpeningApi } from "../client/api";
 import { InboxPanel } from "./inbox-panel";
 import { UploadStrip } from "../assistant/upload-strip";
 import { StartUploads } from "../start/start-uploads";
+import { setupUploadIdentity, uploadTestIdentity } from "./upload-identity-test-fixture";
 
 const upload = vi.hoisted(() => vi.fn());
 const organization = vi.hoisted(() => vi.fn());
@@ -17,10 +18,11 @@ const source = { id: "saved", name: "notes.pdf", mime: "application/pdf", bytes:
 const api = {} as OpeningApi;
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
+  setupUploadIdentity();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host); upload.mockReset(); organization.mockReset().mockResolvedValue({ succeeded: [], failed: [] });
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 function localFile(name: string) {
   const file = new File(["data"], name, { type: "application/pdf" });
@@ -53,6 +55,7 @@ it.each(["inbox", "strip"] as const)("%s waits for upload before reading the nex
   expect(first.read).toHaveBeenCalledOnce();
   expect(second.read).not.toHaveBeenCalled();
   expect(upload).toHaveBeenCalledOnce();
+  expect(upload.mock.calls[0]?.[1]).toMatchObject({ expectedIdentity: uploadTestIdentity });
   await act(async () => finish(source));
   expect(second.read).toHaveBeenCalledOnce();
   expect(upload).toHaveBeenCalledTimes(2);
