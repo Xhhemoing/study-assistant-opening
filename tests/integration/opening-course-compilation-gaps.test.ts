@@ -30,10 +30,11 @@ async function seed() {
 async function compile(activity: TeachingActivity) {
   const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql), chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
   // The production builder, library writer and publisher all run; only the external model is controlled.
-  deps.callModel = async (_scope, _input, options) => {
+  deps.callModel = async (_scope, input, options) => {
     await options.beforeSend?.();
+    expect(input.chunks.length).toBeGreaterThan(0);
     return { text: JSON.stringify({ itemTitles: ["秩与零空间"], blocks: [
-      { type: "text", text: "秩与零空间维数之和等于列数。" },
+      { type: "text", text: "秩与零空间维数之和等于列数。", citedChunkIds: input.chunks.map(chunk => chunk.id) },
       { type: "prompt", text: "一个3×5矩阵的秩为2，零空间维数是多少？" },
       { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", hints: { direction: "先找列数。", concept: "秩与零空间维数之和等于列数。", firstStep: "用5减去2。" } },
       { type: "text", text: "再换一个列数验证。" },
