@@ -9,7 +9,7 @@
  *
  * Dry-run (no DB/storage mutation):
  *   tsx scripts/opening-restore.ts --confirm-local-restore --dry-run --draft <backup.json>
- *     [--journal <deletion-journal.json>]
+ *     [--journal <deletion-journal.json>] [--live-preflight]
  *
  * Mutating apply (when live DB + S3 env present):
  *   tsx scripts/opening-restore.ts --confirm-local-restore --draft <backup.json>
@@ -36,9 +36,11 @@ import {
   type OpeningDeletionMark,
 } from "../packages/database/src/repositories/opening-backup.ts";
 import { OpeningS3 } from "../packages/database/src/storage/opening-s3.ts";
+import { snapshotOpeningRestoreCurrentFacts } from "../packages/database/src/repositories/opening-restore-current-facts.ts";
 
 const CONFIRM = "--confirm-local-restore";
 const DRY_RUN = "--dry-run";
+const LIVE_PREFLIGHT = "--live-preflight";
 
 function flagValue(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
@@ -52,10 +54,11 @@ function usage(): never {
   stderr.write(
     [
       "Usage:",
-      `  tsx scripts/opening-restore.ts ${CONFIRM} ${DRY_RUN} --draft <backup.json> [--journal <journal.json>]`,
+      `  tsx scripts/opening-restore.ts ${CONFIRM} ${DRY_RUN} [${LIVE_PREFLIGHT}] --draft <backup.json> [--journal <journal.json>]`,
       `  tsx scripts/opening-restore.ts ${CONFIRM} --draft <backup.json> [--journal <journal.json>] [--staging <dir>]`,
       "",
       "Dry-run (structural preflight only — no DB/storage mutation):",
+      "  - --live-preflight reads target facts from explicit restore/test DB; no S3 required",
       "  - validateOpeningRestore → allowed / errors / recordCounts",
       "  - planOpeningRestoreApply → batch table row counts + objectCount",
       "  - guarantees: secrets/apiKeys/sessions never restored; pendingJobs=cancelled",
@@ -136,11 +139,24 @@ async function loadDraftAndJournal(args: string[]): Promise<{
 async function runDryRun(args: string[]): Promise<never> {
   const { backup, journal } = await loadDraftAndJournal(args);
 
+  let facts: Awaited<ReturnType<typeof snapshotOpeningRestoreCurrentFacts>> | undefined;
+  if (args.includes(LIVE_PREFLIGHT)) {
+    const databaseUrl = (env.OPENING_RESTORE_DATABASE_URL || env.OPENING_TEST_DATABASE_URL)?.trim();
+    if (!databaseUrl) failClosed("LIVE_DEPS_MISSING", ["OPENING_RESTORE_DATABASE_URL|OPENING_TEST_DATABASE_URL required for --live-preflight"]);
+    const sql = createSqlClient(databaseUrl, { max: 1 });
+    try {
+      facts = await snapshotOpeningRestoreCurrentFacts(sql, backup);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  }
+
   const result = await applyOpeningRestore({
     confirmLocalRestore: true,
     dryRun: true,
     backup,
     currentDeletionJournal: journal,
+    ...facts,
   });
 
   stderr.write(`opening-restore: dry-run → ok=${result.ok} code=${result.code}\n`);
@@ -173,7 +189,7 @@ async function runDryRun(args: string[]): Promise<never> {
 }
 
 async function runMutatingApply(args: string[]): Promise<never> {
-  const { backup, journal, stagingDirectory } = await loadDraftAndJournal(args);
+  const { backup, stagingDirectory } = await loadDraftAndJournal(args);
 
   const deps = resolveOpeningRestoreCliLiveDeps(env);
   if (!deps.ok) {
@@ -188,10 +204,11 @@ async function runMutatingApply(args: string[]): Promise<never> {
   const objectPut = createOpeningS3RestoreObjectPut(storage);
 
   try {
+    const facts = await snapshotOpeningRestoreCurrentFacts(sql, backup);
     const result = await applyOpeningRestore({
       confirmLocalRestore: true,
       backup,
-      currentDeletionJournal: journal,
+      ...facts,
       sql,
       objectPut,
       stagingDirectory,
@@ -213,13 +230,13 @@ async function runMutatingApply(args: string[]): Promise<never> {
 
     if (result.ok && result.code === "APPLY_OK") {
       stderr.write("Exit 0 (APPLY_OK — mutated).\n\n");
-      exit(0);
+      return exit(0);
     }
 
     stderr.write(
       `Exit 1 (fail-closed — code=${result.code}; no successful apply).\n\n`,
     );
-    exit(1);
+    return exit(1);
   } finally {
     try {
       await sql.end({ timeout: 1 });
@@ -248,6 +265,7 @@ async function main(): Promise<void> {
   }
 
   const dryRun = args.includes(DRY_RUN);
+  if (args.includes(LIVE_PREFLIGHT) && !dryRun) failClosed("--live-preflight requires --dry-run");
   if (dryRun) {
     await runDryRun(args);
   }

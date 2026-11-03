@@ -33,6 +33,7 @@ import {
   type OpeningRestoreNamespaceCounts,
 } from "./opening-backup-empty-namespace";
 import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
+import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 
 export type OpeningRestoreObjectPut = {
   put(input: {
@@ -443,14 +444,24 @@ export async function executeOpeningRestoreApply(
     let pendingJobsCancelled = 0;
 
     await sql.begin(async (tx) => {
+      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+      if (!workspace) throw new Error("restore workspace owner is missing");
+      const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, String(workspace.owner_user_id));
+      const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
+        confirmLocalRestore: true,
+        availableCourseIds: facts.availableCourseIds,
+        currentMemoryDeletions: facts.currentMemoryDeletions,
+        currentLearningState: facts.currentLearningState,
+      });
+      if (!livePlan.ok) {
+        throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
+      }
       const linkedMilestones = (backup.tables.workspace_preferences as Record<string, unknown>[] | undefined)?.some(row => {
         const parsed = openingAdaptivePrefsSchema.safeParse(row.adaptive_planning);
         return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
           [...milestone.history, milestone].some(version => version.evidenceRefs.length > 0)));
       });
       if (linkedMilestones || backup.tables.course_goals?.length || backup.tables.course_requirements?.length) {
-        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
-        if (!workspace) throw new Error("restore workspace owner is missing");
         const linkErrors: string[] = [];
         validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
         validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
@@ -467,8 +478,6 @@ export async function executeOpeningRestoreApply(
       const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
       let restoredObservations = observations;
       if (observations.length) {
-        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
-        if (!workspace) throw new Error("restore workspace owner is missing");
         restoredObservations = restoreOpeningGradingMetadata(observations, workspaceId, String(workspace.owner_user_id));
       }
 
@@ -554,6 +563,10 @@ export async function executeOpeningRestoreApply(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const restoreCode = (error as { restoreCode?: string }).restoreCode;
+    if (restoreCode === "PREFLIGHT_REJECTED" || restoreCode === "JOURNAL_DRIFT") {
+      return { ok: false, code: restoreCode, mutated: false, errors: [message], guarantees: RESTORE_GUARANTEES, preview };
+    }
     if (message.startsWith("TARGET_NOT_EMPTY:") || (error as { code?: string }).code === "TARGET_NOT_EMPTY") {
       const details = message.startsWith("TARGET_NOT_EMPTY:")
         ? message.slice("TARGET_NOT_EMPTY:".length).split("|").filter(Boolean)
