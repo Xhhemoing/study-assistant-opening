@@ -34,6 +34,7 @@ import {
 } from "./opening-backup-empty-namespace";
 import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
+import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 
 export type OpeningRestoreObjectPut = {
   put(input: {
@@ -438,6 +439,11 @@ export async function executeOpeningRestoreApply(
   const workspaceId = backup.workspaceId;
 
   try {
+    const verifiedObjects = await prepareOpeningRestoreObjects(
+      backup,
+      parseOpeningRestoreObjectVersion,
+      args.objectPut ? archivePath => resolveObjectBody(args, archivePath) : undefined,
+    );
     let rowsInserted = 0;
     let objectsApplied = 0;
     let objectApplyDeferred = false;
@@ -528,17 +534,13 @@ export async function executeOpeningRestoreApply(
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;
       } else if (args.objectPut) {
-        for (const object of backup.objects) {
-          const body = await resolveObjectBody(args, object.archivePath);
-          if (!body) {
-            throw new Error(`missing object bytes for ${object.archivePath}`);
-          }
+        for (const object of verifiedObjects) {
           await args.objectPut.put({
             sourceId: object.sourceId,
             archivePath: object.archivePath,
             sha256: object.sha256,
             bytes: object.bytes,
-            body,
+            body: object.body,
           });
           objectsApplied += 1;
         }
