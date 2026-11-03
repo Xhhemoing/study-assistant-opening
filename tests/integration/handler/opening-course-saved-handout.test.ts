@@ -11,11 +11,8 @@ import { CourseHandoutReader } from "../../../apps/web/src/features/opening/cour
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "../opening-fixture";
 import { backupRows } from "../opening-backup-records-fixture";
 
-import * as rateLimitState from "../../support/auth-rate-limit-state";
 let f: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
 beforeAll(async () => {
-  // Session reads do not exercise login throttling; keep the shared setup off Redis.
-  vi.spyOn(rateLimitState, "resetTestAuthRateLimits").mockResolvedValue(undefined);
   f = await createOpeningFixture();
   runtime = createAuthRuntime({ databaseUrl: process.env.OPENING_TEST_DATABASE_URL!, authSecret: process.env.AUTH_SECRET!, sessionCookieSecure: false, sessionTtlSeconds: 3600, authCookieName: "aistudy_session" });
   setAuthRuntimeForTests(runtime);
@@ -46,7 +43,7 @@ async function seed() {
     { id: randomUUID(), type: "prompt", content: { text: "没有参考答案的题干？" } },
   ];
   const repo = createOpeningTeachingContentRepository(f.sql), unit = await repo.createUnit(f.scope, { title: "讲义", blocks });
-  await repo.publishActivitySpec(f.scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1, verificationStatus: "needs_check", sourceRefs: [{ sourceId, version: 1, chunkId, page: 1 }], blockOrder: blocks.map((b, position) => ({ blockId: b.id, blockType: b.type, position, role: b.type === "answer_key" ? "answer_key" : b.type === "prompt" ? "prompt" : "explanation" })) });
+  await repo.publishActivitySpec(f.scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1, verificationStatus: "needs_check", sourceRefs: [{ sourceId, version: 1, chunkId, page: 1 }], blockOrder: blocks.map((b, position) => ({ blockId: b.id, blockType: b.type, position, role: b.type === "answer_key" ? "answer_key" : b.type === "prompt" ? "prompt" : "teach" })) });
   await f.sql`UPDATE opening_teaching_activities SET generate_status='needs_check' WHERE id=${activityId}`;
   return { courseId, activityId, sourceId, unit, blocks };
 }
