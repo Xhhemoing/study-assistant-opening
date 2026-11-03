@@ -16,6 +16,9 @@ import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+function sessionAgenda(result: Awaited<ReturnType<ReturnType<typeof createSpanLessonSessionService>["read"]>>) {
+  return "agenda" in result ? result.agenda : undefined;
+}
 let fixture: OpeningFixture;
 beforeEach(async () => { fixture = await createOpeningFixture(); });
 afterEach(async () => { await fixture?.close(); });
@@ -119,7 +122,7 @@ it("reconstructs the same activity, item, parent and original budget across real
   expect(agenda.itemVersionId).toBeTruthy(); expect(agenda.parentDecisionId).toBeTruthy();
   expect(agenda.budget).toEqual(before[0]!.goal_json.tutorBudget);
   const reopened = await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId);
-  expect(reopened?.agenda).toMatchObject({ activityId: agenda.activityId, itemVersionId: agenda.itemVersionId, parentDecisionId: agenda.parentDecisionId });
+  expect(sessionAgenda(reopened)).toMatchObject({ activityId: agenda.activityId, itemVersionId: agenda.itemVersionId, parentDecisionId: agenda.parentDecisionId });
   const today = await createOpeningLongTermPlanningRepository(sql).read(scope);
   expect(today.recovery.agenda?.activityId).toBe(agenda.activityId);
   const retried = await createOpeningSpanTutorContextRepository(sql).read(scope, { ...f.request, operationId: f.operationId });
@@ -143,9 +146,9 @@ it.each(["answer", "help"])("resumes the same question after normal %s without c
   const before = await sql`SELECT * FROM opening_teaching_activities WHERE id=${f.lesson.activityId}`;
   const receipts = await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`;
   const reopened = await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId);
-  expect(reopened.agenda).toMatchObject({ resumable: true, decisionCurrent: false, itemVersionId: attempt!.item_version_id,
+  expect(sessionAgenda(reopened)).toMatchObject({ resumable: true, decisionCurrent: false, itemVersionId: attempt!.item_version_id,
     invalidationReasons: expect.arrayContaining(["state_changed"]), suggestion: { activityKind: "targeted_explain" } });
-  if (kind === "help") expect(reopened.agenda?.help).toEqual({ delivered: true, level: "hinted" });
+  if (kind === "help") expect(sessionAgenda(reopened)?.help).toEqual({ delivered: true, level: "hinted" });
   expect((await createOpeningLongTermPlanningRepository(sql).read(scope)).recovery.agenda?.resumable).toBe(true);
   expect(await prepareTutorNextAction(createSpanTutorNextAction(sql), scope, { ...f.request, userTurnId: randomUUID(), operationId: randomUUID() }))
     .toMatchObject({ resumed: true, action: { activityId: f.lesson.activityId }, decision: { activityKind: "targeted_explain" } });
@@ -166,7 +169,7 @@ it("connects a recovered agenda to controlled scheduling, cancellation and grant
     attemptId: String(attempt!.id), problemId: String(attempt!.problem_id), clientKey: randomUUID(),
     answer: JSON.stringify({ membership: "not_in_span" }), assistance: "independent", outcome: "unverified", verdictSource: "self_report",
   });
-  expect((await createSpanLessonSessionService(sql).read(scope, f.courseId, agenda.activityId)).agenda)
+  expect(sessionAgenda(await createSpanLessonSessionService(sql).read(scope, f.courseId, agenda.activityId)))
     .toMatchObject({ resumable: true, itemVersionId: agenda.itemVersionId, budget: agenda.budget });
   const { createSpanDelayedRetestService } = await import("../../apps/web/src/features/opening/teaching/span/delayed-retest-service");
   const { createOpeningAdaptivePrefsRepository } = await import("@aistudy/database");
@@ -199,7 +202,7 @@ it.each(["快一点", "没懂"])("revalidates real preference receipts for %s in
   const applied = await createStudyIntentService(sql).apply(scope, { sessionId: f.lesson.sessionId, clientKey: randomUUID(), change: { kind: "explicit_request", text } });
   expect(applied.activityDecision.policyVersion).toBe("span-teaching-v2");
   const receipts = await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`;
-  expect((await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId)).agenda)
+  expect(sessionAgenda(await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId)))
     .toMatchObject({ resumable: true, decisionCurrent: true, invalidationReasons: [], intent: applied.event.intent });
   expect(await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`).toEqual(receipts);
 });
@@ -210,7 +213,7 @@ it("prefers A3's current phase over the older intent event", async () => {
   await sessions.save(scope, current.activityId, { expectedRevision: current.revision, intent: current.intent, moveId: "self-example", status: "active" });
   const repo = createOpeningSpanTutorContextRepository(sql), context = (await repo.read(scope, { ...f.request, question: "先巩固" }))!;
   await repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() });
-  expect((await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId)).agenda)
+  expect(sessionAgenda(await createSpanLessonSessionService(sql).read(scope, f.courseId, f.lesson.activityId)))
     .toMatchObject({ resumable: true, decisionCurrent: true, intent: { learningPhase: "consolidate" } });
   expect(applied.event.intent.learningPhase).not.toBe("consolidate");
 });

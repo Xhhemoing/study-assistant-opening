@@ -78,7 +78,7 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
       const input = learningManagementCommandSchema.parse(raw), now = clock();
       if (input.action === "confirm") {
         const draft = await createOpeningPlansRepository(sql, { now: () => now }).acceptPlan(scope, input);
-        return { overview: await overview(sql, scope, draft.date, now), draft };
+        return { overview: await sql.begin("isolation level repeatable read read only", tx => overview(learningTransactionClient(tx), scope, draft.date, now)), draft };
       }
       if (input.action === "settings") return sql.begin(async tx => {
         await lockOwner(tx, scope);
