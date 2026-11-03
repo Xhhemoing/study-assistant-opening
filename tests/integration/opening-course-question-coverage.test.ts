@@ -7,7 +7,7 @@ import { createOpeningCourseRouteRepository } from "../../packages/database/src/
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { assertOpeningTestDatabase } from "@aistudy/config";
-import { act, createElement } from "react";
+import { act, createElement, type MouseEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { CourseRoutePanel } from "../../apps/web/src/features/opening/courses/course-route-panel";
 import { createCourseRouteClient } from "../../apps/web/src/features/opening/courses/course-route-client";
@@ -74,6 +74,56 @@ async function workspaceContents() {
   return JSON.stringify(result);
 }
 const zero = { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" };
+it("opens a completed saved handout through repo → strict client → DOM without selecting a goal or writing", async () => {
+  const x = await seed(), activity = await x.start(0), spec = await compile(activity);
+  await x.start(1);
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${activity.id} AND workspace_id=${f.scope.workspaceId}`;
+  const before = await workspaceContents();
+  const response = await x.repo.read(f.scope, x.courseId);
+  expect(response.summary).toEqual({ total: 3, mandatory: 3, verified: 0, blocked: 0 });
+  expect(response.requirements[0]!.compilation).toMatchObject({ saved: true, activityId: activity.id, documentId: spec.documentId, revisionNumber: spec.revisionNumber, contentVersion: 1, generateStatus: "needs_check", verificationStatus: "needs_check" });
+  expect(response.requirements.map(row => row.questionCoverage)).toEqual([{ ...zero, savedQuestions: 2, withReferenceAnswers: 2 }, zero, zero]);
+  const transport = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    expect(init?.method).toBe("GET");
+    return new Response(JSON.stringify(response), { status: 200 });
+  });
+  const client = createCourseRouteClient(transport), start = vi.spyOn(client, "start"), confirm = vi.spyOn(client, "confirm");
+  const clicked: string[] = [], host = document.createElement("div"), root = createRoot(host);
+  document.body.append(host);
+  try {
+    await act(async () => root.render(createElement("div", { onClick: (event: MouseEvent<HTMLDivElement>) => {
+      if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); }
+    } }, createElement(CourseRoutePanel, { courseId: x.courseId, client,
+      goalsClient: { list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) } }))));
+    const rows = [...host.querySelectorAll("li")].filter(row => row.querySelector("h3"));
+    expect(rows).toHaveLength(3);
+    expect(host.textContent).toContain("已确认 3 项要求，其中 3 项必修；0 项已有验证记录");
+    expect(rows[0]!.textContent).toContain("已保存 · 待核对 · 待核对");
+    expect(rows[1]!.textContent).toContain("排队中");
+    expect(rows[2]!.textContent).toContain("尚无当前匹配活动");
+    expect(rows.every(row => row.textContent?.includes("未暴露资格未确认"))).toBe(true);
+    const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
+    expect(links).toHaveLength(1);
+    expect(links[0]!.closest("li")).toBe(rows[0]);
+    const href = `/opening/courses/${x.courseId}/study?activity=${activity.id}`;
+    expect(links[0]!.getAttribute("href")).toBe(href);
+    expect(host.querySelector("select")?.value).toBe("");
+    expect([...host.querySelectorAll("button")].filter(button => button.textContent === "学习这一项").every(button => button.disabled)).toBe(true);
+    await act(async () => links[0]!.click());
+    expect(clicked).toEqual([href]);
+    expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+    expect(transport).toHaveBeenCalledTimes(1);
+    const init = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, new URL(clicked[0]!, "http://opening.local").searchParams.get("activity")!);
+    expect(init).toMatchObject({ documentId: spec.documentId, revisionNumber: spec.revisionNumber, contentVersion: 1 });
+    expect(JSON.stringify(init)).toContain("一个3×5矩阵");
+    for (const answer of ["5 − 2 = 3", "4 − 2 = 2"]) {
+      expect(JSON.stringify(init)).not.toContain(answer);
+      expect(host.textContent).not.toContain(answer);
+    }
+    expect(host.textContent).not.toContain("已掌握");
+  } finally { await act(async () => root.unmount()); host.remove(); }
+  expect(await workspaceContents()).toBe(before);
+});
 it("carries real saved questions and issuance from confirm/start/publish through strict client into the panel without writes", async () => {
   const x = await seed(), activity = await x.start(0), spec = await compile(activity);
   await x.start(1);

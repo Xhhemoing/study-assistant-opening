@@ -40,6 +40,41 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
   expect(host.textContent).not.toContain("已掌握");
   expect(transport).toHaveBeenCalledTimes(1);
 });
+it.each(["normal", "archived", "pending"] as const)("opens each saved handout without a goal or write command when %s", async mode => {
+  sessionStorage.clear();
+  if (mode === "pending") sessionStorage.setItem(`aistudy:route-command:${courseId}`, JSON.stringify({ kind: "confirm", input: { expectedRevisions: [], requirements: [requirement], confirmScope: true } }));
+  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
+  const saved = { activityId: id, generateStatus: "needs_check" as const, contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" as const };
+  const secondActivity = "22222222-2222-4222-8222-222222222222";
+  const compilations: Array<typeof base & { compilation?: CourseRouteSnapshot["requirements"][number]["compilation"] }> = [
+    { ...base, compilation: saved },
+    { ...base, compilation: { ...saved, activityId: secondActivity, generateStatus: "ready" } },
+    { ...base },
+    ...["failed", "cancelled", "stale", "queued", "generating", "unknown"].map(generateStatus => ({ ...base, compilation: { ...saved, generateStatus: generateStatus as NonNullable<CourseRouteSnapshot["requirements"][number]["compilation"]>["generateStatus"] } })),
+    ...[{ saved: false }, { activityId: null }, { documentId: null }, { revisionNumber: null }, { contentVersion: 0 }].map(patch => ({ ...base, compilation: { ...saved, ...patch } })),
+    { ...base, sourcesAvailable: false, compilation: saved },
+  ];
+  const value: CourseRouteSnapshot = { ...snapshot, scopeState: "confirmed", suggestions: [], materials: [], summary: { total: compilations.length, mandatory: compilations.length, verified: 0, blocked: 0 }, requirements: compilations.map((row, index) => ({ ...row, requirement: { ...row.requirement, id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, title: `要求${index}` } })) };
+  const transport = vi.fn(async () => new Response(JSON.stringify(value), { status: 200 }));
+  const api = createCourseRouteClient(transport);
+  const start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  const clicked: string[] = [];
+  await act(async () => root.render(<div onClick={event => { if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); } }}><CourseRoutePanel courseId={courseId} archived={mode === "archived"} client={api} goalsClient={{ list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) }} /></div>));
+  const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
+  const hrefs = [id, secondActivity].map(activity => `/opening/courses/${courseId}/study?activity=${activity}`);
+  expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
+  expect(links.map(link => link.closest("li")?.querySelector("h3")?.textContent)).toEqual(["要求0 · 必修", "要求1 · 必修"]);
+  expect(host.querySelector("select")?.value).toBe("");
+  await act(async () => { links.forEach(link => link.click()); });
+  expect(clicked).toEqual(hrefs);
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(host.textContent).toContain("0 项已有验证记录");
+  expect(host.textContent).toContain("生成结果未知");
+  expect(host.textContent).not.toContain("讲义已核验");
+  expect(host.textContent).not.toContain("已掌握");
+  sessionStorage.clear();
+});
 it("rejects invented compilation states and private bodies at the strict client boundary", async () => {
   const compilation = { activityId: id, generateStatus: "queued", contentVersion: Number.MAX_SAFE_INTEGER, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
   const value = { ...snapshot, requirements: [{ requirement: { ...requirement, requirementKey: "k".repeat(200), title: "题".repeat(200), courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], compilation }] };
