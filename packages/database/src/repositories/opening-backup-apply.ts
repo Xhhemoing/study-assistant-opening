@@ -1,3 +1,4 @@
+import { OpeningStorageError } from "../storage/opening-s3";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
@@ -36,7 +37,17 @@ import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 
+export type OpeningRestoreObjectSideEffects = {
+  status: "clean" | "remaining" | "unknown";
+  createdKeys: string[];
+  remainingKeys: string[];
+  unknownKeys: string[];
+};
+
 export type OpeningRestoreObjectPut = {
+  /** Optional: only writers that can prove ownership may compensate their writes. */
+  rollback?(): Promise<OpeningRestoreObjectSideEffects>;
+
   put(input: {
     sourceId: string;
     archivePath: string;
@@ -93,7 +104,8 @@ export type OpeningRestoreExecuteErr = {
     | "JOURNAL_DRIFT"
     | "TARGET_NOT_EMPTY"
     | "APPLY_FAILED";
-  mutated: false;
+  mutated: boolean;
+  objectSideEffects?: OpeningRestoreObjectSideEffects;
   errors: string[];
   guarantees: OpeningRestoreApplyGuarantees;
   preview?: RestorePreview;
@@ -438,6 +450,7 @@ export async function executeOpeningRestoreApply(
   const backup = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const workspaceId = backup.workspaceId;
 
+  let objectPutStarted = false;
   try {
     const verifiedObjects = await prepareOpeningRestoreObjects(
       backup,
@@ -535,6 +548,7 @@ export async function executeOpeningRestoreApply(
         objectApplyDeferred = true;
       } else if (args.objectPut) {
         for (const object of verifiedObjects) {
+          objectPutStarted = true;
           await args.objectPut.put({
             sourceId: object.sourceId,
             archivePath: object.archivePath,
@@ -584,10 +598,19 @@ export async function executeOpeningRestoreApply(
         emptyNamespaceVerified: false,
       };
     }
+    let objectSideEffects: OpeningRestoreObjectSideEffects | undefined;
+    if (objectPutStarted) {
+      // A generic writer has no rollback guarantee, even when its PUT rejected.
+      objectSideEffects = { status: "unknown", createdKeys: [], remainingKeys: [], unknownKeys: [] };
+      if (args.objectPut?.rollback) {
+        try { objectSideEffects = await args.objectPut.rollback(); } catch { /* keep unknown */ }
+      }
+    }
     return {
       ok: false,
       code: "APPLY_FAILED",
-      mutated: false,
+      mutated: objectSideEffects !== undefined && objectSideEffects.status !== "clean",
+      objectSideEffects,
       errors: [message],
       guarantees: RESTORE_GUARANTEES,
       preview,
@@ -613,7 +636,8 @@ export function createMemoryOpeningRestoreObjectPut(): OpeningRestoreObjectPut &
 /** Minimal storage surface for live MinIO / S3 restore puts. */
 export type OpeningRestoreObjectStorage = {
   finalKey(sourceId: string, version: number): string;
-  putObject(key: string, body: Uint8Array, input?: { mime?: string }): Promise<void>;
+  putObject(key: string, body: Uint8Array, input?: { mime?: string; ifNoneMatch?: "*" }): Promise<void>;
+  deleteObject(key: string): Promise<void>;
 };
 
 /**
@@ -645,13 +669,29 @@ export function createOpeningS3RestoreObjectPut(
   storage: OpeningRestoreObjectStorage,
 ): OpeningRestoreObjectPut & { keys: string[] } {
   const keys: string[] = [];
+  const unknownKeys: string[] = [];
   return {
     keys,
+    async rollback() {
+      const remainingKeys: string[] = [];
+      for (const key of keys) {
+        try { await storage.deleteObject(key); } catch { remainingKeys.push(key); }
+      }
+      return { status: unknownKeys.length ? "unknown" : remainingKeys.length ? "remaining" : "clean",
+        createdKeys: [...keys], remainingKeys, unknownKeys: [...unknownKeys] };
+    },
     async put(input) {
       const version = parseOpeningRestoreObjectVersion(input.archivePath, input.sourceId);
       const key = storage.finalKey(input.sourceId, version);
-      await storage.putObject(key, input.body, { mime: "application/octet-stream" });
-      keys.push(key);
+      try {
+        await storage.putObject(key, input.body, { mime: "application/octet-stream", ifNoneMatch: "*" });
+        keys.push(key);
+      } catch (error) {
+        // A definitive precondition rejection wrote nothing. Any other response
+        // may have lost an acknowledgement: never delete that unowned key.
+        if (!(error instanceof OpeningStorageError && error.code === "CONFLICT")) unknownKeys.push(key);
+        throw error;
+      }
     },
   };
 }

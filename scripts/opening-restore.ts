@@ -38,6 +38,8 @@ import {
 import { OpeningS3 } from "../packages/database/src/storage/opening-s3.ts";
 import { snapshotOpeningRestoreCurrentFacts } from "../packages/database/src/repositories/opening-restore-current-facts.ts";
 
+import { formatOpeningRestoreObjectSideEffects } from "../packages/database/src/repositories/opening-restore-receipt.ts";
+
 const CONFIRM = "--confirm-local-restore";
 const DRY_RUN = "--dry-run";
 const LIVE_PREFLIGHT = "--live-preflight";
@@ -94,6 +96,7 @@ function printGuarantees(result: Awaited<ReturnType<typeof applyOpeningRestore>>
   stderr.write(`  guarantees: sessionsRestored=${result.guarantees.sessionsRestored}\n`);
   stderr.write(`  guarantees: pendingJobs=${result.guarantees.pendingJobs}\n`);
   stderr.write(`  mutated=${result.mutated}\n`);
+  stderr.write(formatOpeningRestoreObjectSideEffects("objectSideEffects" in result ? result.objectSideEffects : undefined));
 }
 
 async function loadDraftAndJournal(args: string[]): Promise<{
