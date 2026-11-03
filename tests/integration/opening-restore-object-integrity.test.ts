@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectsCommand, S3Client } from "@aws-sdk/client-s3";
 import { afterAll, describe, expect, it } from "vitest";
 import type { OpeningBackup } from "@aistudy/domain";
 import { createSqlClient } from "../../packages/database/src/migrate";
@@ -19,19 +19,34 @@ describe.skipIf(!enabled)("restore actual object integrity before side effects",
   const storage = createOpeningTestStorage();
   const scopes: { workspaceId: string; userId: string }[] = [];
   const keys: string[] = [], dirs: string[] = [];
+  async function cleanupRegisteredFixtures() {
+    // Batch only the keys and scopes registered by this test file. Avoid one
+    // remote round trip per fixture in the final hook; do not widen its timeout.
+    if (keys.length) {
+      if (!(storage.client instanceof S3Client)) throw new Error("fixture cleanup requires its real S3 client");
+      const result = await storage.client.send(new DeleteObjectsCommand({
+        Bucket: storage.bucket,
+        Delete: { Objects: [...new Set(keys)].map(Key => ({ Key })), Quiet: true },
+      }));
+      if (result.Errors?.length) throw new Error(`fixture object cleanup failed: ${JSON.stringify(result.Errors)}`);
+      keys.length = 0;
+    }
+    if (scopes.length) {
+      await sql`DELETE FROM workspaces WHERE id=ANY(${sql.array(scopes.map(scope => scope.workspaceId))}::uuid[])`;
+      await sql`DELETE FROM users WHERE id=ANY(${sql.array(scopes.map(scope => scope.userId))}::uuid[])`;
+      scopes.length = 0;
+    }
+    await Promise.all(dirs.map(dir => rm(dir, { recursive: true, force: true })));
+    dirs.length = 0;
+  }
   afterAll(async () => {
     try {
-      for (const key of keys) await storage.deleteObject(key);
-      for (const scope of scopes) {
-        await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
-        await sql`DELETE FROM users WHERE id=${scope.userId}`;
-      }
-      for (const dir of dirs) await rm(dir, { recursive: true, force: true });
+      await cleanupRegisteredFixtures();
     } finally {
       if (storage.client instanceof S3Client) storage.client.destroy();
       await sql.end({ timeout: 1 });
     }
-  }, 60000);
+  });
   async function fixture(count = 1) {
     const workspaceId = randomUUID(), userId = randomUUID();
     scopes.push({ workspaceId, userId });
@@ -86,6 +101,21 @@ describe.skipIf(!enabled)("restore actual object integrity before side effects",
     }
     return { workspaceId, backup, bodies, directory, stage, cli, unchanged };
   }
+  it('cleans its registered fixture batch without replaying restore cases', async () => {
+    const f = await fixture(2);
+    const ownedKeys = f.backup.objects.map(object => storage.finalKey(object.sourceId, 1));
+    for (const object of f.backup.objects) {
+      await storage.putObject(storage.finalKey(object.sourceId, 1), f.bodies[object.archivePath]!);
+    }
+    expect((await storage.headObject(ownedKeys[0]!)).exists).toBe(true);
+    await cleanupRegisteredFixtures();
+    for (const key of ownedKeys) expect((await storage.headObject(key)).exists).toBe(false);
+    expect(await sql`SELECT id FROM workspaces WHERE id=${f.workspaceId}`).toHaveLength(0);
+    expect(await sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.workspaceId}`).toHaveLength(0);
+    expect(scopes).toHaveLength(0);
+    expect(keys).toHaveLength(0);
+    expect(dirs).toHaveLength(0);
+  });
   it('rejects same-length corrupted staging through real writer', async () => {
     const f = await fixture();
     f.bodies[f.backup.objects[0]!.archivePath] = Uint8Array.from([9, 9, 9, 9]);
