@@ -134,6 +134,7 @@ export function createCompileTeachingUnitWorkerDeps(
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.
             requireModelOutput: true,
+            requireMaterialCitations: routeEvidence !== null,
             // Preserve the activity's original prompt boundary even if current
             // evidence/graph revalidation removed its prelude from model input.
             learnerFocus: activity?.learnerFocus,
