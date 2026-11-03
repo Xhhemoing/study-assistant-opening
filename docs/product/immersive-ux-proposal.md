@@ -1,6 +1,6 @@
 # AIstudy 沉浸式学习：前端精简方案（2026-10-25）
 
-依据：线上实测 `work/browser-findings.md`（测试账号 QA测试，https://23.251.32.22:18443）、`work/study-ux-code-walkthrough.md`、`work/contract-audit-report.md`；代码只读：`/workspace/work/sao` 分支 `hark/contract-audit`；产品约束：`docs/product/UX_AND_AI_POLICY.md`（§1 三层信息、§2 首屏只允许“一个主要操作”）、`docs/product/PRD.md`（成功标准：注册后 15 分钟内开始首个有效任务）。
+依据：线上实测 `work/browser-findings.md`（测试账号 QA测试，线上环境）、`work/study-ux-code-walkthrough.md`、`work/contract-audit-report.md`；代码只读：`/workspace/work/sao` 分支 `hark/contract-audit`；产品约束：`docs/product/UX_AND_AI_POLICY.md`（§1 三层信息、§2 首屏只允许“一个主要操作”）、`docs/product/PRD.md`（成功标准：注册后 15 分钟内开始首个有效任务）。
 
 五条原则：① 1 次点击进入下一步学习动作；② 每屏一个主操作；③ 系统状态不阻塞就不出现；④ 工具按需出现（选中/悬停/快捷键），不常驻；⑤ 设置离开学习面。
 

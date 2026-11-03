@@ -1,4 +1,4 @@
-# 服务器生产编排：23.251.32.22（hermes）。由 scripts/deploy-hermes.sh 驱动。
+# 服务器生产编排（hermes）。由 scripts/deploy-hermes.sh 驱动。
 # 数据库迁移在启动前以一次性容器执行；web/worker 共享 deploy.env 变量。
 services:
   migrate:
