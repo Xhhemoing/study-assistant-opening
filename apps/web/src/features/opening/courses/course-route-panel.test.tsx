@@ -61,7 +61,7 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   const clicked: string[] = [];
   await act(async () => root.render(<div onClick={event => { if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); } }}><CourseRoutePanel courseId={courseId} archived={mode === "archived"} client={api} goalsClient={{ list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) }} /></div>));
   const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
-  const hrefs = [id, secondActivity].map(activity => `/opening/courses/${courseId}/study?activity=${activity}`);
+  const hrefs = [id, secondActivity].map(activity => `/opening/courses/${courseId}/handouts/${activity}`);
   expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
   expect(links.map(link => link.closest("li")?.querySelector("h3")?.textContent)).toEqual(["要求0 · 必修", "要求1 · 必修"]);
   expect(host.querySelector("select")?.value).toBe("");

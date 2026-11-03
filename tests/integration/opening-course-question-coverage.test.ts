@@ -105,7 +105,7 @@ it("opens a completed saved handout through repo → strict client → DOM witho
     const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
     expect(links).toHaveLength(1);
     expect(links[0]!.closest("li")).toBe(rows[0]);
-    const href = `/opening/courses/${x.courseId}/study?activity=${activity.id}`;
+    const href = `/opening/courses/${x.courseId}/handouts/${activity.id}`;
     expect(links[0]!.getAttribute("href")).toBe(href);
     expect(host.querySelector("select")?.value).toBe("");
     expect([...host.querySelectorAll("button")].filter(button => button.textContent === "学习这一项").every(button => button.disabled)).toBe(true);
@@ -113,7 +113,7 @@ it("opens a completed saved handout through repo → strict client → DOM witho
     expect(clicked).toEqual([href]);
     expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
     expect(transport).toHaveBeenCalledTimes(1);
-    const init = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, new URL(clicked[0]!, "http://opening.local").searchParams.get("activity")!);
+    const init = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, new URL(clicked[0]!, "http://opening.local").pathname.split("/").at(-1)!);
     expect(init).toMatchObject({ documentId: spec.documentId, revisionNumber: spec.revisionNumber, contentVersion: 1 });
     expect(JSON.stringify(init)).toContain("一个3×5矩阵");
     for (const answer of ["5 − 2 = 3", "4 − 2 = 2"]) {
