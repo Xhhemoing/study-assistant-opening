@@ -8,7 +8,7 @@ const output: ProviderOutput = {
   text: "可以继续这个问题", citedChunkIds: [], candidates: [], requestId: "confirmed-reply",
   inputTokens: 2, outputTokens: 3,
 };
-function fixture() {
+function fixture(parentNotSent = true) {
   const reserve = vi.fn<BudgetedRepository["reserve"]>().mockResolvedValue({ id: "fresh" });
   const release = vi.fn<BudgetedRepository["release"]>().mockResolvedValue(undefined);
   const complete = vi.fn<(_input: unknown) => Promise<ProviderOutput>>().mockResolvedValue(output);
@@ -17,7 +17,8 @@ function fixture() {
     chunks: { listForSources: async () => [] },
     privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
     provider: { complete },
-    budget: { reserve, release, claimExecution: async () => true, settle: async () => undefined, markUnknown: async () => undefined },
+    budget: { reserve, release, isParentNotSent: async () => parentNotSent,
+      claimExecution: async () => true, settle: async () => undefined, markUnknown: async () => undefined },
     config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
   return { service, reserve, release, complete };
@@ -63,6 +64,13 @@ describe("ephemeral explicit not-sent retry", () => {
     expect(error).toBeInstanceOf(Error);
     expect(f.complete).not.toHaveBeenCalled();
     expect(f.reserve).toHaveBeenCalledOnce();
+  });
+
+  it("does not promote a released child when the persisted parent cannot prove not-sent", async () => {
+    const f = fixture(false);
+    f.reserve.mockResolvedValue({ id: "released", state: "released", releaseReason: "not_sent" });
+    await expect(f.service.replyEphemeral(scope, input("original"))).rejects.toMatchObject({ code: "BUDGET_REPLAY_RELEASED" });
+    expect(f.complete).not.toHaveBeenCalled();
   });
 
   it("does not turn a provider timeout into a known-not-sent response", async () => {

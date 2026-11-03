@@ -198,6 +198,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
         },
         budget: {
           reserve: (entry) => budgetRepo.reserve(scope, entry),
+          isParentNotSent: parentId => budgetRepo.isParentNotSent(scope, parentId),
           release: (requestId, reason) => budgetRepo.release(scope, requestId, reason),
           claimExecution: (reservationId) => budgetRepo.claimExecution(scope, reservationId),
           settle: (...args) => budgetRepo.settle(scope, ...args),

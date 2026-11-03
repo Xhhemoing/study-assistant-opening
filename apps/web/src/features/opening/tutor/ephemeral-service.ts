@@ -359,9 +359,10 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
             })
           : await callWith(selected, selectedRequestId);
       } catch (error) {
-        if (confirmedNotSentFailures.has(error) || isBudgetReplayError(error)
+        const childNotSent = confirmedNotSentFailures.has(error) || isBudgetReplayError(error)
           && error.disposition.kind === "released"
-          && ["not_sent", "cancelled"].includes(error.disposition.reason ?? "")) {
+          && ["not_sent", "cancelled"].includes(error.disposition.reason ?? "");
+        if (childNotSent && await deps.budget.isParentNotSent?.(parentBudget.id) === true) {
           throw new EphemeralServiceError("EPHEMERAL_REQUEST_NOT_SENT",
             "这次临时请求确定未发送。问题已保留；修复模型设置或稍后再次点击发送，将作为一次新尝试。", 409);
         }
