@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { UploadTicket } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, resolveUploadPutUrl, sourceDownloadHref } from "./api";
 
 const U = "11111111-1111-4111-8111-111111111111";
@@ -280,7 +281,7 @@ describe("openingApi (RU-07 client)", () => {
 });
 
 describe("openingApi integration helpers", () => {
-  const baseSource = {
+  const baseSource: UploadTicket["source"] = {
     id: S,
     workspaceId: U,
     name: "lec.pdf",

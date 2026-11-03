@@ -77,7 +77,7 @@ describe("createUploadClient", () => {
     );
     expect(calls).toEqual(["begin", "put", "complete"]);
     expect(progress).toEqual([3 / bytes.byteLength, 1]);
-    expect(accepted?.uploadState).toBe("uploaded");
+    expect(accepted && "uploadState" in accepted ? accepted.uploadState : undefined).toBe("uploaded");
     expect(begin).toHaveBeenCalledWith({
       name: "notes.pdf",
       mime: "application/pdf",
