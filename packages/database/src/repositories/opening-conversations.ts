@@ -2,6 +2,8 @@ import { mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { resolveOpeningStudyContext } from "./opening-study-context";
 import { createHash, randomUUID } from "node:crypto";
+import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId, savedTurnRetryMatches } from "./opening-conversation-retry";
+export { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "./opening-conversation-retry";
 import type { Sql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
@@ -380,6 +382,14 @@ export function createOpeningConversationRepository(sql: Sql) {
           );
         }
 
+        const retryAssistantId = savedTurnRetryAssistantId(input.clientKey);
+        const retryIntent = retryAssistantId
+          ? await readOpeningSavedTurnRetry(tx, input.scope, input.conversationId, retryAssistantId)
+          : null;
+        if (retryAssistantId && (!retryIntent || !savedTurnRetryMatches(input, retryIntent))) {
+          throw new OpeningConversationError("CONFLICT", "原失败轮的提问意图无法核实；请重新读取，或另发一条新问题。");
+        }
+
         if (input.learningSessionId) {
           const sessions = await tx`SELECT course_id FROM opening_learning_sessions
             WHERE id=${input.learningSessionId} AND workspace_id=${input.scope.workspaceId}
@@ -477,6 +487,10 @@ export function createOpeningConversationRepository(sql: Sql) {
         const sourceVersions = Object.fromEntries(
           sourceRows.map((row) => [String((row as Record<string, unknown>).id), Number((row as Record<string, unknown>).version)]),
         );
+        if (retryIntent && (Object.keys(retryIntent.sourceVersions).length !== sourceIds.length
+          || sourceIds.some(id => sourceVersions[id] !== retryIntent.sourceVersions[id]))) {
+          throw new OpeningConversationError("CONFLICT", "原提问资料版本已变化；未改用新版本重试，请确认后另发新问题。");
+        }
         if (contextAnchor?.sourceId && contextAnchor.sourceVersion != null) sourceVersions[contextAnchor.sourceId] = contextAnchor.sourceVersion;
         if (contextAnchor?.activityId && contextAnchor.contentVersion != null) {
           const [spec] = await tx`SELECT source_refs FROM opening_teaching_activity_specs WHERE workspace_id=${input.scope.workspaceId}
