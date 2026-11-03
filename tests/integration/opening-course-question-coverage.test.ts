@@ -101,7 +101,7 @@ it("opens a completed saved handout through repo → strict client → DOM witho
     expect(rows[0]!.textContent).toContain("已保存 · 待核对 · 待核对");
     expect(rows[1]!.textContent).toContain("排队中");
     expect(rows[2]!.textContent).toContain("尚无当前匹配活动");
-    expect(rows.every(row => row.textContent?.includes("未暴露资格未确认"))).toBe(true);
+    expect(rows.every(row => row.textContent?.includes("能否作为独立新题尚未确认"))).toBe(true);
     const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
     expect(links).toHaveLength(1);
     expect(links[0]!.closest("li")).toBe(rows[0]);
@@ -159,8 +159,8 @@ it("carries real saved questions and issuance from confirm/start/publish through
     const rows = [...host.querySelectorAll("li")].filter(row => row.querySelector("h3"));
     expect(rows).toHaveLength(3);
     expect(host.textContent).toContain("已确认 3 项要求，其中 3 项必修；0 项已有验证记录，0 项受阻。");
-    expect(rows[0]!.textContent).toContain("已保存题目 2 道 · 附参考解答 2 道 · 曾发题 1 道 · 未暴露资格未确认");
-    for (const row of rows.slice(1)) expect(row.textContent).toContain("已保存题目 0 道 · 附参考解答 0 道 · 曾发题 0 道 · 未暴露资格未确认");
+    expect(rows[0]!.textContent).toContain("已保存题目 2 道 · 附参考解答 2 道 · 曾发题 1 道 · 能否作为独立新题尚未确认");
+    for (const row of rows.slice(1)) expect(row.textContent).toContain("已保存题目 0 道 · 附参考解答 0 道 · 曾发题 0 道 · 能否作为独立新题尚未确认");
     expect(rows[1]!.textContent).toContain("排队中");
     expect(rows[2]!.textContent).toContain("尚无当前匹配活动");
     expect(host.textContent).not.toContain("5 − 2 = 3");

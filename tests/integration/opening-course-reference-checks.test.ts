@@ -87,7 +87,7 @@ it("checks only current legally published references through repository → stri
       goalsClient: { list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) } })));
     expect(host.textContent).toContain("程序算术核对：一致 1 / 矛盾 1 / 不支持 3");
     expect(host.textContent).toContain("已保存题目 6 道 · 附参考解答 5 道");
-    expect(host.textContent).toContain("未暴露资格未确认");
+    expect(host.textContent).toContain("能否作为独立新题尚未确认");
     expect(host.textContent).toContain("讲义：已保存 · 待核对");
     expect(host.textContent).toContain("待开始");
     for (const b of blocks) expect(host.textContent).not.toContain(b.content.text);
