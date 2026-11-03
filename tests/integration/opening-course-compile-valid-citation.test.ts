@@ -7,6 +7,7 @@ import {
   createOpeningBudgetRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository,
   createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository,
   createOpeningCourseRouteRepository, createOpeningLearningGoalRepository, createOpeningJobRepository,
+  readOpeningCourseRouteEvidenceRefs,
 } from "@aistudy/database";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
@@ -56,7 +57,7 @@ function deps() {
   return createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 }),
     chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
 }
-async function seed() {
+async function seed(mode: "pinned" | "whole_source") {
   const courseId = randomUUID(), sourceId = randomUUID(), chunkId = randomUUID();
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'矩阵秩',${courseId})`;
   await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
@@ -68,13 +69,17 @@ async function seed() {
     kind: "custom", targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "按材料解释" });
   const requirements: CourseRouteRequirementInput[] = [0, 1].map(position => ({ id: randomUUID(), stableSkillId: randomUUID(), knowledgeNodeId: null,
     requirementKey: `rank-${position}`, title: `矩阵秩${position}`, position, mandatory: true, goalIds: [goal.id], prerequisiteIds: [],
-    sourceRefs: [{ sourceId, sourceVersion: 1, page: 1, chunkId }],
+    sourceRefs: [mode === "pinned" ? { sourceId, sourceVersion: 1, page: 1, chunkId } : { sourceId, sourceVersion: 1 }],
     verification: { kind: "rubric", status: "ready", exerciseKeys: ["rank"], rubric: explanation, missingReasons: [] }, origin: "confirmed" }));
   const route = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
   await route.confirm(f.scope, courseId, { expectedRevisions: [], requirements, confirmScope: true });
   const started = await route.start(f.scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirements[0]!.id,
     expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (started.kind !== "ready") throw new Error(JSON.stringify(started));
+  expect((await createOpeningTeachingActivitiesRepository(f.sql).get(f.scope, started.activity.id))?.routeManaged).toBe(true);
+  const evidence = await readOpeningCourseRouteEvidenceRefs(f.sql, f.scope, started.activity.id);
+  if (mode === "whole_source") expect(evidence).toBeNull();
+  else expect(evidence?.chunkIds).toEqual([chunkId]);
   return { courseId, sourceId, chunkId, route, activity: started.activity };
 }
 async function oldContent(activity: TeachingActivity) {
@@ -90,8 +95,8 @@ async function run(activity: TeachingActivity, unitId: string) {
   expect(job).not.toBeNull();
   return createCompileTeachingUnitHandler(deps())(job!, { ...job!.payload as object, teachingUnitId: unitId, expectedContentVersion: 1 });
 }
-it("rejects all-wrong citations via HTTP without changing old bodies, revisions, pins or content version", async () => {
-  const x = await seed(), { content, unit } = await oldContent(x.activity);
+it.each(["pinned", "whole_source"] as const)("%s rejects all-wrong citations via HTTP without changing old bodies, revisions, pins or content version", async mode => {
+  const x = await seed(mode), { content, unit } = await oldContent(x.activity);
   const before = await content.getClientInit(f.scope, x.activity.id);
   const revisions = await f.sql`SELECT * FROM library_revisions WHERE document_id=${unit.documentId} ORDER BY revision_number`;
   expect(JSON.stringify(before)).toContain("保留原来的合法讲解。");
@@ -103,11 +108,12 @@ it("rejects all-wrong citations via HTTP without changing old bodies, revisions,
   expect(await content.getClientInit(f.scope, x.activity.id)).toEqual(before);
   expect(await f.sql`SELECT * FROM library_revisions WHERE document_id=${unit.documentId} ORDER BY revision_number`).toEqual(revisions);
 });
-it("writes valid material citations through HTTP, redacts hidden answers and saves the complete course denominator", async () => {
-  const x = await seed(), { content, unit } = await oldContent(x.activity);
+it.each(["pinned", "whole_source"] as const)("%s writes valid material citations through HTTP, redacts hidden answers and saves the complete course denominator", async mode => {
+  const x = await seed(mode), { content, unit } = await oldContent(x.activity);
   citations = [x.chunkId];
   expect(await run(x.activity, unit.id)).toMatchObject({ generateStatus: "needs_check", verificationStatus: "needs_check" });
   expect(requests).toHaveLength(1);
+  expect(requests[0]!.messages.map(message => message.content).join("\n")).toContain(x.chunkId);
   const spec = await content.getActivitySpec(f.scope, x.activity.id);
   expect(spec).toMatchObject({ version: 2, revisionNumber: 2, verificationStatus: "needs_check" });
   const revision = await content.readRevision(f.scope, unit.documentId, 2);
@@ -124,7 +130,11 @@ it("writes valid material citations through HTTP, redacts hidden answers and sav
 });
 it("preserves non-course no-material generation through the same HTTP worker factory", async () => {
   const activities = createOpeningTeachingActivitiesRepository(f.sql);
-  const activity = await activities.create(f.scope, { clientKey: randomUUID(), intentKind: "topic", intentSummary: "矩阵秩", createIntent: { fixture: true } });
+  const courseId = randomUUID();
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'矩阵秩',${courseId})`;
+  const activity = await activities.create(f.scope, { clientKey: randomUUID(), courseId, intentKind: "topic", intentSummary: "矩阵秩", createIntent: { fixture: true } });
+  expect(activity.courseId).toBe(courseId);
+  expect(activity.routeManaged).not.toBe(true);
   await activities.setGenerateStatus(f.scope, activity.id, "queued");
   const { content, unit } = await oldContent(activity);
   const job = { id: randomUUID(), workspaceId: f.scope.workspaceId, ownerUserId: f.scope.ownerUserId, key: randomUUID(), kind: "compile-teaching-unit",
