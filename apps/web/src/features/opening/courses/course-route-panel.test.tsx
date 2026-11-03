@@ -32,11 +32,11 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
   expect(rows[1]!.textContent).toContain("讲义：尚无当前可用讲义 · 排队中");
   expect(rows[2]!.textContent).toContain("讲义：缺失，尚无当前匹配活动");
   expect(rows[3]!.textContent).toContain("讲义：编译事实未收集");
-  expect(rows[3]!.textContent).toContain("题目覆盖未收集 · 未暴露资格未确认");
+  expect(rows[3]!.textContent).toContain("题目覆盖未收集 · 能否作为独立新题尚未确认");
   expect(rows[3]!.textContent).toContain("程序算术核对：未收集");
   expect(rows.every(row => row.textContent?.includes("待开始"))).toBe(true);
   expect(host.textContent).toContain("已确认 4 项要求");
-  expect(host.textContent).not.toContain("讲义已核验");
+  expect(host.textContent).not.toContain("讲义核对通过");
   expect(host.textContent).not.toContain("已掌握");
   expect(transport).toHaveBeenCalledTimes(1);
 });
@@ -71,7 +71,7 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   expect(transport).toHaveBeenCalledTimes(1);
   expect(host.textContent).toContain("0 项已有验证记录");
   expect(host.textContent).toContain("生成结果未知");
-  expect(host.textContent).not.toContain("讲义已核验");
+  expect(host.textContent).not.toContain("讲义核对通过");
   expect(host.textContent).not.toContain("已掌握");
   sessionStorage.clear();
 });
