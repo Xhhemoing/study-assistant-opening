@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
+import { setupUploadIdentity } from "../inbox/upload-identity-test-fixture";
+import { clearSessionExpiry } from "../../auth/session-expiry";
 import type { LibraryFileBatch } from "./library-view";
 
 const state = vi.hoisted(() => ({ sources: [] as SourceRecord[], upload: vi.fn(), addToCourse: vi.fn(), read: vi.fn() }));
@@ -16,7 +18,10 @@ const source: SourceRecord = { id: "source", workspaceId: "workspace", name: "no
 const api = { listSources: async () => state.sources } as OpeningApi;
 let container: HTMLDivElement;
 let root: Root;
+let releaseIdentity: () => void;
 beforeEach(() => {
+  clearSessionExpiry();
+  releaseIdentity = setupUploadIdentity();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   window.history.replaceState({}, "", "/opening/library");
   state.sources = [source];
@@ -25,7 +30,7 @@ beforeEach(() => {
   state.upload.mockReset().mockResolvedValue(source);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); releaseIdentity(); clearSessionExpiry(); vi.unstubAllGlobals(); });
 async function render(courseId: string | null, incomingFiles?: LibraryFileBatch) {
   await act(async () => root.render(createElement(MaterialLibrary, { api, courseId, incomingFiles, hideUploadPicker: true })));
 }

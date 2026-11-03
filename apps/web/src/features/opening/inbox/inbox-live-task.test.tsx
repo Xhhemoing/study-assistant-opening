@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
+import { setupUploadIdentity } from "./upload-identity-test-fixture";
+import { clearSessionExpiry } from "../../auth/session-expiry";
 
 const state = vi.hoisted(() => ({ upload: vi.fn() }));
 vi.mock("./upload-client", () => ({ createUploadClient: () => ({ uploadFile: state.upload }) }));
@@ -16,12 +18,15 @@ const api = {} as OpeningApi;
 const onChanged = async () => {};
 let container: HTMLDivElement;
 let root: Root;
+let releaseIdentity: () => void;
 beforeEach(() => {
+  clearSessionExpiry();
+  releaseIdentity = setupUploadIdentity();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   state.upload.mockReset().mockResolvedValue(source);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); releaseIdentity(); clearSessionExpiry(); vi.unstubAllGlobals(); });
 
 it("moves a completed parsing task into its normal row without remounting an open management draft", async () => {
   await act(async () => root.render(createElement(InboxPanel, { api, sources: [source], onChanged })));

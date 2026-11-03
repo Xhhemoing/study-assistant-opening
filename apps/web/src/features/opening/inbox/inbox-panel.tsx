@@ -124,15 +124,16 @@ export function InboxPanel({
     return () => { mounted = false; stop(); };
   }, [processing, onChanged]);
   const client = useMemo(() => createUploadClient({
-    begin: (input, identity) => api.beginUpload(input, identity),
+    begin: (input, identity, signal) => api.beginUpload(input, identity, signal),
     complete: (id, identity) => api.completeUpload(id, identity),
-    put: (url, body, onProgress, mime, identity) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded), undefined, identity),
+    put: (url, body, onProgress, mime, identity, signal) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded), undefined, identity, signal),
     resolvePutUrl: resolveUploadPutUrl,
-    refreshTicket: (id, identity) => api.refreshUploadTicket(id, identity),
+    refreshTicket: (id, identity, signal) => api.refreshUploadTicket(id, identity, signal),
   }), [api]);
 
   const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
     uploadId: operation?.uploadId,
+    signal: operation?.signal,
     expectedIdentity: operation?.expectedIdentity,
     onBytes,
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),

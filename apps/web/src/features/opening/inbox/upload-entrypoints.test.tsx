@@ -3,7 +3,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
-import type { OpeningApi } from "../client/api";
+import { createOpeningApi, type OpeningApi } from "../client/api";
+import { webcrypto } from "node:crypto";
+import { Buffer } from "node:buffer";
+import { putPrivateBytes } from "./put-private";
 import { InboxPanel } from "./inbox-panel";
 import { UploadStrip } from "../assistant/upload-strip";
 import { StartUploads } from "../start/start-uploads";
@@ -12,13 +15,22 @@ import { setupUploadIdentity, uploadTestIdentity } from "./upload-identity-test-
 const upload = vi.hoisted(() => vi.fn());
 const organization = vi.hoisted(() => vi.fn());
 vi.mock("../library/material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ addToCourse: organization }) }));
-vi.mock("./upload-client", () => ({ createUploadClient: () => ({ uploadFile: upload }) }));
+const runtime = vi.hoisted(() => ({ real: false }));
+vi.mock("./upload-client", async original => {
+  const actual = await original<typeof import("./upload-client")>();
+  return { ...actual, createUploadClient: (...args: Parameters<typeof actual.createUploadClient>) => runtime.real ? actual.createUploadClient(...args) : { uploadFile: upload } };
+});
+vi.mock("./put-private", async original => {
+  const actual = await original<typeof import("./put-private")>();
+  return { ...actual, putPrivateBytes: vi.fn(actual.putPrivateBytes) };
+});
 vi.mock("./source-cleanup-panel", () => ({ SourceCleanupPanel: () => null }));
 const source = { id: "saved", name: "notes.pdf", mime: "application/pdf", bytes: 4, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
-const api = {} as OpeningApi;
+let api = {} as OpeningApi;
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
   setupUploadIdentity();
+  runtime.real = false; api = {} as OpeningApi; vi.mocked(putPrivateBytes).mockClear();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host); upload.mockReset(); organization.mockReset().mockResolvedValue({ succeeded: [], failed: [] });
 });
@@ -102,4 +114,113 @@ it.each(["inbox", "strip", "start"] as const)("%s retains course-assignment fail
   expect(selected.read).toHaveBeenCalledOnce();
   expect(changed).toHaveBeenCalled();
   expect(host.textContent).not.toContain("归入课程未完成");
+});
+
+// Exercise each real component adapter through the queue, client, HTTP API and XHR wrapper.
+class ControlledXhr {
+  status = 200;
+  responseText = "";
+  withCredentials = false;
+  upload = { onprogress: null as ((event: ProgressEvent) => void) | null };
+  open = vi.fn();
+  setRequestHeader = vi.fn();
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  send = vi.fn();
+  abort = vi.fn(() => this.onabort?.());
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+it.each(["inbox", "strip", "start"] as const)("%s cancels real PUT/refresh and reconciles an unknown complete without re-upload", async kind => {
+  runtime.real = true;
+  vi.stubGlobal("crypto", {
+    randomUUID: () => webcrypto.randomUUID(),
+    subtle: { digest: (algorithm: string, bytes: Uint8Array) => webcrypto.subtle.digest(algorithm, Buffer.from(bytes)) },
+  });
+  const saved: SourceRecord = {
+    id: "33333333-3333-4333-8333-333333333333", workspaceId: uploadTestIdentity.workspaceId,
+    name: "notes.pdf", mime: "application/pdf", bytes: 4, sha256: "ab".repeat(32), version: 0,
+    uploadState: "uploaded", parseState: "queued", error: null, createdAt: "2026-11-03T00:00:00.000Z",
+  };
+  const ticket = { source: { ...saved, uploadState: "pending", parseState: "not_started" },
+    uploadUrl: `https://example.test/api/opening/sources/${saved.id}/staging`, expiresAt: "2026-11-04T00:00:00.000Z" };
+  const refresh = deferred<Response>(), receipt = deferred<Response>();
+  let refreshCount = 0, completeCount = 0;
+  const transport = vi.fn<typeof fetch>(async url => {
+    if (String(url).endsWith("/upload-ticket")) return ++refreshCount === 1 ? refresh.promise : Response.json(ticket);
+    if (String(url).endsWith("/complete")) return ++completeCount === 1 ? receipt.promise : Response.json(saved);
+    return Response.json(ticket);
+  });
+  api = createOpeningApi(transport);
+  const requests: ControlledXhr[] = [];
+  vi.stubGlobal("XMLHttpRequest", class extends ControlledXhr { constructor() { super(); requests.push(this); } });
+  const changed = vi.fn(async () => undefined), selected = localFile("notes.pdf");
+  await entrypoint(kind, changed)([selected.file]);
+  await act(async () => { await vi.waitFor(() => expect(requests).toHaveLength(1)); });
+  const firstPut = vi.mocked(putPrivateBytes).mock.calls[0]!;
+  const firstSignal = firstPut[6]!;
+  expect(firstSignal).toBeInstanceOf(AbortSignal);
+  expect(firstPut[5]).toEqual(uploadTestIdentity);
+  expect(transport.mock.calls[0]?.[1]?.signal).toBe(firstSignal);
+  for (const [name, value] of Object.entries({ "x-upload-user-id": uploadTestIdentity.id, "x-upload-workspace-id": uploadTestIdentity.workspaceId })) {
+    expect(new Headers(transport.mock.calls[0]?.[1]?.headers).get(name)).toBe(value);
+    expect(requests[0]!.setRequestHeader).toHaveBeenCalledWith(name, value);
+  }
+  const cancel = async () => {
+    const button = kind === "start" ? host.querySelector<HTMLButtonElement>('[aria-label="移除上传记录 notes.pdf"]')
+      : Array.from(host.querySelectorAll("button")).find(button => button.textContent === "取消");
+    expect(button).toBeTruthy(); expect(button!.disabled).toBe(false);
+    await act(async () => button!.click());
+  };
+  const retry = async () => {
+    const button = Array.from(host.querySelectorAll("button")).find(button => button.textContent === "重试");
+    expect(button).toBeTruthy(); await act(async () => button!.click());
+  };
+  await cancel();
+  expect(firstSignal.aborted).toBe(true);
+  expect(requests[0]!.abort).toHaveBeenCalledOnce();
+  expect(completeCount).toBe(0);
+  expect(changed).not.toHaveBeenCalledWith([saved.id], [saved]);
+  await retry();
+  expect(refreshCount).toBe(1);
+  const refreshSignal = transport.mock.calls[1]?.[1]?.signal;
+  expect(refreshSignal).toBeInstanceOf(AbortSignal);
+  expect(new Headers(transport.mock.calls[1]?.[1]?.headers).get("x-upload-user-id")).toBe(uploadTestIdentity.id);
+  await cancel();
+  expect(refreshSignal?.aborted).toBe(true);
+  await act(async () => refresh.resolve(Response.json(ticket)));
+  expect(requests).toHaveLength(1); expect(completeCount).toBe(0);
+  await retry();
+  expect(refreshCount).toBe(2); expect(requests).toHaveLength(2);
+  const secondPut = vi.mocked(putPrivateBytes).mock.calls[1]!;
+  expect(secondPut[6]).toBe(transport.mock.calls[2]?.[1]?.signal);
+  expect(secondPut[5]).toEqual(uploadTestIdentity);
+  expect(Array.from(secondPut[1])).toEqual([1, 2, 3, 4]);
+  await act(async () => requests[1]!.onload?.());
+  expect(completeCount).toBe(1);
+  expect(transport.mock.calls[3]?.[1]?.signal).toBeUndefined();
+  await cancel();
+  await act(async () => receipt.reject(new Error("receipt lost")));
+  expect(host.textContent).toContain("可能已保存，待核对");
+  expect(host.textContent).toContain("notes.pdf");
+  await retry();
+  expect(completeCount).toBe(2);
+  expect(transport.mock.calls.map(([url]) => String(url))).toEqual([
+    "/api/opening/sources", `/api/opening/sources/${saved.id}/upload-ticket`,
+    `/api/opening/sources/${saved.id}/upload-ticket`, `/api/opening/sources/${saved.id}/complete`,
+    `/api/opening/sources/${saved.id}/complete`,
+  ]);
+  expect(requests).toHaveLength(2); expect(selected.read).toHaveBeenCalledOnce();
+  if (kind === "inbox") {
+    expect(changed).toHaveBeenCalledExactlyOnceWith();
+    expect(host.querySelector('[aria-label="已上传任务"]')?.textContent).toContain("notes.pdf");
+    expect(host.textContent).toContain("已上传 1 份材料");
+  } else expect(changed).toHaveBeenCalledWith([saved.id], [saved]);
+  expect(host.textContent).not.toContain("可能已保存，待核对");
 });

@@ -127,6 +127,23 @@ it("waits for the first upload before reading the next file", async () => {
   expect(upload).toHaveBeenCalledTimes(2);
 });
 
+it("keeps upload actions mutually exclusive while allowing cancellation unless externally disabled", async () => {
+  let finish!: (value: SourceRecord) => void;
+  upload.mockImplementationOnce(() => new Promise<SourceRecord>(resolve => { finish = resolve; }));
+  const api = {} as OpeningApi;
+  const props = { api, sources: [], courseId: null, onBusyChange: () => undefined, onUploaded: async () => undefined };
+  await act(async () => root.render(<StartUploads {...props} />));
+  await selectFiles([selectableFile("notes.pdf").file]);
+  const remove = () => host.querySelector<HTMLButtonElement>('[aria-label="移除上传记录 notes.pdf"]')!;
+  expect(remove().disabled).toBe(false);
+  for (const text of ["拍题", "上传"]) {
+    expect(Array.from(host.querySelectorAll("button")).find(button => button.textContent === text)?.disabled).toBe(true);
+  }
+  await act(async () => root.render(<StartUploads {...props} disabled />));
+  expect(remove().disabled).toBe(true);
+  await act(async () => finish({ id: "saved", name: "notes.pdf", mime: "application/pdf", uploadState: "uploaded", parseState: "queued" } as SourceRecord));
+});
+
 it("retries only unread files after a read failure without uploading an earlier saved file twice", async () => {
   const source = { id: "first", name: "first.pdf", mime: "application/pdf", uploadState: "uploaded", parseState: "queued" } as SourceRecord;
   upload.mockResolvedValueOnce(source).mockResolvedValueOnce({ ...source, id: "second", name: "second.pdf" });

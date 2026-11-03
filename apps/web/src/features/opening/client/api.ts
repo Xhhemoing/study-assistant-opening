@@ -388,11 +388,11 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(sourceListSchema, body);
     },
 
-    async beginUpload(input: UploadInput, expectedIdentity?: SessionIdentity | null): Promise<UploadTicket> {
+    async beginUpload(input: UploadInput, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal): Promise<UploadTicket> {
       const payload = uploadInputSchema.parse(input);
       const body = await request(
         "/api/opening/sources",
-        { method: "POST", body: JSON.stringify(payload), headers: uploadIdentityHeaders(expectedIdentity) },
+        { method: "POST", body: JSON.stringify(payload), headers: uploadIdentityHeaders(expectedIdentity), signal },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);
@@ -420,10 +420,10 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       await request(`/api/opening/sources/${sourceId}/reindex`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
     },
 
-    async refreshUploadTicket(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<UploadTicket> {
+    async refreshUploadTicket(sourceId: string, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal): Promise<UploadTicket> {
       const body = await request(
         `/api/opening/sources/${sourceId}/upload-ticket`,
-        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity) },
+        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity), signal },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);

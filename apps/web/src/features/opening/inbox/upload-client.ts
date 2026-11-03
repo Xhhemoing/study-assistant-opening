@@ -10,6 +10,7 @@ export type LocalUploadFile = {
 };
 
 export type UploadByteProgress = {
+  signal?: AbortSignal;
   expectedIdentity?: SessionIdentity | null;
   uploadId?: string;
   onBytes?: (loaded: number, total: number) => void;
@@ -33,15 +34,16 @@ type PutFn = (
   onProgress: (loaded: number) => void,
   mime: string,
   expectedIdentity?: SessionIdentity | null,
+  signal?: AbortSignal,
 ) => Promise<void>;
 
 export type UploadClientDeps = {
-  begin: (input: UploadInput, expectedIdentity?: SessionIdentity | null) => Promise<UploadTicket>;
+  begin: (input: UploadInput, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal) => Promise<UploadTicket>;
   complete: (sourceId: string, expectedIdentity?: SessionIdentity | null) => Promise<SourceRecord>;
   put: PutFn;
   resolvePutUrl?: (ticket: UploadTicket) => string;
   /** Reissue lease for pending source; required for retry (never reuse expired uploadUrl). */
-  refreshTicket?: (sourceId: string, expectedIdentity?: SessionIdentity | null) => Promise<UploadTicket>;
+  refreshTicket?: (sourceId: string, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal) => Promise<UploadTicket>;
 };
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -64,7 +66,15 @@ export function createUploadClient(deps: UploadClientDeps) {
       file: LocalUploadFile,
       progress: UploadByteProgress = {},
     ): Promise<SourceRecord | UploadRejected> {
+      const cancelled = async (ticket?: UploadTicket): Promise<UploadRejected> => {
+        return { phase: "interrupted", keptLocal: true, sourceId: ticket?.source.id ?? progress.uploadId ?? pendingBegins.get(file),
+          ticket, message: "上传已停止，未发送保存请求；暂存记录待核对，可重试。" };
+      };
       if (progress.resumeSourceId && progress.completionPending) {
+        if (progress.signal?.aborted) {
+          return { phase: "interrupted", sourceId: progress.resumeSourceId, ticket: progress.ticket,
+            completionPending: true, keptLocal: true, message: "可能已保存，待核对。请重试核对同一材料。" };
+        }
         try {
           const result = await deps.complete(progress.resumeSourceId, progress.expectedIdentity);
           pendingBegins.delete(file);
@@ -73,10 +83,11 @@ export function createUploadClient(deps: UploadClientDeps) {
         catch (error) {
           return { phase: "interrupted", sourceId: progress.resumeSourceId, ticket: progress.ticket,
             completionPending: true, keptLocal: true,
-            message: `上传已暂存，但保存确认失败，仍可重试。${rejectionDetail(error)}` };
+            message: `可能已保存，待核对。请重试核对同一材料。${rejectionDetail(error)}` };
         }
       }
       const mime = resolveUploadMime({ name: file.name, type: file.type });
+      if (progress.signal?.aborted) return cancelled(progress.ticket);
       if (!mime) {
         return {
           phase: "unsupported",
@@ -89,28 +100,30 @@ export function createUploadClient(deps: UploadClientDeps) {
         if (progress.resumeSourceId) {
           // Retry: refresh ticket (same source id) — never reuse expired uploadUrl; never begin a new row.
           ticket = deps.refreshTicket
-            ? await deps.refreshTicket(progress.resumeSourceId, progress.expectedIdentity)
+            ? await deps.refreshTicket(progress.resumeSourceId, progress.expectedIdentity, progress.signal)
             : progress.ticket;
         } else {
           const uploadId = progress.uploadId ?? pendingBegins.get(file) ?? globalThis.crypto.randomUUID();
           pendingBegins.set(file, uploadId);
+          const sha256 = await sha256Hex(file.bytes);
+          if (progress.signal?.aborted) return cancelled();
           ticket = await deps.begin({
             name: file.name.slice(0, 180),
             mime,
             bytes: file.bytes.byteLength,
-            sha256: await sha256Hex(file.bytes),
+            sha256,
             uploadId,
-          }, progress.expectedIdentity);
+          }, progress.expectedIdentity, progress.signal);
         }
       } catch (error) {
         const detail = rejectionDetail(error);
         return {
           phase: "interrupted",
-          sourceId: progress.resumeSourceId,
+          sourceId: progress.resumeSourceId ?? progress.uploadId ?? pendingBegins.get(file),
           keptLocal: true,
           message: progress.resumeSourceId
             ? `上传票据刷新失败，原件仍在本地。未创建第二份材料。${detail}`
-            : `上传准备失败，原件仍在本地。${detail}`,
+            : `上传准备结果待核对，原件仍在本地；重试将沿用同一上传标识。${detail}`,
         };
       }
       if (!ticket || (progress.resumeSourceId && ticket.source.id !== progress.resumeSourceId)) {
@@ -121,11 +134,13 @@ export function createUploadClient(deps: UploadClientDeps) {
           message: "没有可重试的上传票据，未创建第二份材料。",
         };
       }
+      if (progress.signal?.aborted) return cancelled(ticket);
       try {
         await deps.put(deps.resolvePutUrl?.(ticket) ?? ticket.uploadUrl, file.bytes, (loaded) => {
-          progress.onBytes?.(loaded, file.bytes.byteLength);
-        }, mime, progress.expectedIdentity);
+          if (!progress.signal?.aborted) progress.onBytes?.(loaded, file.bytes.byteLength);
+        }, mime, progress.expectedIdentity, progress.signal);
       } catch (error) {
+        if (progress.signal?.aborted) return cancelled(ticket);
         const detail = rejectionDetail(error);
         return {
           phase: "interrupted",
@@ -135,7 +150,9 @@ export function createUploadClient(deps: UploadClientDeps) {
           message: `上传中断，原件仍在本地。未标记为已上传。${detail}`,
         };
       }
+      if (progress.signal?.aborted) return cancelled(ticket);
       try {
+        // Complete may have committed already; do not abort its receipt.
         const result = await deps.complete(ticket.source.id, progress.expectedIdentity);
         pendingBegins.delete(file);
         return result;
@@ -146,7 +163,7 @@ export function createUploadClient(deps: UploadClientDeps) {
           ticket,
           keptLocal: true,
           completionPending: true,
-          message: `上传已暂存，但保存确认失败，仍可重试。${rejectionDetail(error)}`,
+          message: `可能已保存，待核对。请重试核对同一材料。${rejectionDetail(error)}`,
         };
       }
     },
