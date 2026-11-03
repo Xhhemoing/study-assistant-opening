@@ -4,8 +4,9 @@ import { mkdtempSync, writeFileSync, readFileSync, statSync, existsSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import reviewModule from "../../scripts/study-course-audit-review.ts";
-const { createCourseAuditReview, courseAuditReviewIdentity, runCourseAuditReview } = reviewModule;
+import { require as tsxRequire } from "tsx/cjs/api";
+const reviewModule = tsxRequire("../../scripts/study-course-audit-review.ts", import.meta.url);
+const { createCourseAuditReview, courseAuditReviewIdentity, runCourseAuditReview } = reviewModule.default ?? reviewModule;
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const privateText = "PRIVATE-QUESTION-ANSWER-NOTE";

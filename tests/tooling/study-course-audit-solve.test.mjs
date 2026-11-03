@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { require as tsxRequire } from "tsx/cjs/api";
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dir = mkdtempSync(join(tmpdir(), "course-audit-solve-"));
@@ -99,7 +100,7 @@ test("invalid sample and production loopback guard fail before file or HTTP", as
 });
 
 test("configuration and solution boundaries reject invalid values in process", async () => {
-  const module = await import("../../scripts/study-course-audit-solve.ts");
+  const module = tsxRequire("../../scripts/study-course-audit-solve.ts", import.meta.url);
   const { parseSolveOptions, solveOutputSchema, prepareSolveSample } = module.default ?? module;
   const env = { SOLVE_TEST_URL: "https://example.com/v1", SOLVE_TEST_KEY: "fake" };
   for (const limit of ["0", "-1", "1.5", "1001", "NaN", "Infinity", "1e2"]) {
