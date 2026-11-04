@@ -34,8 +34,14 @@ export function assertReferenceTextRevision(order: TeachingBlockRef[], before: B
       delete oldRest.content[key]; delete newRest.content[key];
     }
     if (!isDeepStrictEqual(oldRest, newRest)) throw learningError("VALIDATION", "only reference answer text may change");
-    const answer = teachingQuestionText(next.content);
-    if (!answer || checkArithmeticAnswer(teachingQuestionText(prompt.content)!, answer) === "incorrect") throw learningError("VALIDATION", "reference answer does not match the question");
+    const answerTexts = [...textFields].map(key => next.content[key])
+      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    const question = teachingQuestionText(prompt.content)!;
+    // Alternate saved representations remain part of this revision even when
+    // a higher-priority text field is correct. Unknown prose stays reviewable.
+    if (!answerTexts.length || answerTexts.some(answer => checkArithmeticAnswer(question, answer) === "incorrect")) {
+      throw learningError("VALIDATION", "reference answer does not match the question");
+    }
   }
   if (!changed) throw learningError("VALIDATION", "reference answer text has not changed");
 }
