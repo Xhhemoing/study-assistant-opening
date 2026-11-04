@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LearningObservation, Scope } from "@aistudy/contracts";
 import { createOpeningAdaptivePrefsRepository, createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -18,17 +18,20 @@ import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 
 let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
-beforeAll(async () => {
+beforeEach(async () => {
+  vi.stubEnv("OPENING_TEACHING_LOOP", "1");
+  // Exposure history is workspace-scoped, so each learner flow needs its own
+  // identity rather than inheriting earlier tests' delivered question families.
   fixture = await createOpeningFixture();
   runtime = createAuthRuntime({ databaseUrl: process.env.OPENING_TEST_DATABASE_URL!,
     authSecret: process.env.AUTH_SECRET ?? "opening-fixture-secret-opening-fixture-secret",
     sessionCookieSecure: false, sessionTtlSeconds: 3600, authCookieName: "aistudy_session" });
   setAuthRuntimeForTests(runtime);
 });
-beforeEach(() => { vi.stubEnv("OPENING_TEACHING_LOOP", "1"); });
-afterAll(async () => {
+afterEach(async () => {
   setAuthRuntimeForTests(null); vi.unstubAllEnvs();
-  await runtime?.close(); await fixture?.close();
+  try { await runtime?.close(); }
+  finally { await fixture?.close(); }
 });
 const request = (path: string, body: unknown, cookie = fixture.cookie) => new Request(`http://localhost${path}`, {
   method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
@@ -135,10 +138,22 @@ describe("authenticated span tutor learning flow", () => {
     expect(finalRead.status).toBe(200); const final = await finalRead.json();
     expect(final.session).toMatchObject({ activityId: next.activityId, sessionId: next.sessionId, moveId: "self-example", status: "active", retestId: null });
     expect(final.attempts).toHaveLength(1);
-    expect(final.attempts[0]).toMatchObject({ problemId: presented.problem.id, sessionId: next.sessionId });
-    expect(final.assistance[final.attempts[0].id]).toBe("revealed");
+    const finalAttempt = final.attempts[0];
+    expect(finalAttempt).toMatchObject({ sessionId: next.sessionId,
+      spanExercise: { id: presented.problem.id, version: presented.problem.version } });
+    const [persistedAttempt] = await fixture.sql`SELECT problem_id,item_version_id FROM opening_learning_attempts
+      WHERE id=${finalAttempt.id} AND workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}
+        AND session_id=${next.sessionId}`;
+    expect(persistedAttempt).toBeDefined();
+    expect(persistedAttempt!.problem_id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+    expect(persistedAttempt!.item_version_id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+    expect(finalAttempt).toMatchObject({ problemId: persistedAttempt!.problem_id, itemVersionId: persistedAttempt!.item_version_id });
+    expect(presented.exposureReceipt.contextAnchor).toMatchObject({ courseId: f.courseId, attemptId: finalAttempt.id,
+      itemVersionId: persistedAttempt!.item_version_id, purpose: "learning_help" });
+    expect(final.assistance[finalAttempt.id]).toBe("revealed");
     expect(afterWork.help).toHaveLength(1);
-    expect(afterWork.help[0]).toMatchObject({ id: presented.exposureReceipt.id, delivered: true, level: "revealed" });
+    expect(afterWork.help[0]).toMatchObject({ id: presented.exposureReceipt.id, delivered: true, level: "revealed",
+      course_id: f.courseId, session_id: next.sessionId, attempt_id: finalAttempt.id, problem_id: persistedAttempt!.problem_id });
     expect(afterWork.observations.find(row => row.id === observed.id)).toMatchObject({ outcome: "incorrect", assistance: "independent" });
     expect(afterWork.activities.find(row => row.id === f.origin.activityId)?.status).toBe("completed");
     expect(afterWork.activities).toHaveLength(2);
@@ -187,7 +202,9 @@ describe("authenticated span tutor learning flow", () => {
     expect(await again.json()).toMatchObject({ activityId: retest.activityId, taskId: retest.taskId, activityStatus: "cancelled", taskStatus: "skipped" });
     const next = await nextActivity(request(nextPath, { activityId: lesson.activityId, expectedRevision: lesson.revision, observationId: null, clientKey: randomUUID() }));
     expect(next.status).toBe(200);
-    expect(await next.json()).toMatchObject({ kind: "choice", reason: "cancelled", courseId: f.courseId });
+    expect(await next.json()).toMatchObject({ kind: "choice", reason: "cancelled",
+      primary: { href: `/opening/courses/${f.courseId}#course-learning-records` },
+      secondary: { href: `/opening/courses/${f.courseId}/study/span?lesson=${lesson.activityId}&retest=${retest.activityId}` } });
     const lastRead = await readLesson(lessonGet(f.courseId, lesson.activityId, retest.activityId));
     expect(lastRead.status).toBe(200);
     expect(await lastRead.json()).toMatchObject({ session: { activityId: lesson.activityId, retestId: retest.activityId },
