@@ -9,6 +9,8 @@ import { createOpeningLearningClient } from "../../client/learning-client";
 import { createOpeningApi, resolveUploadPutUrl } from "../../client/api";
 import { createUploadClient } from "../../inbox/upload-client";
 import { putPrivateBytes } from "../../inbox/put-private";
+import { getVerifiedSessionIdentity } from "../../../auth/session-identity";
+import { verifyUploadIdentity } from "../../inbox/upload-identity";
 import { spanLessonRequest, type SpanLessonDetails } from "../../teaching/span/span-session-client";
 import { nextSpanHintLevel, requestSpanHint, SPAN_HINT_LABELS } from "../../teaching/span/span-hint-client";
 import { spanProblemText } from "../../teaching/span/span-problem-text";
@@ -308,10 +310,14 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
       photo = { status: "uploading", name: file.name };
       const api = createOpeningApi();
-      const upload = createUploadClient({ begin: input => api.beginUpload(input), complete: id => api.completeUpload(id),
-        put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, loaded => onProgress(loaded)), resolvePutUrl: resolveUploadPutUrl, refreshTicket: id => api.refreshUploadTicket(id) });
+      const identity = getVerifiedSessionIdentity();
+      const upload = createUploadClient({ begin: (input, expectedIdentity, signal) => api.beginUpload(input, expectedIdentity, signal),
+        complete: (id, expectedIdentity) => api.completeUpload(id, expectedIdentity),
+        put: (url, body, onProgress, mime, expectedIdentity, signal) => putPrivateBytes(url, body, mime, loaded => onProgress(loaded), undefined, expectedIdentity, signal),
+        resolvePutUrl: resolveUploadPutUrl, refreshTicket: (id, expectedIdentity, signal) => api.refreshUploadTicket(id, expectedIdentity, signal) });
       try {
-        const result = await upload.uploadFile({ name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) });
+        await verifyUploadIdentity(identity);
+        const result = await upload.uploadFile({ name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()) }, { expectedIdentity: identity });
         if ("phase" in result) { photo = { status: "failed", name: file.name, message: result.message }; return refresh(); }
         // The photo stays a private upload; it is attached to this answer only, never to the course materials.
         update({ fields: { workSourceId: result.id, workSourceVersion: result.version, workPhysicalPage: 1 } });
