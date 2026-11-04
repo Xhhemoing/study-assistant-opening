@@ -56,9 +56,9 @@ test("operations doc binds release evidence to the exact SHA and says GitHub run
 });
 
 test("static-unit installs the shared parser venv before real PDF renderer units", () => {
-  const block = workflow.match(/^  static-unit:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  const block = workflow.match(/^[ ]{2}static-unit:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   assert.ok(block, "static-unit job must exist");
-  assert.match(block, /^    env: \*quality-env$/m);
+  assert.match(block, /^[ ]{4}env: \*quality-env$/m);
   const requiredSteps = [
     "      - *setup-parser-python",
     "      - *cache-parser-venv",
