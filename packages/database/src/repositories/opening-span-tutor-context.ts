@@ -1,5 +1,5 @@
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
-import { captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
+import { buildDecisionInput, captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
@@ -119,9 +119,8 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   // An explicit continuation answers this activity's result. A newer session
   // can inform later course planning, but cannot replace the selected origin.
   const selected = focusObservationId ? current.filter(row => row.id === focusObservationId) : current;
-  const decisionInput: NextLearningStepInput = { observations: selected, wantsFullExplanation: intent.explanationStyle === "full",
-    ...(intent.learningPhase ? { learningPhase: intent.learningPhase } : {}), phaseSource: intent.learningPhase ? "explicit" : "automatic", dueRetest: Boolean(dueRetestId),
-    status: !selected.length ? "unobserved" : selected[0]!.verifiedCorrect === "yes" && selected[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check" };
+  const decisionInput = buildDecisionInput({ observations: selected, wantsFullExplanation: intent.explanationStyle === "full",
+    ...(intent.learningPhase ? { learningPhase: intent.learningPhase } : {}), phaseSource: intent.learningPhase ? "explicit" : "automatic", dueRetest: Boolean(dueRetestId) });
   return { sourceRefs, decisionInput };
 }
 async function nextSession(db: Sql, scope: Scope, courseId: string) {
@@ -201,7 +200,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
             return { courseId: request.courseId, grantRevision: authorization.grant.revision, privacyEpoch: Number(workspace!.privacy_epoch),
               sourceIds: position.resumeSession.sourceIds, sourceVersions: {}, sourceRefs: [], intent: position.resumeSession.intent,
-              decisionInput: { observations: [], status: "unobserved", wantsFullExplanation: false }, ...position, originChange };
+              decisionInput: buildDecisionInput({ observations: [], wantsFullExplanation: false }), ...position, originChange };
           }
         }
         const selected = origin ? await selectedSources(tx, scope, request.courseId, origin.session.sourceIds)

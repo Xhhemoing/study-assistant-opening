@@ -112,13 +112,18 @@ it("rolls back the real session, attempt and budget if standard receipt persiste
 });
 it("creates a real span activity and resumes it without charging or creating another", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
-  expect(context).toMatchObject({ courseId: f.courseId, grantRevision: 1, decisionInput: { status: "unobserved" } });
+  expect(context).toMatchObject({ courseId: f.courseId, grantRevision: 1, decisionInput: {
+    observations: [], status: "unobserved", wantsFullExplanation: false, phaseSource: "automatic", dueRetest: false,
+  } });
+  expect(nextLearningStep(context.decisionInput)).toEqual({ activityKind: "diagnose", focusObservationId: null,
+    reasonCode: "no_evidence", phase: "explore", phaseSource: "automatic" });
   const input = { context, decision: nextLearningStep(context.decisionInput), operationId: `tutor-next:${randomUUID()}` };
   const one = await f.repo.execute(fixture.scope, input);
   await f.repo.assertCurrent(fixture.scope, context);
   expect(one).toMatchObject({ courseId: f.courseId, moveId: "self_study-reserved", status: "active" });
   const resumed = (await f.repo.read(fixture.scope, f.request))!;
   expect(resumed.resumeSession?.activityId).toBe(one.activityId);
+  expect(resumed.decisionInput).toEqual(context.decisionInput);
   expect((await f.repo.execute(fixture.scope, { ...input, context: resumed })).activityId).toBe(one.activityId);
   const activities = await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`;
   expect(activities.map(row => row.id)).toEqual([one.activityId]);
@@ -128,6 +133,7 @@ it("executes explicit new learning and replays the same phase, source and action
   const request = { ...f.request, question: "完全不会，先学", operationId };
   const context = (await f.repo.read(fixture.scope, request))!;
   expect(context).not.toBeNull();
+  expect(context.decisionInput).toMatchObject({ observations: [], status: "unobserved", learningPhase: "new_learning", phaseSource: "explicit" });
   await f.repo.assertCurrent(fixture.scope, context);
   const decision = nextLearningStep(context.decisionInput);
   expect(decision).toMatchObject({ phase: "new_learning", phaseSource: "explicit", activityKind: "full_explain" });
@@ -172,6 +178,7 @@ it.each(["先学", "先巩固", "继续学习"])("executes %s beside a legal due
   await f.repo.assertCurrent(fixture.scope, context);
   const decision = nextLearningStep(context.decisionInput), capture = captureNextLearningStep(context.decisionInput);
   expect(capture.decision).toEqual(decision);
+  expect(context.decisionInput).toMatchObject({ dueRetest: question === "继续学习", phaseSource: question === "继续学习" ? "automatic" : "explicit" });
   const session = await f.repo.execute(fixture.scope, { context, decision, operationId });
   await f.repo.assertCurrent(fixture.scope, context);
   expect(session.moveId).toBe(question === "先学" ? "self-example" : question === "先巩固" ? "self-faded" : "self_study-reserved");
@@ -230,6 +237,18 @@ it("rejects a source version change before creating the selected activity", asyn
   await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
   await expect(f.repo.execute(fixture.scope, { context, decision: nextLearningStep(context.decisionInput), operationId: `tutor-next:${randomUUID()}` })).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(0);
+});
+it("uses the empty canonical fallback when the consumed material version changed, without reviving the activity", async () => {
+  const f = await seed(), initial = (await f.repo.read(fixture.scope, f.request))!;
+  const session = await f.repo.execute(fixture.scope, { context: initial, decision: nextLearningStep(initial.decisionInput), operationId: randomUUID() });
+  await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+  const current = (await f.repo.read(fixture.scope, f.request))!;
+  expect(current.originChange).toMatchObject({ reason: "source_unavailable" });
+  expect(current.decisionInput).toEqual({ observations: [], status: "unobserved", wantsFullExplanation: false });
+  expect(nextLearningStep(current.decisionInput)).toEqual({ activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" });
+  await expect(f.repo.execute(fixture.scope, { context: current, decision: nextLearningStep(current.decisionInput), operationId: randomUUID() }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toEqual([{ id: session.activityId }]);
 });
 it("rejects an old resume projection after another page changed the activity", async () => {
   const f = await seed(), initial = (await f.repo.read(fixture.scope, f.request))!;
