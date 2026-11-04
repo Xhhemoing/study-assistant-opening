@@ -57,8 +57,17 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
     const rows = await sql`
       SELECT c.* FROM opening_source_chunks c
       JOIN opening_sources s ON s.id = c.source_id
+      JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
-        AND s.parse_state = 'ready' AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
+        AND s.error->>'code' IS DISTINCT FROM 'PRIVACY_EXCLUDED'
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+          WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+        AND (s.parse_state = 'ready' OR (s.mime='application/pdf'
+          AND s.parse_state IN ('queued','running','failed','not_started') AND EXISTS (
+          SELECT 1 FROM opening_jobs j WHERE j.workspace_id=s.workspace_id
+            AND j.owner_user_id=${scope.ownerUserId} AND j.kind='index-source'
+            AND j.payload->>'sourceId'=s.id::text AND j.payload->>'sourceVersion'=s.version::text)))
+        AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         AND c.source_version = s.version
         AND c.source_id IN ${sql(sourceIds)}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at

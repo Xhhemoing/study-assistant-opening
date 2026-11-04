@@ -322,5 +322,5 @@ export function InboxPanel({
 }
 
 function isProcessingSource(record: SourceRecord): boolean {
-  return record.uploadState === "uploaded" && record.error?.code !== "PRIVACY_EXCLUDED" && ["queued", "running", "not_started"].includes(record.parseState);
+  return record.uploadState === "uploaded" && record.error?.code !== "PRIVACY_EXCLUDED" && ["queued", "running"].includes(record.parseState);
 }

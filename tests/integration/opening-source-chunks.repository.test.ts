@@ -48,13 +48,23 @@ describe("source chunks usability", () => {
     await expect(repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1, chunks })).rejects.toThrow("no readable text");
     expect((await repo.listChunks(f.scope, id)).map(row => row.text)).toEqual(["earlier readable body"]);
   });
-  it("preserves blank physical pages for preview but never uses blank or unfinished chunks as tutor text", async () => {
+  it("never opens raw unpublished PDF chunks just because a source is queued, running, failed or not_started", async () => {
+    const id = await seed(), repo = createOpeningSourceChunksRepository(f.sql);
+    await f.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text)
+      VALUES(${id},1,1,'unpublished renderer output')`;
+    for (const state of ["queued", "running", "failed", "not_started"]) {
+      await f.sql`UPDATE opening_sources SET parse_state=${state} WHERE id=${id}`;
+      await expect(readOpeningSourceContent(f.sql, f.scope, id, {})).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(await repo.listForSources(f.scope, [id])).toEqual([]);
+    }
+  });
+  it("preserves blank physical pages and already-published tutor text across a later failed retry", async () => {
     const id = await seed(), repo = createOpeningSourceChunksRepository(f.sql);
     await repo.replaceChunks(f.scope, { sourceId: id, sourceVersion: 1, chunks: [chunk(""), chunk("actual body", 2)] });
     expect((await repo.listChunks(f.scope, id)).map(row => row.page)).toEqual([1, 2]);
     expect((await repo.listForSources(f.scope, [id])).map(row => row.text)).toEqual(["actual body"]);
     await f.sql`UPDATE opening_sources SET parse_state='failed' WHERE id=${id}`;
-    expect(await repo.listForSources(f.scope, [id])).toEqual([]);
+    expect((await repo.listForSources(f.scope, [id])).map(row => row.text)).toEqual(["actual body"]);
     expect(await repo.listForSources(f.otherScope, [id])).toEqual([]);
   });
 });

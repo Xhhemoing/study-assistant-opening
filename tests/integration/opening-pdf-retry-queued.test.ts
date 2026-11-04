@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningSourceChunksRepository,
-  createOpeningSourceRepository } from "@aistudy/database";
+  createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
+import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
+import { createOpeningTestStorage } from "./opening-storage-fixture";
 import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
 import { runJob } from "../../apps/worker/src/runtime/run-job";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -13,7 +15,7 @@ let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 afterAll(async () => { await f?.close(); });
 const originalText = "This first page is already readable and its existing citation must remain stable across a retry.";
-async function seedRetry() {
+async function seedRetry(partial = false) {
   const sourceId = randomUUID(), bytes = Buffer.from("%PDF synthetic retry");
   const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
   const jobs = createOpeningJobRepository(f.sql);
@@ -23,18 +25,26 @@ async function seedRetry() {
     { page: 1, slideLabel: null, startMs: null, endMs: null, text: originalText, imageObjectKey: null },
   ] });
   const original = await chunks.listChunks(f.scope, sourceId);
-  await sources.markParseState(f.scope, sourceId, "failed", { code: "PARSE_FAILED", message: "interrupted", retryable: true });
-  const key = `parse:${sourceId}:v0:retry:${randomUUID()}`;
-  expect(await sources.retryParseWithJob(f.scope, sourceId, { key, payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0 }))
+  await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed",
+    { code: partial ? "PARSE_PARTIAL" : "PARSE_FAILED", message: "interrupted", retryable: true });
+  const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+  expect(await service.retryParse({ userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "pdf-retry" }, sourceId))
     .toMatchObject({ id: sourceId, version: 0, parseState: "queued", error: null });
-  const [job] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  const [job] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}
+    AND kind='parse' AND payload->>'sourceId'=${sourceId}`;
   const [outbox] = await f.sql`SELECT payload FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId} AND job_id=${job!.id}`;
   expect(outbox!.payload).toMatchObject({ jobId: job!.id, kind: "parse", sourceId });
   return { sourceId, sources, chunks, jobs, id: String(job!.id), original, bytes };
 }
 
-it("runs the retry outbox target through the real Worker completion and ordinary source reader", async () => {
-  const d = await seedRetry(), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-queued-"));
+async function expectPublishedPage(d: Awaited<ReturnType<typeof seedRetry>>) {
+  expect(await readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0, page: 1 }))
+    .toMatchObject({ sourceId: d.sourceId, version: 0, currentVersion: 0, page: 1, text: originalText });
+  expect((await d.chunks.listForSources(f.scope, [d.sourceId])).find(chunk => chunk.page === 1)).toEqual(d.original[0]);
+}
+
+it("runs a normal partial retry through service, outbox target, Worker and both ordinary readers", async () => {
+  const d = await seedRetry(true), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-queued-"));
   const runner = vi.fn(async (argv: string[]) => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf")
     ? { pageCount: 2 } : { pages: [
       { page: 1, text: originalText, imagePath: null, visualKinds: [] },
@@ -45,7 +55,16 @@ it("runs the retry outbox target through the real Worker completion and ordinary
       segments: createOpeningPdfSegmentsRepository(f.sql),
       storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` } });
     // The outbox target is invoked directly: no claim of Redis/BullMQ dispatch coverage.
-    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    await expectPublishedPage(d); // queued, before the Worker claims the outbox target
+    let running: { state: string; text: string; chunks: unknown } | undefined;
+    expect(await runJob(d.jobs, d.id, async (job, payload) => {
+      running = { state: (await d.sources.get(f.scope, d.sourceId)).parseState,
+        text: (await readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0, page: 1 })).text,
+        chunks: await d.chunks.listForSources(f.scope, [d.sourceId]) };
+      return handler(job, payload);
+    })).toBe(true);
+    expect(running).toEqual({ state: "running", text: originalText, chunks: d.original });
+    await expectPublishedPage(d);
     expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "ready", uploadState: "uploaded", version: 0 });
     expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 2 } });
     const saved = await d.chunks.listChunks(f.scope, d.sourceId);
@@ -55,6 +74,62 @@ it("runs the retry outbox target through the real Worker completion and ordinary
     expect(await runJob(d.jobs, d.id, handler)).toBe(false);
     expect(runner).toHaveBeenCalledTimes(calls);
   } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("keeps published pages readable when a normal partial retry fails again in the real parse handler", async () => {
+  const d = await seedRetry(true), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-fail-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks,
+      runner: async () => { throw new Error("controlled renderer failure"); }, tempDir,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` } });
+    await expectPublishedPage(d);
+    let runningText: string | undefined;
+    expect(await runJob(d.jobs, d.id, async (job, payload) => {
+      runningText = (await readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0, page: 1 })).text;
+      return handler(job, payload);
+    })).toBe(true);
+    expect(runningText).toBe(originalText);
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "failed" });
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "failed", version: 0 });
+    await expectPublishedPage(d);
+    expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("does not expose retained PDF text to a foreign owner, excluded source, or different current version", async () => {
+  const d = await seedRetry(true);
+  const foreignOwner = { ...f.scope, ownerUserId: f.otherScope.ownerUserId };
+  await expect(readOpeningSourceContent(f.sql, foreignOwner, d.sourceId, {})).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await d.chunks.listForSources(foreignOwner, [d.sourceId])).toEqual([]);
+  await f.sql`UPDATE opening_sources SET version=1 WHERE id=${d.sourceId}`;
+  await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, {})).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
+  // An explicitly pinned historical citation still resolves its own version, never the new one.
+  expect(await readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0, page: 1 })).toMatchObject({ version: 0, currentVersion: 1, text: originalText });
+  await f.sql`UPDATE opening_sources SET version=0,upload_state='rejected' WHERE id=${d.sourceId}`;
+  await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, {})).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
+  await f.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${d.sourceId}`;
+  await f.sql`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,memory_id,deleted_at)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${d.sourceId},${randomUUID()},now())`;
+  await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
+});
+
+it("does not enqueue another retry while the existing partial retry is queued or running", async () => {
+  const d = await seedRetry(true);
+  const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+  const principal = { userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "pdf-retry" };
+  await expect(service.retryParse(principal, d.sourceId)).rejects.toMatchObject({ code: "CONFLICT" });
+  const claimed = await d.jobs.claim(d.id);
+  expect(claimed).toMatchObject({ state: "running" });
+  await expect(service.retryParse(principal, d.sourceId)).rejects.toMatchObject({ code: "CONFLICT" });
+  const [count] = await f.sql`SELECT count(*)::int AS n FROM opening_jobs
+    WHERE workspace_id=${f.scope.workspaceId} AND kind='parse' AND payload->>'sourceId'=${d.sourceId}`;
+  expect(count!.n).toBe(1);
+  await expectPublishedPage(d);
+  expect(await d.jobs.finish(d.id, "failed", { code: "TEST_END", retryable: true }, claimed!.claimToken)).toBe(true);
 });
 
 it("releases an unclaimed cancelled retry instead of leaving the source queued, preserving citations", async () => {
@@ -103,6 +178,10 @@ it.each(["cancelled", "expired", "version"])("fences late chunk publication afte
     { page: 1, slideLabel: null, startMs: null, endMs: null, text: "late obsolete result", imageObjectKey: null },
   ] })).rejects.toThrow();
   expect(await d.chunks.listChunksAtVersion(f.scope, d.sourceId, 0)).toEqual(d.original);
+  if (boundary === "version") {
+    await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, {})).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
+  } else await expectPublishedPage(d);
   expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({
     parseState: boundary === "version" ? "queued" : boundary === "expired" ? "failed" : "not_started",
     version: boundary === "version" ? 1 : 0,
