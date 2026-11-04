@@ -117,16 +117,26 @@ it("does not escalate stale repeated errors in the real agenda consumer", async 
 });
 it("does not reuse withdrawn heads as independent success or repeated errors in either input consumer", async () => {
   const f = await seed(), learning = createOpeningLearningRepository(fixture.sql);
+  const { createOpeningLearnerStateService } = await import("../../packages/database/src/repositories/opening-learner-state-read");
+  const states = createOpeningLearnerStateService(fixture.sql);
+  const initialState = await states.read(fixture.scope, { courseId: f.courseId });
+  const receipts = await fixture.sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`;
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]!.receipt.stateVersion).toBe(initialState.stateVersion);
   const observations = [await agendaAttempt(f, { help: true }), await agendaAttempt(f, { help: true })];
+  expect((await states.read(fixture.scope, { courseId: f.courseId })).stateVersion).not.toBe(initialState.stateVersion);
   for (const observed of observations) await learning.reviseObservation(fixture.scope, {
     rootObservationId: observed.rootObservationId ?? observed.id, revisesObservationId: observed.id,
     expectedHead: observed.id, revisionKind: "retract", reason: "withdraw prior evidence", clientKey: randomUUID(),
   });
   const result = await agendaEvidence(f);
   expect(result.observations).toEqual([]);
-  const decision = { activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" };
-  expect(result.agenda.suggestion).toEqual(decision);
-  expect(result.workerDecision).toMatchObject(decision);
+  expect((await states.read(fixture.scope, { courseId: f.courseId })).stateVersion).toBe(initialState.stateVersion);
+  expect(await fixture.sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`).toEqual(receipts);
+  // All effective heads were withdrawn: the original empty-state receipt is
+  // current again, so agenda keeps its no-invalidation/no-new-suggestion contract.
+  expect(result.agenda).toMatchObject({ decisionCurrent: true, invalidationReasons: [], suggestion: null });
+  expect(result.workerDecision).toMatchObject({ activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" });
 });
 it("reconstructs the same activity, item, parent and original budget across real readers and retry keys without writes", async () => {
   const f = await seed(), { sql, scope } = fixture;
@@ -285,12 +295,19 @@ it.each(["new_learning", "consolidate"] as const)("keeps explicit %s in both rec
 });
 it("retains a due retest in the recovered canonical suggestion without creating a successor", async () => {
   const f = await seed(), { sql, scope } = fixture, retestId = randomUUID(), taskId = randomUUID();
+  // Complete the validation observation before binding the lesson to a retest;
+  // after binding, the attempt owner correctly requires retest-purpose items.
+  await agendaAttempt(f, { correct: true, assistance: "unknown" });
   await sql`INSERT INTO opening_tasks(id,workspace_id,owner_user_id,course_id,title,minutes,origin)
     VALUES (${taskId},${scope.workspaceId},${scope.ownerUserId},${f.courseId},'Due check',20,'retest')`;
   await sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,task_id,recommended_at,not_before_at)
     VALUES (${retestId},${scope.workspaceId},${scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',1,${taskId},now()-interval '1 minute',now()-interval '1 minute')`;
   await sql`UPDATE opening_teaching_activities SET checkpoint_json=jsonb_set(checkpoint_json,'{spanLesson,retestId}',${sql.json(retestId)}::jsonb) WHERE id=${f.lesson.activityId}`;
-  await agendaAttempt(f, { correct: true, assistance: "unknown" });
+  const [binding] = await sql`SELECT r.status,r.task_id,r.recommended_at <= now() AS due,r.not_before_at <= now() AS allowed,
+    a.checkpoint_json->'spanLesson'->>'retestId' AS bound_id
+    FROM opening_retest_activities r JOIN opening_teaching_activities a ON a.id=${f.lesson.activityId}
+    WHERE r.id=${retestId} AND r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}`;
+  expect(binding).toMatchObject({ status: "accepted", task_id: taskId, due: true, allowed: true, bound_id: retestId });
   const agenda = await createOpeningLearningAgendaRepository(sql).get(scope, f.courseId, f.lesson.activityId);
   expect(agenda).toMatchObject({ pendingRetestId: retestId, suggestion: { activityKind: "transfer_check", focusObservationId: null,
     reasonCode: "due_retest", phase: "maintain", phaseSource: "automatic" } });
