@@ -220,6 +220,9 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
+      - name: Technology spike tests
+        run: npm test -- --project '@aistudy/spike-*'
+
       - name: Integration tests
         run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
 
@@ -296,8 +299,6 @@ jobs:
       - *install-parser
       - name: Unit, contract and pipeline tests
         run: npm test -- --project unit --project contract --project notion-pipeline
-      - name: Technology spike tests
-        run: npm test -- --project '@aistudy/spike-*'
 
   build:
     name: production-build
