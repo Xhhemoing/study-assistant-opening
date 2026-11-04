@@ -55,6 +55,40 @@ test("operations doc binds release evidence to the exact SHA and says GitHub run
   assert.match(docs, /GitHub Actions `quality` job is authoritative/);
 });
 
+test("static-unit installs the shared parser venv before real PDF renderer units", () => {
+  const block = workflow.match(/^[ ]{2}static-unit:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(block, "static-unit job must exist");
+  assert.match(block, /^[ ]{4}env: \*quality-env$/m);
+  const requiredSteps = [
+    "      - *setup-parser-python",
+    "      - *cache-parser-venv",
+    "      - *install-parser",
+    "        run: npm test -- --project unit --project contract --project notion-pipeline",
+  ];
+  let previous = -1;
+  for (const step of requiredSteps) {
+    const index = block.indexOf(step);
+    assert.ok(index > previous, `static-unit must run ${step.trim()} in order`);
+    previous = index;
+  }
+  assert.doesNotMatch(block, /\*(?:cache-parser-models|prepare-parser-models)/);
+});
+
+test("technology spikes run once in the integration job after Chromium installation", () => {
+  const integration = workflow.match(/^[ ]{2}integration-browser:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  const staticUnit = workflow.match(/^[ ]{2}static-unit:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(integration, "integration-browser job must exist");
+  assert.ok(staticUnit, "static-unit job must exist");
+  const spike = "run: npm test -- --project '@aistudy/spike-*'";
+  assert.equal(workflow.split(spike).length - 1, 1, "spikes must execute exactly once");
+  assert.ok(!staticUnit.includes(spike), "static-unit must not run browser-dependent spikes");
+  const installIndex = integration.indexOf("run: npx playwright install chromium --with-deps");
+  const spikeIndex = integration.indexOf(spike);
+  const integrationIndex = integration.indexOf("run: npm run test:integration");
+  assert.ok(installIndex >= 0 && installIndex < spikeIndex && spikeIndex < integrationIndex,
+    "integration-browser must install Chromium, then run spikes, then integration tests");
+});
+
 test("parser is installed and seeded before integration runs with explicit Linux paths", () => {
   assert.match(workflow, /uses: actions\/setup-python@v5[\s\S]*?python-version: "3\.13"/);
   assert.match(workflow, /PARSER_PYTHON:.*\.local\/docling-venv\/bin\/python/);

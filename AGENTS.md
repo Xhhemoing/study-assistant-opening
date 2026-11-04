@@ -29,7 +29,7 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 ## 日常开发默认路径
 
 - 先定位相关模块，简述实现选择后直接推进。需求明确的小改动无需额外审批、独立设计/计划文件或逐项验收报告；只有影响产品方向、数据迁移或跨包 API 的关键歧义才先澄清。
-- 一次交付一个完整可用结果，其下组件、文件和实现任务可连续推进，不逐个插入独立 review、PR 或全量检查。普通低风险改动由实现者自查；复杂、跨模块或涉及授权、隐私、事务、迁移、生命周期和数据正确性的改动保留独立只读评审，高风险边界提前定向检查，具体节奏见多工具工作流。
+- 一次交付一个完整可用结果，其下组件、文件和实现任务可连续推进，不逐个插入独立 review、PR 或全量检查。实现者自查不替代正式审查：每个 PR（包括低风险文档和集成提升）均须指定 Claude Opus 5.5 high 批准与精确最新 head 的 required CI。高风险边界提前定向核对，授权、隐私、事务、迁移和数据正确性改动另走独立主线 PR 与用户明确批准，具体节奏见多工具工作流。
 - 只加载当前任务需要的技能和文件；子 Agent 用于有独立收益的调查、实现或评审，不为每个小板块固定唤醒一组角色。已有页面的小修复沿用现有设计，不自动触发新界面设计流程。
 - 日常只运行最接近改动的测试；TypeScript 变更补所属包类型检查，跨包公开类型变化再扩到受影响消费方。文档/注释变更检查 diff 即可，不启动服务或全套测试。
 - 单元测试指定 `--project unit` 和相关文件；集成/handler 测试按改动选择。不要先跑包含所有项目的 `npm test`，又单独重复跑 integration/handler。
@@ -40,11 +40,14 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 
 ## 多工具协作
 
-开工前读 [docs/STATUS.md](docs/STATUS.md)，收工时更新自己负责的行。当前主线程负责统筹、集成和交付；Claude Code、Grok Bot、pi 按可用能力和任务风险分工，不要求每个改动依次转交全部工具。分工、任务卡模板和评审时机见 [多工具开发分工](docs/operations/agent-workflow.md)，它取代 `docs/operations/codex-team.md` 中的旧角色与模型路由。分工本身不构成 commit、push、合并或发布授权。
+主控 PM 负责目标、Kanban 调度、验收与交接，不写业务代码、不计编码车道；实现与测试由已授权 worker 执行，集成由唯一集成者执行。先读原卡目标、允许路径、parents、接口决定和最近断点；按需只读 STATUS，写入由集成者独占。分工和门禁见 [多工具开发分工](docs/operations/agent-workflow.md)，取代旧角色与派单流程；分工本身不授予提交、推送、合并或发布权限。
 
-- 本项目最多同时运行 3 个子 Agent，可为 3 名独立实现者，覆盖通用的两名实现者上限。调查和评审共用这 3 个名额；需要评审时等待名额释放，不额外启动第 4 个子 Agent。独立任务不足 3 个时不凑数。
-- 普通子 Agent 默认使用 `gpt-6.1-sol`、`high`；委派工具支持时，在 spawn 参数中显式设置模型与强度。
-- 同一文件只允许一个写入者；公共契约、锁文件、schema、授权和事务协议由主线程协调。优先复用合适的 checkout 和分支，目录互不冲突时可共享 checkout；确需隔离或并行才新建 worktree，不强制每名 Agent 一个 worktree，仍最多 3 个活跃 worktree。
+- 以文件、接口和资源隔离规划八条编码流，并配置独立评审与集成能力；这是目标容量，不是已运行数量或配额豁免。实际启动必须服从平台及当前上层有效配额（包括仍有效的两名实现者限制），名额不足则按依赖排队，不绕过或虚报并行。
+- 项目不再以固定 3 个 Agent／3 棵 worktree 作为上限。worktree 按隔离需要和有效配额、资源及所有权准入；注册旧树不等于活跃写者，不为凑车道新建树或删除未知成果。
+- 持久 Kanban 是任务执行与交回入口，workspace=worktree；优先续接原卡、原 owner 和原会话，不重复建卡、实现或 dispatcher。目标、允许路径、parents、接口决定、限定 unit／包 types、风险与结果 metadata 必填；投递不等于接受或执行。
+- 同文件单 writer。共享契约、锁文件、迁移编号、schema、STATUS 及跨接口决定由唯一集成者独占协调；worker 不自行扩大 allowlist。接管须先核原 owner 已停止写入且明确交回，不能停他人任务抢权。
+- 共享环境中的重验证经现有 run-heavy 串行；真正隔离运行资源且获准的 worker 才可并行验证，worktree 本身不隔离数据库、Redis、端口或锁。低资源时先限制新准入，不以本地全套测试阻塞已授权轻量实施，完整门禁交精确 CI。
+- 默认实现模型沿当前获准配置，委派支持时显式写模型与强度，不静默换模型；开发成本原则上不作为限流理由，但不解除执行配额、资源与安全门禁，也不改变产品计费、预算或费用策略。
 
 ## 防御逻辑的边界
 
@@ -59,7 +62,7 @@ Name unit and integration tests `*.test.ts`/`*.test.tsx`; name browser tests `*.
 
 ### 浏览器验收分工（用户约定）
 
-- 浏览器验收（页面交互、视觉/响应式、真机、浏览器 E2E）全部由用户负责。除非用户明确授权，Agent 不自行或委派运行 Playwright、浏览器自动化、截图或真机验收。
+- 本地浏览器验收（页面交互、视觉/响应式、真机、浏览器 E2E）全部由用户负责；Agent 不自行或委派运行本地 Playwright、浏览器自动化、截图或真机验收。现有远端 CI 浏览器检查保持启用，不与本地分工混淆。
 - Agent 实现功能、维护测试并执行非浏览器检查（单元/契约、接口/数据库、类型检查、lint、构建）。浏览器验收待完成或既有浏览器测试失败不阻塞后续开发；已确认的数据丢失、越权或依赖不可用仍须处理。
 - UI 交付提供页面入口、环境/数据前提、操作步骤、预期结果和已知问题。没有用户反馈时标记“待用户浏览器验收”，不得声称浏览器通过或伪造截图证据。用户反馈问题后，Agent 定位修复并完成非浏览器回归，再交用户复验。
 - 本约定优先于既有计划和技能流程中的 Agent 浏览器验收要求；不修改或禁用现有 CI 浏览器检查，不抹去历史失败，不把待验收记为通过。
@@ -71,7 +74,7 @@ Name unit and integration tests `*.test.ts`/`*.test.tsx`; name browser tests `*.
 
 ## Commits and Pull Requests
 
-Use Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `test:`, and follow `.agents/skills/aistudy-git-workflow/SKILL.md` for the safe Git flow. PRs should explain the behavior change, link an issue when applicable, list verification commands, call out migrations or configuration changes, and include screenshots for UI changes.
+Use Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `test:`, and follow `.agents/skills/aistudy-git-workflow/SKILL.md` for safe Git operations. Push only to the authorized formal remote `study-assistant-opening`, not the legacy `origin`. PRs describe the full base-to-head diff, verification and unverified boundaries. Low-risk PRs target `integration/opening`; each needs designated Claude Opus 5.5 high approval and exact-head required CI before integration. The sole integrator promotes eligible results serially to `feat/opening-release` as soon as promotion gates pass, not on a twice-daily schedule; promotion PRs retain the same review/CI gates. High-risk authorization, privacy, transaction, migration or data-correctness changes use independent PRs to `feat/opening-release`, designated cross-family review and `needs_input` pending explicit user approval. No workflow text grants automatic deployment, production configuration, real-data operations, destructive migrations or final sample/design sign-off. UI browser verification remains with the user; do not fabricate screenshots.
 
 ## graphify
 
