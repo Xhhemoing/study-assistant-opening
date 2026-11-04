@@ -9,6 +9,7 @@ import unittest
 from checks import allowed_doc, check_gate
 
 SCRIPT = Path(__file__).with_name("checks.py").resolve()
+REPO = SCRIPT.parents[2]
 
 
 class ClassificationTests(unittest.TestCase):
@@ -52,6 +53,69 @@ class ClassificationTests(unittest.TestCase):
 
     def test_docs_with_spaces_and_newline_and_actual_light_check(self):
         self.put("docs/a space\nand newline.md", "valid\n")
+        self.commit()
+        self.assert_classification(True)
+        self.assertEqual(self.run_check("docs").returncode, 0)
+
+    def copy_repo_file(self, path):
+        self.put(path, (REPO / path).read_text())
+
+    def assert_full_and_light_rejected(self):
+        self.assert_classification(False)
+        self.assertNotEqual(self.run_check("docs").returncode, 0)
+
+    def test_plan_baseline_todo_is_full(self):
+        path = "docs/superpowers/plans/opening-release/00-baseline.md"
+        self.copy_repo_file(path)
+        self.base = self.commit()
+        original = (self.root / path).read_text()
+        self.put(path, original + "\nTODO\n")
+        self.commit()
+        self.assert_full_and_light_rejected()
+
+    def test_ci_guide_required_keyword_deletion_is_full(self):
+        path = "docs/operations/ci.md"
+        self.copy_repo_file(path)
+        self.base = self.commit()
+        original = (self.root / path).read_text()
+        self.assertIn("exact commit SHA", original)
+        self.put(path, original.replace("exact commit SHA", "commit"))
+        self.commit()
+        self.assert_full_and_light_rejected()
+
+    def test_task_referenced_evidence_deletion_is_full(self):
+        manifest = "docs/superpowers/plans/opening-release/tasks.json"
+        self.copy_repo_file(manifest)
+        tasks = json.loads((self.root / manifest).read_text())["tasks"]
+        reference = next(e for t in tasks for e in t.get("evidence", []) if e.endswith(".md"))
+        evidence = (REPO / manifest).parent.joinpath(reference).resolve().relative_to(REPO)
+        self.copy_repo_file(evidence)
+        self.base = self.commit()
+        self.git("rm", str(evidence))
+        self.commit()
+        self.assert_full_and_light_rejected()
+
+    def test_quality_and_deployment_docs_are_full(self):
+        for path in ("docs/quality/checks.md", "docs/quality/result.txt",
+                     "docs/operations/cloud-deployment.md"):
+            with self.subTest(path=path):
+                self.put(path, "checked documentation\n")
+                self.base = self.commit()
+                self.put(path, "changed checked documentation\n")
+                self.commit()
+                self.assert_full_and_light_rejected()
+
+    def test_protected_doc_renamed_to_ordinary_doc_is_full(self):
+        path = "docs/superpowers/evidence/checked.md"
+        self.put(path, "checked evidence\n")
+        self.base = self.commit()
+        self.git("mv", path, "docs/ordinary.md")
+        self.commit()
+        self.assert_full_and_light_rejected()
+
+    def test_readme_and_ordinary_prose_remain_light(self):
+        self.put("README.md", "ordinary README update\n")
+        self.put("docs/guide.txt", "ordinary guide\n")
         self.commit()
         self.assert_classification(True)
         self.assertEqual(self.run_check("docs").returncode, 0)

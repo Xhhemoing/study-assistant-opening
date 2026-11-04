@@ -89,10 +89,12 @@ soupsieve==2.10
 sympy==1.14.0
 tabulate==0.10.0
 tokenizers==0.23.2
-# CPU wheels verified against the official CPU index (CPython 3.13, Linux x86_64).
-# Direct URLs scope the CPU source to these two packages; all others use pip's existing index.
-torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.14.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=160e1bc46aeded3111d2801f8ae10dc9a1b946843a7e126b4dbf5e19c5706e95
-torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=6ff3b816ec955f3ef9f32d1e698e1856549e2e03637c358ee067c6f5f17f74fa
+# Verified CPU wheels apply only to CPython 3.13 on Linux x86_64.
+# Other environments retain the original pins and pip's existing index.
+torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.14.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=160e1bc46aeded3111d2801f8ae10dc9a1b946843a7e126b4dbf5e19c5706e95 ; implementation_name == 'cpython' and python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'
+torch==2.14.0 ; implementation_name != 'cpython' or python_version != '3.13' or sys_platform != 'linux' or platform_machine != 'x86_64'
+torchvision @ https://download-r2.pytorch.org/whl/cpu/torchvision-0.29.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl#sha256=6ff3b816ec955f3ef9f32d1e698e1856549e2e03637c358ee067c6f5f17f74fa ; implementation_name == 'cpython' and python_version == '3.13' and sys_platform == 'linux' and platform_machine == 'x86_64'
+torchvision==0.29.0 ; implementation_name != 'cpython' or python_version != '3.13' or sys_platform != 'linux' or platform_machine != 'x86_64'
 tqdm==4.70.1
 transformers==5.17.0
 tree-sitter==0.26.0
