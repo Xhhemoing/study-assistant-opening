@@ -42,6 +42,20 @@ describe("offline synthetic L0", () => {
     }
   });
 
+  it.each([
+    { caseId: "next-due-retest", field: "phase", wrong: "explore" },
+    { caseId: "next-due-retest", field: "phaseSource", wrong: "explicit" },
+    { caseId: "next-explicit-consolidate", field: "phase", wrong: "maintain" },
+    { caseId: "next-explicit-consolidate", field: "phaseSource", wrong: "automatic" },
+  ])("rejects a present but wrong $field=$wrong for $caseId", ({ caseId, field, wrong }) => {
+    const row = parseTutorL0Fixture(fixture()).cases.find(row => row.caseId === caseId)!;
+    const output = executeTutorL0Case(row);
+    expect(judgeTutorL0Output(row, output)).toEqual({ status: "pass", violations: [] });
+    const mutated = structuredClone(output) as { decision: Record<string, unknown> };
+    mutated.decision[field] = wrong;
+    expect(judgeTutorL0Output(row, mutated)).toEqual({ status: "fail", violations: [`not_allowed:decision.${field}`] });
+  });
+
   it("accepts bounded observation errors using the shared consumer schema", () => {
     const row = evidenceCase();
     const error = row.input.observations[0].errors[0];
