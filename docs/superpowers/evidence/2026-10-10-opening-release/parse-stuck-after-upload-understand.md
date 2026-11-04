@@ -135,8 +135,8 @@ beginUpload (uploadUrl → same-origin /staging @ 7dd1ef8)
 ```bash
 # 本机（有 hermes SSH 密钥时）
 bash infra/deploy/deploy-hermes.sh status   # 现只看 aistudy-web + /api/health
-ssh root@23.251.32.22 'systemctl status aistudy-worker --no-pager -l | head -20'
-ssh root@23.251.32.22 'journalctl -u aistudy-worker -n 80 --no-pager'
+ssh <生产主机别名> 'systemctl status aistudy-worker --no-pager -l | head -20'
+ssh <生产主机别名> 'journalctl -u aistudy-worker -n 80 --no-pager'
 
 # DB（在 hermes，用 .env.production 的库）
 # 卡住样本：

@@ -10,6 +10,7 @@ import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
 import { StudySession, StudySessionShell } from "./study-session-shell";
 import { primaryAction, type StudySessionView } from "./model";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
   read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
@@ -39,8 +40,17 @@ function fixture(moveId = "self-faded", problemId = "span-faded-3d") {
 }
 const hintResponse = (level: number) => ({ attemptId: "x", level, text: `提示${level}`, exposureReceipt: { id: uuid() } });
 
+let releasePhotoIdentity: (() => void) | undefined;
+function verifyPhotoAccount() {
+  const identity = { id: uuid(), workspaceId: uuid() };
+  releasePhotoIdentity = publishVerifiedSessionIdentity(identity);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    expect(String(input)).toBe("/api/auth/me");
+    return Response.json({ user: identity });
+  }));
+}
 beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); sessionStorage.clear(); });
-afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { releasePhotoIdentity?.(); releasePhotoIdentity = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 async function mount(port: ReturnType<typeof createSpanStudySession>) {
   const host = document.createElement("div"); document.body.append(host);
@@ -414,6 +424,7 @@ it("the reserved step records a teaching move the session service accepts, then 
 });
 
 it("an uploaded photo is attached to the answer without being added to the course", async () => {
+  verifyPhotoAccount();
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
   mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
@@ -432,6 +443,7 @@ it("an uploaded photo is attached to the answer without being added to the cours
 });
 
 it("a failed photo leaves no attachment on the text answer", async () => {
+  verifyPhotoAccount();
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
   mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
