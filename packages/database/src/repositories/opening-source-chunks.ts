@@ -59,10 +59,10 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       JOIN opening_sources s ON s.id = c.source_id
       JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
-        AND s.error->>'code' IS DISTINCT FROM 'PRIVACY_EXCLUDED'
-        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
-          WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
         AND (s.parse_state = 'ready' OR (s.mime='application/pdf'
+          AND s.error->>'code' IS DISTINCT FROM 'PRIVACY_EXCLUDED'
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+            WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
           AND s.parse_state IN ('queued','running','failed','not_started') AND EXISTS (
           SELECT 1 FROM opening_jobs j WHERE j.workspace_id=s.workspace_id
             AND j.owner_user_id=${scope.ownerUserId} AND j.kind='index-source'

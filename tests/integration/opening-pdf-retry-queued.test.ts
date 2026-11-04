@@ -113,7 +113,21 @@ it("does not expose retained PDF text to a foreign owner, excluded source, or di
   await f.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${d.sourceId}`;
   await f.sql`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,memory_id,deleted_at)
     VALUES(${randomUUID()},${f.scope.workspaceId},${d.sourceId},${randomUUID()},now())`;
-  await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  // Exclusion denies the additional retry-read path, not all owner/history access.
+  for (const state of ["queued", "running", "failed", "not_started"]) {
+    await f.sql`UPDATE opening_sources SET parse_state=${state} WHERE id=${d.sourceId}`;
+    await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0 })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
+  }
+  await f.sql`UPDATE opening_sources SET parse_state='ready' WHERE id=${d.sourceId}`;
+  await expectPublishedPage(d);
+  await f.sql`UPDATE opening_sources SET version=1,parse_state='queued' WHERE id=${d.sourceId}`;
+  expect(await readOpeningSourceContent(f.sql, f.scope, d.sourceId, { version: 0, page: 1 }))
+    .toMatchObject({ version: 0, currentVersion: 1, text: originalText });
+  await f.sql`DELETE FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId} AND source_id=${d.sourceId}`;
+  await f.sql`UPDATE opening_sources SET version=0,parse_state='failed',
+    error=${f.sql.json({ code: "PRIVACY_EXCLUDED", message: "excluded", retryable: false })} WHERE id=${d.sourceId}`;
+  await expect(readOpeningSourceContent(f.sql, f.scope, d.sourceId, {})).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await d.chunks.listForSources(f.scope, [d.sourceId])).toEqual([]);
 });
 
