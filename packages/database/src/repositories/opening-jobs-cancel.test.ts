@@ -48,6 +48,29 @@ describe("opening_jobs.cancel (V2-07)", () => {
     expect(writes.some((w) => w.query.includes("opening_teaching_activities") && w.query.includes("cancelled"))).toBe(true);
   });
 
+  it("fences queued parse cleanup by owner, version and other live jobs", async () => {
+    const sourceId = "00000000-0000-4000-8000-000000000003";
+    const { sql, writes } = db(query => query.includes("UPDATE opening_jobs") ? [{
+      id: jobId, workspace_id: workspaceId, owner_user_id: ownerUserId, key: "retry",
+      kind: "parse", payload: { sourceId, sourceVersion: 0 }, result: null, state: "cancelled", privacy_epoch: 1,
+    }] : []);
+    expect(await createOpeningJobRepository(sql).cancel(scope, jobId)).toMatchObject({ state: "cancelled" });
+    const cleanup = writes.find(write => write.query.includes("s.parse_state='queued'"));
+    expect(cleanup?.query).toContain("s.version=?");
+    expect(cleanup?.query).toContain("w.owner_user_id=?");
+    expect(cleanup?.query).toContain("active.state IN ('queued','running')");
+    expect(cleanup?.values).toEqual([sourceId, workspaceId, 0, ownerUserId, sourceId]);
+  });
+
+  it("does not release queued state from an unfenced legacy parse payload", async () => {
+    const { sql, writes } = db(query => query.includes("UPDATE opening_jobs") ? [{
+      id: jobId, workspace_id: workspaceId, owner_user_id: ownerUserId, key: "legacy",
+      kind: "parse", payload: { sourceId: "00000000-0000-4000-8000-000000000003" }, result: null, state: "cancelled", privacy_epoch: 1,
+    }] : []);
+    await createOpeningJobRepository(sql).cancel(scope, jobId);
+    expect(writes.some(write => write.query.includes("s.parse_state='queued'"))).toBe(false);
+  });
+
   it("returns null when job is not queued/running", async () => {
     const { sql } = db((query) => {
       if (query.includes("SELECT id FROM workspaces")) return [{ id: workspaceId }];
