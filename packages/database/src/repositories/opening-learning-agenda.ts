@@ -1,9 +1,10 @@
 import type { Scope, LearningAgenda } from "@aistudy/contracts";
 import { isDeepStrictEqual } from "node:util";
-import { assembleLearningAgenda, learningDecisionInvalidation, nextLearningStep, SPAN_REQUIREMENT_KEY, type LearningDecision, type NextLearningStepInput } from "@aistudy/domain";
+import { assembleLearningAgenda, learningDecisionInvalidation, nextLearningStep, toSnapshotEvidence, SPAN_REQUIREMENT_KEY, type LearningDecision, type NextLearningStepInput } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { readOpeningLearningDecision } from "./opening-learning-decisions";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
+import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 import { readLearningGoal } from "./opening-learning-goals";
@@ -92,9 +93,21 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
     reasons.push(...learningDecisionInvalidation(decision, { stateVersion: validationState.stateVersion, sourceVersions, goalVersion, intentVersion, policyVersion }));
   }
   const invalidationReasons = [...new Set(reasons)];
-  const observations: NextLearningStepInput["observations"] = (state?.features ?? []).filter(row => row.requirementKey === (route.requirementKey ?? SPAN_REQUIREMENT_KEY))
-    .reverse().map(row => ({ id: row.observationId, skillLabel: row.skillLabel, requirementKey: row.requirementKey, attemptedAt: row.attemptedAt,
-      assistance: row.views.includes("help") ? "hinted" : "independent", ...row.eligibility, problemId: null }));
+  let observations: NextLearningStepInput["observations"] = [];
+  if (invalidationReasons.length && state) {
+    // Reuse the effective-head/privacy/context owner in this same read-only snapshot.
+    // Its transaction boundary becomes a savepoint, never a second connection.
+    const db = new Proxy(tx, { get(target, key, receiver) {
+      if (key === "begin") return (...args: unknown[]) => target.savepoint(nested =>
+        (args.at(-1) as (value: TransactionSql) => Promise<unknown>)(nested));
+      return Reflect.get(target, key, receiver);
+    } }) as unknown as Sql;
+    const evidence = await readOpeningCourseEvidence(db, scope, courseId);
+    const projected = new Map(toSnapshotEvidence(evidence, new Date(state.dataAsOf)).observations.map(row => [row.id, row]));
+    // Preserve the existing requirement scope and newest-first feature ordering.
+    observations = state.features.filter(row => row.requirementKey === (route.requirementKey ?? SPAN_REQUIREMENT_KEY))
+      .reverse().map(row => projected.get(row.observationId)!);
+  }
   const suggestion = invalidationReasons.length ? nextLearningStep({ observations,
     status: !observations.length ? "unobserved" : observations[0]!.verifiedCorrect === "yes" && observations[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check",
     wantsFullExplanation: intent.explanationStyle === "full", ...(intent.learningPhase ? { learningPhase: intent.learningPhase as NextLearningStepInput["learningPhase"], phaseSource: "explicit" as const } : {}) }) : null;
