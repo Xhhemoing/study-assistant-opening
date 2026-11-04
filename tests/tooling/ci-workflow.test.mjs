@@ -55,6 +55,25 @@ test("operations doc binds release evidence to the exact SHA and says GitHub run
   assert.match(docs, /GitHub Actions `quality` job is authoritative/);
 });
 
+test("static-unit installs the shared parser venv before real PDF renderer units", () => {
+  const block = workflow.match(/^  static-unit:\n[\s\S]*?(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(block, "static-unit job must exist");
+  assert.match(block, /^    env: \*quality-env$/m);
+  const requiredSteps = [
+    "      - *setup-parser-python",
+    "      - *cache-parser-venv",
+    "      - *install-parser",
+    "        run: npm test -- --project unit --project contract --project notion-pipeline",
+  ];
+  let previous = -1;
+  for (const step of requiredSteps) {
+    const index = block.indexOf(step);
+    assert.ok(index > previous, `static-unit must run ${step.trim()} in order`);
+    previous = index;
+  }
+  assert.doesNotMatch(block, /\*(?:cache-parser-models|prepare-parser-models)/);
+});
+
 test("parser is installed and seeded before integration runs with explicit Linux paths", () => {
   assert.match(workflow, /uses: actions\/setup-python@v5[\s\S]*?python-version: "3\.13"/);
   assert.match(workflow, /PARSER_PYTHON:.*\.local\/docling-venv\/bin\/python/);
