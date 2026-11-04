@@ -50,11 +50,12 @@ describe("CI workflow contract", () => {
     const yaml = readFileSync(workflowPath, "utf8");
 
     expect(yaml).toMatch(/OPENING_TEST_DB:\s*"1"/);
+    expect(yaml).toContain("55432:5432");
     expect(yaml).toContain(
-      "OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test",
+      "OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test",
     );
     expect(yaml).toContain(
-      "DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5432/aistudy_opening_test",
+      "DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test",
     );
     expect(yaml).toMatch(/POSTGRES_DB:\s*aistudy_opening_test/);
     expect(yaml).toMatch(
