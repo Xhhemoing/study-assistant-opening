@@ -17,7 +17,11 @@ import { POST as nextActivity } from "../../../apps/web/src/app/api/opening/teac
 import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 
-let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
+let fixture: OpeningFixture | undefined, runtime: ReturnType<typeof createAuthRuntime> | undefined;
+function currentFixture() {
+  if (!fixture) throw new Error("Opening fixture is not initialized");
+  return fixture;
+}
 beforeEach(async () => {
   vi.stubEnv("OPENING_TEACHING_LOOP", "1");
   // Exposure history is workspace-scoped, so each learner flow needs its own
@@ -31,14 +35,21 @@ beforeEach(async () => {
 afterEach(async () => {
   setAuthRuntimeForTests(null); vi.unstubAllEnvs();
   try { await runtime?.close(); }
-  finally { await fixture?.close(); }
+  finally {
+    try { await fixture?.close(); }
+    finally { runtime = undefined; fixture = undefined; }
+  }
 });
-const request = (path: string, body: unknown, cookie = fixture.cookie) => new Request(`http://localhost${path}`, {
+const request = (path: string, body: unknown, cookie = currentFixture().cookie) => new Request(`http://localhost${path}`, {
   method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
+});
+const patchRequest = (path: string, body: unknown, cookie = currentFixture().cookie) => new Request(`http://localhost${path}`, {
+  method: "PATCH", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
 });
 const nextPath = "/api/opening/teaching/span/next";
 
-async function start(scope: Scope = fixture.scope) {
+async function start(scope: Scope = currentFixture().scope) {
+  const fixture = currentFixture();
   const rows = backupRows(fixture.sql, scope), sourceId = await rows.source(), courseId = randomUUID();
   await rows.chunk(sourceId);
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Span real flow',${courseId})`;
@@ -63,6 +74,7 @@ async function start(scope: Scope = fixture.scope) {
 }
 
 async function retestState(activityId: string) {
+  const fixture = currentFixture();
   return fixture.sql`SELECT r.id,r.status AS retest_status,r.version AS retest_version,r.not_before_at,r.learning_protocol,
     t.id AS task_id,t.status AS task_status,t.version AS task_version,t.close_source
     FROM opening_retest_activities r JOIN opening_tasks t ON t.id=r.task_id
@@ -71,20 +83,21 @@ async function retestState(activityId: string) {
 }
 
 async function persistedCourse(courseId: string) {
-  const { sql, scope } = fixture;
+  const { sql, scope } = currentFixture();
   return {
-    activities: await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    sessions: await sql`SELECT * FROM opening_learning_sessions WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    observations: await sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    help: await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    tasks: await sql`SELECT * FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    retests: await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
-    decisions: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    sessions: await sql`SELECT * FROM opening_learning_sessions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    observations: await sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    help: await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    tasks: await sql`SELECT * FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    retests: await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} ORDER BY id`,
+    decisions: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} ORDER BY id`,
     money: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
   };
 }
 function lessonGet(courseId: string, activityId?: string, retestId?: string) {
+  const fixture = currentFixture();
   const url = new URL("http://localhost/api/opening/teaching/span/lesson");
   url.searchParams.set("courseId", courseId);
   if (activityId) url.searchParams.set("activityId", activityId);
@@ -94,10 +107,9 @@ function lessonGet(courseId: string, activityId?: string, retestId?: string) {
 
 describe("authenticated span tutor learning flow", () => {
   it("restores a paused lesson by ordinary GET after leaving, then executes and reads its actual correction", async () => {
-    const f = await start();
-    const pause = await saveLesson(new Request(`http://localhost/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
-      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ expectedRevision: f.origin.revision, intent: f.origin.intent, moveId: f.origin.moveId, status: "paused" }),
+    const fixture = currentFixture(), f = await start();
+    const pause = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
+      expectedRevision: f.origin.revision, intent: f.origin.intent, moveId: f.origin.moveId, status: "paused",
     }));
     expect(pause.status).toBe(200);
     const paused = await pause.json();
@@ -113,9 +125,8 @@ describe("authenticated span tutor learning flow", () => {
     expect(attempt).toMatchObject({ sessionId: f.origin.sessionId, spanExercise: { id: "span-reserved-fraction" } });
     expect((await (await readLesson(lessonGet(f.courseId, f.origin.activityId))).json()).attempts.map((row: { id: string }) => row.id)).toEqual([attempt.id]);
     expect(await persistedCourse(f.courseId)).toEqual(beforeReads);
-    const resume = await saveLesson(new Request(`http://localhost/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
-      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ expectedRevision: paused.revision, intent: paused.intent, moveId: paused.moveId, status: "active" }),
+    const resume = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
+      expectedRevision: paused.revision, intent: paused.intent, moveId: paused.moveId, status: "active",
     }));
     expect(resume.status).toBe(200); const active = await resume.json();
     const submitted = await submitAttempt(request(`/api/opening/attempts/${attempt.id}/submit`, {
@@ -163,8 +174,46 @@ describe("authenticated span tutor learning flow", () => {
     expect(await persistedCourse(f.courseId)).toEqual(afterWork);
   });
 
+  it("restores the most recently updated active or paused lesson, breaking ties by descending activity id", async () => {
+    const fixture = currentFixture(), f = await start(), { sql, scope } = fixture;
+    const created = await createLesson(request("/api/opening/teaching/span/lesson", {
+      courseId: f.courseId, sourceIds: [f.sourceId], intent: f.origin.intent, clientKey: randomUUID(),
+    }));
+    expect(created.status).toBe(200);
+    const second = await created.json();
+    expect(second.activityId).not.toBe(f.origin.activityId);
+    const candidate = f.origin.activityId < second.activityId ? f.origin : second;
+    const pause = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${candidate.activityId}`, {
+      expectedRevision: candidate.revision, intent: candidate.intent, moveId: candidate.moveId, status: "paused",
+    }));
+    expect(pause.status).toBe(200);
+    const paused = await pause.json();
+    expect(paused).toMatchObject({ activityId: candidate.activityId, status: "paused" });
+    // Make the lower id newer, so updated_at must take precedence over id.
+    await sql`UPDATE opening_teaching_activities
+      SET updated_at=CASE WHEN id=${candidate.activityId} THEN '2026-01-02T00:00:00Z'::timestamptz
+        ELSE '2026-01-01T00:00:00Z'::timestamptz END
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId}`;
+    const beforeRead = await persistedCourse(f.courseId);
+    expect(beforeRead.activities).toHaveLength(2);
+    expect(beforeRead.activities.map(row => row.status).sort()).toEqual(["active", "paused"]);
+    const reopened = await readLesson(lessonGet(f.courseId));
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toMatchObject({ session: { activityId: candidate.activityId, status: "paused" } });
+    expect(await persistedCourse(f.courseId)).toEqual(beforeRead);
+
+    await sql`UPDATE opening_teaching_activities SET updated_at='2026-01-02T00:00:00Z'::timestamptz
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId}`;
+    const beforeTieRead = await persistedCourse(f.courseId);
+    const expectedActivityId = [f.origin.activityId, second.activityId].sort().at(-1);
+    const tied = await readLesson(lessonGet(f.courseId));
+    expect(tied.status).toBe(200);
+    expect(await tied.json()).toMatchObject({ session: { activityId: expectedActivityId } });
+    expect(await persistedCourse(f.courseId)).toEqual(beforeTieRead);
+  });
+
   it("keeps a learner-cancelled bound retest cancelled across ordinary reads, schedule replay and next", async () => {
-    const f = await start();
+    const fixture = currentFixture(), f = await start();
     const initial = await readLesson(lessonGet(f.courseId));
     expect(initial.status).toBe(200); const restored = await initial.json();
     const attempt = restored.attempts[0];
@@ -183,9 +232,8 @@ describe("authenticated span tutor learning flow", () => {
     // Automatic undo intentionally refuses an already-bound lesson. The task's
     // real learner status endpoint owns explicit cancellation in this lifecycle.
     const [task] = await fixture.sql`SELECT version FROM opening_tasks WHERE id=${retest.taskId} AND workspace_id=${fixture.scope.workspaceId}`;
-    const cancel = await updateTask(new Request(`http://localhost/api/opening/tasks/${retest.taskId}`, {
-      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ expectedVersion: Number(task!.version), status: "skipped", at: new Date().toISOString() }),
+    const cancel = await updateTask(patchRequest(`/api/opening/tasks/${retest.taskId}`, {
+      expectedVersion: Number(task!.version), status: "skipped", at: new Date().toISOString(),
     }), { params: Promise.resolve({ id: retest.taskId }) });
     expect(cancel.status).toBe(200);
     expect(await cancel.json()).toMatchObject({ id: retest.taskId, status: "skipped" });
@@ -213,7 +261,7 @@ describe("authenticated span tutor learning flow", () => {
   });
 
   it("issues and scores a real unseen question, schedules its retest, then creates and replays ordinary correction", async () => {
-    const f = await start();
+    const fixture = currentFixture(), f = await start();
     // Consume the attempt already issued atomically by the tutor, exactly as page restoration does.
     const details = await createSpanLessonSessionService(fixture.sql).read(fixture.scope, f.courseId, f.origin.activityId);
     expect(details.session?.sessionId).toBe(f.origin.sessionId);
@@ -314,7 +362,7 @@ describe("authenticated span tutor learning flow", () => {
     expect(response.status).toBe(401);
   });
   it("refuses another user's real origin and leaves its session and task count unchanged", async () => {
-    const f = await start(fixture.otherScope);
+    const fixture = currentFixture(), f = await start(fixture.otherScope);
     const response = await nextActivity(request(nextPath, {
       activityId: f.origin.activityId, expectedRevision: f.origin.revision, observationId: null, clientKey: randomUUID(),
     }));
