@@ -18,8 +18,6 @@ const proposal: AiGradingProposal = { outcome: "correct", confidence: 0.93, ques
 
 async function seed(withSource = false, prompt = "求二阶单位矩阵的秩。", interaction?: TeachingQuestionInteraction, misconceptions?: TeachingMisconception[], referenceAnswer = answer) {
   const base = await learningAttemptFixture(fixture), sourceIds = withSource ? [base.sourceId] : [];
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES (${fixture.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
   const activity = await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope, {
     clientKey: randomUUID(), intentKind: "topic", intentSummary: "矩阵秩", courseId: base.courseId, sourceIds, createIntent: {},
   });

@@ -90,8 +90,6 @@ async function seedCourseSource() {
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${f.scope.workspaceId}, 'V2-16 teaching loop', ${courseId})`;
-  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   return { courseId, sourceId, chunkId };
 }
 
@@ -116,26 +114,27 @@ describe("ActivitySpec publication source trust boundary (PG)", () => {
       units: await f.sql`SELECT * FROM opening_teaching_units WHERE id=${unit.id}`,
       revisions: await f.sql`SELECT * FROM library_revisions WHERE document_id=${unit.documentId} ORDER BY revision_number`,
     });
-    return { content, input, sourceId, chunkId, oldChunkId, snapshot };
+    return { content, input, courseId, sourceId, chunkId, oldChunkId, snapshot };
   }
 
   it("publishes valid current refs, accepts numeric string versions and preserves soft-idempotency", async () => {
-    const { content, input } = await seedBoundary();
+    const { content, input, sourceId } = await seedBoundary();
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE asset_id=${sourceId}`).toHaveLength(0);
     input.sourceRefs![0]!.version = "2";
     const spec = await content.publishActivitySpec(f.scope, input);
     expect(spec).toMatchObject({ version: 1, sourceRefs: input.sourceRefs });
     expect(await content.publishActivitySpec(f.scope, input)).toEqual(spec);
   });
 
-  it.each(["invented chunk", "foreign workspace chunk", "foreign course chunk", "old version chunk",
-    "old chunk with current version", "out-of-range page", "chunk-page mismatch", "wrong source chunk", "missing source", "unpublished source", "missing version"] as const)(
+  it.each(["invented chunk", "non-UUID chunk", "foreign workspace whole source", "nonexistent version",
+    "old chunk with current version", "out-of-range page", "chunk-page mismatch", "wrong source chunk", "missing source", "unavailable version"] as const)(
     "rejects %s without changing spec, activity, unit or revision (initial and replacement)", async kind => {
       const { content, input, sourceId, oldChunkId, snapshot } = await seedBoundary();
       const ref = { ...input.sourceRefs![0]! };
       if (kind === "invented chunk") ref.chunkId = randomUUID();
       if (kind === "missing source") ref.sourceId = randomUUID();
-      if (kind === "missing version") ref.version = null;
-      if (kind === "old version chunk") { ref.version = 1; ref.chunkId = oldChunkId; }
+      if (kind === "non-UUID chunk") ref.chunkId = "invented-not-a-uuid";
+      if (kind === "nonexistent version") ref.version = 999;
       if (kind === "old chunk with current version") ref.chunkId = oldChunkId;
       if (kind === "out-of-range page") { ref.page = 99; ref.chunkId = null; }
       if (kind === "chunk-page mismatch") {
@@ -146,35 +145,76 @@ describe("ActivitySpec publication source trust boundary (PG)", () => {
         const otherSource = await backupRows(f.sql, f.scope).source("uploaded", 2);
         ref.chunkId = await backupRows(f.sql, f.scope).chunk(otherSource, 2);
       }
-      if (kind === "foreign workspace chunk" || kind === "foreign course chunk") {
-        const foreignSource = randomUUID(), foreignChunk = randomUUID(), foreignCourse = randomUUID();
-        const workspaceId = kind === "foreign workspace chunk" ? f.otherScope.workspaceId : f.scope.workspaceId;
-        await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${foreignCourse},${workspaceId},'其他课程',${foreignCourse})`;
-        await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
-          VALUES (${foreignSource},${workspaceId},'其他资料','text/plain',1,${"b".repeat(64)},2,'uploaded','ready')`;
-        await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES (${foreignChunk},${foreignSource},2,1,'其他片段')`;
-        await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-          VALUES (${workspaceId},${foreignCourse},'source',${foreignSource},'core','course')`;
-        ref.sourceId = foreignSource; ref.chunkId = foreignChunk;
+      if (kind === "foreign workspace whole source") {
+        // No membership or locator/version-journal dependency: removing the source
+        // workspace predicate alone would make this publication succeed.
+        ref.sourceId = await backupRows(f.sql, f.otherScope).source("uploaded", 2);
+        ref.chunkId = null; ref.page = null;
       }
       for (const expectedVersion of [0, 1]) {
         if (expectedVersion === 1) await content.publishActivitySpec(f.scope, input);
-        if (kind === "unpublished source") await f.sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${sourceId}`;
+        if (kind === "unavailable version") await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
+          VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')`;
         const before = await snapshot();
         await expect(content.publishActivitySpec(f.scope, { ...input, expectedVersion, sourceRefs: [input.sourceRefs![0]!, ref] }))
-          .rejects.toMatchObject({ code: kind === "old version chunk" ? "CONFLICT" : "VALIDATION" });
+          .rejects.toMatchObject({ code: kind === "nonexistent version" ? "CONFLICT" : "VALIDATION" });
         expect(await snapshot()).toEqual(before);
-        if (kind === "unpublished source") await f.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${sourceId}`;
+        if (kind === "unavailable version") await f.sql`DELETE FROM opening_source_versions WHERE source_id=${sourceId} AND version=2`;
       }
     },
   );
 
-  it("preflight success cannot authorize publication after a version replacement", async () => {
+  it.each(["historical chunk", "historical whole source", "journal-only version", "unpinned whole source", "unpinned chunk"] as const)(
+    "publishes workspace-only nonmember refs: %s", async kind => {
+      const { content, input, sourceId, oldChunkId } = await seedBoundary();
+      const ref = { sourceId, version: 1 as number | null, chunkId: null as string | null, page: null as number | null };
+      if (kind === "historical chunk") { ref.chunkId = oldChunkId; ref.page = 1; }
+      if (kind === "journal-only version") {
+        ref.version = 0;
+        await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
+          VALUES (${sourceId},${f.scope.workspaceId},0,'available')`;
+      }
+      if (kind === "unpinned whole source") {
+        ref.version = null;
+        await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${sourceId}`;
+        await f.sql`UPDATE opening_sources SET upload_state='pending',parse_state='queued' WHERE id=${sourceId}`;
+      }
+      if (kind === "unpinned chunk") { ref.version = null; ref.chunkId = oldChunkId; }
+      input.sourceRefs = [ref];
+      expect(await content.publishActivitySpec(f.scope, input)).toMatchObject({ version: 1, sourceRefs: [ref] });
+    },
+  );
+
+  it("returns the existing spec on equivalent replay after replacement makes its refs unavailable", async () => {
+    const { content, input, sourceId, snapshot } = await seedBoundary();
+    const spec = await content.publishActivitySpec(f.scope, input);
+    await f.sql`UPDATE opening_sources SET version=3 WHERE id=${sourceId}`;
+    await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
+      VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')`;
+    await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${sourceId} AND source_version=2`;
+    const before = await snapshot();
+    expect(await content.publishActivitySpec(f.scope, input)).toEqual(spec);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("keeps archived course-route NOT_FOUND ahead of invalid source validation", async () => {
+    const { content, input, courseId, snapshot } = await seedBoundary();
+    const courseRoute = { goalId: randomUUID(), goalRevision: 1, requirementId: randomUUID(), requirementRevision: 1,
+      stableSkillId: randomUUID(), requirementKey: "archived", action: "diagnose" };
+    await f.sql`UPDATE opening_teaching_activities SET goal_json=${f.sql.json({ courseRoute })} WHERE id=${input.activityId}`;
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
+    const before = await snapshot();
+    await expect(content.publishActivitySpec(f.scope, { ...input, sourceRefs: [{ sourceId: randomUUID() }] }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("preflight success cannot authorize publication after source deletion", async () => {
     const { content, input, sourceId, snapshot } = await seedBoundary();
     await content.validateActivitySourceRefs(f.scope, input);
-    await f.sql`UPDATE opening_sources SET version=3 WHERE id=${sourceId}`;
+    await backupRows(f.sql, f.scope).exclude(sourceId);
     const before = await snapshot();
-    await expect(content.publishActivitySpec(f.scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(content.publishActivitySpec(f.scope, input)).rejects.toMatchObject({ code: "VALIDATION" });
     expect(await snapshot()).toEqual(before);
   });
 });

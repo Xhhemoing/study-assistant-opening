@@ -156,7 +156,8 @@ describe("opening teaching content repository (unit)", () => {
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
-  it("T2 soft-idempotent: already at +1 with same graph succeeds", async () => {
+  it("T2 soft-idempotent: same graph succeeds without revalidating changed sources", async () => {
+    const sourceRefs = [{ sourceId: "ffffffff-ffff-4fff-8fff-fffffffffff1", version: 1 }];
     const specRow = {
       id: "ffffffff-ffff-4fff-8fff-fffffffffff1",
       workspace_id: workspaceId,
@@ -166,7 +167,7 @@ describe("opening teaching content repository (unit)", () => {
       document_id: documentId,
       revision_number: 1,
       block_order: blockOrder,
-      source_refs: [],
+      source_refs: sourceRefs,
       goals_json: [],
       verification_status: "unchecked",
       generation_config: {},
@@ -197,6 +198,7 @@ describe("opening teaching content repository (unit)", () => {
         return [{ id: activityId, content_version: 1, checkpoint_json: {} }];
       }
       if (query.includes("FROM opening_teaching_activity_specs")) return [specRow];
+      if (query.includes("FROM opening_sources")) throw new Error("replay must not revalidate sources");
       return [];
     });
     const result = await createOpeningTeachingContentRepository(sql).publishActivitySpec(scope, {
@@ -205,27 +207,27 @@ describe("opening teaching content repository (unit)", () => {
       expectedVersion: 0,
       revisionNumber: 1,
       blockOrder,
+      sourceRefs,
     });
     expect(result.version).toBe(1);
     expect(writes.some((w) => w.query.includes("INSERT INTO opening_teaching_activity_specs"))).toBe(false);
   });
 
   it.each([
-    { kind: "missing source", source: false, member: true, chunk: true, version: 1, code: "VALIDATION" },
-    { kind: "foreign course", source: true, member: false, chunk: true, version: 1, code: "VALIDATION" },
-    { kind: "invented chunk", source: true, member: true, chunk: false, version: 1, code: "VALIDATION" },
-    { kind: "old version", source: true, member: true, chunk: true, version: 0, code: "CONFLICT" },
-    { kind: "unpinned version", source: true, member: true, chunk: true, version: null, code: "VALIDATION" },
-  ])("rejects $kind before any spec/unit/activity write", async ({ source, member, chunk, version, code }) => {
+    { kind: "missing source", source: false, chunk: true, version: 1, code: "VALIDATION" },
+    { kind: "invented chunk", source: true, chunk: false, version: 1, code: "VALIDATION" },
+    { kind: "nonexistent version", source: true, chunk: false, version: 0, code: "CONFLICT" },
+    { kind: "invalid version", source: true, chunk: true, version: "invented", code: "VALIDATION" },
+    { kind: "unavailable version", source: true, chunk: true, version: 1, code: "VALIDATION" },
+  ])("rejects $kind before any spec/unit/activity write", async ({ kind, source, chunk, version, code }) => {
     const sourceId = "ffffffff-ffff-4fff-8fff-fffffffffff1";
     const { sql, writes } = db(query => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
       if (query.includes("FROM opening_teaching_units")) return [{ id: unitId, document_id: documentId }];
       if (query.includes("FROM opening_teaching_activities")) return [{ id: activityId, course_id: workspaceId, content_version: 0 }];
       if (query.includes("FROM opening_sources")) return source ? [{ id: sourceId, version: 1 }] : [];
-      if (query.includes("FROM courses")) return [{ id: workspaceId }];
-      if (query.includes("FROM course_asset_memberships")) return member ? [{ asset_id: sourceId }] : [];
-      if (query.includes("FROM opening_source_chunks")) return chunk ? [{ id: blockTeach }] : [];
+      if (query.includes("FROM opening_source_versions")) return kind === "unavailable version" ? [{ version: 1, availability: "unavailable" }] : [];
+      if (query.includes("FROM opening_source_chunks")) return chunk ? [{ id: blockTeach, source_version: 1 }] : [];
       return [];
     });
     await expect(createOpeningTeachingContentRepository(sql).publishActivitySpec(scope, {
@@ -233,6 +235,31 @@ describe("opening teaching content repository (unit)", () => {
       sourceRefs: [{ sourceId, version, chunkId: blockTeach, page: 1 }],
     })).rejects.toMatchObject({ code });
     expect(writes.filter(write => /(?:INSERT INTO|UPDATE) opening_teaching_(?:activity_specs|units|activities)/.test(write.query))).toEqual([]);
+  });
+
+  it.each([
+    { version: undefined }, { version: null }, { version: 1 }, { version: "1" }, { version: 2 }, { version: 0 },
+    { version: 1, chunkId: blockTeach, page: 3 }, { chunkId: blockTeach, page: 3 },
+  ])("accepts workspace-only fallback and historical lineage refs: %j", async ref => {
+    const sourceId = "ffffffff-ffff-4fff-8fff-fffffffffff1";
+    const { sql } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [{ id: activityId, course_id: workspaceId }];
+      if (query.includes("FROM opening_sources")) return [{ id: sourceId, version: 2 }];
+      if (query.includes("FROM opening_source_versions")) return [{ version: 0, availability: "available" },
+        ...(ref.version == null && "chunkId" in ref ? [{ version: 2, availability: "unavailable" }] : [])];
+      if (query.includes("FROM opening_source_chunks")) {
+        if (ref.version == null && !("chunkId" in ref) || ref.version === 2 || ref.version === 0) {
+          throw new Error("known whole-source refs need no parsed chunks");
+        }
+        return [{ id: blockTeach, source_version: 1 }];
+      }
+      if (query.includes("FROM courses") || query.includes("FROM course_asset_memberships")) throw new Error("course membership is not a publication invariant");
+      return [];
+    });
+    await expect(createOpeningTeachingContentRepository(sql).validateActivitySourceRefs(scope, {
+      activityId, sourceRefs: [{ sourceId, ...ref }],
+    })).resolves.toBeUndefined();
   });
 
   it("T5 draft_anchor_lost when block removed", async () => {

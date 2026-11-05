@@ -304,7 +304,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
   it.each(["0", "1"])("rejects invalid source ownership before saving bodies or publishing (validation flag %s)", async (flag) => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
-    const error = Object.assign(new Error("source ref does not belong to the activity course"), { code: "VALIDATION" });
+    const error = Object.assign(new Error("source ref is unavailable in this workspace"), { code: "VALIDATION" });
     content.validateActivitySourceRefs.mockRejectedValue(error);
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
     await expect(run(job, payload)).rejects.toBe(error);
@@ -329,7 +329,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
 
   it("publication still rejects refs invalidated after a successful preflight", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
-    content.publishActivitySpec.mockRejectedValue(Object.assign(new Error("source ref version is no longer current"), { code: "CONFLICT" }));
+    content.publishActivitySpec.mockRejectedValue(Object.assign(new Error("source ref version no longer exists"), { code: "CONFLICT" }));
     await expect(createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload))
       .rejects.toMatchObject({ code: "CONFLICT" });
     expect(content.validateActivitySourceRefs).toHaveBeenCalled();
