@@ -9,12 +9,12 @@ SCRIPT = Path(__file__).with_name("install-parser.sh").resolve()
 
 
 class InstallerTests(unittest.TestCase):
-    def run_installer(self, hit, fail=""):
+    def run_installer(self, hit, fail="", parser_path=".local/docling-venv/bin/python"):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            parser = root / ".local/docling-venv/bin/python"
+            parser = root / parser_path
             parser.parent.mkdir(parents=True)
             stub = '''#!/bin/bash
 printf '%s\\n' "$*" >> "$CALLS"
@@ -31,7 +31,7 @@ if [[ -n "$FAIL_ON" && "$*" == *"$FAIL_ON"* ]]; then exit 23; fi
                      "CALLS": str(root / "calls"), "SMOKE": str(root / "smoke"),
                      "FAIL_ON": fail},
             )
-            calls = (root / "calls").read_text().splitlines()
+            calls = (root / "calls").read_text().splitlines() if (root / "calls").exists() else []
             smoke = (root / "smoke").read_text() if (root / "smoke").exists() else ""
             return result, calls, smoke
 
@@ -49,6 +49,14 @@ if [[ -n "$FAIL_ON" && "$*" == *"$FAIL_ON"* ]]; then exit 23; fi
             self.assertIn("import torchvision", smoke)
             self.assertIn("torch.version.cuda is None", smoke)
             self.assertIn("assert nms(", smoke)
+
+    def test_miss_rejects_unexpected_parser_path_before_clearing_venv(self):
+        for parser_path in ("other-venv/bin/python", ".local/docling-venv/bin/other-python"):
+            with self.subTest(parser_path=parser_path):
+                result, calls, _ = self.run_installer("false", parser_path=parser_path)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("-m venv --clear .local/docling-venv", calls)
+                self.assertEqual(calls, [], "Invalid paths must fail before any Python command")
 
     def test_install_check_and_smoke_failure_are_not_swallowed(self):
         for hit, fail in (("false", "pip install"), ("true", "pip check"),
