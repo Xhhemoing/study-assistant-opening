@@ -15,7 +15,7 @@ concurrency:
 jobs:
   quality:
     name: lint-typecheck-test-build
-    needs: [changes, docs, static-unit, integration-browser, build]
+    needs: [changes, docs, static-unit, integration-parser, handler-browser-spikes, build]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -24,7 +24,7 @@ jobs:
       - name: Require actual successful checks
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: python3 scripts/ci/checks.py gate static-unit integration-browser build
+        run: python3 scripts/ci/checks.py gate static-unit integration-parser handler-browser-spikes build
 
   changes:
     name: classify-changes
@@ -60,15 +60,16 @@ jobs:
       - name: Verify allowlist and whitespace
         run: python3 scripts/ci/checks.py docs
 
-  integration-browser:
-    name: integration-handler-parser-browser
+  integration-parser:
+    name: integration-parser
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
-    services: &quality-services
-      postgres:
+    # Integration exercises the real parser, queue and object storage, not E2E.
+    services:
+      postgres: &test-postgres
         image: pgvector/pgvector:0.8.7-pg16
         env:
           POSTGRES_USER: aistudy
@@ -82,21 +83,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      postgres-e2e:
-        image: pgvector/pgvector:0.8.7-pg16
-        env:
-          POSTGRES_USER: aistudy
-          POSTGRES_PASSWORD: aistudy
-          POSTGRES_DB: aistudy_e2e
-        ports:
-          - 5433:5432
-        options: >-
-          --health-cmd "pg_isready -U aistudy -d aistudy_e2e"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-      redis:
+      redis: &test-redis
         image: redis:7-alpine
         ports:
           - 6379:6379
@@ -110,7 +97,7 @@ jobs:
       # (GitHub Actions service containers cannot set image CMD easily).
       # Bitnami moved pre-2025-08 images to bitnamilegacy; the bitnami/minio repo
       # now has no pullable tags and minio/minio left Docker Hub entirely.
-      minio:
+      minio: &test-minio
         image: bitnamilegacy/minio:2025.4.22-debian-12-r2
         env:
           MINIO_ROOT_USER: minioadmin
@@ -124,15 +111,13 @@ jobs:
           --health-timeout 5s
           --health-retries 15
 
-    env: &quality-env
+    env:
       HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_TEST_DB: "1"
-      # Real collectors reject the default DB port; both test consumers must agree.
+      # Real collectors reject the default DB port; integration uses this DB.
       OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
       DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
-      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
-      E2E_BASE_URL: http://127.0.0.1:3000
       REDIS_URL: redis://127.0.0.1:6379
       S3_ENDPOINT: http://127.0.0.1:9000
       S3_REGION: us-east-1
@@ -211,6 +196,84 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Integration tests
+        run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-failure-integration-parser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-reports/
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  handler-browser-spikes:
+    name: handler-browser-spikes
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # Handler/spikes use the guarded test DB; Playwright resets a separate E2E DB.
+    # The Chromium spike shares Playwright setup. No worker/parser runs here.
+    services:
+      postgres: *test-postgres
+      postgres-e2e: &e2e-postgres
+        image: pgvector/pgvector:0.8.7-pg16
+        env:
+          POSTGRES_USER: aistudy
+          POSTGRES_PASSWORD: aistudy
+          POSTGRES_DB: aistudy_e2e
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U aistudy -d aistudy_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis: *test-redis
+      minio: *test-minio
+
+    env:
+      HERMES_HEAVY_ENABLED: "0"
+      NODE_ENV: test
+      OPENING_TEST_DB: "1"
+      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
+      E2E_BASE_URL: http://127.0.0.1:3000
+      REDIS_URL: redis://127.0.0.1:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: aistudy
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_FORCE_PATH_STYLE: "true"
+      PUBLIC_BASE_URL: http://localhost:3000
+      AUTH_SECRET: ci-test-auth-secret-at-least-32-chars
+      SESSION_COOKIE_SECURE: "false"
+      SESSION_TTL_SECONDS: "3600"
+      AUTH_COOKIE_NAME: aistudy_session
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -222,9 +285,6 @@ jobs:
 
       - name: Technology spike tests
         run: npm test -- --project '@aistudy/spike-*'
-
-      - name: Integration tests
-        run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
 
       - name: Route handler tests
         run: npm run test:handler -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/handler.json
@@ -252,7 +312,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ci-failure-handler-browser-spikes-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-reports/
             playwright-report/
@@ -267,8 +327,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Spikes consume real Redis; retain the original isolated service/env setup.
-    services: *quality-services
-    env: *quality-env
+    services:
+      postgres: *test-postgres
+      postgres-e2e: *e2e-postgres
+      redis: *test-redis
+      minio: *test-minio
+    env: &quality-env
+      HERMES_HEAVY_ENABLED: "0"
+      NODE_ENV: test
+      OPENING_TEST_DB: "1"
+      # Preserve the static/build environment independently of the split jobs.
+      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
+      E2E_BASE_URL: http://127.0.0.1:3000
+      REDIS_URL: redis://127.0.0.1:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: aistudy
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_FORCE_PATH_STYLE: "true"
+      PUBLIC_BASE_URL: http://localhost:3000
+      AUTH_SECRET: ci-test-auth-secret-at-least-32-chars
+      SESSION_COOKIE_SECURE: "false"
+      SESSION_TTL_SECONDS: "3600"
+      AUTH_COOKIE_NAME: aistudy_session
+      PARSER_PYTHON: ${{ github.workspace }}/.local/docling-venv/bin/python
+      PARSER_CWD: ${{ github.workspace }}/services/parser
+      HF_HOME: ${{ github.workspace }}/.local/hf-home
+      HF_HUB_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
