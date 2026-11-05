@@ -10,6 +10,12 @@ import { backupRows } from "./opening-backup-records-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { refreshOpeningLearningEligibility, openingEligibilityStateQuery } from "../../packages/database/src/repositories/opening-learning-eligibility";
 import { contextSourceRefsIncluded } from "../../packages/database/src/repositories/opening-context-provenance";
+import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
+import { createOpeningLearningAgendaRepository } from "../../packages/database/src/repositories/opening-learning-agenda";
+import { readOpeningTeachingCompilerFocus } from "../../packages/database/src/repositories/opening-teaching-focus";
+import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
+import { nextLearningStep, solveSpanProblem, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { createWorkspacePreferencesRepository } from "@aistudy/database";
 
 let fixture: OpeningFixture;
 const signal = () => new AbortController().signal;
@@ -191,6 +197,63 @@ describe("owned read-only system query against PostgreSQL", () => {
     expect(truncated.data[0]).toMatchObject({ recommendationStatus: "unknown" });
     expect(truncated.data[0]).not.toHaveProperty("step");
   });
+  it("aligns recommendation, compiler focus, agenda and span after real errors and independent success", async () => {
+    const { sql, scope } = fixture, rows = backupRows(sql, scope), courseId = randomUUID(), sourceId = await rows.source();
+    await rows.chunk(sourceId);
+    await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${scope.workspaceId},'Canonical consumers',${courseId})`;
+    await sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES (${scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
+    await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+      { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
+    const at = new Date().toISOString();
+    await sql`UPDATE workspace_preferences SET adaptive_planning=${sql.json({ ...DEFAULT_OPENING_ADAPTIVE_PREFS,
+      spanTutorGrants: { [courseId]: { enabled: true, dailyMinutes: 180, revision: 1, confirmedAt: at, updatedAt: at, expiresOn: null } } })}
+      WHERE workspace_id=${scope.workspaceId}`;
+    const repo = createOpeningSpanTutorContextRepository(sql);
+    const request = { courseId, sourceIds: [sourceId], sourceVersions: { [sourceId]: 1 }, question: "继续学习" };
+    const initial = (await repo.read(scope, request))!;
+    const lesson = await repo.execute(scope, { context: initial, decision: nextLearningStep(initial.decisionInput), operationId: `consumers:${randomUUID()}` });
+    const attempts = createOpeningAttemptService(sql);
+    const submit = async (correct: boolean, assistance: "independent" | "unknown" = "independent") => {
+      const attempt = await attempts.create(scope, { sessionId: lesson.sessionId, clientKey: randomUUID(),
+        spanExercise: { sourceId, problemId: correct ? "span-reserved-fraction" : "span-example-2d", version: 1 } });
+      const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+      if (solution.kind !== "unique") throw new Error("fixture expects unique span solution");
+      const answer = correct ? { membership: "in_span", coefficients: solution.coefficients,
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }
+        : { membership: "in_span", coefficients: ["999", "999"] };
+      return attempts.submit(scope, attempt.id, { clientKey: randomUUID(), answer: JSON.stringify(answer), outcome: "unverified", assistance });
+    };
+    const failed = await submit(false);
+    expect(failed).toMatchObject({ outcome: "incorrect", eligibility: { verifiedCorrect: "no" } });
+    // Exercise compiler recheck via an admitted old incorrect focus, not a new public input.
+    const stored = { skillLabel: SPAN_SKILL_LABEL, requirementKey: SPAN_REQUIREMENT_KEY, activityKind: "targeted_explain",
+      reasonCode: "verified_incorrect", focusObservationId: failed.id, recentAssistance: [], strategyVersion: "adaptive-1" };
+    await sql`UPDATE opening_teaching_activities SET goal_json=jsonb_set(goal_json,'{learnerFocus}',${sql.json(stored)}) WHERE id=${lesson.activityId}`;
+    const activityDecision = ({ activityKind, reasonCode, focusObservationId }: ReturnType<typeof nextLearningStep>) =>
+      ({ activityKind, reasonCode, focusObservationId });
+    const check = async (expected: ReturnType<typeof activityDecision>) => {
+      const span = (await repo.read(scope, request))!;
+      expect(activityDecision(nextLearningStep(span.decisionInput))).toEqual(expected);
+      const recommendation = await read({ name: "recommendation", arguments: { courseId } });
+      expect(recommendation.data).toHaveLength(1);
+      expect(recommendation.data[0]?.step).toEqual(expected);
+      expect((await createOpeningLearningAgendaRepository(sql).get(scope, courseId, lesson.activityId))?.suggestion).toMatchObject(expected);
+      expect((await readOpeningTeachingCompilerFocus(sql, scope, lesson.activityId)).learnerFocus).toMatchObject(expected);
+    };
+    await check({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: failed.id });
+    const success = await submit(true);
+    expect(success).toMatchObject({ outcome: "correct", eligibility: { independentAttempt: "yes", verifiedCorrect: "yes" } });
+    await check({ activityKind: "transfer_check", reasonCode: "independent", focusObservationId: null });
+    await submit(true, "unknown");
+    await check({ activityKind: "transfer_check", reasonCode: "correct_needs_independent_check", focusObservationId: null });
+    // An expired original focus is still rejected even if a newer decision could be made.
+    await sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+    expect(await readOpeningTeachingCompilerFocus(sql, scope, lesson.activityId)).toEqual({});
+    const unavailable = await read({ name: "recommendation", arguments: { courseId } });
+    expect(unavailable.data.every(row => !Object.hasOwn(row, "step"))).toBe(true);
+  }, 30_000);
+
   it("returns current physical pages and exact lineage, with explicit excerpt limits and stale-version refusal", async () => {
     const rows = backupRows(fixture.sql, fixture.scope), sourceId = await rows.source(), chunkId = await rows.chunk(sourceId);
     await fixture.sql`UPDATE opening_source_chunks SET text=${"q".repeat(1300)} WHERE id=${chunkId}`;

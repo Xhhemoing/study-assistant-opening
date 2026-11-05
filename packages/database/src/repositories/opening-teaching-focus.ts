@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { knowledgeSnapshotSchema, teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
+import { buildDecisionInput, evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { plannerSuggestionKind } from "./opening-task-fields";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
@@ -33,10 +33,12 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
     && (learnerFocus.requirementKey === undefined || (row.requirementKey ?? null) === learnerFocus.requirementKey));
   if (summaries.length !== 1) return {};
   const target = summaries[0]!;
-  const observations = mapped.observations.filter(row => normalizeSkillLabelKey(row.skillLabel) === labelKey
-    && (row.requirementKey ?? null) === (target.requirementKey ?? null))
-    .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || a.id.localeCompare(b.id));
-  const next = nextLearningStep({ status: target.status, observations, wantsFullExplanation: false });
+  const input = buildDecisionInput({ wantsFullExplanation: false,
+    observations: mapped.observations.filter(row => normalizeSkillLabelKey(row.skillLabel) === labelKey
+      && (row.requirementKey ?? null) === (target.requirementKey ?? null)),
+  });
+  const { observations } = input;
+  const next = nextLearningStep(input);
   if (!observations.some(row => row.usableForCurrentVersion === "yes")) return {};
   if (next.activityKind !== learnerFocus.activityKind || next.focusObservationId !== learnerFocus.focusObservationId) {
     const { recentErrors: _errors, prerequisiteRepair: _repair, ...base } = learnerFocus;
