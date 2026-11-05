@@ -1,3 +1,4 @@
+import { OpeningStorageError } from "../storage/opening-s3";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
@@ -33,8 +34,20 @@ import {
   type OpeningRestoreNamespaceCounts,
 } from "./opening-backup-empty-namespace";
 import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
+import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
+import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
+
+export type OpeningRestoreObjectSideEffects = {
+  status: "clean" | "remaining" | "unknown";
+  createdKeys: string[];
+  remainingKeys: string[];
+  unknownKeys: string[];
+};
 
 export type OpeningRestoreObjectPut = {
+  /** Optional: only writers that can prove ownership may compensate their writes. */
+  rollback?(): Promise<OpeningRestoreObjectSideEffects>;
+
   put(input: {
     sourceId: string;
     archivePath: string;
@@ -91,7 +104,8 @@ export type OpeningRestoreExecuteErr = {
     | "JOURNAL_DRIFT"
     | "TARGET_NOT_EMPTY"
     | "APPLY_FAILED";
-  mutated: false;
+  mutated: boolean;
+  objectSideEffects?: OpeningRestoreObjectSideEffects;
   errors: string[];
   guarantees: OpeningRestoreApplyGuarantees;
   preview?: RestorePreview;
@@ -436,21 +450,37 @@ export async function executeOpeningRestoreApply(
   const backup = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const workspaceId = backup.workspaceId;
 
+  let objectPutStarted = false;
   try {
+    const verifiedObjects = await prepareOpeningRestoreObjects(
+      backup,
+      parseOpeningRestoreObjectVersion,
+      args.objectPut ? archivePath => resolveObjectBody(args, archivePath) : undefined,
+    );
     let rowsInserted = 0;
     let objectsApplied = 0;
     let objectApplyDeferred = false;
     let pendingJobsCancelled = 0;
 
     await sql.begin(async (tx) => {
+      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+      if (!workspace) throw new Error("restore workspace owner is missing");
+      const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, String(workspace.owner_user_id));
+      const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
+        confirmLocalRestore: true,
+        availableCourseIds: facts.availableCourseIds,
+        currentMemoryDeletions: facts.currentMemoryDeletions,
+        currentLearningState: facts.currentLearningState,
+      });
+      if (!livePlan.ok) {
+        throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
+      }
       const linkedMilestones = (backup.tables.workspace_preferences as Record<string, unknown>[] | undefined)?.some(row => {
         const parsed = openingAdaptivePrefsSchema.safeParse(row.adaptive_planning);
         return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
           [...milestone.history, milestone].some(version => version.evidenceRefs.length > 0)));
       });
       if (linkedMilestones || backup.tables.course_goals?.length || backup.tables.course_requirements?.length) {
-        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
-        if (!workspace) throw new Error("restore workspace owner is missing");
         const linkErrors: string[] = [];
         validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
         validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
@@ -467,8 +497,6 @@ export async function executeOpeningRestoreApply(
       const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
       let restoredObservations = observations;
       if (observations.length) {
-        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
-        if (!workspace) throw new Error("restore workspace owner is missing");
         restoredObservations = restoreOpeningGradingMetadata(observations, workspaceId, String(workspace.owner_user_id));
       }
 
@@ -519,17 +547,14 @@ export async function executeOpeningRestoreApply(
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;
       } else if (args.objectPut) {
-        for (const object of backup.objects) {
-          const body = await resolveObjectBody(args, object.archivePath);
-          if (!body) {
-            throw new Error(`missing object bytes for ${object.archivePath}`);
-          }
+        for (const object of verifiedObjects) {
+          objectPutStarted = true;
           await args.objectPut.put({
             sourceId: object.sourceId,
             archivePath: object.archivePath,
             sha256: object.sha256,
             bytes: object.bytes,
-            body,
+            body: object.body,
           });
           objectsApplied += 1;
         }
@@ -554,6 +579,10 @@ export async function executeOpeningRestoreApply(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const restoreCode = (error as { restoreCode?: string }).restoreCode;
+    if (restoreCode === "PREFLIGHT_REJECTED" || restoreCode === "JOURNAL_DRIFT") {
+      return { ok: false, code: restoreCode, mutated: false, errors: [message], guarantees: RESTORE_GUARANTEES, preview };
+    }
     if (message.startsWith("TARGET_NOT_EMPTY:") || (error as { code?: string }).code === "TARGET_NOT_EMPTY") {
       const details = message.startsWith("TARGET_NOT_EMPTY:")
         ? message.slice("TARGET_NOT_EMPTY:".length).split("|").filter(Boolean)
@@ -569,10 +598,19 @@ export async function executeOpeningRestoreApply(
         emptyNamespaceVerified: false,
       };
     }
+    let objectSideEffects: OpeningRestoreObjectSideEffects | undefined;
+    if (objectPutStarted) {
+      // A generic writer has no rollback guarantee, even when its PUT rejected.
+      objectSideEffects = { status: "unknown", createdKeys: [], remainingKeys: [], unknownKeys: [] };
+      if (args.objectPut?.rollback) {
+        try { objectSideEffects = await args.objectPut.rollback(); } catch { /* keep unknown */ }
+      }
+    }
     return {
       ok: false,
       code: "APPLY_FAILED",
-      mutated: false,
+      mutated: objectSideEffects !== undefined && objectSideEffects.status !== "clean",
+      objectSideEffects,
       errors: [message],
       guarantees: RESTORE_GUARANTEES,
       preview,
@@ -598,7 +636,8 @@ export function createMemoryOpeningRestoreObjectPut(): OpeningRestoreObjectPut &
 /** Minimal storage surface for live MinIO / S3 restore puts. */
 export type OpeningRestoreObjectStorage = {
   finalKey(sourceId: string, version: number): string;
-  putObject(key: string, body: Uint8Array, input?: { mime?: string }): Promise<void>;
+  putObject(key: string, body: Uint8Array, input?: { mime?: string; ifNoneMatch?: "*" }): Promise<void>;
+  deleteObject(key: string): Promise<void>;
 };
 
 /**
@@ -630,13 +669,29 @@ export function createOpeningS3RestoreObjectPut(
   storage: OpeningRestoreObjectStorage,
 ): OpeningRestoreObjectPut & { keys: string[] } {
   const keys: string[] = [];
+  const unknownKeys: string[] = [];
   return {
     keys,
+    async rollback() {
+      const remainingKeys: string[] = [];
+      for (const key of keys) {
+        try { await storage.deleteObject(key); } catch { remainingKeys.push(key); }
+      }
+      return { status: unknownKeys.length ? "unknown" : remainingKeys.length ? "remaining" : "clean",
+        createdKeys: [...keys], remainingKeys, unknownKeys: [...unknownKeys] };
+    },
     async put(input) {
       const version = parseOpeningRestoreObjectVersion(input.archivePath, input.sourceId);
       const key = storage.finalKey(input.sourceId, version);
-      await storage.putObject(key, input.body, { mime: "application/octet-stream" });
-      keys.push(key);
+      try {
+        await storage.putObject(key, input.body, { mime: "application/octet-stream", ifNoneMatch: "*" });
+        keys.push(key);
+      } catch (error) {
+        // A definitive precondition rejection wrote nothing. Any other response
+        // may have lost an acknowledgement: never delete that unowned key.
+        if (!(error instanceof OpeningStorageError && error.code === "CONFLICT")) unknownKeys.push(key);
+        throw error;
+      }
     },
   };
 }

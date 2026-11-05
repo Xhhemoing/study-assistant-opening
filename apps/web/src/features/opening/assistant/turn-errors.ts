@@ -5,8 +5,18 @@ import { TUTOR_MODEL_SETUP_MESSAGE } from "@aistudy/domain";
 /** Where the learner fixes "no usable model". */
 export const MODEL_SETUP_HREF = "/opening/settings#quick-model-setup";
 
+/** Only this server-confirmed pre-send outcome permits a fresh explicit attempt. */
+export function isEphemeralNotSentError(err: unknown): boolean {
+  // The same structured error is HTTP 409 for JSON and wrapped as 502 by the
+  // existing SSE client; only the server code, never a transport status, grants retry.
+  return err instanceof OpeningApiError && err.code === "EPHEMERAL_REQUEST_NOT_SENT";
+}
+
 /** Validate an optional physical page against scope-authorized, parse-ready chunks. */
 export function formatTurnError(err: unknown): string {
+  if (isEphemeralNotSentError(err)) {
+    return "这次临时请求确定未发送。问题已保留；修复模型设置或稍后再次点击发送，将作为一次新尝试。";
+  }
   if (err instanceof OpeningApiError) {
     if (err.code === "page_not_in_sources") {
       return "这一页在材料里找不到对应内容。如果材料还在处理中，可以先清空页码再提问。";

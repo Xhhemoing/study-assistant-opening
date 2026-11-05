@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { TurnRecord, TutorMode } from "@aistudy/contracts";
+import type { TurnInput, TurnRecord, TutorMode } from "@aistudy/contracts";
 
 /** After this long without a first token the learner sees that it is slower than usual. */
 export const SLOW_TURN_MS = 3_000;
@@ -39,6 +39,13 @@ export function useTurnWaitPhase(active: boolean, waitKey: string | null): TurnW
 }
 
 export type FailedTurnRetry = { assistantTurnId: string; text: string; mode: TutorMode; clientKey: string };
+
+/** Resolve the original owned intent server-side, never from today's selection. */
+export function submitFailedTurnRetry<T>(conversationId: string, target: FailedTurnRetry,
+  submit: (input: TurnInput) => Promise<T>): Promise<T> {
+  return submit({ conversationId, text: target.text, mode: target.mode, clientKey: target.clientKey,
+    privacy: "saved", sourceIds: [] });
+}
 
 /**
  * The newest saved turn ended without an answer (failed, including cancelled). Only that

@@ -1,11 +1,11 @@
 import type { OpeningBackup } from "@aistudy/domain";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 
 export type OpeningMemoryDeletions = NonNullable<OpeningBackup["memoryDeletions"]>;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Called only inside an owner-checked snapshot transaction. Never reads memory bodies. */
-export async function readOpeningMemoryDeletions(tx: Sql, workspaceId: string): Promise<OpeningMemoryDeletions> {
+export async function readOpeningMemoryDeletions(tx: Sql | TransactionSql, workspaceId: string): Promise<OpeningMemoryDeletions> {
   const rows = await tx`
     SELECT id, updated_at FROM opening_memories
     WHERE workspace_id = ${workspaceId} AND status = 'deleted'

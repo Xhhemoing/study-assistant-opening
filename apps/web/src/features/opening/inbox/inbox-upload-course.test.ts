@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import { createUploadClient } from "./upload-client";
 import { createUploadQueue } from "./upload-queue";
+import { beforeEach, afterEach } from "vitest";
+import { setupUploadIdentity } from "./upload-identity-test-fixture";
+beforeEach(() => { setupUploadIdentity(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 import { createMaterialOrganizationClient } from "../library/material-organization-client";
 
 const ID = "11111111-1111-4111-8111-111111111111";

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readStoredTeachingOutline } from "./teaching-outline";
+import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import {
@@ -133,6 +134,7 @@ export function createCompileTeachingUnitWorkerDeps(
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.
             requireModelOutput: true,
+            requireMaterialCitations: activity?.routeManaged === true,
             // Preserve the activity's original prompt boundary even if current
             // evidence/graph revalidation removed its prelude from model input.
             learnerFocus: activity?.learnerFocus,
@@ -155,6 +157,7 @@ export function createCompileTeachingUnitWorkerDeps(
             (input.publishInput.sourceRefs ?? []).flatMap((ref) => (ref.chunkId ? [ref.chunkId] : [])),
           );
           return createTeachingValidationAfterPublish({
+            tools: { checkFormula: checkTeachingFormula },
             loadChunks: async (ownedScope, sourceIds) => {
               const rows = await chunks.listForSources(ownedScope, sourceIds);
               return pinned.size ? rows.filter((row) => pinned.has(row.id)) : rows;

@@ -34,11 +34,39 @@ export function knowledgeExtractionBatches(chunks: readonly AuthorizedChunk[]): 
   return batches;
 }
 
+// This matching key is deliberately separate from the persisted, source-aware
+// node identity. Only complete text evidence proves exact cross-source equality.
+function exactTextDefinition(node: KnowledgeSnapshot["nodes"][number], courseId: string,
+  chunks: ReadonlyMap<string, AuthorizedChunk>, slicedChunkIds: ReadonlySet<string>): string | null {
+  if (node.courseId !== courseId || !node.evidenceChunkIds.length) return null;
+  const texts = new Set<string>();
+  for (const id of node.evidenceChunkIds) {
+    const chunk = chunks.get(id);
+    if (!chunk || chunk.courseId !== courseId || !chunk.text?.trim() || slicedChunkIds.has(id)
+      || chunk.imageObjectKey || chunk.startMs !== null || chunk.endMs !== null) return null;
+    texts.add(chunk.text.normalize("NFC").replace(/\r\n/gu, "\n"));
+  }
+  return JSON.stringify([courseId, node.kind, node.label.normalize("NFC"), [...texts].sort()]);
+}
+
 /** Labels are local to each extraction. Merge only the same evidence-backed definition. */
 export function mergeKnowledgeBatches(courseId: string, version: number, snapshots: KnowledgeSnapshot[], chunks: AuthorizedChunk[],
   slicedChunkIds: ReadonlySet<string> = new Set()): KnowledgeSnapshot {
   const merged: KnowledgeSnapshot = { courseId, version, nodes: [], edges: [] };
   const definitions = new Map<string, string>();
+  const byId = new Map(chunks.map(chunk => [chunk.id, chunk]));
+  const exactDefinitions = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const snapshot of snapshots) {
+    const seen = new Set<string>();
+    for (const node of snapshot.nodes) {
+      const key = exactTextDefinition(node, courseId, byId, slicedChunkIds);
+      if (!key) continue;
+      if (seen.has(key)) ambiguous.add(key);
+      seen.add(key);
+      exactDefinitions.set(node.id, key);
+    }
+  }
   const edgeKeys = new Set<string>();
   for (const snapshot of snapshots) {
     const ids = new Map<string, string>();
@@ -50,9 +78,11 @@ export function mergeKnowledgeBatches(courseId: string, version: number, snapsho
     for (const node of snapshot.nodes) {
       const definition = knowledgeNodeDefinition(node, chunks);
       // Two distant slices sharing one parser UUID do not prove the same definition.
-      const candidates = node.evidenceChunkIds.some(id => slicedChunkIds.has(id)) ? [] : merged.nodes.filter(candidate => definition
-        ? counts.get(definition) === 1 && definitions.get(candidate.id) === definition
-        : node.evidenceChunkIds.length > 0 && sameKnowledgeNodeIdentity(candidate, node));
+      const exact = exactDefinitions.get(node.id);
+      const candidates = node.evidenceChunkIds.some(id => slicedChunkIds.has(id)) || exact && ambiguous.has(exact) ? []
+        : merged.nodes.filter(candidate => exact && exactDefinitions.get(candidate.id) === exact
+          || (definition ? counts.get(definition) === 1 && definitions.get(candidate.id) === definition
+            : node.evidenceChunkIds.length > 0 && sameKnowledgeNodeIdentity(candidate, node)));
       const existing = candidates.length === 1 ? candidates[0] : undefined;
       ids.set(node.id, existing?.id ?? node.id);
       if (existing) {

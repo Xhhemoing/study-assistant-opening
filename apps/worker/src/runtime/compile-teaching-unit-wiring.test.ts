@@ -175,6 +175,17 @@ const payload = {
 };
 
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
+  it.each([undefined, "0"])("keeps formula validation disabled for flag %s", (flag) => {
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
+    vi.stubEnv("TEACHING_VALIDATION_ENABLED", undefined);
+    expect(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()).verifyAfterPublish).toBeUndefined();
+  });
+
+  it("configures post-publish validation only when enabled", () => {
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
+    expect(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()).verifyAfterPublish).toBeTypeOf("function");
+  });
+
   it("injects the actual page loader and uses the visual task only for image-bearing compilation", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
     const dependencies = shared();

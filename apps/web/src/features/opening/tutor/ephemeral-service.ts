@@ -293,6 +293,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         ...(onTextDelta ? { outputFormat: "markdown" as const } : {}),
       };
       let completedRequestId = requestId;
+      const confirmedNotSentFailures = new Set<unknown>();
       const callWith = async (model: ResolvedTaskModel | undefined, callRequestId: string) => {
         const terms: ReservationTerms = model
           ? reservationTerms(model, providerInput, deps.config.reservedCents)
@@ -303,10 +304,18 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
                 actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
               };
             })();
+        let releasedNotSent = false;
         const output = await runBudgetedCall({
           provider: model?.provider ?? deps.provider,
           modelSnapshot: model?.modelSnapshot ?? deps.modelSnapshot,
-          budget: deps.budget,
+          budget: {
+            ...deps.budget,
+            release: async (operationId, reason) => {
+              const result = await deps.budget.release(operationId, reason);
+              if (reason === "not_sent") releasedNotSent = true;
+              return result;
+            },
+          },
           input: providerInput,
           parentBudget,
           requestId: callRequestId,
@@ -328,6 +337,13 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
               throw new EphemeralServiceError("ABORTED", "ephemeral request aborted before sending", 499);
             }
           },
+        }).catch((error: unknown) => {
+          // Keep fallback semantics; only an acknowledged pre-send release may
+          // authorize a later explicit user attempt.
+          if (releasedNotSent && error instanceof OpeningProviderError && isNotSentFailure(error)) {
+            confirmedNotSentFailures.add(error);
+          }
+          throw error;
         });
         completedRequestId = callRequestId;
         return output;
@@ -343,6 +359,13 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
             })
           : await callWith(selected, selectedRequestId);
       } catch (error) {
+        const childNotSent = confirmedNotSentFailures.has(error) || isBudgetReplayError(error)
+          && error.disposition.kind === "released"
+          && ["not_sent", "cancelled"].includes(error.disposition.reason ?? "");
+        if (childNotSent && await deps.budget.isParentNotSent?.(parentBudget.id) === true) {
+          throw new EphemeralServiceError("EPHEMERAL_REQUEST_NOT_SENT",
+            "这次临时请求确定未发送。问题已保留；修复模型设置或稍后再次点击发送，将作为一次新尝试。", 409);
+        }
         if (isBudgetReplayError(error)) throw new EphemeralServiceError(error.code,
           error.disposition.kind === "completed" ? "这次临时请求已完成；为保护临时内容，服务器未保存可重放的正文。请确认后另发一条新请求。" : "这次临时请求已发送或结果尚未确认，请勿自动重发。", 409);
         if (error instanceof OpeningProviderError) throw error;

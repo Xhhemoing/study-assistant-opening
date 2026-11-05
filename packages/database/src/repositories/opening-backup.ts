@@ -286,7 +286,8 @@ export type OpeningRestoreApplyResult =
         | "TARGET_NOT_EMPTY"
         | "APPLY_FAILED";
       mode?: "dry-run";
-      mutated: false;
+      mutated: boolean;
+      objectSideEffects?: import("./opening-backup-apply").OpeningRestoreObjectSideEffects;
       errors: string[];
       guarantees: OpeningRestoreApplyGuarantees;
       preview?: RestorePreview;
@@ -445,7 +446,8 @@ export async function applyOpeningRestore(
       return {
         ok: false,
         code: executed.code,
-        mutated: false,
+        mutated: executed.mutated,
+        objectSideEffects: executed.objectSideEffects,
         errors: executed.errors,
         guarantees: RESTORE_GUARANTEES,
         preview: executed.preview ?? preview,

@@ -638,6 +638,8 @@ export type BuildCompilerPublishInputOptions = {
   newBlockId?: () => string;
   /** Production with a real model: fail instead of publishing template blocks. */
   requireModelOutput?: boolean;
+  /** Course routes require a generated teaching/example block citing this evidence pack. */
+  requireMaterialCitations?: boolean;
 };
 
 type CompilePayload = {
@@ -857,6 +859,13 @@ export function createCompilerBuildPublishInput(
       newBlockId: options.newBlockId,
       ...(modelOutput ? { modelOutput } : {}),
     });
+
+    // The parser has already removed citations outside this exact evidence pack.
+    // Only model-written, learner-visible teaching counts, never a question or hidden key.
+    if (options.requireMaterialCitations && !modelOutput?.blocks.some(block =>
+      block.type !== "prompt" && block.type !== "answer_key" && block.citedChunkIds.length > 0)) {
+      throw new TeachingCompileOutputError("course teaching requires a teaching block citing the material evidence pack");
+    }
 
     if (options.writeLibraryBlocks) {
       await options.writeLibraryBlocks(compiled.libraryBlocks);

@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { courseRouteDelayedProtocolSchema,readOpeningCourseRouteRetestOutcome } from "./opening-course-route-retest-state";
 import type { CourseRouteObservation,CourseRouteSourceChunk } from "@aistudy/domain";
+import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
 const bindingSchema=z.object({id:z.string().uuid(),revision:z.number().int().positive(),stableSkillId:z.string().uuid(),requirementKey:z.string()}).strict();
 export type CourseRouteDb=Sql|TransactionSql;
@@ -95,6 +96,7 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
   const requirements=await readCourseRequirements(db,scope,courseId),materials=await readCourseRouteMaterials(db,scope,courseId);
   const observations=await readCourseRouteObservations(db,scope,courseId);
   const progress=courseRequirementProgress(requirements,observations.projected,new Map(materials.filter(row=>row.available).map(row=>[row.sourceId,row.sourceVersion])),await readCourseRouteSourceChunks(db,scope,courseId));
+  await readCourseRouteCompilation(db,scope,courseId,progress);
   const retests=await db`SELECT id,task_id,learning_protocol,not_before_at FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND learning_protocol->>'protocolId'='course-route-delayed-v1' ORDER BY created_at DESC,id DESC`;
   for(const item of progress){
