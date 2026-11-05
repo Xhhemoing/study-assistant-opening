@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { Redis } from "ioredis";
+import { createTutorStreamReader, createTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
 import { isDeepStrictEqual } from "node:util";
 import { createOpeningProvider, runBudgetedCall, actualCentsForOutput, type OpeningProviderOptions } from "@aistudy/ai";
 import { fetchOpeningProvider } from "../../packages/ai/src/opening/provider-network";
@@ -8,7 +10,7 @@ import { createSqlClient, createOpeningConversationRepository, createOpeningTuto
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { createOpeningPrivacyRepository, createOpeningAdaptivePrefsRepository, createWorkspacePreferencesRepository,
   createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository,
-  createOpeningRetestActivityRepository, readOpeningSystemQueryAuthorization } from "../../packages/database/src/index";
+  createOpeningRetestActivityRepository, createOpeningStudyExposureRepository, readOpeningSystemQueryAuthorization } from "../../packages/database/src/index";
 import { DEFAULT_STUDY_SESSION_INTENT, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tutor-next-action";
@@ -20,7 +22,7 @@ export type DialogueRequest = {
   status: number | null; raw: string | null; requestBody?: unknown; output?: ProviderOutput; error?: string;
 };
 export type DialogueReport = {
-  synthetic: true; transport: "real_provider" | "controlled_fetch"; version: { git: string; fixture: string; model: string };
+  synthetic: true; transport: "real_provider" | "controlled_fetch" | "controlled_provider"; version: { git: string; fixture: string; model: string };
   maxRequests: number; requests: DialogueRequest[]; cases: Array<Record<string, unknown>>; errors: string[];
   unknown: Record<string, string>; fixturePricing: Record<string, unknown>; passed: boolean;
 };
@@ -230,6 +232,103 @@ export async function collectTutorRuntimeSafety(options: {
     report.passed = report.errors.length === 0 && report.cases.length === RUNTIME_SAFETY_CASES.length;
     await checkpoint(); return report;
   } finally { await sql.end({ timeout: 5 }); }
+}
+
+export const STREAM_SAFETY_CASES = ["stream_success", "stream_cancel"] as const;
+
+export function assertStreamRedisUrl(value: string): URL {
+  const url = new URL(value);
+  if (!["redis:", "rediss:"].includes(url.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new Error("Stream collection requires loopback Redis");
+  }
+  return url;
+}
+
+/** Controlled deltas, but real Worker, Redis writer/reader and PG delivery authorization. */
+export async function collectTutorStreamSafety(options: { git: string; redisUrl: string }): Promise<DialogueReport> {
+  const url = assertDialogueDatabase();
+  assertStreamRedisUrl(options.redisUrl);
+  const sql = createSqlClient(url.toString());
+  const redis = new Redis(options.redisUrl, { lazyConnect: true, enableOfflineQueue: false,
+    maxRetriesPerRequest: 0, connectTimeout: 3000, commandTimeout: 3000, retryStrategy: () => null });
+  redis.on("error", () => undefined);
+  const report: DialogueReport = { synthetic: true, transport: "controlled_provider",
+    version: { git: options.git, fixture: "m1-d1-stream-1", model: "controlled_delta_provider" },
+    maxRequests: 2, requests: [], cases: [], errors: [], passed: false, fixturePricing: pricing,
+    unknown: { stream: "real Redis writer/reader + PG authorization; controlled provider deltas",
+      queue: "not_run; direct Worker handler", http: "not_run; delivery authorization called directly",
+      browser: "not_run", learningEffect: "unknown", privacyRace: "not_run", otherStreamFailures: "not_run" } };
+  const check = (value: unknown, label: string) => { if (!value) throw new Error(`STREAM_CHECK_FAILED:${label}`); };
+  try {
+    await redis.connect();
+    const conversations = createOpeningConversationRepository(sql), jobs = createOpeningTutorJobsRepository(sql);
+    const chunks = createOpeningSourceChunksRepository(sql), budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    for (const caseId of STREAM_SAFETY_CASES) {
+      const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() }, sourceId = randomUUID();
+      const record: Record<string, unknown> = { caseId, scope, status: "running" }; report.cases.push(record);
+      try {
+        await sql`INSERT INTO users(id,email,display_name,password_hash) VALUES(${scope.ownerUserId},${`${scope.ownerUserId}@example.invalid`},'Synthetic stream','disabled-test-identity')`;
+        await sql`INSERT INTO workspaces(id,owner_user_id) VALUES(${scope.workspaceId},${scope.ownerUserId})`;
+        await sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+          VALUES(${sourceId},${scope.workspaceId},'synthetic-stream.txt','text/plain',1,${"0".repeat(64)},0,'uploaded','ready')`;
+        await chunks.replaceChunks(scope, { sourceId, sourceVersion: 0, chunks: [{ page: 1, text: "Synthetic equation material",
+          slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }] });
+        const conversation = await conversations.create(scope, { title: caseId, courseId: null });
+        const input = { scope, conversationId: conversation.id, text: "给一个提示", mode: "hint" as const, clientKey: randomUUID(),
+          sourceIds: [sourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+          contextAnchor: { purpose: "material_read" as const, sourceId, sourceVersion: 0, page: 1 } };
+        const saved = await conversations.appendSavedTurn(input);
+        const published: string[] = [];
+        let calls = 0, cancelHelp: unknown;
+        const facts = async () => ({
+          stream: await reader.read(scope.workspaceId, saved.jobId), job: await jobs.get(scope, saved.jobId),
+          turns: Array.from(await sql`SELECT * FROM opening_turns WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
+          help: Array.from(await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
+          ledger: Array.from(await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
+          activities: Array.from(await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
+        });
+        const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, stream: writer,
+          streamExposures: createOpeningStudyExposureRepository(sql), privacy: createOpeningPrivacyRepository(sql),
+          onStreamUnavailable: error => { throw error; },
+          provider: { complete: async (value, _signal, onDelta) => {
+            calls++; check(value.outputFormat === "markdown" && onDelta, "real_stream_callback");
+            report.requests.push({ ordinal: report.requests.length + 1, caseId, actor: "tutor", input: value, status: null, raw: null });
+            for (const delta of ["先看等式两边。", "再尝试同减一个数。 "]) {
+              await onDelta!(delta);
+              const snapshot = await reader.read(scope.workspaceId, saved.jobId); check(snapshot?.text, "real_cache_snapshot");
+              const authorized = await jobs.readStream(scope, saved.jobId, snapshot!);
+              if (authorized?.status === "running") published.push(delta);
+              if (caseId === "stream_cancel" && published.length === 1 && !cancelHelp) {
+                await jobs.cancel(scope, saved.jobId); cancelHelp = (await facts()).help;
+              }
+            }
+            return { text: "先看等式两边。再尝试同减一个数。 ", citedChunkIds: [], candidates: [], requestId: "controlled-stream",
+              inputTokens: 10, outputTokens: 10 };
+          } }, config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, ...pricing } });
+        let handlerError: string | undefined;
+        try { await handler(saved.jobId); } catch (error) { handlerError = errorName(error); }
+        const after = await facts();
+        check(calls === 1 && after.ledger.length === 1, "one_provider_and_ledger");
+        check(after.help.length === 1 && after.help[0]!.delivered === true, "one_actual_help_delivery");
+        if (caseId === "stream_success") {
+          check(!handlerError && published.length === 2 && after.stream?.sequence === 2 && after.job?.status === "succeeded", "stream_success");
+          check(after.turns.find(turn => turn.id === saved.assistantTurnId)?.status === "complete", "durable_answer");
+        } else {
+          check(published.length === 1 && after.job?.status === "cancelled", "late_delta_not_authorized");
+          check(after.turns.find(turn => turn.id === saved.assistantTurnId)?.status === "failed", "cancel_not_completed");
+          check(isDeepStrictEqual(cancelHelp, after.help), "no_help_after_cancel");
+        }
+        check(after.ledger[0]!.state === "completed", "received_usage_settled_once");
+        const replay = await conversations.appendSavedTurn(input); const replayHandler = await handler(saved.jobId);
+        check(isDeepStrictEqual(saved, replay) && replayHandler.skipped && calls === 1 && isDeepStrictEqual(after, await facts()), "replay_no_calls_or_writes");
+        Object.assign(record, { status: "passed", saved, published, handlerError, after, replayHandler,
+          cacheBoundary: "Late deltas may remain in Redis; PG terminal authorization prevents delivery. No HTTP transport exercised." });
+      } catch (error) { record.status = "failed"; record.error = errorName(error); report.errors.push(`${caseId}:${errorName(error)}`); }
+    }
+    report.passed = report.errors.length === 0 && report.cases.length === 2;
+    return report;
+  } finally { redis.disconnect(); await sql.end({ timeout: 5 }); }
 }
 
 export function assertDialogueDatabase(fetchImpl?: OpeningProviderOptions["fetchImpl"]): URL {
