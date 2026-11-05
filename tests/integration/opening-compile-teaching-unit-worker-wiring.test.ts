@@ -4,6 +4,7 @@ import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
  * (createCompileTeachingUnitWorkerDeps, as constructed by apps/worker main):
  * the real loadReplayedResult → teachingActivities.get, real publish, real
  * ledger. Replay never calls the provider and returns the existing result.
+ * Route cases also pin two-source block provenance and exercise real validation.
  */
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -16,6 +17,7 @@ import {
   createOpeningCourseRouteRepository, createOpeningLearningGoalRepository,
 } from "@aistudy/database";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
+import { mayPublishVerified } from "@aistudy/domain";
 import type { OpeningJobRecord } from "@aistudy/database";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
@@ -62,6 +64,7 @@ const modelServer = createServer(async (request, response) => {
       itemTitles: ["秩与零空间"],
       blocks: [
         { type: "text", text: "矩阵的秩与零空间维数之和等于列数。", citedChunkIds: modelCitations },
+        { type: "formula", text: "rank(A) + dim N(A) = 5", citedChunkIds: modelCitations },
         { type: "prompt", text: "一个 3×5 矩阵的秩为 2，零空间维数是多少？", citedChunkIds: modelCitations },
         { type: "answer_key", ...rankPedagogy, text: "5 − 2 = 3", citedChunkIds: modelCitations, hints: {
           direction: "先找矩阵的列数与秩。", concept: "秩与零空间维数之和等于列数。",
@@ -165,7 +168,7 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
 
   it.each([false, true])("course-route wiring excludes relevant next chapters (whole source B: %s)", async (wholeSourceB) => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
-    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "0");
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
     vi.stubEnv("OPENING_PROVIDER_ALLOW_LOCAL", "1");
     vi.stubEnv("OPENING_MODEL_API_KEY", "test-wiring-key");
     vi.stubEnv("OPENING_MODEL_DAILY_CAP_CENTS", "100000");
@@ -214,10 +217,11 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     // Spies observe the real builders used by the handler; no replacement implementation.
     const providerSpy = vi.spyOn(deps, "buildProviderInput");
     const publishSpy = vi.spyOn(deps, "buildPublishInput");
+    const verifySpy = vi.spyOn(deps, "verifyAfterPublish");
     modelCitations = [chunkA, chunkB];
     const job: OpeningJobRecord = { id: randomUUID(), workspaceId: f.scope.workspaceId, ownerUserId: f.scope.ownerUserId, key: randomUUID(), kind: "compile-teaching-unit", payload: {}, result: null, state: "running", privacyEpoch: 0 };
     const run = createCompileTeachingUnitHandler(deps);
-    await run(job, payload);
+    const result = await run(job, payload);
     expect(providerSpy).toHaveBeenCalledTimes(1);
     const providerInput = await providerSpy.mock.results[0]!.value;
     expect(providerInput.chunks.map(chunk => chunk.id).sort()).toEqual([...expectedIds].sort());
@@ -242,6 +246,58 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
       ...(wholeSourceB ? [{ sourceId: sourceB, version: 1, page: 2, chunkId: chunkBNext }] : []),
     ]));
     for (const id of excludedIds) expect(published?.sourceRefs.map(ref => ref.chunkId)).not.toContain(id);
+
+    // Read actual library bodies, not the builder output: the model cited the
+    // two current chapters even when the evidence pack also contains B's next.
+    const content = createOpeningTeachingContentRepository(f.sql);
+    expect(published).not.toBeNull();
+    const revision = await content.readRevision(f.scope, published!.documentId, published!.revisionNumber);
+    const citedBlocks = revision.blocks.filter(block => Array.isArray(block.content.citedChunkIds));
+    expect(citedBlocks).toHaveLength(7);
+    for (const block of citedBlocks) expect(block.content.citedChunkIds).toEqual([chunkA, chunkB]);
+    expect(citedBlocks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "text", content: expect.objectContaining({ text: "矩阵的秩与零空间维数之和等于列数。" }) }),
+      expect.objectContaining({ type: "formula", content: { latex: "rank(A) + dim N(A) = 5", citedChunkIds: [chunkA, chunkB] } }),
+      expect.objectContaining({ type: "answer_key", content: expect.objectContaining({ answer: "5 − 2 = 3", hidden: true }) }),
+      expect.objectContaining({ type: "answer_key", content: expect.objectContaining({ answer: "4 − 2 = 2", hidden: true }) }),
+    ]));
+
+    // No formula checker is configured in production wiring. Observe the real
+    // validator and its metadata republish; unknown must not become verified.
+    expect(verifySpy).toHaveBeenCalledTimes(1);
+    const promotion = await verifySpy.mock.results[0]!.value;
+    expect(promotion?.report.layers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ layer: "schema", outcome: "pass" }),
+      expect.objectContaining({ layer: "source_identity", outcome: "pass" }),
+      expect.objectContaining({ layer: "tool_result", outcome: "unknown" }),
+    ]));
+    expect(promotion?.nextVerificationStatus).toBe("needs_check");
+    expect(promotion?.nextGenerateStatus).toBeUndefined();
+    expect(promotion?.report.factPassed).toBe(false);
+    expect(promotion?.report.presentation).toMatchObject({ kind: "discussion_draft", allowsFormalScoring: false });
+    expect(mayPublishVerified(promotion!.report)).toBe(false);
+    expect(result).toMatchObject({ generateStatus: "needs_check", verificationStatus: "needs_check" });
+    expect(published).toMatchObject({ version: 2, verificationStatus: "needs_check", revisionNumber: 2 });
+    expect(await createOpeningTeachingActivitiesRepository(f.sql).get(f.scope, activity.id))
+      .toMatchObject({ generateStatus: "needs_check", contentVersion: 2 });
+
+    // The same real verifier rejects an invented chunk. This is a validation
+    // result, separate from whether the repository fences publication.
+    const invalid = await deps.verifyAfterPublish!(f.scope, {
+      activityId: activity.id,
+      publishInput: {
+        ...verifySpy.mock.calls[0]![1].publishInput,
+        sourceRefs: [
+          { sourceId: sourceA, version: 1, page: 1, chunkId: chunkA },
+          { sourceId: sourceB, version: 1, page: 1, chunkId: randomUUID() },
+        ],
+      },
+      providerOutput: null,
+    });
+    expect(invalid?.report.layers).toContainEqual(expect.objectContaining({ layer: "source_identity", outcome: "fail" }));
+    expect(invalid?.nextVerificationStatus).toBe("rejected");
+    expect(invalid?.nextGenerateStatus).toBeUndefined();
+    expect(mayPublishVerified(invalid!.report)).toBe(false);
   });
 
   it("production loader is scope-bound and rejects foreign refs", async () => {

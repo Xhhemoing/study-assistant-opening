@@ -3,18 +3,19 @@ import { open, readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { dialogueFixtureSchema } from "../packages/domain/src/opening/tutor-dialogue-evaluation";
-import { assertDialogueDatabase, collectTutorDialogue, collectTutorRuntimeSafety } from "./lib/tutor-dialogue";
+import { assertDialogueDatabase, collectTutorDialogue, collectTutorRuntimeSafety, collectTutorStreamSafety } from "./lib/tutor-dialogue";
 
 async function main() {
   const { values } = parseArgs({ options: {
-    fixture: { type: "string" }, "runtime-safety": { type: "boolean" }, model: { type: "string" }, "base-url-env": { type: "string" }, "key-env": { type: "string" },
+    fixture: { type: "string" }, "runtime-safety": { type: "boolean" }, "stream-safety": { type: "boolean" }, "redis-url-env": { type: "string" }, model: { type: "string" }, "base-url-env": { type: "string" }, "key-env": { type: "string" },
     "max-requests": { type: "string" }, output: { type: "string" }, case: { type: "string" },
   }, strict: true });
-  for (const name of ["model", "base-url-env", "key-env", "max-requests", "output"] as const) {
+  if (values["stream-safety"] && (values["runtime-safety"] || values.fixture || values.case)) throw new Error("--stream-safety is an independent controlled slice");
+  for (const name of (values["stream-safety"] ? ["output", "redis-url-env"] : ["model", "base-url-env", "key-env", "max-requests", "output"]) as Array<keyof typeof values>) {
     if (!values[name]) throw new Error(`Missing --${name}`);
   }
   assertDialogueDatabase();
-  if (!values["runtime-safety"] && !values.fixture) throw new Error("Missing --fixture");
+  if (!values["runtime-safety"] && !values["stream-safety"] && !values.fixture) throw new Error("Missing --fixture");
   if (values["runtime-safety"] && (values.fixture || values.case)) throw new Error("--runtime-safety cannot be combined with --fixture/--case");
   const fixturePath = values.fixture ? await realpath(values.fixture) : undefined, outputPath = resolve(values.output!);
   if (fixturePath === outputPath) throw new Error("Output cannot overwrite fixture");
@@ -22,9 +23,11 @@ async function main() {
   const cases = fixture ? values.case ? fixture.cases.filter(item => item.caseId === values.case) : fixture.cases : [];
   if (fixture && !cases.length) throw new Error("Unknown --case");
   const baseUrl = process.env[values["base-url-env"]!], apiKey = process.env[values["key-env"]!];
-  if (!baseUrl || !apiKey) throw new Error("Provider environment variables are missing");
+  if (!values["stream-safety"] && (!baseUrl || !apiKey)) throw new Error("Provider environment variables are missing");
+  const redisUrl = values["redis-url-env"] ? process.env[values["redis-url-env"]] : undefined;
+  if (values["stream-safety"] && !redisUrl) throw new Error("Explicit loopback test Redis environment variable is missing");
   const maxRequests = Number(values["max-requests"]);
-  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 12) throw new Error("max-requests must be 1..12");
+  if (!values["stream-safety"] && (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 12)) throw new Error("max-requests must be 1..12");
   const git = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const output = await open(outputPath, "wx", 0o600);
   const save = async (report: unknown) => {
@@ -32,9 +35,10 @@ async function main() {
     await output.write(data, 0, data.length, 0); await output.truncate(data.length); await output.sync();
   };
   try {
-    const common = { git, model: values.model!, baseUrl, apiKey, maxRequests, checkpoint: save };
-    const report = values["runtime-safety"] ? await collectTutorRuntimeSafety(common)
+    const common = { git, model: values.model!, baseUrl: baseUrl!, apiKey: apiKey!, maxRequests, checkpoint: save };
+    const report = values["stream-safety"] ? await collectTutorStreamSafety({ git, redisUrl: redisUrl! }) : values["runtime-safety"] ? await collectTutorRuntimeSafety(common)
       : await collectTutorDialogue({ ...common, cases, fixtureVersion: fixture!.version });
+    await save(report);
     console.log(JSON.stringify({ output: outputPath, passed: report.passed, requests: report.requests.length, cases: report.cases.length, errors: report.errors }));
     if (!report.passed) process.exitCode = 1;
   } finally { await output.close(); }
