@@ -216,7 +216,8 @@ describe("owned read-only system query against PostgreSQL", () => {
     const attempts = createOpeningAttemptService(sql);
     const submit = async (correct: boolean, assistance: "independent" | "unknown" = "independent") => {
       const attempt = await attempts.create(scope, { sessionId: lesson.sessionId, clientKey: randomUUID(),
-        spanExercise: { sourceId, problemId: correct ? "span-reserved-fraction" : "span-example-2d", version: 1 } });
+        spanExercise: { sourceId, problemId: !correct ? "span-example-2d"
+          : assistance === "unknown" ? "span-reserved-20261021-q02" : "span-reserved-fraction", version: 1 } });
       const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
       if (solution.kind !== "unique") throw new Error("fixture expects unique span solution");
       const answer = correct ? { membership: "in_span", coefficients: solution.coefficients,
