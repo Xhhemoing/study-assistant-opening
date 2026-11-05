@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LearningObservation, Scope } from "@aistudy/contracts";
 import { createOpeningAdaptivePrefsRepository, createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -9,6 +9,8 @@ import { prepareTutorNextAction } from "../../../apps/worker/src/jobs/tutor-next
 import { createSpanLessonSessionService } from "../../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
 import { POST as automaticRetest } from "../../../apps/web/src/app/api/opening/teaching/span/delayed/automatic/route";
+import { PATCH as updateTask } from "../../../apps/web/src/app/api/opening/tasks/[id]/route";
+import { GET as readLesson, POST as createLesson, PATCH as saveLesson } from "../../../apps/web/src/app/api/opening/teaching/span/lesson/route";
 import { POST as presentation } from "../../../apps/web/src/app/api/opening/teaching/span/presentation/route";
 import { POST as hint } from "../../../apps/web/src/app/api/opening/teaching/span/hint/route";
 import { POST as nextActivity } from "../../../apps/web/src/app/api/opening/teaching/span/next/route";
@@ -16,17 +18,20 @@ import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 
 let fixture: OpeningFixture, runtime: ReturnType<typeof createAuthRuntime>;
-beforeAll(async () => {
+beforeEach(async () => {
+  vi.stubEnv("OPENING_TEACHING_LOOP", "1");
+  // Exposure history is workspace-scoped, so each learner flow needs its own
+  // identity rather than inheriting earlier tests' delivered question families.
   fixture = await createOpeningFixture();
   runtime = createAuthRuntime({ databaseUrl: process.env.OPENING_TEST_DATABASE_URL!,
     authSecret: process.env.AUTH_SECRET ?? "opening-fixture-secret-opening-fixture-secret",
     sessionCookieSecure: false, sessionTtlSeconds: 3600, authCookieName: "aistudy_session" });
   setAuthRuntimeForTests(runtime);
 });
-beforeEach(() => { vi.stubEnv("OPENING_TEACHING_LOOP", "1"); });
-afterAll(async () => {
+afterEach(async () => {
   setAuthRuntimeForTests(null); vi.unstubAllEnvs();
-  await runtime?.close(); await fixture?.close();
+  try { await runtime?.close(); }
+  finally { await fixture?.close(); }
 });
 const request = (path: string, body: unknown, cookie = fixture.cookie) => new Request(`http://localhost${path}`, {
   method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
@@ -65,7 +70,148 @@ async function retestState(activityId: string) {
     WHERE r.id=${activityId} AND r.workspace_id=${fixture.scope.workspaceId} AND r.owner_user_id=${fixture.scope.ownerUserId}`;
 }
 
+async function persistedCourse(courseId: string) {
+  const { sql, scope } = fixture;
+  return {
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    sessions: await sql`SELECT * FROM opening_learning_sessions WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    observations: await sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    help: await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    tasks: await sql`SELECT * FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    retests: await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} ORDER BY id`,
+    decisions: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    money: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+  };
+}
+function lessonGet(courseId: string, activityId?: string, retestId?: string) {
+  const url = new URL("http://localhost/api/opening/teaching/span/lesson");
+  url.searchParams.set("courseId", courseId);
+  if (activityId) url.searchParams.set("activityId", activityId);
+  if (retestId) url.searchParams.set("retestId", retestId);
+  return new Request(url, { headers: { cookie: fixture.cookie } });
+}
+
 describe("authenticated span tutor learning flow", () => {
+  it("restores a paused lesson by ordinary GET after leaving, then executes and reads its actual correction", async () => {
+    const f = await start();
+    const pause = await saveLesson(new Request(`http://localhost/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
+      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision: f.origin.revision, intent: f.origin.intent, moveId: f.origin.moveId, status: "paused" }),
+    }));
+    expect(pause.status).toBe(200);
+    const paused = await pause.json();
+    expect(paused).toMatchObject({ activityId: f.origin.activityId, sessionId: f.origin.sessionId, status: "paused", revision: f.origin.revision + 1 });
+    const beforeReads = await persistedCourse(f.courseId);
+    // No activity id or retained service object: the normal course GET must find the saved lesson.
+    const reopened = await readLesson(lessonGet(f.courseId));
+    expect(reopened.status).toBe(200); expect(reopened.headers.get("cache-control")).toBe("no-store");
+    const restored = await reopened.json();
+    expect(restored.session).toEqual(paused);
+    expect(restored.attempts).toHaveLength(1);
+    const attempt = restored.attempts[0];
+    expect(attempt).toMatchObject({ sessionId: f.origin.sessionId, spanExercise: { id: "span-reserved-fraction" } });
+    expect((await (await readLesson(lessonGet(f.courseId, f.origin.activityId))).json()).attempts.map((row: { id: string }) => row.id)).toEqual([attempt.id]);
+    expect(await persistedCourse(f.courseId)).toEqual(beforeReads);
+    const resume = await saveLesson(new Request(`http://localhost/api/opening/teaching/span/lesson?activityId=${f.origin.activityId}`, {
+      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision: paused.revision, intent: paused.intent, moveId: paused.moveId, status: "active" }),
+    }));
+    expect(resume.status).toBe(200); const active = await resume.json();
+    const submitted = await submitAttempt(request(`/api/opening/attempts/${attempt.id}/submit`, {
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), outcome: "unverified", assistance: "independent",
+    }), { params: Promise.resolve({ id: attempt.id }) });
+    expect(submitted.status).toBe(201); const observed = await submitted.json() as LearningObservation;
+    expect(observed).toMatchObject({ outcome: "incorrect", sessionId: f.origin.sessionId, serverEvaluation: { decision: "incorrect" } });
+    const nextBody = { activityId: f.origin.activityId, expectedRevision: active.revision, observationId: observed.id, clientKey: randomUUID() };
+    const response = await nextActivity(request(nextPath, nextBody));
+    expect(response.status).toBe(200); const next = await response.json();
+    expect(next).toMatchObject({ kind: "ready", resumed: false, courseId: f.courseId });
+    expect(next.activityId).not.toBe(f.origin.activityId);
+    expect(next.href).toBe(`/opening/courses/${f.courseId}/study/span?lesson=${next.activityId}`);
+    const worked = await presentation(request("/api/opening/teaching/span/presentation", {
+      sessionId: next.sessionId, courseId: f.courseId, sourceId: f.sourceId, kind: "worked", clientKey: randomUUID(),
+    }));
+    expect(worked.status).toBe(200); const presented = await worked.json();
+    const afterWork = await persistedCourse(f.courseId);
+    const finalRead = await readLesson(lessonGet(f.courseId));
+    expect(finalRead.status).toBe(200); const final = await finalRead.json();
+    expect(final.session).toMatchObject({ activityId: next.activityId, sessionId: next.sessionId, moveId: "self-example", status: "active", retestId: null });
+    expect(final.attempts).toHaveLength(1);
+    const finalAttempt = final.attempts[0];
+    expect(finalAttempt).toMatchObject({ sessionId: next.sessionId,
+      spanExercise: { id: presented.problem.id, version: presented.problem.version } });
+    const [persistedAttempt] = await fixture.sql`SELECT problem_id,item_version_id FROM opening_learning_attempts
+      WHERE id=${finalAttempt.id} AND workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}
+        AND session_id=${next.sessionId}`;
+    expect(persistedAttempt).toBeDefined();
+    expect(persistedAttempt!.problem_id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+    expect(persistedAttempt!.item_version_id).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i);
+    expect(finalAttempt).toMatchObject({ problemId: persistedAttempt!.problem_id, itemVersionId: persistedAttempt!.item_version_id });
+    expect(presented.exposureReceipt.contextAnchor).toMatchObject({ courseId: f.courseId, attemptId: finalAttempt.id,
+      itemVersionId: persistedAttempt!.item_version_id, purpose: "learning_help" });
+    expect(final.assistance[finalAttempt.id]).toBe("revealed");
+    expect(afterWork.help).toHaveLength(1);
+    expect(afterWork.help[0]).toMatchObject({ id: presented.exposureReceipt.id, delivered: true, level: "revealed",
+      course_id: f.courseId, session_id: next.sessionId, attempt_id: finalAttempt.id, problem_id: persistedAttempt!.problem_id });
+    expect(afterWork.observations.find(row => row.id === observed.id)).toMatchObject({ outcome: "incorrect", assistance: "independent" });
+    expect(afterWork.activities.find(row => row.id === f.origin.activityId)?.status).toBe("completed");
+    expect(afterWork.activities).toHaveLength(2);
+    const replay = await nextActivity(request(nextPath, nextBody));
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ kind: "ready", resumed: true, activityId: next.activityId, sessionId: next.sessionId });
+    expect(await persistedCourse(f.courseId)).toEqual(afterWork);
+  });
+
+  it("keeps a learner-cancelled bound retest cancelled across ordinary reads, schedule replay and next", async () => {
+    const f = await start();
+    const initial = await readLesson(lessonGet(f.courseId));
+    expect(initial.status).toBe(200); const restored = await initial.json();
+    const attempt = restored.attempts[0];
+    const submitted = await submitAttempt(request(`/api/opening/attempts/${attempt.id}/submit`, {
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), outcome: "unverified", assistance: "independent",
+    }), { params: Promise.resolve({ id: attempt.id }) });
+    expect(submitted.status).toBe(201); const observed = await submitted.json() as LearningObservation;
+    const scheduleBody = { observationId: observed.id, clientKey: randomUUID(), expectedGrantRevision: 1 };
+    const scheduled = await automaticRetest(request("/api/opening/teaching/span/delayed/automatic", scheduleBody));
+    expect(scheduled.status).toBe(200); const retest = await scheduled.json();
+    expect(retest).toMatchObject({ activityStatus: "accepted", taskStatus: "pending" });
+    const bound = await createLesson(request("/api/opening/teaching/span/lesson", {
+      courseId: f.courseId, sourceIds: [f.sourceId], intent: f.origin.intent, clientKey: randomUUID(), retestId: retest.activityId,
+    }));
+    expect(bound.status).toBe(200); const lesson = await bound.json();
+    // Automatic undo intentionally refuses an already-bound lesson. The task's
+    // real learner status endpoint owns explicit cancellation in this lifecycle.
+    const [task] = await fixture.sql`SELECT version FROM opening_tasks WHERE id=${retest.taskId} AND workspace_id=${fixture.scope.workspaceId}`;
+    const cancel = await updateTask(new Request(`http://localhost/api/opening/tasks/${retest.taskId}`, {
+      method: "PATCH", headers: { cookie: fixture.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: Number(task!.version), status: "skipped", at: new Date().toISOString() }),
+    }), { params: Promise.resolve({ id: retest.taskId }) });
+    expect(cancel.status).toBe(200);
+    expect(await cancel.json()).toMatchObject({ id: retest.taskId, status: "skipped" });
+    const cancelled = await persistedCourse(f.courseId);
+    expect(cancelled.retests.find(row => row.id === retest.activityId)?.status).toBe("cancelled");
+    expect(cancelled.tasks.find(row => row.id === retest.taskId)).toMatchObject({ status: "skipped", close_source: "learner" });
+    expect(cancelled.attempts.filter(row => row.session_id === lesson.sessionId)).toEqual([]);
+    const reopened = await readLesson(lessonGet(f.courseId, lesson.activityId, retest.activityId));
+    expect(reopened.status).toBe(200);
+    expect(await reopened.json()).toMatchObject({ session: { activityId: lesson.activityId, retestId: retest.activityId },
+      attempts: [], agenda: { status: "cancelled", resumable: false, pendingRetestId: retest.activityId } });
+    const again = await automaticRetest(request("/api/opening/teaching/span/delayed/automatic", scheduleBody));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ activityId: retest.activityId, taskId: retest.taskId, activityStatus: "cancelled", taskStatus: "skipped" });
+    const next = await nextActivity(request(nextPath, { activityId: lesson.activityId, expectedRevision: lesson.revision, observationId: null, clientKey: randomUUID() }));
+    expect(next.status).toBe(200);
+    expect(await next.json()).toMatchObject({ kind: "choice", reason: "cancelled",
+      primary: { href: `/opening/courses/${f.courseId}#course-learning-records` },
+      secondary: { href: `/opening/courses/${f.courseId}/study/span?lesson=${lesson.activityId}&retest=${retest.activityId}` } });
+    const lastRead = await readLesson(lessonGet(f.courseId, lesson.activityId, retest.activityId));
+    expect(lastRead.status).toBe(200);
+    expect(await lastRead.json()).toMatchObject({ session: { activityId: lesson.activityId, retestId: retest.activityId },
+      attempts: [], agenda: { status: "cancelled", resumable: false } });
+    expect(await persistedCourse(f.courseId)).toEqual(cancelled);
+  });
+
   it("issues and scores a real unseen question, schedules its retest, then creates and replays ordinary correction", async () => {
     const f = await start();
     // Consume the attempt already issued atomically by the tutor, exactly as page restoration does.

@@ -70,6 +70,36 @@ describe("explicit saved reference revision", () => {
     expect(response.status).toBe(kind === "anonymous" ? 401 : kind === "foreign" ? 404 : ["old-version", "old-pin", "missing", "completed", "queued", "generating"].includes(kind) ? 409 : 400);
     expect(await snapshot()).toEqual(before);
   });
+  it.each(["text", "markdown", "answer", "solution"] as const)("rejects a persisted incorrect %s through the authenticated adoption handler without writes", async field => {
+    const s = await seed();
+    const edited = structuredClone(s.edited);
+    Object.assign(edited[1]!.content, { text: "5", markdown: "5.0", answer: "10/2", solution: "2+3=5", [field]: "6" });
+    // Actual library save persists all fields; the route adopts that revision,
+    // not a helper-only payload and not a client-supplied validation verdict.
+    await s.save(edited);
+    const saved = await s.repo.readRevision(f.scope, s.unit.documentId, 2);
+    expect(saved.blocks[1]!.content).toMatchObject({ [field]: "6" });
+    const before = await snapshot();
+    const response = await POST(request(s.input), context(s.activity.id));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "VALIDATION" } });
+    expect(await snapshot()).toEqual(before);
+    expect((await s.repo.getClientInit(f.scope, s.activity.id))?.revisionNumber).toBe(1);
+  });
+  it.each(["equivalent", "unknown"] as const)("adopts persisted %s multi-field answers without discarding content or asserting verification", async kind => {
+    const s = await seed(), edited = structuredClone(s.edited);
+    const fields = { text: "5", markdown: "5.0", answer: "10/2",
+      solution: kind === "unknown" ? "依据题意给出说明，仍需人工复核" : "2+3=5" };
+    Object.assign(edited[1]!.content, fields);
+    await s.save(edited);
+    const response = await POST(request(s.input), context(s.activity.id));
+    expect(response.status).toBe(200);
+    expect(activitySpecSchema.parse(await response.json())).toMatchObject({ version: 2, revisionNumber: 2, verificationStatus: "needs_check" });
+    const saved = await s.repo.readRevision(f.scope, s.unit.documentId, 2);
+    expect(saved.blocks[1]!.content).toMatchObject(fields);
+    expect(saved.blocks[1]!.content.citedChunkIds).toEqual([]);
+    expect((await s.repo.readRevision(f.scope, s.unit.documentId, 1)).blocks.map(b => b.content)).toEqual(s.blocks.map(b => b.content));
+  });
   it("rejects a newer competing save and accepts multiple saved revisions only at latest", async () => {
     const s = await seed(); await s.save();
     const next = structuredClone(s.edited); next[1]!.content.text = "5.0";
