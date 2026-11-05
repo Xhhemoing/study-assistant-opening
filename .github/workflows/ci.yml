@@ -111,13 +111,15 @@ jobs:
           --health-timeout 5s
           --health-retries 15
 
-    env:
+    env: &quality-env
       HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_TEST_DB: "1"
       # Real collectors reject the default DB port; integration uses this DB.
       OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
       DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
+      E2E_BASE_URL: http://127.0.0.1:3000
       REDIS_URL: redis://127.0.0.1:6379
       S3_ENDPOINT: http://127.0.0.1:9000
       S3_REGION: us-east-1
@@ -332,31 +334,7 @@ jobs:
       postgres-e2e: *e2e-postgres
       redis: *test-redis
       minio: *test-minio
-    env: &quality-env
-      HERMES_HEAVY_ENABLED: "0"
-      NODE_ENV: test
-      OPENING_TEST_DB: "1"
-      # Preserve the static/build environment independently of the split jobs.
-      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
-      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
-      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
-      E2E_BASE_URL: http://127.0.0.1:3000
-      REDIS_URL: redis://127.0.0.1:6379
-      S3_ENDPOINT: http://127.0.0.1:9000
-      S3_REGION: us-east-1
-      S3_BUCKET: aistudy
-      S3_ACCESS_KEY_ID: minioadmin
-      S3_SECRET_ACCESS_KEY: minioadmin
-      S3_FORCE_PATH_STYLE: "true"
-      PUBLIC_BASE_URL: http://localhost:3000
-      AUTH_SECRET: ci-test-auth-secret-at-least-32-chars
-      SESSION_COOKIE_SECURE: "false"
-      SESSION_TTL_SECONDS: "3600"
-      AUTH_COOKIE_NAME: aistudy_session
-      PARSER_PYTHON: ${{ github.workspace }}/.local/docling-venv/bin/python
-      PARSER_CWD: ${{ github.workspace }}/services/parser
-      HF_HOME: ${{ github.workspace }}/.local/hf-home
-      HF_HUB_OFFLINE: "1"
+    env: *quality-env
     steps:
       - uses: actions/checkout@v4
         with:
