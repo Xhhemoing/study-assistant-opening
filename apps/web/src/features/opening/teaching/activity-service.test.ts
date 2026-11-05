@@ -1,14 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import { assembleLearnerSnapshot, type LearnerSnapshotSources } from "@aistudy/domain";
+import type { LearnerSnapshotRead } from "../planning/learner-snapshot-service";
 
 const create = vi.hoisted(() => vi.fn());
 const get = vi.hoisted(() => vi.fn());
 const requestCompile = vi.hoisted(() => vi.fn());
 const readTask = vi.hoisted(() => vi.fn());
 const readySources = vi.hoisted(() => vi.fn());
+const readSnapshot = vi.hoisted(() => vi.fn());
+const readSettings = vi.hoisted(() => vi.fn());
+
+vi.mock("../planning/learner-snapshot-runtime", () => ({ createSqlLearnerSnapshotService: () => ({ read: readSnapshot }) }));
 
 vi.mock("@aistudy/database", () => ({
   createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, get, requestCompile })),
+  createOpeningPlanningSettingsRepository: vi.fn(() => ({ get: readSettings })),
   readOpeningTeachingTaskFocus: readTask,
   createOpeningCourseReadySourcesRepository: vi.fn(() => ({ listReadySourceIdsForCourse: readySources })),
 }));
@@ -35,6 +42,8 @@ beforeEach(() => {
   requestCompile.mockReset().mockResolvedValue({ activity: { id: activityId }, jobId: "job" });
   readTask.mockReset();
   readySources.mockReset().mockResolvedValue([activityId]);
+  readSettings.mockReset().mockResolvedValue({ settings: { timeZone: "UTC" } });
+  readSnapshot.mockReset();
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
@@ -77,6 +86,32 @@ describe("teaching activity service: compile enqueue seam", () => {
     }), { enqueueCompile: false });
     expect(create.mock.calls[0]![1]).not.toHaveProperty("goalJson.learnerFocus");
   });
+  it.each([false, true])("uses actual canonical Web focus instead of a stale independent summary, full=%s", async full => {
+    const sources: LearnerSnapshotSources = { date: "2026-10-16", timeZone: "UTC", dueCardCount: 0, tasks: [], courses: [{
+      courseId: activityId, title: "Math", goal: null, hasUsableMaterials: true, evidenceStatus: "available", knowledgeNodes: [],
+      summaries: [{ skillLabel: "Matrix rank", requirementKey: "calculate", status: "observed_independent", lastObservedAt: "2026-10-16T08:00:00Z" }],
+      observations: [{ id: "original-success", skillLabel: "Matrix rank", requirementKey: "calculate", attemptedAt: "2026-10-16T08:00:00Z",
+        usableForCurrentVersion: "yes", verifiedCorrect: "yes", independentAttempt: "yes", assistance: "independent", problemId: null }],
+    }] };
+    const read: LearnerSnapshotRead = { sources, snapshot: assembleLearnerSnapshot(sources), autonomy: "copilot", plannerInputRevision: "r1",
+      dataStatus: { evidence: "available", goals: "available", dueCards: "available" }, metrics: { reads: 4, durationMs: 1 } };
+    // A valid current non-independent result replaces the facts, not the old summary.
+    sources.courses[0]!.observations = [{ ...sources.courses[0]!.observations[0]!, id: "current-not-independent",
+      independentAttempt: "no", assistance: "unknown" }];
+    readSnapshot.mockResolvedValue(read);
+    readTask.mockResolvedValue({ title: "Real task", courseId: activityId, skillLabel: "Matrix rank", requirementKey: "calculate" });
+    await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "1", OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, {
+      ...input, createIntent: { source: "task", taskId: activityId }, goalJson: { wantsFullExplanation: full },
+    });
+    expect(readSnapshot).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(scope, expect.objectContaining({
+      courseId: activityId, sourceIds: [activityId], goalJson: { wantsFullExplanation: full, learnerFocus: expect.objectContaining({
+        skillLabel: "Matrix rank", requirementKey: "calculate", focusObservationId: null,
+        activityKind: full ? "full_explain" : "diagnose", reasonCode: full ? "requested_full" : "needs_check", recentAssistance: ["unknown"],
+      }) },
+    }), { enqueueCompile: false });
+  });
+
   it("discards client-supplied learner focus even when adaptive planning is off", async () => {
     await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0", OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, {
       ...input, goalJson: { wantsFullExplanation: true, learnerFocus: { activityKind: "transfer_check" } },
