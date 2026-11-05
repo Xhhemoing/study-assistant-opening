@@ -4,10 +4,10 @@ import { shouldRefreshSources, startSourceRefresh } from "./source-refresh";
 afterEach(() => { vi.useRealTimers(); });
 describe("source processing refresh", () => {
   it("refreshes uploaded processing sources until a terminal parse state is visible", () => {
-    for (const parseState of ["not_started", "queued", "running"] as const) {
+    for (const parseState of ["queued", "running"] as const) {
       expect(shouldRefreshSources([{ uploadState: "uploaded", parseState }])).toBe(true);
     }
-    for (const parseState of ["ready", "failed", "unsupported"] as const) {
+    for (const parseState of ["not_started", "ready", "failed", "unsupported"] as const) {
       expect(shouldRefreshSources([{ uploadState: "uploaded", parseState }])).toBe(false);
     }
     expect(shouldRefreshSources([{ uploadState: "pending", parseState: "not_started" }])).toBe(false);

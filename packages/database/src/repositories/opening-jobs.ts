@@ -221,6 +221,21 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
         const job = mapJob(rows[0] as Record<string, unknown>);
         if (job.kind === "parse" || job.kind === "parse-media") {
           await releaseOpeningParseClaim(tx, job.payload);
+          const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
+          const sourceId = payload?.sourceId;
+          const sourceVersion = payload?.sourceVersion;
+          // A cancelled retry may never have been claimed: its source is still
+          // queued, so the running-claim cleanup above cannot release it.
+          if (typeof sourceId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)
+            && typeof sourceVersion === "number" && Number.isSafeInteger(sourceVersion) && sourceVersion >= 0) {
+            await tx`UPDATE opening_sources s SET parse_state='not_started', updated_at=now()
+              WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.version=${sourceVersion}
+                AND s.upload_state='uploaded' AND s.parse_state='queued'
+                AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId})
+                AND NOT EXISTS (SELECT 1 FROM opening_jobs active WHERE active.workspace_id=s.workspace_id
+                  AND active.kind IN ('parse','parse-media') AND active.state IN ('queued','running')
+                  AND active.payload->>'sourceId'=${sourceId})`;
+          }
         }
         if (job.kind === "compile-teaching-unit") {
           const payload =

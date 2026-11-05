@@ -68,7 +68,7 @@ it("differentiates running from queued and aged queued without fake-fail", () =>
   const now = Date.parse("2026-10-10T14:00:00.000Z");
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "running" }, now)).toBe("原件已保存，正在解析");
   expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "queued" }, now)).toBe("原件已保存，解析排队中");
-  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "not_started" }, now)).toBe("原件已保存，解析排队中");
+  expect(sourceStatusLabel({ uploadState: "uploaded", parseState: "not_started" }, now)).toBe("原件已保存，解析尚未开始");
   expect(
     sourceStatusLabel(
       { uploadState: "uploaded", parseState: "queued", createdAt: "2026-10-10T13:56:00.000Z" },
