@@ -21,7 +21,7 @@ afterAll(async () => { await sql?.end({ timeout: 5 }); });
 
 it("saved library → pinned client init → strict HTTP client → block item preserves only this block's versioned citations", async () => {
   const rows = backupRows(sql, scope);
-  const a = await rows.source("uploaded", 4), b = await rows.source("uploaded", 7), unused = await rows.source("uploaded", 9);
+  const a = await rows.source("uploaded", 2), b = await rows.source("uploaded", 5), unused = await rows.source("uploaded", 9);
   const ca = await rows.chunk(a, 2), cb = await rows.chunk(b, 5), cu = await rows.chunk(unused, 9);
   await rows.chunk(a, 4);
   await rows.chunk(b, 7);
@@ -42,8 +42,14 @@ it("saved library → pinned client init → strict HTTP client → block item p
   await content.publishActivitySpec(scope, activitySpecPublishInputSchema.parse({ activityId: activity.id, teachingUnitId: unit.id,
     expectedVersion: 0, revisionNumber: revision.revisionNumber, blockOrder,
     sourceRefs: [{ sourceId: a, version: 2, page: 3, chunkId: ca }, { sourceId: b, version: "5", page: 11, chunkId: cb },
-      { sourceId: unused, version: 9, page: 1, chunkId: cu }, { sourceId: a, chunkId: "unversioned" }],
+      { sourceId: unused, version: 9, page: 1, chunkId: cu }],
   }));
+  // Historical reads remain supported: versions can advance after publication.
+  // Seed the pre-boundary unversioned metadata explicitly; new publication rejects it.
+  await sql`UPDATE opening_sources SET version=4 WHERE id=${a}`;
+  await sql`UPDATE opening_sources SET version=7 WHERE id=${b}`;
+  await sql`UPDATE opening_teaching_activity_specs SET source_refs=source_refs ||
+    ${sql.json([{ sourceId: a, chunkId: "unversioned" }])}::jsonb WHERE activity_id=${activity.id}`;
   // A subsequent saved revision must not change the already-published body.
   await content.writeUnitBlocks(scope, unit.id, [makeBlock("text", "未发布的新内容", [cu])]);
   const response = await content.getClientInit(scope, activity.id);

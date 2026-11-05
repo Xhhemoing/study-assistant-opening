@@ -14,6 +14,8 @@ const generatedHints = { direction: "先确定列向量是否线性无关。", c
 
 async function seed(hints: unknown = generatedHints) {
   const base = await learningAttemptFixture(fixture);
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES (${fixture.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
   const activity = await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope, {
     clientKey: randomUUID(), intentKind: "topic", intentSummary: "单位矩阵的秩", courseId: base.courseId, sourceIds: [base.sourceId], createIntent: {},
   });

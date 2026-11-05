@@ -6,6 +6,8 @@ import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
+import { teachingSourceRefSchema } from "@aistudy/contracts";
+import type { TransactionSql } from "postgres";
 import type {
   ActivitySpec,
   ActivitySpecClientInit,
@@ -214,6 +216,55 @@ export function sanitizeCheckpointForRestore(
   return clone;
 }
 
+/** Publication owns source identity; callers must keep these locks through the write. */
+async function assertPublishSourceRefs(
+  tx: TransactionSql,
+  scope: Scope,
+  activity: Record<string, unknown>,
+  refs: TeachingSourceRef[],
+): Promise<void> {
+  if (!refs.length) return;
+  for (const ref of refs) {
+    if (!teachingSourceRefSchema.safeParse(ref).success || ref.version == null
+      || !/^(0|[1-9]\d*)$/.test(String(ref.version)) || !Number.isSafeInteger(Number(ref.version))) {
+      throw learningError("VALIDATION", "source ref requires a valid pinned version and location");
+    }
+  }
+  const sourceIds = [...new Set(refs.map(ref => ref.sourceId))].sort();
+  // FOR SHARE blocks source replacement/deletion until the spec transaction commits.
+  const sources = await tx`SELECT s.id,s.version FROM opening_sources s
+    WHERE s.workspace_id=${scope.workspaceId} AND s.id IN ${tx(sourceIds)}
+      AND s.upload_state='uploaded' AND s.parse_state='ready'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+    ORDER BY s.id FOR SHARE OF s`;
+  if (sources.length !== sourceIds.length) throw learningError("VALIDATION", "source ref is unavailable in this workspace");
+  if (activity.course_id != null) {
+    const courses = await tx`SELECT id FROM courses WHERE id=${String(activity.course_id)}
+      AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
+    const memberships = await tx`SELECT asset_id FROM course_asset_memberships
+      WHERE workspace_id=${scope.workspaceId} AND course_id=${String(activity.course_id)}
+        AND asset_type='source' AND asset_id IN ${tx(sourceIds)} ORDER BY asset_id FOR SHARE`;
+    if (!courses.length || memberships.length !== sourceIds.length) {
+      throw learningError("VALIDATION", "source ref does not belong to the activity course");
+    }
+  }
+  const versions = new Map(sources.map(row => [String(row.id), Number(row.version)]));
+  for (const ref of refs) {
+    if (Number(ref.version) !== versions.get(ref.sourceId)) {
+      throw learningError("CONFLICT", "source ref version is no longer current");
+    }
+    // Pages have no separate catalog: parsed chunks are the authoritative page set.
+    // Compare ids as text so malformed external chunk ids are VALIDATION, not PG casts.
+    const chunks = await tx`SELECT id FROM opening_source_chunks
+      WHERE source_id=${ref.sourceId} AND source_version=${Number(ref.version)}
+        AND (${ref.chunkId ?? null}::text IS NULL OR id::text=${ref.chunkId ?? null})
+        AND (${ref.page ?? null}::integer IS NULL OR page=${ref.page ?? null})
+      ORDER BY id FOR SHARE`;
+    if (!chunks.length) throw learningError("VALIDATION", "source ref chunk or page does not exist at the pinned source version");
+  }
+}
+
 export function createOpeningTeachingContentRepository(sql: Sql) {
   const library = createLibraryRepository(sql);
 
@@ -336,6 +387,15 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       return rows.map((row) => mapUnit(row as Record<string, unknown>));
     },
 
+    /** Preflight only; publication repeats the check under its own write transaction. */
+    async validateActivitySourceRefs(scope: Scope, input: Pick<ActivitySpecPublishInput, "activityId" | "sourceRefs">): Promise<void> {
+      await sql.begin(async tx => {
+        await lockLearningOwner(tx, scope);
+        const activity = await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
+        await assertPublishSourceRefs(tx, scope, { course_id: activity.courseId }, input.sourceRefs ?? []);
+      });
+    },
+
     /**
      * Publish / upsert current ActivitySpec and bump activity.content_version with CAS.
      * Soft-idempotent: if already at expectedVersion+1 AND sameSpecGraph → success.
@@ -398,6 +458,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         if (!activityRows.length) throw learningError("NOT_FOUND", "teaching activity not found");
         const activity = activityRows[0] as Record<string, unknown>;
         const currentContentVersion = Number(activity.content_version);
+        await assertPublishSourceRefs(tx, scope, activity, sourceRefs);
 
         const existingSpecRows = await tx`
           SELECT * FROM opening_teaching_activity_specs

@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { ActivitySpecPublishInput } from "@aistudy/contracts";
 import {
   conversationResumeSchema,
   learningResumeSchema,
@@ -15,6 +16,7 @@ import {
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   createOpeningTeachingContentRepository,
+  createOpeningTeachingActivitiesRepository,
 } from "@aistudy/database";
 import { probeMaterialsAvailability } from "@aistudy/domain";
 import {
@@ -88,8 +90,94 @@ async function seedCourseSource() {
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${f.scope.workspaceId}, 'V2-16 teaching loop', ${courseId})`;
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   return { courseId, sourceId, chunkId };
 }
+
+describe("ActivitySpec publication source trust boundary (PG)", () => {
+  async function seedBoundary() {
+    const { courseId, sourceId, chunkId } = await seedCourseSource();
+    const oldChunkId = randomUUID();
+    await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+    await f.sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${chunkId}`;
+    await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+      VALUES (${oldChunkId},${sourceId},1,1,'历史版本')`;
+    const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+      clientKey: randomUUID(), intentKind: "material", intentSummary: "边界", courseId, sourceIds: [sourceId], createIntent: {},
+    });
+    const content = createOpeningTeachingContentRepository(f.sql);
+    const unit = await content.createUnit(f.scope, { title: "边界", blocks: [{ id: randomUUID(), type: "text", content: { text: "seed" } }] });
+    const input: ActivitySpecPublishInput = { activityId: activity.id, teachingUnitId: unit.id, expectedVersion: 0,
+      revisionNumber: 1, blockOrder: [], sourceRefs: [{ sourceId, version: 2, page: 1, chunkId }] };
+    const snapshot = async () => ({
+      spec: await content.getActivitySpec(f.scope, activity.id),
+      activities: await f.sql`SELECT * FROM opening_teaching_activities WHERE id=${activity.id}`,
+      units: await f.sql`SELECT * FROM opening_teaching_units WHERE id=${unit.id}`,
+      revisions: await f.sql`SELECT * FROM library_revisions WHERE document_id=${unit.documentId} ORDER BY revision_number`,
+    });
+    return { content, input, sourceId, chunkId, oldChunkId, snapshot };
+  }
+
+  it("publishes valid current refs, accepts numeric string versions and preserves soft-idempotency", async () => {
+    const { content, input } = await seedBoundary();
+    input.sourceRefs![0]!.version = "2";
+    const spec = await content.publishActivitySpec(f.scope, input);
+    expect(spec).toMatchObject({ version: 1, sourceRefs: input.sourceRefs });
+    expect(await content.publishActivitySpec(f.scope, input)).toEqual(spec);
+  });
+
+  it.each(["invented chunk", "foreign workspace chunk", "foreign course chunk", "old version chunk",
+    "old chunk with current version", "out-of-range page", "chunk-page mismatch", "wrong source chunk", "missing source", "unpublished source", "missing version"] as const)(
+    "rejects %s without changing spec, activity, unit or revision (initial and replacement)", async kind => {
+      const { content, input, sourceId, oldChunkId, snapshot } = await seedBoundary();
+      const ref = { ...input.sourceRefs![0]! };
+      if (kind === "invented chunk") ref.chunkId = randomUUID();
+      if (kind === "missing source") ref.sourceId = randomUUID();
+      if (kind === "missing version") ref.version = null;
+      if (kind === "old version chunk") { ref.version = 1; ref.chunkId = oldChunkId; }
+      if (kind === "old chunk with current version") ref.chunkId = oldChunkId;
+      if (kind === "out-of-range page") { ref.page = 99; ref.chunkId = null; }
+      if (kind === "chunk-page mismatch") {
+        await f.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text) VALUES (${sourceId},2,2,'第二页')`;
+        ref.page = 2;
+      }
+      if (kind === "wrong source chunk") {
+        const otherSource = await backupRows(f.sql, f.scope).source("uploaded", 2);
+        ref.chunkId = await backupRows(f.sql, f.scope).chunk(otherSource, 2);
+      }
+      if (kind === "foreign workspace chunk" || kind === "foreign course chunk") {
+        const foreignSource = randomUUID(), foreignChunk = randomUUID(), foreignCourse = randomUUID();
+        const workspaceId = kind === "foreign workspace chunk" ? f.otherScope.workspaceId : f.scope.workspaceId;
+        await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${foreignCourse},${workspaceId},'其他课程',${foreignCourse})`;
+        await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+          VALUES (${foreignSource},${workspaceId},'其他资料','text/plain',1,${"b".repeat(64)},2,'uploaded','ready')`;
+        await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES (${foreignChunk},${foreignSource},2,1,'其他片段')`;
+        await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+          VALUES (${workspaceId},${foreignCourse},'source',${foreignSource},'core','course')`;
+        ref.sourceId = foreignSource; ref.chunkId = foreignChunk;
+      }
+      for (const expectedVersion of [0, 1]) {
+        if (expectedVersion === 1) await content.publishActivitySpec(f.scope, input);
+        if (kind === "unpublished source") await f.sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${sourceId}`;
+        const before = await snapshot();
+        await expect(content.publishActivitySpec(f.scope, { ...input, expectedVersion, sourceRefs: [input.sourceRefs![0]!, ref] }))
+          .rejects.toMatchObject({ code: kind === "old version chunk" ? "CONFLICT" : "VALIDATION" });
+        expect(await snapshot()).toEqual(before);
+        if (kind === "unpublished source") await f.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${sourceId}`;
+      }
+    },
+  );
+
+  it("preflight success cannot authorize publication after a version replacement", async () => {
+    const { content, input, sourceId, snapshot } = await seedBoundary();
+    await content.validateActivitySourceRefs(f.scope, input);
+    await f.sql`UPDATE opening_sources SET version=3 WHERE id=${sourceId}`;
+    const before = await snapshot();
+    await expect(content.publishActivitySpec(f.scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await snapshot()).toEqual(before);
+  });
+});
 
 const blockA = "dddddddd-dddd-4ddd-8ddd-ddddddddddd1";
 const blockB = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1";

@@ -210,6 +210,31 @@ describe("opening teaching content repository (unit)", () => {
     expect(writes.some((w) => w.query.includes("INSERT INTO opening_teaching_activity_specs"))).toBe(false);
   });
 
+  it.each([
+    { kind: "missing source", source: false, member: true, chunk: true, version: 1, code: "VALIDATION" },
+    { kind: "foreign course", source: true, member: false, chunk: true, version: 1, code: "VALIDATION" },
+    { kind: "invented chunk", source: true, member: true, chunk: false, version: 1, code: "VALIDATION" },
+    { kind: "old version", source: true, member: true, chunk: true, version: 0, code: "CONFLICT" },
+    { kind: "unpinned version", source: true, member: true, chunk: true, version: null, code: "VALIDATION" },
+  ])("rejects $kind before any spec/unit/activity write", async ({ source, member, chunk, version, code }) => {
+    const sourceId = "ffffffff-ffff-4fff-8fff-fffffffffff1";
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_units")) return [{ id: unitId, document_id: documentId }];
+      if (query.includes("FROM opening_teaching_activities")) return [{ id: activityId, course_id: workspaceId, content_version: 0 }];
+      if (query.includes("FROM opening_sources")) return source ? [{ id: sourceId, version: 1 }] : [];
+      if (query.includes("FROM courses")) return [{ id: workspaceId }];
+      if (query.includes("FROM course_asset_memberships")) return member ? [{ asset_id: sourceId }] : [];
+      if (query.includes("FROM opening_source_chunks")) return chunk ? [{ id: blockTeach }] : [];
+      return [];
+    });
+    await expect(createOpeningTeachingContentRepository(sql).publishActivitySpec(scope, {
+      activityId, teachingUnitId: unitId, expectedVersion: 0, revisionNumber: 1, blockOrder,
+      sourceRefs: [{ sourceId, version, chunkId: blockTeach, page: 1 }],
+    })).rejects.toMatchObject({ code });
+    expect(writes.filter(write => /(?:INSERT INTO|UPDATE) opening_teaching_(?:activity_specs|units|activities)/.test(write.query))).toEqual([]);
+  });
+
   it("T5 draft_anchor_lost when block removed", async () => {
     const { sql } = db((query) => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];

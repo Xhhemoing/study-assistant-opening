@@ -89,6 +89,7 @@ export function createCompileTeachingUnitWorkerDeps(
     reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
+    validateSourceRefs: (scope, input) => teachingContent.validateActivitySourceRefs(scope, input),
     publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
     loadReplayedResult: async (scope, resultRef) => {
       const match = /^teaching_activity:(.+)$/.exec(resultRef);
@@ -125,7 +126,7 @@ export function createCompileTeachingUnitWorkerDeps(
           const activity = await teachingActivities.get(scope, payload.activityId);
           const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
           const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
-          let revisionNumber: number | null = null;
+          let compiledBlocks: Parameters<typeof teachingContent.writeUnitBlocks>[2] | null = null;
           const build = createTeachingCompilerPublishInput({
             loadChunks: scopedLoadChunks,
             evidenceChunks: providerInput?.chunks,
@@ -138,15 +139,15 @@ export function createCompileTeachingUnitWorkerDeps(
             // Preserve the activity's original prompt boundary even if current
             // evidence/graph revalidation removed its prelude from model input.
             learnerFocus: activity?.learnerFocus,
-            writeLibraryBlocks: async (blocks) => {
-              const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, blocks);
-              revisionNumber = written.revisionNumber;
-            },
+            writeLibraryBlocks: async (blocks) => { compiledBlocks = blocks; },
           });
           const publishInput = await build(scope, payload, providerOutput);
-          if (revisionNumber == null) throw new Error("compiled blocks were not written to the unit document");
-          // Pin the revision holding the compiled bodies so client-init reads them.
-          return { ...publishInput, revisionNumber };
+          if (compiledBlocks == null) throw new Error("compiled blocks were not built");
+          // Fail before saving model bodies, even when post-publish validation is off.
+          await teachingContent.validateActivitySourceRefs(scope, publishInput);
+          const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
+          // Publication revalidates atomically; preflight cannot authorize a later write.
+          return { ...publishInput, revisionNumber: written.revisionNumber };
         }
       : undefined,
     verifyAfterPublish: teachingValidationOn

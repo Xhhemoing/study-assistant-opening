@@ -14,6 +14,7 @@ const content = vi.hoisted(() => ({
   writeUnitBlocks: vi.fn(),
   readRevision: vi.fn(),
   publishActivitySpec: vi.fn(),
+  validateActivitySourceRefs: vi.fn(),
 }));
 
 const model = vi.hoisted(() => ({ complete: vi.fn(), task: vi.fn() }));
@@ -109,6 +110,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   readFocus.mockResolvedValue({});
   content.getActivitySpec.mockResolvedValue(null);
+  content.validateActivitySourceRefs.mockResolvedValue(undefined);
   model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
   statuses = [];
   writtenBlocks = [];
@@ -274,6 +276,8 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(content.writeUnitBlocks).toHaveBeenCalledWith(scope, UNIT, expect.any(Array));
     expect(writtenBlocks.length).toBeGreaterThan(0);
     expect(published).toHaveLength(1);
+    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
+    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[1]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
     const spec = published[0]!;
     expect(spec.revisionNumber).toBe(2);
     expect(spec.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((b) => b.id));
@@ -295,6 +299,42 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(writtenBlocks.find((b) => b.type === "prompt")!.content).not.toHaveProperty("hints");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
+  });
+
+  it.each(["0", "1"])("rejects invalid source ownership before saving bodies or publishing (validation flag %s)", async (flag) => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
+    const error = Object.assign(new Error("source ref does not belong to the activity course"), { code: "VALIDATION" });
+    content.validateActivitySourceRefs.mockRejectedValue(error);
+    const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
+    await expect(run(job, payload)).rejects.toBe(error);
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledWith(scope, expect.objectContaining({
+      activityId: ACTIVITY, sourceRefs: [{ sourceId: SOURCE, version: 1, page: 1, chunkId: CHUNK }],
+    }));
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
+    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(statuses).toEqual(["generating", "failed"]);
+  });
+
+  it("preflights custom publish builders before calling the repository publish path", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    deps.buildPublishInput = async () => ({ activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0,
+      revisionNumber: 2, blockOrder: [], sourceRefs: [{ sourceId: SOURCE, version: 1, chunkId: "invented" }] });
+    content.validateActivitySourceRefs.mockRejectedValue(Object.assign(new Error("invalid chunk"), { code: "VALIDATION" }));
+    await expect(createCompileTeachingUnitHandler(deps)(job, payload)).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(statuses).toEqual(["generating", "failed"]);
+  });
+
+  it("publication still rejects refs invalidated after a successful preflight", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    content.publishActivitySpec.mockRejectedValue(Object.assign(new Error("source ref version is no longer current"), { code: "CONFLICT" }));
+    await expect(createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(content.validateActivitySourceRefs).toHaveBeenCalled();
+    expect(published).toEqual([]);
+    expect(statuses).toEqual(["generating", "failed"]);
   });
 
   it("validation publishes cited teaching as a draft without upgrading the unchecked answer key", async () => {
@@ -320,6 +360,19 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     // The published graph and learner prompt remain available for studying.
     expect(published[1]?.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((block) => block.id));
     expect(writtenBlocks.find((block) => block.type === "prompt")?.content.text).toContain("零空间维数是多少");
+  });
+
+  it("keeps unknown symbolic formula verification as needs_check after valid source preflight", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
+    const result = await createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload);
+    expect(result).toMatchObject({ generateStatus: "needs_check", verificationStatus: "needs_check",
+      validationReport: { factPassed: false, layers: expect.arrayContaining([
+        expect.objectContaining({ layer: "source_identity", outcome: "pass" }),
+        expect.objectContaining({ layer: "tool_result", outcome: "unknown" }),
+      ]) } });
+    expect(statuses).not.toContain("ready");
+    expect(published.map(spec => spec.verificationStatus)).toEqual(["needs_check", "needs_check"]);
   });
 
   it("without materials the result stays needs_check — never ready without checked content", async () => {
