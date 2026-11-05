@@ -102,6 +102,140 @@ function snapshotFor(
   return { courseId, version, nodes, edges };
 }
 
+describe("opening knowledge manual confirmation", () => {
+  async function pending() {
+    const material = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    const snapshot = snapshotFor(material.courseId, material.chunkId, 1);
+    snapshot.nodes[0]!.status = "needs_check";
+    const record = await repo.replace(f.scope, material.courseId, { expectedVersion: 0, snapshot,
+      sourceVersions: { [material.sourceId]: 1 } });
+    return { ...material, repo, record, nodeId: snapshot.nodes[0]!.id };
+  }
+
+  it("confirms only the selected node and atomically records the observed evidence", async () => {
+    const { repo, courseId, nodeId, record, chunkId, sourceId } = await pending();
+    const result = await repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
+    expect(result.version).toBe(2);
+    expect(result.snapshot.nodes[0]!.status).toBe("supported");
+    expect(result.snapshot.nodes.slice(1)).toEqual(record.snapshot.nodes.slice(1));
+    expect(result.snapshot.edges).toEqual(record.snapshot.edges);
+    expect(await repo.get(f.scope, courseId)).toEqual(result);
+    const audit = await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ workspace_id: f.scope.workspaceId, owner_user_id: f.scope.ownerUserId,
+      course_id: courseId, node_id: nodeId, graph_version_before: 1, graph_version_after: 2,
+      source_versions: { [sourceId]: 1 }, evidence_chunk_ids: [chunkId] });
+    expect(audit[0]!.confirmed_at).toBeTruthy();
+    await expect(repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(1);
+  });
+
+  it.each(["supported", "suggested"] as const)("rejects the %s state without writing an audit record", async status => {
+    const { repo, courseId, nodeId, record } = await pending();
+    const snapshot = structuredClone(record.snapshot); snapshot.nodes[0]!.status = status;
+    await f.sql`UPDATE opening_course_knowledge SET snapshot=${f.sql.json(snapshot as never)} WHERE course_id=${courseId}`;
+    await expect(repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  });
+
+  it.each(["request", "live", "missing", "extra", "evidence", "privacy"])("conflicts on changed provenance even with an unchanged graph version: %s", async change => {
+    const { repo, courseId, nodeId, sourceId, chunkId, record } = await pending();
+    const sourceVersions = { ...record.sourceVersions };
+    if (change === "request") sourceVersions[sourceId] = 2;
+    if (change === "live") await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+    if (change === "missing") delete sourceVersions[sourceId];
+    if (change === "extra") sourceVersions[randomUUID()] = 1;
+    if (change === "evidence") await f.sql`DELETE FROM opening_source_chunks WHERE id=${chunkId}`;
+    if (change === "privacy") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${f.scope.workspaceId},${sourceId})`;
+    await expect(repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await repo.get(f.scope, courseId))!.snapshot.nodes[0]!.status).toBe("needs_check");
+    expect(await repo.getVersion(f.scope, courseId)).toBe(1);
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  });
+
+  it("rejects other workspaces and forged owners", async () => {
+    const { repo, courseId, nodeId, record } = await pending();
+    for (const scope of [f.otherScope, { ...f.scope, ownerUserId: f.otherScope.ownerUserId }]) {
+      await expect(repo.confirmNode(scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  });
+
+  it("serializes simultaneous submissions: one transition and one audit only", async () => {
+    const { repo, courseId, nodeId, record } = await pending();
+    const results = await Promise.allSettled([1, 2].map(() => repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: 1, sourceVersions: record.sourceVersions })));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: { code: "CONFLICT" } });
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(1);
+  });
+
+  it("rejects a concurrent source-version commit while the observed graph version remains unchanged", async () => {
+    const { repo, courseId, nodeId, record, sourceId } = await pending();
+    let release!: () => void, locked!: () => void;
+    const ready = new Promise<void>(resolve => { locked = resolve; });
+    const proceed = new Promise<void>(resolve => { release = resolve; });
+    const bump = f.sql.begin(async tx => {
+      await tx`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+      locked(); await proceed;
+    });
+    await ready;
+    const confirming = repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
+    release(); await bump;
+    await expect(confirming).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await repo.get(f.scope, courseId)).toEqual(record);
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  });
+
+  it("rolls back the status/version when the confirmation insert fails", async () => {
+    const { repo, courseId, nodeId, record, chunkId } = await pending();
+    // Force the insert to fail at the database unique constraint, after the graph UPDATE.
+    await f.sql`INSERT INTO opening_knowledge_confirmations
+      (id,workspace_id,owner_user_id,course_id,node_id,node_label,node_kind,graph_version_before,graph_version_after,source_versions,evidence_chunk_ids)
+      VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${nodeId},'函数','concept',1,2,
+        ${f.sql.json(record.sourceVersions)},${f.sql.json([chunkId])})`;
+    await expect(repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions }))
+      .rejects.toMatchObject({ code: "23505" });
+    expect(await repo.get(f.scope, courseId)).toEqual(record);
+  });
+
+  it.each(["unchanged", "version", "evidence"])("rebuild keeps only the exact confirmed source and evidence set: %s", async change => {
+    const { repo, courseId, nodeId, record, sourceId, chunkId } = await pending();
+    await repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
+    const snapshot = structuredClone(record.snapshot), sourceVersions = { ...record.sourceVersions };
+    if (change === "version") {
+      await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+      await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+        SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${sourceId}`;
+      await f.sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${chunkId}`;
+      sourceVersions[sourceId] = 2;
+    }
+    if (change === "evidence") {
+      const replacement = randomUUID();
+      await f.sql`UPDATE opening_source_chunks SET id=${replacement} WHERE id=${chunkId}`;
+      snapshot.nodes.forEach(node => { node.evidenceChunkIds = [replacement]; });
+      snapshot.edges.forEach(edge => { edge.evidenceChunkIds = [replacement]; });
+    }
+    const result = await repo.replace(f.scope, courseId, { expectedVersion: 2, expectedReferencedNodeIds: [], snapshot, sourceVersions });
+    expect(result.snapshot.nodes[0]!.status).toBe(change === "unchanged" ? "supported" : "needs_check");
+    expect(result.snapshot.nodes[1]!.status).toBe("supported");
+    expect(result.snapshot.edges).toEqual(snapshot.edges);
+  });
+
+  it("does not allow the ordinary snapshot write to bypass manual confirmation", async () => {
+    const { repo, courseId, record } = await pending();
+    const snapshot = structuredClone(record.snapshot); snapshot.nodes[0]!.status = "supported";
+    await expect(repo.replace(f.scope, courseId, { expectedVersion: 1, snapshot, sourceVersions: record.sourceVersions }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await repo.get(f.scope, courseId)).toEqual(record);
+  });
+});
+
 describe("opening knowledge repository", () => {
   it("returns null from get/getVersion when no row exists", async () => {
     const { courseId } = await seedCourseMaterial();

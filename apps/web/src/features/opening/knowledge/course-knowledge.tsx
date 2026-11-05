@@ -7,6 +7,7 @@ import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { ConfirmKnowledgeNode } from "./confirm-knowledge-node";
 
 const KIND_ORDER: Record<KnowledgeNode["kind"], number> = {
   chapter: 0, concept: 1, procedure: 2, problem_type: 3,
@@ -50,6 +51,7 @@ export function CourseKnowledge({
 }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const [snapshot, setSnapshot] = useState<KnowledgeSnapshot | null>(null);
+  const [record, setRecord] = useState<Awaited<ReturnType<OpeningApi["getCourseKnowledge"]>> | null>(null);
   const [actions, setActions] = useState<ThinTutorActionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -62,6 +64,8 @@ export function CourseKnowledge({
     try {
       const knowledge = await api.getCourseKnowledge(courseId);
       setSnapshot(knowledge.snapshot);
+      setRecord(knowledge);
+      setSelected(null);
       try {
         const tutor = await api.listTutorActions({
           courseId,
@@ -168,6 +172,11 @@ export function CourseKnowledge({
                   {node.label}
                   <span className="ml-2 font-normal text-text-2">{knowledgeKindLabel[node.kind]} · {knowledgeStatusLabel[node.status]}</span>
                 </button>
+                {record ? <ConfirmKnowledgeNode node={node} record={record} api={api} onReload={() => void load()}
+                  onConfirmed={next => {
+                    setRecord(next); setSnapshot(next.snapshot); setActions([]);
+                    setSelected(previous => previous ? next.snapshot.nodes.find(item => item.id === previous.id) ?? null : null);
+                  }} /> : null}
               </li>
             ))}
           </ul>
