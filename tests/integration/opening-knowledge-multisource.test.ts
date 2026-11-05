@@ -46,7 +46,7 @@ async function rebuild(courseId: string) {
   return result;
 }
 
-it("persists one exact definition with both source/version/page references and keeps conflicting text separate", async () => {
+it("persists exact-source unions and same-name different-text candidates without declaring semantic conflict", async () => {
   const { sql, scope } = fixture, courseId = randomUUID();
   await sql`INSERT INTO courses(id,workspace_id,title,slug)
     VALUES(${courseId},${scope.workspaceId},'Multi-source course',${courseId})`;
@@ -58,8 +58,12 @@ it("persists one exact definition with both source/version/page references and k
   expect(saved.snapshot.nodes).toHaveLength(2);
   const merged = saved.snapshot.nodes.find(node => node.evidenceChunkIds.includes(a.chunkId));
   expect(merged?.evidenceChunkIds.slice().sort()).toEqual([a.chunkId, b.chunkId].sort());
-  expect(saved.snapshot.nodes.find(node => node.evidenceChunkIds.includes(conflict.chunkId))?.evidenceChunkIds)
-    .toEqual([conflict.chunkId]);
+  expect(merged?.status).toBe("needs_check");
+  const separate = saved.snapshot.nodes.find(node => node.evidenceChunkIds.includes(conflict.chunkId));
+  expect(separate?.evidenceChunkIds).toEqual([conflict.chunkId]);
+  expect(separate?.status).toBe("needs_check");
+  expect(separate?.id).not.toBe(merged?.id);
+  expect(saved.snapshot.edges).toEqual([]);
   expect(saved.sourceVersions).toEqual({ [a.sourceId]: 1, [b.sourceId]: 7, [conflict.sourceId]: 3 });
   const chunks = await createOpeningKnowledgeRepository(sql).listAuthorizedChunks(scope, courseId);
   expect(chunks.filter(chunk => merged?.evidenceChunkIds.includes(chunk.id)).map(chunk => ({
@@ -68,6 +72,24 @@ it("persists one exact definition with both source/version/page references and k
     { sourceId: a.sourceId, version: a.version, page: a.page },
     { sourceId: b.sourceId, version: b.version, page: b.page },
   ].sort((left, right) => left.sourceId.localeCompare(right.sourceId)));
+  expect(chunks.find(chunk => chunk.id === conflict.chunkId))
+    .toMatchObject({ sourceId: conflict.sourceId, sourceVersion: 3, page: 5, text: "café\nx2 + x₁" });
+  // Persisted API readback carries status and original node evidence to the renderer.
+  expect(await createOpeningKnowledgeRepository(sql).get(scope, courseId)).toEqual(saved);
+});
+
+it("keeps exact complete definitions supported through real extraction merge, replacement and readback", async () => {
+  const { sql, scope } = fixture, courseId = randomUUID();
+  await sql`INSERT INTO courses(id,workspace_id,title,slug)
+    VALUES(${courseId},${scope.workspaceId},'Exact definitions',${courseId})`;
+  const a = await material(courseId, "cafe\u0301\r\nx² + x₁", 1, 2);
+  const b = await material(courseId, "café\nx² + x₁", 7, 42);
+  const saved = await rebuild(courseId);
+  expect(saved.snapshot.nodes).toHaveLength(1);
+  expect(saved.snapshot.nodes[0]).toMatchObject({ courseId, kind: "concept", label: "向量的定义", status: "supported" });
+  expect(saved.snapshot.nodes[0]!.evidenceChunkIds.slice().sort()).toEqual([a.chunkId, b.chunkId].sort());
+  expect(saved.sourceVersions).toEqual({ [a.sourceId]: 1, [b.sourceId]: 7 });
+  expect(await createOpeningKnowledgeRepository(sql).get(scope, courseId)).toEqual(saved);
 });
 
 it("rebuilds with a new merged UUID while preserving the old referenced skill and repository identity guard", async () => {

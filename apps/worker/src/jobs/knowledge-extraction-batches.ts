@@ -99,6 +99,24 @@ export function mergeKnowledgeBatches(courseId: string, version: number, snapsho
       if (!edgeKeys.has(key)) { edgeKeys.add(key); merged.edges.push(next); }
     }
   }
+  // Different complete definitions with the same local name are review candidates,
+  // not a proven semantic conflict. Compare only independent source sets; chapters
+  // from the same material must not trigger this cross-source rule.
+  const namedDefinitions = new Map<string, Array<{ node: KnowledgeSnapshot["nodes"][number]; key: string; sources: Set<string> }>>();
+  for (const node of merged.nodes) {
+    const key = exactTextDefinition(node, courseId, byId, slicedChunkIds);
+    if (!key) continue;
+    const name = JSON.stringify([courseId, node.kind, node.label.normalize("NFC")]);
+    const sources = new Set(node.evidenceChunkIds.map(id => byId.get(id)!.sourceId));
+    const previous = namedDefinitions.get(name) ?? [];
+    for (const candidate of previous) {
+      if (candidate.key === key || [...sources].some(source => candidate.sources.has(source))) continue;
+      if (node.status === "supported") node.status = "needs_check";
+      if (candidate.node.status === "supported") candidate.node.status = "needs_check";
+    }
+    previous.push({ node, key, sources });
+    namedDefinitions.set(name, previous);
+  }
   return merged;
 }
 
