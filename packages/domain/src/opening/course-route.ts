@@ -1,6 +1,7 @@
 import type { CourseRequirement, CourseRequirementProgress, LearningActivityKind } from "@aistudy/contracts";
 import type { SnapshotObservation } from "./adaptive/snapshot-sources";
 import { nextLearningStep } from "./adaptive/next-learning-step";
+import { buildDecisionInput } from "./adaptive/decision-input";
 
 /** The manifest is the denominator. Source/context selection must never truncate it. */
 export type CourseRouteObservation=SnapshotObservation&{courseRequirement?:{id:string;revision:number;stableSkillId:string;requirementKey:string};activityId?:string;routeAction?:string;comprehensiveRunKey?:string;questionIdentity?:string|null;firstQuestionExposure?:boolean;evidenceContext?:{responseFormat:"numeric"|"choice"|"text";elapsedSeconds:number|null};sharedFor?:{linkId:string;requirementId:string;requirementRevision:number;stableSkillId:string;sourceCourseId:string;sourceRequirementId:string}[]};
@@ -54,7 +55,7 @@ export function selectCourseRouteStep(rows:readonly CourseRequirementProgress[],
 }
 /** The full observation context remains the existing adaptive policy's responsibility. */
 export function courseRouteLearningDecision(observations:readonly SnapshotObservation[]){
-  return nextLearningStep({observations,status:observations[0]?.verifiedCorrect==="yes"&&observations[0].independentAttempt==="yes"?"observed_independent":"unobserved",wantsFullExplanation:false});
+  return nextLearningStep(buildDecisionInput({ observations, wantsFullExplanation: false }));
 }
 export function remainingCourseComprehensiveRequirements(rows:readonly CourseRequirementProgress[],observations:readonly CourseRouteObservation[],runKey:string):string[]{
   return rows.filter(row=>row.requirement.mandatory).filter(row=>{
