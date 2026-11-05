@@ -1,6 +1,6 @@
 import type { Scope, LearningAgenda } from "@aistudy/contracts";
 import { isDeepStrictEqual } from "node:util";
-import { assembleLearningAgenda, learningDecisionInvalidation, nextLearningStep, toSnapshotEvidence, SPAN_REQUIREMENT_KEY, type LearningDecision, type NextLearningStepInput } from "@aistudy/domain";
+import { assembleLearningAgenda, buildDecisionInput, learningDecisionInvalidation, nextLearningStep, toSnapshotEvidence, SPAN_REQUIREMENT_KEY, type LearningDecision, type NextLearningStepInput } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { readOpeningLearningDecision } from "./opening-learning-decisions";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
@@ -47,6 +47,7 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
   if (goal.tutorNextAction && !authorization.authorized) reasons.push(`permission:${authorization.reason}`);
   let status = String(activity.status) as LearningAgenda["status"];
   const retestId = text(checkpoint.retestId ?? route.retestId);
+  let dueRetest = false;
   if (retestId) {
     const [retest] = await tx`SELECT r.*,t.status AS task_status,t.not_before FROM opening_retest_activities r
       LEFT JOIN opening_tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.owner_user_id=r.owner_user_id
@@ -55,6 +56,8 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
     if (!retest || ["cancelled","expired","invalidated"].includes(String(retest.status)) || retest.task_status === "skipped") { status = "cancelled"; reasons.push("retest_cancelled_or_unavailable"); }
     else if ([retest.snoozed_until,retest.not_before_at,retest.not_before,retest.scheduled_start_at ?? retest.recommended_at].some(value => value && new Date(value).getTime() > Date.now())) { status = "deferred"; reasons.push("retest_deferred"); }
     else if (retest.status === "completed" || retest.task_status === "done") status = "completed";
+    else dueRetest = ["accepted", "in_progress"].includes(String(retest.status)) && retest.task_status === "pending"
+      && (retest.scheduled_start_at ?? retest.recommended_at) != null;
   }
   const sourceIds = [...new Set([...(activity.source_ids as string[]), ...Object.keys(decision?.policyVersion === "span-teaching-v2" ? {} : decision?.sourceVersions ?? {})])];
   const sources = sourceIds.length ? await tx`SELECT s.id,s.version FROM opening_sources s JOIN course_asset_memberships m
@@ -108,9 +111,8 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
     observations = state.features.filter(row => row.requirementKey === (route.requirementKey ?? SPAN_REQUIREMENT_KEY))
       .reverse().map(row => projected.get(row.observationId)!);
   }
-  const suggestion = invalidationReasons.length ? nextLearningStep({ observations,
-    status: !observations.length ? "unobserved" : observations[0]!.verifiedCorrect === "yes" && observations[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check",
-    wantsFullExplanation: intent.explanationStyle === "full", ...(intent.learningPhase ? { learningPhase: intent.learningPhase as NextLearningStepInput["learningPhase"], phaseSource: "explicit" as const } : {}) }) : null;
+  const suggestion = invalidationReasons.length ? nextLearningStep(buildDecisionInput({ observations,
+    wantsFullExplanation: intent.explanationStyle === "full", ...(retestId ? { dueRetest } : {}), ...(intent.learningPhase ? { learningPhase: intent.learningPhase as NextLearningStepInput["learningPhase"], phaseSource: "explicit" as const } : {}) })) : null;
   const captured = decision ? parseVersion(decision) : {};
   return assembleLearningAgenda({ courseId, goalId: text(route.goalId ?? object(goal.learningBudget).goalId), activityId: aid, sessionId,
     itemVersionId: text(attempt?.item_version_id), status, mode: agendaMode(object(captured.ruleDecision).activityKind ?? route.action),

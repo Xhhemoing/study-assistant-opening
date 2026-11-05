@@ -1,5 +1,5 @@
 import type { TeachingLearnerFocus } from "@aistudy/contracts";
-import { ADAPTIVE_STRATEGY_VERSION, nextLearningStep, resolveGoalLearningContext, selectPrerequisiteRepair } from "@aistudy/domain";
+import { ADAPTIVE_STRATEGY_VERSION, buildDecisionInput, nextLearningStep, resolveGoalLearningContext, selectPrerequisiteRepair } from "@aistudy/domain";
 import type { LearnerSnapshotRead } from "../planning/learner-snapshot-service";
 import { normalizeSkillLabelKey } from "../learning/skill-label-options";
 
@@ -21,10 +21,13 @@ export function teachingLearnerFocus(read: LearnerSnapshotRead, courseId: string
   // A label-only legacy task must not borrow the first of several requirements.
   const hasTarget = skill !== undefined || requestedRequirementKey !== undefined;
   const requirementKey = requestedRequirementKey ?? skill?.requirementKey ?? null;
-  const observations = source.observations.filter(row => hasTarget
-    && normalizeSkillLabelKey(row.skillLabel) === key && (row.requirementKey ?? null) === requirementKey)
-    .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || a.id.localeCompare(b.id));
-  const next = nextLearningStep({ status: skill?.status ?? "unobserved", observations, wantsFullExplanation });
+  const decisionInput = buildDecisionInput({
+    observations: source.observations.filter(row => hasTarget
+      && normalizeSkillLabelKey(row.skillLabel) === key && (row.requirementKey ?? null) === requirementKey),
+    wantsFullExplanation,
+  });
+  const { observations } = decisionInput;
+  const next = nextLearningStep(decisionInput);
   const goalContext = resolveGoalLearningContext(source.goal, read.sources.date);
   const prerequisiteRepair = next.activityKind === "transfer_check" ? null : selectPrerequisiteRepair({ targetSkillLabel: skill?.skillLabel ?? label,
     knowledgeNodes: source.knowledgeNodes, observations: source.observations, goalContext, now });

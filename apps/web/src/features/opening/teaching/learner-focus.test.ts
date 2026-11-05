@@ -25,6 +25,62 @@ it.each([
   expect(result?.focusObservationId).toBe(correct === "no" ? "22222222-2222-4222-8222-222222222222" : null);
 });
 
+it.each([
+  { verifiedCorrect: "unknown" as const, independentAttempt: "unknown" as const, reasonCode: "unverified_only" },
+  { verifiedCorrect: "yes" as const, independentAttempt: "no" as const, reasonCode: "needs_check" },
+])("does not trust an independent summary over current $verifiedCorrect/$independentAttempt facts", fact => {
+  const value = read("yes"), source = value.sources.courses[0]!;
+  source.observations = [{ ...source.observations[0]!, verifiedCorrect: fact.verifiedCorrect,
+    independentAttempt: fact.independentAttempt, assistance: "unknown" }];
+  // Intentionally keep the previously read snapshot summary independent.
+  expect(value.snapshot.courses[0]!.skills[0]!.status).toBe("observed_independent");
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)).toMatchObject({
+    activityKind: "diagnose", reasonCode: fact.reasonCode, focusObservationId: null, recentAssistance: ["unknown"],
+  });
+});
+
+it("uses canonical ordering for shuffled observations and stable ties without mutating the source", () => {
+  const value = read("yes"), source = value.sources.courses[0]!, base = source.observations[0]!;
+  const earlier = { ...base, id: "z", attemptedAt: "2026-10-15T08:00:00Z" };
+  const tiedWrong = { ...base, id: "a", verifiedCorrect: "no" as const, independentAttempt: "no" as const };
+  const tiedCorrect = { ...base, id: "b" };
+  for (const observations of [[earlier, tiedCorrect, tiedWrong], [tiedWrong, earlier, tiedCorrect]]) {
+    source.observations = observations;
+    const originalOrder = observations.map(row => row.id);
+    expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)).toMatchObject({
+      activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "a",
+    });
+    expect(source.observations.map(row => row.id)).toEqual(originalOrder);
+  }
+});
+
+it("does not let older success plus an independent summary confirm the newest unknown attempt", () => {
+  const value = read("yes"), source = value.sources.courses[0]!, base = source.observations[0]!;
+  source.observations = [base, { ...base, id: "latest-unknown", attemptedAt: "2026-10-17T00:00:00Z",
+    verifiedCorrect: "unknown", independentAttempt: "unknown", assistance: "unknown" }];
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)).toMatchObject({
+    activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null,
+    recentAssistance: ["unknown", "independent"],
+  });
+});
+
+it("does not borrow current independent evidence from another course/requirement or stale rows", () => {
+  const value = read("yes"), source = value.sources.courses[0]!, base = source.observations[0]!;
+  source.observations = [
+    { ...base, id: "stale", attemptedAt: "2026-10-18T00:00:00Z", usableForCurrentVersion: "no" },
+    { ...base, id: "other-requirement", requirementKey: "other" },
+    { ...base, id: "current", verifiedCorrect: "unknown", independentAttempt: "unknown", assistance: "unknown" },
+  ];
+  value.sources.courses.push({ ...source, courseId: "other-course", observations: [{ ...base, id: "other-course-success" }] });
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false, null)).toMatchObject({
+    requirementKey: null, activityKind: "diagnose", reasonCode: "unverified_only", focusObservationId: null,
+    recentAssistance: ["unknown"], recentErrors: [],
+  });
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", true, null)).toMatchObject({
+    activityKind: "full_explain", reasonCode: "requested_full", focusObservationId: null,
+  });
+});
+
 it("keeps assisted success separate and honors an explicit full explanation", () => {
   expect(teachingLearnerFocus(read("yes", true), courseId, "Linear Algebra", false)?.activityKind).toBe("reduced_help_practice");
   expect(teachingLearnerFocus(read("no"), courseId, "Linear Algebra", true)).toMatchObject({ activityKind: "full_explain", focusObservationId: null });

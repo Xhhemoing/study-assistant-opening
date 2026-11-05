@@ -4,14 +4,28 @@ import { OpeningSourceError, type OpeningScope } from "./opening-sources";
 /** Owner-only, version-pinned plain text; object keys and rendered HTML never leave this reader. */
 export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id: string, input: { version?: number; page?: number }) {
   return sql.begin("isolation level repeatable read read only", async tx => {
-    const rows = await tx`SELECT s.version,s.mime,s.parse_state,s.upload_state FROM opening_sources s
+    const rows = await tx`SELECT s.version,s.mime,s.parse_state,s.upload_state,s.error,
+      EXISTS (SELECT 1 FROM opening_jobs j WHERE j.workspace_id=s.workspace_id
+        AND j.owner_user_id=${scope.ownerUserId} AND j.kind='index-source'
+        AND j.payload->>'sourceId'=s.id::text AND j.payload->>'sourceVersion'=s.version::text) AS published,
+      EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id) AS ai_excluded
+      FROM opening_sources s
       JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.id=${id} AND s.workspace_id=${scope.workspaceId}`;
     const source = rows[0];
     if (!source) throw new OpeningSourceError("NOT_FOUND", "Source not found");
     const version = input.version ?? Number(source.version);
     if (version < 0 || version > Number(source.version)) throw new OpeningSourceError("NOT_FOUND", "Source version not found");
-    if (source.upload_state !== "uploaded" || (version === Number(source.version) && source.parse_state !== "ready")) {
+    // replaceChunks atomically commits ready chunks and the index-source job.
+    // That existing publication receipt survives retries; raw/staged chunks do not qualify.
+    // AI exclusion is not asset deletion: keep existing ready/historical self-reads.
+    // Only the additional non-ready PDF retry access is denied for excluded material.
+    const publishedPdf = source.mime === "application/pdf" && source.published === true
+      && source.ai_excluded === false
+      && (source.error as { code?: string } | null)?.code !== "PRIVACY_EXCLUDED"
+      && ["queued", "running", "failed", "not_started"].includes(String(source.parse_state));
+    if (source.upload_state !== "uploaded" || (version === Number(source.version) && source.parse_state !== "ready" && !publishedPdf)) {
       throw new OpeningSourceError("CONFLICT", "材料尚未完成正文解析");
     }
     const stats = await tx`SELECT page,sum(length(text))::int AS characters,bool_or(text ~ '[^[:space:]]') AS readable
