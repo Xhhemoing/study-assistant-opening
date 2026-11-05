@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CourseRequirement, Scope } from "@aistudy/contracts";
 import type { CourseRouteObservation } from "@aistudy/domain";
 import type { Sql } from "postgres";
 
-const mocks = vi.hoisted(() => ({ read: vi.fn(), observations: vi.fn(), goal: vi.fn(), create: vi.fn(), capture: vi.fn(), record: vi.fn(), reserve: vi.fn() }));
-vi.mock("./opening-course-route-read", () => ({ readOpeningCourseRoute: mocks.read, readCourseRouteObservations: mocks.observations, readCourseRouteSourceChunks: vi.fn(async () => []) }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), observations: vi.fn(), goal: vi.fn(), create: vi.fn(), capture: vi.fn(), record: vi.fn(), reserve: vi.fn(), retestOutcome: vi.fn() }));
+vi.mock("./opening-course-route-retest-state", () => ({ readOpeningCourseRouteRetestOutcome: mocks.retestOutcome }));
+vi.mock("./opening-course-route-read", () => ({ readOpeningCourseRoute: mocks.read, readCourseRouteObservations: mocks.observations, readCourseRouteSourceChunks: vi.fn(async () => [{ id: "chunk", sourceId: "source", sourceVersion: 1, page: null }]) }));
 vi.mock("./opening-learning-goals", () => ({ assertLearningGoalAction: mocks.goal, readLearningGoal: mocks.goal }));
 vi.mock("./opening-teaching-activities", () => ({ createOpeningTeachingActivityInTransaction: mocks.create, mapTeachingActivity: vi.fn() }));
 vi.mock("./opening-learning-capacity", () => ({ reserveOpeningLearningActivityBudget: mocks.reserve }));
@@ -22,7 +24,8 @@ const row = (id: string, overrides: Partial<CourseRouteObservation> = {}): Cours
 const scope = { workspaceId: "w", ownerUserId: "u" } as Scope;
 // No connection or database package is constructed: mock only scoped I/O;
 // the real action entry, requirement qualification, builder and policy run.
-const sql = Object.assign(vi.fn(async () => []), { begin: async (fn: (tx: unknown) => unknown) => fn(sql) }) as unknown as Sql;
+const query = vi.fn(async (): Promise<Record<string, unknown>[]> => []);
+const sql = Object.assign(query, { begin: async (fn: (tx: unknown) => unknown) => fn(sql) }) as unknown as Sql;
 const start = () => createOpeningCourseRouteActions(sql, { compilerEnabled: true }).start(scope, "c", { goalId: "g", expectedGoalRevision: 1, requirementId: "r", expectedRequirementRevision: 1, clientKey: "request", minutes: 20 });
 beforeEach(() => {
   vi.clearAllMocks();
@@ -39,6 +42,39 @@ describe("course route action canonical teaching decisions", () => {
     const result = await start();
     expect(result).toMatchObject({ kind: "ready", action: "full_explain", activity: { learnerFocus: { activityKind: "full_explain", reasonCode: "repeated_assisted_error", focusObservationId: "latest" } } });
     expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ context: { action: "full_explain" }, decisionInput: { status: "needs_check", observations: [{ id: "latest" }, { id: "older" }] } });
+    expect(mocks.reserve).toHaveBeenCalledTimes(1);
+    expect(mocks.record).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, 2])("真实复测受助结果覆盖%d次先前独立检查后仍进入减少帮助练习", async priorChecks => {
+    const activityId = randomUUID(), observationId = randomUUID(), goalId = randomUUID();
+    const currentRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID() };
+    const context = { goalId, goalRevision: 1, requirementId: currentRequirement.id, requirementRevision: 1,
+      stableSkillId: currentRequirement.stableSkillId, requirementKey: "key", action: "transfer_check", retestId: randomUUID() };
+    const binding = { id: currentRequirement.id, revision: 1, stableSkillId: currentRequirement.stableSkillId, requirementKey: "key" };
+    const current = row(observationId, { courseRequirement: binding, activityId, verifiedCorrect: "yes", errors: [],
+      // The second case has no help on this attempt: the real retest reader
+      // reports assistance from delivered interval help on the baseline instead.
+      assistance: priorChecks === 1 ? "hinted" : "independent", independentAttempt: priorChecks === 1 ? "no" : "yes" });
+    const previous = Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, { courseRequirement: binding,
+      verifiedCorrect: "yes", assistance: "independent", independentAttempt: "yes", errors: [],
+      attemptedAt: `2026-10-${24 + i}T00:00:00Z`, questionIdentity: `question-${i}`, firstQuestionExposure: true }));
+    query.mockResolvedValueOnce([{ id: activityId, path_version: 1, goal_json: { courseRoute: context } }]);
+    mocks.read.mockResolvedValue({ scopeState: "confirmed", materials: [{ sourceId: "source", sourceVersion: 1, available: true }],
+      requirements: [{ requirement: currentRequirement, status: "assisted", observationId, sourcesAvailable: true, missingReasons: [] }] });
+    mocks.goal.mockResolvedValue({ id: goalId, revision: 1, courseIds: ["c"] });
+    mocks.observations.mockResolvedValue({ projected: [current, ...previous], raw: [{ id: observationId, activityId, submittedAt: current.attemptedAt }] });
+    mocks.retestOutcome.mockResolvedValue("assisted");
+    const result = await createOpeningCourseRouteActions(sql, { compilerEnabled: true }).next(scope, "c", {
+      goalId, expectedGoalRevision: 1, activityId, expectedPathVersion: 1, observationId, clientKey: "next", minutes: 20,
+    });
+    expect(result).toMatchObject({ kind: "ready", action: "reduced_help_practice", activity: { learnerFocus: {
+      activityKind: "reduced_help_practice", reasonCode: "requested_consolidate", recentAssistance: ["hinted", ...previous.map(() => "independent")],
+    } } });
+    expect(mocks.retestOutcome).toHaveBeenCalledWith(sql, scope, context.retestId, current);
+    expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ context: { action: "reduced_help_practice" }, decisionInput: {
+      status: "needs_check", learningPhase: "consolidate", phaseSource: "automatic", observations: [{ id: observationId, assistance: "hinted", independentAttempt: "no" }, ...previous.map(previous => ({ id: previous.id })).reverse()],
+    } });
     expect(mocks.reserve).toHaveBeenCalledTimes(1);
     expect(mocks.record).toHaveBeenCalledTimes(1);
   });

@@ -123,7 +123,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       comprehensiveRunKey=key;
     }
     if(comprehensiveIds)step={requirementId:requestedId||step.requirementId,action:"comprehensive",focusObservationId:currentObservation?.verifiedCorrect==="no"?currentObservation.id:null};
-    const selected=progress.find(row=>row.requirement.id===step.requirementId)!;
+    const selectedStep=step;
+    const selected=progress.find(row=>row.requirement.id===selectedStep.requirementId)!;
     if(!selected.sourcesAvailable)return choice(courseId,"source_unavailable",[selected.requirement.id]);
     const all=await readCourseRouteObservations(tx,scope,courseId);
     const decisionInput=courseRouteDecisionInput(selected.requirement,all.projected.map(row=>currentObservation&&row.id===currentObservation.id?currentObservation:row),{dueRetest:Boolean(boundRetestId),origin:currentObservation});

@@ -26,6 +26,35 @@ describe("course route repository decision qualification", () => {
       .toEqual({ activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null });
   });
 
+  it.each([1, 2])("最新真实受助成功不被之前%d次独立检查稀释", priorChecks => {
+    const previous = Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, { attemptedAt: `2026-10-${24 + i}T00:00:00Z` }));
+    for (const assistance of ["hinted", "revealed"] as const) {
+      const current = row("helped", { assistance, independentAttempt: "no" });
+      const input = courseRouteDecisionInput(requirement, [...previous, current], { origin: current });
+      expect(input).toMatchObject({ status: "needs_check", learningPhase: "consolidate", phaseSource: "automatic" });
+      expect(input.observations.map(observation => observation.id)).toEqual(["helped", ...previous.map(observation => observation.id).reverse()]);
+      expect(nextLearningStep(input)).toEqual({ activityKind: "reduced_help_practice", reasonCode: "requested_consolidate", focusObservationId: null, phase: "consolidate", phaseSource: "automatic" });
+      expect(nextLearningStep(courseRouteDecisionInput(requirement, [current, ...previous], { dueRetest: true })))
+        .toMatchObject({ activityKind: "transfer_check", reasonCode: "due_retest", phase: "maintain" });
+    }
+  });
+
+  it("受助观察仍须有当前要求资格，错误或未验证结果不触发订正阶段", () => {
+    const previous = row("prior", { attemptedAt: "2026-10-26T00:00:00Z" });
+    const wrongBindings = [undefined, { ...previous.courseRequirement!, id: "other" },
+      { ...previous.courseRequirement!, revision: 1 }, { ...previous.courseRequirement!, stableSkillId: "other" }];
+    for (const courseRequirement of wrongBindings) {
+      const helped = row("helped", { courseRequirement, assistance: "hinted", independentAttempt: "no" });
+      const input = courseRouteDecisionInput(requirement, [previous, helped], { origin: helped });
+      expect(input.observations.map(observation => observation.id)).toEqual(["prior"]);
+      expect(input).not.toHaveProperty("learningPhase");
+      expect(nextLearningStep(input)).toMatchObject({ activityKind: "transfer_check", reasonCode: "independent" });
+    }
+    expect(decision([previous, row("wrong", { assistance: "hinted", independentAttempt: "no", verifiedCorrect: "no" })]))
+      .toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "wrong" });
+    expect(courseRouteDecisionInput(requirement, [row("unverified", { assistance: "hinted", verifiedCorrect: "unknown" })])).not.toHaveProperty("learningPhase");
+  });
+
   it("普通路线使用最新事实；显式origin保留原反馈范围，其他要求不会混入", () => {
     const old = row("origin", { verifiedCorrect: "no", attemptedAt: "2026-10-26T00:00:00Z" });
     const latest = row("latest");

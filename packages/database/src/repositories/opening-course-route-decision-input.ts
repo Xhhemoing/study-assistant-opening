@@ -20,5 +20,13 @@ export function courseRouteDecisionInput(requirement: CourseRequirement, observa
   if (local && (local.verifiedCorrect !== "yes" || local.assistance !== "independent")) {
     matching = matching.filter(row => !row.sharedFor?.length);
   }
-  return buildDecisionInput({ observations: matching, wantsFullExplanation: false, ...(options.dueRetest ? { dueRetest: true } : {}) });
+  const input = buildDecisionInput({ observations: matching, wantsFullExplanation: false, ...(options.dueRetest ? { dueRetest: true } : {}) });
+  const latest = input.observations[0];
+  // A current assisted success still needs reduced-help correction even when
+  // earlier independent checks outnumber it (including interval-help retests).
+  // Use the existing phase control without inventing or upgrading evidence.
+  if (!options.dueRetest && latest?.verifiedCorrect === "yes" && (latest.assistance === "hinted" || latest.assistance === "revealed")) {
+    return { ...input, learningPhase: "consolidate" as const, phaseSource: "automatic" as const };
+  }
+  return input;
 }
