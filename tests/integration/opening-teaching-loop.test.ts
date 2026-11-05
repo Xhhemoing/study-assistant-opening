@@ -154,7 +154,8 @@ describe("ActivitySpec publication source trust boundary (PG)", () => {
       for (const expectedVersion of [0, 1]) {
         if (expectedVersion === 1) await content.publishActivitySpec(f.scope, input);
         if (kind === "unavailable version") await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
-          VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')`;
+          VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')
+          ON CONFLICT(source_id,version) DO UPDATE SET availability='unavailable'`;
         const before = await snapshot();
         await expect(content.publishActivitySpec(f.scope, { ...input, expectedVersion, sourceRefs: [input.sourceRefs![0]!, ref] }))
           .rejects.toMatchObject({ code: kind === "nonexistent version" ? "CONFLICT" : "VALIDATION" });
@@ -190,7 +191,8 @@ describe("ActivitySpec publication source trust boundary (PG)", () => {
     const spec = await content.publishActivitySpec(f.scope, input);
     await f.sql`UPDATE opening_sources SET version=3 WHERE id=${sourceId}`;
     await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
-      VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')`;
+      VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')
+      ON CONFLICT(source_id,version) DO UPDATE SET availability='unavailable'`;
     await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${sourceId} AND source_version=2`;
     const before = await snapshot();
     expect(await content.publishActivitySpec(f.scope, input)).toEqual(spec);
