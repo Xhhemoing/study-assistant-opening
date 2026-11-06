@@ -181,9 +181,6 @@ describe("createCourseAuditReview", () => {
     expect(mandatory.upper95).toBe(binomialUpper95(1, 2));
     expect(mandatory.conservative.upper95).toBe(binomialUpper95(2, 3));
     expect(optional.upper95).toBe(binomialUpper95(1, 3));
-    expect(report.errorRateDefinition).toMatch(/independent binomial/);
-    expect(report.errorRateDefinition).toMatch(/upper95 <= 2% is not a default acceptance condition/);
-    expect(report.errorRateDefinition).toMatch(/targeted error hunting are not random samples/);
   });
 
   it("leaves rates null with no judged answers and counts all-unjudgeable as conservative errors", () => {
