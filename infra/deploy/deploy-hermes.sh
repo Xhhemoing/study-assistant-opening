@@ -57,7 +57,8 @@ if [[ "$ACTION" == deploy ]]; then
   verify_release
   ssh_run true || fail 'Trusted SSH connection unavailable; no deployment was attempted.'
   local_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-source.XXXXXXXX.tar.gz")"
-  git archive --format=tar.gz --output="$local_archive" "$COMMIT"
+  # The server matches committed text such as .worker-protocol exactly; local CRLF conversion must not apply.
+  git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$local_archive" "$COMMIT"
   remote_archive="$(ssh_run 'mktemp /tmp/aistudy-source.XXXXXXXX.tar.gz')"
   [[ "$remote_archive" =~ ^/tmp/aistudy-source\.[A-Za-z0-9]+\.tar\.gz$ ]] || fail 'Invalid remote staging path.'
   scp -q -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
