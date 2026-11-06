@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -123,12 +123,69 @@ test("parser is installed and seeded before integration runs with explicit Linux
   assert.ok(install > 0 && install < seed && seed < check && check < parserTests && parserTests < integration);
 });
 
-test("every job pins a runner image that the pinned Playwright supports", () => {
-  const runners = [...workflow.matchAll(/^[ ]{4}runs-on:\s*(\S+)/gm)].map((match) => match[1]);
-  const jobs = [...workflow.matchAll(/^[ ]{2}([a-z][a-z0-9_-]*):\n/gm)].map((match) => match[1])
-    .filter((name) => !["pull_request", "push", "workflow_dispatch"].includes(name));
-  assert.ok(runners.length >= 9 && runners.length === jobs.length, `one runs-on per job (${runners.length} runners, ${jobs.length} jobs)`);
-  assert.deepEqual([...new Set(runners)], ["ubuntu-24.04"]);
-  assert.doesNotMatch(workflow, /runs-on:\s*ubuntu-latest/);
+// Job ids: any GitHub-valid id (letter or "_" first), optionally quoted. The jobs
+// section ends at the next top-level key, so later top-level keys are not jobs.
+const JOB_KEY = String.raw`^[ ]{2}["']?([A-Za-z_][\w-]*)["']?:[ \t]*(?:#.*)?\n`;
+function jobBlocks(yaml) {
+  const start = yaml.search(/^jobs:[ \t]*(?:#.*)?\n/m);
+  if (start < 0) return [];
+  const rest = yaml.slice(start).replace(/^jobs:[^\n]*\n/, "");
+  const end = rest.search(/^[^\s#][^\n]*:/m);
+  const body = end < 0 ? rest : rest.slice(0, end);
+  return [...body.matchAll(new RegExp(`${JOB_KEY}([\\s\\S]*?)(?=${JOB_KEY}|(?![\\s\\S]))`, "gm"))]
+    .map((match) => ({ name: match[1], block: match[2] }));
+}
+
+test("every job in every workflow pins a runner image that the pinned Playwright supports", () => {
+  const dir = `${root}.github/workflows/`;
+  const files = readdirSync(dir).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(files.includes("ci.yml"));
+  for (const file of files) {
+    const yaml = readFileSync(`${dir}${file}`, "utf8").replaceAll("\r\n", "\n");
+    const jobs = jobBlocks(yaml);
+    assert.ok(jobs.length > 0, `${file} defines jobs`);
+    for (const { name, block } of jobs) {
+      if (/^[ ]{4}uses:/m.test(block)) continue; // reusable workflow call: the callee pins its own runner
+      const runner = block.match(/^[ ]{4}runs-on:[ \t]*["']?([^"'\s#]+)["']?/m)?.[1];
+      assert.equal(runner, "ubuntu-24.04", `${file} job ${name} must pin runs-on: ubuntu-24.04`);
+    }
+  }
+  assert.ok(jobBlocks(workflow).length >= 9);
   assert.match(docs, /ubuntu-24\.04/);
+  assert.match(docs, /transaction_timeout/);
+});
+
+test("quality gate requires both split jobs and handler-browser-spikes shares the test env", () => {
+  const jobs = Object.fromEntries(jobBlocks(workflow).map(({ name, block }) => [name, block]));
+  const needs = jobs.quality.match(/^[ ]{4}needs:\s*\[([^\]]*)\]/m)?.[1].split(",").map((name) => name.trim());
+  const gate = jobs.quality.match(/checks\.py gate ([^\n]+)/)?.[1].trim().split(/\s+/);
+  for (const name of ["integration-parser", "handler-browser-spikes", "static-unit", "build"]) {
+    assert.ok(jobs[name], `${name} job exists`);
+    assert.ok(needs?.includes(name), `quality needs ${name}`);
+    assert.ok(gate?.includes(name), `quality gate requires ${name}`);
+  }
+  assert.deepEqual([...gate].sort(), needs.filter((name) => !["changes", "docs"].includes(name)).sort(),
+    "every worker the quality job waits for is also required to succeed");
+  assert.match(jobs["handler-browser-spikes"], /^[ ]{4}env: \*quality-env$/m);
+  assert.match(jobs["integration-parser"], /^[ ]{4}env: &quality-env$/m);
+  const dir = `${root}.github/workflows/`;
+  for (const file of readdirSync(dir).filter((name) => /\.ya?ml$/.test(name))) {
+    assert.doesNotMatch(readFileSync(`${dir}${file}`, "utf8"), /^\s+cache:\s*["']?pip/m,
+      `${file}: the parser venv cache is the only Python dependency cache`);
+  }
+});
+
+test("every gate job runs even when a worker fails and requires exactly the workers it waits for", () => {
+  const jobs = Object.fromEntries(jobBlocks(workflow).map(({ name, block }) => [name, block]));
+  const gates = Object.entries(jobs).filter(([, block]) => /checks\.py gate /.test(block));
+  assert.deepEqual(gates.map(([name]) => name).sort(), ["quality", "worker-gate"]);
+  for (const [name, block] of gates) {
+    // Without always(), a failed worker skips the gate, and a skipped required check can pass.
+    assert.match(block, /^[ ]{4}if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/m, `${name} must run with if: always()`);
+    const needs = block.match(/^[ ]{4}needs:\s*\[([^\]]*)\]/m)?.[1].split(",").map((item) => item.trim());
+    const gate = block.match(/checks\.py gate ([^\n]+)/)?.[1].trim().split(/\s+/);
+    assert.ok(needs?.includes("changes") && needs.includes("docs"), `${name} waits for classification and docs`);
+    assert.deepEqual([...gate].sort(), needs.filter((item) => !["changes", "docs"].includes(item)).sort(), `${name} gate covers its workers`);
+    for (const worker of gate) assert.ok(jobs[worker], `${name} gate names an existing job ${worker}`);
+  }
 });
