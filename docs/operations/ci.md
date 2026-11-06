@@ -51,10 +51,18 @@ and handler files remain serial because they share database fixtures. Local
 checks retain one Vitest worker and the shared-host protections by default.
 
 All jobs run on `ubuntu-24.04` rather than `ubuntu-latest`. Since 2026-11 the
-latest label resolves to Ubuntu 26.04, which Playwright 1.53.2 does not support
-(`playwright install chromium --with-deps` fails), and its setup-python pip cache
-post step fails because the cache directory is absent. Move off the pin only
-together with a Playwright upgrade and a green CI run on the new image.
+latest label resolves to Ubuntu 26.04, where Playwright 1.53.2 cannot install
+Chromium (`playwright install chromium --with-deps` fails) and the image's newer
+`pg_dump` writes `SET transaction_timeout = 0;`, which `pg_restore` into the PG16
+service rejects (`opening-measurement-recovery`). Move off the pin only together
+with a Playwright upgrade, a PG16-compatible dump client, and a green CI run on
+the new image.
+
+The parser virtualenv cache (`parser-venv-v1-…`, keyed by the lockfile and the
+install script) is the only Python dependency cache. `setup-python` no longer uses
+`cache: pip`: when the venv cache hits, nothing creates `~/.cache/pip`, and the
+pip cache post step then fails whenever its own entry is missing. A venv cache
+miss reinstalls from the lockfile.
 
 Playwright browsers and parser model files are cached using the lockfile and
 model manifest as cache keys. Install and model preparation/check commands still
