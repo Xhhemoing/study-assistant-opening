@@ -36,7 +36,7 @@
 | --- | --- | --- |
 | 提交上的远端 CI | run 36290760180 / job 108540258710 的 integration 失败；后续 handler、browser、build 跳过 | 跳过不等于发现缺陷，也不等于通过；S0 完成修复后的实际运行 |
 | 本地既有修复 | 空库迁移、fixture 失败连接清理、parser 配置及离线转换已有实现 | 保留并交接，不重复创建相同修复任务 |
-| 已记录的本地验证 | 9 个 TS 配置、unit/contract 1166 个通过、定向 DB 34 个、Python 14 个、tooling 67 个及构建通过 | 引用 [验证入口记录](../evidence/2026-09-27-opening-hardening/verification-entry.md)，不冒充本次重新运行 |
+| 已记录的本地验证 | 9 个 TS 配置、unit/contract 1166 个通过、定向 DB 34 个、Python 14 个、tooling 67 个及构建通过 | 引用 [验证入口记录](../../archive/superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)，不冒充本次重新运行 |
 | 尚缺验证 | 当前修复上的完整 integration/handler/browser、Redis spike、修改后的 Linux CI | S0 列为未验收；早期其他提交的通过不能替代 |
 | 已审阅的业务风险 | 候选来源错配、资格规则不一致、修订不支持、到期集合错误、201 条响应越界 | S1–S6 以能捕获原问题的失败测试落实 |
 | 并发风险的证据强度 | retest 原函数受控模拟显示“首次查重为空、等待锁后已经接受”可能误报冲突 | 这是控制流证据；S1 补真实 PostgreSQL 双连接交错测试 |

@@ -42,5 +42,5 @@
 - Plan: [rp7-plan.md](./rp7-plan.md)
 - Holistic opt A/B/G: [holistic-opt-abg-implement.md](./holistic-opt-abg-implement.md)
 - Residual register: [residual-register.md](./residual-register.md)
-- Research / AC: [15-research-hardening.md](../../plans/opening-release/15-research-hardening.md) §RP7
-- Ops CI: [docs/operations/ci.md](../../../operations/ci.md)
+- Research / AC: [15-research-hardening.md](../../../../superpowers/plans/opening-release/15-research-hardening.md) §RP7
+- Ops CI: [docs/operations/ci.md](../../../../operations/ci.md)

@@ -59,7 +59,7 @@
 
 **Severity:** P0  
 **Owners:** Pipeline (reissue API) + Experience (queue + materials retry)  
-**Prior plan to absorb:** `docs/superpowers/evidence/2026-10-10-opening-release/upload-interrupt-client-represign-p0-plan.md` (never implemented)
+**Prior plan to absorb:** `docs/archive/superpowers/evidence/2026-10-10-opening-release/upload-interrupt-client-represign-p0-plan.md` (never implemented)
 
 ### Files
 
@@ -214,4 +214,4 @@ D (upload→course) ─┘
 
 ## Ready for Integrator
 
-After PM AGREE on Packages **A–D**, assign Implementers; each package writes its own `*-implement.md` / accept under `docs/superpowers/evidence/2026-10-10-opening-release/` (or next dated folder). This file stays the **batch contract**.
+After PM AGREE on Packages **A–D**, assign Implementers; each package writes its own `*-implement.md` / accept under `docs/archive/superpowers/evidence/2026-10-10-opening-release/` (or next dated folder). This file stays the **batch contract**.

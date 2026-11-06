@@ -1,6 +1,6 @@
 # S1：审核闭环与候选安全（本轮实现和定向检查完成，待用户浏览器验收）
 
-计划：[learning-continuity-implementation.md](../../plans/2026-09-27-learning-continuity-implementation.md#s1正确审核可靠重试与继续入口)。
+计划：[learning-continuity-implementation.md](../../../../superpowers/plans/2026-09-27-learning-continuity-implementation.md#s1正确审核可靠重试与继续入口)。
 
 ## 执行边界
 

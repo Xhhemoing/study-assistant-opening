@@ -158,7 +158,7 @@ Q02最终验收依赖保持不变，但脱敏固定样本、离线evaluator与�
 
 ## 6. 当前证据入口
 
-- `../evidence/2026-09-12-opening-release/baseline.md`：安装、lint、类型、构建与测试的实际结果。
+- `../../archive/superpowers/evidence/2026-09-12-opening-release/baseline.md`：安装、lint、类型、构建与测试的实际结果。
 - `opening-release/tasks.json`：任务依赖与状态。
 - 各子计划：准确文件、接口、测试样例和执行步骤。
 - 计划自检：`node scripts/validate-opening-plan.mjs`、`node --test tests/tooling/opening-plan.test.mjs tests/tooling/opening-capability-plan.test.mjs`；仅校验任务引用/依赖/需求覆盖，不证明代码正确或学校服务已接通。
