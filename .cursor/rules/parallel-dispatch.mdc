@@ -1,0 +1,39 @@
+---
+description: 主控在 Cursor 中拆分任务、并行派发实现/调查/审查子 Agent、集成与提升主线时使用
+alwaysApply: false
+---
+
+# Cursor 并行派单（主控）
+
+规则以根 `AGENTS.md` 与 `docs/operations/agent-workflow.md`（"Cursor 中的执行映射"）为准；本文件只写 Cursor 里的具体操作。
+
+## 子 Agent 分工
+
+- 实现：`best-of-n-runner`，每个独占一个 worktree 与分支。prompt 第一句要求它先完整阅读主 checkout 中的 `.cursor/agents/aistudy-lane-worker.md`（派单时给出该文件在本机的绝对路径；worktree 基于主线时文件可能尚不存在），再附完整任务卡。
+- 只读调查：`aistudy-explorer` 或内置 `explore`，可多个并行，开工前的盘点和任务卡草稿都交给它们。
+- 指定审查：`aistudy-pr-reviewer`，传入 PR 号、base 与精确 head SHA；派单前先 `git fetch` 对应分支，因为审查者不能 fetch。
+- 异家族审查：Cursor 子 Agent 都是 Claude，按“Claude 写的交 GPT”，它们实现的代码与方案改动由主控在 shell 中另跑 `codex exec -s read-only -C <repo> -m gpt-6.1-sol -c model_reasoning_effort=high -o <结论文件> "<brief>"`；高风险 PR 一律需要。brief 写全目标、PR、base 与 head SHA、用本地 `git diff <base-sha>...<head-sha>` 读差分、审查边界、红线和输出格式（同 `aistudy-pr-reviewer`），不要假设它读过 `AGENTS.md`。
+- CI 失败定位：`ci-investigator`。bugbot / security-review 可以补充，但不代替指定审查。
+
+## 并发与资源
+
+- 同时运行的实现子 Agent 最多 5 个；只读调查和审查不占名额，同时运行的子 Agent 总数建议不超过 8。
+- 子 Agent 默认共享主控 checkout，会互相覆盖改动：写文件的子 Agent 一律放进独立 worktree，同一 checkout 里只跑只读任务。
+- 内存是本机并行的主要瓶颈：同一时刻只跑一个 web/worker typecheck 或 build（run-heavy 锁会自动串行）。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交给精确 head CI。
+- worktree 全机上限 25 个；合入后用 `git worktree list` 清理已合入且干净的 worktree。
+
+## 派单前
+
+1. 各卡写集合互不重叠，同一文件只有一个 writer。纵向切片（contracts → repository → domain → web/worker → tests）放在同一车道。
+2. 共享独占项留给主控：STATUS、迁移编号与 schema、`package-lock.json`、env 示例与 `packages/config/src/registry.ts`、`ci.yml`、`.cursor/**`、`AGENTS.md`。卡里写明"由集成者在合并时处理"。
+3. 接口未定时先由主控定下接口并写进卡的"接口决定"，不让两条车道各写一份契约。
+4. 任务卡字段：目标、owner、worktree/分支、允许路径、只读要求、红线、parents、接口决定、共享独占项、限定验证、风险、Git 授权、预算（实现 1 次、审查 1 次、集中修复 1 次）、汇报格式。
+5. 互相独立的子 Agent 在同一条消息里一起发出；耗时任务用 `run_in_background: true`。
+
+## 集成节奏
+
+1. 实现返回 DONE 后，主控核对实际 diff 与 PR 正文，再并行派 `aistudy-pr-reviewer` 与 `codex exec` 异家族审查（不涉及方案的纯文档、配置改动可只走指定审查）。两路都无阻塞才算通过；某一路失败或没读完范围记为未审查，不用同家族自检代替。
+2. CHANGES_REQUESTED：resume 原实现子 Agent 集中修复一次，之后只复核修复部分。
+3. 低风险：指定审查 APPROVED 且精确 head 的 required CI 全绿，以 merge commit 合入 `integration/opening`。高风险：独立 PR 到 `feat/opening-release`，满足长期授权条件才由主控合入，否则等用户批准。
+4. `integration/opening` 有达标结果就开提升 PR 到 `feat/opening-release`，同样经审查与 CI 后合入。
+5. 合入主线后由主控更新 `docs/STATUS.md`，每个结果一行。

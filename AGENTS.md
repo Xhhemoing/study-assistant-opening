@@ -40,9 +40,9 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 
 ## 多工具协作
 
-主控 PM 负责目标、Kanban 调度、验收与交接，不写业务代码、不计编码车道；实现与测试由已授权 worker 执行，集成由唯一集成者执行。先读原卡目标、允许路径、parents、接口决定和最近断点；按需只读 STATUS，写入由集成者独占。分工和门禁见 [多工具开发分工](docs/operations/agent-workflow.md)，取代旧角色与派单流程；分工本身不授予提交、推送、合并或发布权限。
+主控 PM 负责目标、Kanban 调度、验收与交接，不写业务代码、不计编码车道；实现与测试由已授权 worker 执行，集成由唯一集成者执行。先读原卡目标、允许路径、parents、接口决定和最近断点；按需只读 STATUS，写入由集成者独占。分工和门禁见 [多工具开发分工](docs/operations/agent-workflow.md)，取代旧角色与派单流程；分工本身不授予提交、推送、合并或发布权限。在 Cursor 中由主会话同时担任主控 PM 与唯一集成者，子 Agent 映射见该文档的“Cursor 中的执行映射”，派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
 
-- 以文件、接口和资源隔离规划八条编码流，并配置独立评审与集成能力；这是目标容量，不是已运行数量或配额豁免。实际启动必须服从平台及当前上层有效配额（包括仍有效的两名实现者限制），名额不足则按依赖排队，不绕过或虚报并行。
+- 以文件、接口和资源隔离规划八条编码流，并配置独立评审与集成能力；这是目标容量，不是已运行数量或配额豁免。实际启动必须服从平台配额与本机资源；用户 2026-11-06 将同时运行的实现者上限定为 5（只读调查与审查不计），名额不足则按依赖排队，不绕过或虚报并行。
 - 项目不再以固定 3 个 Agent／3 棵 worktree 作为上限。worktree 按隔离需要和有效配额、资源及所有权准入；注册旧树不等于活跃写者，不为凑车道新建树或删除未知成果。
 - 持久 Kanban 是任务执行与交回入口，workspace=worktree；优先续接原卡、原 owner 和原会话，不重复建卡、实现或 dispatcher。目标、允许路径、parents、接口决定、限定 unit／包 types、风险与结果 metadata 必填；投递不等于接受或执行。
 - 同文件单 writer。共享契约、锁文件、迁移编号、schema、STATUS 及跨接口决定由唯一集成者独占协调；worker 不自行扩大 allowlist。接管须先核原 owner 已停止写入且明确交回，不能停他人任务抢权。
@@ -74,7 +74,7 @@ Name unit and integration tests `*.test.ts`/`*.test.tsx`; name browser tests `*.
 
 ## Commits and Pull Requests
 
-Use Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `test:`, and follow `.agents/skills/aistudy-git-workflow/SKILL.md` for safe Git operations. Push only to the authorized formal remote `study-assistant-opening`, not the legacy `origin`. PRs describe the full base-to-head diff, verification and unverified boundaries. Low-risk PRs target `integration/opening`; each needs designated Claude Opus 5.5 high approval and exact-head required CI before integration. The sole integrator promotes eligible results serially to `feat/opening-release` as soon as promotion gates pass, not on a twice-daily schedule; promotion PRs retain the same review/CI gates. High-risk authorization, privacy, transaction, migration or data-correctness changes use independent PRs to `feat/opening-release`, designated cross-family review and `needs_input` pending explicit user approval. A standing user authorization recorded in `docs/operations/agent-workflow.md` counts as explicit approval only within its stated conditions. No workflow text grants automatic deployment, migration execution, production configuration, real-data operations, destructive migrations or final sample/design sign-off. UI browser verification remains with the user; do not fabricate screenshots.
+Use Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `test:`, and follow `.agents/skills/aistudy-git-workflow/SKILL.md` for safe Git operations. Push only to the formal repository `Xhhemoing/study-assistant-opening` through the remote named `study-assistant-opening` (rename `origin` in fresh clones); never push to a legacy repository remote. PRs describe the full base-to-head diff, verification and unverified boundaries. Low-risk PRs target `integration/opening`; each needs designated Claude Opus 5.5 high approval and exact-head required CI before integration. The designation is the model: in Cursor the review runs as the `aistudy-pr-reviewer` subagent, in other tools through the claude CLI. The sole integrator promotes eligible results serially to `feat/opening-release` as soon as promotion gates pass, not on a twice-daily schedule; promotion PRs retain the same review/CI gates. High-risk authorization, privacy, transaction, migration or data-correctness changes use independent PRs to `feat/opening-release`, designated cross-family review and `needs_input` pending explicit user approval. A standing user authorization recorded in `docs/operations/agent-workflow.md` counts as explicit approval only within its stated conditions. No workflow text grants automatic deployment, migration execution, production configuration, real-data operations, destructive migrations or final sample/design sign-off. UI browser verification remains with the user; do not fabricate screenshots.
 
 ## graphify
 
