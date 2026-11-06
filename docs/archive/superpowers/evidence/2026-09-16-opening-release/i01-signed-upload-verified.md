@@ -1,6 +1,6 @@
 # I01 signed upload verified — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Implemented by two `xhh/gpt-5.6-luna-fast` worker runs (`mu492tnj-310dd074` core, `mu49erjn-5a1eb277` magic/sniffing + unit rewrite); integration gate + completion pass finished by lead after a third delegation attempt returned no result. Infrastructure provisioned by lead (INTEGRATOR): portable MinIO `RELEASE.2025-04-22T22-12-26Z` (exact compose-pinned version) into gitignored `.local/minio.exe` with bucket `aistudy`, portable Redis 8.10.1 into `.local/redis8/` (I03 prep), deps pinned at `c5a0012`.
 
 ## Delivered

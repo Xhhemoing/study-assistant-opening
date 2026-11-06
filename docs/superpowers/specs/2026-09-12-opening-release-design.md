@@ -3,7 +3,7 @@
 > **当前范围补充（2026-09-14）：**用户已要求把学校自建邮箱、钉钉、视频/录音理解、课程知识架构及主动辅导安排纳入计划。见[学习管家能力扩展](2026-09-14-learning-capability-expansion.md)。下文保留原批准范围与历史研究；“转写可暂缓/知识图谱暂缓”等不再用于排除新增课程级能力。原限制仍适用于未授权采集、通用知识图谱平台及自训练模型。
 
 > 状态：用户已确认需求范围、设计，以及从AIstudy已提交基线建立隔离开学版；普通开发与验证无需逐项再次审批。
-> 工作区：E:/Project/study-assistant-opening；分支feat/opening-release；起点e7639c9930bf230185551c86ea825e2524c40a39。
+> 工作区：`<repo>`；分支feat/opening-release；起点e7639c9930bf230185551c86ea825e2524c40a39。
 > 本文实证部分是批准前研究快照；执行进展由实施计划和证据目录记录，不追溯改写历史结果。原工作区未提交内容不在本次分支内。
 > 标记：[V] 本轮直接观察／执行证据；[H] 设计建议或推演；[T] 尚待验证；[C] 已发现冲突或证据边界。
 
@@ -99,13 +99,13 @@
 
 ### E01 本地候选基座 [V]
 
-发现 E:/Project/AIstudy。git HEAD=e7639c9；工作区有既有修改和未跟踪的goals/plan-state相关文件，未修改／提交／暂存这些内容。
+发现 AIstudy。git HEAD=e7639c9；工作区有既有修改和未跟踪的goals/plan-state相关文件，未修改／提交／暂存这些内容。
 仓库ADR-001规定Next.js/TypeScript、PostgreSQL、BullMQ/Redis、S3兼容存储及web/worker模块化结构。
-另有E:/Project/Deep-student（本地优先，AGPL-3.0）和E:/Project/Soul（个人软件，含采集/人格方向）。仅阅读README作为参考，不复制私人档案或引入其采集范围。
+另有Deep-student（本地优先，AGPL-3.0）和Soul（个人软件，含采集/人格方向）。仅阅读README作为参考，不复制私人档案或引入其采集范围。
 
 ### E02 当前工作区单元测试 [V]
 
-命令（cwd=E:/Project/AIstudy）：
+命令（cwd=AIstudy）：
 `bash scripts/run-heavy.sh node node_modules/vitest/vitest.mjs run --project unit`
 结果：`Test Files 111 passed (111)`；`Tests 507 passed (507)`；`Duration 71.43s`。
 日志：aistudy-unit-baseline.log。
@@ -145,7 +145,7 @@ openpyxl提示文件无默认样式并应用默认样式，文本提取完成。
 
 ### 推荐方向：隔离复用AIstudy，而非再建立第二套主后端
 
-用户已批准复用，已从提交e7639c9930bf230185551c86ea825e2524c40a39建立独立工作区E:/Project/study-assistant-opening与feat/opening-release分支；原工作区及其未提交内容保留。
+用户已批准复用，已从提交e7639c9930bf230185551c86ea825e2524c40a39建立独立工作区`<repo>`与feat/opening-release分支；原工作区及其未提交内容保留。
 不继承旧产品所有功能目标；本次范围作为独立增量规格。隔离基线先重测，不自动搬入未提交0016迁移。
 若基础链在限定的首个交付切片内证明不可安全复用，再提交替代方案；不一边修旧框架一边无预算重写。
 原先Next.js＋FastAPI是未检查本地资产前的候选；现有单语言契约和数据结构使增加第二业务后端不利于开学交付。
@@ -261,6 +261,6 @@ openpyxl提示文件无默认样式并应用默认样式，文本提取完成。
 - 老课表缺少英语等课程与钟点，不将空白自动判作空闲。
 - 用户服务器配置只在部署阶段核对，不阻塞独立本地实现。
 
-用户已批准本设计与AIstudy隔离复用；已建立E:/Project/study-assistant-opening，未覆盖原工作区修改。接下来依详细实施计划持续执行普通代码、测试和本地修复。
+用户已批准本设计与AIstudy隔离复用；已建立`<repo>`，未覆盖原工作区修改。接下来依详细实施计划持续执行普通代码、测试和本地修复。
 需要另行确认的事项限于购买/收费调用预算与密钥授权、生产部署或生产数据迁移、对外开放、扩大个人数据采集、以及改变已确认产品范围。未具备外部配置时，可继续接口实现、离线测试和其他不依赖该配置的切片。
 本设计批准不是对实际运行质量的验收；每个功能须提供自己的实现与验证证据。

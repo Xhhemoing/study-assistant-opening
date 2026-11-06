@@ -1,6 +1,6 @@
 # I03 outbox dispatch + BullMQ runtime verified — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Implemented by `xhh/gpt-5.6-luna-fast` worker run `mu54vjl7-111122ac`, gap-fix pass by run `mu55xjfe-949855df`; final full-suite run and smoke-restoration by lead.
 
 ## Delivered

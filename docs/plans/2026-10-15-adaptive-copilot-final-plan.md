@@ -101,7 +101,7 @@ PR #46 的代码改动（`propose-tasks.ts` 约 15 行 + vitest 测试）已复�
 所有 Grok 卡共用以下尾注，粘贴时附在每张卡末尾：
 
 ```text
-仓库：E:/Project/study-assistant-opening，基于最新 feat/opening-release 新建分支，在独立 worktree 里做。
+仓库：<repo>，基于最新 feat/opening-release 新建分支，在独立 worktree 里做。
 不许动：packages/contracts 公共导出、migration、package.json/lockfile、CI（需要时停下来报告）。
 先读根 AGENTS.md 和目标包的 AGENTS.md。不要做 commit/push 之外的 Git 历史操作，不跑浏览器测试，不调用付费模型 API。
 返回：改了哪些文件、实际运行的命令和结果、没解决的问题。卡片规则和代码现状对不上时，停下来报告，不要自行扩大范围。

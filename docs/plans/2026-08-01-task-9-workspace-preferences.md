@@ -111,4 +111,4 @@ flock -w 180 /tmp/hermes-project-heavy.lock bash -c "
 "
 ```
 
-Review the diff, stage only Task 9 files, commit without pushing, then refresh and verify `/home/ubuntu/aistudy-gates.bundle`.
+Review the diff, stage only Task 9 files, commit without pushing, then refresh and verify `<home>/aistudy-gates.bundle`.

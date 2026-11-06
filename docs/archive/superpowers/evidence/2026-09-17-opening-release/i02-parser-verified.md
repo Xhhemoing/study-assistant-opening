@@ -1,6 +1,6 @@
 # I02 structured conversion verified — 2026-09-17
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Part A implemented by `xhh/gpt-5.6-luna-fast` run `mu5953xm-0d2c8b3a` (request timed out after files landed; lead verified + committed); part B core by `mu5d560p-947d9f6a`, tests by `mu5g9w0d-f8a9c209` + one lead assertion fix (fixture-content strings). Infrastructure by lead: Docling 2.126.0 venv.
 
 ## Delivered

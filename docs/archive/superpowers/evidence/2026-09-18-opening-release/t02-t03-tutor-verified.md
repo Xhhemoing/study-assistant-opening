@@ -1,6 +1,6 @@
 # T02 / T03 tutor path verified — 2026-09-18
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 T02 unit/integration slice landed in `7ad048b`; T03 slice in `7f98283`; Windows encoding fix in `fa4d023`.
 Executed across lead session + parallel subagent runs (no active runs at acceptance time); test files were updated concurrently during the run — final state re-verified below.
 

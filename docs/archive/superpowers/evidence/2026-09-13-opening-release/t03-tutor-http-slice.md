@@ -1,6 +1,6 @@
 # T03 saved conversations / tutor HTTP slice → verified (2026-09-13)
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Marked by aistudy-lead for **U03-blocking HTTP vertical** (tutor/conversations/sources), not the full T03 plan checklist.
 
 ## Delivered (verified this slice)
