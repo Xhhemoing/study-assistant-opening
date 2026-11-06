@@ -82,6 +82,11 @@ export function createCompileTeachingUnitWorkerDeps(
     : {};
   // Per-result, one-use bookkeeping keeps handler preflight for custom builders
   // without repeating the production builder's check (including wrapped builders).
+  // Contract: the object the production builder returns must not be mutated in
+  // place before it reaches the handler. The skip keys on object identity, so an
+  // in-place edit (e.g. to sourceRefs) would bypass the handler preflight for the
+  // edited refs; the authoritative check inside the publish transaction still
+  // rejects them. Wrappers that change the input must return a new object.
   const preflightedInputs = new WeakSet<object>();
   return {
     budget,
