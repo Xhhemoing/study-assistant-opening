@@ -109,6 +109,28 @@ it("preserves only the manually confirmed definition across rebuilds and recheck
   expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(1);
 });
 
+it("rejects confirming a node that cites only source A after source B, also in the course, changed version", async () => {
+  const { sql, scope } = fixture, courseId = randomUUID();
+  await sql`INSERT INTO courses(id,workspace_id,title,slug)
+    VALUES(${courseId},${scope.workspaceId},'Whole source set course',${courseId})`;
+  const a = await material(courseId, "x² + x₁", 1, 2);
+  const b = await material(courseId, "x² - x₁", 1, 3);
+  const original = await rebuild(courseId);
+  const onlyA = original.snapshot.nodes.find(node => node.evidenceChunkIds.includes(a.chunkId))!;
+  expect(onlyA.evidenceChunkIds).toEqual([a.chunkId]);
+  expect(onlyA.status).toBe("needs_check");
+  // B moves to v2 without a graph-version bump; A and the selected node's own evidence are unchanged.
+  await sql`UPDATE opening_sources SET version=2 WHERE id=${b.sourceId}`;
+  await sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${b.sourceId}`;
+  await sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${b.chunkId}`;
+  const knowledge = createOpeningKnowledgeRepository(sql);
+  await expect(knowledge.confirmNode(scope, courseId, onlyA.id,
+    { expectedVersion: original.version, sourceVersions: original.sourceVersions })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await knowledge.get(scope, courseId)).toEqual(original);
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+});
+
 it("keeps exact complete definitions supported through real extraction merge, replacement and readback", async () => {
   const { sql, scope } = fixture, courseId = randomUUID();
   await sql`INSERT INTO courses(id,workspace_id,title,slug)

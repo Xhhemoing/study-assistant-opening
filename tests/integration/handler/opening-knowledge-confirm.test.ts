@@ -37,6 +37,7 @@ async function seed(scope = f.scope) {
       evidenceChunkIds: [chunkId], status: "needs_check" }] } });
   return { courseId, nodeId, expectedVersion: 1, sourceVersions };
 }
+type Body = Omit<Awaited<ReturnType<typeof seed>>, "courseId">;
 const send = (courseId: string, body: unknown, cookie = f.cookie) => POST(new Request(
   `http://localhost/api/opening/courses/${courseId}/knowledge/confirm`, { method: "POST",
     headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) }),
@@ -67,5 +68,15 @@ it("validates pinned versions and rejects unexpected fields", async () => {
   expect((await send(courseId, { nodeId: body.nodeId, expectedVersion: 1 })).status).toBe(400);
   expect((await send(courseId, { ...body, sourceVersions: {} })).status).toBe(409);
   expect((await send(courseId, { ...body, expectedVersion: 0 })).status).toBe(409);
+  expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+});
+
+it.each([
+  ["nodeId is not a UUID", (body: Body) => ({ ...body, nodeId: "not-a-uuid" })],
+  ["a sourceVersions key is not a UUID", (body: Body) => ({ ...body, sourceVersions: { "not-a-uuid": 1 } })],
+  ["expectedVersion is negative", (body: Body) => ({ ...body, expectedVersion: -1 })],
+])("rejects a malformed body with 400 and no confirmation row: %s", async (_name, change) => {
+  const { courseId, ...body } = await seed();
+  expect((await send(courseId, change(body))).status).toBe(400);
   expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
 });

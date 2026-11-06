@@ -20,9 +20,19 @@ describe("knowledge confirmation client boundary", () => {
     await expect(createOpeningApi(fetchImpl).confirmKnowledgeNode(courseId, input)).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
-  it("rejects a malformed success without updating local state", async () => {
+  it("rejects a malformed success", async () => {
     const fetchImpl = vi.fn(async () => Response.json({ version: 4, snapshot: {}, sourceVersions: {} }));
     await expect(createOpeningApi(fetchImpl).confirmKnowledgeNode(courseId, input)).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("does not retry a 503", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ error: { code: "UNAVAILABLE", message: "服务暂不可用" } }, { status: 503 }));
+    await expect(createOpeningApi(fetchImpl).confirmKnowledgeNode(courseId, input)).rejects.toMatchObject({ status: 503 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("does not retry a network failure", async () => {
+    const fetchImpl = vi.fn(async (): Promise<Response> => { throw new TypeError("Failed to fetch"); });
+    await expect(createOpeningApi(fetchImpl).confirmKnowledgeNode(courseId, input)).rejects.toBeInstanceOf(TypeError);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
