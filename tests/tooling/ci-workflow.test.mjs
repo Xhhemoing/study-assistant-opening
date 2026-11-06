@@ -138,7 +138,8 @@ function jobBlocks(yaml) {
   // always indented deeper than its key, so it never sits at indent 1-3.
   const jobKeyLine = new RegExp(JOB_KEY);
   for (const line of body.split("\n")) {
-    if (/^[ ]{1,3}[^ #]/.test(line)) {
+    // Whitespace-only lines (spaces then a tab) are blank in YAML, not job keys.
+    if (/^[ ]{1,3}[^\s#]/.test(line)) {
       assert.match(`${line}\n`, jobKeyLine, `jobs section line is not a plain job key: ${line.trim()}`);
     }
   }
@@ -206,17 +207,22 @@ test("every gate job runs even when a worker fails and requires exactly the work
 
 test("every docs_only=false worker is required by exactly one gate job", () => {
   const jobs = jobBlocks(workflow);
-  const workers = jobs
-    .filter(({ block }) => /^[ ]{4}if:.*needs\.changes\.outputs\.docs_only\s*==\s*'false'/m.test(block))
-    .map(({ name }) => name);
+  // Workers are defined by exclusion, not by matching their `if:` text, so a job whose
+  // condition is spelled differently (or missing) cannot silently escape every gate.
+  const gateJobs = jobs.filter(({ block }) => /checks\.py gate /.test(block));
+  const nonWorkers = new Set(["changes", "docs", ...gateJobs.map(({ name }) => name)]);
+  const workers = jobs.filter(({ name }) => !nonWorkers.has(name));
   assert.ok(workers.length >= 5, "worker detection found the code-change jobs");
-  const gated = jobs
-    .filter(({ block }) => /checks\.py gate /.test(block))
+  for (const { name, block } of workers) {
+    // One canonical spelling keeps the docs-only skip auditable; change it here and in ci.yml together.
+    assert.match(block, /^[ ]{4}if:[ \t]*needs\.changes\.outputs\.docs_only == 'false'[ \t]*$/m, `worker ${name} must use if: needs.changes.outputs.docs_only == 'false'`);
+  }
+  const gated = gateJobs
     .flatMap(({ block }) => block.match(/checks\.py gate ([^\n]+)/)[1].trim().split(/\s+/));
-  for (const worker of workers) {
+  for (const { name: worker } of workers) {
     const count = gated.filter((name) => name === worker).length;
     // An ungated worker can fail without blocking merge; a twice-gated one has ambiguous ownership.
     assert.equal(count, 1, `worker ${worker} must appear in exactly one gate, found ${count}`);
   }
-  assert.deepEqual([...gated].sort(), [...workers].sort(), "gates name only docs_only=false workers");
+  assert.deepEqual([...gated].sort(), workers.map(({ name }) => name).sort(), "gates name only docs_only=false workers");
 });
