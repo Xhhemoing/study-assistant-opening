@@ -213,10 +213,11 @@ Rows whose commit SHA differs from the index tip are marked `stale` and need
 re-run on tip. Q03 ledger status is independent of this index.
 
 Evidence of completed slices now lives under `docs/archive/superpowers/evidence/`
-and is read-only; plan lines that point there record where that evidence ended up.
-Evidence not produced yet goes to the `docs/superpowers/evidence/<date>…/` path its
-plan names. The CI classifier protects both trees, so changes in either take the
-full CI path.
+and is read-only apart from privacy redaction; plan lines that point there record
+where that evidence ended up. Ordinary development does not create evidence files:
+only when a plan explicitly requires merge- or release-stage evidence does it go to
+the `docs/superpowers/evidence/<date>…/` path that plan names. The CI classifier
+protects both trees, so changes in either take the full CI path.
 
 ## Opening parser and isolated test bootstrap
 

@@ -28,7 +28,7 @@
 | 角色 | Cursor 中的承担方式 |
 |---|---|
 | 主控 PM 与唯一集成者 | 主会话同时承担，不写业务代码。获授权提交和推送功能分支、开 PR、门禁齐全后合入 `integration/opening` 并提升主线；高风险 PR 只按下文“用户长期授权”的条件合入。部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
-| 实现 worker | 主会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变跨包公开契约或类型的卡（`packages/contracts` 的 schema，或 domain/database 中被其他包消费的导出类型与函数签名），由集成者按用户 2026-11-06 的授权界定。 |
+| 实现 worker | 主会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由集成者按用户 2026-11-06 的授权界定。 |
 | 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
 | 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行，其他工具中用 claude CLI。 |
 | 异家族审查 | Cursor 子 Agent 属 Claude 系列。按 2026-10-28 “Claude 写的交 GPT”原则，Cursor 中实现的代码与方案改动在指定审查之外，再由主会话以 `codex exec` 只读沙箱调用 GPT 审查；高风险 PR 一律需要。 |
