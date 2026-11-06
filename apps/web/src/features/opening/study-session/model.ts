@@ -82,6 +82,8 @@ export type StudySessionPort = {
   choosePhoto(file: File): Promise<StudySessionView>;
   removePhoto(): StudySessionView;
   pause(): Promise<void>;
+  /** After a failed operation the shell reads the adapter's current view back with this; null keeps the screen as it was. */
+  current?(): StudySessionView | null;
 };
 
 const correctLabels: Record<ResultAssistance, string> = {

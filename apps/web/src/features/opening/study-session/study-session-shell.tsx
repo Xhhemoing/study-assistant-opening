@@ -119,7 +119,12 @@ export function StudySession({ port }: { port: StudySessionPort }) {
     if (busy.current) return;
     busy.current = true; const current = generation.current; setPending(true); setError("");
     try { const next = await operation(); if (current === generation.current && next) setView(next); }
-    catch (reason) { if (current === generation.current) setError(reason instanceof Error ? reason.message : "这一步还没确认，答案已保留，请重新读取。"); }
+    catch (reason) {
+      if (current === generation.current) {
+        setError(reason instanceof Error ? reason.message : "这一步还没确认，答案已保留，请重新读取。");
+        try { const shown = port.current?.(); if (shown) setView(shown); } catch { /* a failed read-back keeps the screen and the error above */ }
+      }
+    }
     finally { if (current === generation.current) { busy.current = false; setPending(false); } }
   }
   function sync(operation: () => StudySessionView) {

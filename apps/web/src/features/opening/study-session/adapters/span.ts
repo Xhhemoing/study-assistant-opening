@@ -118,12 +118,12 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const current = draft();
     const sealed = Boolean(current?.submission);
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
-    // After the first answer only the sealed request is shown; a skipped or unknown choice shows nothing.
-    const sealedConfidence = current?.submission?.input.preAnswerConfidence;
+    // After the first answer this tab's sealed request is shown, otherwise the value the server saved; a skipped choice shows nothing.
+    const savedConfidence = sealed ? current?.submission?.input.preAnswerConfidence : attempt?.preAnswerConfidence;
     view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
       sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo,
-      confidence: sealed ? sealedConfidence ? { value: sealedConfidence, locked: true } : undefined
-        : record ? undefined : { value: chosenConfidence(), locked: false },
+      confidence: sealed || record ? savedConfidence ? { value: savedConfidence, locked: true } : undefined
+        : { value: chosenConfidence(), locked: false },
       canPracticeVariant: correctedRedo(),
       canRedo: Boolean(record && adaptSpanResult(record).outcome !== "correct" && !retestId && !photo?.workSource
         && !current?.submission?.input.workSource && !current?.start?.clientKey.startsWith("span-redo:")) };
@@ -230,6 +230,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
         return view;
       }
       return loadQuestion();
+    },
+    current() {
+      return view?.step.kind === "question" && attempt && view.step.id === attempt.id && draft()?.submission?.attemptId === attempt.id ? refresh() : null;
     },
     edit(change: Partial<SpanDraftAnswer>) {
       const current = draft();
