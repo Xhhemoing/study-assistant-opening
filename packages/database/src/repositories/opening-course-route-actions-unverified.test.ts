@@ -38,10 +38,11 @@ beforeEach(() => {
   setup();
 });
 it("缺少可用的当前作答时等待核对", async () => { setup({}, []); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); });
-it("延迟复测 unknown 时等待核对", async () => { setup({ retestId: randomUUID() }); m.retest.mockResolvedValue("insufficient_evidence"); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); });
-it("综合检查 unknown 时等待核对", async () => { setup({ coveredRequirementIds: [ids.requirement], comprehensiveRunKey: "run-key-123" }); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); });
+it("延迟复测 unknown 时等待核对", async () => { setup({ retestId: randomUUID() }); m.retest.mockResolvedValue("assisted"); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); expect(m.grading).not.toHaveBeenCalled(); });
+it("综合检查 unknown 时等待核对", async () => { setup({ coveredRequirementIds: [ids.requirement], comprehensiveRunKey: "run-key-123" }); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); expect(m.grading).not.toHaveBeenCalled(); });
+it("旧综合检查 unknown 时不读取批改状态", async () => { setup({ coveredRequirementIds: [ids.requirement] }); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); expect(m.grading).not.toHaveBeenCalled(); });
 it.each(["queued", "grading"])("批改状态 %s 时等待结果", async status => { m.grading.mockResolvedValue({ status }); expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_unknown" }); });
-it.each(["graded", "needs_manual", "unknown_cost"])("批改状态 %s 继续选步", async status => { m.grading.mockResolvedValue({ status }); expect(await next()).toMatchObject({ kind: "ready", requirementId: ids.requirement }); });
+it.each(["graded", "needs_manual", "unknown_cost"])("批改状态 %s 继续选步", async status => { m.grading.mockResolvedValue({ status }); expect(await next()).toMatchObject({ kind: "ready", requirementId: ids.requirement }); expect(m.grading).toHaveBeenCalledWith(expect.anything(), scope, ids.observation); });
 it("未校准的结果继续同一要求", async () => { expect(await next()).toMatchObject({ kind: "ready", requirementId: ids.requirement, action: "diagnose", activity: { learnerFocus: { reasonCode: "unverified_only" } } }); expect(m.reserve).toHaveBeenCalledTimes(1); });
 it("前置题 unknown 且使用提示后回到目标要求", async () => {
   const target = { ...requirement, id: ids.target, stableSkillId: randomUUID(), requirementKey: "target", prerequisiteIds: [ids.requirement], position: 1 };
@@ -60,4 +61,16 @@ it("前置题 unknown 且使用提示后回到目标要求", async () => {
   expect(verified.reasonCodes).not.toContain("uncalibrated_prerequisite_return");
   expect(verified.intentVersion).toBe(defaultVerified.intentVersion);
   expect(JSON.parse(uncalibrated.intentVersion!)).toMatchObject({ returnBasis: "uncalibrated" });
+});
+
+it.each(["unknown", "verified"] as const)("前置要求 %s 后返回目标已失效时不写入", async state => {
+  const projected = state === "unknown" ? [observation] : [
+    { ...observation, verifiedCorrect: "yes", questionIdentity: "first", firstQuestionExposure: true },
+    { ...observation, id: randomUUID(), activityId: randomUUID(), verifiedCorrect: "yes", questionIdentity: "second", firstQuestionExposure: true, attemptedAt: "2026-10-26T00:00:00Z" },
+  ];
+  setup({ action: "prerequisite", returnTo: ids.target }, projected);
+  expect(await next()).toMatchObject({ kind: "choice", reason: "evidence_changed", requirementIds: [ids.requirement] });
+  expect(m.create).not.toHaveBeenCalled();
+  expect(m.reserve).not.toHaveBeenCalled();
+  expect(m.capture).not.toHaveBeenCalled();
 });

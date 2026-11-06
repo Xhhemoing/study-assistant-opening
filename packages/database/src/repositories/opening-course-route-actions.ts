@@ -95,7 +95,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       }
       if(!currentObservation)return choice(courseId,"evidence_unknown",[requestedId]);
       if(currentObservation.verifiedCorrect==="unknown"){
-        if(origin.context.retestId||comprehensiveIds&&comprehensiveRunKey)return choice(courseId,"evidence_unknown",[requestedId]);
+        if(origin.context.retestId||comprehensiveIds)return choice(courseId,"evidence_unknown",[requestedId]);
         const grading=await readOpeningAiGradingStatusInTx(tx,scope,currentObservation.id);
         if(grading.status==="queued"||grading.status==="grading")return choice(courseId,"evidence_unknown",[requestedId]);
         returnAfterUnknown=Boolean(origin.context.returnTo);
@@ -105,7 +105,10 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         .map(row=>row.id===head!.id?currentObservation!:row);
       const recalculated=courseRequirementProgress(progress.map(row=>row.requirement),focused,new Map(snapshot.materials.filter(row=>row.available).map(row=>[row.sourceId,row.sourceVersion])),await readCourseRouteSourceChunks(tx,scope,courseId));
       progress=recalculated;
-      if(origin.context.returnTo&&(returnAfterUnknown||recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified"))requestedId=origin.context.returnTo;
+      if(origin.context.returnTo&&(returnAfterUnknown||recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified")){
+        if(!progress.some(row=>row.requirement.id===origin.context.returnTo))return choice(courseId,"evidence_changed",[origin.context.requirementId]);
+        requestedId=origin.context.returnTo;
+      }
       else if(recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified")requestedId="";
       if(comprehensiveIds&&comprehensiveRunKey){
         const mandatory=progress.filter(row=>row.requirement.mandatory).map(row=>row.requirement.id);

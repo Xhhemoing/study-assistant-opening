@@ -447,6 +447,24 @@ it("returns from an uncalibrated prerequisite without claiming verification",asy
   const receipt=await activityDecision(returned);expect(receipt.reasonCodes).toContain("uncalibrated_prerequisite_return");expect(receipt.reasonCodes).not.toContain("verified_prerequisite_return");
   expect((await x.repo.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
 });
+it("preserves activity, budget and decisions when the prerequisite return target is archived",async()=>{
+  const x=await seed(2),snapshot=await x.repo.read(f.scope,x.courseId),list=x.requirements.map((row,index)=>index===1?{...row,prerequisiteIds:[x.requirements[0]!.id]}:row);
+  await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:snapshot.requirements.map(row=>({id:row.requirement.id,revision:1})),requirements:list,confirmScope:true});
+  const basic=ready(await x.start());await compile(basic.activity);await answer(basic.activity,0,"incorrect");
+  const repair=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirements[1]!.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
+  expect(repair).toMatchObject({requirementId:x.requirements[0]!.id,action:"prerequisite"});
+  await compile(repair.activity,2);const checked=await answer(repair.activity,0,"correct","hinted",false);
+  const beforeArchive=await x.repo.read(f.scope,x.courseId,repair.activity.id);
+  await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:beforeArchive.requirements.map(row=>({id:row.requirement.id,revision:row.requirement.revision})),requirements:[list[0]!],confirmScope:true});
+  const current=await x.repo.read(f.scope,x.courseId,repair.activity.id),capacity=await readOpeningLearningCapacity(f.sql,f.scope);
+  const activities=await f.sql`SELECT id FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  const decisions=await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  expect(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:repair.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20}))
+    .toMatchObject({kind:"choice",reason:"evidence_changed",requirementIds:[x.requirements[0]!.id]});
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(activities);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(capacity.usedMinutes);
+  expect(await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(decisions);
+});
 it("runs a separate comprehensive check for every requirement before an idempotent current-scope finish",async()=>{
   const x=await seed(2),a=ready(await x.start(0));await compile(a.activity,0);await answer(a.activity,0);await answer(a.activity,1);
   const b=ready(await x.start(1));await compile(b.activity,1);await answer(b.activity,0);const result=await answer(b.activity,1);
