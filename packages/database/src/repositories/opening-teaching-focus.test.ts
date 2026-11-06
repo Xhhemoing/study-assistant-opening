@@ -101,6 +101,33 @@ describe("compiler focus canonical decision input with independent admission gua
       .toEqual({ learnerFocus: { ...focus, goalContext, activityKind: "diagnose", reasonCode: "no_evidence" } });
   });
 
+  it("keeps a course-route snapshot instead of re-deriving it from label/key evidence", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(evidence());
+    const stored = { ...focus, activityKind: "reduced_help_practice" as const, reasonCode: "route_assisted_correction",
+      recentAssistance: ["hinted" as const, "independent" as const], strategyVersion: "course-route-1" };
+    // The same evidence re-derives a different action for a non-route activity.
+    expect((await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, strategyVersion: "adaptive-1" }) as unknown as Sql, scope, newId)).learnerFocus)
+      .toMatchObject({ activityKind: "transfer_check", reasonCode: "independent" });
+    expect(readOpeningCourseEvidence).toHaveBeenCalledTimes(1);
+    for (const activityKind of ["reduced_help_practice", "transfer_check"] as const) {
+      const route = { ...stored, activityKind };
+      expect(await readOpeningTeachingCompilerFocus(sqlFor(route) as unknown as Sql, scope, newId)).toEqual({ learnerFocus: route });
+    }
+    expect(readOpeningCourseEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a course-route focused correction while its answer is still current and incorrect, and clears it otherwise", async () => {
+    const facts = evidence(), captured = facts.evidenceContexts[oldId]!;
+    captured.observation = { ...captured.observation, outcome: "incorrect" };
+    captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    const stored = { ...focus, activityKind: "targeted_explain" as const, reasonCode: "verified_incorrect", focusObservationId: oldId, strategyVersion: "course-route-1" };
+    // A newer independent success refreshes non-route focus (see above) but not the route's snapshot.
+    expect((await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).learnerFocus).toEqual(stored);
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(evidence());
+    expect(await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).toEqual({});
+  });
+
   it("keeps the explicit explanation snapshot without reading evidence", async () => {
     const stored = { ...focus, activityKind: "full_explain" as const, reasonCode: "requested_full" };
     expect(await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).toEqual({ learnerFocus: stored });
