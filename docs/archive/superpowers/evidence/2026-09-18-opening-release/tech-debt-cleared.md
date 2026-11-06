@@ -1,6 +1,6 @@
 # Technical debt cleared — full integration project green for the first time — 2026-09-18
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Debt-removal pass executed by `xhh/gpt-5.6-luna-fast` run `mu6gpa2u-327404b4` (6 suites) + lead (search.test.ts root-cause analysis and contract-aligned fix). Committed as `c7eade3` by the parallel session (its commit message describes parser work; the 7 test files in it are this pass's debt fixes).
 
 ## The debt

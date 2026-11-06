@@ -27,7 +27,7 @@
 |------|--------|--------|
 | 根 AGENTS.md | 1 | - |
 | 包级嵌套 AGENTS.md | 7 (apps/web + 6 packages) | 从 0% → ~2% (409 源文件) |
-| 全局技能 | 22 个 (位于 `~/.agents/skills/`) | - |
+| 全局技能 | 22 个 (位于 `<home>/.agents/skills/`) | - |
 
 **Better-harness 改进效果**:
 - Task-understanding: 66 → 74
@@ -65,7 +65,7 @@
 **现状**:
 - 位于全局 npm 模块,无项目级 `.pi/` 或 `.agents/`
 - 文档与示例在 `examples/extensions/`
-- 技能为用户级 `~/.agents/skills/`
+- 技能为用户级 `<home>/.agents/skills/`
 
 **问题**:
 - Pi 自身无 AGENTS.md
@@ -91,7 +91,7 @@
 **缺失**:
 - 无机制将 AIstudy 的 `aistudy-git-workflow` 推广为全局技能
 - 无机制将 cengfan 的 `cengfan-data-import` 共享
-- 全局 `~/.agents/skills/` 与项目级 `.agents/skills/` 无同步策略
+- 全局 `<home>/.agents/skills/` 与项目级 `.agents/skills/` 无同步策略
 
 ### 3.3 缺少元技能 (Meta-skill)
 
@@ -140,7 +140,7 @@
 
 ### 4.2 中期 (跨项目)
 
-1. 建立 `~/.agents/skills/shared/` 目录,存放可跨项目复用的技能
+1. 建立 `<home>/.agents/skills/shared/` 目录,存放可跨项目复用的技能
 2. 开发 `pi skill sync` 命令,在项目间同步共享技能
 3. 为 better-harness 增加 `--trend` 模式,对比多轮报告
 
@@ -166,4 +166,4 @@ git diff --stat
 
 **风险**:
 - `project/` 目录包含完整源码副本,体积较大,需评估是否纳入提交
-- 分析文档涉及敏感路径 (`C:\Users\86080\.pi\...`),已脱敏处理
+- 分析文档涉及敏感路径 (`<home>\.pi\...`),已脱敏处理

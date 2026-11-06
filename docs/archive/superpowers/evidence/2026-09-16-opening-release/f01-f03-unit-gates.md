@@ -1,6 +1,6 @@
 # F01 / F03 unit-level gate evidence — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Executed by two `xhh-verifier` subagent runs (`mu3nuwr8-f38bc95d`, `mu3nuwr8-fd8959ad`); typecheck re-run by lead. Handler/DB gates remain BLOCKED (no Docker on this host), so F01/F03 stay `blocked`, not `verified`.
 
 ## 1) F01/F02 regression gates (unit) — all green

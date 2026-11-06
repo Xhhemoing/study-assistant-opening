@@ -1,6 +1,6 @@
 # P01 slice 2 verified — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Implemented by `xhh/gpt-5.6-luna-fast` worker run `mu47kbym-7efa48bf`; independently re-verified by read-only verifier run `mu48env0-9b3154c1`.
 
 ## Delivered

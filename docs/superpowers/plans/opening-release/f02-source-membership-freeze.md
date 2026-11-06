@@ -2,7 +2,7 @@
 
 Status: **freeze bump verified** (2026-09-14, see §9). Contract freeze originally adopted by opening-lead 2026-09-13. Do **not** treat remaining F03/I01 resolver gaps as blocked by F02 — F02 contracts are green; F03/I01 sequencing per §4.
 Owner: materials (RU-01 freeze doc) + INTEGRATOR (Zod / interfaces).
-Branch: `feat/opening-release` @ `E:\Project\study-assistant-opening`
+Branch: `feat/opening-release` @ `<repo>`
 
 ## 0) Ruling (adopted)
 

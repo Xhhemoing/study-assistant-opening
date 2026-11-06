@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 已批准规格：`../specs/2026-09-12-opening-release-design.md`；2026-09-14用户要求补齐的能力范围见`../specs/2026-09-14-learning-capability-expansion.md`，与旧范围冲突时以补充为准。
-- 工作区：`E:/Project/study-assistant-opening`；分支`feat/opening-release`；起点`e7639c9930bf230185551c86ea825e2524c40a39`。
+- 工作区：`<repo>`；分支`feat/opening-release`；起点`e7639c9930bf230185551c86ea825e2524c40a39`。
 - 原工作区只读；不搬入未提交的0016迁移和goals/plan-state文件，不自动合并或push。
 - 单用户使用，但所有对象仍按workspace/owner验证；无公开注册、无自行扩大采集。
 - 所有新代码文件≤200行；既有大文件不继续堆业务，不做无关重构。

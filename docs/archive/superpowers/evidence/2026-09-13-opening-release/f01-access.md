@@ -1,6 +1,6 @@
 # F01 access / test-DB evidence pack (NOT verified) — 2026-09-13
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY (no GitHub).
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY (no GitHub).
 
 **Status:** evidence collection only. Do **not** set `tasks.json` F01 → `verified` from this file alone.
 

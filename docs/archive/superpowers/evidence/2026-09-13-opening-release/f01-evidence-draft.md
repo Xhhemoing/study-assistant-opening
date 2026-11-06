@@ -1,6 +1,6 @@
 # F01 evidence draft (not verified yet) — 2026-09-13
 
-Repo: E:/Project/study-assistant-opening; commit 2e52af4. Status: active (PM).
+Repo: `<repo>`; commit 2e52af4. Status: active (PM).
 
 ## Green
 vitest unit test-database + access-policy → 2 files / 6 passed (reconfirmed 2026-09-13).

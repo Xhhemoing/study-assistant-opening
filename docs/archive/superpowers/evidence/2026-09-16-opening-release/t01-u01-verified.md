@@ -1,6 +1,6 @@
 # T01 / U01 verified — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Executed by `xhh/gpt-5.6-luna-fast` workers (`mu3zkybe-edeb3fe2` T01; `mu3zkybf-294c07c8` U01 timed out mid-run, files audited and completed by lead). Test DBs: `aistudy_opening_test` (integration) and `aistudy_opening_e2e` (browser) on portable PG 17.5 at 127.0.0.1:5433.
 
 ## 1) T01 → verified (provider adapter, budget ledger, usage)

@@ -1,6 +1,6 @@
 # T03 durable tutor turn verified — 2026-09-18
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Implemented across `xhh/gpt-5.6-luna-fast` run `mu5r6fef-904eea1d` (mode policy + migration 0021 + candidates repository) and lead (handler core, dispatch bridge, wiring, routes, tests) after the worker punted on the core path.
 
 ## Delivered

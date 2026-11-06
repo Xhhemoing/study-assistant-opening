@@ -1,6 +1,6 @@
 # F01 / F03 verified — DB gates green — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Test database: portable PostgreSQL 17.5 at `127.0.0.1:5433`, db `aistudy_opening_test` (F01 guard: `OPENING_TEST_DB=1 OPENING_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/aistudy_opening_test`). Binaries in gitignored `.local/pgsql`; start with `.local/pgsql/bin/pg_ctl.exe -D .local/pgdata -o "-p 5433 -h 127.0.0.1" -l .local/pg.log start`.
 
 ## 1) F01 → verified

@@ -1,6 +1,6 @@
 # X01 capability contracts / P01 timetable slice evidence — 2026-09-16
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY.
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY.
 Executed by `xhh/gpt-5.6-luna-fast` subagent runs (`mu3oaw29-69aaebe3` X01; P01 runs `mu3oaw28-e25f5736`/`mu3pgrhi-7c12d032`/`mu3pje6j-32d11b5f` failed with connection errors — xhh origin returned HTTP 526, lead finished the P01 slice directly).
 
 ## 1) X01 — verified

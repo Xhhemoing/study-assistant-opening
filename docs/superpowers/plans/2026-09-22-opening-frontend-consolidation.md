@@ -10,7 +10,7 @@
 
 ## 0. 基线、范围和证据边界
 
-- 核查日期：2026-09-22；工作区：`E:/Project/study-assistant-opening`；HEAD：`8d616c0`，叠加大量既有未提交修改。HEAD 单独不能代表本文分析对象。
+- 核查日期：2026-09-22；工作区：`<repo>`；HEAD：`8d616c0`，叠加大量既有未提交修改。HEAD 单独不能代表本文分析对象。
 - 用户选择「视觉与操作一起改」，本轮进一步要求「根据已有信息重新分析和计划」。本轮不修改业务代码、不提交、不部署、不触发真实模型调用。
 - 依据：当前源码、`AGENTS.md`、`apps/web/AGENTS.md`、`docs/product/UX_AND_AI_POLICY.md`、既有 `docs/design/2026-09-20-opening-frontend-review-plan.md` 与 `docs/superpowers/plans/opening-release/continuation-status.md`。
 - graphify 查询已执行，但子图被截断；最终结论以直接源码和浏览器观测为准。

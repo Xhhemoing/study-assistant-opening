@@ -1,6 +1,6 @@
 # F02 opening contracts freeze → verified (2026-09-13)
 
-Repo: `E:/Project/study-assistant-opening`; branch `feat/opening-release`. LOCAL-ONLY (no GitHub).
+Repo: `<repo>`; branch `feat/opening-release`. LOCAL-ONLY (no GitHub).
 
 ## Acceptance checklist
 
