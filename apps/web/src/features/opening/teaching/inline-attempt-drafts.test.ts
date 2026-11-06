@@ -109,6 +109,71 @@ describe("inline attempt draft continuity", () => {
     expect(drafts.get(key)).toEqual(frozen);
   });
 
+  it("freezes an attached photo with an empty answer and replays the identical request after a lost reply", async () => {
+    const { storage } = memoryStorage();
+    const drafts = createInlineAttemptDrafts(storage);
+    const workSource = { id: otherId, version: 2, physicalPage: 3 };
+    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockRejectedValue(new Error("reply lost")) };
+    const original = createInlineAttemptSubmission({ ...input, answer: "", workSource }, client, {
+      onCheckpoint: checkpoint => drafts.set(key, { ...draft, answer: "", workSource, submission: checkpoint }),
+    });
+    await expect(original.submit()).rejects.toThrow("reply lost");
+    expect(client.submitAttempt).toHaveBeenCalledWith(id, expect.objectContaining({ answer: "", workSource }));
+    const recovered = createInlineAttemptDrafts(storage).get(key)!;
+    expect(recovered).toMatchObject({ answer: "", workSource, submission: { input: { answer: "", workSource } } });
+    vi.resetModules();
+    const { createInlineAttemptSubmission: restore } = await import("./inline-attempt-submission");
+    client.submitAttempt.mockResolvedValue({ ...savedObservation, answer: "" });
+    await restore(recovered.submission!.input, client, { checkpoint: recovered.submission }).submit();
+    expect(client.createSession).toHaveBeenCalledTimes(1);
+    expect(client.submitAttempt.mock.calls[1]).toEqual(client.submitAttempt.mock.calls[0]);
+  });
+
+  it("shares an attached photo's in-flight request with a remounted form", async () => {
+    const { storage } = memoryStorage();
+    const drafts = createInlineAttemptDrafts(storage);
+    const workSource = { id: otherId, version: 2, physicalPage: 1 };
+    let resolveSession!: (value: { id: string }) => void;
+    const client = { createSession: vi.fn().mockImplementation(() => new Promise<{ id: string }>(resolve => { resolveSession = resolve; })), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
+    const first = createInlineAttemptSubmission({ ...input, workSource }, client, { onCheckpoint: checkpoint => drafts.set(key, { ...draft, workSource, submission: checkpoint }) }).submit();
+    const persisted = drafts.get(key)!.submission!;
+    const remounted = createInlineAttemptSubmission(persisted.input, client, { checkpoint: persisted }).submit();
+    resolveSession({ id });
+    expect(await remounted).toBe(await first);
+    expect(client.submitAttempt).toHaveBeenCalledExactlyOnceWith(id, expect.objectContaining({ answer: input.answer, workSource }));
+  });
+
+  it("replays a checkpoint saved before photo answers as a text-only request", async () => {
+    const { storage } = memoryStorage();
+    const legacy = { input, attemptKey: `teaching-attempt:${crypto.randomUUID()}`, submitKey: `teaching-answer:${crypto.randomUUID()}`, sessionId: id, attemptId: id, status: "pending" as const };
+    createInlineAttemptDrafts(storage).set(key, withSubmission(legacy));
+    const recovered = createInlineAttemptDrafts(storage).get(key)!;
+    expect(recovered.workSource).toBeUndefined();
+    const client = { createSession: vi.fn(), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt), submitAttempt: vi.fn().mockResolvedValue(savedObservation) };
+    await createInlineAttemptSubmission(recovered.submission!.input, client, { checkpoint: recovered.submission }).submit();
+    expect(client.createSession).not.toHaveBeenCalled();
+    expect(client.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("workSource");
+  });
+
+  it("restores a selected photo but ignores malformed photos and frozen requests with a different photo", () => {
+    const { storage } = memoryStorage();
+    const drafts = createInlineAttemptDrafts(storage);
+    const workSource = { id: otherId, version: 2, physicalPage: 1 };
+    drafts.set(key, { ...draft, workSource });
+    expect(createInlineAttemptDrafts(storage).get(key)).toEqual({ ...draft, workSource });
+    for (const malformed of [{ ...workSource, version: -1 }, { ...workSource, physicalPage: 0 }, { ...workSource, sha256: "x" }]) {
+      drafts.set(key, { ...draft, workSource: malformed });
+      expect(createInlineAttemptDrafts(storage).get(key)).toBeUndefined();
+    }
+    const submission = { input: { ...input, workSource }, attemptKey: `teaching-attempt:${id}`, submitKey: `teaching-answer:${id}`, sessionId: id, attemptId: id, status: "pending" as const };
+    drafts.set(key, { ...draft, workSource, submission });
+    expect(createInlineAttemptDrafts(storage).get(key)?.submission?.input.workSource).toEqual(workSource);
+    for (const shown of [undefined, { ...workSource, physicalPage: 2 }, { ...workSource, version: 3 }]) {
+      drafts.set(key, { ...draft, ...(shown ? { workSource: shown } : {}), submission });
+      expect(createInlineAttemptDrafts(storage).get(key)).toBeUndefined();
+    }
+  });
+
   it("restores the effective self-comparison and stops when that answer was retracted", async () => {
     const revised = { id: otherId, outcome: "correct", referenceCheck: { method: "learner_self_compare" }, revisionKind: "replace" };
     const client = { getObservationHistory: vi.fn().mockResolvedValue({ headObservationId: otherId, revisions: [{ id, outcome: "unverified" }, revised] }) };
