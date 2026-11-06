@@ -207,8 +207,18 @@ describe("createCourseAuditReview", () => {
     expect(report.errorRate.optional).toMatchObject({ complete: true, judged: 49, rate: 1 / 49, pointEstimateWithin2Percent: false });
     const withUnjudgeable = createCourseAuditReview(big, reviewsFor(big,
       g.mandatory.map((item, index): [AuditItem, Outcome] => [item, index === 0 ? "unjudgeable" : "correct"])));
+    // Any unjudgeable answer withholds the verdict until it is resolved; the figures are still reported.
     expect(withUnjudgeable.errorRate.mandatory).toMatchObject({ complete: true, judged: 49, incorrect: 0, rate: 0,
-      conservative: { errors: 1, denominator: 50, rate: 0.02 }, pointEstimateWithin2Percent: true });
+      conservative: { errors: 1, denominator: 50, rate: 0.02 }, pointEstimateWithin2Percent: null });
+  });
+
+  it("never reports a pass for a mostly unjudgeable complete sample", () => {
+    const big = sampleOf([{ n: 1, blocks: questions(1, 149) }], 149);
+    const report = createCourseAuditReview(big, reviewsFor(big,
+      big.samples.map((item, index): [AuditItem, Outcome] => [item, index === 0 ? "correct" : "unjudgeable"])));
+    expect(report.errorRate.all).toMatchObject({ complete: true, judged: 1, incorrect: 0, rate: 0, unjudgeable: 148,
+      pointEstimateWithin2Percent: null });
+    expect(report.errorRate.all.conservative.rate!).toBeGreaterThan(0.99);
   });
 
   it("carries the sampling frame size and sample size as denominators (zero errors in 149 of 160)", () => {

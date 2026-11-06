@@ -3,6 +3,7 @@
  * Bernoulli trials: solves P(Binomial(n, p) <= k) = 0.05 in log space.
  * Edges: n = 0 -> null; k = n -> 1; k = 0 -> closed form 1 - 0.05^(1/n).
  * Independence is an assumption of the bound, not something it checks.
+ * Precondition (not validated, unchanged from the original): integers with 0 <= k <= n.
  */
 export function binomialUpper95(k: number, n: number): number | null {
   if (!n) return null;

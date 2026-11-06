@@ -114,8 +114,9 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown,
     return { population, sampleSize: counts.total, complete, judged, incorrect: counts.incorrect, unjudgeable: counts.unjudgeable,
       rate: point.rate, upper95: point.upper95,
       conservative: { errors: conservative.numerator, denominator: conservative.denominator, rate: conservative.rate, upper95: conservative.upper95 },
-      // Integer comparison: incorrect / judged <= 2/100 without floating-point rounding.
-      pointEstimateWithin2Percent: complete && judged > 0 ? counts.incorrect * 50 <= judged : null };
+      // A verdict only once every sampled answer is judged: pending or unjudgeable answers must be resolved first,
+      // otherwise a mostly-unjudgeable sample could read as passing. Integer form of incorrect / judged <= 2/100.
+      pointEstimateWithin2Percent: complete && counts.unjudgeable === 0 && judged > 0 ? counts.incorrect * 50 <= judged : null };
   };
   const groups = { all: samples, mandatory: samples.filter(item => item.requirement.mandatory),
     optional: samples.filter(item => !item.requirement.mandatory) };
@@ -125,8 +126,11 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown,
     reviewDefinition: "reviewed = correct + incorrect + unjudgeable; total = reviewed + pending. Counts describe the entire selected sample, not the whole course.",
     errorRateDefinition: "rate = incorrect / judged, judged = correct + incorrect; conservative counts unjudgeable as errors over correct + incorrect + unjudgeable."
       + " upper95 is a one-sided 95% Clopper–Pearson bound assuming independent binomial draws; correlation within a question family is not modelled."
-      + " Acceptance uses the point estimate <= 2% only when complete (pending = 0); upper95 <= 2% is not a default acceptance condition."
-      + " population is the eligible sampling frame and sampleSize the simple random sample drawn from it; questions picked by targeted error hunting are not random samples and must not be counted here.",
+      + " pointEstimateWithin2Percent is a verdict only when complete (pending = 0) and no answer is unjudgeable; otherwise null until those are resolved."
+      + " upper95 <= 2% is not a default acceptance condition."
+      + " population is the eligible sampling frame and sampleSize the simple random sample drawn from it (for mandatory/optional, the part of that sample falling in the group, a random-sized subsample);"
+      + " sampling is without replacement, so the binomial bound is conservative relative to the hypergeometric one."
+      + " Questions picked by targeted error hunting are not random samples and must not be counted here.",
     reviewCounts,
     errorRate: { all: errorRate(reviewCounts.all, sample.counts.population),
       mandatory: errorRate(reviewCounts.mandatory, sample.mandatory.eligible),
