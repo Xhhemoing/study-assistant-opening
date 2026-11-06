@@ -56,7 +56,9 @@ Chromium (`playwright install chromium --with-deps` fails) and the image's newer
 `pg_dump` writes `SET transaction_timeout = 0;`, which `pg_restore` into the PG16
 service rejects (`opening-measurement-recovery`). Move off the pin only together
 with a Playwright upgrade, a PG16-compatible dump client, and a green CI run on
-the new image.
+the new image. The parser-venv cache key does not include the runner image, so
+when unpinning, also add `ImageOS`/`ImageVersion` to that key or bump its prefix
+to `parser-venv-v2`; otherwise a venv built on the old image is restored on the new one.
 
 The parser virtualenv cache (`parser-venv-v1-…`, keyed by the lockfile and the
 install script) is the only Python dependency cache. `setup-python` no longer uses
