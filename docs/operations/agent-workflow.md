@@ -8,7 +8,7 @@
 |---|---|
 | 主控 PM（Hermes） | 目标、依赖拆分、Kanban 调度、资源准入、验收与交接；不写业务代码，不计编码车道。不可把排队、started 或子任务 completed 当验交。 |
 | 实现 worker（Pi 等已获准工具） | 独占原卡 allowlist，完成代码、最近验证、授权 Git 操作；优先原 owner／原会话续接，不重复实现。实际工具、模型与强度写入卡，不静默替换。 |
-| 独立审查者 | 在稳定候选上只读核对实际 diff、调用链、失败路径和证据，指定 Claude Opus 5.5 high 为每 PR 正式审查；其他独立意见不能代签。 |
+| 独立审查者 | 在稳定候选上只读核对实际 diff、调用链、失败路径和证据；每个 PR 由指定 Claude Opus 5.5 high 与 GPT 异家族审查两路正式审查，其他独立意见不能代签。 |
 | 唯一集成者 | 执行集成分支与主线 Git 操作，独占共享接口决定、公共契约、依赖锁文件、schema／迁移编号和 STATUS；不与 worker 争写。该执行角色与 PM 调度角色区分。 |
 | 用户 | 长期授权以外的高风险合并批准，含迁移的版本部署／生产配置／真数据／破坏迁移／定样审批，以及浏览器和真实使用验收。 |
 
@@ -30,8 +30,8 @@
 | 主控 PM 与唯一集成者 | 主会话同时承担，不写业务代码。获授权提交和推送功能分支、开 PR、门禁齐全后合入 `integration/opening` 并提升主线；高风险 PR 只按下文“用户长期授权”的条件合入。不含迁移的主线版本按同一节部署；含迁移的版本部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
 | 实现 worker | 主会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由集成者按用户 2026-11-06 的授权界定。 |
 | 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
-| 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行，其他工具中用 claude CLI。 |
-| 异家族审查 | Cursor 子 Agent 属 Claude 系列。按 2026-10-28 “Claude 写的交 GPT”原则，Cursor 中实现的代码与方案改动在指定审查之外，再由主会话以 `codex exec` 只读沙箱调用 GPT 审查；高风险 PR 一律需要。 |
+| 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行（该类型不可用时，由 `generalPurpose` 子 Agent 按同一说明执行，并在审查评论里注明），其他工具中用 claude CLI。 |
+| 异家族审查 | 按用户 2026-11-06 决定，每个 PR（含文档、低风险和集成提升）在指定审查之外，都由主会话以 `codex exec` 只读沙箱调用 GPT 审查，两路都批准才可合入。 |
 | 任务卡与交回 | 任务卡随派单 brief 完整下发，结果以 PR 正文为持久记录，会话内用 TodoWrite 跟踪；Hermes Kanban 可用时仍以原卡为准。 |
 
 子 Agent 默认共享主会话的 checkout，会互相覆盖改动，所以写文件的子 Agent 必须使用独立 worktree，同一 checkout 内只运行只读调查和审查。需要本地验证的 worktree 单独 `npm ci`，不软链共享 `node_modules`，否则 workspace 包会解析到其他 checkout 的源码。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交精确 head CI。
@@ -63,8 +63,8 @@ parents：<前置卡 ID，无则明确无；对应就绪证据>
 共享独占项：<契约／锁文件／迁移编号／STATUS；不得自行写>
 限定验证：<最近 unit 文件、所属包 types、必要集成与执行者；文档仅 diff>
 风险：<低／高及依据；迁移与回退、权限／费用／取消影响>
-Git 授权：<commit／push／PR base／是否可合；部署单独审批>
-预算：实现 1 次＋指定 Opus 审查 1 次＋必要集中修复 1 次
+Git 授权：<commit／push／PR base／是否可合；部署按“用户长期授权”第 3 条或单独审批>
+预算：实现 1 次＋两路审查各 1 次＋必要集中修复 1 次
 metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA、PR、unverified、owner／是否交回
 ```
 
@@ -83,12 +83,12 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
 
 ## 每 PR 正式审查与分支规则
 
-所有 PR（含低风险文档、测试和集成提升）须 **Claude Opus 5.5 high 批准＋精确最新 head 的 required CI**，实现者自查不能代替。只读独立核验可以补证，但不能代 Opus。高风险另须指定异家族审查及用户明确批准；不得自行降模型、拿空 verdict／工具错误／旧 head 批准放行。指定渠道受阻只阻对应集成门禁，不冻结无依赖的独立实施／近验。
+所有 PR（含低风险文档、测试和集成提升）须 **指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准＋精确最新 head 的 required CI**（用户 2026-11-06），实现者自查不能代替。只读独立核验可以补证，但不能代替这两路审查。高风险另须独立主线 PR 及用户明确批准（长期授权见下节）；不得自行降模型、拿空 verdict／工具错误／旧 head 批准放行。指定渠道受阻只阻对应集成门禁，不冻结无依赖的独立实施／近验。
 
 | 风险与路径 | 目标与准入 |
 |---|---|
-| 低风险：不改变授权、隐私、事务、迁移、数据正确性或相关安全语义 | 功能分支 PR 到 `integration/opening`；指定 Opus 批准与该 PR 精确 head required CI 全过后，由唯一集成者按授权集成。文档／小改动也不免审。 |
-| 集成提升 | 唯一集成者整理 `integration/opening` 的已达标结果，以完整相对 base 差分向正式主线 `feat/opening-release` 提升；提升 PR 同样满足指定 Opus 与精确 head required CI，达门禁即串行进入主线，不再固定每天两次批次。 |
+| 低风险：不改变授权、隐私、事务、迁移、数据正确性或相关安全语义 | 功能分支 PR 到 `integration/opening`；指定 Opus 与 GPT 都批准、该 PR 精确 head required CI 全过后，由唯一集成者按授权集成。文档／小改动也不免审。 |
+| 集成提升 | 唯一集成者整理 `integration/opening` 的已达标结果，以完整相对 base 差分向正式主线 `feat/opening-release` 提升；提升 PR 同样须两个模型都批准并通过精确 head required CI，达门禁即串行进入主线，不再固定每天两次批次。 |
 | 高风险：授权、隐私、事务／并发、迁移、数据正确性，或影响这些边界的取消／生命周期／费用行为 | 从安全基线独立 PR 到 `feat/opening-release`，不借低风险集成池带入；完成指定 Opus、异家族审查与精确 head required CI 后，仍以 `needs_input` 等用户明确批准，不能由 Agent 自动合并；满足下节“用户长期授权”全部条件的，视为已获用户明确批准。 |
 
 ### 用户长期授权
@@ -103,8 +103,9 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
    - 每次合入都在 PR 正文记录所依据的审查、CI 和等价证明。
 2. **清理**：已完全合入主线、相对主线没有独有提交、工作区干净的 worktree 和远端分支，可由唯一集成者回收。有独有提交、未合并、属于线上参照树或无法判断的，仍须用户决定。
 3. **不含迁移的主线版本部署**（2026-11-06）：同时满足以下条件时，由唯一集成者用目标版本自带的受管发布脚本部署主线精确 head，不再逐次等用户批准。
-   - 目标版本与线上版本之间迁移目录没有差异。
-   - 目标版本中的每个 PR 都经指定 Claude Opus 5.5 high 与 GPT 异家族审查；只经指定审查合入 integration 的低风险 PR，由提升 PR 的 GPT 审查覆盖。
+   - 目标版本与线上版本之间迁移目录没有差异，并且部署前只读核实线上数据库的迁移账本已包含目标版本的全部迁移。受管发布脚本会执行所有尚未应用的迁移，只比较代码目录不够；发现待执行迁移或无法确认时，按含迁移的版本处理，先取得用户批准。
+   - 相对线上版本新增的每个 PR 都经两个模型批准；2026-11-06 之前只经指定审查合入 integration 的 PR，由包含它的提升 PR 的 GPT 审查覆盖。
+   - 目标版本若改动了会写到服务器上的服务配置（`infra/deploy/` 下的服务单元、容器编排或主机初始化脚本），部署前单独列出，按生产配置逐次审批；只改打包或校验逻辑的不在此列。
    - 目标 SHA 的 required CI 全部通过。
    - 部署前在会话中向用户给出精确提交号、迁移差异与回滚方案；部署后只读核验健康检查返回的提交与服务状态，结论按“公开仓库信息边界”记入 STATUS。
 

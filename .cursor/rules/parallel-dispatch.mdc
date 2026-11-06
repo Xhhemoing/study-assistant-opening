@@ -34,8 +34,8 @@ alwaysApply: false
 
 ## 集成节奏
 
-1. 实现返回 DONE 后，主控核对实际 diff 与 PR 正文，再并行派 `aistudy-pr-reviewer` 与 `codex exec` 两路审查（实现者是 Claude 时，codex 一路就是异家族审查；低风险且不涉及方案的纯文档、配置改动可只走指定审查）。两路都无阻塞才算通过；某一路失败或没读完范围记为未审查，不用同家族自检代替。各路结论由主控以 PR 评论留档（同一账号不能 approve 自己的 PR）。
+1. 实现返回 DONE 后，主控核对实际 diff 与 PR 正文，再并行派 `aistudy-pr-reviewer` 与 `codex exec` 两路审查（每个 PR 都要两路，含纯文档、配置改动与提升 PR）。两路都无阻塞才算通过；某一路失败或没读完范围记为未审查，不用同家族自检代替。各路结论由主控以 PR 评论留档（同一账号不能 approve 自己的 PR）。
 2. CHANGES_REQUESTED：resume 原实现子 Agent 集中修复一次，之后只复核修复部分。
-3. 低风险：第 1 步审查通过（含需要时的异家族审查）且精确 head 的 required CI 全绿，用 `gh pr merge --merge --match-head-commit <head-sha>` 合入 `integration/opening`。高风险：独立 PR 到 `feat/opening-release`，满足长期授权条件才由主控合入，否则等用户批准。
-4. `integration/opening` 有达标结果就开提升 PR 到 `feat/opening-release`，同样经审查与 CI 后合入。
+3. 低风险：第 1 步两路审查都通过且精确 head 的 required CI 全绿，用 `gh pr merge --merge --match-head-commit <head-sha>` 合入 `integration/opening`。高风险：独立 PR 到 `feat/opening-release`，满足长期授权条件才由主控合入，否则等用户批准。
+4. `integration/opening` 有达标结果就开提升 PR 到 `feat/opening-release`，同样经两路审查与 CI 后合入。
 5. 合入主线后由主控更新 `docs/STATUS.md`，每个结果一行。
