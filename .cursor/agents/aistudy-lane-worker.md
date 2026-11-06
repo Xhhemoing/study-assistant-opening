@@ -11,7 +11,7 @@ model: inherit
 ## 开工前
 
 1. 运行 `git rev-parse --show-toplevel` 与 `git worktree list`。当前顶层目录是列表第一项（主 checkout）时，停止并以 BLOCKED 汇报，不切换或新建分支。
-2. 核对起点：`<remote>` 指 `git remote -v` 中指向 `Xhhemoing/study-assistant-opening` 的 remote。`git fetch <remote> <卡片 base>` 后，`git merge-base --is-ancestor <remote>/<base> HEAD` 须退出 0，且 `git log --oneline <remote>/<base>..HEAD` 只含本车道的提交。worktree 干净但起点不对时，在本 worktree 内 `git switch -c <卡片分支> <remote>/<base>`；有未提交改动时 BLOCKED。
+2. 核对起点：`<remote>` 指 `git remote -v` 中指向 `Xhhemoing/study-assistant-opening` 的 remote。首次开工时，`git fetch <remote> <卡片 base>` 后，`git merge-base --is-ancestor <remote>/<base> HEAD` 须退出 0，且 `git log --oneline <remote>/<base>..HEAD` 只含本车道的提交；worktree 干净但起点不对时，在本 worktree 内 `git switch --no-track -c <卡片分支> <remote>/<base>`，有未提交改动时 BLOCKED。被主控续接（如修复轮）时不重做这一步：卡片分支已推送的，先 `git pull --ff-only <remote> <卡片分支>` 取回集成者推到 PR 分支的改动，不能快进时 BLOCKED。任何时候都不用 `git switch -C` 或其他会重置分支的写法。
 3. 没有 `node_modules` 时运行 `$env:HERMES_HEAVY_LOCK_TIMEOUT='1800'; node scripts/run-heavy.mjs npm ci --prefer-offline --no-audit --no-fund`，与其他车道的安装和重任务串行（`run-heavy.mjs` 只依赖 Node 内置模块）。不要软链或复用其他 checkout 的 `node_modules`：workspace 包会解析到别处的源码。
 4. 读根 `AGENTS.md` 和所改包的 `AGENTS.md`。卡片与本文冲突时以卡片为准，但卡片不能放宽下方红线。
 5. 目标、允许路径或接口决定有歧义时，先以 NEEDS_CONTEXT 汇报，不猜。
