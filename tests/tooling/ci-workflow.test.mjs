@@ -132,6 +132,16 @@ function jobBlocks(yaml) {
   const rest = yaml.slice(start).replace(/^jobs:[^\n]*\n/, "");
   const end = rest.search(/^[^\s#][^\n]*:/m);
   const body = end < 0 ? rest : rest.slice(0, end);
+  // Fail closed: a job-level line the parser cannot read as a job key (an anchored
+  // `lint: &x`, a flow `lint: {...}`, a stray shallow line) would otherwise be folded
+  // into the previous job and escape every per-job check. Block scalar content is
+  // always indented deeper than its key, so it never sits at indent 1-3.
+  const jobKeyLine = new RegExp(JOB_KEY);
+  for (const line of body.split("\n")) {
+    if (/^[ ]{1,3}[^ #]/.test(line)) {
+      assert.match(`${line}\n`, jobKeyLine, `jobs section line is not a plain job key: ${line.trim()}`);
+    }
+  }
   return [...body.matchAll(new RegExp(`${JOB_KEY}([\\s\\S]*?)(?=${JOB_KEY}|(?![\\s\\S]))`, "gm"))]
     .map((match) => ({ name: match[1], block: match[2] }));
 }
@@ -153,6 +163,10 @@ test("every job in every workflow pins a runner image that the pinned Playwright
   assert.ok(jobBlocks(workflow).length >= 9);
   assert.match(docs, /ubuntu-24\.04/);
   assert.match(docs, /transaction_timeout/);
+  // The parser venv key has no image component, so unpinning must also re-key it.
+  assert.match(docs, /ImageOS/);
+  assert.match(docs, /ImageVersion/);
+  assert.match(docs, /parser-venv-v2/);
 });
 
 test("quality gate requires both split jobs and handler-browser-spikes shares the test env", () => {
@@ -188,4 +202,21 @@ test("every gate job runs even when a worker fails and requires exactly the work
     assert.deepEqual([...gate].sort(), needs.filter((item) => !["changes", "docs"].includes(item)).sort(), `${name} gate covers its workers`);
     for (const worker of gate) assert.ok(jobs[worker], `${name} gate names an existing job ${worker}`);
   }
+});
+
+test("every docs_only=false worker is required by exactly one gate job", () => {
+  const jobs = jobBlocks(workflow);
+  const workers = jobs
+    .filter(({ block }) => /^[ ]{4}if:.*needs\.changes\.outputs\.docs_only\s*==\s*'false'/m.test(block))
+    .map(({ name }) => name);
+  assert.ok(workers.length >= 5, "worker detection found the code-change jobs");
+  const gated = jobs
+    .filter(({ block }) => /checks\.py gate /.test(block))
+    .flatMap(({ block }) => block.match(/checks\.py gate ([^\n]+)/)[1].trim().split(/\s+/));
+  for (const worker of workers) {
+    const count = gated.filter((name) => name === worker).length;
+    // An ungated worker can fail without blocking merge; a twice-gated one has ambiguous ownership.
+    assert.equal(count, 1, `worker ${worker} must appear in exactly one gate, found ${count}`);
+  }
+  assert.deepEqual([...gated].sort(), [...workers].sort(), "gates name only docs_only=false workers");
 });
