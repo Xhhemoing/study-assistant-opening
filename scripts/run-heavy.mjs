@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Cross-platform entry for heavy validation tasks.
 // POSIX: delegate to run-heavy.sh (flock + nice/ionice/taskset).
-// Windows (or HERMES_HEAVY_LOCK_IMPL=node): take the same machine-wide slot with the
-// portable directory lock in heavy-lock.mjs, then run the command.
+// Windows (or HERMES_HEAVY_LOCK_IMPL=node): serialize with the portable directory lock in
+// heavy-lock.mjs, then run the command. That lock does not exclude flock holders, so
+// callers on one POSIX host share a slot only if they all use the same implementation.
 // HERMES_HEAVY_ENABLED=0 skips local host controls, for isolated CI runners.
 // In both cases the wrapper forwards SIGINT/SIGTERM/SIGHUP to the whole child tree
 // and releases the slot when the child exits.

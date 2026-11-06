@@ -28,13 +28,13 @@
 | 角色 | Cursor 中的承担方式 |
 |---|---|
 | 主控 PM 与唯一集成者 | 主会话同时承担，不写业务代码。获授权提交和推送功能分支、开 PR、门禁齐全后合入 `integration/opening` 并提升主线；高风险 PR 只按下文“用户长期授权”的条件合入。部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
-| 实现 worker | `best-of-n-runner` 子 Agent，各占独立 worktree 与分支，遵循 `.cursor/agents/aistudy-lane-worker.md`；同时运行不超过 5 个。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。 |
+| 实现 worker | 主会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由集成者按用户 2026-11-06 的授权界定。 |
 | 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
 | 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行，其他工具中用 claude CLI。 |
 | 异家族审查 | Cursor 子 Agent 属 Claude 系列。按 2026-10-28 “Claude 写的交 GPT”原则，Cursor 中实现的代码与方案改动在指定审查之外，再由主会话以 `codex exec` 只读沙箱调用 GPT 审查；高风险 PR 一律需要。 |
 | 任务卡与交回 | 任务卡随派单 brief 完整下发，结果以 PR 正文为持久记录，会话内用 TodoWrite 跟踪；Hermes Kanban 可用时仍以原卡为准。 |
 
-子 Agent 默认共享主会话的 checkout，会互相覆盖改动，所以写文件的子 Agent 必须使用独立 worktree，同一 checkout 内只运行只读调查和审查。每个 worktree 单独 `npm ci`，不软链共享 `node_modules`，否则 workspace 包会解析到其他 checkout 的源码。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交精确 head CI。
+子 Agent 默认共享主会话的 checkout，会互相覆盖改动，所以写文件的子 Agent 必须使用独立 worktree，同一 checkout 内只运行只读调查和审查。需要本地验证的 worktree 单独 `npm ci`，不软链共享 `node_modules`，否则 workspace 包会解析到其他 checkout 的源码。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交精确 head CI。
 
 审查者同样运行在共享 checkout 中，所以在 Cursor 里，下文“指定审查使用该提交的独立干净快照”由精确 head 的 git 对象承担：差分、文件、搜索和调用链都从 head 对象读取，不以工作区内容为证据；确需完整工作区时由主控为该 SHA 建 detached worktree。结束时的核对相应改为确认 PR head 未变。派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
 

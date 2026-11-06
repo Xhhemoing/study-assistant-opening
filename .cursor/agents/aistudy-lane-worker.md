@@ -1,6 +1,6 @@
 ---
 name: aistudy-lane-worker
-description: AIstudy 实现车道 worker 的说明书。由主控派出的 best-of-n-runner 在独立 worktree 中读取执行，任务卡须含目标、允许路径、parents、接口决定、限定验证、Git 授权。不要直接作为子 Agent 派发：直接派发会与主会话共享 checkout。不用于调查或审查。
+description: AIstudy 实现车道 worker 的说明书。主控先建好独立 worktree 与卡片分支再派发，任务卡须含 worktree 路径、目标、允许路径、parents、接口决定、限定验证、Git 授权；所有 Shell 调用在该 worktree 中运行。不用于调查或审查。
 model: inherit
 ---
 
@@ -10,9 +10,9 @@ model: inherit
 
 ## 开工前
 
-1. 运行 `git rev-parse --show-toplevel` 与 `git worktree list`。当前顶层目录是列表第一项（主 checkout）时，停止并以 BLOCKED 汇报，不切换或新建分支。
-2. 核对起点：`<remote>` 指 `git remote -v` 中指向 `Xhhemoing/study-assistant-opening` 的 remote。首次开工时，`git fetch <remote> <卡片 base>` 后，`git merge-base --is-ancestor <remote>/<base> HEAD` 须退出 0，且 `git log --oneline <remote>/<base>..HEAD` 只含本车道的提交；worktree 干净但起点不对时，在本 worktree 内 `git switch --no-track -c <卡片分支> <remote>/<base>`，有未提交改动时 BLOCKED。被主控续接（如修复轮）时不重做这一步：卡片分支已推送的，先 `git pull --ff-only <remote> <卡片分支>` 取回集成者推到 PR 分支的改动，不能快进时 BLOCKED。任何时候都不用 `git switch -C` 或其他会重置分支的写法。
-3. 没有 `node_modules` 时运行 `$env:HERMES_HEAVY_LOCK_TIMEOUT='1800'; node scripts/run-heavy.mjs npm ci --prefer-offline --no-audit --no-fund`，与其他车道的安装和重任务串行（`run-heavy.mjs` 只依赖 Node 内置模块）。不要软链或复用其他 checkout 的 `node_modules`：workspace 包会解析到别处的源码。
+1. 每个 Shell 调用都以任务卡给出的 worktree 路径为 working_directory，文件工具只用该路径下的绝对路径。在其中运行 `git rev-parse --show-toplevel` 与 `git worktree list`：顶层目录不是卡片给出的路径，或者是列表第一项（主 checkout）时，停止并以 BLOCKED 汇报，不切换或新建分支。
+2. 核对起点：`<remote>` 指 `git remote -v` 中指向 `Xhhemoing/study-assistant-opening` 的 remote。首次开工时，对照卡片写明的 base SHA：`git merge-base --is-ancestor <base-sha> HEAD` 须退出 0，且 `git log --oneline <base-sha>..HEAD` 只含本车道的提交；不满足时以 BLOCKED 汇报，由集成者重建 worktree，不自行切换或新建分支。建树后 base 分支又前进不算起点不对。被主控续接（如修复轮）时不重做这一步：卡片分支已推送的，先 `git pull --ff-only <remote> <卡片分支>` 取回集成者推到 PR 分支的改动，不能快进时 BLOCKED。任何时候都不用 `git switch -C` 或其他会重置分支的写法。
+3. 卡片要求本地验证且没有 `node_modules` 时运行 `$env:HERMES_HEAVY_LOCK_TIMEOUT='1800'; node scripts/run-heavy.mjs npm ci --prefer-offline --no-audit --no-fund`；卡片没要求时不装，验证交精确 head CI。安装与其他车道的安装和重任务串行（`run-heavy.mjs` 只依赖 Node 内置模块）。不要软链或复用其他 checkout 的 `node_modules`：workspace 包会解析到别处的源码。
 4. 读根 `AGENTS.md` 和所改包的 `AGENTS.md`。卡片与本文冲突时以卡片为准，但卡片不能放宽下方红线。
 5. 目标、允许路径或接口决定有歧义时，先以 NEEDS_CONTEXT 汇报，不猜。
 
