@@ -20,6 +20,12 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 async function render() { await act(async () => root.render(<SpanDelayedRetestControl record={record} />)); }
 function button(text: string) { const node = [...host.querySelectorAll("button")].find(item => item.textContent === text); if (!node) throw new Error(`missing ${text}`); return node; }
+function hasButton(text: string) { return [...host.querySelectorAll("button")].some(node => node.textContent === text); }
+const undoResult = (cancelled: boolean, closedTaskIds: string[] = []) => Response.json({ activityId: id, cancelled, closedTaskIds });
+async function confirmUndo() {
+  await act(async () => button("撤销这次安排").click());
+  await act(async () => button("确认撤销").click());
+}
 it("does not automatically use the manual route when the course has no grant", async () => {
   mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: {} } });
   await render();
@@ -92,4 +98,77 @@ it.each([
   expect(host.textContent).not.toContain("复习已加入今日任务");
   if (taskStatus === "skipped") expect(host.querySelector('a[href="' + receipt.href + '"]')).toBeNull();
   else expect(host.querySelector('a[href="' + receipt.href + '"]')?.textContent).toBe("回看这项复习");
+});
+
+it.each([
+  ["the first undo", [id]],
+  ["a repeated undo", [] as string[]],
+])("asks before %s and then shows the automatic arrangement as undone", async (_, closedTaskIds) => {
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json(receipt)).mockResolvedValueOnce(undoResult(true, closedTaskIds));
+  await render();
+  await act(async () => button("撤销这次安排").click());
+  expect(button("撤销这次安排").getAttribute("aria-expanded")).toBe("true");
+  await act(async () => button("保留安排").click());
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await confirmUndo();
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(["/api/opening/teaching/span/delayed/automatic/cancel",
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ activityId: id }) })]);
+  expect(host.textContent).toContain("已撤销这次自动安排");
+  expect(host.querySelector('a[href="' + receipt.href + '"]')).toBeNull();
+  expect(hasButton("撤销这次安排")).toBe(false);
+});
+
+it.each([
+  ["refuses a started, adjusted or planned arrangement", () => undoResult(false), "这项安排已开始、已调整或已列入计划"],
+  ["does not find an automatic arrangement", () => Response.json({ error: { code: "NOT_FOUND", message: "自动复测不存在。" } }, { status: 404 }), "这项复习不是可撤销的自动安排"],
+])("keeps the arrangement when the server %s", async (_, reply, reason) => {
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json(receipt)).mockResolvedValueOnce(reply());
+  await render();
+  await confirmUndo();
+  expect(host.textContent).toContain(`${reason}，未撤销，原记录保留`);
+  expect(host.textContent).toContain("已自动排进复习");
+  expect(host.querySelector('a[href="' + receipt.href + '"]')?.textContent).toBe("打开这项复习");
+  expect(hasButton("撤销这次安排")).toBe(false);
+});
+
+it.each([
+  ["a lost connection", () => Promise.reject(new Error("connection lost"))],
+  ["a server failure", async () => Response.json({ error: { code: "INTERNAL_ERROR", message: "服务暂时无法处理请求，请稍后重试。" } }, { status: 500 })],
+])("keeps an undo after %s locked until an explicit retry repeats the same request", async (_, fail) => {
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json(receipt)).mockImplementationOnce(fail).mockResolvedValueOnce(undoResult(true));
+  await render();
+  await confirmUndo();
+  expect(host.textContent).toContain("撤销结果未确认");
+  expect(host.querySelector('a[href="' + receipt.href + '"]')).toBeNull();
+  expect(["撤销这次安排", "确认撤销", "保留安排"].some(text => hasButton(text))).toBe(false);
+  await act(async () => button("重新确认撤销").click());
+  expect(vi.mocked(fetch).mock.calls[2]).toEqual(vi.mocked(fetch).mock.calls[1]);
+  expect(host.textContent).toContain("已撤销这次自动安排");
+});
+
+it("sends one undo request however often the confirmation is pressed", async () => {
+  let settle: (response: Response) => void = () => undefined;
+  vi.mocked(fetch).mockResolvedValueOnce(Response.json(receipt)).mockImplementationOnce(() => new Promise<Response>(resolve => { settle = resolve; }));
+  await render();
+  await act(async () => button("撤销这次安排").click());
+  const confirm = button("确认撤销");
+  await act(async () => { confirm.click(); confirm.click(); });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(button("正在撤销…").disabled).toBe(true);
+  await act(async () => settle(undoResult(true, [id])));
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toContain("已撤销这次自动安排");
+});
+
+it.each([
+  ["a manual receipt", {}, false],
+  ["a cancelled automatic replay", { taskStatus: "skipped", activityStatus: "cancelled" }, true],
+  ["a completed automatic replay", { taskStatus: "done", activityStatus: "completed" }, true],
+])("does not offer undo for %s", async (_, replay, automatic) => {
+  if (!automatic) mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: {} } });
+  vi.mocked(fetch).mockResolvedValue(Response.json({ ...receipt, ...replay }));
+  await render();
+  if (!automatic) await act(async () => button("安排 3 天后再练习").click());
+  expect(host.querySelector('[role="status"]')).not.toBeNull();
+  expect(hasButton("撤销这次安排")).toBe(false);
 });
