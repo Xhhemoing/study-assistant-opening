@@ -1,7 +1,7 @@
 "use client";
 
 import { Check } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { KnowledgeNode } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { secondaryButtonClass } from "../design/ui";
@@ -19,10 +19,13 @@ export function ConfirmKnowledgeNode({ node, record, api, onConfirmed, onReload 
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  // Synchronous lock: `pending` state is stale inside the same render, so it cannot stop a double click.
+  const inFlight = useRef(false);
   if (node.status !== "needs_check") return confirmed ? <p role="status" className="text-xs text-text-2">已确认材料依据，不代表已掌握。</p> : null;
 
   async function confirm() {
-    if (pending) return;
+    if (inFlight.current) return;
+    inFlight.current = true;
     setPending(true); setError("");
     try {
       const next = await api.confirmKnowledgeNode(node.courseId, {
@@ -33,6 +36,7 @@ export function ConfirmKnowledgeNode({ node, record, api, onConfirmed, onReload 
     } catch (reason) {
       setError(userFacingMessage(reason, "确认未保存，请重新读取并核对材料后再试。"));
     } finally {
+      inFlight.current = false;
       setPending(false);
     }
   }
