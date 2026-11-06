@@ -206,8 +206,8 @@ Machine index for the opening-release candidate tip (RP7). Cite the tip SHA plus
 the quality Actions URL; do not treat index presence as packaging verified or
 prod cutover.
 
-- JSON: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json)
-- Companion MD: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md)
+- JSON: [`docs/archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json`](../archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json)
+- Companion MD: [`docs/archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md`](../archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md)
 
 Rows whose commit SHA differs from the index tip are marked `stale` and need
 re-run on tip. Q03 ledger status is independent of this index.
@@ -225,7 +225,7 @@ pinned Python dependencies and required model resources before running real
 parser tests. Runtime document conversion remains offline; preparing the model
 cache is a separate setup operation.
 
-The [2026-09-27 execution record](../superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)
+The [2026-09-27 execution record](../archive/superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)
 contains the observed failure, minimal changes, local verification and outstanding
 checks for OP-01–OP-03 (B02/F03/Q01/RP5/Q03). It is not a replacement for the
 merged-commit GitHub Actions result or the original task ledger.
