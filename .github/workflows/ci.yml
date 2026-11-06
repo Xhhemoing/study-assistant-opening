@@ -12,12 +12,15 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job pins ubuntu-24.04: since 2026-11 ubuntu-latest resolves to
+# ubuntu-26.04, where Playwright 1.53.2 cannot install Chromium and the
+# setup-python pip cache directory is absent. Revisit after upgrading Playwright.
 jobs:
   quality:
     name: lint-typecheck-test-build
     needs: [changes, docs, static-unit, integration-parser, handler-browser-spikes, build]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +31,7 @@ jobs:
 
   changes:
     name: classify-changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
@@ -48,7 +51,7 @@ jobs:
     name: documentation-light-check
     needs: changes
     if: needs.changes.outputs.docs_only == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -64,7 +67,7 @@ jobs:
     name: integration-parser
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     # Integration exercises the real parser, queue and object storage, not E2E.
@@ -217,7 +220,7 @@ jobs:
     name: handler-browser-spikes
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     # Handler/spikes use the guarded test DB; Playwright resets a separate E2E DB.
@@ -326,7 +329,7 @@ jobs:
     name: static-unit-contract-spikes
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Spikes consume real Redis; retain the original isolated service/env setup.
     services:
@@ -370,7 +373,7 @@ jobs:
     name: production-build
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env: *quality-env
     steps:
@@ -388,7 +391,7 @@ jobs:
     name: isolated-worker-pdf-browser
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     # The isolated runner resets only these fresh services. In particular its
@@ -507,7 +510,7 @@ jobs:
     name: real-worker-pdf-browser-flow
     needs: [changes, docs, opening-worker-flow]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
