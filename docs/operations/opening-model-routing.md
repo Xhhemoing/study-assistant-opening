@@ -63,9 +63,9 @@ SECONDARY_MODEL_API_KEY=
 
 Tutor worker 与设置页 / readiness 一样，用 **有效日额度**（env 与工作区确认额度）计算付费模型的 availability；免费额度模型改由请求数上限约束。视觉能力影响图片材料，模型转写则必须明确支持音频输入。
 
-## Hermes 运维清单（Lant + glm-5.3，勿由 agent 自行 redeploy）
+## Hermes 运维清单（Lant + glm-5.3；属于生产配置，须用户逐次批准）
 
-在 hermes `/opt/aistudy/.env.production`（web + worker 相同）由 PM 设置并重启。密钥只进密钥库/该文件，**永不进 git**：
+在服务器的生产配置文件中设置（web 与 worker 共用，位置见 [hermes-deployment.md](hermes-deployment.md) 的“目录与前提”），经用户批准后修改并重启。密钥只进密钥库/该文件，**永不进 git**：
 
 | 键 | 作用 |
 |---|---|

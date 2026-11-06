@@ -78,7 +78,7 @@ R1–R5、R7 一个提交批次，R6、R8 顺手做；R9、R10 可以放到第 4
 ### 第 2 步：部署 Hermes（从 `8b500e6` 升级）
 1. 先做数据库备份（`docs/operations/opening-backup-manifest.md`）。
 2. 部署后执行 `npm run db:migrate`，会应用 0061–0064；回滚语句在各迁移文件末尾，0062 回滚前要先处理免费额度模型和 0 元预算记录。
-3. `/opt/aistudy/.env.production`（web 与 worker 相同）：
+3. 生产配置文件（web 与 worker 相同）：
    - `OPENING_TEACHING_COMPILER_ENABLED=1`（主讲用真实模型）；`OPENING_TEACHING_VALIDATION_ENABLED` 先保持 0，内容会显示「待核对」。
    - `OPENING_ADAPTIVE_PLANNING` 保持 0，直到第 4 步完成。
    - 换上新的 Lant key。

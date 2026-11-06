@@ -7,7 +7,7 @@ Worker 的 systemd `active` 只代表进程存在，不代表解析器预检完�
 - 启动时先删除旧凭据；每个角色的完整消费者集合都 `await waitUntilReady()`，并核对 Redis CLIENT LIST 中本 PID/启动 UUID 命名的 BullMQ blocking consumer（`rawname`），同时验证 running、未 paused。
 - 成功后原子写 JSON：实际消费者 PID、tsx supervisor PID、真实 release 目录、role、完整 queue kinds、检查时间和 15 秒有效期。每 5 秒复核；连接错误、消费者错误/关闭、parser lease 失效、正常退出立即删除，失联/冻结不能无限保留就绪。
 - `hermes-health.mjs` 在现有 systemd MainPID/命令路径/账号核验之外读取凭据，并验证消费者 `/proc` 的 release、命令路径与直接父子 PID（tsx CLI 会派生实际运行进程）。无凭据、过期、角色/队列集合不一致均失败；`hermes-release.sh` 有界等待冷启动，不再看到 Web healthy 就立即用 active 放行。
-- 默认文件 `.tmp/worker-<role>-ready.json`。受管 provision 写到可写 `/var/cache/aistudy-worker/worker-ready.json`；多角色实例必须分别指定 `WORKER_READINESS_FILE`。不支持 Redis CLIENT LIST/SETNAME 的后端会 fail closed。
+- 默认文件 `.tmp/worker-<role>-ready.json`。受管 provision 写到 Worker cache 目录下可写的 `worker-ready.json`；多角色实例必须分别指定 `WORKER_READINESS_FILE`。不支持 Redis CLIENT LIST/SETNAME 的后端会 fail closed。
 
 ## 预检成功缓存与预热
 

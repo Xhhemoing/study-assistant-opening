@@ -29,16 +29,18 @@
 
 ## 生产只读核实（2026-10-19）
 
-已通过既有SSH别名Hermes读取，未部署、重启、改配置或写生产数据库。web、worker、nginx均active/running；web仅监听127.0.0.1:18090，worker运行用户为aistudy-worker。`/opt/aistudy-current`指向以75cd1687命名的release目录，但该目录`.release-sha`记录为`6c4a4ea8e78c8fe51fdee31bb1af9b09684e1d9d`；这是发布记录，不能据目录名或单个记录证明全部文件版本。
+当日只读核实，未部署、重启、改配置或写生产数据库。以下是当时的结论，不代表当前状态；主机、目录、进程、工具版本与容量等明细不在公开文档中记录。
 
-数据库只读查询确认最新迁移`0074_opening_system_query_receipts.sql`，verification_state为verified。配置文件显示OPENING_RELEASE=0、三个TEACHING开关为1，SYSTEM_QUERY/ADAPTIVE_PLANNING/AUTH_TRUSTED_IP_HEADER未设置；未据此声称所有运行进程的有效配置相同。nginx设置X-Real-IP及X-Forwarded-For，真实客户端IP限流隔离尚未实测。
+web、worker 和反向代理都在运行；web 只监听回环地址，worker 以专用非 root 用户运行。当前应用目录里的发布记录为 `6c4a4ea8e78c8fe51fdee31bb1af9b09684e1d9d`，与目录名标示的版本不一致；这是发布记录，不能据目录名或单个记录证明全部文件版本。
 
-最近备份dump为510334字节。系统默认pg_restore 14.24不能读取该1.15格式；现有`/usr/lib/postgresql/16/bin/pg_restore`16.14成功列出700项目录。备份恢复演练仍待执行，目录可读不等于已证明可恢复。后续部署前核对发布记录与实际制品版本，并用匹配的pg_restore执行隔离恢复验证。
+数据库只读查询确认最新迁移`0074_opening_system_query_receipts.sql`，verification_state为verified。配置文件显示OPENING_RELEASE=0、三个TEACHING开关为1，SYSTEM_QUERY/ADAPTIVE_PLANNING/AUTH_TRUSTED_IP_HEADER未设置；未据此声称所有运行进程的有效配置相同。反向代理会设置客户端 IP 头，真实客户端IP限流隔离尚未实测。
+
+系统默认的 pg_restore 版本过旧，读不了最近的备份；与数据库版本匹配的 pg_restore 能完整列出备份目录。备份恢复演练仍待执行，目录可读不等于已证明可恢复。后续部署前核对发布记录与实际制品版本，并用匹配的pg_restore执行隔离恢复验证。
 
 ## 发布接管与修复（2026-10-20）
 
-用户授权清理或迁往 /www，随后明确授权核实并安全停止已有发布流程。已核对 `/tmp/study-stage-20261020.sh` 与待发布阶段脚本一致、仅构建未激活，再停止该进程树；线上 Web / Worker PID 1462026 / 1462033 及 current 均未变化。/www 为独立 ext4 磁盘，约13.6GiB可用，保留 /opt 当前应用、回退文件与备份，无空间清理删除。
+用户授权清理或迁往独立数据盘，随后明确授权核实并安全停止已有发布流程。已核对服务器上的临时阶段脚本与待发布阶段脚本一致、仅构建未激活，再停止该进程树；线上 Web / Worker 进程及 current 均未变化。数据盘空间足够，原位置的当前应用、回退文件与备份都保留，没有为腾空间删除文件。
 
-已用 PostgreSQL 16 将510334字节现有备份恢复至专用隔离数据库，实查93张public表、74项已验证迁移，再删除仅本轮创建的隔离库。生产数据库未改。实际源码与6c4a4ea8归档对照，除换行外，仅 Worker provisioning 的 systemd 路径引号存在部署侧修补；本轮将有效修复及真实systemd解析测试归入源码。
+已用 PostgreSQL 16 将现有备份恢复至专用隔离数据库，实查93张public表、74项已验证迁移，再删除仅本轮创建的隔离库。生产数据库未改。实际源码与6c4a4ea8归档对照，除换行外，仅 Worker provisioning 的 systemd 路径引号存在部署侧修补；本轮将有效修复及真实systemd解析测试归入源码。
 
-#76 整合c5cb6424后66项最近单元与Web/Database类型检查通过。发布脚本保留既有CI、4GiB空间、身份与备份检查，允许新release/backup迁往/www，状态与锁仍用/opt；同时按0081实际数据语义禁止Study启动后恢复不理解作答条件的旧Web。最终CI、合并与发布结果以PR和发布transition为准，此记录不表示已部署。用户浏览器/真实模型/学习收益仍待验收。
+#76 整合c5cb6424后66项最近单元与Web/Database类型检查通过。发布脚本保留既有CI、4GiB空间、身份与备份检查，允许新release/backup迁往数据盘，状态与锁仍留在原位置；同时按0081实际数据语义禁止Study启动后恢复不理解作答条件的旧Web。最终CI、合并与发布结果以PR和发布transition为准，此记录不表示已部署。用户浏览器/真实模型/学习收益仍待验收。

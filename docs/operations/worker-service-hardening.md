@@ -32,13 +32,13 @@
 ```bash
 bash "$release/infra/deploy/provision-worker.sh" \
   --app-dir "$current" --release-dir "$release" \
-  --legacy-app-dir /opt/aistudy \
-  --config-file /opt/aistudy/.env.production \
-  --parser-python /opt/aistudy/.local/docling-venv/bin/python \
+  --legacy-app-dir "$DIR" \
+  --config-file "$DIR/.env.production" \
+  --parser-python "$DIR/.local/docling-venv/bin/python" \
   --state-dir "$transition"
 ```
 
-默认配置位置为 `/etc/systemd/system/aistudy-worker.service` 和 `/etc/aistudy/worker-runtime.env`；隔离测试可传 `--systemd-dir`、`--config-dir` 和 `--cache-dir`。脚本与相邻的 `provision-worker.py` 必须一起部署，依赖服务器现有 Python 3、systemd、`runuser`、`useradd` 和 `groupadd`。
+`$DIR` 是发布脚本的稳定配置目录，见 [hermes-deployment.md](hermes-deployment.md) 的“目录与前提”。unit 与 `worker-runtime.env` 默认写入系统 systemd 目录和产品配置目录，默认值见 `provision-worker.py`；隔离测试可传 `--systemd-dir`、`--config-dir` 和 `--cache-dir`。脚本与相邻的 `provision-worker.py` 必须一起部署，依赖服务器现有 Python 3、systemd、`runuser`、`useradd` 和 `groupadd`。
 
 专用账号 `aistudy-worker` 使用同名主组和禁止登录的 shell。已有同名账号若指向 root、其他主组或交互 shell，脚本会停止，要求运维先核对身份，不擅自改造既有账号。
 
@@ -46,7 +46,7 @@ bash "$release/infra/deploy/provision-worker.sh" \
 
 ## 缓存与解析路径
 
-首次创建 `/var/cache/aistudy-worker` 时，把旧 `HF_HOME`（未配置时为旧应用的 `.local/hf-home`）复制到其中的 `hf-home`。复制保留 Hugging Face 内部相对 symlink，拒绝缺失链接和指向复制范围以外的链接，排除根目录的 `token` 和 `stored_tokens` 登录凭据；旧缓存不删除、不移动。已有 worker 缓存不被旧缓存覆盖，也不会被 root 递归改权；缓存目录本身必须是真实目录且属于专用用户，symlink 或未知所有权会阻止发布。
+首次创建 worker 专用缓存目录（`--cache-dir`）时，把旧 `HF_HOME`（未配置时为旧应用的 `.local/hf-home`）复制到其中的 `hf-home`。复制保留 Hugging Face 内部相对 symlink，拒绝缺失链接和指向复制范围以外的链接，排除根目录的 `token` 和 `stored_tokens` 登录凭据；旧缓存不删除、不移动。已有 worker 缓存不被旧缓存覆盖，也不会被 root 递归改权；缓存目录本身必须是真实目录且属于专用用户，symlink 或未知所有权会阻止发布。
 
 独立的 `worker-runtime.env` 位于原 `EnvironmentFile` 之后，固定 `HOME`、HF/Torch/XDG 缓存、本地 Python、当前代码的 parser 目录与临时路径，避免旧配置覆盖这些路径。`PARSER_TEMP_DIR=/tmp/opening-parser`、`TMPDIR=/tmp` 配合 `PrivateTmp=true`；`ProtectSystem=strict` 只开放专用 cache，不再开放整棵源码。原 OCR 模型配置继续使用；模型文件需对 worker 只读可访问。
 
