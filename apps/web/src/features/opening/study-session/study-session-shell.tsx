@@ -4,7 +4,8 @@ import { LearningProse } from "../assistant/learning-prose";
 import { SuccessCheck } from "../v3/motion/feedback";
 import { useTransitionRouter } from "../v3/motion/view-transition";
 import { ui } from "../design/ui";
-import { primaryAction, resultLabel, type StudySessionPort, type StudySessionView } from "./model";
+import { ConfidenceChoice } from "./confidence-choice";
+import { primaryAction, resultLabel, type PreAnswerConfidence, type StudySessionPort, type StudySessionView } from "./model";
 import { StepRenderer } from "./step-renderers";
 
 type Handlers = {
@@ -13,6 +14,7 @@ type Handlers = {
   onSelectGrade?: Parameters<typeof StepRenderer>[0]["onSelectGrade"];
   onRedo?: () => void;
   onContinue?: () => void;
+  onConfidence?: (value: PreAnswerConfidence | null) => void;
 };
 
 /** One session screen: top bar, the current step, one primary action. Help and "more" open on demand. */
@@ -25,6 +27,8 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
   const locked = pending || view.sealed || Boolean(view.result);
   const questionStep = view.step.kind === "question" ? view.step : null;
   const helpAllowed = questionStep !== null && !(questionStep.purpose === "retest" && !view.result);
+  const time = view.step.estimateMinutes != null ? `约 ${view.step.estimateMinutes} 分钟` : view.budgetMinutes != null ? `本次时长 ${view.budgetMinutes} 分钟` : null;
+  const hasReasons = Boolean(view.result?.detail || view.result?.nextStep || view.next?.reason);
   useEffect(() => { setHelpOpen(false); setMoreOpen(false); }, [view.step.id]);
   useEffect(() => { if (!helpAllowed) setHelpOpen(false); }, [helpAllowed]);
   useEffect(() => {
@@ -46,7 +50,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
             className={`h-1 flex-1 rounded-pill transition-colors duration-(--duration-state) ${index < view.position.index ? "bg-text-3" : index === view.position.index ? "bg-text" : "bg-line"}`} />)}
         </ol>
       </div>
-      {view.step.estimateMinutes != null ? <span className="shrink-0 text-xs tabular-nums text-text-2">约 {view.step.estimateMinutes} 分钟</span> : null}
+      {time ? <span className="shrink-0 text-xs tabular-nums text-text-2">{time}</span> : null}
       {view.step.kind !== "photo_practice" ? <div className="relative">
         <button type="button" className={ui.icon} aria-label="更多" aria-haspopup="menu" aria-expanded={moreOpen} aria-controls={moreId} onClick={() => setMoreOpen(value => !value)}>⋯</button>
         {moreOpen ? <div id={moreId} role="menu" className="absolute right-0 top-10 z-20 grid min-w-40 rounded-tile border border-line bg-popover p-1 shadow-float motion-safe:animate-pop">
@@ -63,9 +67,15 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
         <p className="flex items-center gap-2 font-medium">
           {view.result.outcome === "correct" ? <SuccessCheck play label="" /> : null}{resultLabel(view.result)}
         </p>
-        {view.result.detail ? <p className="text-sm leading-7 text-text-2">{view.result.detail}</p> : null}
-        {view.result.nextStep ? <div className="rounded-tile border border-line bg-accent-soft p-3 text-sm leading-7"><p className="font-medium">下一步：{view.result.nextStep.label}</p><p>{view.result.nextStep.action}</p></div> : null}
-        {view.next?.reason ? <p className="text-sm leading-7 text-text-2">{view.next.reason}</p> : null}
+        {view.next?.notice ? <p className="text-sm leading-7">{view.next.notice}</p> : null}
+        {hasReasons ? <details className="text-sm leading-7 text-text-2">
+          <summary className="cursor-pointer">为什么</summary>
+          <div className="mt-2 space-y-2">
+            {view.result.detail ? <p>{view.result.detail}</p> : null}
+            {view.result.nextStep ? <div className="rounded-tile border border-line bg-accent-soft p-3 text-text"><p className="font-medium">下一步：{view.result.nextStep.label}</p><p>{view.result.nextStep.action}</p></div> : null}
+            {view.next?.reason ? <p>{view.next.reason}</p> : null}
+          </div>
+        </details> : null}
         {view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
         {primary.kind === "redo" && on.onContinue ? <button type="button" className={ui.secondary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onContinue}>看下一步安排</button> : null}
       </section> : null}
@@ -75,9 +85,11 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
     </main>
 
-    {view.step.kind !== "photo_practice" || primary.kind !== "none" ? <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
+    {view.step.kind !== "photo_practice" || primary.kind !== "none" ? <footer className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
       {helpAllowed ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
+      {view.confidence && on.onConfidence ? <ConfidenceChoice value={view.confidence.value} disabled={pending || view.confidence.locked} onChange={on.onConfidence}
+        className="order-first w-full sm:order-none sm:ml-auto sm:w-auto" /> : null}
       <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
         {pending ? "正在保存…" : primary.label}
       </button>
@@ -136,5 +148,6 @@ export function StudySession({ port }: { port: StudySessionPort }) {
     onContinue={continueSession}
     onHelp={() => void run(port.help)} onPause={() => void run(port.pause)} onReload={() => void run(port.load)}
     onRedo={port.redo ? () => void run(port.redo!) : undefined}
-    onEdit={change => sync(() => port.edit(change))} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => sync(port.removePhoto)} />;
+    onEdit={change => sync(() => port.edit(change))} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => sync(port.removePhoto)}
+    onConfidence={port.setConfidence ? value => sync(() => port.setConfidence!(value)) : undefined} />;
 }

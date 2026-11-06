@@ -2,10 +2,12 @@
  * Study session view model. Components read only these types; adapters own every API shape.
  * A new activity adds one `kind`, one adapter and one renderer; the shell does not change.
  */
-import type { ReviewGrade } from "@aistudy/contracts";
+import type { LearningAttemptSubmitInput, ReviewGrade } from "@aistudy/contracts";
 import type { SpanDraftAnswer } from "../teaching/span/span-answer";
 
 export type StudyStepKind = "learn" | "question" | "photo_practice" | "card";
+/** Ordinal self-report sealed with the first answer; never evidence or a probability. */
+export type PreAnswerConfidence = NonNullable<LearningAttemptSubmitInput["preAnswerConfidence"]>;
 
 /** Rich text uses the shared LearningProse renderer (Markdown + `$…$` math). */
 export type LearnStep = { kind: "learn"; id: string; title: string; body: string; focus?: string; estimateMinutes: number | null };
@@ -45,7 +47,8 @@ export type StepResult = { outcome: ResultOutcome; assistance: ResultAssistance;
 export type PhotoWorkSource = { id: string; version: number; physicalPage: number };
 export type PhotoState = { status: "none" | "uploading" | "preparing" | "ready" | "pending" | "unavailable" | "failed"; name?: string; workSource?: PhotoWorkSource; message?: string };
 
-export type NextAction = { href: string; label: string; reason?: string; alternatives: { href: string; label: string }[] };
+/** `notice` asks the learner to choose and stays visible; `reason` only explains the step and is folded. */
+export type NextAction = { href: string; label: string; reason?: string; notice?: string; alternatives: { href: string; label: string }[] };
 
 export type StudySessionView = {
   step: StudyStep;
@@ -62,11 +65,17 @@ export type StudySessionView = {
   canPracticeVariant?: boolean;
   next: NextAction | null;
   photo: PhotoState | null;
+  /** Optional choice beside the submit action; activities that omit it render no control. */
+  confidence?: { value: PreAnswerConfidence | null; locked: boolean };
+  /** The learner's session time, shown only when the step has no estimate. */
+  budgetMinutes?: number;
 };
 
 export type StudySessionPort = {
   load(): Promise<StudySessionView>;
   edit(change: Partial<SpanDraftAnswer>): StudySessionView;
+  /** Local only; throws once the first answer is sealed, like `edit`. */
+  setConfidence?(value: PreAnswerConfidence | null): StudySessionView;
   primary(): Promise<StudySessionView>;
   redo?(): Promise<StudySessionView>;
   help(): Promise<StudySessionView>;
