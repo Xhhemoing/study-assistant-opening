@@ -234,7 +234,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
           ORDER BY s.id FOR SHARE` : [];
         if (!sameVersions(input.sourceVersions, Object.fromEntries(sources.map(source => [String(source.id), Number(source.version)])))) {
-          throw new OpeningKnowledgeError("CONFLICT", "材料已变化，请重新读取并核对材料。");
+          throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化（任一材料升版、移出课程或被排除都会影响确认），请先重新整理课程知识，再核对确认。");
         }
         let chunks: SourceChunk[];
         try {
