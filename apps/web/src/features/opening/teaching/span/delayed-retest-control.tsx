@@ -2,7 +2,7 @@
 import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
-import { retestActivityStatusSchema, type LearningObservation } from "@aistudy/contracts";
+import { controlledLearningTools, retestActivityStatusSchema, type LearningObservation } from "@aistudy/contracts";
 import { createOpeningApi } from "../../client/api";
 import { ui } from "../../design/ui";
 import { userFacingMessage } from "../../../../lib/user-facing-error";
@@ -11,7 +11,9 @@ const receiptSchema = receiptFields.extend({ taskStatus: z.enum(["pending", "don
   .refine(value => value.href === `/opening/courses/${value.courseId}/study/span?retest=${value.activityId}`);
 const automaticReceiptSchema = receiptFields.extend({ taskStatus: z.enum(["pending", "done", "skipped"]), activityStatus: retestActivityStatusSchema })
   .refine(value => value.href === `/opening/courses/${value.courseId}/study/span?retest=${value.activityId}`);
+const problemSchema = z.object({ error: z.object({ message: z.string() }) });
 type Receipt = z.infer<typeof receiptFields> & { taskStatus?: "pending" | "done" | "skipped"; activityStatus?: z.infer<typeof retestActivityStatusSchema>; automatic: boolean };
+type Undo = "confirm" | "unknown" | "undone" | "kept" | "unavailable";
 /** 已核对的 span 结果仅在本课程已有明确授权时尝试自动安排。 */
 export function shouldAutoScheduleRetest(record: Pick<LearningObservation, "serverEvaluation">): boolean {
   const decision = record.serverEvaluation?.decision;
@@ -23,6 +25,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   const [pending, setPending] = useState(false), [error, setError] = useState("");
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [unknownMode, setUnknownMode] = useState<"automatic" | "manual" | null>(null);
+  const [undo, setUndo] = useState<Undo | null>(null);
   const busy = useRef(false), epoch = useRef(0);
   const autoGrantRevision = useRef<number | null>(null);
   async function schedule(automatic = false) {
@@ -36,7 +39,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       definitiveFailure = !response.ok && response.status < 500;
       const body: unknown = await response.json();
       if (current !== epoch.current) return;
-      if (!response.ok) { const problem = z.object({ error: z.object({ message: z.string() }) }).safeParse(body); throw new Error(problem.success ? problem.data.error.message : "复测任务保存未确认，请用同一按钮重新确认。"); }
+      if (!response.ok) { const problem = problemSchema.safeParse(body); throw new Error(problem.success ? problem.data.error.message : "复测任务保存未确认，请用同一按钮重新确认。"); }
       const saved = automatic ? automaticReceiptSchema.parse(body) : receiptSchema.parse(body);
       if (saved.courseId !== record.courseId) throw new Error("这条复测安排不属于当前课程。");
       setReceipt({ ...saved, automatic });
@@ -46,10 +49,32 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       setError(`${definitiveFailure ? "" : "保存结果未确认。"}${userFacingMessage(reason, "请查看今日任务，或再次确认这次安排。")}`);
     } finally { if (current === epoch.current) { busy.current = false; setPending(false); } }
   }
+  // 能否撤销只由服务器判断：404 表示原安排未改动；5xx 或断网时结果未知，只能重发同一撤销。
+  async function undoAutomatic(activityId: string) {
+    if (busy.current) return;
+    const current = epoch.current;
+    busy.current = true; setPending(true); setError("");
+    let definitiveFailure = false;
+    try {
+      const response = await fetch("/api/opening/teaching/span/delayed/automatic/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ activityId }) });
+      definitiveFailure = !response.ok && response.status < 500;
+      if (response.status === 404) { if (current === epoch.current) setUndo("unavailable"); return; }
+      const body: unknown = await response.json();
+      if (current !== epoch.current) return;
+      if (!response.ok) { const problem = problemSchema.safeParse(body); throw new Error(problem.success ? problem.data.error.message : ""); }
+      const result = controlledLearningTools.cancel_retest.output.parse(body);
+      if (result.activityId !== activityId) throw new Error("撤销结果与这项复习不一致，请重新确认。");
+      setUndo(result.cancelled ? "undone" : "kept");
+    } catch (reason) {
+      if (current !== epoch.current) return;
+      setUndo(definitiveFailure ? null : "unknown");
+      setError(definitiveFailure ? `未撤销，原安排保留。${userFacingMessage(reason, "")}` : `撤销结果未确认。${userFacingMessage(reason, "请用同一按钮重新确认。")}`);
+    } finally { if (current === epoch.current) { busy.current = false; setPending(false); } }
+  }
   // 授权读取不能替代服务器对账号开关、课程、预算与取消历史的事务核对。
   useEffect(() => {
     const current = ++epoch.current;
-    setReceipt(null); setUnknownMode(null); setError(""); autoGrantRevision.current = null;
+    setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); autoGrantRevision.current = null;
     busy.current = false; setPending(false);
     if (!shouldAutoScheduleRetest(record)) return () => { epoch.current += 1; };
     busy.current = true; setPending(true);
@@ -66,13 +91,26 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   }, [api, record.id]);
   const cancelled = receipt && (receipt.taskStatus === "skipped" || receipt.activityStatus && ["cancelled", "declined", "invalidated", "superseded"].includes(receipt.activityStatus));
   const completed = receipt && (receipt.taskStatus === "done" || receipt.activityStatus === "completed");
+  const undoOffered = Boolean(receipt?.automatic && !cancelled && !completed) && (undo === null || undo === "confirm");
+  const settling = pending || undo === "unknown";
   return <div className="space-y-2 border-t border-line pt-3">
     {receipt ? <div role="status" className="space-y-2">
-      {cancelled ? <p className="text-sm leading-7">这项复测已取消或失效，原记录保留，本次没有重新安排。</p>
-        : completed ? <p className="text-sm leading-7">这项复测已完成，原记录保留，本次没有新增任务。</p>
-          : <p className="text-sm leading-7">{receipt.automatic ? "已自动排进复习：" : "复习已加入今日任务："}{new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 之后再做一道新题。</p>}
-      {!cancelled ? <Link className={ui.secondary} href={receipt.href}>{completed ? "回看这项复习" : "打开这项复习"}</Link> : null}
+      {undo === "undone" ? <p className="text-sm leading-7">已撤销这次自动安排：复习任务已关闭，学习记录保留。</p>
+        : cancelled ? <p className="text-sm leading-7">这项复测已取消或失效，原记录保留，本次没有重新安排。</p>
+          : completed ? <p className="text-sm leading-7">这项复测已完成，原记录保留，本次没有新增任务。</p>
+            : <p className="text-sm leading-7">{receipt.automatic ? "已自动排进复习：" : "复习已加入今日任务："}{new Date(receipt.notBeforeAt).toLocaleString("zh-CN")} 之后再做一道新题。</p>}
+      {undo === "kept" || undo === "unavailable" ? <p className="text-xs leading-6 text-text-2">{undo === "kept" ? "这项安排已开始、已调整或已列入计划" : "这项复习不是可撤销的自动安排"}，未撤销，原记录保留。</p> : null}
+      {!cancelled && undo !== "undone" && !settling ? <Link className={ui.secondary} href={receipt.href}>{completed ? "回看这项复习" : "打开这项复习"}</Link> : null}
       <Link className={ui.quiet} href="/opening/today">查看今日任务</Link>
+      {undoOffered ? <button type="button" className={ui.quiet} aria-expanded={undo === "confirm"} disabled={pending} onClick={() => setUndo(undo === "confirm" ? null : "confirm")}>撤销这次安排</button> : null}
+      {undoOffered && undo === "confirm" ? <div className="space-y-2">
+        <p className="text-xs leading-6 text-text-2">仅在这项复习尚未开始、任务未改动、也未列入已确认的计划时撤销；只关闭导师自动新建的这项复习，学习记录保留。</p>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className={ui.secondary} disabled={pending} onClick={() => void undoAutomatic(receipt.activityId)}>{pending ? "正在撤销…" : "确认撤销"}</button>
+          <button type="button" className={ui.quiet} disabled={pending} onClick={() => setUndo(null)}>保留安排</button>
+        </div>
+      </div> : null}
+      {undo === "unknown" ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => void undoAutomatic(receipt.activityId)}>{pending ? "正在核对撤销结果…" : "重新确认撤销"}</button> : null}
     </div> : <>
       <button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule(unknownMode === "automatic")}>
         {pending ? "正在核对复测安排…" : unknownMode === "automatic" ? "重新确认自动安排" : unknownMode === "manual" ? "重新确认复测安排" : "安排 3 天后再练习"}

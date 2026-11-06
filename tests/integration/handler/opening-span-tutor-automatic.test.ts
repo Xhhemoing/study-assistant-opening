@@ -6,6 +6,9 @@ import { getSpanProblem, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import { POST } from "../../../apps/web/src/app/api/opening/teaching/span/delayed/automatic/route";
+import { POST as CANCEL } from "../../../apps/web/src/app/api/opening/teaching/span/delayed/automatic/cancel/route";
+import { POST as MANUAL } from "../../../apps/web/src/app/api/opening/teaching/span/delayed/route";
+import { createSpanDelayedRetestService } from "../../../apps/web/src/features/opening/teaching/span/delayed-retest-service";
 import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 
@@ -22,19 +25,20 @@ afterAll(async () => {
   setAuthRuntimeForTests(null); vi.unstubAllEnvs();
   await runtime?.close(); await fixture?.close();
 });
-const request = (body: unknown, cookie = fixture.cookie) => new Request("http://localhost/api/opening/teaching/span/delayed/automatic", {
+const post = (path: string) => (body: unknown, cookie = fixture.cookie) => new Request(`http://localhost/api/opening/teaching/span/delayed${path}`, {
   method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body),
 });
+const request = post("/automatic"), cancelRequest = post("/automatic/cancel"), manualRequest = post("");
 
 /** Reuses the guarded fixture and source helpers; the baseline is scored by the real span repository. */
-async function baseline(scope = fixture.scope) {
+async function baseline(scope = fixture.scope, dailyMinutes = 30) {
   const rows = backupRows(fixture.sql, scope), sourceId = await rows.source(), courseId = randomUUID();
   await rows.chunk(sourceId);
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Automatic span handler',${courseId})`;
   await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(scope,
     { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
   await createOpeningAdaptivePrefsRepository(fixture.sql).patch(scope, {
-    spanTutorGrant: { courseId, enabled: true, dailyMinutes: 30, expiresOn: null, expectedRevision: 0 },
+    spanTutorGrant: { courseId, enabled: true, dailyMinutes, expiresOn: null, expectedRevision: 0 },
   });
   const learning = createOpeningLearningRepository(fixture.sql);
   const session = await learning.createSession(scope, { courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [sourceId] });
@@ -84,5 +88,60 @@ describe("authenticated automatic span retest", () => {
     expect(response.status).toBe(409);
     expect(await fixture.sql`SELECT id FROM opening_tasks WHERE course_id=${f.courseId}`).toHaveLength(0);
     expect(await fixture.sql`SELECT id FROM opening_retest_activities WHERE course_id=${f.courseId}`).toHaveLength(0);
+  });
+});
+
+// Automatic retests in this file share one target-day budget, so the undo cases grant the full daily minutes.
+describe("learner undo of an automatic span retest", () => {
+  async function scheduled(f: Awaited<ReturnType<typeof baseline>>) {
+    const response = await POST(request(f.body));
+    expect(response.status).toBe(200);
+    return await response.json() as { taskId: string; activityId: string };
+  }
+  it("closes an untouched retest once, answers a repeat the same way and is not rebuilt by a refresh", async () => {
+    const f = await baseline(fixture.scope, 180), retest = await scheduled(f);
+    expect((await CANCEL(cancelRequest({ activityId: retest.activityId }, ""))).status).toBe(401);
+    const response = await CANCEL(cancelRequest({ activityId: retest.activityId }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ activityId: retest.activityId, cancelled: true, closedTaskIds: [retest.taskId] });
+    const repeat = await CANCEL(cancelRequest({ activityId: retest.activityId }));
+    expect(await repeat.json()).toEqual({ activityId: retest.activityId, cancelled: true, closedTaskIds: [] });
+    const [task] = await fixture.sql`SELECT status,close_source FROM opening_tasks WHERE id=${retest.taskId}`;
+    expect(task).toMatchObject({ status: "skipped", close_source: "system" });
+    const [activity] = await fixture.sql`SELECT status,reason FROM opening_retest_activities WHERE id=${retest.activityId}`;
+    expect(activity).toMatchObject({ status: "cancelled", reason: "learner_undo_automatic" });
+    const refresh = await POST(request(f.body));
+    expect(refresh.status).toBe(200);
+    expect(await refresh.json()).toMatchObject({ taskId: retest.taskId, activityId: retest.activityId, taskStatus: "skipped", activityStatus: "cancelled" });
+    expect((await POST(request({ ...f.body, clientKey: randomUUID() }))).status).toBe(409);
+    expect(await fixture.sql`SELECT id FROM opening_tasks WHERE course_id=${f.courseId}`).toHaveLength(1);
+  });
+  it("leaves an edited retest untouched and repeats the same refusal", async () => {
+    const f = await baseline(fixture.scope, 180), retest = await scheduled(f);
+    await fixture.sql`UPDATE opening_tasks SET title='learner edited',version=version+1 WHERE id=${retest.taskId}`;
+    const snapshot = async () => {
+      const [task] = await fixture.sql`SELECT status,title,version,updated_at FROM opening_tasks WHERE id=${retest.taskId}`;
+      const [activity] = await fixture.sql`SELECT status,version,updated_at,cancelled_at FROM opening_retest_activities WHERE id=${retest.activityId}`;
+      const [history] = await fixture.sql`SELECT revision FROM opening_workspace_history_revisions
+        WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
+      return { task: { ...task }, activity: { ...activity }, revision: history?.revision };
+    };
+    const before = await snapshot(), refusal = { activityId: retest.activityId, cancelled: false, closedTaskIds: [] };
+    expect(await (await CANCEL(cancelRequest({ activityId: retest.activityId }))).json()).toEqual(refusal);
+    expect(await (await CANCEL(cancelRequest({ activityId: retest.activityId }))).json()).toEqual(refusal);
+    expect(await snapshot()).toEqual(before);
+  });
+  it("does not undo a manually accepted retest or another user's automatic retest", async () => {
+    const own = await baseline(), other = await baseline(fixture.otherScope);
+    const manual = await MANUAL(manualRequest({ observationId: own.body.observationId, clientKey: own.body.clientKey }));
+    expect(manual.status).toBe(200);
+    const accepted = await manual.json() as { taskId: string; activityId: string };
+    const foreign = await createSpanDelayedRetestService(fixture.sql).scheduleAutomatic(fixture.otherScope, other.body);
+    for (const target of [accepted, foreign]) expect((await CANCEL(cancelRequest({ activityId: target.activityId }))).status).toBe(404);
+    const rows = await fixture.sql`SELECT t.status AS task_status,r.status AS activity_status FROM opening_tasks t
+      JOIN opening_retest_activities r ON r.task_id=t.id WHERE t.id IN ${fixture.sql([accepted.taskId, foreign.taskId])}`;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).toMatchObject({ task_status: "pending", activity_status: "accepted" });
   });
 });
