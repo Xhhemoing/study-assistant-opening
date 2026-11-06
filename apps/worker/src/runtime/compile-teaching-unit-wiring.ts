@@ -80,6 +80,9 @@ export function createCompileTeachingUnitWorkerDeps(
         },
       }
     : {};
+  // Per-result, one-use bookkeeping keeps handler preflight for custom builders
+  // without repeating the production builder's check (including wrapped builders).
+  const preflightedInputs = new WeakSet<object>();
   return {
     budget,
     resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
@@ -89,7 +92,9 @@ export function createCompileTeachingUnitWorkerDeps(
     reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
-    validateSourceRefs: (scope, input) => teachingContent.validateActivitySourceRefs(scope, input),
+    validateSourceRefs: (scope, input) => preflightedInputs.delete(input)
+      ? Promise.resolve()
+      : teachingContent.validateActivitySourceRefs(scope, input),
     publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
     loadReplayedResult: async (scope, resultRef) => {
       const match = /^teaching_activity:(.+)$/.exec(resultRef);
@@ -147,7 +152,9 @@ export function createCompileTeachingUnitWorkerDeps(
           await teachingContent.validateActivitySourceRefs(scope, publishInput);
           const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
           // Publication revalidates atomically; preflight cannot authorize a later write.
-          return { ...publishInput, revisionNumber: written.revisionNumber };
+          const result = { ...publishInput, revisionNumber: written.revisionNumber };
+          preflightedInputs.add(result);
+          return result;
         }
       : undefined,
     verifyAfterPublish: teachingValidationOn

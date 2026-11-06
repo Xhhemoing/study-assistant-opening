@@ -277,7 +277,8 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(writtenBlocks.length).toBeGreaterThan(0);
     expect(published).toHaveLength(1);
     expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
-    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[1]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
+    expect(content.writeUnitBlocks.mock.invocationCallOrder[0]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
     const spec = published[0]!;
     expect(spec.revisionNumber).toBe(2);
     expect(spec.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((b) => b.id));
@@ -299,6 +300,64 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(writtenBlocks.find((b) => b.type === "prompt")!.content).not.toHaveProperty("hints");
     expect(result).toMatchObject({ generateStatus: "needs_check" });
     expect(statuses).toEqual(["generating", "needs_check"]);
+  });
+
+  it.each(["0", "1"])("runs one preflight plus authoritative publication with real repository lock queries (validation flag %s)", async flag => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
+    // Only SQL I/O is synthetic here: run the real repository validation,
+    // transaction boundaries and locks rather than counting a mocked validator.
+    const queries: Array<{ transaction: number; query: string }> = [];
+    let transaction = 0;
+    const sql = ((strings: TemplateStringsArray | unknown[], ...values: unknown[]) => {
+      if (!Object.hasOwn(strings, "raw")) return strings;
+      const query = (strings as TemplateStringsArray).join("?");
+      queries.push({ transaction, query });
+      if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
+      if (query.includes("FROM opening_jobs")) return Promise.resolve([{ state: "running" }]);
+      if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY, content_version: 0 }]);
+      if (query.includes("FROM opening_teaching_units")) return Promise.resolve([{ id: UNIT, document_id: DOC }]);
+      if (query.includes("FROM opening_sources")) return Promise.resolve([{ id: SOURCE, version: 1 }]);
+      if (query.includes("FROM opening_source_versions")) return Promise.resolve([{ version: 1, availability: "available" }]);
+      if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ id: CHUNK, source_version: 1 }]);
+      if (query.includes("INSERT INTO opening_teaching_activity_specs")) return Promise.resolve([{
+        id: "spec-1", activity_id: ACTIVITY, teaching_unit_id: UNIT, document_id: DOC,
+        revision_number: 2, block_order: values[7], source_refs: values[8], version: 1,
+      }]);
+      if (query.includes("UPDATE opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY }]);
+      return Promise.resolve([]);
+    }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
+    sql.begin = vi.fn(async callback => { transaction++; return callback(sql); }) as unknown as typeof sql.begin;
+    sql.json = ((value: unknown) => value) as typeof sql.json;
+    const { createOpeningTeachingContentRepository } = await import("../../../../packages/database/src/repositories/opening-teaching-content");
+    const repository = createOpeningTeachingContentRepository(sql);
+    content.validateActivitySourceRefs.mockImplementation(repository.validateActivitySourceRefs);
+    content.publishActivitySpec.mockImplementation(repository.publishActivitySpec);
+    const dependencies = shared();
+    const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
+    // Exercise the optional verifier once without an extra metadata publication.
+    const verify = vi.fn(async () => null);
+    deps.verifyAfterPublish = verify;
+    await createCompileTeachingUnitHandler(deps)(job, payload);
+
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
+    expect(content.publishActivitySpec).toHaveBeenCalledTimes(1);
+    expect(sql.begin).toHaveBeenCalledTimes(2);
+    const historyLocks = queries.filter(({ query }) => query.includes("SELECT revision FROM opening_workspace_history_revisions") && query.includes("FOR UPDATE"));
+    expect(historyLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
+    const sourceLocks = queries.filter(({ query }) => query.includes("FROM opening_sources") && query.includes("FOR SHARE"));
+    expect(sourceLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
+    const versionLocks = queries.filter(({ query }) => query.includes("FROM opening_source_versions") && query.includes("FOR SHARE"));
+    const chunkLocks = queries.filter(({ query }) => query.includes("FROM opening_source_chunks") && query.includes("FOR SHARE"));
+    expect(versionLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
+    expect(chunkLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
+    const routeChecks = queries.filter(({ query }) => query.includes("SELECT course_id,goal_json,create_intent FROM opening_teaching_activities"));
+    expect(routeChecks.map(({ transaction }) => transaction)).toEqual([1, 2]);
+    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
+    expect(content.writeUnitBlocks.mock.invocationCallOrder[0]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
+    expect(verify).toHaveBeenCalledTimes(flag === "1" ? 1 : 0);
+    expect(dependencies.budget.reserve).toHaveBeenCalledTimes(1);
+    expect(dependencies.budget.settle).toHaveBeenCalledTimes(1);
   });
 
   it.each(["0", "1"])("rejects invalid source ownership before saving bodies or publishing (validation flag %s)", async (flag) => {
@@ -323,6 +382,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       revisionNumber: 2, blockOrder: [], sourceRefs: [{ sourceId: SOURCE, version: 1, chunkId: "invented" }] });
     content.validateActivitySourceRefs.mockRejectedValue(Object.assign(new Error("invalid chunk"), { code: "VALIDATION" }));
     await expect(createCompileTeachingUnitHandler(deps)(job, payload)).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
     expect(content.publishActivitySpec).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
   });
@@ -332,7 +392,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     content.publishActivitySpec.mockRejectedValue(Object.assign(new Error("source ref version no longer exists"), { code: "CONFLICT" }));
     await expect(createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload))
       .rejects.toMatchObject({ code: "CONFLICT" });
-    expect(content.validateActivitySourceRefs).toHaveBeenCalled();
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
     expect(published).toEqual([]);
     expect(statuses).toEqual(["generating", "failed"]);
   });
