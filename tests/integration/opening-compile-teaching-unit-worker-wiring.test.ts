@@ -269,6 +269,8 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     expect(promotion?.report.layers).toEqual(expect.arrayContaining([
       expect.objectContaining({ layer: "schema", outcome: "pass" }),
       expect.objectContaining({ layer: "source_identity", outcome: "pass" }),
+      // Generated answer keys are not independently supported by the material links.
+      expect.objectContaining({ layer: "claim_support", outcome: "fail" }),
       expect.objectContaining({ layer: "tool_result", outcome: "unknown" }),
     ]));
     expect(promotion?.nextVerificationStatus).toBe("needs_check");
@@ -283,18 +285,21 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
 
     // The same real verifier rejects an invented chunk. This is a validation
     // result, separate from whether the repository fences publication.
+    const inventedChunkId = randomUUID();
     const invalid = await deps.verifyAfterPublish!(f.scope, {
       activityId: activity.id,
       publishInput: {
         ...verifySpy.mock.calls[0]![1].publishInput,
         sourceRefs: [
           { sourceId: sourceA, version: 1, page: 1, chunkId: chunkA },
-          { sourceId: sourceB, version: 1, page: 1, chunkId: randomUUID() },
+          { sourceId: sourceB, version: 1, page: 1, chunkId: inventedChunkId },
         ],
       },
       providerOutput: null,
     });
     expect(invalid?.report.layers).toContainEqual(expect.objectContaining({ layer: "source_identity", outcome: "fail" }));
+    expect(invalid?.report.layers.find(layer => layer.layer === "source_identity")?.details?.bad)
+      .toContain(`chunk:${inventedChunkId}`);
     expect(invalid?.nextVerificationStatus).toBe("rejected");
     expect(invalid?.nextGenerateStatus).toBeUndefined();
     expect(mayPublishVerified(invalid!.report)).toBe(false);
