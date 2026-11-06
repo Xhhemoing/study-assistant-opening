@@ -38,7 +38,7 @@ Files: playwright.opening.config.mts, scripts/opening-e2e/server.mjs, tests/supp
 ## Task 3：验证与交付记录
 
 - [x] 串行运行定向unit/tooling、独立integration/handler、类型/定向lint与生产构建/浏览器。
-- [x] 保存准确命令、计数、环境边界与未运行项目到 docs/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md。
+- [x] 保存准确命令、计数、环境边界与未运行项目到 docs/archive/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md。
 - [x] 完成后graphify update一次，审查本轮diff，不提升尚未通过全部门禁的任务状态。
 
 ## Completion (2026-09-25, Asia/Shanghai)

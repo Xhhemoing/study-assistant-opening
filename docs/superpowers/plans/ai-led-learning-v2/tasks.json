@@ -122,7 +122,7 @@
         ".github/workflows/ci.yml": "existing_area_or_plan_target_verify_before_edit",
         "package.json": "existing_area_or_plan_target_verify_before_edit"
       },
-      "notes": "Integrator ACCEPT 2026-10-11; local eslint + npm run lint exit 0; remote GHA pending push. See docs/superpowers/evidence/2026-10-11-opening-release/v2-01-ci-lint-accept.md"
+      "notes": "Integrator ACCEPT 2026-10-11; local eslint + npm run lint exit 0; remote GHA pending push. See docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-01-ci-lint-accept.md"
     },
     {
       "id": "V2-02",

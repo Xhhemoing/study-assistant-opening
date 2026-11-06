@@ -90,7 +90,7 @@
 
 ### PA-10 / 中：长期平台计划与开学版状态入口没有明确对接 [C]
 
-- 证据：`TODO.md:9–14,31–39`、`docs/roadmap/EXECUTION_PLAN.md:3` 仍指向旧路线；`docs/product/PRD.md:118–135` P0 广于开学版五项。
+- 证据：`TODO.md:9–14,31–39`、`docs/archive/roadmap/EXECUTION_PLAN.md:3` 仍指向旧路线；`docs/product/PRD.md:118–135` P0 广于开学版五项。
 - 最新规格已经明确独立开学范围，不能把所有旧 P0 都强加为本版缺项；缺的是 release profile 与 AIST 旧问题→新任务映射。
 - 最小修正：保留历史，说明本分支以 opening spec/master/tasks 为状态来源；笔记/市场/导出投影/离线等分别标“本版不承诺/已有但未复验/后续”。不得从 opening 局部通过推导整个 AIstudy 完成。**阻塞验收口径，不需要 Grok 替用户选范围。**
 

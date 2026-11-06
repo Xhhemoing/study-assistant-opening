@@ -284,7 +284,7 @@ review 与验证：
 
 ## 2026-09-25 隔离验收完成与下一切片
 
-本段更新此前“本地服务不可用”的历史游标。计划 `../2026-09-24-opening-isolated-acceptance.md` 已完成本地切片，完整命令、红绿链和边界见 `../../evidence/2026-09-24-opening-isolated-acceptance/verification.md`。
+本段更新此前“本地服务不可用”的历史游标。计划 `../2026-09-24-opening-isolated-acceptance.md` 已完成本地切片，完整命令、红绿链和边界见 `../../../archive/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md`。
 
 - 已使用任务专属 PostgreSQL 15432、Redis 16379、MinIO 19000/19001、Web 3100、fixture provider 18081；数据只在隔离测试库，未读取生产库或调用付费模型。
 - 新浏览器断言暴露并修复：loopback 重定向 host 变化导致 Cookie 丢失；解析 job 失败未写 source 终态；模型 fixture 被用户问题中的词错误满足。失败回写通过事务、workspace-first lock、CAS、owner/epoch/version/exclusion 约束；原件保留。
@@ -300,13 +300,13 @@ review 与验证：
 
 - 修复真实SQL阻断（JSON别名遮蔽导致text=uuid）、异常candidate形状放行、filtered session后代遗漏、非法memory UUID cast、空provenance与restore规则不一致、citation字符串版本、大写UUID误过滤及异步scope突变。
 - 31个新增聚焦integration通过；全unit 209 files /1112 tests、全integration 47 files /255 tests通过。database/domain/web及6个显式测试roots类型、全仓库lint通过。全unit暴露的editor测试1ms漂移已固定测试Date；cipher单测1MB深比较超时已改为同等逐字节Buffer.equals，未提高超时阈值。
-- 独立只读review三项发现全部先真实复现后修复并复核关闭。完整failure→cause→fix→recheck及测试fixture修正见 `../../evidence/2026-09-25-opening-backup-integration/verification.md`。
+- 独立只读review三项发现全部先真实复现后修复并复核关闭。完整failure→cause→fix→recheck及测试fixture修正见 `../../../archive/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`。
 - task-owned PostgreSQL/Redis/MinIO已停止；未提交、推送、部署、访问生产或调用付费模型，未修改tasks状态。最终图谱数字在证据文件记录。
 
 下一步保持原Q03范围：设计并实现DB历史快照+对象hash一致性、发布时隐私栅栏和并发不覆盖文件发布；随后恢复apply及新空库/存储隔离恢复演练、CLI与packaging。不能把此次加密往返当作恢复演练，也不能把workspace锁描述为覆盖所有写入的全库锁。原有真实模型、外部提醒、完整legacy browser、Docker/fresh-machine及release-SHA CI验收仍未因此完成。
 
 ## 2026-09-25 排他文件修复收尾与新执行入口
 
-排他文件发布切片已本地完成：parent独立跑备份unit 24 files/170 tests、真实DB/MinIO integration 4 files/31 tests、5个显式测试roots类型、database类型和6文件lint通过。归档/加密/解密以自有临时文件加排他hard-link发布；已发布清理失败与未发布明文残留分别报告。完整红绿链与边界见 `../../evidence/2026-09-25-opening-backup-publication/verification.md`。短写、sync错误、Windows ACL和DB发布/恢复协议仍未完成。
+排他文件发布切片已本地完成：parent独立跑备份unit 24 files/170 tests、真实DB/MinIO integration 4 files/31 tests、5个显式测试roots类型、database类型和6文件lint通过。归档/加密/解密以自有临时文件加排他hard-link发布；已发布清理失败与未发布明文残留分别报告。完整红绿链与边界见 `../../../archive/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md`。短写、sync错误、Windows ACL和DB发布/恢复协议仍未完成。
 
 用户已指示转入 `../2026-09-25-personal-use-multi-agent.md`：先PU00逐路径冻结隔离基线，再PU01契约，之后PU02与PU04并行。旧publication B–F移交PU05，不继续抢跑。该新计划明确允许在独立集成树形成逐路径本地snapshot提交；此前“不提交”的执行约定不再阻止该指定本地基线步骤，但原树/index仍受保护，push/部署/付费权限没有扩大。原43任务与CAP范围不变。

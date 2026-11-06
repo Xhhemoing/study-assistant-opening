@@ -18,7 +18,7 @@ Verify the fixed 17-table export against the isolated PostgreSQL database, then 
 - `tests/integration/opening-backup-records-*.ts`: isolated fixtures and repository regression tests; use `readOpeningBackupRecords(sql, scope)` without faking its SQL.
 - `packages/database/src/repositories/opening-backup-record-{table-queries,predicates}.ts`: minimal fixes if proven by those tests.
 - `tests/integration/opening-backup-compose-repository.test.ts`: real source inventory/staging and archive round trip, using existing storage fixtures.
-- Evidence: `docs/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`.
+- Evidence: `docs/archive/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`.
 
 ## Acceptance
 

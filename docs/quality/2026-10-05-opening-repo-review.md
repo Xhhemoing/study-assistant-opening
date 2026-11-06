@@ -60,9 +60,9 @@
 ### 3.2 证据与账本的不一致 [已核实]
 
 1. **P02 没有评审记录。** 队友描述的 “P02 CLOSED (Reviewer PASS)” 在仓库中找不到对应签字；`docs/superpowers/plans/2026-09-19-opening-grok-execution.md` 只有 09-20 的 Coder 自报与协调者复跑（day-planner 15/15、opening-plans handler 6/6）。P02 直到 10-05 才在 `4eaf858` 中提升，同样没有评审记录。
-2. **`m02-m03-active.md` 文件名与状态矛盾。** `docs/superpowers/evidence/2026-10-02-week-sprint/m02-m03-active.md` 被 M02、M03、U02 引为 verified 证据，但文件名是 “active”，正文写明浏览器验收待用户。
+2. **`m02-m03-active.md` 文件名与状态矛盾。** `docs/archive/superpowers/evidence/2026-10-02-week-sprint/m02-m03-active.md` 被 M02、M03、U02 引为 verified 证据，但文件名是 “active”，正文写明浏览器验收待用户。
 3. **P02/P03 证据计数不符。** `p02-p03-planning-reminders-verified.md`：integration 命令列出 4 个文件，输出却是 `Test Files 2 passed (2)`；repository 单测列出 3 个文件，输出 `2 passed (2)`。另外此文件使用 5433 端口，其它同批证据使用 15432。
-4. **RP1/RP2 与 M02 重叠。** M02 证据描述的 “历史/材料隐私准入” 与 “completeTurn 在工作区行锁下原子校验 epoch” 正是 RP1/RP2 的范围。代码抽查（§4.2）确认已实现，但 RP1/RP2 仍为 planned。`docs/superpowers/evidence/2026-09-21-opening-release/rp2-writeback-race.md:72` 写明 “worker 捕获错误并调用 fail() 的并发全链路未覆盖，不能宣称完整 RP2 verified”；`continuation-status.md` 记 RP1 “已实施，尚需合入门禁”。
+4. **RP1/RP2 与 M02 重叠。** M02 证据描述的 “历史/材料隐私准入” 与 “completeTurn 在工作区行锁下原子校验 epoch” 正是 RP1/RP2 的范围。代码抽查（§4.2）确认已实现，但 RP1/RP2 仍为 planned。`docs/archive/superpowers/evidence/2026-09-21-opening-release/rp2-writeback-race.md:72` 写明 “worker 捕获错误并调用 fail() 的并发全链路未覆盖，不能宣称完整 RP2 verified”；`continuation-status.md` 记 RP1 “已实施，尚需合入门禁”。
 5. **“prior M02 tip BLOCKED”** 对应 `2026-09-19-opening-grok-execution.md` 的 “BLOCKED / Coord” 段（09-20：worker 未把 `privacy` 传给 `createTutorTurnHandler`、job 仓库无 `workspacePrivacyEpoch`）。当前代码已接线：`apps/worker/src/index.ts:77`、`packages/database/src/repositories/opening-jobs.ts:141`。
 6. **任务数口径并存：** 27 项（09-12～09-14 的审计/证据）、37 项（`docs/design/2026-09-20-opening-frontend-review-plan.md:45`）、43 项（09-21 起至今）。旧文件是历史快照，不是错误，但读者容易误判。
 7. **10-05 批量提升（`4eaf858`）** 的 11 项（M01–M03、L01–L03、P02、P03、U02、U03 及 C01→active）都只有自动化测试证据，没有 PR/CI 绑定 SHA，也没有浏览器验收；而 `continuation-status.md` 自己约定 “合入验收须 PR/CI 绑定 SHA”。

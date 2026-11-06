@@ -7,7 +7,7 @@
 **Paula:** does **not** want piecemeal “name one bug → fix one bug”. Wants deep analysis of raised problems, proactive discovery of **same-class** gaps, then one prioritized inventory.
 
 **Evidence base (read, not re-litigated):**  
-`docs/superpowers/evidence/2026-10-10-opening-release/` — `upload-parse-gaps-understand.md`, `upload-delete-understand.md`, `stuck-pending-upload-understand.md`, `upload-interrupt-pending-understand.md`, `upload-interrupt-understand-plan.md`, `upload-interrupt-client-represign-p0-plan.md`, `parse-stuck-after-upload-understand.md`, `materials-course-link-understand.md`, plus matching `*-p0-*.md` accept/implement where shipped.
+`docs/archive/superpowers/evidence/2026-10-10-opening-release/` — `upload-parse-gaps-understand.md`, `upload-delete-understand.md`, `stuck-pending-upload-understand.md`, `upload-interrupt-pending-understand.md`, `upload-interrupt-understand-plan.md`, `upload-interrupt-client-represign-p0-plan.md`, `parse-stuck-after-upload-understand.md`, `materials-course-link-understand.md`, plus matching `*-p0-*.md` accept/implement where shipped.
 
 ---
 
