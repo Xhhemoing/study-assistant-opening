@@ -107,6 +107,8 @@ export type OpeningBudgetRepository = {
    * BUDGET_EXCEEDED and writes nothing.
    */
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
+  /** True only when every persisted child of the owned parent was certainly not sent. */
+  isParentNotSent(scope: OpeningScope, parentId: string): Promise<boolean>;
   /** Scope-bound: only rows of scope.workspaceId owned by scope.ownerUserId. */
   release(scope: OpeningScope, requestId: string, reason?: ReleaseReason): Promise<BudgetReservationRecord>;
   complete(scope: OpeningScope, requestId: string, options?: { resultRef?: string }): Promise<BudgetReservationRecord>;
@@ -410,6 +412,20 @@ export function createOpeningBudgetRepository(
   };
 
   return {
+    async isParentNotSent(scope, parentId) {
+      return sql.begin(async tx => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
+        // Same owner lock as reserve: configuration changes cannot hide a sibling
+        // that was sent, completed, unknown or still in flight.
+        const [row] = await tx`SELECT count(*)::int AS calls,
+          bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
+          FROM opening_budget_reservations
+          WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}`;
+        return Number(row!.calls) > 0 && row!.not_sent === true;
+      });
+    },
     async reserve(scope, input) {
       let parentBudget = input.parentBudget ?? (options.dailyQuotaMode === "unlimited" ? { id: input.requestId } : undefined);
       if (parentBudget) {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readStoredTeachingOutline } from "./teaching-outline";
+import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import {
@@ -79,6 +80,9 @@ export function createCompileTeachingUnitWorkerDeps(
         },
       }
     : {};
+  // Per-result, one-use bookkeeping keeps handler preflight for custom builders
+  // without repeating the production builder's check (including wrapped builders).
+  const preflightedInputs = new WeakSet<object>();
   return {
     budget,
     resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
@@ -88,6 +92,9 @@ export function createCompileTeachingUnitWorkerDeps(
     reservedCents: 100,
     setGenerateStatus: (scope, activityId, status, options) =>
       teachingActivities.setGenerateStatus(scope, activityId, status, options),
+    validateSourceRefs: (scope, input) => preflightedInputs.delete(input)
+      ? Promise.resolve()
+      : teachingContent.validateActivitySourceRefs(scope, input),
     publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
     loadReplayedResult: async (scope, resultRef) => {
       const match = /^teaching_activity:(.+)$/.exec(resultRef);
@@ -124,7 +131,7 @@ export function createCompileTeachingUnitWorkerDeps(
           const activity = await teachingActivities.get(scope, payload.activityId);
           const spec = await teachingContent.getActivitySpec(scope, payload.activityId);
           const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
-          let revisionNumber: number | null = null;
+          let compiledBlocks: Parameters<typeof teachingContent.writeUnitBlocks>[2] | null = null;
           const build = createTeachingCompilerPublishInput({
             loadChunks: scopedLoadChunks,
             evidenceChunks: providerInput?.chunks,
@@ -133,18 +140,21 @@ export function createCompileTeachingUnitWorkerDeps(
             intentKind: activity?.intentKind,
             // A real model wrote this activity: never fall back to template filler.
             requireModelOutput: true,
+            requireMaterialCitations: activity?.routeManaged === true,
             // Preserve the activity's original prompt boundary even if current
             // evidence/graph revalidation removed its prelude from model input.
             learnerFocus: activity?.learnerFocus,
-            writeLibraryBlocks: async (blocks) => {
-              const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, blocks);
-              revisionNumber = written.revisionNumber;
-            },
+            writeLibraryBlocks: async (blocks) => { compiledBlocks = blocks; },
           });
           const publishInput = await build(scope, payload, providerOutput);
-          if (revisionNumber == null) throw new Error("compiled blocks were not written to the unit document");
-          // Pin the revision holding the compiled bodies so client-init reads them.
-          return { ...publishInput, revisionNumber };
+          if (compiledBlocks == null) throw new Error("compiled blocks were not built");
+          // Fail before saving model bodies, even when post-publish validation is off.
+          await teachingContent.validateActivitySourceRefs(scope, publishInput);
+          const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
+          // Publication revalidates atomically; preflight cannot authorize a later write.
+          const result = { ...publishInput, revisionNumber: written.revisionNumber };
+          preflightedInputs.add(result);
+          return result;
         }
       : undefined,
     verifyAfterPublish: teachingValidationOn
@@ -155,6 +165,7 @@ export function createCompileTeachingUnitWorkerDeps(
             (input.publishInput.sourceRefs ?? []).flatMap((ref) => (ref.chunkId ? [ref.chunkId] : [])),
           );
           return createTeachingValidationAfterPublish({
+            tools: { checkFormula: checkTeachingFormula },
             loadChunks: async (ownedScope, sourceIds) => {
               const rows = await chunks.listForSources(ownedScope, sourceIds);
               return pinned.size ? rows.filter((row) => pinned.has(row.id)) : rows;

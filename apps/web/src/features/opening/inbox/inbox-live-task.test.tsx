@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
+import { setupUploadIdentity } from "./upload-identity-test-fixture";
+import { clearSessionExpiry } from "../../auth/session-expiry";
 
 const state = vi.hoisted(() => ({ upload: vi.fn() }));
 vi.mock("./upload-client", () => ({ createUploadClient: () => ({ uploadFile: state.upload }) }));
@@ -16,12 +18,15 @@ const api = {} as OpeningApi;
 const onChanged = async () => {};
 let container: HTMLDivElement;
 let root: Root;
+let releaseIdentity: () => void;
 beforeEach(() => {
+  clearSessionExpiry();
+  releaseIdentity = setupUploadIdentity();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   state.upload.mockReset().mockResolvedValue(source);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); releaseIdentity(); clearSessionExpiry(); vi.unstubAllGlobals(); });
 
 it("moves a completed parsing task into its normal row without remounting an open management draft", async () => {
   await act(async () => root.render(createElement(InboxPanel, { api, sources: [source], onChanged })));
@@ -34,6 +39,46 @@ it("moves a completed parsing task into its normal row without remounting an ope
   expect(container.querySelector<HTMLInputElement>('[aria-label="管理中的草稿"]')).toBe(input);
   expect(input.value).toBe("保留编辑内容");
 });
+it("renders a released not_started source honestly without a live task, polling, or an unauthorized retry", async () => {
+  vi.useFakeTimers();
+  const changed = vi.fn(async () => {}), retryParse = vi.fn();
+  try {
+    await act(async () => root.render(createElement(InboxPanel, {
+      api: { retryParse } as unknown as OpeningApi,
+      sources: [{ ...source, parseState: "not_started" }], onChanged: changed,
+    })));
+    expect(container.querySelector('[aria-label="材料处理任务"]')).toBeNull();
+    expect(container.textContent).toContain("解析尚未开始");
+    expect(container.textContent).not.toContain("解析排队中");
+    expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent === "重新解析")).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(changed).not.toHaveBeenCalled();
+    expect(retryParse).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
+});
+
+it("keeps the existing partial retry entry and shows its queued then failed state without false success", async () => {
+  const retryParse = vi.fn(async () => ({ ...source, parseState: "queued" })), changed = vi.fn(async () => {});
+  const retryApi = { retryParse } as unknown as OpeningApi;
+  const partial = { ...source, parseState: "ready" as const,
+    error: { code: "PARSE_PARTIAL", message: "第二页失败，成功页仍可阅读", retryable: true } };
+  await act(async () => root.render(createElement(InboxPanel, { api: retryApi, sources: [partial], onChanged: changed })));
+  const retry = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "重新解析")!;
+  await act(async () => retry.click());
+  expect(retryParse).toHaveBeenCalledExactlyOnceWith(source.id);
+  expect(changed).toHaveBeenCalledTimes(1);
+  await act(async () => root.render(createElement(InboxPanel, { api: retryApi, sources: [source], onChanged: changed })));
+  expect(container.querySelector('[aria-label="材料处理任务"]')).not.toBeNull();
+  expect(container.textContent).toContain("解析排队中");
+  expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent === "重新解析")).toBe(false);
+  await act(async () => root.render(createElement(InboxPanel, { api: retryApi,
+    sources: [{ ...source, parseState: "failed", error: { code: "PARSE_FAILED", message: "再次解析失败", retryable: true } }], onChanged: changed })));
+  expect(container.querySelector('[aria-label="材料处理任务"]')).toBeNull();
+  expect(container.textContent).toContain("再次解析失败");
+  expect(container.textContent).not.toContain("可以用于提问");
+  expect(Array.from(container.querySelectorAll("button")).some(button => button.textContent === "重新解析")).toBe(true);
+});
+
 it.each(["parsing-filter", "outside-current-page"])("keeps an open management draft after parsing leaves %s until explicit close", async situation => {
   const unrelated = { ...source, id: "other", name: "other.pdf", parseState: "ready" as const };
   const sources = [source, unrelated];

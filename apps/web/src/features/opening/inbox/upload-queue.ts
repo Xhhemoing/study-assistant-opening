@@ -1,4 +1,6 @@
 import { isSessionExpired } from "../../auth/session-expiry";
+import { getVerifiedSessionIdentity, type SessionIdentity } from "../../auth/session-identity";
+import { verifyUploadIdentity } from "./upload-identity";
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import type { LocalUploadFile, UploadByteProgress, UploadRejected } from "./upload-client";
 import { uploadBatchRejection, uploadFileRejection } from "./upload-preflight";
@@ -8,6 +10,7 @@ export type UploadQueueState = "idle" | "uploading" | "saved" | "failed";
 
 export type UploadQueueItem = {
   id: string;
+  expectedIdentity?: SessionIdentity | null;
   file: LocalUploadFile;
   state: UploadQueueState;
   source?: SourceRecord;
@@ -25,7 +28,7 @@ type LegacyUpload = (
   file: LocalUploadFile,
   onBytes?: (loaded: number, total: number) => void,
   resume?: { sourceId: string; ticket: UploadTicket; completionPending?: boolean },
-  operation?: { uploadId: string },
+  operation?: { uploadId: string; expectedIdentity: SessionIdentity | null; signal?: AbortSignal },
 ) => Promise<SourceRecord | UploadRejected>;
 
 type UploadOperation = UploadQueueClient | LegacyUpload;
@@ -53,11 +56,14 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
   };
   /** Item ids removed while idle/uploading — ignore late process/progress completions. */
   const cancelled = new Set<string>();
+  const controllers = new Map<string, AbortController>();
+  const attempted = new Set<string>();
 
   const add = (files: LocalUploadFile[]): UploadQueueItem[] => {
     assertRoom(files.map(file => ({ size: file.bytes.byteLength })));
     const added = files.map((file) => ({
       id: globalThis.crypto.randomUUID(),
+      expectedIdentity: getVerifiedSessionIdentity(),
       file,
       state: "idle" as const,
       progress: 0,
@@ -88,39 +94,48 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       return;
     }
     item.state = "uploading";
+    const controller = new AbortController();
+    controllers.set(item.id, controller);
     item.message = undefined;
     update?.(snapshot());
     const onBytes = (loaded: number, total: number) => {
-      if (!stillActive(item.id)) return;
+      if (!stillActive(item.id) || controller.signal.aborted) return;
       const ratio = Number.isFinite(loaded) && Number.isFinite(total) && total > 0 ? loaded / total : 0;
       item.progress = Math.max(0, Math.min(100, Math.round(ratio * 100)));
       update?.(snapshot());
     };
     let result: SourceRecord | UploadRejected;
     try {
+      await verifyUploadIdentity(item.expectedIdentity ?? null);
+      if (controller.signal.aborted) throw new UploadUserError("上传已停止，原件仍在本地，可重试。");
+      if (!stillActive(item.id)) return;
       const unread = unreadFiles.get(item.id);
       if (unread) {
         let bytes: Uint8Array;
         try { bytes = new Uint8Array(await unread.arrayBuffer()); }
         catch { throw new UploadUserError(`无法读取文件「${unread.name}」，原文件仍在，请重试或重新选择。`); }
+        if (controller.signal.aborted) throw new UploadUserError("上传已停止，原件仍在本地，可重试。");
         if (!stillActive(item.id)) return;
         item.file = { name: unread.name, type: unread.type, bytes };
         unreadFiles.delete(item.id);
       }
+      attempted.add(item.id);
       if (isClient(client)) {
         result = await client.uploadFile(item.file, item.ticket ? {
           uploadId: item.id,
+          signal: controller.signal,
+          expectedIdentity: item.expectedIdentity,
           resumeSourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
           onBytes,
-        } : { uploadId: item.id, onBytes });
+        } : { uploadId: item.id, expectedIdentity: item.expectedIdentity, signal: controller.signal, onBytes });
       } else {
         result = await client(item.file, onBytes, item.ticket ? {
           sourceId: item.ticket.source.id,
           ticket: item.ticket,
           completionPending: item.completionPending,
-        } : undefined, { uploadId: item.id });
+        } : undefined, { uploadId: item.id, expectedIdentity: item.expectedIdentity ?? null, signal: controller.signal });
       }
     } catch (error) {
       if (!stillActive(item.id)) return;
@@ -128,7 +143,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       item.message = uploadErrorMessage(error, "上传未完成，原件仍在本地，请重试。");
       update?.(snapshot());
       return;
-    }
+    } finally { controllers.delete(item.id); }
     if (!stillActive(item.id)) return;
     if ("phase" in result) {
       item.state = "failed";
@@ -140,6 +155,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     }
     item.state = "saved";
     item.source = result;
+    item.message = undefined;
     // Saved rows only need metadata. Keep failed buffers intact for same-source retry.
     item.file = { name: item.file.name, type: item.file.type, bytes: new Uint8Array() };
     item.ticket = undefined;
@@ -178,7 +194,19 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     if (index < 0) return;
     const item = items[index];
     if (!item || !DISMISSIBLE.has(item.state)) return;
+    if (item.state === "uploading") {
+      controllers.get(id)?.abort();
+      item.message = "正在停止上传；若已发送保存请求，可能已保存，待核对。";
+      update?.(snapshot());
+      return;
+    }
+    if (item.state !== "saved" && (item.completionPending || item.ticket || attempted.has(id))) {
+      item.message = item.completionPending ? "可能已保存，待核对。请重试核对同一材料。" : "上传准备或暂存记录待核对，可重试；尚未清理记录。";
+      update?.(snapshot());
+      return;
+    }
     cancelled.add(id);
+    attempted.delete(id);
     unreadFiles.delete(id);
     items.splice(index, 1);
     update?.(snapshot());

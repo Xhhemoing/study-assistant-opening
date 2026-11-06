@@ -3,7 +3,7 @@ import type { SourceRecord } from "@aistudy/contracts";
 type SourceState = Pick<SourceRecord, "uploadState" | "parseState">;
 export function shouldRefreshSources(sources: readonly SourceState[]): boolean {
   return sources.some((source) => source.uploadState === "uploaded" &&
-    ["not_started", "queued", "running"].includes(source.parseState));
+    ["queued", "running"].includes(source.parseState));
 }
 
 /** Serial reads only; disposing never schedules another request or reports late failures. */

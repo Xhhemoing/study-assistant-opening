@@ -15,6 +15,100 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 function client(value = snapshot): CourseRouteClient { return { read: vi.fn(async () => value), confirm: vi.fn(async () => ({ ...value, scopeState: "confirmed" as const })), start: vi.fn(), next: vi.fn(), scheduleRetest: vi.fn(), task: vi.fn(), verification: vi.fn(), confirmVerification: vi.fn() }; }
 function button(text: string) { const node = [...host.querySelectorAll("button")].find(item => item.textContent === text); if (!node) throw new Error(`missing ${text}`); return node; }
 async function render(api: CourseRouteClient) { await act(async () => root.render(<CourseRoutePanel courseId={courseId} client={api} goalsClient={{ list: vi.fn(async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] })) }} />)); }
+it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict client compilation facts separately from learning for %s", async verificationStatus => {
+  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
+  const missing = { activityId: null, generateStatus: null, contentVersion: 0, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
+  const value: CourseRouteSnapshot = { ...snapshot, scopeState: "confirmed", suggestions: [], materials: [], summary: { total: 4, mandatory: 4, verified: 0, blocked: 0 }, requirements: [
+    { ...base, compilation: { activityId: id, generateStatus: "needs_check", contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus } },
+    { ...base, requirement: { ...base.requirement, id: "22222222-2222-4222-8222-222222222222", title: "第二要求" }, compilation: { ...missing, activityId: id, generateStatus: "queued" } },
+    { ...base, requirement: { ...base.requirement, id: "33333333-3333-4333-8333-333333333333", title: "第三要求" }, compilation: missing },
+    { ...base, requirement: { ...base.requirement, id: "44444444-4444-4444-8444-444444444444", title: "旧响应要求" } },
+  ] };
+  const transport = vi.fn(async () => new Response(JSON.stringify(value), { status: 200 }));
+  await render(createCourseRouteClient(transport));
+  const rows = [...host.querySelectorAll("li")].filter(row => row.querySelector("h3"));
+  expect(rows).toHaveLength(4);
+  expect(rows[0]!.textContent).toContain("讲义：已保存 · 待核对");
+  expect(rows[1]!.textContent).toContain("讲义：尚无当前可用讲义 · 排队中");
+  expect(rows[2]!.textContent).toContain("讲义：缺失，尚无当前匹配活动");
+  expect(rows[3]!.textContent).toContain("讲义：编译事实未收集");
+  expect(rows[3]!.textContent).toContain("题目覆盖未收集 · 能否作为独立新题尚未确认");
+  expect(rows[3]!.textContent).toContain("程序算术核对：未收集");
+  expect(rows.every(row => row.textContent?.includes("待开始"))).toBe(true);
+  expect(host.textContent).toContain("已确认 4 项要求");
+  expect(host.textContent).not.toContain("讲义核对通过");
+  expect(host.textContent).not.toContain("已掌握");
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+it.each(["normal", "archived", "pending"] as const)("opens each saved handout without a goal or write command when %s", async mode => {
+  sessionStorage.clear();
+  if (mode === "pending") sessionStorage.setItem(`aistudy:route-command:${courseId}`, JSON.stringify({ kind: "confirm", input: { expectedRevisions: [], requirements: [requirement], confirmScope: true } }));
+  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
+  const saved = { activityId: id, generateStatus: "needs_check" as const, contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" as const };
+  const secondActivity = "22222222-2222-4222-8222-222222222222";
+  const compilations: Array<typeof base & { compilation?: CourseRouteSnapshot["requirements"][number]["compilation"] }> = [
+    { ...base, compilation: saved },
+    { ...base, compilation: { ...saved, activityId: secondActivity, generateStatus: "ready" } },
+    { ...base },
+    ...["failed", "cancelled", "stale", "queued", "generating", "unknown"].map(generateStatus => ({ ...base, compilation: { ...saved, generateStatus: generateStatus as NonNullable<CourseRouteSnapshot["requirements"][number]["compilation"]>["generateStatus"] } })),
+    ...[{ saved: false }, { activityId: null }, { documentId: null }, { revisionNumber: null }, { contentVersion: 0 }].map(patch => ({ ...base, compilation: { ...saved, ...patch } })),
+    { ...base, sourcesAvailable: false, compilation: saved },
+  ];
+  const value: CourseRouteSnapshot = { ...snapshot, scopeState: "confirmed", suggestions: [], materials: [], summary: { total: compilations.length, mandatory: compilations.length, verified: 0, blocked: 0 }, requirements: compilations.map((row, index) => ({ ...row, requirement: { ...row.requirement, id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, title: `要求${index}` } })) };
+  const transport = vi.fn(async () => new Response(JSON.stringify(value), { status: 200 }));
+  const api = createCourseRouteClient(transport);
+  const start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  const clicked: string[] = [];
+  await act(async () => root.render(<div onClick={event => { if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); } }}><CourseRoutePanel courseId={courseId} archived={mode === "archived"} client={api} goalsClient={{ list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) }} /></div>));
+  const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
+  const hrefs = [id, secondActivity].map(activity => `/opening/courses/${courseId}/handouts/${activity}`);
+  expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
+  expect(links.map(link => link.closest("li")?.querySelector("h3")?.textContent)).toEqual(["要求0 · 必修", "要求1 · 必修"]);
+  expect(host.querySelector("select")?.value).toBe("");
+  await act(async () => { links.forEach(link => link.click()); });
+  expect(clicked).toEqual(hrefs);
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(host.textContent).toContain("0 项已有验证记录");
+  expect(host.textContent).toContain("生成结果未知");
+  expect(host.textContent).not.toContain("讲义核对通过");
+  expect(host.textContent).not.toContain("已掌握");
+  sessionStorage.clear();
+});
+it("rejects invented compilation states and private bodies at the strict client boundary", async () => {
+  const compilation = { activityId: id, generateStatus: "queued", contentVersion: Number.MAX_SAFE_INTEGER, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
+  const value = { ...snapshot, requirements: [{ requirement: { ...requirement, requirementKey: "k".repeat(200), title: "题".repeat(200), courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], compilation }] };
+  const { courseRouteSnapshotSchema } = await import("@aistudy/contracts");
+  expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
+  for (const invalid of [{ ...compilation, generateStatus: "mastered" }, { ...compilation, verificationStatus: "passed" }, { ...compilation, blocks: [{ answer: "private" }] }]) {
+    const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...value.requirements[0], compilation: invalid }] }), { status: 200 }));
+    await expect(api.read(courseId)).rejects.toThrow();
+  }
+});
+it("accepts count-only coverage and rejects private bodies or invented unexposed eligibility", async () => {
+  const coverage = { savedQuestions: Number.MAX_SAFE_INTEGER, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], questionCoverage: coverage };
+  const { courseRouteSnapshotSchema } = await import("@aistudy/contracts");
+  const value = { ...snapshot, requirements: [row] };
+  expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
+  await expect(createCourseRouteClient(async () => new Response(JSON.stringify(value))).read(courseId)).resolves.toMatchObject({ requirements: [{ questionCoverage: coverage }] });
+  for (const invalid of [{ ...coverage, prompt: "private stem" }, { ...coverage, answer: "private answer" }, { ...coverage, answerBlockId: id }, { ...coverage, unexposedEligibility: "eligible" }, { ...coverage, savedQuestions: -1 }]) {
+    const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, questionCoverage: invalid }] })));
+    await expect(api.read(courseId)).rejects.toThrow();
+  }
+});
+it("accepts count-only reference checks and rejects private or invalid aggregates", async () => {
+  const referenceChecks = { matched: Number.MAX_SAFE_INTEGER, mismatched: 0, unsupported: 0 };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], referenceChecks };
+  const { courseRouteSnapshotSchema } = await import("@aistudy/contracts");
+  const value = { ...snapshot, requirements: [row] };
+  expect(courseRouteSnapshotSchema.safeParse(value).success).toBe(true);
+  await expect(createCourseRouteClient(async () => new Response(JSON.stringify(value))).read(courseId)).resolves.toMatchObject({ requirements: [{ referenceChecks }] });
+  for (const invalid of [{ ...referenceChecks, answer: "private" }, { ...referenceChecks, answerBlockId: id }, { ...referenceChecks, matched: -1 }, { ...referenceChecks, unsupported: 0.5 }]) {
+    expect(courseRouteSnapshotSchema.safeParse({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }).success).toBe(false);
+    await expect(createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }))).read(courseId)).rejects.toThrow();
+  }
+});
 it("shows the full material inventory while keeping extracted suggestions unconfirmed", async () => { const api = client(); await render(api); expect(host.textContent).toContain("资料 33"); expect(host.textContent).toContain("尚未确认全课范围"); expect(api.confirm).not.toHaveBeenCalled(); expect(api.start).not.toHaveBeenCalled(); });
 it("confirms the explicitly reviewed full list without replacing stable identities", async () => { const api = client(); await render(api); await act(async () => button("检查与确认课程范围").click()); expect(host.textContent).toContain("概念一"); await act(async () => button("确认这份全课范围").click()); expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [requirement], confirmScope: true }); });
 it("keeps material and verification gaps visible and does not claim course mastery", async () => { const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "blocked" as const, observationId: null, sourcesAvailable: false, missingReasons: ["缺少可用题目"] }; await render(client({ ...snapshot, scopeState: "confirmed", suggestions: [], requirements: [row], summary: { total: 1, mandatory: 1, verified: 0, blocked: 1 } })); expect(host.textContent).toContain("缺少可用题目"); expect(host.textContent).toContain("资料不可用"); expect(host.textContent).not.toContain("已掌握"); });

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { putPrivateBytes } from "./put-private";
+import { setupUploadIdentity, uploadTestIdentity } from "./upload-identity-test-fixture";
 import { clearSessionExpiry, createSessionFetch, subscribeToSessionExpiry } from "../../auth/session-expiry";
 import { createUploadClient } from "./upload-client";
 import { createUploadQueue } from "./upload-queue";
@@ -22,11 +23,12 @@ class FakeXhr {
   }
 }
 
-let onExpired: ReturnType<typeof vi.fn>;
+let onExpired: ReturnType<typeof vi.fn<() => void>>;
 let unsubscribe: () => void;
 beforeEach(() => {
   vi.stubGlobal("window", Object.assign(new EventTarget(), { location: new URL("https://study.example/opening/library") }));
-  onExpired = vi.fn();
+  setupUploadIdentity();
+  onExpired = vi.fn<() => void>();
   unsubscribe = subscribeToSessionExpiry(onExpired);
 });
 afterEach(() => { unsubscribe(); clearSessionExpiry(); vi.unstubAllGlobals(); });
@@ -46,6 +48,7 @@ describe("putPrivateBytes", () => {
       "application/pdf",
       (loaded, total) => seen.push(loaded / total),
       () => new FakeXhr() as unknown as XMLHttpRequest,
+      uploadTestIdentity,
     );
     expect(seen).toEqual([0.5, 1]);
   });
@@ -57,7 +60,7 @@ describe("private upload session boundary", () => {
     const xhr = new FakeXhr();
     xhr.status = 401;
     xhr.responseText = JSON.stringify(sessionError);
-    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(xhr))).rejects.toThrow("上传对象失败 (401)");
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(xhr), uploadTestIdentity)).rejects.toThrow("上传对象失败 (401)");
     expect(onExpired).toHaveBeenCalledOnce();
     const factory = vi.fn(() => asXhr(new FakeXhr()));
     await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, factory)).rejects.toThrow("请先登录原账户");
@@ -66,7 +69,7 @@ describe("private upload session boundary", () => {
     expect((await createSessionFetch(beginTransport)("/api/opening/sources/begin", { method: "POST" })).status).toBe(401);
     expect(beginTransport).not.toHaveBeenCalled();
     clearSessionExpiry();
-    await putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, factory);
+    await putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, factory, uploadTestIdentity);
     expect(factory).toHaveBeenCalledOnce();
   });
 
@@ -80,14 +83,14 @@ describe("private upload session boundary", () => {
     const xhr = new FakeXhr();
     xhr.status = status;
     xhr.responseText = body;
-    await expect(putPrivateBytes(url, bytes, "application/pdf", undefined, () => asXhr(xhr))).rejects.toThrow(`上传对象失败 (${status})`);
+    await expect(putPrivateBytes(url, bytes, "application/pdf", undefined, () => asXhr(xhr), uploadTestIdentity)).rejects.toThrow(`上传对象失败 (${status})`);
     expect(onExpired).not.toHaveBeenCalled();
   });
 
   it("does not expire a revalidated session when an older XHR finishes late", async () => {
     const xhr = new FakeXhr();
     xhr.autoLoad = false;
-    const request = putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(xhr));
+    const request = putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(xhr), uploadTestIdentity);
     clearSessionExpiry();
     xhr.status = 401;
     xhr.responseText = JSON.stringify(sessionError);
@@ -110,7 +113,7 @@ describe("private upload session boundary", () => {
     firstXhr.status = 401;
     firstXhr.responseText = JSON.stringify(sessionError);
     const factory = vi.fn().mockReturnValueOnce(asXhr(firstXhr)).mockImplementation(() => asXhr(new FakeXhr()));
-    const client = createUploadClient({ begin, complete, refreshTicket, put: (url, body, progress, mime) => putPrivateBytes(url, body, mime, progress, factory) });
+    const client = createUploadClient({ begin, complete, refreshTicket, put: (url, body, progress, mime, identity) => putPrivateBytes(url, body, mime, progress, factory, identity) });
     const file = (name: string) => ({ name, type: "application/pdf", bytes });
     const queue = createUploadQueue(client, [file("first.pdf"), file("second.pdf")]);
     const stop = subscribeToSessionExpiry(() => { account = "B"; });

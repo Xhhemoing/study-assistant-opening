@@ -65,6 +65,22 @@ describe("opening S3 storage", () => {
   });
 
 
+  it("uses an atomic create condition only when requested", async () => {
+    const calls: { input: Record<string, unknown> }[] = [];
+    const storage = new OpeningS3({ endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      { send: async command => { calls.push(command as { input: Record<string, unknown> }); return {}; } });
+    await storage.putObject("new", new Uint8Array([1]), { ifNoneMatch: "*" });
+    await storage.putObject("ordinary", new Uint8Array([1]));
+    expect(calls[0]?.input.IfNoneMatch).toBe("*");
+    expect(calls[1]?.input.IfNoneMatch).toBeUndefined();
+  });
+  it.each([1, 2])("treats a retried conflict as an uncertain PUT (attempts=%s)", async attempts => {
+    const storage = new OpeningS3({ endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      { send: async () => { throw { name: "PreconditionFailed", $metadata: { httpStatusCode: 412, attempts } }; } });
+    await expect(storage.putObject("existing", new Uint8Array([1]), { ifNoneMatch: "*" }))
+      .rejects.toMatchObject({ code: attempts === 1 ? "CONFLICT" : "UNAVAILABLE" });
+  });
+
   it("streams object bytes via getObjectStream", async () => {
     const payload = new Uint8Array([9, 8, 7]);
     const client: S3ClientLike = {

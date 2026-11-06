@@ -1,4 +1,5 @@
 import { uploadInputSchema } from "@aistudy/contracts";
+import { assertUploadIdentity } from "../../../../features/opening/sources/upload-identity";
 import {
   jsonError,
   mapDomainError,
@@ -28,6 +29,7 @@ export async function POST(request: Request): Promise<Response> {
   const runtime = getAuthRuntime();
   try {
     const principal = await requirePrincipal(runtime, request);
+    assertUploadIdentity(request, principal);
     const body = uploadInputSchema.parse(await readOpeningJsonBody(request));
     const ticket = await createOpeningSourceService(runtime.sql).beginUpload(
       principal,

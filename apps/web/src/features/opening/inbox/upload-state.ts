@@ -114,10 +114,11 @@ export function sourceStatusLabel(
     return message || "原件已保存，解析失败";
   }
   if (record.parseState === "unsupported") return "原件已保存，暂不能提取文字";
-  // Honest machine: running = worker claimed; queued/not_started = waiting (age → 较慢).
+  // Only queued/running represent active work; a released claim is not a queue.
   // Never invent a UI timeout that marks failed.
+  if (record.parseState === "not_started") return "原件已保存，解析尚未开始";
   if (record.parseState === "running") return "原件已保存，正在解析";
-  if (record.parseState === "not_started" || record.parseState === "queued") {
+  if (record.parseState === "queued") {
     if (isAgedQueued(record.createdAt, nowMs)) return "原件已保存，解析排队中，可能较慢";
     return "原件已保存，解析排队中";
   }

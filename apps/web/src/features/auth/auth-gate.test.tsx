@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthGate } from "./auth-gate";
 import { clearSessionExpiry, createSessionFetch } from "./session-expiry";
 import { getVerifiedSessionNamespace, publishVerifiedSessionIdentity } from "./session-identity";
+import { createUploadQueue } from "../opening/inbox/upload-queue";
 
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], cursor: 0, effects: [] as Array<() => unknown>, replace: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: hooks.replace }) }));
@@ -73,6 +74,8 @@ describe("AuthGate session recovery", () => {
     await flush();
     expect(content().props.children).toBe(child);
     expect(getVerifiedSessionNamespace()).not.toBeNull();
+    const queue = createUploadQueue({ uploadFile: vi.fn() }, [{ name: "a.pdf", type: "application/pdf", bytes: new Uint8Array([1]) }]);
+    expect(queue.items[0]?.expectedIdentity).toEqual({ id: "u1", workspaceId: "w1" });
     transport.mockResolvedValueOnce(Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 }));
     await fetch("/api/opening/conversations", { method: "POST" });
     expect(content().props.inert).toBe(true);

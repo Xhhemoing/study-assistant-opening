@@ -6,7 +6,7 @@ import { readOpeningLearningAgenda } from "../../packages/database/src/repositor
 import { readOpeningCourseEvidence } from "../../packages/database/src/repositories/opening-learning-read";
 import { createOpeningLearningAttemptRepository } from "@aistudy/database";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
-import { solveSpanProblem, toSnapshotEvidence, type NextLearningStepInput } from "@aistudy/domain";
+import { solveSpanProblem, toSnapshotEvidence } from "@aistudy/domain";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createStudyIntentService } from "../../apps/web/src/features/opening/teaching/span/intent-service";
@@ -49,11 +49,10 @@ async function agendaEvidence(f: Awaited<ReturnType<typeof seed>>) {
     const observations = toSnapshotEvidence(evidence, new Date(agenda.dataAsOf)).observations
       .filter(row => row.requirementKey === SPAN_REQUIREMENT_KEY)
       .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || b.id.localeCompare(a.id));
-    const input: NextLearningStepInput = { observations,
-      status: !observations.length ? "unobserved" : observations[0]!.verifiedCorrect === "yes" && observations[0]!.independentAttempt === "yes" ? "observed_independent" : "needs_check",
-      wantsFullExplanation: agenda.intent?.explanationStyle === "full",
-      ...(agenda.intent?.learningPhase ? { learningPhase: agenda.intent.learningPhase, phaseSource: "explicit" as const } : {}) };
-    return { agenda, observations, expected: nextLearningStep(input) };
+    const [source] = await tx`SELECT version FROM opening_sources WHERE id=${f.sourceId} AND workspace_id=${fixture.scope.workspaceId}`;
+    const span = await createOpeningSpanTutorContextRepository(db).read(fixture.scope,
+      { ...f.request, sourceVersions: { [f.sourceId]: Number(source!.version) } });
+    return { agenda, observations, workerDecision: span ? nextLearningStep(span.decisionInput) : null };
   });
 }
 async function agendaAttempt(f: Awaited<ReturnType<typeof seed>>, options: { correct?: boolean; help?: boolean; assistance?: "independent" | "unknown" } = {}) {
@@ -83,24 +82,25 @@ it("projects repeated real hinted errors into the recovered agenda and resolves 
     { assistance: "hinted", errors: expect.arrayContaining([expect.objectContaining({ label: "coefficients", source: "verified_steps" })]) },
     { assistance: "hinted", errors: expect.arrayContaining([expect.objectContaining({ label: "coefficients", source: "verified_steps" })]) },
   ]);
-  expect(repeated.expected).toMatchObject({ activityKind: "full_explain", reasonCode: "repeated_assisted_error", focusObservationId: latest.id });
-  console.info("agenda repeated error", { actual: repeated.agenda.suggestion, canonical: repeated.expected, assistance: repeated.observations.map(row => row.assistance) });
-  expect(repeated.agenda).toMatchObject({ resumable: true, invalidationReasons: expect.arrayContaining(["state_changed"]), suggestion: repeated.expected });
+  const repeatedDecision = { activityKind: "full_explain", reasonCode: "repeated_assisted_error", focusObservationId: latest.id };
+  expect(repeated.agenda).toMatchObject({ resumable: true, invalidationReasons: expect.arrayContaining(["state_changed"]), suggestion: repeatedDecision });
+  expect(repeated.workerDecision).toMatchObject(repeatedDecision);
   const success = await agendaAttempt(f, { correct: true });
   const resolved = await agendaEvidence(f);
   expect(resolved.observations[0]).toMatchObject({ id: success.id, assistance: "independent", verifiedCorrect: "yes", independentAttempt: "yes" });
   // Two older hints still form the existing recent assisted majority; the error escalation is resolved.
-  expect(resolved.expected).toMatchObject({ activityKind: "reduced_help_practice", reasonCode: "assistance_dependent" });
-  expect(resolved.agenda.suggestion).toEqual(resolved.expected);
-  console.info("agenda independent success", resolved.agenda.suggestion);
+  const resolvedDecision = { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null };
+  expect(resolved.agenda.suggestion).toEqual(resolvedDecision);
+  expect(resolved.workerDecision).toMatchObject(resolvedDecision);
 });
 it("keeps unknown assistance unknown in a real recovered agenda", async () => {
   const f = await seed();
   await agendaAttempt(f, { correct: true, assistance: "unknown" });
   const result = await agendaEvidence(f);
   expect(result.observations[0]).toMatchObject({ assistance: "unknown", independentAttempt: "unknown", verifiedCorrect: "yes" });
-  expect(result.expected).toMatchObject({ activityKind: "transfer_check", reasonCode: "correct_needs_independent_check" });
-  expect(result.agenda.suggestion).toEqual(result.expected);
+  const decision = { activityKind: "transfer_check", reasonCode: "correct_needs_independent_check", focusObservationId: null };
+  expect(result.agenda.suggestion).toEqual(decision);
+  expect(result.workerDecision).toMatchObject(decision);
   console.info("agenda unknown assistance", { assistance: result.observations[0]!.assistance, suggestion: result.agenda.suggestion });
 });
 it("does not escalate stale repeated errors in the real agenda consumer", async () => {
@@ -110,9 +110,33 @@ it("does not escalate stale repeated errors in the real agenda consumer", async 
   const result = await agendaEvidence(f);
   expect(result.observations).toHaveLength(2);
   expect(result.observations.every(row => row.usableForCurrentVersion !== "yes" && !row.errors)).toBe(true);
-  expect(result.expected).toMatchObject({ activityKind: "diagnose", reasonCode: "no_evidence" });
-  expect(result.agenda).toMatchObject({ resumable: false, suggestion: result.expected });
+  const decision = { activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null };
+  expect(result.agenda).toMatchObject({ resumable: false, suggestion: decision });
+  expect(result.workerDecision).toMatchObject(decision);
   console.info("agenda stale errors", result.agenda.suggestion);
+});
+it("does not reuse withdrawn heads as independent success or repeated errors in either input consumer", async () => {
+  const f = await seed(), learning = createOpeningLearningRepository(fixture.sql);
+  const { createOpeningLearnerStateService } = await import("../../packages/database/src/repositories/opening-learner-state-read");
+  const states = createOpeningLearnerStateService(fixture.sql);
+  const initialState = await states.read(fixture.scope, { courseId: f.courseId });
+  const receipts = await fixture.sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`;
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]!.receipt.stateVersion).toBe(initialState.stateVersion);
+  const observations = [await agendaAttempt(f, { help: true }), await agendaAttempt(f, { help: true })];
+  expect((await states.read(fixture.scope, { courseId: f.courseId })).stateVersion).not.toBe(initialState.stateVersion);
+  for (const observed of observations) await learning.reviseObservation(fixture.scope, {
+    rootObservationId: observed.rootObservationId ?? observed.id, revisesObservationId: observed.id,
+    expectedHead: observed.id, revisionKind: "retract", reason: "withdraw prior evidence", clientKey: randomUUID(),
+  });
+  const result = await agendaEvidence(f);
+  expect(result.observations).toEqual([]);
+  expect((await states.read(fixture.scope, { courseId: f.courseId })).stateVersion).toBe(initialState.stateVersion);
+  expect(await fixture.sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`).toEqual(receipts);
+  // All effective heads were withdrawn: the original empty-state receipt is
+  // current again, so agenda keeps its no-invalidation/no-new-suggestion contract.
+  expect(result.agenda).toMatchObject({ decisionCurrent: true, invalidationReasons: [], suggestion: null });
+  expect(result.workerDecision).toMatchObject({ activityKind: "diagnose", focusObservationId: null, reasonCode: "no_evidence" });
 });
 it("reconstructs the same activity, item, parent and original budget across real readers and retry keys without writes", async () => {
   const f = await seed(), { sql, scope } = fixture;
@@ -256,6 +280,39 @@ it.each(["source", "goal", "intent", "policy"])("invalidates %s changes with a f
   expect(agenda?.invalidationReasons).toContain(`${kind}_changed`);
   if (kind !== "policy") expect(await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.lesson.activityId}`).toEqual(receipts);
 });
+it.each(["new_learning", "consolidate"] as const)("keeps explicit %s in both recovered agenda and Worker input", async phase => {
+  const f = await seed(), sessions = createOpeningSpanSessionRepository(fixture.sql);
+  const current = (await sessions.get(fixture.scope, f.lesson.activityId))!;
+  await sessions.save(fixture.scope, current.activityId, { expectedRevision: current.revision,
+    intent: { ...current.intent, learningPhase: phase }, moveId: current.moveId, status: current.status });
+  await agendaAttempt(f, { correct: true, assistance: "unknown" });
+  const result = await agendaEvidence(f);
+  const expected = phase === "new_learning"
+    ? { activityKind: "full_explain", focusObservationId: null, reasonCode: "requested_full", phase: "new_learning", phaseSource: "explicit" }
+    : { activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "requested_consolidate", phase: "consolidate", phaseSource: "explicit" };
+  expect(result.agenda.suggestion).toEqual(expected);
+  expect(result.workerDecision).toEqual(expected);
+});
+it("retains a due retest in the recovered canonical suggestion without creating a successor", async () => {
+  const f = await seed(), { sql, scope } = fixture, retestId = randomUUID(), taskId = randomUUID();
+  // Complete the validation observation before binding the lesson to a retest;
+  // after binding, the attempt owner correctly requires retest-purpose items.
+  await agendaAttempt(f, { correct: true, assistance: "unknown" });
+  await sql`INSERT INTO opening_tasks(id,workspace_id,owner_user_id,course_id,title,minutes,origin)
+    VALUES (${taskId},${scope.workspaceId},${scope.ownerUserId},${f.courseId},'Due check',20,'retest')`;
+  await sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,task_id,recommended_at,not_before_at)
+    VALUES (${retestId},${scope.workspaceId},${scope.ownerUserId},${f.courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',1,${taskId},now()-interval '1 minute',now()-interval '1 minute')`;
+  await sql`UPDATE opening_teaching_activities SET checkpoint_json=jsonb_set(checkpoint_json,'{spanLesson,retestId}',${sql.json(retestId)}::jsonb) WHERE id=${f.lesson.activityId}`;
+  const [binding] = await sql`SELECT r.status,r.task_id,r.recommended_at <= now() AS due,r.not_before_at <= now() AS allowed,
+    a.checkpoint_json->'spanLesson'->>'retestId' AS bound_id
+    FROM opening_retest_activities r JOIN opening_teaching_activities a ON a.id=${f.lesson.activityId}
+    WHERE r.id=${retestId} AND r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}`;
+  expect(binding).toMatchObject({ status: "accepted", task_id: taskId, due: true, allowed: true, bound_id: retestId });
+  const agenda = await createOpeningLearningAgendaRepository(sql).get(scope, f.courseId, f.lesson.activityId);
+  expect(agenda).toMatchObject({ pendingRetestId: retestId, suggestion: { activityKind: "transfer_check", focusObservationId: null,
+    reasonCode: "due_retest", phase: "maintain", phaseSource: "automatic" } });
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+});
 it.each(["cancelled", "deferred"])("keeps %s retests closed to recovery and creates nothing", async kind => {
   const f = await seed(), { sql, scope } = fixture, retestId = randomUUID();
   await sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,snoozed_until)
@@ -263,6 +320,7 @@ it.each(["cancelled", "deferred"])("keeps %s retests closed to recovery and crea
   await sql`UPDATE opening_teaching_activities SET checkpoint_json=jsonb_set(checkpoint_json,'{spanLesson,retestId}',${sql.json(retestId)}::jsonb) WHERE id=${f.lesson.activityId}`;
   const agenda = await createOpeningLearningAgendaRepository(sql).get(scope, f.courseId, f.lesson.activityId);
   expect(agenda).toMatchObject({ status: kind, resumable: false, pendingRetestId: retestId });
+  expect(agenda?.suggestion?.reasonCode).not.toBe("due_retest");
   expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
   expect(await sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${f.lesson.activityId}`).toHaveLength(1);
 });

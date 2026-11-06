@@ -1,4 +1,5 @@
 import { jsonError, mapDomainError } from "../../../../../../features/auth/service";
+import { assertUploadIdentity } from "../../../../../../features/opening/sources/upload-identity";
 import { requireOpeningScope } from "../../../../../../features/opening/runtime";
 import { createOpeningSourceService } from "../../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../../features/opening/sources/upload-policy";
@@ -26,6 +27,7 @@ function storageError(error: unknown): Response | undefined {
 export async function PUT(request: Request, context: Params): Promise<Response> {
   try {
     const { principal, sql } = await requireOpeningScope(request);
+    assertUploadIdentity(request, principal);
     const id = (await context.params).id;
     const service = createOpeningSourceService(sql);
     const target = await service.getStagingPutTarget(principal, id);

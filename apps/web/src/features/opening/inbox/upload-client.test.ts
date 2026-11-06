@@ -77,14 +77,14 @@ describe("createUploadClient", () => {
     );
     expect(calls).toEqual(["begin", "put", "complete"]);
     expect(progress).toEqual([3 / bytes.byteLength, 1]);
-    expect(accepted?.uploadState).toBe("uploaded");
+    expect(accepted && "uploadState" in accepted ? accepted.uploadState : undefined).toBe("uploaded");
     expect(begin).toHaveBeenCalledWith({
       name: "notes.pdf",
       mime: "application/pdf",
       bytes: bytes.byteLength,
       sha256: sha256(bytes),
       uploadId: expect.any(String),
-    });
+    }, undefined, undefined);
   });
 
   it("does not complete or invent a second source when the private PUT fails", async () => {
@@ -132,7 +132,7 @@ describe("createUploadClient", () => {
     expect(second).toMatchObject({ id: ID, uploadState: "uploaded" });
     expect(begin).toHaveBeenCalledTimes(1);
     expect(refreshTicket).toHaveBeenCalledTimes(1);
-    expect(refreshTicket).toHaveBeenCalledWith(ID);
+    expect(refreshTicket).toHaveBeenCalledWith(ID, undefined, undefined);
     expect(complete).toHaveBeenCalledTimes(1);
     expect(putUrls[1]).toBe(`/api/opening/sources/${ID}/staging`);
     expect(putUrls[1]).not.toBe(first.ticket.uploadUrl);
@@ -154,9 +154,9 @@ describe("createUploadClient", () => {
     const result = await client.uploadFile(file, { resumeSourceId: ID, ticket: expired });
     expect(result).toMatchObject({ id: ID, uploadState: "uploaded" });
     expect(begin).not.toHaveBeenCalled();
-    expect(refreshTicket).toHaveBeenCalledWith(ID);
-    expect(put).toHaveBeenCalledWith(`/api/opening/sources/${ID}/staging`, bytes, expect.any(Function), "application/pdf");
-    expect(complete).toHaveBeenCalledWith(ID);
+    expect(refreshTicket).toHaveBeenCalledWith(ID, undefined, undefined);
+    expect(put).toHaveBeenCalledWith(`/api/opening/sources/${ID}/staging`, bytes, expect.any(Function), "application/pdf", undefined, undefined);
+    expect(complete).toHaveBeenCalledWith(ID, undefined);
   });
 
   it("retries completion on the same source id", async () => {
@@ -169,8 +169,8 @@ describe("createUploadClient", () => {
     const replay = await client.retryComplete(ID);
     expect(replay.uploadState).toBe("uploaded");
     expect(begin).toHaveBeenCalledTimes(1);
-    expect(complete).toHaveBeenNthCalledWith(1, ID);
-    expect(complete).toHaveBeenNthCalledWith(2, ID);
+    expect(complete).toHaveBeenNthCalledWith(1, ID, undefined);
+    expect(complete).toHaveBeenNthCalledWith(2, ID, undefined);
     expect(put).toHaveBeenCalledTimes(1);
   });
 
@@ -222,7 +222,7 @@ it("keeps internal server failures generic and preserves completion rejection de
   const begin = vi.fn(async () => { throw new OpeningApiError(500, "database password=private stack", "INTERNAL"); });
   const client = createUploadClient({ begin, complete: vi.fn(), put: vi.fn() });
   const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
-  expect(await client.uploadFile(file)).toMatchObject({ message: "上传准备失败，原件仍在本地。" });
+  expect(await client.uploadFile(file)).toMatchObject({ message: "上传准备结果待核对，原件仍在本地；重试将沿用同一上传标识。" });
   const complete = vi.fn(async () => { throw new OpeningApiError(400, "文件内容与声明的格式不一致，请检查原文件。", "VALIDATION"); });
   const result = await createUploadClient({ begin: async () => ticket(), complete, put: async () => undefined }).uploadFile(file);
   expect(result).toMatchObject({ sourceId: ID, ticket: ticket(), message: expect.stringContaining("文件内容与声明的格式不一致") });

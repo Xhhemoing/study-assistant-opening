@@ -105,6 +105,7 @@ describe("createOpeningS3RestoreObjectPut / parseOpeningRestoreObjectVersion", (
 
     const puts: Array<{ key: string; body: Uint8Array }> = [];
     const storage = {
+      async deleteObject() {},
       finalKey: (id: string, version: number) => `opening/sources/${id}/v${version}`,
       async putObject(key: string, body: Uint8Array) {
         puts.push({ key, body });

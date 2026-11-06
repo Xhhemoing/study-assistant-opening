@@ -6,15 +6,17 @@ import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 import { Composer, type ComposerSubmit } from "../assistant/composer";
 import { StartUploads } from "./start-uploads";
+import { setupUploadIdentity, uploadTestIdentity } from "../inbox/upload-identity-test-fixture";
 
 const upload = vi.hoisted(() => vi.fn());
 vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: upload }) }));
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
+  setupUploadIdentity();
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host); upload.mockReset();
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
 it("retains a failed photo and text, blocks incomplete attachment sends, and resumes the same saved source on retry", async () => {
   const source = { id: "source-id", name: "题目.jpg", mime: "image/jpeg", version: 1, uploadState: "uploaded", parseState: "ready" } as SourceRecord;
@@ -42,7 +44,7 @@ it("retains a failed photo and text, blocks incomplete attachment sends, and res
   expect(submitted).not.toHaveBeenCalled();
   await act(async () => Array.from(host.querySelectorAll("button")).find(button => button.textContent === "重试")!.click());
   expect(upload).toHaveBeenCalledTimes(2);
-  expect(upload.mock.calls[1]?.[1]).toMatchObject({ resumeSourceId: "source-id", ticket });
+  expect(upload.mock.calls[1]?.[1]).toMatchObject({ resumeSourceId: "source-id", ticket, expectedIdentity: uploadTestIdentity });
   expect(uploaded).toHaveBeenCalledExactlyOnceWith(["source-id"], [source]);
   expect(host.querySelector('a[href="/opening/practice?sourceId=source-id"]')?.textContent).toBe("开始作答");
   expect(host.querySelector<HTMLButtonElement>('[aria-label="发送"]')?.disabled).toBe(false);
@@ -123,6 +125,23 @@ it("waits for the first upload before reading the next file", async () => {
   await act(async () => finish(source));
   expect(second.read).toHaveBeenCalledOnce();
   expect(upload).toHaveBeenCalledTimes(2);
+});
+
+it("keeps upload actions mutually exclusive while allowing cancellation unless externally disabled", async () => {
+  let finish!: (value: SourceRecord) => void;
+  upload.mockImplementationOnce(() => new Promise<SourceRecord>(resolve => { finish = resolve; }));
+  const api = {} as OpeningApi;
+  const props = { api, sources: [], courseId: null, onBusyChange: () => undefined, onUploaded: async () => undefined };
+  await act(async () => root.render(<StartUploads {...props} />));
+  await selectFiles([selectableFile("notes.pdf").file]);
+  const remove = () => host.querySelector<HTMLButtonElement>('[aria-label="移除上传记录 notes.pdf"]')!;
+  expect(remove().disabled).toBe(false);
+  for (const text of ["拍题", "上传"]) {
+    expect(Array.from(host.querySelectorAll("button")).find(button => button.textContent === text)?.disabled).toBe(true);
+  }
+  await act(async () => root.render(<StartUploads {...props} disabled />));
+  expect(remove().disabled).toBe(true);
+  await act(async () => finish({ id: "saved", name: "notes.pdf", mime: "application/pdf", uploadState: "uploaded", parseState: "queued" } as SourceRecord));
 });
 
 it("retries only unread files after a read failure without uploading an earlier saved file twice", async () => {

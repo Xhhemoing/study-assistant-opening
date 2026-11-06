@@ -11,7 +11,7 @@ const PURPOSE_LABELS: Partial<Record<ComposerPurpose, string>> = { teach: "å¸¦æˆ
 type IntentOverride = { mode?: TutorMode; purpose?: ComposerPurpose };
 export type ComposerPrivacy = "saved" | "ephemeral";
 export type ComposerSubmit = { text: string; mode?: TutorMode; privacy: ComposerPrivacy; clientKey: string; querySystem?: boolean; purpose?: ComposerPurpose };
-export type ComposerSubmitResult = { accepted: boolean };
+export type ComposerSubmitResult = { accepted: boolean; retryNotSent?: true };
 type Props = {
   questionMode?: boolean; startMode?: boolean; attachments?: ReactNode; sendDisabled?: boolean; emptyText?: string;
   contextChips?: { id: string; label: string }[]; onRemoveContext?: (id: string) => void;
@@ -90,6 +90,11 @@ export function Composer({ compact = false, practiceMode = false, questionMode =
     try {
       const result = await onSubmit({ text, ...override, privacy: effectivePrivacy, clientKey: issued.clientKey });
       if (result?.accepted !== false) { sendKey.current = null; clearOverride(); }
+      else if (effectivePrivacy === "ephemeral" && result.retryNotSent && sendKey.current === issued) {
+        // No automatic resend: the next explicit click creates the new key.
+        // Preserve both the draft and the one-turn choices.
+        sendKey.current = null;
+      }
     } catch {
       // The parent shows the error; retain this intent's idempotency key.
     } finally { locked.current = false; setSending(false); }

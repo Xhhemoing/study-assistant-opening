@@ -47,8 +47,8 @@ async function seed(count=1,sourceVersion=1){
 async function compile(activity:TeachingActivity,variant=0){
   const deps=createCompileTeachingUnitWorkerDeps(f.sql,{budget:createOpeningBudgetRepository(f.sql),chunks:createOpeningSourceChunksRepository(f.sql),privacy:createOpeningPrivacyRepository(f.sql)});
   deps.buildProviderInput=async()=>({instruction:"教学编译测试",text:activity.intentSummary,chunks:await createOpeningSourceChunksRepository(f.sql).listForSources(f.scope,activity.sourceIds),mode:"explain",maxOutputTokens:5500,mediaCapability:"text_only",imageParts:[],outputFormat:"json"});
-  deps.callModel=async(_scope,_input,options)=>{await options.beforeSend?.();return {text:JSON.stringify({itemTitles:["秩与零空间"],blocks:[
-    {type:"text",text:"秩与零空间维数之和等于列数。"},
+  deps.callModel=async(_scope,input,options)=>{await options.beforeSend?.();expect(input.chunks.length).toBeGreaterThan(0);return {text:JSON.stringify({itemTitles:["秩与零空间"],blocks:[
+    {type:"text",text:"秩与零空间维数之和等于列数。",citedChunkIds:input.chunks.map(chunk=>chunk.id)},
     {type:"prompt",text:`一个3×${5+variant*3}矩阵的秩为2，零空间维数是多少？`},{type:"answer_key",...rankPedagogy,text:`${5+variant*3} − 2 = ${3+variant*3}`,hints:{direction:"先找列数。",concept:"秩与零空间维数之和等于列数。",firstStep:`用${5+variant*3}减去2。`}},
     {type:"text",text:"再换一个列数验证。"},
     {type:"prompt",text:`一个3×${4+variant*3}矩阵的秩为2，零空间维数是多少？`},{type:"answer_key",...rankPedagogy,text:`${4+variant*3} − 2 = ${2+variant*3}`,hints:{direction:"先找列数。",concept:"秩与零空间维数之和等于列数。",firstStep:`用${4+variant*3}减去2。`}},

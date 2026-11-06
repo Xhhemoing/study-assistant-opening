@@ -4,13 +4,13 @@ import { StudyNoteComposer } from "../learning-links/study-note-composer";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type ComposerPurpose, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
 import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
-import { Composer, logicalSendFingerprint, nextClientKey, type ComposerPrivacy, type ComposerSubmit } from "./composer";
+import { Composer, logicalSendFingerprint, nextClientKey, type ComposerPrivacy, type ComposerSubmit, type ComposerSubmitResult } from "./composer";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { ephemeralHistoryFromMessages, messagesWithStreamingReply, resolveChatMessages, type ChatMessageView } from "./message-model";
 import { queryEvidenceLinks } from "./query-evidence-links";
 import { SourcePageControls } from "./source-page-controls";
-import { MODEL_SETUP_HREF, formatTurnError, pageForSubmit } from "./turn-errors";
+import { MODEL_SETUP_HREF, formatTurnError, isEphemeralNotSentError, pageForSubmit } from "./turn-errors";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowUpRight, BookOpen, Plus, ShieldCheck } from "lucide-react";
 import { LoadingRows, secondaryButtonClass } from "../design/ui";
@@ -51,7 +51,7 @@ import type { AssistantStarter } from "./assistant-starters";
 import { ThinkingText } from "./ai-response";
 import { createJobPoller, TERMINAL_JOB_STATUSES } from "./job-poller";
 import { useJobStream, type FirstTextTiming } from "./use-job-stream";
-import { TURN_WAIT_COPY, failedTurnRetry, useTurnWaitPhase, type FailedTurnRetry } from "./turn-wait";
+import { TURN_WAIT_COPY, failedTurnRetry, submitFailedTurnRetry, useTurnWaitPhase, type FailedTurnRetry } from "./turn-wait";
 import { TopBar, TopBarTools } from "../v3/shell/top-bar";
 import { ui as v3ui } from "../v3/ui/controls";
 import { StartSuggestions, type StartConfiguration } from "../start/start-composer";
@@ -798,9 +798,29 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   }
 
   /** Same question, retry key derived from the failed turn: the server replays rather than charging twice. */
-  function retryFailedTurn(target: FailedTurnRetry | null = retryTarget): void {
-    if (!target) return;
-    void handleSubmit({ text: target.text, mode: target.mode, privacy: "saved", clientKey: target.clientKey }, { preserveDraft: true });
+  async function retryFailedTurn(target: FailedTurnRetry | null = retryTarget): Promise<void> {
+    if (!target || !conversationId || submissionLock.current || pending || loading || recoveryRequired || interactionDisabled
+      || unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return;
+    const token = Symbol("failed-turn-retry");
+    submissionLock.current = token;
+    setError(""); setPendingHint(""); setPending(true);
+    const startedAt = submitClocks.current.get(target.clientKey) ?? performance.now();
+    submitClocks.current.set(target.clientKey, startedAt);
+    setWaitRequestKey(target.clientKey);
+    let submitted = false;
+    try {
+      const result = await submitFailedTurnRetry(conversationId, target, input => api.submitTurn(input));
+      submitted = true;
+      setActiveJobId(result.jobId); setUnknownJob(null);
+      setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
+      setPendingHint("已按原提问重试，正在准备回答…");
+      await refreshConversation(conversationId);
+    } catch (error) {
+      if (!submitted) setPending(false);
+      setError(formatTurnError(error));
+    } finally {
+      if (submissionLock.current === token) submissionLock.current = null;
+    }
   }
   const retryFailedTurnRef = useRef(retryFailedTurn);
   retryFailedTurnRef.current = retryFailedTurn;
@@ -835,7 +855,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     if (target?.assistantTurnId === queuedRetry) retryFailedTurnRef.current(target);
   }, [queuedRetry, pending, loading, recoveryRequired, recoveredTurns]);
 
-  async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
+  async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<ComposerSubmitResult> {
     // Composer and reply actions share the same preflight/send boundary.
     if (submissionLock.current || pending || loading || recoveryRequired || interactionDisabled) return { accepted: false };
     const token = Symbol("submission");
@@ -848,7 +868,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     }
   }
 
-  async function submitRequest(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<{ accepted: boolean }> {
+  async function submitRequest(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<ComposerSubmitResult> {
     // Check the current clock at the actual send boundary, including background tabs.
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
@@ -1000,6 +1020,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         setCurrentPage("");
       }
       setError(input.privacy === "ephemeral" ? `${formatTurnError(err)} 本轮回答未完成，问题已保留。` : formatTurnError(err));
+      if (input.privacy === "ephemeral" && !learningAttempt && isEphemeralNotSentError(err)) {
+        return { accepted: false, retryNotSent: true };
+      }
       return { accepted: false };
     }
   }
@@ -1057,7 +1080,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       directExplainBusy.current = true;
       try {
         const result = await handleSubmit({ text, mode, purpose: "answer", privacy, clientKey: issued.clientKey }, { preserveDraft: true });
-        if (result.accepted) directExplainKey.current = null;
+        if (result.accepted || privacy === "ephemeral" && result.retryNotSent) directExplainKey.current = null;
       } finally { directExplainBusy.current = false; }
       return;
     }

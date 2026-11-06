@@ -7,7 +7,7 @@ import { createOpeningTeachingContentService } from "./teaching/teaching-content
 import { createOpeningTeachingCommandService } from "./teaching/command-service";
 import { createOpeningTeachingResumeService } from "./teaching/resume-service";
 import {
-  createOpeningTutorLearnerContextRepository, createOpeningConversationRepository, readOpeningConversationSelection,
+  createOpeningTutorLearnerContextRepository, createOpeningConversationRepository, readOpeningConversationSelection, readOpeningSavedTurnRetry,
   createOpeningStudyContextRepository, createOpeningStudyExposureRepository,
   createOpeningLearningRepository, createOpeningLearningAttemptRepository, readOpeningCourseEvidence, readOpeningCourseObservationHeads,
   createOpeningSourceChunksRepository,
@@ -65,6 +65,7 @@ export function getTutorService(sql: Sql): TutorService {
   const sourceChunks: OpeningSourceChunksRepository =
     createOpeningSourceChunksRepository(sql);
   return createTutorService({ conversations, sourceChunks, attempts: createOpeningLearningAttemptRepository(sql),
+    readFailedTurnRetry: (scope, conversationId, assistantTurnId) => readOpeningSavedTurnRetry(sql, scope, conversationId, assistantTurnId),
     studyContext: createOpeningStudyContextRepository(sql),
     systemQueryEnabled: () => loadFeatureSwitches().systemQuery,
     readSelection: (scope, id) => readOpeningConversationSelection(sql, scope, id),
@@ -197,6 +198,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
         },
         budget: {
           reserve: (entry) => budgetRepo.reserve(scope, entry),
+          isParentNotSent: parentId => budgetRepo.isParentNotSent(scope, parentId),
           release: (requestId, reason) => budgetRepo.release(scope, requestId, reason),
           claimExecution: (reservationId) => budgetRepo.claimExecution(scope, reservationId),
           settle: (...args) => budgetRepo.settle(scope, ...args),

@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setupUploadIdentity, uploadTestIdentity } from "./upload-identity-test-fixture";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
+beforeEach(() => { setupUploadIdentity(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
 import { createUploadQueue } from "./upload-queue";
 import { createUploadClient, type LocalUploadFile } from "./upload-client";
@@ -22,6 +26,53 @@ function file(name: string): LocalUploadFile {
 }
 
 describe("createUploadQueue", () => {
+  it.each(["begin", "put"])("cancels the real client during %s without publishing complete", async stage => {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const ticket: UploadTicket = { source: { ...source, uploadState: "pending" }, uploadUrl: "/staging", expiresAt: source.createdAt };
+    const complete = vi.fn(async () => source);
+    const client = createUploadClient({
+      begin: async () => { if (stage === "begin") { entered(); await gate; } return ticket; },
+      put: async () => { if (stage === "put") { entered(); await gate; } },
+      complete,
+    });
+    const queue = createUploadQueue(client, [file("cancel.pdf")]);
+    const id = queue.items[0]!.id;
+    const running = queue.start();
+    await ready;
+    queue.dismiss(id);
+    release();
+    await running;
+    expect(complete).not.toHaveBeenCalled();
+  });
+  it("does not read a local File under B and resumes the retained A file after switching back", async () => {
+    const upload = vi.fn(async () => source);
+    const queue = createUploadQueue({ uploadFile: upload });
+    const read = vi.fn(async () => new Uint8Array([1, 2]).buffer);
+    const selected = { name: "a.pdf", type: "application/pdf", size: 2, arrayBuffer: read } as unknown as File;
+    const [item] = queue.addFiles([selected]);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ user: { ...uploadTestIdentity, id: "B" } })));
+    await queue.start();
+    expect(read).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(item?.state).toBe("failed");
+    setupUploadIdentity();
+    await queue.retry(item!.id);
+    expect(read).toHaveBeenCalledOnce();
+    expect(item?.state).toBe("saved");
+  });
+
+  it("never binds an unknown selection to a later verified account", async () => {
+    vi.stubGlobal("window", Object.assign(new EventTarget(), { location: new URL("http://localhost/opening") }));
+    const upload = vi.fn(async () => source);
+    const queue = createUploadQueue({ uploadFile: upload }, [file("unknown.pdf")]);
+    publishVerifiedSessionIdentity(uploadTestIdentity);
+    await queue.start();
+    expect(upload).not.toHaveBeenCalled();
+    expect(queue.items[0]?.file.bytes).toHaveLength(4);
+  });
   it("retains an unknown begin identity through legacy adapters and gives a new selection a new identity", async () => {
     const begins: string[] = [];
     const client = createUploadClient({
@@ -197,7 +248,7 @@ describe("createUploadQueue", () => {
     await expect(client.uploadFile(file("begin-failure.pdf"))).resolves.toMatchObject({
       phase: "interrupted",
       keptLocal: true,
-      message: "上传准备失败，原件仍在本地。",
+      message: "上传准备结果待核对，原件仍在本地；重试将沿用同一上传标识。",
     });
   });
 
@@ -222,7 +273,7 @@ describe("createUploadQueue", () => {
     expect(updates.every((progress) => Number.isFinite(progress) && progress >= 0 && progress <= 100)).toBe(true);
   });
 
-  it("dismisses saved and failed items from the session queue without re-uploading or changing saved sources", async () => {
+  it("dismisses saved items but retains attempted failures for reconciliation without re-uploading", async () => {
     const upload = vi.fn(async (input: LocalUploadFile) => {
       if (input.name === "broken.pdf") {
         return { phase: "interrupted", keptLocal: true, message: "网络中断" } as const;
@@ -241,11 +292,12 @@ describe("createUploadQueue", () => {
     expect(savedSource).toEqual({ ...source, name: "ok.pdf" });
 
     queue.dismiss(failed!.id, (items) => updates.push(items.length));
-    expect(queue.snapshot()).toEqual([]);
-    expect(updates).toEqual([1, 0]);
+    expect(queue.snapshot()[0]).toMatchObject({ id: failed!.id, state: "failed" });
+    expect(queue.snapshot()[0]?.message).toContain("待核对");
+    expect(updates).toEqual([1, 1]);
 
     queue.dismiss(failed!.id, (items) => updates.push(items.length));
-    expect(updates).toEqual([1, 0]);
+    expect(updates).toEqual([1, 1, 1]);
     await queue.start();
     expect(upload).toHaveBeenCalledTimes(2);
   });
@@ -261,7 +313,7 @@ describe("createUploadQueue", () => {
     expect(updates).toEqual([1]);
   });
 
-  it("dismisses uploading items and ignores late progress or completion", async () => {
+  it("stops late progress but retains an already-sent successful completion as saved", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const upload = vi.fn(async (_input: LocalUploadFile, onBytes?: (loaded: number, total: number) => void) => {
@@ -276,15 +328,17 @@ describe("createUploadQueue", () => {
     const startPromise = queue.start((items) => progressLengths.push(items.length));
     // Allow process to enter uploading and emit first progress.
     await vi.waitFor(() => {
-      expect(queue.snapshot()[0]?.state).toBe("uploading");
+      expect(upload).toHaveBeenCalledOnce();
     });
     queue.dismiss(item!.id, (items) => progressLengths.push(items.length));
-    expect(queue.snapshot()).toHaveLength(0);
+    expect(queue.snapshot()[0]).toMatchObject({ state: "uploading", progress: 10 });
+    expect(queue.snapshot()[0]?.message).toContain("可能已保存");
     release();
     await startPromise;
-    expect(queue.snapshot()).toHaveLength(0);
-    // Late completion must not resurrect the dismissed item.
-    expect(progressLengths.at(-1)).toBe(0);
+    expect(queue.snapshot()[0]).toMatchObject({ state: "saved", source, progress: 100 });
+    expect(progressLengths.every(length => length === 1)).toBe(true);
+    queue.dismiss(item!.id);
+    expect(queue.snapshot()).toEqual([]);
   });
 
 });

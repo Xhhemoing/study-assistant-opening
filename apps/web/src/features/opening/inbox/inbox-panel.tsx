@@ -124,15 +124,17 @@ export function InboxPanel({
     return () => { mounted = false; stop(); };
   }, [processing, onChanged]);
   const client = useMemo(() => createUploadClient({
-    begin: (input) => api.beginUpload(input),
-    complete: (id) => api.completeUpload(id),
-    put: (url, body, onProgress, mime) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded)),
+    begin: (input, identity, signal) => api.beginUpload(input, identity, signal),
+    complete: (id, identity) => api.completeUpload(id, identity),
+    put: (url, body, onProgress, mime, identity, signal) => putPrivateBytes(url, body, mime, (loaded) => onProgress(loaded), undefined, identity, signal),
     resolvePutUrl: resolveUploadPutUrl,
-    refreshTicket: (id) => api.refreshUploadTicket(id),
+    refreshTicket: (id, identity, signal) => api.refreshUploadTicket(id, identity, signal),
   }), [api]);
 
   const uploadQueue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
     uploadId: operation?.uploadId,
+    signal: operation?.signal,
+    expectedIdentity: operation?.expectedIdentity,
     onBytes,
     ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
@@ -322,5 +324,5 @@ export function InboxPanel({
 }
 
 function isProcessingSource(record: SourceRecord): boolean {
-  return record.uploadState === "uploaded" && record.error?.code !== "PRIVACY_EXCLUDED" && ["queued", "running", "not_started"].includes(record.parseState);
+  return record.uploadState === "uploaded" && record.error?.code !== "PRIVACY_EXCLUDED" && ["queued", "running"].includes(record.parseState);
 }

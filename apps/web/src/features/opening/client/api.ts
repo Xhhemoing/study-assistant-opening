@@ -1,4 +1,6 @@
 import { parseOpeningResponse } from "./parse-response";
+import type { SessionIdentity } from "../../auth/session-identity";
+import { uploadIdentityHeaders } from "../inbox/upload-identity";
 import { readServerEvents } from "./sse";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { createSessionFetch } from "../../auth/session-expiry";
@@ -81,6 +83,8 @@ import {
   teachingActivityCreateInputSchema,
   teachingActivityAssociateCourseInputSchema,
   activitySpecClientInitSchema,
+  activitySpecSchema,
+  type ActivitySpec,
   interventionSettingsResponseSchema,
   interventionPrefsSchema,
   interventionPrefsPatchSchema,
@@ -384,20 +388,20 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(sourceListSchema, body);
     },
 
-    async beginUpload(input: UploadInput): Promise<UploadTicket> {
+    async beginUpload(input: UploadInput, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal): Promise<UploadTicket> {
       const payload = uploadInputSchema.parse(input);
       const body = await request(
         "/api/opening/sources",
-        { method: "POST", body: JSON.stringify(payload) },
+        { method: "POST", body: JSON.stringify(payload), headers: uploadIdentityHeaders(expectedIdentity), signal },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);
     },
 
-    async completeUpload(sourceId: string): Promise<SourceRecord> {
+    async completeUpload(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<SourceRecord> {
       const body = await request(
         `/api/opening/sources/${sourceId}/complete`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity) },
         fetchImpl,
       );
       return parseOpeningResponse(sourceRecordSchema, body);
@@ -416,10 +420,10 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       await request(`/api/opening/sources/${sourceId}/reindex`, { method: "POST", body: JSON.stringify({}) }, fetchImpl);
     },
 
-    async refreshUploadTicket(sourceId: string): Promise<UploadTicket> {
+    async refreshUploadTicket(sourceId: string, expectedIdentity?: SessionIdentity | null, signal?: AbortSignal): Promise<UploadTicket> {
       const body = await request(
         `/api/opening/sources/${sourceId}/upload-ticket`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({}), headers: uploadIdentityHeaders(expectedIdentity), signal },
         fetchImpl,
       );
       return parseOpeningResponse(uploadTicketSchema, body);
@@ -767,6 +771,27 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(teachingActivitySchema, body);
     },
 
+
+    async adoptTeachingReferenceRevision(
+      activityId: string,
+      input: { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number },
+    ): Promise<ActivitySpec> {
+      const id = z.string().uuid().parse(activityId);
+      const payload = z.object({
+        expectedContentVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - 1),
+        expectedRevisionNumber: z.number().int().positive().safe(),
+        revisionNumber: z.number().int().positive().safe(),
+      }).strict().parse(input);
+      const body = await request(
+        `/api/opening/teaching-activities/${id}/reference-revision`,
+        { method: "POST", body: JSON.stringify(payload) },
+        fetchImpl,
+      );
+      return parseOpeningResponse(activitySpecSchema.refine(spec =>
+        spec.activityId === id && spec.version === payload.expectedContentVersion + 1
+        && spec.revisionNumber === payload.revisionNumber,
+      ), body);
+    },
 
     async getTeachingClientInit(activityId: string): Promise<ActivitySpecClientInit> {
       const body = await readTeaching(

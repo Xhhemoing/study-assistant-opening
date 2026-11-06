@@ -23,6 +23,8 @@ export type BudgetedRepository = {
     requestCapPerDay?: number;
   }): Promise<BudgetedReservation>;
   release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
+  /** Durable proof for the entire interaction, not just the currently routed child. */
+  isParentNotSent?(parentId: string): Promise<boolean>;
   /**
    * Atomically claim the single right to call the provider for this
    * reservation. Exactly one concurrent caller gets true.

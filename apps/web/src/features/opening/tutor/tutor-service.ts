@@ -14,6 +14,7 @@ import {
   type TutorMode,
 } from "@aistudy/contracts";
 import { composerMessageText, inferComposerIntent, requestsFinalAnswer, TUTOR_MODEL_SETUP_MESSAGE } from "@aistudy/domain";
+import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "@aistudy/database";
 import type {
   OpeningConversationRepository,
   OpeningConversationScope,
@@ -66,6 +67,7 @@ export function exposureLevelForMode(
 export function createTutorService(deps: {
   systemQueryEnabled?: () => boolean;
   conversations: OpeningConversationRepository;
+  readFailedTurnRetry?: (scope: OpeningConversationScope, conversationId: string, assistantTurnId: string) => ReturnType<typeof readOpeningSavedTurnRetry>;
   sourceChunks: OpeningSourceChunksRepository;
   studyContext?: { sessionIntent(scope: OpeningConversationScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   attempts?: { assertAccess(scope: OpeningConversationScope, id: string): Promise<{ id: string; sessionId: string }> };
@@ -165,7 +167,7 @@ export function createTutorService(deps: {
       scope: OpeningConversationScope,
       body: unknown,
     ): Promise<{ jobId: string; turnId: string; learningSessionId: string | null; replayed: boolean }> {
-      const request = turnInputSchema.parse(body);
+      let request = turnInputSchema.parse(body);
       if (request.privacy !== "saved") {
         throw new TutorServiceError(
           "VALIDATION",
@@ -175,6 +177,25 @@ export function createTutorService(deps: {
       }
 
       const owned = await deps.conversations.getOwned(scope, request.conversationId);
+      const retryAssistantId = savedTurnRetryAssistantId(request.clientKey);
+      const retryIntent = retryAssistantId
+        ? await deps.readFailedTurnRetry?.(scope, request.conversationId, retryAssistantId)
+        : null;
+      if (retryAssistantId && !retryIntent) {
+        throw new TutorServiceError("CONFLICT", "原失败轮无法核实，或资料已不可用于 AI；本次未重试。", 409);
+      }
+      if (retryIntent) {
+        request = turnInputSchema.parse({
+          conversationId: request.conversationId, clientKey: request.clientKey, privacy: "saved",
+          text: retryIntent.text, mode: retryIntent.mode, sourceIds: retryIntent.sourceIds,
+          ...(retryIntent.sourceIds.length ? { sourceSelection: "selected" } : {}),
+          currentPage: retryIntent.currentPage, chunkId: retryIntent.chunkId,
+          learningSessionId: retryIntent.learningSessionId, attemptId: retryIntent.attemptId,
+          ...(retryIntent.strategyTemplateId ? { strategyTemplateId: retryIntent.strategyTemplateId } : {}),
+          ...(retryIntent.contextAnchor ? { contextAnchor: retryIntent.contextAnchor } : {}),
+          ...(retryIntent.purpose ? { purpose: retryIntent.purpose } : {}),
+        });
+      }
       const existing = await deps.conversations.findTurnByClientKey(scope, request.clientKey, request.conversationId);
       let queryHistory: QueryHistory = [];
       if (!existing?.mode && isRecordFollowup(composerMessageText(request.text))) {
@@ -194,12 +215,18 @@ export function createTutorService(deps: {
         mode: request.mode ?? existing?.mode,
         practiceMode: Boolean(request.attemptId || request.contextAnchor?.attemptId || request.contextAnchor?.activityId),
       });
+      if (retryIntent) {
+        resolved.mode = retryIntent.mode;
+        resolved.purpose = retryIntent.purpose ?? "answer";
+        resolved.querySystem = false;
+      }
       // A retry reuses the original resolved defaults even if history/preferences changed.
       if (existing?.mode && request.purpose === undefined && request.querySystem === undefined) {
         resolved.purpose = existing.purpose ?? "answer";
         resolved.querySystem = existing.querySystem === true || ["query", "explain_state"].includes(resolved.purpose);
       }
-      const purpose = request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
+      const purpose = retryIntent ? retryIntent.purpose ?? undefined
+        : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
       let input = { ...request, mode: resolved.mode, purpose };
       if (resolved.querySystem) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
@@ -219,9 +246,10 @@ export function createTutorService(deps: {
 
       // Explicit client sourceIds outrank course pool. Empty + courseId → Data ready membership fill.
       const clientSourceIds = [...input.sourceIds];
-      let effectiveSourceIds = input.sourceSelection === "none" ? [] : clientSourceIds.length === 0 && input.contextAnchor?.sourceId ? [input.contextAnchor.sourceId] : [...clientSourceIds];
+      let effectiveSourceIds = retryIntent ? [...retryIntent.sourceIds]
+        : input.sourceSelection === "none" ? [] : clientSourceIds.length === 0 && input.contextAnchor?.sourceId ? [input.contextAnchor.sourceId] : [...clientSourceIds];
       if (
-        effectiveSourceIds.length === 0
+        !retryIntent && effectiveSourceIds.length === 0
         && input.sourceSelection !== "none" && input.sourceSelection !== "selected"
         && owned.courseId
         && deps.listReadySourceIdsForCourse
@@ -260,8 +288,9 @@ export function createTutorService(deps: {
       const attempt = attemptId && deps.attempts ? await deps.attempts.assertAccess(scope, attemptId) : null;
       if (attemptId && !attempt) throw new TutorServiceError("NOT_FOUND", "attempt not found", 404);
       if (attempt && input.learningSessionId && input.learningSessionId !== attempt.sessionId) throw new TutorServiceError("VALIDATION", "attempt/session mismatch", 400);
-      let learningSessionId = attempt?.sessionId ?? existing?.learningSessionId ?? input.learningSessionId ?? null;
-      if (!attempt && !shouldCreateLearningSession(input.mode)) {
+      let learningSessionId = retryIntent ? retryIntent.learningSessionId
+        : attempt?.sessionId ?? existing?.learningSessionId ?? input.learningSessionId ?? null;
+      if (!retryIntent && !attempt && !shouldCreateLearningSession(input.mode)) {
         learningSessionId = null;
       }
 

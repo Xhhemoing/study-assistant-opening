@@ -29,12 +29,14 @@ export function StartUploads({ api, sources, courseId, disabled, onBusyChange, o
   const [error, setError] = useState("");
   const [rejection, setRejection] = useState("");
   const client = useMemo(() => createUploadClient({
-    begin: input => api.beginUpload(input), complete: id => api.completeUpload(id),
-    put: (url, body, progress, mime) => putPrivateBytes(url, body, mime, loaded => progress(loaded)),
-    resolvePutUrl: resolveUploadPutUrl, refreshTicket: id => api.refreshUploadTicket(id),
+    begin: (input, identity, signal) => api.beginUpload(input, identity, signal), complete: (id, identity) => api.completeUpload(id, identity),
+    put: (url, body, progress, mime, identity, signal) => putPrivateBytes(url, body, mime, loaded => progress(loaded), undefined, identity, signal),
+    resolvePutUrl: resolveUploadPutUrl, refreshTicket: (id, identity, signal) => api.refreshUploadTicket(id, identity, signal),
   }), [api]);
   const queue = useMemo(() => createUploadQueue((file, onBytes, resume, operation) => client.uploadFile(file, {
     uploadId: operation?.uploadId,
+    signal: operation?.signal,
+    expectedIdentity: operation?.expectedIdentity,
     onBytes, ...(resume ? { resumeSourceId: resume.sourceId, ticket: resume.ticket, completionPending: resume.completionPending } : {}),
   })), [client]);
   const published = useRef(new Set<string>());
@@ -80,7 +82,7 @@ export function StartUploads({ api, sources, courseId, disabled, onBusyChange, o
         <span className="min-w-0 flex-1 break-words">{item.file.name}</span><span role="status">{uploadStripItemStatus(item, sources)}</span>
         {item.state === "saved" && item.source?.mime.startsWith("image/") ? <Link href={objectHref(`/opening/practice?sourceId=${encodeURIComponent(item.source.id)}`)} className={action}>开始作答</Link> : null}
         {item.state === "failed" ? <button type="button" className={action} disabled={blocked} onClick={() => void run(() => queue.retry(item.id, setItems))}>重试</button> : null}
-        <button type="button" aria-label={`移除上传记录 ${item.file.name}`} className="grid size-8 place-items-center rounded hover:bg-surface-2 disabled:opacity-50" disabled={blocked} onClick={() => { queue.dismiss(item.id, setItems); onBusyChange(queue.snapshot().some(row => row.state !== "saved")); }}><X size={14} aria-hidden="true" /></button>
+        <button type="button" aria-label={`移除上传记录 ${item.file.name}`} className="grid size-8 place-items-center rounded hover:bg-surface-2 disabled:opacity-50" disabled={disabled} onClick={() => { queue.dismiss(item.id, setItems); onBusyChange(queue.snapshot().some(row => row.state !== "saved")); }}><X size={14} aria-hidden="true" /></button>
       </li>)}
     </ul> : null}
     {items.length ? <p className="px-2 pb-1 text-xs text-text-3">附件作为题目或参考资料。可直接发送来读题；你的解答在作答区另行提交。</p> : null}
