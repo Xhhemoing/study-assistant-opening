@@ -122,3 +122,13 @@ test("parser is installed and seeded before integration runs with explicit Linux
   const integration = workflow.indexOf("npm run test:integration");
   assert.ok(install > 0 && install < seed && seed < check && check < parserTests && parserTests < integration);
 });
+
+test("every job pins a runner image that the pinned Playwright supports", () => {
+  const runners = [...workflow.matchAll(/^[ ]{4}runs-on:\s*(\S+)/gm)].map((match) => match[1]);
+  const jobs = [...workflow.matchAll(/^[ ]{2}([a-z][a-z0-9_-]*):\n/gm)].map((match) => match[1])
+    .filter((name) => !["pull_request", "push", "workflow_dispatch"].includes(name));
+  assert.ok(runners.length >= 9 && runners.length === jobs.length, `one runs-on per job (${runners.length} runners, ${jobs.length} jobs)`);
+  assert.deepEqual([...new Set(runners)], ["ubuntu-24.04"]);
+  assert.doesNotMatch(workflow, /runs-on:\s*ubuntu-latest/);
+  assert.match(docs, /ubuntu-24\.04/);
+});
