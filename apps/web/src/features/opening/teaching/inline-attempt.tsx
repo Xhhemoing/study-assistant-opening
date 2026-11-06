@@ -230,6 +230,8 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   }, [ready, restoring, restoreFailed, draftConflict, recorded, attempt, context.courseId, context.status, skillLabel]);
 
   const photoVisible = ready && !restoring && !restoreFailed && !recorded && context.status !== "completed" && Boolean(attempt || photo.workSourceId);
+  // The server rejects the materials sealed into this question's attempt as answer photos.
+  const photoSources = attempt ? sources.filter(source => !attempt.sourceIds.includes(source.id)) : sources;
   async function loadSources(isCurrent: () => boolean) {
     try {
       const rows = await api.listSources();
@@ -362,7 +364,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       <p className="text-xs font-medium text-text-2">我的解答</p>
       <InlineAnswerInput interaction={context.interaction} value={answer} disabled={answerLocked} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt, photo }); }} />
       {photoVisible ? <>
-        <AiGradingPhotoFields sources={sources} value={photo} disabled={answerLocked} onRefresh={() => void loadSources(() => mounted.current)}
+        <AiGradingPhotoFields sources={photoSources} value={photo} disabled={answerLocked} onRefresh={() => void loadSources(() => mounted.current)}
           onChange={next => { setPhoto(next); persistDraft({ answer, skillLabel, prompt, photo: next }); }} />
         {sourcesUnavailable && !submission.current ? <p role="status" className="text-xs text-warn">暂时读不到作答照片列表，可以稍后点“刷新文件”再试；文字答案照常可以提交。</p> : null}
       </> : null}

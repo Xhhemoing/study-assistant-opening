@@ -83,6 +83,17 @@ it("offers uploaded photos once the question is prepared and lets a photo replac
   expect(lastCardProps()).toMatchObject({ autoGrade: true, gradingPhoto });
 });
 
+it("leaves the materials sealed into the question's attempt out of the photo choices", async () => {
+  const sealedMaterial = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  api.createAttempt.mockResolvedValue({ ...attempt, sourceIds: [...attempt.sourceIds, sealedMaterial] });
+  api.listSources.mockResolvedValue([
+    source({ id: attempt.sourceIds[0]!, name: "课堂讲义.pdf", mime: "application/pdf", parseState: "ready" }),
+    source({ id: sealedMaterial, name: "参考答案.png" }), source(),
+  ]);
+  await render();
+  expect([...photoSelect()!.options].map(option => option.textContent)).toEqual(["仅批改文字答案", "手写作答.png"]);
+});
+
 it("keeps a text answer working when the photo list cannot be read, and sends it without a photo", async () => {
   api.listSources.mockRejectedValue(new Error("offline"));
   await render(draft({ answer: "y' = 2x，所以导数是 2" }));
