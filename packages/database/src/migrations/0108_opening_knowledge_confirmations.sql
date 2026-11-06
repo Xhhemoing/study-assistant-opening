@@ -23,6 +23,7 @@ CREATE INDEX opening_knowledge_confirmations_node_idx
 -- row remains in schema_migrations: a later forward deploy would skip 0108 and run
 -- without the table. While that row exists, older code's `npm run db:migrate` (the
 -- deploy pre-step) fails with MIGRATION_UNKNOWN_HISTORY whether or not the table
--- exists, so an application rollback across 0108 needs the separately approved
--- registry procedure (docs/operations/database-migrations.md).
+-- exists, so an application rollback across 0108 needs a registry procedure that is
+-- still to be written and approved (not yet in docs/operations/database-migrations.md);
+-- until then, stop rather than edit schema_migrations by hand.
 -- Additive only: safe to apply before releasing application code.
