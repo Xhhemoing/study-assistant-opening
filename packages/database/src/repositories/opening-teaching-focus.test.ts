@@ -126,6 +126,11 @@ describe("compiler focus canonical decision input with independent admission gua
     expect((await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).learnerFocus).toEqual(stored);
     vi.mocked(readOpeningCourseEvidence).mockResolvedValue(evidence());
     expect(await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).toEqual({});
+    // Real route focus always carries requirementKey; a focused answer under another key is cleared.
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    expect((await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, requirementKey: null }) as unknown as Sql, scope, newId)).learnerFocus)
+      .toEqual({ ...stored, requirementKey: null });
+    expect(await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, requirementKey: "other-requirement" }) as unknown as Sql, scope, newId)).toEqual({});
   });
 
   it("keeps the explicit explanation snapshot without reading evidence", async () => {
