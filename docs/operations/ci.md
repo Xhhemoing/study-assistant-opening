@@ -168,12 +168,19 @@ Playwright Chromium plus an isolated E2E database whose name ends in `_e2e`.
 The existing CI browser step remains required. Neither a scoped check nor a
 full local run replaces the remote CI result for the current commit.
 
-By default, `run-heavy.sh` uses `flock`, `nice`, `ionice`, and `taskset` only when each tool
-is available. On Windows Git Bash or minimal containers, unavailable host
-scheduling controls produce one warning and the requested command still runs;
-its exit code is preserved. This fallback removes a portability blocker but
-does not provide cross-process serialization. Set `HERMES_HEAVY_ENABLED=0` only
-when the caller has an isolated environment and does not need those host controls.
+npm scripts call `node scripts/run-heavy.mjs`. On POSIX it delegates to
+`run-heavy.sh`, which uses `flock`, `nice`, `ionice`, and `taskset` only when each
+tool is available. In minimal containers, unavailable host scheduling controls
+produce one warning and the requested command still runs with its exit code
+preserved, but without cross-process serialization. On Windows, or with
+`HERMES_HEAVY_LOCK_IMPL=node`, the wrapper uses a portable Node directory lock
+instead and needs no Bash. The Node lock and `flock` do not exclude each other, so
+callers on one host serialize only when they use the same implementation and the
+same `HERMES_HEAVY_LOCK` path; do not mix them on a POSIX host. With either lock,
+waiting longer than `HERMES_HEAVY_LOCK_TIMEOUT` seconds (default 120) exits with
+code 75. Set
+`HERMES_HEAVY_ENABLED=0` only when the caller has an isolated environment and does
+not need those host controls.
 
 ### Authoritative merge gate
 

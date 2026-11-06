@@ -1,6 +1,6 @@
 # 多工具并行开发与集成规则
 
-本规则取代 [codex-team.md](codex-team.md) 与 [project-lead-prompt.md](project-lead-prompt.md) 中的旧角色、模型路由和派单流程；两者仅作历史。与根 `AGENTS.md` 共同约束执行，不因任务小或文档风险低豁免正式 PR 审查。最新明确授权优先，但本文不能覆盖平台或更高层仍有效的执行配额。
+本规则取代 [codex-team.md](../archive/operations/codex-team.md) 与 [project-lead-prompt.md](../archive/operations/project-lead-prompt.md) 中的旧角色、模型路由和派单流程；两者仅作历史。与根 `AGENTS.md` 共同约束执行，不因任务小或文档风险低豁免正式 PR 审查。最新明确授权优先，但本文不能覆盖平台或更高层仍有效的执行配额。
 
 ## 职责与车道
 
@@ -14,12 +14,29 @@
 
 目标容量是**八条隔离编码流，加评审／集成配套**，不是八个已经启动的 Agent，也不是允许突破运行配额。实际准入取决于以下条件全部满足：
 
-1. 平台及当前上层有效配额允许；仍有效的两名实现者等限制未被本规则解除。额度不足则只启动可容纳的就绪流，其余保留原卡依赖排队；不换会话或多开工具绕过。
+1. 平台配额与本机资源允许；用户 2026-11-06 将同时运行的实现者上限定为 5，只读调查与审查不计。额度不足则只启动可容纳的就绪流，其余保留原卡依赖排队；不换会话或多开工具绕过。
 2. 文件写集合互斥，接口已有一致决定，依赖产物可用；不能用不同目录掩盖同一个接口、迁移编号或共享状态冲突。
 3. 工作区、数据库、Redis、端口、重验证槽和磁盘资源获准使用。注册旧 worktree 不等于活跃 writer；不为凑车道创建任务或工作树。
 4. owner 明确且持有写权；切换前核原 owner 已停止写入并明确交回，不停止他人任务抢权。
 
 项目不再采用固定 3 个 Agent／3 棵活跃 worktree 上限。worktree 按隔离需要复用或创建，但仍受上述实际配额及资源准入约束；它只隔离文件，不能隔离服务或重验证锁。清理工作树需确认无独有成果并取得清理授权，流程本身不授予删除权限。
+
+## Cursor 中的执行映射
+
+用户 2026-11-06 决定，在 Cursor 中按下表承担上文角色；其余规则不变。
+
+| 角色 | Cursor 中的承担方式 |
+|---|---|
+| 主控 PM 与唯一集成者 | 主会话同时承担，不写业务代码。获授权提交和推送功能分支、开 PR、门禁齐全后合入 `integration/opening` 并提升主线；高风险 PR 只按下文“用户长期授权”的条件合入。部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
+| 实现 worker | `best-of-n-runner` 子 Agent，各占独立 worktree 与分支，遵循 `.cursor/agents/aistudy-lane-worker.md`；同时运行不超过 5 个。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。 |
+| 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
+| 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行，其他工具中用 claude CLI。 |
+| 异家族审查 | Cursor 子 Agent 属 Claude 系列。按 2026-10-28 “Claude 写的交 GPT”原则，Cursor 中实现的代码与方案改动在指定审查之外，再由主会话以 `codex exec` 只读沙箱调用 GPT 审查；高风险 PR 一律需要。 |
+| 任务卡与交回 | 任务卡随派单 brief 完整下发，结果以 PR 正文为持久记录，会话内用 TodoWrite 跟踪；Hermes Kanban 可用时仍以原卡为准。 |
+
+子 Agent 默认共享主会话的 checkout，会互相覆盖改动，所以写文件的子 Agent 必须使用独立 worktree，同一 checkout 内只运行只读调查和审查。每个 worktree 单独 `npm ci`，不软链共享 `node_modules`，否则 workspace 包会解析到其他 checkout 的源码。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交精确 head CI。
+
+审查者同样运行在共享 checkout 中，所以在 Cursor 里，下文“指定审查使用该提交的独立干净快照”由精确 head 的 git 对象承担：差分、文件、搜索和调用链都从 head 对象读取，不以工作区内容为证据；确需完整工作区时由主控为该 SHA 建 detached worktree。结束时的核对相应改为确认 PR head 未变。派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
 
 ## 持久 Kanban 与原 owner 续接
 
@@ -90,7 +107,7 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
 
 接口或用途使风险升级时先回 PM／集成者调整原卡和依赖，不以文件少、测试过或分支名认定低风险。PR 写明全部相对 base 改动及未验范围；不能只描述最后一笔修复，也不能以旧候选已批准覆盖新 head。若合并目标变化或集成修改影响审查覆盖，重新确认实际差分和对应门禁，不静默沿用旧批准。
 
-Git 使用 Conventional Commit，正式 remote 为 `study-assistant-opening`，不推旧 `origin`；commit、push、PR、合并及发布各自服从当前授权，禁止 force、reset／clean／覆盖他人成果。没有迁移的卡明确写无，不捏造回滚。允许的本地完成与代码交回不是已交付用户；最终合并和用户效果另记真实证据。
+Git 使用 Conventional Commit，正式仓库为 `Xhhemoing/study-assistant-opening`，remote 命名为 `study-assistant-opening`（新克隆把 `origin` 改为此名），不推任何旧仓库 remote；commit、push、PR、合并及发布各自服从当前授权，禁止 force、reset／clean／覆盖他人成果。没有迁移的卡明确写无，不捏造回滚。允许的本地完成与代码交回不是已交付用户；最终合并和用户效果另记真实证据。
 
 部署、生产配置、真数据导出／改写、破坏性迁移、定样仍需用户审批；开发成本原则不解除产品费用策略或该审批边界。不得用“加快交付”推导发布授权。
 
