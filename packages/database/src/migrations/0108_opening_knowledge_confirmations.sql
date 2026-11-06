@@ -19,7 +19,10 @@ CREATE TABLE opening_knowledge_confirmations (
 CREATE INDEX opening_knowledge_confirmations_node_idx
   ON opening_knowledge_confirmations (workspace_id, owner_user_id, course_id, node_id, graph_version_after DESC);
 
--- Rollback: revert the application only and keep this table; older code never reads it.
--- Do not DROP it as a rollback: the 0108 row in schema_migrations would remain, and
--- verifyRegistry rejects history unknown to older code (MIGRATION_UNKNOWN_HISTORY).
+-- Rollback: keep this table; older code never reads it. Never DROP it while the 0108
+-- row remains in schema_migrations: a later forward deploy would skip 0108 and run
+-- without the table. While that row exists, older code's `npm run db:migrate` (the
+-- deploy pre-step) fails with MIGRATION_UNKNOWN_HISTORY whether or not the table
+-- exists, so an application rollback across 0108 needs the separately approved
+-- registry procedure (docs/operations/database-migrations.md).
 -- Additive only: safe to apply before releasing application code.

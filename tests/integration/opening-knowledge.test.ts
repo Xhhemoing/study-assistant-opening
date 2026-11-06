@@ -176,10 +176,11 @@ describe("opening knowledge manual confirmation", () => {
   });
 
   it("rejects confirmation after a source-version commit that left the graph version unchanged", async () => {
-    // Ordering note: the bump is released before confirmNode issues its first query, so this
-    // proves the committed-bump-then-confirm order. The blocked interleaving is covered by the
-    // lock order (workspace FOR UPDATE, then sources/versions/memberships FOR SHARE, where a
-    // blocked version update makes EPQ re-check the join and fail it), not by this test.
+    // Ordering note: confirmNode first takes workspace/course and graph FOR UPDATE, so the
+    // released bump has in practice committed before the sources/versions FOR SHARE read; this
+    // proves the committed-bump-then-confirm order. Either interleaving serializes: if confirm
+    // holds FOR SHARE first, the version UPDATE waits for it; if confirm's FOR SHARE waits on
+    // an uncommitted bump, EPQ re-checks the join and excludes the row (CONFLICT).
     const { repo, courseId, nodeId, record, sourceId } = await pending();
     let release!: () => void, locked!: () => void;
     const ready = new Promise<void>(resolve => { locked = resolve; });
