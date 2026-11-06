@@ -119,4 +119,26 @@ describe("course route repository decision qualification", () => {
   it("相同时间戳使用规范排序，不沿用route progress的降序ID", () => {
     expect(decision([row("z", { verifiedCorrect: "no" }), row("a")])).toEqual({ activityKind: "transfer_check", reasonCode: "independent", focusObservationId: null });
   });
+
+  it("origin截断严格早于origin：与origin同一attemptedAt、不同id的行被丢弃", () => {
+    const origin = row("origin", { verifiedCorrect: "no" });
+    // Same timestamp; canonical ordering would put "a-tied" first if it survived.
+    const tied = row("a-tied");
+    const earlier = row("earlier", { attemptedAt: "2026-10-26T00:00:00Z" });
+    const input = courseRouteDecisionInput(requirement, [tied, earlier, origin], { origin });
+    expect(input.observations.map(observation => observation.id)).toEqual(["origin", "earlier"]);
+    expect(nextLearningStep(input)).toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "origin" });
+    expect(courseRouteDecisionInput(requirement, [tied, earlier, origin]).observations.map(observation => observation.id)).toEqual(["a-tied", "origin", "earlier"]);
+  });
+
+  it("origin与sharedFor共享行同时存在时，晚于origin的共享成功被截掉，更早的共享行保留", () => {
+    const sharedFor = [{ linkId: "l", requirementId: "r", requirementRevision: 2, stableSkillId: "skill", sourceCourseId: "other", sourceRequirementId: "other-r" }];
+    // A local independent success keeps shared rows eligible; only the origin cut removes the later one.
+    const origin = row("origin");
+    const sharedLate = row("shared-late", { attemptedAt: "2026-10-28T00:00:00Z", requirementKey: "source-key", courseRequirement: undefined, sharedFor });
+    const sharedEarly = row("shared-early", { attemptedAt: "2026-10-26T00:00:00Z", requirementKey: "source-key", courseRequirement: undefined, sharedFor });
+    const rows = [sharedLate, origin, sharedEarly];
+    expect(courseRouteDecisionInput(requirement, rows).observations.map(observation => observation.id)).toEqual(["shared-late", "origin", "shared-early"]);
+    expect(courseRouteDecisionInput(requirement, rows, { origin }).observations.map(observation => observation.id)).toEqual(["origin", "shared-early"]);
+  });
 });
