@@ -165,6 +165,24 @@ describe("ActivitySpec publication source trust boundary (PG)", () => {
     },
   );
 
+  it.each([2, null])("rejects unavailable whole-source refs (version %s) without relying on chunk filtering", async version => {
+    const { content, input, sourceId, snapshot } = await seedBoundary();
+    // No locator: removing the explicit availability check would take the
+    // known whole-source fast path, bypassing the chunk availability filter.
+    const sourceRefs = [{ sourceId, version }];
+    for (const expectedVersion of [0, 1]) {
+      if (expectedVersion === 1) await content.publishActivitySpec(f.scope, input);
+      await f.sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,availability)
+        VALUES (${sourceId},${f.scope.workspaceId},2,'unavailable')
+        ON CONFLICT(source_id,version) DO UPDATE SET availability='unavailable'`;
+      const before = await snapshot();
+      await expect(content.publishActivitySpec(f.scope, { ...input, expectedVersion, sourceRefs }))
+        .rejects.toMatchObject({ code: "VALIDATION" });
+      expect(await snapshot()).toEqual(before);
+      await f.sql`UPDATE opening_source_versions SET availability='available' WHERE source_id=${sourceId} AND version=2`;
+    }
+  });
+
   it.each(["historical chunk", "historical whole source", "journal-only version", "unpinned whole source", "unpinned chunk"] as const)(
     "publishes workspace-only nonmember refs: %s", async kind => {
       const { content, input, sourceId, oldChunkId } = await seedBoundary();
