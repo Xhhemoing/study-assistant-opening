@@ -106,7 +106,7 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown,
     const reviewed = correct + incorrect + unjudgeable;
     return { total: items.length, reviewed, pending: items.length - reviewed, correct, incorrect, unjudgeable };
   };
-  // MP:32/569: acceptance is the point estimate <= 2%; the upper bound is reported, never a default gate.
+  // Acceptance is the point estimate <= 2%; the upper bound is reported, never a default gate.
   const errorRate = (counts: ReturnType<typeof summarize>, population: number) => {
     const judged = counts.correct + counts.incorrect, complete = counts.pending === 0;
     const point = binomialRatio(counts.incorrect, judged);
@@ -126,7 +126,7 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown,
     reviewDefinition: "reviewed = correct + incorrect + unjudgeable; total = reviewed + pending. Counts describe the entire selected sample, not the whole course.",
     errorRateDefinition: "rate = incorrect / judged, judged = correct + incorrect; conservative counts unjudgeable as errors over correct + incorrect + unjudgeable."
       + " upper95 is a one-sided 95% Clopper–Pearson bound assuming independent binomial draws; correlation within a question family is not modelled."
-      + " pointEstimateWithin2Percent is a verdict only when complete (pending = 0) and no answer is unjudgeable; otherwise null until those are resolved."
+      + " pointEstimateWithin2Percent is a verdict only when complete (pending = 0), no answer is unjudgeable and at least one answer is judged (judged > 0); otherwise null."
       + " upper95 <= 2% is not a default acceptance condition."
       + " population is the eligible sampling frame and sampleSize the simple random sample drawn from it (for mandatory/optional, the part of that sample falling in the group, a random-sized subsample);"
       + " sampling is without replacement, so the binomial bound is conservative relative to the hypergeometric one."
@@ -150,7 +150,7 @@ Copy identity fields exactly from the sample: courseId, full requirement, activi
 contentVersion, documentId, revisionNumber, questionBlockId, answerBlockId. No extra authority fields.
 Partial reviews leave pending samples; reviewed = correct + incorrect + unjudgeable. All denominators and gaps remain.
 errorRate (all/mandatory/optional): incorrect/judged with one-sided 95% upper bound (independence assumed), plus a
-conservative rate counting unjudgeable as errors; the 2% check uses the point estimate and only once pending = 0.
+conservative rate counting unjudgeable as errors; the 2% point-estimate check is null unless pending = 0, unjudgeable = 0 and judged > 0.
 Output is a NEW private (0600) file; no overwrites, database, network, model calls or automatic verification.
 Human input does not establish independence, whole-course correctness or release eligibility. No private content is printed.`);
     return;
