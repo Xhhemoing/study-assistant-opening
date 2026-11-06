@@ -1,6 +1,6 @@
 import { courseRouteActivityContextSchema, type CourseRouteActivityContext, type CourseRouteActionResult, type CourseRouteNext, type CourseRouteStart, type Scope } from "@aistudy/contracts";
-import { courseRequirementProgress, selectCourseRouteStep, nextLearningStep,remainingCourseComprehensiveRequirements } from "@aistudy/domain";
-import { courseRouteDecisionInput } from "./opening-course-route-decision-input";
+import { courseRequirementProgress, selectCourseRouteStep, remainingCourseComprehensiveRequirements } from "@aistudy/domain";
+import { courseRouteDecisionInput,courseRouteTeachingStep } from "./opening-course-route-decision-input";
 import { assertOpeningCourseRouteRetestCurrent,readOpeningCourseRouteRetest,readOpeningCourseRouteRetestOutcome,courseRouteDelayedProtocolSchema } from "./opening-course-route-retest-state";
 import type { Sql,TransactionSql } from "postgres";
 import { learningError,lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -129,7 +129,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const all=await readCourseRouteObservations(tx,scope,courseId);
     const decisionInput=courseRouteDecisionInput(selected.requirement,all.projected.map(row=>currentObservation&&row.id===currentObservation.id?currentObservation:row),{dueRetest:Boolean(boundRetestId),origin:currentObservation});
     const observations=decisionInput.observations;
-    const decision=nextLearningStep(decisionInput);
+    // Shared policy result, or the recorded route-level assisted-correction override.
+    const {decision}=courseRouteTeachingStep(decisionInput);
     // Keep route navigation/coverage actions, but use the shared policy for teaching.
     if(!["prerequisite","comprehensive"].includes(step.action))step={...step,action:decision.activityKind,focusObservationId:decision.focusObservationId};
     if(["transfer_check","comprehensive"].includes(step.action)&&selected.requirement.verification.status!=="ready")return choice(courseId,"verification_unavailable",[selected.requirement.id]);
