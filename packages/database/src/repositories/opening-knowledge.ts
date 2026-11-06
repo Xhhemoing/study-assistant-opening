@@ -62,6 +62,11 @@ function sameVersions(left: Record<string, number>, right: Record<string, number
     && Object.entries(left).every(([id, version]) => right[id] === version);
 }
 
+/** Evidence is compared and stored as a set: sorted unique chunk ids. */
+function evidenceSet(chunkIds: readonly string[]): string[] {
+  return [...new Set(chunkIds)].sort();
+}
+
 function nodeSourceVersions(chunkIds: readonly string[], chunks: readonly SourceChunk[]): Record<string, number> {
   const ids = new Set(chunkIds);
   return Object.fromEntries(chunks.filter(chunk => ids.has(chunk.id)).map(chunk => [chunk.sourceId, chunk.sourceVersion]));
@@ -222,6 +227,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           throw new OpeningKnowledgeError("CONFLICT", "课程知识已变化，请重新读取并核对材料。");
         }
         if (!node.evidenceChunkIds.length) throw new OpeningKnowledgeError("CONFLICT", "尚无材料依据，请先补充材料。");
+        const evidenceIds = evidenceSet(node.evidenceChunkIds);
         // Live source rows are locked until commit. markNeedsCheck does not bump graph versions.
         // Validate the complete observed source set as well as the selected node's evidence.
         const sourceIds = Object.keys(input.sourceVersions).sort();
@@ -239,9 +245,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         let chunks: SourceChunk[];
         try {
           const rows = await tx`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
-            WHERE s.workspace_id=${scope.workspaceId} AND c.id IN ${tx(node.evidenceChunkIds)} FOR SHARE`;
+            WHERE s.workspace_id=${scope.workspaceId} AND c.id IN ${tx(evidenceIds)} FOR SHARE`;
           const versions = Object.fromEntries(rows.map(chunk => [String(chunk.source_id), Number(chunk.source_version)]));
-          chunks = await assertAuthorizedChunks(tx, scope, courseId, node.evidenceChunkIds, versions);
+          chunks = await assertAuthorizedChunks(tx, scope, courseId, evidenceIds, versions);
           if (Object.entries(versions).some(([id, version]) => input.sourceVersions[id] !== version)) {
             throw new OpeningKnowledgeError("VALIDATION", "stale evidence");
           }
@@ -259,7 +265,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         await tx`INSERT INTO opening_knowledge_confirmations
           (id,workspace_id,owner_user_id,course_id,node_id,node_label,node_kind,graph_version_before,graph_version_after,source_versions,evidence_chunk_ids)
           VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${courseId},${nodeId},${node.label},${node.kind},${current.version},${version},
-            ${tx.json(nodeSourceVersions(node.evidenceChunkIds, chunks))},${tx.json([...node.evidenceChunkIds].sort())})`;
+            ${tx.json(nodeSourceVersions(evidenceIds, chunks))},${tx.json(evidenceIds)})`;
         return { ...current, version, snapshot };
       });
     },
@@ -387,7 +393,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           const confirmation = confirmations.find(item => item.node_id === node.id);
           const confirmed = existing && confirmation && node.label === confirmation.node_label && node.kind === confirmation.node_kind
             && node.evidenceChunkIds.length > 0
-            && JSON.stringify([...node.evidenceChunkIds].sort()) === JSON.stringify(confirmation.evidence_chunk_ids)
+            && JSON.stringify(evidenceSet(node.evidenceChunkIds)) === JSON.stringify(confirmation.evidence_chunk_ids)
             && sameVersions(nodeSourceVersions(node.evidenceChunkIds, evidence), parseSourceVersions(confirmation.source_versions));
           if (input.expectedReferencedNodeIds && confirmed && (node.status === "needs_check" || node.status === "supported")) {
             return { ...node, status: "supported" as const };
@@ -416,6 +422,18 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           WHERE opening_course_knowledge.version = ${input.expectedVersion}
           RETURNING version, snapshot, source_versions`;
         if (!rows.length) throw new OpeningKnowledgeError("CONFLICT", "knowledge replace raced");
+        // Withdrawn confirmations never come back: a node removed from the graph, or manually moved off
+        // supported, must be re-checked by the learner even if the same UUID/evidence reappears later.
+        // markNeedsCheckForSources does not pass through here and keeps confirmations; the restore
+        // condition above already requires the exact confirmed source versions.
+        const nextStatus = new Map(nodes.map(node => [node.id, node.status]));
+        const revoked = (previous?.snapshot.nodes ?? []).filter(node => !nextStatus.has(node.id)
+          || (!input.expectedReferencedNodeIds && node.status === "supported" && nextStatus.get(node.id) !== "supported"))
+          .map(node => node.id).sort();
+        if (revoked.length) {
+          await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND node_id IN ${tx(revoked)}`;
+        }
         return mapRecord(rows[0] as Record<string, unknown>);
       });
     },

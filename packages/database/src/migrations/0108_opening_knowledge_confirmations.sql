@@ -1,4 +1,6 @@
--- Append-only manual confirmations; no existing schema or automatic rules change.
+-- Current manual confirmations. A node's rows are deleted when the node leaves the graph or is
+-- manually moved off supported, so a withdrawn confirmation never restores it. No existing
+-- schema or automatic rules change.
 CREATE TABLE opening_knowledge_confirmations (
   id uuid PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
