@@ -1,18 +1,21 @@
 import type { CourseRequirementProgress, CourseRouteActivityContext, CourseRouteNext, CourseRouteStart, Scope } from "@aistudy/contracts";
-import type { CourseRouteStep, LearningDecisionCandidate, LearningDecisionInput } from "@aistudy/domain";
+import { type CourseRouteStep, type LearningDecisionCandidate, type LearningDecisionInput, type NextLearningStepInput } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
+import { courseRouteTeachingStep } from "./opening-course-route-decision-input";
 
 type Input = {
   courseId: string; goal: { id: string; revision: number }; request: CourseRouteStart | CourseRouteNext;
   entry: "start" | "next"; requestedId: string; progress: CourseRequirementProgress[];
-  excluded: CourseRequirementProgress[]; initialStep: CourseRouteStep | null; context: CourseRouteActivityContext;
+  excluded: CourseRequirementProgress[]; initialStep: CourseRouteStep | null; context: CourseRouteActivityContext; decisionInput: NextLearningStepInput;
 };
 /** Capture before activity/compile/budget writes. These are this entry's real inputs,
  * not a new policy's hypothetical alternatives or a later reconstruction. */
 export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scope: Scope, input: Input): Promise<Omit<LearningDecisionInput, "targetId">> {
   const state = await readOpeningLearnerState(tx, scope, { courseId: input.courseId });
   const { context, initialStep } = input;
+  // `teaching` stays the exact shared-policy result; a route override is recorded beside it.
+  const { canonical: teaching, override: teachingOverride } = courseRouteTeachingStep(input.decisionInput);
   const requirementRef = (row: CourseRequirementProgress) => `requirement:${row.requirement.id}:v${row.requirement.revision}`;
   const selected = input.progress.find(row => row.requirement.id === context.requirementId)!;
   const reasonCodes = [`entry:course-route-${input.entry}`, `progress:${selected.status}`,
@@ -20,11 +23,13 @@ export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scop
     ...(context.action === "prerequisite" ? ["weak_explicit_prerequisite"] : []),
     ...(context.action === "return" ? ["verified_prerequisite_return"] : []),
     ...(context.action === "comprehensive" ? ["current_scope_comprehensive_run"] : []),
-    ...(initialStep && initialStep.action === context.action ? ["course_requirement_progress_rule"] : [])];
-  const evidenceRefs = [`course:${input.courseId}`, `goal:${input.goal.id}:v${input.goal.revision}`, requirementRef(selected),
+    ...(initialStep && initialStep.action === context.action ? ["course_requirement_progress_rule"] : []),
+    `teaching:${teaching.decision.reasonCode}`, ...(teachingOverride ? [`teaching_override:${teachingOverride.rule}`] : [])];
+  const evidenceRefs = [...new Set([`course:${input.courseId}`, `goal:${input.goal.id}:v${input.goal.revision}`, requirementRef(selected),
     ...(context.originActivityId ? [`activity:${context.originActivityId}`] : []),
     ...(context.originObservationId ? [`observation:${context.originObservationId}`] : []),
-    ...(context.retestId ? [`retest:${context.retestId}`] : [])];
+    ...(context.retestId ? [`retest:${context.retestId}`] : []),
+    ...input.decisionInput.observations.map(row => `observation:${row.id}`)])];
   const candidates: LearningDecisionCandidate[] = input.progress.map(row => ({
     // Requirement candidates are not fabricated calls to the action selector.
     action: row === selected ? context.action : `requirement:${row.requirement.id}`,
@@ -37,9 +42,15 @@ export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scop
   }));
   candidates.push(...input.excluded.map(row => ({ action: `requirement:${row.requirement.id}`, eligible: false,
     reasonCodes: ["outside_goal_scope"], evidenceRefs: [requirementRef(row)] })));
+  if (teachingOverride && context.action === teachingOverride.to.activityKind) {
+    // The shared policy's own result is kept as a rejected candidate, not hidden.
+    candidates.push({ action: teachingOverride.from.activityKind, eligible: false,
+      reasonCodes: [`teaching:${teachingOverride.from.reasonCode}`, `overridden_by_${teachingOverride.rule}`],
+      evidenceRefs: [`observation:${teachingOverride.observationId}`] });
+  }
   if (initialStep && (initialStep.action !== context.action || initialStep.requirementId !== context.requirementId)) {
     candidates.push({ action: initialStep.action, eligible: false,
-      reasonCodes: [context.retestId ? "overridden_by_bound_retest" : context.action === "return" ? "overridden_by_return" : "overridden_by_comprehensive_run"],
+      reasonCodes: [context.retestId ? "overridden_by_bound_retest" : context.action === "return" ? "overridden_by_return" : context.action === "comprehensive" ? "overridden_by_comprehensive_run" : "overridden_by_current_evidence_policy"],
       evidenceRefs: [`requirement:${initialStep.requirementId}`, ...(initialStep.focusObservationId ? [`observation:${initialStep.focusObservationId}`] : [])] });
   }
   // LearnerState only includes observed sources; the route also uses unobserved
@@ -53,7 +64,8 @@ export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scop
     // The route's input snapshot includes requirement definitions, derived progress,
     // origin-bound request and the exact pre-override selector result. No session exists.
     intentVersion: JSON.stringify({ entry: `course-route-${input.entry}`, request: input.request, requestedId: input.requestedId,
-      progress: input.progress, excluded: input.excluded, initialStep, context }),
+      progress: input.progress, excluded: input.excluded, initialStep, context, decisionInput: input.decisionInput, teaching,
+      ...(teachingOverride ? { teachingOverride } : {}) }),
     policyVersion: "course-route-1", sourceVersions, dataAsOf: state.dataAsOf,
     invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] };
 }

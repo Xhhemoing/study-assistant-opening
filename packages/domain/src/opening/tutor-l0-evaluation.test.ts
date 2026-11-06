@@ -6,6 +6,11 @@ import { teachingLearnerFocusSchema } from "@aistudy/contracts";
 import { evaluateTutorL0, executeTutorL0Case, judgeTutorL0Output, parseTutorL0Fixture, tutorL0MeasurementSkeleton } from "./tutor-l0-evaluation";
 
 const fixture = () => JSON.parse(readFileSync(new URL("../../../../tests/fixtures/opening/tutor-l0-cases.json", import.meta.url), "utf8"));
+function requireCase(data: ReturnType<typeof parseTutorL0Fixture>, caseId: string) {
+  const row = data.cases.find(row => row.caseId === caseId);
+  if (!row) throw new Error(`L0 fixture case not found: ${caseId}`);
+  return row;
+}
 
 describe("offline synthetic L0", () => {
   const evidenceCase = () => structuredClone(fixture().cases.find((row: { caseId: string }) => row.caseId === "next-repeated-assisted-error"));
@@ -14,7 +19,7 @@ describe("offline synthetic L0", () => {
   it("replays new evidence and phase gold through the real rule and rejects regressed outputs", () => {
     const data = parseTutorL0Fixture(fixture());
     for (const caseId of ["next-repeated-assisted-error", "next-independent-success-resolves-errors", "next-due-retest", "next-explicit-consolidate"]) {
-      const row = data.cases.find(row => row.caseId === caseId)!;
+      const row = requireCase(data, caseId);
       const output = executeTutorL0Case(row);
       expect(judgeTutorL0Output(row, output)).toEqual({ status: "pass", violations: [] });
       for (const path of Object.keys(row.gold.allowed)) {
@@ -23,8 +28,8 @@ describe("offline synthetic L0", () => {
         expect(judgeTutorL0Output(row, mutated).status).toBe("fail");
       }
     }
-    const repeated = data.cases.find(row => row.caseId === "next-repeated-assisted-error")!;
-    const resolved = data.cases.find(row => row.caseId === "next-independent-success-resolves-errors")!;
+    const repeated = requireCase(data, "next-repeated-assisted-error");
+    const resolved = requireCase(data, "next-independent-success-resolves-errors");
     expect(judgeTutorL0Output(resolved, executeTutorL0Case(repeated)).status).toBe("fail");
     if (repeated.entry !== "nextLearningStep") throw new Error("Expected nextLearningStep fixture");
     const feedbackOnly = structuredClone(repeated);
@@ -33,7 +38,7 @@ describe("offline synthetic L0", () => {
     }
     expect(executeTutorL0Case(feedbackOnly)).toMatchObject({ decision: { activityKind: "targeted_explain", reasonCode: "verified_incorrect" } });
     for (const caseId of ["next-due-retest", "next-explicit-consolidate"]) {
-      const row = structuredClone(data.cases.find(row => row.caseId === caseId)!);
+      const row = structuredClone(requireCase(data, caseId));
       if (row.entry !== "nextLearningStep") throw new Error("Expected nextLearningStep fixture");
       row.input.dueRetest = false;
       delete row.input.learningPhase;
@@ -48,7 +53,7 @@ describe("offline synthetic L0", () => {
     { caseId: "next-explicit-consolidate", field: "phase", wrong: "maintain" },
     { caseId: "next-explicit-consolidate", field: "phaseSource", wrong: "automatic" },
   ])("rejects a present but wrong $field=$wrong for $caseId", ({ caseId, field, wrong }) => {
-    const row = parseTutorL0Fixture(fixture()).cases.find(row => row.caseId === caseId)!;
+    const row = requireCase(parseTutorL0Fixture(fixture()), caseId);
     const output = executeTutorL0Case(row);
     expect(judgeTutorL0Output(row, output)).toEqual({ status: "pass", violations: [] });
     const mutated = structuredClone(output) as { decision: Record<string, unknown> };

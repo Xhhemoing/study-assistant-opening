@@ -1,5 +1,6 @@
 import { courseRouteActivityContextSchema, type CourseRouteActivityContext, type CourseRouteActionResult, type CourseRouteNext, type CourseRouteStart, type Scope } from "@aistudy/contracts";
-import { courseRequirementProgress, selectCourseRouteStep, courseRouteLearningDecision,remainingCourseComprehensiveRequirements } from "@aistudy/domain";
+import { courseRequirementProgress, selectCourseRouteStep, remainingCourseComprehensiveRequirements } from "@aistudy/domain";
+import { courseRouteDecisionInput,courseRouteTeachingStep } from "./opening-course-route-decision-input";
 import { assertOpeningCourseRouteRetestCurrent,readOpeningCourseRouteRetest,readOpeningCourseRouteRetestOutcome,courseRouteDelayedProtocolSchema } from "./opening-course-route-retest-state";
 import type { Sql,TransactionSql } from "postgres";
 import { learningError,lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -122,8 +123,16 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       comprehensiveRunKey=key;
     }
     if(comprehensiveIds)step={requirementId:requestedId||step.requirementId,action:"comprehensive",focusObservationId:currentObservation?.verifiedCorrect==="no"?currentObservation.id:null};
-    const selected=progress.find(row=>row.requirement.id===step.requirementId)!;
+    const selectedStep=step;
+    const selected=progress.find(row=>row.requirement.id===selectedStep.requirementId)!;
     if(!selected.sourcesAvailable)return choice(courseId,"source_unavailable",[selected.requirement.id]);
+    const all=await readCourseRouteObservations(tx,scope,courseId);
+    const decisionInput=courseRouteDecisionInput(selected.requirement,all.projected.map(row=>currentObservation&&row.id===currentObservation.id?currentObservation:row),{dueRetest:Boolean(boundRetestId),origin:currentObservation});
+    const observations=decisionInput.observations;
+    // Shared policy result, or the recorded route-level assisted-correction override.
+    const {decision}=courseRouteTeachingStep(decisionInput);
+    // Keep route navigation/coverage actions, but use the shared policy for teaching.
+    if(!["prerequisite","comprehensive"].includes(step.action))step={...step,action:decision.activityKind,focusObservationId:decision.focusObservationId};
     if(["transfer_check","comprehensive"].includes(step.action)&&selected.requirement.verification.status!=="ready")return choice(courseId,"verification_unavailable",[selected.requirement.id]);
     if(!options.compilerEnabled)return choice(courseId,"configuration",[selected.requirement.id]);
     const action=origin?.context.returnTo===selected.requirement.id?"return":step.action;
@@ -143,9 +152,6 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const covering=[selected];
     const sourceIds=[...new Set(covering.flatMap(row=>row.requirement.sourceRefs.map(ref=>ref.sourceId)))];
     if(sourceIds.length>32||covering.some(row=>!row.sourcesAvailable))return choice(courseId,"source_unavailable",covering.map(row=>row.requirement.id));
-    const all=await readCourseRouteObservations(tx,scope,courseId);
-    const observations=all.projected.filter(row=>row.requirementKey===selected.requirement.requirementKey).sort((a,b)=>Date.parse(b.attemptedAt)-Date.parse(a.attemptedAt)||b.id.localeCompare(a.id));
-    const decision=courseRouteLearningDecision(currentObservation?[currentObservation,...observations.filter(row=>row.id!==currentObservation!.id)]:observations);
     const context:CourseRouteActivityContext={goalId:goal.id,goalRevision:goal.revision,requirementId:selected.requirement.id,requirementRevision:selected.requirement.revision,
       stableSkillId:selected.requirement.stableSkillId,requirementKey:selected.requirement.requirementKey,action,
       ...(step.returnTo?{returnTo:step.returnTo}:origin?.context.returnTo&&selected.requirement.id!==origin.context.returnTo?{returnTo:origin.context.returnTo}:{}),
@@ -153,13 +159,13 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const summary=step.action==="comprehensive"?`综合检查当前要求（全范围共${comprehensiveIds!.length}项，逐项检查）：${selected.requirement.title}；${selected.requirement.verification.rubric??"按本要求已确认标准判定"}`
       :`${action==="prerequisite"?"先补前置要求，检查后返回原要求：":action==="return"?"返回原要求：":"课程要求："}${selected.requirement.title}；本次${input.minutes}分钟；验证方式${selected.requirement.verification.kind}。${selected.requirement.verification.rubric??""}`;
     const receiptInput=await captureOpeningCourseRouteDecision(tx,scope,{courseId,goal,request:input,entry:origin?"next":"start",requestedId,progress,
-      excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context});
+      excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context,decisionInput});
     const activity=await createOpeningTeachingActivityInTransaction(tx,scope,{clientKey:key,intentKind:"goal",intentSummary:summary.slice(0,2000),courseId,sourceIds,
       createIntent:{kind:"course_route",goalId:goal.id,requirementId:selected.requirement.id,...("taskId" in input&&input.taskId?{source:"task",taskId:input.taskId}:{}),
         ...(origin?{originActivityId:origin.input.activityId,observationId:origin.input.observationId}:{clientKey:input.clientKey})},
       goalJson:{courseRoute:context,learnerFocus:{skillLabel:selected.requirement.title,requirementKey:selected.requirement.requirementKey,
-        activityKind:["prerequisite","return","comprehensive"].includes(action)?decision.activityKind:step.action,reasonCode:decision.reasonCode,
-        focusObservationId:step.focusObservationId,recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:true});
+        activityKind:decision.activityKind,reasonCode:decision.reasonCode,
+        focusObservationId:decision.focusObservationId,recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:true});
     await reserveOpeningLearningActivityBudget(tx,scope,{activityId:activity.id,minutes:input.minutes,goalId:goal.id,expectedGoalRevision:goal.revision});
     if(origin)await tx`UPDATE opening_teaching_activities SET status='completed',path_version=path_version+1,updated_at=now() WHERE id=${origin.input.activityId} AND workspace_id=${scope.workspaceId}`;
     await recordOpeningLearningDecision(tx,scope,{...receiptInput,targetId:activity.id},`course-route-activity:${activity.id}`);

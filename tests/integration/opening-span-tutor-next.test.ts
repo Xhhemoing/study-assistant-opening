@@ -118,7 +118,8 @@ it("ends only the selected origin and replays the actual next activity after an 
   if (first.kind === "ready" && afterRefresh.kind === "ready") expect(afterRefresh.session.activityId).toBe(first.session.activityId);
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(2);
   if (first.kind !== "ready") throw new Error("expected the persisted correction to be executable");
-  const beforeRestore = await fixture.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`;
+  const beforeRestore = await fixture.sql`SELECT * FROM opening_teaching_activities
+    WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`;
   const reader = createSpanLessonSessionService(fixture.sql);
   const restored = await reader.read(fixture.scope, f.courseId);
   expect(restored.session).toMatchObject({ activityId: first.session.activityId, sessionId: first.session.sessionId,
@@ -126,7 +127,8 @@ it("ends only the selected origin and replays the actual next activity after an 
   expect(restored.observations).toEqual([]);
   expect(restored.attempts).toEqual([]); // Correction has not yet delivered worked content.
   expect((await reader.read(fixture.scope, f.courseId)).session).toEqual(restored.session);
-  expect(await fixture.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`).toEqual(beforeRestore);
+  expect(await fixture.sql`SELECT * FROM opening_teaching_activities
+    WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`).toEqual(beforeRestore);
 });
 it("uses origin A's error after a newer independent pass in B and keeps B active", async () => {
   const f = await seed(), a = await f.create(), wrong = await record(f, a.sessionId, { membership: "not_in_span" });
@@ -190,12 +192,13 @@ it.each(["cancelled", "expired"] as const)("preserves a real %s retest as an exp
   expect(retest!.status).toBe(reason === "cancelled" ? "cancelled" : "accepted");
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(2);
   if (reason === "cancelled") {
+    const { sql, scope } = fixture;
     const persisted = async () => ({
-      activities: await fixture.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`,
-      retests: await fixture.sql`SELECT * FROM opening_retest_activities WHERE course_id=${f.courseId} ORDER BY id`,
-      tasks: await fixture.sql`SELECT * FROM opening_tasks WHERE course_id=${f.courseId} ORDER BY id`,
-      attempts: await fixture.sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`,
-      money: await fixture.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`,
+      activities: await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`,
+      retests: await sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`,
+      tasks: await sql`SELECT * FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`,
+      attempts: await sql`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${f.courseId} ORDER BY id`,
+      money: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
     });
     const cancelled = await persisted();
     const restored = await createSpanLessonSessionService(fixture.sql).read(fixture.scope, f.courseId, null, scheduled.activityId);

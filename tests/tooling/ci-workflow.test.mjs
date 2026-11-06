@@ -72,21 +72,41 @@ test("static-unit installs the shared parser venv before real PDF renderer units
     previous = index;
   }
   assert.doesNotMatch(block, /\*(?:cache-parser-models|prepare-parser-models)/);
+
+  const parser = workflow.match(/^[ ]{2}integration-parser:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+  assert.ok(parser, "integration-parser job must exist");
+  assert.match(parser, /^[ ]{4}env: &quality-env$/m);
+  for (const variable of ["PARSER_PYTHON", "PARSER_CWD", "HF_HOME", "HF_HUB_OFFLINE"]) {
+    assert.match(parser, new RegExp(`^      ${variable}:`, "m"));
+  }
+  previous = -1;
+  for (const step of [
+    "      - &setup-parser-python",
+    "      - &cache-parser-venv",
+    "      - &install-parser",
+    '          "$PARSER_PYTHON" -m pytest services/parser/tests -q',
+    "        run: npm run test:integration",
+  ]) {
+    const index = parser.indexOf(step);
+    assert.ok(index > previous, `integration-parser must run ${step.trim()} in order`);
+    previous = index;
+  }
 });
 
-test("technology spikes run once in the integration job after Chromium installation", () => {
-  const integration = workflow.match(/^[ ]{2}integration-browser:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
+test("technology spikes run once in the handler/browser job after Chromium installation", () => {
+  const browser = workflow.match(/^[ ]{2}handler-browser-spikes:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   const staticUnit = workflow.match(/^[ ]{2}static-unit:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
-  assert.ok(integration, "integration-browser job must exist");
+  assert.ok(browser, "handler-browser-spikes job must exist");
   assert.ok(staticUnit, "static-unit job must exist");
   const spike = "run: npm test -- --project '@aistudy/spike-*'";
   assert.equal(workflow.split(spike).length - 1, 1, "spikes must execute exactly once");
   assert.ok(!staticUnit.includes(spike), "static-unit must not run browser-dependent spikes");
-  const installIndex = integration.indexOf("run: npx playwright install chromium --with-deps");
-  const spikeIndex = integration.indexOf(spike);
-  const integrationIndex = integration.indexOf("run: npm run test:integration");
-  assert.ok(installIndex >= 0 && installIndex < spikeIndex && spikeIndex < integrationIndex,
-    "integration-browser must install Chromium, then run spikes, then integration tests");
+  const installIndex = browser.indexOf("run: npx playwright install chromium --with-deps");
+  const spikeIndex = browser.indexOf(spike);
+  const handlerIndex = browser.indexOf("run: npm run test:handler");
+  const browserIndex = browser.indexOf("run: npm run test:browser");
+  assert.ok(installIndex >= 0 && installIndex < spikeIndex && spikeIndex < handlerIndex && handlerIndex < browserIndex,
+    "handler-browser-spikes must install Chromium, then run spikes, then handler and browser tests");
 });
 
 test("parser is installed and seeded before integration runs with explicit Linux paths", () => {

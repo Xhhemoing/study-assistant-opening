@@ -81,6 +81,8 @@ export type CompileTeachingUnitDeps = {
     status: TeachingGenerateStatus,
     options?: { from?: readonly TeachingGenerateStatus[] },
   ): Promise<boolean>;
+  /** Mandatory in production, independent of the optional post-publish validation flag. */
+  validateSourceRefs?(scope: Scope, input: ActivitySpecPublishInput): Promise<void>;
   publishActivitySpec(scope: Scope, input: ActivitySpecPublishInput): Promise<unknown>;
   /**
    * PR-D replay: resolve a ledger resultRef ("teaching_activity:<id>") to the
@@ -349,6 +351,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
       const publishInput = deps.buildPublishInput
         ? await deps.buildPublishInput(scope, { ...body, teachingUnitId, sourceIds: allowedSources }, providerOutput, sentInput)
         : defaultStubPublish({ ...body, teachingUnitId, sourceIds: allowedSources }, teachingUnitId);
+
+      await deps.validateSourceRefs?.(scope, publishInput);
 
       // Re-check cancel immediately before publish (late-result fence).
       const stateBeforePublish = await deps.getJobState(job.id);

@@ -42,8 +42,12 @@ it("saved library → pinned client init → strict HTTP client → block item p
   await content.publishActivitySpec(scope, activitySpecPublishInputSchema.parse({ activityId: activity.id, teachingUnitId: unit.id,
     expectedVersion: 0, revisionNumber: revision.revisionNumber, blockOrder,
     sourceRefs: [{ sourceId: a, version: 2, page: 3, chunkId: ca }, { sourceId: b, version: "5", page: 11, chunkId: cb },
-      { sourceId: unused, version: 9, page: 1, chunkId: cu }, { sourceId: a, chunkId: "unversioned" }],
+      { sourceId: unused, version: 9, page: 1, chunkId: cu }],
   }));
+  // Historical versions above are valid publication input. This invented chunk
+  // is not: seed only the legacy unreadable locator to exercise read compatibility.
+  await sql`UPDATE opening_teaching_activity_specs SET source_refs=source_refs ||
+    ${sql.json([{ sourceId: a, chunkId: "unversioned" }])}::jsonb WHERE activity_id=${activity.id}`;
   // A subsequent saved revision must not change the already-published body.
   await content.writeUnitBlocks(scope, unit.id, [makeBlock("text", "未发布的新内容", [cu])]);
   const response = await content.getClientInit(scope, activity.id);
