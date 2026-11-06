@@ -307,28 +307,35 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
     // Only SQL I/O is synthetic here: run the real repository validation,
     // transaction boundaries and locks rather than counting a mocked validator.
+    // Each query is labelled by the handle that issued it: 0 for the outer pool,
+    // otherwise the id of the begin() whose callback received that handle. A lock
+    // taken through the outer handle, or after begin() returned, is labelled 0.
     const queries: Array<{ transaction: number; query: string }> = [];
-    let transaction = 0;
-    const sql = ((strings: TemplateStringsArray | unknown[], ...values: unknown[]) => {
-      if (!Object.hasOwn(strings, "raw")) return strings;
-      const query = (strings as TemplateStringsArray).join("?");
-      queries.push({ transaction, query });
-      if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
-      if (query.includes("FROM opening_jobs")) return Promise.resolve([{ state: "running" }]);
-      if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY, content_version: 0 }]);
-      if (query.includes("FROM opening_teaching_units")) return Promise.resolve([{ id: UNIT, document_id: DOC }]);
-      if (query.includes("FROM opening_sources")) return Promise.resolve([{ id: SOURCE, version: 1 }]);
-      if (query.includes("FROM opening_source_versions")) return Promise.resolve([{ version: 1, availability: "available" }]);
-      if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ id: CHUNK, source_version: 1 }]);
-      if (query.includes("INSERT INTO opening_teaching_activity_specs")) return Promise.resolve([{
-        id: "spec-1", activity_id: ACTIVITY, teaching_unit_id: UNIT, document_id: DOC,
-        revision_number: 2, block_order: values[7], source_refs: values[8], version: 1,
-      }]);
-      if (query.includes("UPDATE opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY }]);
-      return Promise.resolve([]);
-    }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
-    sql.begin = vi.fn(async callback => { transaction++; return callback(sql); }) as unknown as typeof sql.begin;
-    sql.json = ((value: unknown) => value) as typeof sql.json;
+    const handle = (transaction: number) => {
+      const issue = ((strings: TemplateStringsArray | unknown[], ...values: unknown[]) => {
+        if (!Object.hasOwn(strings, "raw")) return strings;
+        const query = (strings as TemplateStringsArray).join("?");
+        queries.push({ transaction, query });
+        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
+        if (query.includes("FROM opening_jobs")) return Promise.resolve([{ state: "running" }]);
+        if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY, content_version: 0 }]);
+        if (query.includes("FROM opening_teaching_units")) return Promise.resolve([{ id: UNIT, document_id: DOC }]);
+        if (query.includes("FROM opening_sources")) return Promise.resolve([{ id: SOURCE, version: 1 }]);
+        if (query.includes("FROM opening_source_versions")) return Promise.resolve([{ version: 1, availability: "available" }]);
+        if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ id: CHUNK, source_version: 1 }]);
+        if (query.includes("INSERT INTO opening_teaching_activity_specs")) return Promise.resolve([{
+          id: "spec-1", activity_id: ACTIVITY, teaching_unit_id: UNIT, document_id: DOC,
+          revision_number: 2, block_order: values[7], source_refs: values[8], version: 1,
+        }]);
+        if (query.includes("UPDATE opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY }]);
+        return Promise.resolve([]);
+      }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
+      issue.json = ((value: unknown) => value) as typeof issue.json;
+      return issue;
+    };
+    const sql = handle(0);
+    let begun = 0;
+    sql.begin = vi.fn(async callback => callback(handle(++begun))) as unknown as typeof sql.begin;
     const { createOpeningTeachingContentRepository } = await import("../../../../packages/database/src/repositories/opening-teaching-content");
     const repository = createOpeningTeachingContentRepository(sql);
     content.validateActivitySourceRefs.mockImplementation(repository.validateActivitySourceRefs);
@@ -343,6 +350,10 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
     expect(content.publishActivitySpec).toHaveBeenCalledTimes(1);
     expect(sql.begin).toHaveBeenCalledTimes(2);
+    // Every row lock must go through a begin() callback's handle, never the pool.
+    const rowLocks = queries.filter(({ query }) => /\bFOR (UPDATE|SHARE)\b/.test(query));
+    expect(rowLocks.length).toBeGreaterThan(0);
+    expect(rowLocks.filter(({ transaction }) => transaction === 0)).toEqual([]);
     const historyLocks = queries.filter(({ query }) => query.includes("SELECT revision FROM opening_workspace_history_revisions") && query.includes("FOR UPDATE"));
     expect(historyLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
     const sourceLocks = queries.filter(({ query }) => query.includes("FROM opening_sources") && query.includes("FOR SHARE"));
@@ -385,6 +396,24 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
     expect(content.publishActivitySpec).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
+  });
+
+  it("skips repository preflight only once per production result, then validates the same object again", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const build = deps.buildPublishInput!;
+    let built: ActivitySpecPublishInput | undefined;
+    deps.buildPublishInput = async (...args) => (built = await build(...args));
+    await createCompileTeachingUnitHandler(deps)(job, payload);
+
+    // The production builder's own preflight; the handler's check was skipped.
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
+    expect(published).toHaveLength(1);
+    expect(published[0]).toBe(built);
+    // The skip was consumed: the identical object must reach the repository again.
+    await deps.validateSourceRefs!(scope, built!);
+    expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(2);
+    expect(content.validateActivitySourceRefs).toHaveBeenLastCalledWith(scope, built);
   });
 
   it("publication still rejects refs invalidated after a successful preflight", async () => {
