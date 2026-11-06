@@ -2,10 +2,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import type { CourseRouteRequirementInput, CourseRouteSnapshot } from "@aistudy/contracts";
-import { CourseRoutePanel, parsePhysicalPages } from "./course-route-panel";
+import type { CourseRouteRequirementInput, CourseRouteSnapshot, LearningGoal, LearningGoalList } from "@aistudy/contracts";
+import { CourseRoutePanel, parsePhysicalPages, routeStartBlockers } from "./course-route-panel";
 import { createCourseRouteClient } from "./course-route-client";
 import type { CourseRouteClient } from "./course-route-client";
+import type { KnowledgeRebuildClient } from "../knowledge/knowledge-rebuild-client";
+import { KNOWLEDGE_POLL_INTERVAL_MS } from "../knowledge/knowledge-rebuild-control";
 const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const requirement: CourseRouteRequirementInput = { id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "concept-one", title: "概念一", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "manual", status: "needs_check", exerciseKeys: [], rubric: "独立解释概念", missingReasons: [] }, origin: "confirmed" };
 const snapshot: CourseRouteSnapshot = { courseId, scopeState: "unconfirmed", requirements: [], suggestions: [requirement], summary: { total: 0, mandatory: 0, verified: 0, blocked: 0 }, materials: Array.from({ length: 33 }, (_, index) => ({ sourceId: id, sourceVersion: index, title: `资料 ${index + 1}`, available: true })), currentActivity: null, currentRoute: null, observationId: null };
@@ -14,7 +16,10 @@ beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); host = docum
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 function client(value = snapshot): CourseRouteClient { return { read: vi.fn(async () => value), confirm: vi.fn(async () => ({ ...value, scopeState: "confirmed" as const })), start: vi.fn(), next: vi.fn(), scheduleRetest: vi.fn(), task: vi.fn(), verification: vi.fn(), confirmVerification: vi.fn() }; }
 function button(text: string) { const node = [...host.querySelectorAll("button")].find(item => item.textContent === text); if (!node) throw new Error(`missing ${text}`); return node; }
-async function render(api: CourseRouteClient) { await act(async () => root.render(<CourseRoutePanel courseId={courseId} client={api} goalsClient={{ list: vi.fn(async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] })) }} />)); }
+const noGoals: LearningGoalList = { goals: [], selectedGoalIds: {}, legacyConflicts: [] };
+function knowledgeRecord(version: number, nodes = 0) { return { version, sourceVersions: {}, snapshot: { courseId, version, edges: [], nodes: Array.from({ length: nodes }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, courseId, label: `知识点${index}`, kind: "concept" as const, evidenceChunkIds: [], status: "suggested" as const })) } }; }
+function knowledgeClient(): KnowledgeRebuildClient { return { read: vi.fn(async () => knowledgeRecord(1)), rebuild: vi.fn() }; }
+async function render(api: CourseRouteClient, options: { grouped?: boolean; archived?: boolean; goals?: LearningGoalList; knowledge?: KnowledgeRebuildClient } = {}) { await act(async () => root.render(<CourseRoutePanel courseId={courseId} archived={options.archived} grouped={options.grouped} client={api} knowledgeClient={options.knowledge ?? knowledgeClient()} goalsClient={{ list: vi.fn(async () => options.goals ?? noGoals) }} />)); }
 it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict client compilation facts separately from learning for %s", async verificationStatus => {
   const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
   const missing = { activityId: null, generateStatus: null, contentVersion: 0, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
@@ -59,7 +64,7 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   const api = createCourseRouteClient(transport);
   const start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
   const clicked: string[] = [];
-  await act(async () => root.render(<div onClick={event => { if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); } }}><CourseRoutePanel courseId={courseId} archived={mode === "archived"} client={api} goalsClient={{ list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) }} /></div>));
+  await act(async () => root.render(<div onClick={event => { if (event.target instanceof HTMLAnchorElement) { event.preventDefault(); clicked.push(event.target.getAttribute("href")!); } }}><CourseRoutePanel courseId={courseId} archived={mode === "archived"} client={api} knowledgeClient={knowledgeClient()} goalsClient={{ list: async () => ({ goals: [], selectedGoalIds: {}, legacyConflicts: [] }) }} /></div>));
   const links = [...host.querySelectorAll<HTMLAnchorElement>("a")].filter(link => link.textContent === "打开已保存讲义");
   const hrefs = [id, secondActivity].map(activity => `/opening/courses/${courseId}/handouts/${activity}`);
   expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
@@ -194,4 +199,111 @@ it("does not resurrect pages after their material is unchecked", async () => {
   await act(async () => materialACheck.click());
   await act(async () => button("确认这份全课范围").click());
   expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [{ ...requirement, sourceRefs: [{ sourceId: materialB, sourceVersion: 1 }] }], confirmScope: true });
+});
+
+const goalId = "55555555-5555-4555-8555-555555555555";
+const goal: LearningGoal = { id: goalId, workspaceId: courseId, title: "期末复习", courseIds: [courseId], kind: "custom", targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "独立解释", revision: 3, lifecycle: "active", maintenanceIntervalDays: null, milestones: [], createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" };
+const selectedGoal: LearningGoalList = { goals: [goal], selectedGoalIds: { [courseId]: goalId }, legacyConflicts: [] };
+const confirmed: CourseRouteSnapshot = { ...snapshot, scopeState: "confirmed", suggestions: [], summary: { total: 1, mandatory: 1, verified: 0, blocked: 0 }, requirements: [{ requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [] }] };
+function rebuildingKnowledge() {
+  const state = { version: 1, nodes: 0 };
+  const knowledge: KnowledgeRebuildClient = { read: vi.fn(async () => knowledgeRecord(state.version, state.nodes)), rebuild: vi.fn(async () => ({ jobId: id, kind: "build-course-knowledge" as const, created: true })) };
+  return { state, knowledge };
+}
+async function finishRebuild(state: { version: number; nodes: number }) {
+  await act(async () => button("整理知识点").click());
+  state.version += 1; state.nodes = 2;
+  await act(async () => { await vi.advanceTimersByTimeAsync(KNOWLEDGE_POLL_INTERVAL_MS); });
+}
+
+it.each([[true, "?tab=overview#course-goals"], [false, "?tab=progress#course-goals"]] as const)("sends every goal link to the goal form when grouped is %s", async (grouped, href) => {
+  await render(client(), { grouped });
+  const links = [...host.querySelectorAll("a")].filter(link => ["目标与成功标准", "去目标与成功标准", "先确认课程目标"].includes(link.textContent ?? ""));
+  expect(links).toHaveLength(3);
+  expect(links.map(link => link.getAttribute("href"))).toEqual([href, href, href]);
+});
+it("names exactly the conditions that keep a requirement from starting", () => {
+  const ready = { archived: false, busy: false, pending: false, goalId, scopeState: "confirmed" as const };
+  expect(routeStartBlockers(ready)).toEqual([]);
+  expect(routeStartBlockers({ ...ready, archived: true })).toEqual(["课程已归档，恢复课程后才能开始"]);
+  expect(routeStartBlockers({ ...ready, pending: true })).toEqual(["上一次安排结果尚未确认，请先在下方重新确认"]);
+  expect(routeStartBlockers({ ...ready, busy: true })).toEqual(["正在处理上一项操作"]);
+  expect(routeStartBlockers({ ...ready, goalId: "" })).toEqual(["先选择本次路线目标"]);
+  expect(routeStartBlockers({ ...ready, scopeState: "unconfirmed" })).toEqual(["先确认全课范围"]);
+  expect(routeStartBlockers({ ...ready, scopeState: "missing", goalId: "" })).toEqual(["先选择本次路线目标", "先确认全课范围"]);
+});
+const blockedStarts: Array<[string, CourseRouteSnapshot, LearningGoalList, boolean, string]> = [
+  ["no goal is selected", confirmed, noGoals, false, "暂不能开始：先选择本次路线目标。"],
+  ["the scope is unconfirmed", { ...confirmed, scopeState: "unconfirmed" }, selectedGoal, false, "暂不能开始：先确认全课范围。"],
+  ["the course is archived", confirmed, selectedGoal, true, "暂不能开始：课程已归档，恢复课程后才能开始。"],
+];
+it.each(blockedStarts)("shows the reason beside a disabled start when %s", async (_label, value, goals, archived, reason) => {
+  await render(client(value), { goals, archived });
+  const start = button("学习这一项");
+  expect(start.disabled).toBe(true);
+  const reasonId = start.getAttribute("aria-describedby");
+  expect(reasonId).toBeTruthy();
+  expect(document.getElementById(reasonId!)?.textContent).toBe(reason);
+});
+it("offers the start without a reason once a goal is selected and the scope is confirmed", async () => {
+  await render(client(confirmed), { goals: selectedGoal });
+  const start = button("学习这一项");
+  expect(start.disabled).toBe(false);
+  expect(start.hasAttribute("aria-describedby")).toBe(false);
+  expect(host.textContent).not.toContain("暂不能开始");
+});
+it("warns that a requirement without a checked material will be marked blocked", async () => {
+  await render(client({ ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: true }] }));
+  await act(async () => button("检查与确认课程范围").click());
+  expect(host.textContent).toContain("勾选对应资料，否则这项会被标为受阻。");
+  const materialCheck = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(input => input.parentElement?.textContent === "资料 A");
+  if (!materialCheck) throw new Error("missing material checkbox");
+  await act(async () => materialCheck.click());
+  expect(host.textContent).not.toContain("勾选对应资料");
+  await act(async () => button("添加课程要求").click());
+  expect(host.textContent).toContain("勾选对应资料，否则这项会被标为受阻。");
+});
+it("says nothing can be checked yet when no material is available", async () => {
+  await render(client({ ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: false }] }));
+  await act(async () => button("检查与确认课程范围").click());
+  expect(host.textContent).toContain("暂时没有可勾选的资料，这项会被标为受阻");
+});
+it("opens and focuses the scope review from the setup checklist", async () => {
+  await render(client());
+  await act(async () => button("去确认全课范围").click());
+  const editor = host.querySelector("fieldset");
+  expect(editor?.querySelector("legend")?.textContent).toBe("对照大纲检查完整范围");
+  expect(document.activeElement).toBe(editor);
+});
+it("re-reads the route after a finished rebuild so the new suggestions appear", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const api = client();
+    vi.mocked(api.read).mockResolvedValueOnce(snapshot).mockResolvedValue({ ...snapshot, scopeState: "missing", suggestions: [requirement, { ...requirement, id: goalId, stableSkillId: goalId, requirementKey: "concept-two", title: "概念二" }] });
+    const { state, knowledge } = rebuildingKnowledge();
+    await render(api, { knowledge });
+    await finishRebuild(state);
+    expect(knowledge.rebuild).toHaveBeenCalledTimes(1);
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("已整理：共 2 个知识点。刷新页面可查看新的知识图。");
+    expect(host.textContent).toContain("已整理出 2 个知识点。");
+    expect(host.textContent).toContain("已整理出 2 项要求建议");
+  } finally { vi.useRealTimers(); }
+});
+it("keeps an open scope draft and re-reads the route only after it is confirmed", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    sessionStorage.clear();
+    const api = client();
+    const { state, knowledge } = rebuildingKnowledge();
+    await render(api, { knowledge });
+    await act(async () => button("检查与确认课程范围").click());
+    await finishRebuild(state);
+    expect(api.read).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("知识点已重新整理；完成当前编辑或确认后会重新读取课程路线，显示新的建议。");
+    await act(async () => button("确认这份全课范围").click());
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(api.read).toHaveBeenCalledTimes(2);
+    expect(host.textContent).not.toContain("知识点已重新整理；");
+  } finally { vi.useRealTimers(); }
 });
