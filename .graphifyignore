@@ -3,3 +3,4 @@ package-lock.json
 
 # Graphify's own output
 graphify-out/
+docs/archive/
