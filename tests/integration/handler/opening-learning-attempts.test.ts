@@ -129,3 +129,15 @@ it.each(["other_course", "unassigned", "session_only"])("refuses %s conversation
   expect(await fixture.sql`SELECT id FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId}`).toHaveLength(0);
   expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE attempt_id=${attempt.id}`).toHaveLength(0);
 });
+
+it("reports a rolled-back photo rejection and accepts a new text-only submission", async () => {
+  const f = await learningAttemptFixture(fixture), attempt = await f.start();
+  const failed = await submitAttempt(req({ ...answer(), workSource: { id: randomUUID(), version: 1, physicalPage: 1 } }), params(attempt.id));
+  expect(failed.status).toBe(409);
+  expect(await failed.json()).toMatchObject({ error: { code: "CONFLICT", reason: "work_source_rejected" } });
+  expect(await f.attempts.get(fixture.scope, attempt.id)).toMatchObject({ submittedAt: null, observationId: null });
+  const saved = await submitAttempt(req(answer()), params(attempt.id));
+  expect(saved.status).toBe(201);
+  expect((await saved.json()).attemptId).toBe(attempt.id);
+  expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE attempt_id=${attempt.id}`).toHaveLength(1);
+});
