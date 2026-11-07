@@ -41,6 +41,8 @@ async function seedRoute(f: OpeningFixture, refs: CourseRouteRequirementInput["s
   }
   const repo = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
   await repo.confirm(f.scope, courseId, { expectedRevisions: [], requirements, confirmScope: true });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  for (const requirement of requirements) await f.sql`UPDATE course_requirements SET verification=${f.sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   const started = await repo.start(f.scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirements[0]!.id,
     expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (started.kind !== "ready") throw new Error(JSON.stringify(started));

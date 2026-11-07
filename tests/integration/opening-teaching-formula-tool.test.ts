@@ -43,6 +43,8 @@ it.each([
     sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], origin: "confirmed",
     verification: { kind: "rubric", status: "ready", exerciseKeys: ["rank"], rubric: "列数减秩", missingReasons: [] },
   }] });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  await f.sql`UPDATE course_requirements SET verification=${f.sql.json({ kind: "rubric", status: "ready", exerciseKeys: ["rank"], rubric: "列数减秩", missingReasons: [] })} WHERE id=${requirementId} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   const started = await route.start(f.scope, courseId, {
     goalId: goal.id, expectedGoalRevision: 1, requirementId, expectedRequirementRevision: 1,
     clientKey: randomUUID(), minutes: 20,

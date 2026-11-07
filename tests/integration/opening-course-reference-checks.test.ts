@@ -39,6 +39,8 @@ it("checks only current legally published references through repository → stri
   const requirement: CourseRouteRequirementInput = { id: randomUUID(), stableSkillId: randomUUID(), knowledgeNodeId: null, requirementKey: "arithmetic", title: "运算要求", position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [], sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], verification: { kind: "rubric", status: "ready", exerciseKeys: ["arithmetic"], rubric: "精确运算", missingReasons: [] }, origin: "confirmed" };
   const repo = createOpeningCourseRouteRepository(sql, { compilerEnabled: true });
   await repo.confirm(scope, courseId, { expectedRevisions: [], requirements: [requirement], confirmScope: true });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  await sql`UPDATE course_requirements SET verification=${sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const start = await repo.start(scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirement.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (start.kind !== "ready") throw new Error(JSON.stringify(start));
   const content = createOpeningTeachingContentRepository(sql);
