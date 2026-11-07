@@ -112,3 +112,13 @@ it("restores a course-bound teaching attempt only with its saved canonical requi
   expect(read({ ...attempt, courseRequirement: { ...binding, revision: 0 } })).toBe(false);
   expect(learningAttemptCreateInputSchema.safeParse({ sessionId, clientKey: "forged-binding", courseRequirement: binding }).success).toBe(false);
 });
+
+it("accepts only the transaction rollback reason and enforces the observation source limit", async () => {
+  const { observationSubmitRejectionReasonSchema } = await import("./learning-attempts");
+  const { learningObservationSchema, LEARNING_OBSERVATION_SOURCE_LIMIT } = await import("./learning");
+  expect(observationSubmitRejectionReasonSchema.options).toEqual(["work_source_rejected"]);
+  for (const value of [null, undefined, "work_source_rejected_extra", "other"]) expect(observationSubmitRejectionReasonSchema.safeParse(value).success).toBe(false);
+  expect(LEARNING_OBSERVATION_SOURCE_LIMIT).toBe(32);
+  expect(learningObservationSchema.shape.sourceIds.safeParse(Array(32).fill(sessionId)).success).toBe(true);
+  expect(learningObservationSchema.shape.sourceIds.safeParse(Array(33).fill(sessionId)).success).toBe(false);
+});

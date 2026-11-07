@@ -108,13 +108,15 @@ export const helpExposureSchema = z
   })
   .strict();
 
+export const LEARNING_OBSERVATION_SOURCE_LIMIT = 32;
+
 export const observationInputSchema = z
   .object({
     sessionId: uuidSchema,
     attemptId: uuidSchema.nullable().optional(),
     courseId: uuidSchema,
     skillLabel: z.string().min(1).max(200),
-    sourceIds: z.array(uuidSchema).max(32),
+    sourceIds: z.array(uuidSchema).max(LEARNING_OBSERVATION_SOURCE_LIMIT),
     /** Optional problem / item linkage within the learning session (RU-04). */
     problemId: uuidSchema.nullable().optional(),
     /** Optional delayed retest linkage (RU-04). */
