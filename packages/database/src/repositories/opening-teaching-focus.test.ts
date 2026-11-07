@@ -163,9 +163,9 @@ describe("compiler focus canonical decision input with independent admission gua
 
   it("clears a course-route focused answer whose requirementKey matches but whose skill label differs", async () => {
     // Pins the existing fail-closed behaviour: the focused answer must match the stored focus on
-    // requirementKey AND normalized skill label, otherwise no focused answer is attached. The #231
-    // review suggested scoping this by requirementKey plus the requirement binding instead; if that
-    // change is made, update this case with it.
+    // requirementKey AND normalized skill label, otherwise no focused answer is attached. This
+    // activity has no valid goal_json.courseRoute, so the identity-bound route projection path
+    // (covered by the exam-answer cases below) cannot qualify it either.
     const facts = evidence(), captured = facts.evidenceContexts[oldId]!;
     captured.observation = { ...captured.observation, outcome: "incorrect" };
     captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
