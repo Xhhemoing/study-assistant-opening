@@ -63,9 +63,9 @@ SECONDARY_MODEL_API_KEY=
 
 Tutor worker 与设置页 / readiness 一样，用 **有效日额度**（env 与工作区确认额度）计算付费模型的 availability；免费额度模型改由请求数上限约束。视觉能力影响图片材料，模型转写则必须明确支持音频输入。
 
-## Hermes 运维清单（Lant + glm-5.3，勿由 agent 自行 redeploy）
+## 服务器运维清单（Lant + glm-5.3；属于生产配置，须用户逐次批准）
 
-在 hermes `/opt/aistudy/.env.production`（web + worker 相同）由 PM 设置并重启。密钥只进密钥库/该文件，**永不进 git**：
+在服务器的生产配置文件中设置（web 与 worker 共用，位置见 [hermes-deployment.md](hermes-deployment.md) 的“目录与前提”），经用户批准后修改并重启。密钥只进密钥库/该文件，**永不进 git**：
 
 | 键 | 作用 |
 |---|---|
@@ -159,13 +159,13 @@ Google Gemini 免费额度预设只预填 `https://generativelanguage.googleapis
 
 自定义模型的 `POST /api/opening/model-providers/{id}/models/{modelId}/probe` 经同一调度器和预算账本发出极小 JSON 请求。探测明确使用该模型，不跟随辅导路由或备用模型；一次探测计入相应费用或免费请求数。结果仅说明本次请求成功或失败，不证明回答质量、音频能力或所有供应商功能可用。
 
-## 免费额度与 Hermes 网络
+## 免费额度与服务器网络
 
 免费额度（如 Google Gemini API 免费额度）的输入和输出可能被供应商用于改进其产品，并可能经人工审阅；不要用于隐私材料。界面使用 `FREE_TIER_NOTICE` 明示这一点。材料隐私排除和隐私 epoch 检查继续生效；选择免费模型不扩大材料授权范围。
 
 `billing:"free_tier"` 的账本金额为零，仍有预留、执行权、快照、幂等与未知结果记录。`dailyRequestCap` 是每工作区、每模型、按工作区规划时区计算的每日请求上限；跨用途累计，未释放的请求和已完成请求都计数。同一 operationId 的幂等重放不再占一次；到达上限后只可能使用该用途明确指定的可用备用模型。模型转写每个音频片段算一次调用。
 
-部署前由运维确认 Hermes 的 web 与 worker 能通过正常 TLS 验证访问 `generativelanguage.googleapis.com:443`；使用其他供应商时也确认其实际 API 域名。网络放行和真实密钥验证属于部署/用户验收，本轮本地测试不建立 Hermes 或 Google 实际连通的结论。
+部署前由运维确认服务器的 web 与 worker 能通过正常 TLS 验证访问 Google Gemini API 的 HTTPS 端点；使用其他供应商时也确认其实际 API 域名。网络放行和真实密钥验证属于部署/用户验收，本轮本地测试不建立服务器与 Google 实际连通的结论。
 
 ## 本地或模型转写
 
