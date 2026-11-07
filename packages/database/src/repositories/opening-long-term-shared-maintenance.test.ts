@@ -19,3 +19,7 @@ it("does not defer maintenance from an unadopted raw shared row after a receivin
  const result=await buildLongTermSuggestions(db,{workspaceId:"w",ownerUserId:"u"},{date:"2026-11-05",timeZone:"UTC",now:new Date("2026-11-05T12:00:00Z"),goals:[goal("weekly",7)] as never,tasks:[]});
  expect(result.suggestions.map(item=>item.key)).toEqual(["planner:2026-11-05:maintenance:weekly:target-requirement"]);
 });
+it("reads each route with the caller's exact verification switch",async()=>{
+ await buildLongTermSuggestions(db,{workspaceId:"w",ownerUserId:"u"},{date:"2026-11-05",timeZone:"UTC",now:new Date("2026-11-05T12:00:00Z"),goals:[goal("weekly",7)] as never,tasks:[],exactVerificationEnabled:true});
+ expect(readOpeningCourseRoute).toHaveBeenLastCalledWith(db,{workspaceId:"w",ownerUserId:"u"},"course-b",undefined,true);
+});

@@ -2,6 +2,7 @@ import { parseOpeningResponse } from "./parse-response";
 import { acknowledgeStudyExposureHeaders } from "../assistant/study-exposure-ack";
 import { createSessionFetch } from "../../auth/session-expiry";
 import {
+  observationSubmitRejectionReasonSchema,
   learningSummarySchema,
   courseLearningSummaryInputSchema, courseLearningSummaryPageSchema,
   learningSessionCreateInputSchema, learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningAttemptSchema, learningAttemptContextReadSchema, learningObservationSchema,
@@ -22,8 +23,11 @@ type FetchLike = typeof fetch;
 
 function requestError(body: unknown, status: number): OpeningApiError {
   if (body && typeof body === "object" && "error" in body) {
-    const error = (body as { error?: { message?: unknown; code?: unknown } }).error;
-    if (error && typeof error.message === "string") return new OpeningApiError(status, error.message, typeof error.code === "string" ? error.code : null);
+    const error = (body as { error?: { message?: unknown; code?: unknown; reason?: unknown } }).error;
+    if (error && typeof error.message === "string") {
+      const reason = observationSubmitRejectionReasonSchema.safeParse(error.reason);
+      return new OpeningApiError(status, error.message, typeof error.code === "string" ? error.code : null, reason.success ? reason.data : null);
+    }
   }
   return new OpeningApiError(status, `request failed (${status})`);
 }

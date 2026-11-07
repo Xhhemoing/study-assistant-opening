@@ -16,6 +16,7 @@ import { assertOpeningCourseRouteReady } from "../../packages/database/src/repos
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { validateBackupRetestProtocols } from "../../packages/domain/src/opening/backup-retest-protocol";
+import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
@@ -40,6 +41,8 @@ async function seed(count=1,sourceVersion=1){
     verification:{kind:"rubric",status:"ready",exerciseKeys:["saved-teaching-question"],rubric:"正确应用秩与零空间维数之和等于列数，并说明依据。",missingReasons:[]},origin:"confirmed"}));
   const repo=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true});
   await repo.confirm(f.scope,courseId,{expectedRevisions:[],requirements,confirmScope:true});
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  for (const requirement of requirements) await f.sql`UPDATE course_requirements SET verification=${f.sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   const start=(index=0,clientKey=randomUUID())=>repo.start(f.scope,courseId,{goalId:goal.id,expectedGoalRevision:1,requirementId:requirements[index]!.id,expectedRequirementRevision:1,clientKey,minutes:20});
   return {courseId,sourceId,chunkId,goals,goal,requirements,repo,start};
 }
@@ -78,20 +81,27 @@ async function activityDecision(result:ReturnType<typeof ready>){
   expect(await decisions.get(f.otherScope,receipt.id)).toBeNull();
   return receipt;
 }
-it.each(["correct","incorrect"] as const)("keeps actual AI-only %s feedback unknown without new activity or budget",async outcome=>{
+it.each(["correct","incorrect"] as const)("continues actual AI-only %s feedback without upgrading evidence",async outcome=>{
   gradingFixture.restore();
   const x=await seed(),one=ready(await x.start());await compile(one.activity);
   const result=await answer(one.activity,0,outcome);
   expect(result.observation).toMatchObject({outcome,verdictSource:"ai_graded",eligibility:{verifiedCorrect:"unknown",policyVersion:"opening-evidence-v4",reasonCodes:expect.arrayContaining(["ai_evaluation_uncalibrated"])}});
   const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id),before=await readOpeningLearningCapacity(f.sql,f.scope);
-  const activities=await f.sql`SELECT id,status FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`;
-  const jobs=await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
   const request={goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:result.observation.id,clientKey:randomUUID(),minutes:20};
-  expect(await x.repo.next(f.scope,x.courseId,request)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
-  expect(await x.repo.next(f.scope,x.courseId,request)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
+  const next=ready(await x.repo.next(f.scope,x.courseId,request));
+  expect(next).toMatchObject({requirementId:x.requirements[0]!.id,action:"diagnose",activity:{learnerFocus:{reasonCode:"unverified_only"}}});
+  expect(ready(await x.repo.next(f.scope,x.courseId,request))).toMatchObject({resumed:true,activity:{id:next.activity.id}});
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(before.usedMinutes+20);
+  expect((await x.repo.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+it("waits for a queued grading job on ordinary unknown evidence",async()=>{
+  const x=await seed(),one=ready(await x.start());await compile(one.activity);
+  const result=await answer(one.activity,0,"correct","independent",false);
+  const jobs=createOpeningAiGradingJobRepository(f.sql);await jobs.enqueue(f.scope,{observationId:result.observation.id});
+  expect(await jobs.read(f.scope,{observationId:result.observation.id})).toMatchObject({status:"queued"});
+  const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id),before=await readOpeningLearningCapacity(f.sql,f.scope);
+  expect(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:result.observation.id,clientKey:randomUUID(),minutes:20})).toMatchObject({kind:"choice",reason:"evidence_unknown"});
   expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(before.usedMinutes);
-  expect(await f.sql`SELECT id,status FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`).toEqual(activities);
-  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(jobs);
 });
 it("persists zero source versions through real course start and next without rolling back activities",async()=>{
   const x=await seed(1,0),one=ready(await x.start());
@@ -424,7 +434,38 @@ it("creates a prerequisite repair activity and really returns to its original re
   const current=await x.repo.read(f.scope,x.courseId,practice.activity.id),returned=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,
     activityId:practice.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20}));
   expect(returned).toMatchObject({requirementId:x.requirements[1]!.id,action:"return"});expect(returned.activity.id).not.toBe(repair.activity.id);
-  expect((await activityDecision(returned)).reasonCodes).toContain("verified_prerequisite_return");
+  const returnDecision=await activityDecision(returned);expect(returnDecision.reasonCodes).toContain("verified_prerequisite_return");expect(returnDecision.reasonCodes).not.toContain("uncalibrated_prerequisite_return");
+});
+it("returns from an uncalibrated prerequisite without claiming verification",async()=>{
+  const x=await seed(2),snapshot=await x.repo.read(f.scope,x.courseId),list=x.requirements.map((row,index)=>index===1?{...row,prerequisiteIds:[x.requirements[0]!.id]}:row);
+  await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:snapshot.requirements.map(row=>({id:row.requirement.id,revision:1})),requirements:list,confirmScope:true});
+  const basic=ready(await x.start());await compile(basic.activity);await answer(basic.activity,0,"incorrect");
+  const repair=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirements[1]!.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
+  expect(repair).toMatchObject({requirementId:x.requirements[0]!.id,action:"prerequisite"});
+  await compile(repair.activity,2);const checked=await answer(repair.activity,0,"correct","hinted",false);
+  expect(checked.observation).toMatchObject({eligibility:{verifiedCorrect:"unknown"}});
+  const current=await x.repo.read(f.scope,x.courseId,repair.activity.id),returned=ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:repair.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20}));
+  expect(returned).toMatchObject({requirementId:x.requirements[1]!.id,action:"return"});
+  const receipt=await activityDecision(returned);expect(receipt.reasonCodes).toContain("uncalibrated_prerequisite_return");expect(receipt.reasonCodes).not.toContain("verified_prerequisite_return");
+  expect((await x.repo.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+it("preserves activity, budget and decisions when the prerequisite return target is archived",async()=>{
+  const x=await seed(2),snapshot=await x.repo.read(f.scope,x.courseId),list=x.requirements.map((row,index)=>index===1?{...row,prerequisiteIds:[x.requirements[0]!.id]}:row);
+  await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:snapshot.requirements.map(row=>({id:row.requirement.id,revision:1})),requirements:list,confirmScope:true});
+  const basic=ready(await x.start());await compile(basic.activity);await answer(basic.activity,0,"incorrect");
+  const repair=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirements[1]!.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
+  expect(repair).toMatchObject({requirementId:x.requirements[0]!.id,action:"prerequisite"});
+  await compile(repair.activity,2);const checked=await answer(repair.activity,0,"correct","hinted",false);
+  const beforeArchive=await x.repo.read(f.scope,x.courseId,repair.activity.id);
+  await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:beforeArchive.requirements.map(row=>({id:row.requirement.id,revision:row.requirement.revision})),requirements:[list[0]!],confirmScope:true});
+  const current=await x.repo.read(f.scope,x.courseId,repair.activity.id),capacity=await readOpeningLearningCapacity(f.sql,f.scope);
+  const activities=await f.sql`SELECT id FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  const decisions=await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  expect(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:repair.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20}))
+    .toMatchObject({kind:"choice",reason:"evidence_changed",requirementIds:[x.requirements[0]!.id]});
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(activities);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(capacity.usedMinutes);
+  expect(await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(decisions);
 });
 it("runs a separate comprehensive check for every requirement before an idempotent current-scope finish",async()=>{
   const x=await seed(2),a=ready(await x.start(0));await compile(a.activity,0);await answer(a.activity,0);await answer(a.activity,1);
@@ -442,7 +483,7 @@ it("runs a separate comprehensive check for every requirement before an idempote
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(4);
 });
 it("makes a real saved submitted question usable only after explicit verification confirmation, without upgrading old answers",async()=>{
-  const x=await seed();await x.repo.read(f.scope,x.courseId);const definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[]}};
+  const x=await seed();await x.repo.read(f.scope,x.courseId);const definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[],rubric:x.requirements[0]!.verification.rubric+" 新标准"}};
   await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:[{id:definition.id,revision:1}],requirements:[definition],confirmScope:true});
   const started=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:definition.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
   await compile(started.activity);const helped=await answer(started.activity,1,"correct","hinted",false);
@@ -459,10 +500,12 @@ it("makes a real saved submitted question usable only after explicit verificatio
     observationId:answerA.observation.id,clientKey:randomUUID(),minutes:20};
   expect(unknown.requirements[0]).toMatchObject({status:"needs_verification",observationId:answerA.observation.id});
   const savedUnknown=await f.sql`SELECT * FROM opening_learning_observations WHERE id=${answerA.observation.id}`;
+  const continued=ready(await x.repo.next(f.scope,x.courseId,unknownRequest));
+  expect(continued).toMatchObject({requirementId:definition.id,action:"diagnose",activity:{learnerFocus:{reasonCode:"unverified_only"}}});
+  expect(ready(await x.repo.next(f.scope,x.courseId,unknownRequest))).toMatchObject({resumed:true,activity:{id:continued.activity.id}});
+  expect((await x.repo.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
   const originalJobs=await f.sql`SELECT id,kind FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
-  expect(await x.repo.next(f.scope,x.courseId,unknownRequest)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
-  expect(await x.repo.next(f.scope,x.courseId,unknownRequest)).toMatchObject({kind:"choice",reason:"evidence_unknown"});
-  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(20);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
   const view=await verification.read(f.scope,x.courseId,started.activity.id);expect(view.available).toBe(true);expect(view.items).toHaveLength(2);
   const input={goalId:x.goal.id,expectedGoalRevision:1,activityId:started.activity.id,expectedContentVersion:1,requirementId:definition.id,expectedRequirementRevision:2,
     itemVersionIds:[answerA.attempt.itemVersionId!],confirmed:true as const};
@@ -473,11 +516,11 @@ it("makes a real saved submitted question usable only after explicit verificatio
   expect((await x.repo.read(f.scope,x.courseId)).requirements[0]).toMatchObject({status:"unobserved",requirement:{revision:3}});
   expect(await f.sql`SELECT id,kind FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(originalJobs);
   expect(await readOldHelp()).toEqual(savedHelp);
-  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(20);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
   const startRequest={goalId:x.goal.id,expectedGoalRevision:1,requirementId:definition.id,expectedRequirementRevision:3,clientKey:randomUUID(),minutes:20};
   const fresh=ready(await x.repo.start(f.scope,x.courseId,startRequest));expect(fresh.activity.id).not.toBe(started.activity.id);
   expect(ready(await x.repo.start(f.scope,x.courseId,startRequest)).activity.id).toBe(fresh.activity.id);
-  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(40);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(60);
   await compile(fresh.activity,1);const checked=await answer(fresh.activity);
   expect(checked.attempt.itemVersionId).not.toBe(answerA.attempt.itemVersionId);
   expect(checked.attempt.stemSnapshot).not.toBe(answerA.attempt.stemSnapshot);
@@ -489,7 +532,7 @@ it("makes a real saved submitted question usable only after explicit verificatio
   const next=ready(await x.repo.next(f.scope,x.courseId,nextRequest));expect(next.action).toBe("transfer_check");
   expect((await activityDecision(next)).evidenceRefs).toContain(`observation:${checked.observation.id}`);
   expect(ready(await x.repo.next(f.scope,x.courseId,nextRequest)).activity.id).toBe(next.activity.id);
-  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(60);
+  expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(80);
   expect(await f.sql`SELECT * FROM opening_learning_observations WHERE id=${answerA.observation.id}`).toEqual(savedUnknown);
   expect(await readOldHelp()).toEqual(savedHelp);
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE root_observation_id=${answerA.observation.id} AND id<>${answerA.observation.id}`).toHaveLength(0);
@@ -497,7 +540,7 @@ it("makes a real saved submitted question usable only after explicit verificatio
   await expect(verification.confirm(f.otherScope,x.courseId,input)).rejects.toMatchObject({code:"NOT_FOUND"});
 });
 it("does not confirm a saved question against another goal or a later requirement standard",async()=>{
-  const x=await seed(),definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[]}};
+  const x=await seed(),definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[],rubric:x.requirements[0]!.verification.rubric+" 新标准"}};
   await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:[{id:definition.id,revision:1}],requirements:[definition],confirmScope:true});
   const started=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:definition.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
   await compile(started.activity);const answered=await answer(started.activity),verification=createOpeningCourseRouteVerificationRepository(f.sql);

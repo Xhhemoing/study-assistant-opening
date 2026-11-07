@@ -8,6 +8,7 @@ import { assertLearningGoalAction,readLearningGoal } from "./opening-learning-go
 import { createOpeningTeachingActivityInTransaction,mapTeachingActivity } from "./opening-teaching-activities";
 import { reserveOpeningLearningActivityBudget } from "./opening-learning-capacity";
 import { readOpeningCourseRoute,readCourseRouteObservations,readCourseRouteSourceChunks } from "./opening-course-route-read";
+import { readOpeningAiGradingStatusInTx } from "./opening-ai-grading-jobs";
 import { captureOpeningCourseRouteDecision } from "./opening-course-route-decision";
 import { recordOpeningLearningDecision } from "./opening-learning-decisions";
 
@@ -22,12 +23,12 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
   return {kind:"choice",reason,message:messages[reason],courseId,href:href(courseId),requirementIds:ids};
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
-export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean}){
+export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
   async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin):Promise<CourseRouteActionResult>{
     const key=origin?`course-route-next:${origin.input.activityId}:${origin.input.observationId??"none"}`
       :"taskId" in input&&input.taskId?`course-route-task:${input.taskId}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
-    const snapshot=await readOpeningCourseRoute(tx,scope,courseId);
+    const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
       const context=courseRouteActivityContextSchema.parse((receipt.goal_json as {courseRoute:unknown}).courseRoute);
       if(context.goalId!==input.goalId)throw learningError("CONFLICT","原请求属于不同目标。");
@@ -72,6 +73,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         boundRetestId=String(retest.id);await assertOpeningCourseRouteRetestCurrent(tx,scope,boundRetestId,courseId,current.requirement.id);
       }else if(typeof task.client_key!=="string"||!task.client_key.endsWith(`:maintenance:${goal.id}:${current.requirement.id}`))throw learningError("CONFLICT","任务缺少可信目标与要求绑定。");
     }
+    let returnAfterUnknown=false;
     let currentObservation:Awaited<ReturnType<typeof readCourseRouteObservations>>["projected"][number]|undefined;
     let comprehensiveIds=origin?.context.coveredRequirementIds;
     let comprehensiveRunKey=origin?.context.comprehensiveRunKey;
@@ -91,13 +93,22 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         if(outcome==="insufficient_evidence")return choice(courseId,"evidence_unknown",[requestedId]);
         if(outcome==="assisted"&&currentObservation)currentObservation={...currentObservation,assistance:"hinted",independentAttempt:"no"};
       }
-      if(!currentObservation||currentObservation.verifiedCorrect==="unknown")return choice(courseId,"evidence_unknown",[requestedId]);
+      if(!currentObservation)return choice(courseId,"evidence_unknown",[requestedId]);
+      if(currentObservation.verifiedCorrect==="unknown"){
+        if(origin.context.retestId||comprehensiveIds)return choice(courseId,"evidence_unknown",[requestedId]);
+        const grading=await readOpeningAiGradingStatusInTx(tx,scope,currentObservation.id);
+        if(grading.status==="queued"||grading.status==="grading")return choice(courseId,"evidence_unknown",[requestedId]);
+        returnAfterUnknown=Boolean(origin.context.returnTo);
+      }
       // Origin feedback wins over later observations from another activity.
       const focused=all.projected.filter(row=>row.requirementKey!==current.requirement.requirementKey||row.id===head!.id||Date.parse(row.attemptedAt)<Date.parse(currentObservation!.attemptedAt))
         .map(row=>row.id===head!.id?currentObservation!:row);
       const recalculated=courseRequirementProgress(progress.map(row=>row.requirement),focused,new Map(snapshot.materials.filter(row=>row.available).map(row=>[row.sourceId,row.sourceVersion])),await readCourseRouteSourceChunks(tx,scope,courseId));
       progress=recalculated;
-      if(origin.context.returnTo&&recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified")requestedId=origin.context.returnTo;
+      if(origin.context.returnTo&&(returnAfterUnknown||recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified")){
+        if(!progress.some(row=>row.requirement.id===origin.context.returnTo))return choice(courseId,"evidence_changed",[origin.context.requirementId]);
+        requestedId=origin.context.returnTo;
+      }
       else if(recalculated.find(row=>row.requirement.id===requestedId)?.status==="verified")requestedId="";
       if(comprehensiveIds&&comprehensiveRunKey){
         const mandatory=progress.filter(row=>row.requirement.mandatory).map(row=>row.requirement.id);
@@ -112,7 +123,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         requestedId=remaining.includes(origin.context.requirementId)?origin.context.requirementId:remaining[0]!;
       }
     }
-    let step=selectCourseRouteStep(progress,requestedId||undefined);
+    let step=selectCourseRouteStep(returnAfterUnknown?progress.filter(row=>row.requirement.id===requestedId):progress,requestedId||undefined);
     const initialStep=step;
     if(boundRetestId)step={requirementId:current.requirement.id,action:"transfer_check",focusObservationId:null};
     if(!step){
@@ -159,7 +170,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const summary=step.action==="comprehensive"?`综合检查当前要求（全范围共${comprehensiveIds!.length}项，逐项检查）：${selected.requirement.title}；${selected.requirement.verification.rubric??"按本要求已确认标准判定"}`
       :`${action==="prerequisite"?"先补前置要求，检查后返回原要求：":action==="return"?"返回原要求：":"课程要求："}${selected.requirement.title}；本次${input.minutes}分钟；验证方式${selected.requirement.verification.kind}。${selected.requirement.verification.rubric??""}`;
     const receiptInput=await captureOpeningCourseRouteDecision(tx,scope,{courseId,goal,request:input,entry:origin?"next":"start",requestedId,progress,
-      excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context,decisionInput});
+      excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context,decisionInput,
+      ...(action==="return"&&returnAfterUnknown?{returnBasis:"uncalibrated" as const}:{})});
     const activity=await createOpeningTeachingActivityInTransaction(tx,scope,{clientKey:key,intentKind:"goal",intentSummary:summary.slice(0,2000),courseId,sourceIds,
       createIntent:{kind:"course_route",goalId:goal.id,requirementId:selected.requirement.id,...("taskId" in input&&input.taskId?{source:"task",taskId:input.taskId}:{}),
         ...(origin?{originActivityId:origin.input.activityId,observationId:origin.input.observationId}:{clientKey:input.clientKey})},

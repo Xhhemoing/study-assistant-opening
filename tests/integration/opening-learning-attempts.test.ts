@@ -113,8 +113,12 @@ it("rolls confidence back with a rejected answer and refuses cross-workspace sub
   const input = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     problemId: attempt.problemId, answer: "1", outcome: "correct" as const, assistance: "independent" as const, clientKey: randomUUID() };
   await expect(f.learning.insertObservation(fixture.otherScope, input, { preAnswerConfidence: "confident" })).rejects.toThrow();
-  await expect(f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence: "confident", workSource: { id: randomUUID(), version: 1, physicalPage: 1 } })).rejects.toThrow();
+  await expect(f.learning.insertObservation(fixture.scope, input, { preAnswerConfidence: "confident", workSource: { id: randomUUID(), version: 1, physicalPage: 1 } })).rejects.toMatchObject({ code: "CONFLICT", reason: "work_source_rejected" });
   expect(await f.attempts.get(fixture.scope, attempt.id)).toMatchObject({ submittedAt: null, observationId: null, preAnswerConfidence: null });
+  expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE attempt_id=${attempt.id}`).toHaveLength(0);
+  const saved = await f.learning.insertObservation(fixture.scope, { ...input, clientKey: randomUUID() }, { preAnswerConfidence: "confident" });
+  expect(saved.attemptId).toBe(attempt.id);
+  expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE attempt_id=${attempt.id}`).toHaveLength(1);
 });
 
 it("serializes concurrent fact commits into a contiguous course revision", async () => {

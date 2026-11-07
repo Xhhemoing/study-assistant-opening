@@ -60,6 +60,8 @@ it("adopts through client → authenticated API → strict course read, preservi
   const requirements: CourseRouteRequirementInput[] = Array.from({ length: 3 }, (_, position) => ({ id: randomUUID(), stableSkillId: randomUUID(), knowledgeNodeId: null, requirementKey: `arithmetic:${position}`, title: `运算${position}`, position, mandatory: true, goalIds: [goal.id], prerequisiteIds: [], sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], verification: { kind: "rubric", status: "ready", exerciseKeys: ["arithmetic"], rubric: "精确运算", missingReasons: [] }, origin: "confirmed" }));
   const course = createCourseRouteClient(transport), api = createOpeningApi(transport);
   await course.confirm(courseId, { expectedRevisions: [], requirements, confirmScope: true });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  for (const requirement of requirements) await f.sql`UPDATE course_requirements SET verification=${f.sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   const started = await course.start(courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirements[0]!.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (started.kind !== "ready") throw new Error(JSON.stringify(started));
   const activityId = started.activity.id, content = createOpeningTeachingContentRepository(f.sql);

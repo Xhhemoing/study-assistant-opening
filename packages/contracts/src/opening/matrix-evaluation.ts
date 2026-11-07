@@ -36,6 +36,7 @@ const serverEvaluationFacts = {
 };
 /** Each evaluator is paired with its exact supported spec, never an arbitrary deterministic label. */
 export const serverEvaluationSchema = z.discriminatedUnion("evaluatorVersion", [
+  z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("teaching-key-exact-v1"), specVersion: z.literal("teaching-key-v1") }).strict(),
   z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("matrix-exact-v1"), specVersion: z.literal("matrix-arithmetic-v1") }).strict(),
   z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("exam-choice-exact-v1"), specVersion: z.literal("exam-choice-v1") }).strict(),
   z.object({ ...serverEvaluationFacts, evaluatorVersion: z.literal("span-exact-v1"), specVersion: z.literal("span-v1"), skills: spanVerificationSkillsSchema.optional(), coreEvidenceComplete: z.boolean().default(false), membershipOutcome: z.enum(["correct", "incorrect", "unobserved"]).optional() }).strict(),

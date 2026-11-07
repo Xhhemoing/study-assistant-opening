@@ -251,3 +251,33 @@ describe("inline attempt draft continuity", () => {
     remounted.set(key, null);
   });
 });
+
+it("releases a rejected submission, shares the next key, and ignores a late release", async () => {
+  const { inlineAttemptPreparationCheckpointSchema } = await import("./inline-attempt-prepare");
+  const storage = memoryStorage().storage;
+  const workSource = { id: otherId, version: 1, physicalPage: 2 };
+  const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt),
+    submitAttempt: vi.fn().mockRejectedValueOnce(new OpeningApiError(409, "拒收", "CONFLICT", "work_source_rejected")) };
+  const old = createInlineAttemptSubmission({ ...input, workSource }, client);
+  await expect(old.submit()).rejects.toThrow("拒收");
+  const released = old.release();
+  expect(inlineAttemptPreparationCheckpointSchema.parse(released.preparation)).toEqual(released.preparation);
+  expect(old.release()).toEqual(released);
+  const saved = { ...draft, workSource, preparation: released.preparation };
+  createInlineAttemptDrafts(storage).set(key, saved);
+  expect(createInlineAttemptDrafts(storage).get(key)).toEqual(saved);
+  let resolve!: (value: typeof savedObservation) => void;
+  client.submitAttempt.mockImplementationOnce(() => new Promise(resolvePromise => { resolve = resolvePromise; }));
+  let nextCheckpoint: InlineAttemptSubmissionCheckpoint | undefined;
+  const next = createInlineAttemptSubmission(input, client, { preparation: released.preparation, onCheckpoint: value => { nextCheckpoint = value; } });
+  const pending = next.submit();
+  await vi.waitFor(() => expect(client.submitAttempt).toHaveBeenCalledTimes(2));
+  expect(() => next.release()).toThrow();
+  expect(old.release()).toEqual(released);
+  const remounted = createInlineAttemptSubmission(input, client, { checkpoint: nextCheckpoint });
+  const shared = remounted.submit();
+  expect(client.submitAttempt).toHaveBeenCalledTimes(2);
+  resolve(savedObservation);
+  expect(await shared).toBe(await pending);
+  expect(() => next.release()).toThrow();
+});
