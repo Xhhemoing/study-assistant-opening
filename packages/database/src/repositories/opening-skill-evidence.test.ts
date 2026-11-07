@@ -141,6 +141,15 @@ function flagsDatabase(options: { version?: number; excluded?: boolean; help?: b
 }
 
 describe("live node evidence flags", () => {
+  it("returns empty flags when no course-node evidence is found", async () => {
+    const sql = db(query => query.includes("FROM workspaces") ? [{ id: workspaceId }] : []);
+    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))
+      .toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+  });
+  it("rejects flags reads without workspace ownership", async () => {
+    await expect(createOpeningSkillEvidenceRepository(db(() => [])).flagsForNode(scope, courseId, nodeId))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
   it("qualifies an independent server-scored effective answer", async () => {
     const { sql, evidenceId } = flagsDatabase();
     expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))

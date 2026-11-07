@@ -337,6 +337,32 @@ describe("listTutorActionsForCourse authorization", () => {
     expect(flagsForNode).toHaveBeenCalledWith(scope, COURSE, NODE);
   });
 
+  it("does not reuse another course's flags for the same node", async () => {
+    const otherCourse = "33333333-3333-4333-8333-333333333333";
+    const flagsForNode = vi.fn(async (_scope: typeof scope, courseId: string, _nodeId: string) => ({
+      hasAssistance: courseId === COURSE,
+      hasCheckedIndependent: false,
+      evidenceIds: courseId === COURSE ? [OBS] : [],
+    }));
+    const deps = createDeps({ flagsForNode });
+    const query = new URLSearchParams({ skillLabel: "chain rule", nodeId: NODE });
+    const first = await listTutorActionsForCourse({} as never, scope, COURSE, query, deps);
+    const second = await listTutorActionsForCourse({} as never, scope, otherCourse, query, deps);
+    expect(first[0]).toMatchObject({ kind: "independent_variant", evidenceIds: [OBS] });
+    expect(second[0]).toMatchObject({ kind: "clarify", evidenceIds: [] });
+    expect(flagsForNode).toHaveBeenNthCalledWith(1, scope, COURSE, NODE);
+    expect(flagsForNode).toHaveBeenNthCalledWith(2, scope, otherCourse, NODE);
+  });
+
+  it("propagates evidence read failures instead of returning empty flags", async () => {
+    const failure = new Error("evidence unavailable");
+    const deps = createDeps({ flagsForNode: vi.fn(async () => { throw failure; }) });
+    await expect(listTutorActionsForCourse(
+      {} as never, scope, COURSE,
+      new URLSearchParams({ skillLabel: "chain rule", nodeId: NODE }), deps,
+    )).rejects.toBe(failure);
+  });
+
   it("does not load node flags on the thin path", async () => {
     const deps = createDeps();
     await listTutorActionsForCourse(

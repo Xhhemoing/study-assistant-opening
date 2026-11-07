@@ -214,12 +214,27 @@ describe("opening adaptive loop (K02 Data)", () => {
     await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
       VALUES (${otherCourseId}, ${f.scope.workspaceId}, 'Other course', ${otherCourseId})`;
 
+    // Both courses have a live, supported node with the same ID and material basis.
+    // An empty result must come from course isolation, not an absent knowledge node.
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES(${f.scope.workspaceId},${otherCourseId},'source',${matrix.sourceId},'core','private')`;
+    await createOpeningKnowledgeRepository(f.sql).replace(f.scope, otherCourseId, { expectedVersion: 0,
+      sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: otherCourseId, version: 1, edges: [],
+        nodes: [{ id: nodeA, courseId: otherCourseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
+
     expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({
       nodeId: nodeA, hasCheckedIndependent: true, hasAssistance: false, evidenceIds: [link.id],
     });
-    expect(await evidence.flagsForNode(f.scope, otherCourseId, nodeA)).toEqual({
-      nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [],
-    });
+    const emptyFlags = { nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] };
+    expect(await evidence.flagsForNode(f.scope, otherCourseId, nodeA)).toEqual(emptyFlags);
+    expect(await evidence.flagsForNode(f.otherScope, matrix.courseId, nodeA)).toEqual(emptyFlags);
+    expect(await evidence.flagsForNode(f.scope, randomUUID(), nodeA)).toEqual(emptyFlags);
+    await expect(evidence.flagsForNode({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, matrix.courseId, nodeA))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // A current graph alone does not make an archived course's evidence usable.
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${matrix.courseId}`;
+    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual(emptyFlags);
   });
   it("does not pollute a sibling knowledge node (cross-skill isolation)", async () => {
     const { courseId, sourceId } = await seedCourseWithKnowledge();
