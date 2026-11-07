@@ -222,17 +222,17 @@ export function createOpeningSkillEvidenceRepository(sql: Sql) {
     /**
      * Flags Experience/AI need for recommendAdaptiveTutorAction.
      * Independent = linked observation passes eligibility (independent + verified + usable).
-     * Only current supported nodes and usable effective heads contribute flags.
+     * Only evidence in the requested course with current supported nodes and usable effective heads contributes flags.
      * Historical links stay available through listByNode/listByObservation.
      */
-    async flagsForNode(scope: Scope, nodeId: string): Promise<NodeSkillEvidenceFlags> {
+    async flagsForNode(scope: Scope, courseId: string, nodeId: string): Promise<NodeSkillEvidenceFlags> {
       return sql.begin("isolation level repeatable read", async tx => {
         await assertOwnedWorkspace(tx, scope);
         const rows = await tx`
         SELECT o.*,e.id AS evidence_id
         FROM opening_skill_evidence e
         JOIN courses c ON c.id=e.course_id AND c.workspace_id=e.workspace_id AND c.archived_at IS NULL
-        JOIN (${openingCurrentKnowledgeNodesQuery(tx, scope)}) node ON node.course_id=e.course_id AND node.node_id=e.node_id
+        JOIN (${openingCurrentKnowledgeNodesQuery(tx, scope, courseId)}) node ON node.course_id=e.course_id AND node.node_id=e.node_id
         JOIN opening_learning_observations linked ON linked.id=e.observation_id
           AND linked.workspace_id=e.workspace_id AND linked.owner_user_id=e.owner_user_id
         JOIN opening_learning_observations root ON root.id=COALESCE(linked.root_observation_id,linked.id)
@@ -241,6 +241,7 @@ export function createOpeningSkillEvidenceRepository(sql: Sql) {
           AND o.workspace_id=e.workspace_id AND o.owner_user_id=e.owner_user_id AND o.course_id=e.course_id
         WHERE e.workspace_id = ${scope.workspaceId}
           AND e.owner_user_id = ${scope.ownerUserId}
+          AND e.course_id = ${courseId}
           AND e.node_id = ${nodeId}
           AND COALESCE(o.revision_kind,'original')<>'retract'
         ORDER BY e.created_at, e.id`;

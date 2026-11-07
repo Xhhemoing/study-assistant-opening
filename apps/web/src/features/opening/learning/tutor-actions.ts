@@ -1,4 +1,4 @@
-import { uuidSchema, type Scope, type SkillEvidence } from "@aistudy/contracts";
+import { uuidSchema, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import {
@@ -10,9 +10,9 @@ import {
   type AdaptiveTutorActionKind,
 } from "@aistudy/domain";
 import type { InterventionSettingsResponse } from "@aistudy/contracts";
-import * as openingDatabase from "@aistudy/database";
 import {
   createOpeningLearningRepository,
+  createOpeningSkillEvidenceRepository,
   createOpeningRetestActivityRepository,
   createOpeningInterventionSettingsRepository,
 } from "@aistudy/database";
@@ -53,14 +53,7 @@ export type NodeSkillEvidenceFlagsView = {
 };
 
 export type TutorActionSkillEvidenceDeps = {
-  listSkillEvidenceForNode(
-    scope: Scope,
-    nodeId: string,
-  ): Promise<SkillEvidence[]>;
-  hasAssistanceForNode(scope: Scope, nodeId: string): Promise<boolean>;
-  hasCheckedIndependentForNode(scope: Scope, nodeId: string): Promise<boolean>;
-  /** Optional single-shot path when Data exposes flagsForNode. */
-  flagsForNode?(scope: Scope, nodeId: string): Promise<NodeSkillEvidenceFlagsView>;
+  flagsForNode(scope: Scope, courseId: string, nodeId: string): Promise<NodeSkillEvidenceFlagsView>;
 };
 
 export type TutorActionObservationDeps = {
@@ -81,96 +74,10 @@ export type TutorActionObservationDeps = {
   getIntervention?(scope: Scope, courseId: string, activityId: string | null): Promise<InterventionSettingsResponse>;
 } & TutorActionSkillEvidenceDeps;
 
-const emptySkillEvidenceDeps: TutorActionSkillEvidenceDeps = {
-  listSkillEvidenceForNode: async () => [],
-  hasAssistanceForNode: async () => false,
-  hasCheckedIndependentForNode: async () => false,
-  flagsForNode: async () => ({
-    hasAssistance: false,
-    hasCheckedIndependent: false,
-    evidenceIds: [],
-  }),
-};
-
-type SkillEvidenceRepositoryLike = {
-  listByNode?(scope: Scope, nodeId: string): Promise<SkillEvidence[]>;
-  listSkillEvidenceForNode?(scope: Scope, nodeId: string): Promise<SkillEvidence[]>;
-  listForNode?(scope: Scope, nodeId: string): Promise<SkillEvidence[]>;
-  flagsForNode?(
-    scope: Scope,
-    nodeId: string,
-  ): Promise<{
-    hasAssistance: boolean;
-    hasCheckedIndependent: boolean;
-    evidenceIds?: string[];
-  }>;
-  hasAssistance?(scope: Scope, nodeId: string): Promise<boolean>;
-  hasAssistanceForNode?(scope: Scope, nodeId: string): Promise<boolean>;
-  hasCheckedIndependent?(scope: Scope, nodeId: string): Promise<boolean>;
-  hasCheckedIndependentForNode?(scope: Scope, nodeId: string): Promise<boolean>;
-};
-
-/**
- * Prefer Data-owned `createOpeningSkillEvidenceRepository` when exported.
- * Until that lands, return an injectable empty stub (Experience does not invent migrations).
- */
-export function createSkillEvidenceDepsFromDatabase(
-  sql: Sql,
-  databaseModule: Record<string, unknown>,
-): TutorActionSkillEvidenceDeps {
-  const factory = databaseModule.createOpeningSkillEvidenceRepository;
-  if (typeof factory !== "function") {
-    return emptySkillEvidenceDeps;
-  }
-  const repo = (factory as (sql: Sql) => SkillEvidenceRepositoryLike)(sql);
-
-  const listSkillEvidenceForNode = async (scope: Scope, nodeId: string) =>
-    (await (repo.listByNode ?? repo.listSkillEvidenceForNode ?? repo.listForNode)?.(
-      scope,
-      nodeId,
-    )) ?? [];
-
-  const flagsForNode = repo.flagsForNode
-    ? async (scope: Scope, nodeId: string): Promise<NodeSkillEvidenceFlagsView> => {
-        const flags = await repo.flagsForNode!(scope, nodeId);
-        return {
-          hasAssistance: flags.hasAssistance,
-          hasCheckedIndependent: flags.hasCheckedIndependent,
-          evidenceIds: flags.evidenceIds ?? [],
-        };
-      }
-    : undefined;
-
-  return {
-    listSkillEvidenceForNode,
-    hasAssistanceForNode: async (scope, nodeId) => {
-      if (flagsForNode) return (await flagsForNode(scope, nodeId)).hasAssistance;
-      return (
-        (await (repo.hasAssistanceForNode ?? repo.hasAssistance)?.(scope, nodeId)) ??
-        false
-      );
-    },
-    hasCheckedIndependentForNode: async (scope, nodeId) => {
-      if (flagsForNode) {
-        return (await flagsForNode(scope, nodeId)).hasCheckedIndependent;
-      }
-      return (
-        (await (
-          repo.hasCheckedIndependentForNode ?? repo.hasCheckedIndependent
-        )?.(scope, nodeId)) ?? false
-      );
-    },
-    flagsForNode,
-  };
-}
-
 function createDefaultObservationDeps(sql: Sql): TutorActionObservationDeps {
   const learning = createOpeningLearningRepository(sql);
   const retests = createOpeningRetestActivityRepository(sql);
-  const skillEvidence = createSkillEvidenceDepsFromDatabase(
-    sql,
-    openingDatabase as unknown as Record<string, unknown>,
-  );
+  const skillEvidence = createOpeningSkillEvidenceRepository(sql);
   return {
     assertOwnedCourse: (scope, courseId) => learning.assertOwnedCourse(scope, courseId),
     getSession: (scope, sessionId) => learning.getSession(scope, sessionId),
@@ -179,7 +86,7 @@ function createDefaultObservationDeps(sql: Sql): TutorActionObservationDeps {
     listDueRetests: (scope, courseId, now) => retests.listDue(scope, courseId, now),
     getIntervention: (scope, courseId, activityId) =>
       createOpeningInterventionSettingsRepository(sql).resolve(scope, { courseId, activityId }),
-    ...skillEvidence,
+    flagsForNode: (scope, courseId, nodeId) => skillEvidence.flagsForNode(scope, courseId, nodeId),
   };
 }
 
@@ -302,26 +209,6 @@ export function parseTutorActionsSearchParams(
   };
 }
 
-async function loadNodeFlags(
-  deps: TutorActionSkillEvidenceDeps,
-  scope: Scope,
-  nodeId: string,
-): Promise<NodeSkillEvidenceFlagsView> {
-  if (deps.flagsForNode) {
-    return deps.flagsForNode(scope, nodeId);
-  }
-  const [evidence, hasAssistance, hasCheckedIndependent] = await Promise.all([
-    deps.listSkillEvidenceForNode(scope, nodeId),
-    deps.hasAssistanceForNode(scope, nodeId),
-    deps.hasCheckedIndependentForNode(scope, nodeId),
-  ]);
-  return {
-    hasAssistance,
-    hasCheckedIndependent,
-    evidenceIds: evidence.map((row) => row.observationId),
-  };
-}
-
 export async function listTutorActionsForCourse(
   sql: Sql,
   scope: Scope,
@@ -362,7 +249,7 @@ export async function listTutorActionsForCourse(
 
   const nodeId = parsed.query.nodeId ?? null;
   if (nodeId) {
-    const flags = await loadNodeFlags(deps, scope, nodeId);
+    const flags = await deps.flagsForNode(scope, parsed.courseId, nodeId);
     return gate(buildTutorActions({
       skillLabel: parsed.query.skillLabel,
       currentPage: parsed.query.currentPage ?? null,
