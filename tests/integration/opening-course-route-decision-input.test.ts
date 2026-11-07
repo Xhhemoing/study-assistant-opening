@@ -32,6 +32,8 @@ async function routeWithSpanEvidence() {
   await route.confirm(scope, courseId, { expectedRevisions: [], confirmScope: true, requirements: [{ id: requirementId, stableSkillId, knowledgeNodeId: null,
     requirementKey: SPAN_REQUIREMENT_KEY, title: SPAN_SKILL_LABEL, position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [],
     sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], verification: { kind: "exact", status: "ready", exerciseKeys: ["span-reserved-fraction"], rubric: null, missingReasons: [] }, origin: "confirmed" }] });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  await sql`UPDATE course_requirements SET verification=${sql.json({ kind: "exact", status: "ready", exerciseKeys: ["span-reserved-fraction"], rubric: null, missingReasons: [] })} WHERE id=${requirementId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const request = { goalId: goal.id, expectedGoalRevision: 1, requirementId, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 };
   const initial = ready(await route.start(scope, courseId, request));
   const learning = createOpeningLearningRepository(sql), session = await learning.createSession(scope, { activityId: initial.activity.id, courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [sourceId] });
