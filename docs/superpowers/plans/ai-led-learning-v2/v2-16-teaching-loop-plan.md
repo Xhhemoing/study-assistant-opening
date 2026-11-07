@@ -266,4 +266,4 @@ npm run typecheck
 
 ## 10. Dirty tree note
 
-Unrelated untracked evidence (`rp5-gha-…`, `p0-assistant-list-preview-failsoft-implement.md`) may exist on the worktree — **not** touched. No stash/reset. This slice writes **only** V2-16 Understand/Plan docs (+ optional evidence stubs) under `docs/superpowers/plans/ai-led-learning-v2/` and `docs/superpowers/evidence/2026-10-11-opening-release/`.
+Unrelated untracked evidence (`rp5-gha-…`, `p0-assistant-list-preview-failsoft-implement.md`) may exist on the worktree — **not** touched. No stash/reset. This slice writes **only** V2-16 Understand/Plan docs (+ optional evidence stubs) under `docs/superpowers/plans/ai-led-learning-v2/` and `docs/archive/superpowers/evidence/2026-10-11-opening-release/`.

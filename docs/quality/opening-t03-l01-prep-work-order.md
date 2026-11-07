@@ -1,7 +1,7 @@
 # T03 / L01 预备工单（learning-loop）
 
 状态：**预备 only** — 可对照开工；**勿**在 materials/continuity 本轮短报前把 L01 实现写到半截。  
-根目录：E:\Project\study-assistant-opening（eat/opening-release）。  
+根目录：`<repo>`（eat/opening-release）。\
 合约基线：F02 RU-04 语义审补已落地（packages/contracts unit 15/15）。  
 硬约束：**保留 P02 → L01**；闲聊不建 session；AC06 / AC10。
 

@@ -1,7 +1,8 @@
 // Portable heavy-task lock (directory lock + owner pid), used where flock(1) is not
-// available (Windows) or when HERMES_HEAVY_LOCK_IMPL=node. Same lock *path policy*
-// as run-heavy.sh: one machine-wide slot at HERMES_HEAVY_LOCK (default
-// <tmpdir>/hermes-project-heavy.lock), shared by every worktree and repo copy.
+// available (Windows) or when HERMES_HEAVY_LOCK_IMPL=node. Same lock path as
+// run-heavy.sh (HERMES_HEAVY_LOCK, default <tmpdir>/hermes-project-heavy.lock), shared
+// by every worktree and repo copy, but it locks `<path>.d` instead of flock(1) on the
+// file, so it does not exclude run-heavy.sh callers on the same host.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";

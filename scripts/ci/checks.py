@@ -14,7 +14,7 @@ def allowed_doc(path):
     p = PurePosixPath(path)
     # These documents are inputs to plan, tooling, or deployment contracts.
     # Whitespace-only checks must never replace their real consumer checks.
-    if path.startswith(("docs/superpowers/", "docs/quality/")) or path in {
+    if path.startswith(("docs/superpowers/", "docs/archive/superpowers/", "docs/quality/")) or path in {
         "docs/operations/ci.md", "docs/operations/cloud-deployment.md",
     }:
         return False

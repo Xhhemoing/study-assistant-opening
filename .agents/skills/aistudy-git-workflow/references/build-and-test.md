@@ -11,7 +11,7 @@
 
 ```pwsh
 $ErrorActionPreference = 'Stop'
-npx vitest run --project unit apps/web/src/features/editor/local-draft.test.ts
+npx vitest run --project unit apps/web/src/features/opening/editor/local-draft.test.ts
 npm run typecheck -w @aistudy/web
 ```
 
@@ -47,7 +47,8 @@ npm ci
 ```
 
 - 需要集成/handler 测试时按 `docs/operations/ci.md` 准备隔离数据库与服务；不要对用户数据库运行测试，不要在日志打印 `.env` 内容或凭据。
-- 质量脚本仍使用现有 `run-heavy.sh` 保护；Windows 需 Bash 可用。缺少 Bash 是相关脚本的环境限制，不把它当成产品测试失败。
+- 重任务经 `node scripts/run-heavy.mjs` 串行，Windows 不需要 Bash。退出码 75 表示另一项重任务占用槽位，记为未验证，不当成产品测试失败；多个 worktree 并行时设 `HERMES_HEAVY_LOCK_TIMEOUT`（秒）排队。
+- npm 会拦截 `esbuild`、`sharp`、`msgpackr-extract` 的安装脚本并提示；这些包通过可选平台包照常可用，不为消除提示修改 `allowScripts` 或锁文件。
 - 不再需要本地服务时运行 `npm run compose:down`。
 
 ## 失败处理与交接

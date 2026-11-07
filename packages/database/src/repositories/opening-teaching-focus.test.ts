@@ -22,8 +22,12 @@ function evidence(): CourseEvidence {
       context: { ...qualifiedInput.context, ...(index === 0 ? { helpHistory: { complete: false, exposures: [] } } : {}) },
     }])) };
 }
-function sqlFor(stored: TeachingLearnerFocus) {
-  return vi.fn().mockResolvedValue([{ course_id: learningObservation.courseId, goal_json: { learnerFocus: stored } }]);
+function sqlFor(stored: TeachingLearnerFocus, stem?: string) {
+  const activity = [{ course_id: learningObservation.courseId, goal_json: { learnerFocus: stored } }];
+  const sql = vi.fn().mockResolvedValue(activity);
+  // Query order in readOpeningTeachingCompilerFocus: the activity row first, then
+  // (route branch, no prerequisite repair) withFocusAttempt's stem_snapshot lookup.
+  return stem === undefined ? sql : sql.mockResolvedValueOnce(activity).mockResolvedValueOnce([{ stem_snapshot: stem }]);
 }
 beforeEach(() => vi.clearAllMocks());
 describe("compiler focus canonical decision input with independent admission guards", () => {
@@ -131,6 +135,44 @@ describe("compiler focus canonical decision input with independent admission gua
     expect((await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, requirementKey: null }) as unknown as Sql, scope, newId)).learnerFocus)
       .toEqual({ ...stored, requirementKey: null });
     expect(await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, requirementKey: "other-requirement" }) as unknown as Sql, scope, newId)).toEqual({});
+  });
+
+  it("attaches the focused question and original answer to a course-route correction only while that answer is still incorrect", async () => {
+    const itemVersionId = "88888888-8888-4888-8888-888888888881", stem = "Simplify 2/4.";
+    const withItem = (facts: CourseEvidence) => ({ ...facts, observations: facts.observations.map(row => row.id === oldId ? { ...row, itemVersionId } : row) });
+    const facts = withItem(evidence()), captured = facts.evidenceContexts[oldId]!;
+    captured.observation = { ...captured.observation, outcome: "incorrect" };
+    captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    const stored = { ...focus, activityKind: "targeted_explain" as const, reasonCode: "verified_incorrect", focusObservationId: oldId, strategyVersion: "course-route-1" };
+    const sql = sqlFor(stored, stem);
+    expect(await readOpeningTeachingCompilerFocus(sql as unknown as Sql, scope, newId))
+      .toEqual({ learnerFocus: stored, focusAttempt: { question: stem, answer: learningObservation.answer } });
+    expect(sql).toHaveBeenCalledTimes(2);
+    expect(sql.mock.calls[1]).toEqual(expect.arrayContaining([itemVersionId, learningObservation.problemId, scope.workspaceId, scope.ownerUserId]));
+    // The same answer is no longer incorrect: no focus and no question/answer reach the prompt.
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(withItem(evidence()));
+    const cleared = sqlFor(stored, stem);
+    const result = await readOpeningTeachingCompilerFocus(cleared as unknown as Sql, scope, newId);
+    expect(result).toEqual({});
+    expect(result).not.toHaveProperty("focusAttempt");
+    expect(cleared).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a course-route focused answer whose requirementKey matches but whose skill label differs", async () => {
+    // Pins the existing fail-closed behaviour: the focused answer must match the stored focus on
+    // requirementKey AND normalized skill label, otherwise no focused answer is attached. The #231
+    // review suggested scoping this by requirementKey plus the requirement binding instead; if that
+    // change is made, update this case with it.
+    const facts = evidence(), captured = facts.evidenceContexts[oldId]!;
+    captured.observation = { ...captured.observation, outcome: "incorrect" };
+    captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    // The observation has no requirementKey, so a stored null key matches it.
+    const stored = { ...focus, activityKind: "targeted_explain" as const, reasonCode: "verified_incorrect", focusObservationId: oldId,
+      strategyVersion: "course-route-1", requirementKey: null };
+    expect(await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).toEqual({ learnerFocus: stored });
+    expect(await readOpeningTeachingCompilerFocus(sqlFor({ ...stored, skillLabel: "decimals" }) as unknown as Sql, scope, newId)).toEqual({});
   });
 
   it("keeps the explicit explanation snapshot without reading evidence", async () => {

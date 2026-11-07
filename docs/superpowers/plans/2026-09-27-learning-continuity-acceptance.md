@@ -165,11 +165,11 @@ it('stops automatic actions for an archived course', () => {
 
 ## 4. 实施时的命令组
 
-路径均相对仓库根 `E:/Project/study-assistant-opening`。先在同一个 pwsh 会话执行下列辅助函数，再执行目标命令组。每条 Node 命令的非零退出都中止该组，避免 PowerShell 只看到最后一个成功结果。这个函数仅用于手工执行，不作为新增仓库门禁脚本。
+路径均相对仓库根 `<repo>`。先在同一个 pwsh 会话执行下列辅助函数，再执行目标命令组。每条 Node 命令的非零退出都中止该组，避免 PowerShell 只看到最后一个成功结果。这个函数仅用于手工执行，不作为新增仓库门禁脚本。
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-Set-Location -LiteralPath 'E:/Project/study-assistant-opening'
+Set-Location -LiteralPath '<repo>'
 function Invoke-NodeCheck {
     param([Parameter(Mandatory = $true)][string[]]$NodeArgs)
     & node @NodeArgs

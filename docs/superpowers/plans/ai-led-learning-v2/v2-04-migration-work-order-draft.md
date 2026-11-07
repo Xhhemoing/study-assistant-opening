@@ -5,8 +5,8 @@
 **Task:** V2-04（实现可自由开始的学习活动上下文）  
 **Depends on:** V2-03 ADR `docs/decisions/ADR-teaching-activity-context.md`  
 **PM design approval:** 已批准（设计）; history revision-key **option A**  
-**PM design decisions:** `docs/superpowers/evidence/2026-10-11-opening-release/v2-04-pm-design-decisions.md`  
-**Draft ACCEPT:** `docs/superpowers/evidence/2026-10-11-opening-release/v2-04-migration-work-order-draft-accept.md`  
+**PM design decisions:** `docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-04-pm-design-decisions.md`\
+**Draft ACCEPT:** `docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-04-migration-work-order-draft-accept.md`\
 **Baseline tip:** `1a4cf465c86da7f08b6fda3044f9b0f932b80824`（`feat/opening-release`）  
 **Owner role (plan):** 数据/服务  
 
@@ -364,10 +364,10 @@ There is **no** standalone `knowledge_nodes` relation in 0048. SkillEvidence `no
 
 ## 13. References
 
-- PM design decisions: `docs/superpowers/evidence/2026-10-11-opening-release/v2-04-pm-design-decisions.md`
-- Draft ACCEPT: `docs/superpowers/evidence/2026-10-11-opening-release/v2-04-migration-work-order-draft-accept.md`
+- PM design decisions: `docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-04-pm-design-decisions.md`
+- Draft ACCEPT: `docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-04-migration-work-order-draft-accept.md`
 - ADR: `docs/decisions/ADR-teaching-activity-context.md` (D1–D8, D3.1 A)
-- V2-03 evidence: `docs/superpowers/evidence/2026-10-11-opening-release/v2-03-activity-compat-adr-implement.md`
+- V2-03 evidence: `docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-03-activity-compat-adr-implement.md`
 - V2-03 accept note (0048 wording): `…/v2-03-activity-compat-adr-accept.md`
 - Plan: `docs/superpowers/plans/ai-led-learning-v2/plan.md` §6.1, V2-04
 - Task: `docs/superpowers/plans/ai-led-learning-v2/tasks.json` → V2-04

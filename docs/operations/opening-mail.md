@@ -2,7 +2,7 @@
 
 ## 现状（2026-10-09，agent-owned）
 
-- 隔离 IMAP integration 门禁已通过（`tests/integration/opening-imap-sync.test.ts` **5/5**）；C02 账本为 verified，见 `docs/superpowers/evidence/2026-10-09-opening-release/c02-imap-sync-verified.md`。
+- 隔离 IMAP integration 门禁已通过（`tests/integration/opening-imap-sync.test.ts` **5/5**）；C02 账本为 verified，见 `docs/archive/superpowers/evidence/2026-10-09-opening-release/c02-imap-sync-verified.md`。
 - 学校真实 IMAP / CAP01 live（授权主机、实接邮箱、读一封+附件、确认未改已读、撤销）**尚未运行**，不得标完成。
 - 浏览器实接验收未跑。
 

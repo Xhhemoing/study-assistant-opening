@@ -35,7 +35,7 @@ bash infra/deploy/deploy-hermes.sh rollback
 
 ## 发布顺序
 
-1. 核实 HEAD、远端主干与实际 CI，打包该提交并上传至唯一临时文件。
+1. 核实 HEAD、远端主干与实际 CI，打包该提交并上传至唯一临时文件。打包固定 `core.autocrlf=false` 与 `core.eol=lf`，包内文件保持提交中的字节，本机换行配置（如 Windows 常见的 `core.autocrlf=true`）不会给 `.worker-protocol` 等文本加回车。
 2. 在服务器持有同一把非阻塞 `flock`；发布、重启、回退不能并行。先检查 releases 与 backups 所在磁盘可用空间，默认各需至少 4 GiB；不足直接停止，不删除在线代码、旧 release、缓存或备份。
 3. 解包新 release，独立执行 `npm ci` 与构建，补齐 standalone 静态资源，使用稳定 venv 在新 parser 目录执行 `--check`。安装、构建日志保存在本轮发布状态目录，不打印生产环境变量。
 4. 从生产配置解析 `DATABASE_URL`，用 `pg_dump --format=custom` 写备份并执行 `pg_restore --list`；成功后才将 `.partial` 命名为 `.dump`。清除继承的 `PG*` 路由变量，只从 URL 重建连接参数。未知或重复 URL 查询参数直接拒绝，避免猜测备份目标。

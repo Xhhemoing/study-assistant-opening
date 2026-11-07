@@ -220,4 +220,4 @@ D (resolve + page/photo UX) ────┘     D ∥ A after contracts cite sha
 
 ## Ready for Integrator
 
-After PM AGREE on Packages **A–D**, assign Implementers; each package writes its own `*-implement.md` / accept under `docs/superpowers/evidence/2026-10-10-opening-release/` (or next dated folder). This file stays the **batch contract**. Coordinate with any remaining ABD hermes accept so `assistant-view.tsx` / `upload-strip.tsx` edits land cleanly on `a837bb8+`.
+After PM AGREE on Packages **A–D**, assign Implementers; each package writes its own `*-implement.md` / accept under `docs/archive/superpowers/evidence/2026-10-10-opening-release/` (or next dated folder). This file stays the **batch contract**. Coordinate with any remaining ABD hermes accept so `assistant-view.tsx` / `upload-strip.tsx` edits land cleanly on `a837bb8+`.

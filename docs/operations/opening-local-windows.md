@@ -112,16 +112,16 @@ web 起来后打开 `http://127.0.0.1:3000`。
 
 ## 没有 bash 时的检查
 
-根目录和 `apps/web`、`apps/worker` 的 `typecheck`、`lint`、`test`、`build` 会走 `scripts/run-heavy.sh`。这台机器没有 bash，那些 npm 脚本会失败。改用：
+根目录和 `apps/web`、`apps/worker` 的 `typecheck`、`lint`、`test`、`build` 经 `node scripts/run-heavy.mjs` 运行。它在 Windows 上用 Node 目录锁串行重任务，不需要 bash，所以直接用 npm 脚本：
 
 ```powershell
-node node_modules/typescript/bin/tsc -p apps/web/tsconfig.json --noEmit
-node node_modules/typescript/bin/tsc -p apps/worker/tsconfig.json --noEmit
-node node_modules/vitest/vitest.mjs run --project unit
-node node_modules/eslint/bin/eslint.js apps/web/src/features/opening
+npm run typecheck -w @aistudy/web
+npm run typecheck -w @aistudy/worker
+npx vitest run --project unit <相关测试文件>
+npx eslint apps/web/src/features/opening
 ```
 
-`packages/*` 的 typecheck 本身就是直接 `tsc`，照它自己的脚本跑。
+另一项重任务占着全机槽位时，脚本等待 `HERMES_HEAVY_LOCK_TIMEOUT` 秒（默认 120）后以退出码 75 结束，记为未验证，不算失败。`packages/*` 的 typecheck 本身就是直接 `tsc`，照它自己的脚本跑。
 
 ## 走一次闭环
 

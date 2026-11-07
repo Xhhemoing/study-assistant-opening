@@ -129,7 +129,7 @@
 - [x] `tutor-turn.ts`：hint/explain 提示送达与 assistant turn 在同一事务记录 exposure（hinted/revealed）；失败与非学习模式不记录
 - [x] 集成测试：已知提示覆盖独立资格、跨题/会话隔离、曝光重放完整意图校验、错误 attempt 与无题目 attempt 归属拒绝
 - [x] 真实 PostgreSQL integration：5 files / 50 tests；handler：2 files / 11 tests；unit：6 files / 74 tests
-- [x] database 类型检查、新测试入口严格编译与定向 ESLint；[L01 证据](../superpowers/evidence/2026-10-02-week-sprint/l01-learning-verified.md)
+- [x] database 类型检查、新测试入口严格编译与定向 ESLint；[L01 证据](../archive/superpowers/evidence/2026-10-02-week-sprint/l01-learning-verified.md)
 - [ ] 浏览器人工验收课程练习、提示后提交与刷新历史（由用户执行）
 
 **交付标准**：
@@ -149,7 +149,7 @@
 - [x] `apps/worker/src/jobs/retest-candidate.ts`：默认至多 1 题，不虚构题干/来源；保持课程/requirement 身份，尊重关闭偏好与隐私 epoch
 - [x] `apps/web/src/app/api/opening/retests/[id]/accept/route.ts`：真实 task 接受、同键重放与冲突检查；不声明已安排日历
 - [x] unit：7 files / 79 tests；真实 PostgreSQL integration：6 files / 63 tests（1 个条件跳过）；handler：2 files / 5 tests
-- [x] domain、database、worker、web 类型检查和定向 ESLint；[L02 证据](../superpowers/evidence/2026-10-02-week-sprint/l02-learning-summary-retest-verified.md)
+- [x] domain、database、worker、web 类型检查和定向 ESLint；[L02 证据](../archive/superpowers/evidence/2026-10-02-week-sprint/l02-learning-summary-retest-verified.md)
 - [ ] 浏览器人工验收摘要、资格说明、重测接受与刷新（由用户执行）
 
 **交付标准**：
@@ -175,7 +175,7 @@
 **交付标准**：
 - 课程页显示学习状态（来自服务端 L02 规则）
 - 无观察时显示空状态，不显示假数据
-- 非浏览器自动化已完成：真实隔离 PostgreSQL handler/integration、unit、contract、类型检查、定向 ESLint 和差异检查；[L03 证据](../superpowers/evidence/2026-10-02-week-sprint/l03-learning-read-verified.md)
+- 非浏览器自动化已完成：真实隔离 PostgreSQL handler/integration、unit、contract、类型检查、定向 ESLint 和差异检查；[L03 证据](../archive/superpowers/evidence/2026-10-02-week-sprint/l03-learning-read-verified.md)
 - 跨设备同步（浏览器 A 提交 → 浏览器 B 刷新可见）仍待用户浏览器验收
 
 #### **U03 集成：记忆面板 + 学习状态**（0.5 天）
@@ -287,7 +287,7 @@
 **交付物**：
 1. 代码提交（feat/opening-release 分支）
 2. 更新 `tasks.json`：U02/M01/M02/M03/L01 状态 → verified
-3. 证据文档：`docs/superpowers/evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md`
+3. 证据文档：`docs/archive/superpowers/evidence/2026-10-02-week-sprint/m1-m2-desktop-verified.md`
 4. 浏览器录屏：完整流程演示（5 分钟）
 
 ---
