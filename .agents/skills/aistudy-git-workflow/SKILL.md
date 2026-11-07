@@ -29,7 +29,7 @@ description: Use when working in the AIstudy repository and asked to pull remote
 
 - **Pull / Update:** 仅在干净工作树且目标分支明确验证后做 fast-forward-only 更新;脏树时展示路径让用户决定(提交/worktree/显式 stash),不静默 stash。冲突保持可见并询问解决方案。
 - **Commit:** 确定范围 → `git diff --check` → 窄测试先行 → 仅暂存目标路径 → 审查完整 staged 补丁 → 一个 Conventional Commit → `git status` + `git log -1` 验证。除非明确要求否则不 amend;push 是独立的用户授权动作。
-- **Merge:** 一律走 PR，base 与门禁以根 `AGENTS.md` 为准：低风险 PR 进 `integration/opening`，再由提升 PR 进主线；高风险 PR 独立以主线为 base。每个 PR 须指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准，并通过精确 head 的 required CI（见 `docs/operations/agent-workflow.md`）。合并前按需更新特性分支，仅 push 命名特性分支。完整本地检查仅在用户明确请求时运行，不重复作为开发、提交或 PR 的前置。绝不 force-push 主线或 `integration/opening`；本地合并且冲突时停止，保持冲突标记待用户解决。
+- **Merge:** 一律走 PR，base 与门禁以根 `AGENTS.md` 为准：低风险 PR 进 `integration/opening`，再由提升 PR 进主线；高风险 PR 独立以主线为 base。每个 PR 须指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准，并通过精确 head 的 required CI；与已双审 PR 补丁等价的提升 PR 沿用原审查，只跑 CI（条件见 `docs/operations/agent-workflow.md`）。合并前按需更新特性分支，仅 push 命名特性分支。完整本地检查仅在用户明确请求时运行，不重复作为开发、提交或 PR 的前置。绝不 force-push 主线或 `integration/opening`；本地合并且冲突时停止，保持冲突标记待用户解决。
 
 ## Build and Test
 
