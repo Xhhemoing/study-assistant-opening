@@ -17,26 +17,28 @@
 1. 平台配额与本机资源允许；用户 2026-11-06 将同时运行的实现者上限定为 5，只读调查与审查不计。额度不足则只启动可容纳的就绪流，其余保留原卡依赖排队；不换会话或多开工具绕过。
 2. 文件写集合互斥，接口已有一致决定，依赖产物可用；不能用不同目录掩盖同一个接口、迁移编号或共享状态冲突。
 3. 工作区、数据库、Redis、端口、重验证槽和磁盘资源获准使用。注册旧 worktree 不等于活跃 writer；不为凑车道创建任务或工作树。
-4. owner 明确且持有写权；切换前核原 owner 已停止写入并明确交回，不停止他人任务抢权。
+4. owner 明确且持有写权；切换前核原 owner 已停止写入并明确交回，不停止他人任务抢权。因平台错误停滞的车道按下文“用户长期授权”第 4 条接手。
 
 项目不再采用固定 3 个 Agent／3 棵活跃 worktree 上限。worktree 按隔离需要复用或创建，但仍受上述实际配额及资源准入约束；它只隔离文件，不能隔离服务或重验证锁。清理工作树需确认无独有成果并取得清理授权，流程本身不授予删除权限。
 
 ## Cursor 中的执行映射
 
-用户 2026-11-06 决定，在 Cursor 中按下表承担上文角色；其余规则不变。
+用户 2026-11-06 决定，在 Cursor 中由三个会话分工承担上文角色；其余规则不变。合并权按分支分开：`integration/opening` 的 PR 由开它的会话在门禁齐全后合入；`feat/opening-release` 只由集成会话合入（提升 PR 与高风险 PR）。
 
 | 角色 | Cursor 中的承担方式 |
 |---|---|
-| 主控 PM 与唯一集成者 | 主会话同时承担，不写业务代码。获授权提交和推送功能分支、开 PR、门禁齐全后合入 `integration/opening` 并提升主线；高风险 PR 只按下文“用户长期授权”的条件合入。不含迁移的主线版本按同一节部署；含迁移的版本部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
-| 实现 worker | 主会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由集成者按用户 2026-11-06 的授权界定。 |
+| 规划会话（主控 PM 的规划部分） | 只读调查、拆卡、核接口，把完整任务卡写进仓库外的卡片目录 `ready/`（本机位置由用户指定，不写入仓库）；要用户拍板的产品问题攒起来，每天集中问一两次。不派单、不实现；除非出现具体故障，不开流程类 PR。 |
+| 派单与审查会话（主控 PM 的调度部分） | 从 `ready/` 取满足就绪条件的卡并移到 `active/`，建 worktree、派实现者，对 PR 发起两路审查；自己开的 PR 门禁齐全后合入 `integration/opening`，合入后把卡移到 `done/`。也可自行起草卡，标准与规划会话相同。 |
+| 集成会话（唯一集成者） | 唯一合入 `feat/opening-release` 的会话：提升 PR 与高风险 PR（后者按下文“用户长期授权”的条件）。独占 STATUS、共享接口决定、公共契约、依赖锁文件、schema／迁移编号，随 STATUS 批量同步总计划附录 F。不含迁移的主线版本按同一节部署；含迁移的版本部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
+| 实现 worker | 派单与审查会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由写卡的会话在卡里界定并写明实现者。 |
 | 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
 | 每 PR 指定审查 | 指定的是模型 Claude Opus 5.5，渠道随工具：Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行（该类型不可用时，由 `generalPurpose` 子 Agent 按同一说明执行，并在审查评论里注明），其他工具中用 claude CLI。 |
-| 异家族审查 | 按用户 2026-11-06 决定，每个 PR（含文档、低风险和集成提升）在指定审查之外，都由主会话以 `codex exec` 只读沙箱调用 GPT 审查，两路都批准才可合入。 |
-| 任务卡与交回 | 任务卡随派单 brief 完整下发，结果以 PR 正文为持久记录，会话内用 TodoWrite 跟踪；Hermes Kanban 可用时仍以原卡为准。 |
+| 异家族审查 | 按用户 2026-11-06 决定，每个 PR（含文档、低风险和集成提升）在指定审查之外，都以 `codex exec` 只读沙箱调用 GPT 审查，两路都批准才可合入；补丁等价的提升 PR 按下文“提升 PR 复用审查”。由派单与审查会话发起，其他会话自己开的 PR 也可自行发起。 |
+| 任务卡与交回 | 任务卡放在仓库外的卡片目录，按 `ready/`、`active/`、`done/` 三个子目录流转，派单时完整写进 brief；结果以 PR 正文为持久记录，会话内用 TodoWrite 跟踪；Hermes Kanban 可用时仍以原卡为准。 |
 
 子 Agent 默认共享主会话的 checkout，会互相覆盖改动，所以写文件的子 Agent 必须使用独立 worktree，同一 checkout 内只运行只读调查和审查。需要本地验证的 worktree 单独 `npm ci`，不软链共享 `node_modules`，否则 workspace 包会解析到其他 checkout 的源码。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交精确 head CI。
 
-审查者同样运行在共享 checkout 中，所以在 Cursor 里，下文“指定审查使用该提交的独立干净快照”由精确 head 的 git 对象承担：差分、文件、搜索和调用链都从 head 对象读取，不以工作区内容为证据；确需完整工作区时由主控为该 SHA 建 detached worktree。结束时的核对相应改为确认 PR head 未变。派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
+审查者同样运行在共享 checkout 中，所以在 Cursor 里，下文“指定审查使用该提交的独立干净快照”由精确 head 的 git 对象承担：差分、文件、搜索和调用链都从 head 对象读取，不以工作区内容为证据；确需完整工作区时由发起审查的会话为该 SHA 建 detached worktree。结束时的核对相应改为确认 PR head 未变。派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
 
 ## 持久 Kanban 与原 owner 续接
 
@@ -83,17 +85,27 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
 
 ## 每 PR 正式审查与分支规则
 
-所有 PR（含低风险文档、测试和集成提升）须 **指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准＋精确最新 head 的 required CI**（用户 2026-11-06），实现者自查不能代替。只读独立核验可以补证，但不能代替这两路审查。高风险另须独立主线 PR 及用户明确批准（长期授权见下节）；不得自行降模型、拿空 verdict／工具错误／旧 head 批准放行。指定渠道受阻只阻对应集成门禁，不冻结无依赖的独立实施／近验。
+所有 PR（含低风险文档、测试和集成提升）须 **指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准＋精确最新 head 的 required CI**（用户 2026-11-06），实现者自查不能代替；补丁等价的提升 PR 按下文“提升 PR 复用审查”沿用原审查。只读独立核验可以补证，但不能代替这两路审查。高风险另须独立主线 PR 及用户明确批准（长期授权见下节）；不得自行降模型、拿空 verdict／工具错误／旧 head 批准放行。指定渠道受阻只阻对应集成门禁，不冻结无依赖的独立实施／近验。
 
 | 风险与路径 | 目标与准入 |
 |---|---|
 | 低风险：不改变授权、隐私、事务、迁移、数据正确性或相关安全语义 | 功能分支 PR 到 `integration/opening`；指定 Opus 与 GPT 都批准、该 PR 精确 head required CI 全过后，由唯一集成者按授权集成。文档／小改动也不免审。 |
-| 集成提升 | 唯一集成者整理 `integration/opening` 的已达标结果，以完整相对 base 差分向正式主线 `feat/opening-release` 提升；提升 PR 同样须两个模型都批准并通过精确 head required CI，达门禁即串行进入主线，不再固定每天两次批次。 |
+| 集成提升 | 唯一集成者整理 `integration/opening` 的已达标结果，以完整相对 base 差分向正式主线 `feat/opening-release` 提升，达门禁即串行进入主线，不再固定每天两次批次。提升 PR 须通过精确 head required CI；审查按下文“提升 PR 复用审查”，条件不满足时同样须两个模型都批准。 |
 | 高风险：授权、隐私、事务／并发、迁移、数据正确性，或影响这些边界的取消／生命周期／费用行为 | 从安全基线独立 PR 到 `feat/opening-release`，不借低风险集成池带入；完成指定 Opus、异家族审查与精确 head required CI 后，仍以 `needs_input` 等用户明确批准，不能由 Agent 自动合并；满足下节“用户长期授权”全部条件的，视为已获用户明确批准。 |
+
+### 提升 PR 复用审查
+
+用户 2026-11-06 决定：提升 PR 与它带入的、已经两个模型批准的 PR 补丁等价时，沿用原审查，只跑精确 head required CI。须同时满足：
+
+- 提升差分里每个功能 PR 都以两个模型批准的那个 head 合入 `integration/opening`，合入时实际带入的 `--binary --full-index` 补丁 SHA-256 与已审补丁相同。
+- 除这些 PR 的合并提交外，只有同步主线的合并提交，且两边改动的文件不重叠、没有手工改动；`integration/opening` 与提升分支上没有其他直接提交。
+- 集成者在 PR 正文逐项列出所含 PR、已审 base..head、两边补丁 SHA-256 和两路审查评论链接。
+
+任一条件不满足时，对没覆盖的部分补齐缺的那一路：双模型门禁之前只经指定审查合入的 PR 补 GPT 审查，冲突解决或集成者补的提交须两个模型都审。PR 之间的语义交互由精确 head CI 把关，这是用户接受的取舍。
 
 ### 用户长期授权
 
-用户于 2026-11-05 明确给出以下长期授权，2026-11-06 扩展第 1 条并新增第 3 条，有效至用户撤回。授权只由唯一集成者执行，不扩展到其他角色。
+用户于 2026-11-05 明确给出以下长期授权，2026-11-06 扩展第 1 条并新增第 3、4 条，有效至用户撤回。授权只由唯一集成者执行，不扩展到其他角色。
 
 1. **高风险 PR 合入 `feat/opening-release`**：在上表高风险门禁（指定 Opus、异家族审查、精确 head required CI、独立主线 PR）全部完成的前提下，同时满足以下条件时，视为已获用户明确批准，由唯一集成者按 expected SHA 以 merge commit 合入。用户 2026-11-06 决定两个模型都批准就合并，含迁移的 PR 也适用。
    - 指定 Claude Opus 5.5 high 与 GPT 异家族审查都对当前 head，或对相对 base 的完整 `--binary --full-index` 补丁 SHA-256 与当前 head 相同的已审版本，给出 approved，且没有未关闭的 blocking。
@@ -108,6 +120,7 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
    - 目标版本若改动了会写到服务器上的服务配置，部署前单独列出，按生产配置逐次审批。这包括 `infra/deploy/` 下的服务单元、容器编排和主机初始化脚本，以及 `deploy-hermes.sh`、`hermes-release.sh` 中写入 systemd override／drop-in 或决定其写入位置的部分；只改打包或校验逻辑的不在此列。
    - 目标 SHA 的 required CI 全部通过。
    - 部署前在会话中向用户给出精确提交号、迁移差异与回滚方案；部署后只读核验健康检查返回的提交与服务状态，结论按“公开仓库信息边界”记入 STATUS。
+4. **接手停滞车道**（2026-11-06）：某会话因 402、503 等平台错误停止 30 分钟以上，且没有在跑的任务（没有运行中的子 Agent、`codex` 或 run-heavy 任务，相关分支 30 分钟内没有新推送）时，集成会话先在相关 PR 上留言写明接手原因和当前 head，再接手它的车道。接手后续用原卡、原分支和原 worktree，不重复实现；原会话恢复后先读留言，不再写已被接手的车道。
 
 以下事项不在授权范围内，仍须用户逐次审批：含迁移的版本部署、迁移执行、生产配置、真实数据操作（含导出、改写）、破坏性迁移、定样。
 
