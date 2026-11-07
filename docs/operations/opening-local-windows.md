@@ -121,7 +121,7 @@ npx vitest run --project unit <相关测试文件>
 npx eslint apps/web/src/features/opening
 ```
 
-另一项重任务占着全机槽位时，脚本等待 `HERMES_HEAVY_LOCK_TIMEOUT` 秒（默认 120）后以退出码 75 结束，记为未验证，不算失败。`packages/*` 的 typecheck 本身就是直接 `tsc`，照它自己的脚本跑。
+另一项重任务占着全机槽位时，脚本等待 `HERMES_HEAVY_LOCK_TIMEOUT` 秒（默认 120）后以退出码 75 结束，记为未验证，不算失败。拿到槽位后，可用内存低于 `HERMES_HEAVY_MIN_FREE_MB`（默认 1024，设 0 关闭）时也在同一时限内等待，仍不足同样以 75 结束；这时先关掉不用的程序，而不是反复重试。`packages/*` 的 typecheck 本身就是直接 `tsc`，照它自己的脚本跑。
 
 ## 走一次闭环
 
