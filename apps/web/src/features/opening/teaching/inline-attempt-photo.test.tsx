@@ -249,6 +249,63 @@ it("does not release or start another request when rejection arrives after unmou
   await act(async () => root.render(null));
   onDraftChange.mockClear();
   await act(async () => reject(new OpeningApiError(409, "照片不可用", "CONFLICT", "work_source_rejected")));
-  expect(onDraftChange).not.toHaveBeenCalled();
+  expect(onDraftChange).toHaveBeenCalled();
+  expect(onDraftChange.mock.calls.every(([value]) => value.submission && !value.preparation)).toBe(true);
+  expect(onDraftChange.mock.lastCall![0]).toMatchObject({ submission: { ...frozen.submission, sessionId: record.sessionId, attemptId } });
   expect([api.createSession.mock.calls.length, api.createAttempt.mock.calls.length, api.submitAttempt.mock.calls.length]).toEqual(calls);
+});
+
+it.each(["success", "failure", "rejection"])("clears pending after the question changes and the old request ends: %s", async outcome => {
+  const { OpeningApiError } = await import("../client/api");
+  let resolve!: (value: LearningObservation) => void, reject!: (reason: Error) => void;
+  api.submitAttempt.mockImplementation(() => new Promise((ok, fail) => { resolve = ok; reject = fail; }));
+  await render(draft({ answer: "答案", workSource }));
+  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await act(async () => root.render(createElement(InlineAttemptForm, { blockId, prompt: "新的题干", context, ready: true, initialDraft: draft({ prompt: "新的题干", answer: "答案", workSource }), onDraftChange })));
+  await flush(); onDraftChange.mockClear();
+  await act(async () => outcome === "success" ? resolve(record) : reject(outcome === "rejection" ? new OpeningApiError(409, "照片不可用", "CONFLICT", "work_source_rejected") : new Error("offline")));
+  expect(container.textContent).not.toContain("正在保存原答案");
+  expect(submitButton().disabled).toBe(false);
+  expect(onDraftChange).not.toHaveBeenCalled();
+  expect(api.submitAttempt).toHaveBeenCalledTimes(1);
+});
+
+it.each(["validation", "server", "timeout"])("replays a frozen submission after %s", async kind => {
+  const { OpeningApiError } = await import("../client/api");
+  const failure = kind === "validation" ? new OpeningApiError(400, "原始校验错误", "VALIDATION") : kind === "server" ? new OpeningApiError(500, "服务失败", "INTERNAL", null) : new DOMException("超时", "TimeoutError");
+  api.submitAttempt.mockRejectedValueOnce(failure).mockResolvedValue(record);
+  await render(draft({ answer: "答案", workSource })); await submit();
+  expect(photoSelect()!.disabled).toBe(true);
+  expect(container.querySelector("textarea")!.disabled).toBe(true);
+  expect(submitButton().textContent).toContain("重新确认");
+  if (kind === "validation") expect(container.textContent).toContain("原始校验错误");
+  expect(onDraftChange.mock.lastCall![0].submission).toBeDefined();
+  await submit();
+  expect(api.submitAttempt).toHaveBeenCalledTimes(2);
+  expect(api.submitAttempt.mock.calls[1]).toEqual(api.submitAttempt.mock.calls[0]);
+});
+
+it("offers photos when the union contains 31 distinct sources", async () => {
+  const ids = Array.from({ length: 31 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+  api.createAttempt.mockResolvedValue({ ...attempt, sourceIds: ids.slice(0, 20), sourceVersions: Object.fromEntries(ids.slice(10).map(id => [id, 1])) });
+  await render(draft({ answer: "答案" }));
+  expect(photoSelect()).not.toBeNull();
+  expect([...photoSelect()!.options].map(option => option.textContent)).toContain("手写作答.png");
+});
+it("persists session and attempt checkpoints after unmount when preparation failed before the session", async () => {
+  const { OpeningApiError } = await import("../client/api");
+  let resolveSession!: (value: { id: string }) => void;
+  api.createSession.mockRejectedValueOnce(new Error("offline")).mockImplementationOnce(() => new Promise(resolve => { resolveSession = resolve; }));
+  api.submitAttempt.mockRejectedValueOnce(new OpeningApiError(409, "照片不可用", "CONFLICT", "work_source_rejected"));
+  await render(draft({ answer: "答案", workSource }));
+  await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  const frozen = onDraftChange.mock.lastCall![0].submission;
+  expect(frozen.sessionId).toBeNull();
+  await act(async () => root.render(null)); onDraftChange.mockClear();
+  await act(async () => resolveSession({ id: record.sessionId }));
+  expect(api.createSession).toHaveBeenCalledTimes(2);
+  expect(api.createAttempt).toHaveBeenCalledOnce();
+  expect(api.submitAttempt).toHaveBeenCalledOnce();
+  expect(onDraftChange.mock.calls.every(([value]) => value.submission && !value.preparation)).toBe(true);
+  expect(onDraftChange.mock.lastCall![0].submission).toEqual({ ...frozen, sessionId: record.sessionId, attemptId });
 });

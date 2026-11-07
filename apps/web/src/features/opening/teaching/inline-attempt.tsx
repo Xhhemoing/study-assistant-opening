@@ -146,7 +146,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   function publishSubmission(checkpoint: InlineAttemptSubmissionCheckpoint) {
-    if (mounted.current && currentScope.current.courseId === context.courseId && currentScope.current.prompt === prompt) onDraftChange(submissionDraft(checkpoint));
+    if (currentScope.current.courseId === context.courseId && currentScope.current.prompt === prompt) onDraftChange(submissionDraft(checkpoint));
   }
   if (!submission.current && restoredSubmission.current && initialDraft?.submission) submission.current = createInlineAttemptSubmission(initialDraft.submission.input, client, {
     checkpoint: initialDraft.submission, onCheckpoint: publishSubmission,
@@ -313,7 +313,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
         setError(`${reason instanceof Error ? reason.message : "照片未通过检查。"} 可以改页码、换照片或移除照片后再提交。`);
       } else setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : userFacingMessage(reason, "答案保存未确认，可用相同请求重新确认。"));
     }
-    finally { inFlight.current = false; if (mounted.current && currentScope.current.courseId === context.courseId && currentScope.current.prompt === prompt) setPending(false); }
+    finally { inFlight.current = false; setPending(false); }
   }
   async function compare(choice: "match" | "mismatch") {
     if (context.status === "completed" || !recorded || recorded.aiEvaluation || !answerKey?.referenceSourceId || inFlight.current || checked || rereadNeeded) return;

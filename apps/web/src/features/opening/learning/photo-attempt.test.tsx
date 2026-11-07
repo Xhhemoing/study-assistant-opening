@@ -104,3 +104,35 @@ it.each([
     }
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
+
+it("keeps a different submission frozen without suggesting photo edits", async () => {
+  const { OpeningApiError } = await import("../client/api");
+  const { practiceScope, readPracticeDraft, patchPracticeDraft } = await import("./practice-draft");
+  vi.resetAllMocks(); window.sessionStorage.clear(); Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID(), sessionId = crypto.randomUUID();
+  const problem = { sourceId, sourceVersion: 2, stem: "计算 1+1" };
+  const attempt: LearningAttempt = { id: crypto.randomUUID(), workspaceId: courseId, courseId, sessionId, skillLabel: "随手练习", requirementKey: null,
+    sourceIds: [sourceId], sourceVersions: { [sourceId]: 2 }, problemId: sourceId, itemVersionId: sessionId, stemSnapshot: problem.stem,
+    observationId: null, submittedAt: null, startedAt: "2026-10-22T00:00:00Z", historyRevision: 0 };
+  api.listSources.mockResolvedValue([]); api.getSummary.mockResolvedValue([]); api.createSession.mockResolvedValue({ id: sessionId }); api.createAttempt.mockResolvedValue(attempt);
+  api.getAttempt.mockResolvedValue({ attemptId: attempt.id, sessionId, deliveredAssistance: "none" }); api.listObservations.mockResolvedValue([]);
+  let reject!: (reason: Error) => void;
+  api.submitAttempt.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(LearningAttemptForm, { courseId, initialProblem: problem, onRecorded() {} })));
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "答案"); textarea.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    const scope = practiceScope(courseId, "ordinary", undefined, { skillLabel: "随手练习", requirementKey: null }, problem);
+    const current = readPracticeDraft(scope, null)!;
+    const replacement = { ...current.submission!, input: { ...current.submission!.input, clientKey: `answer-${crypto.randomUUID()}` } };
+    patchPracticeDraft(scope, {}, { submission: replacement }, window.sessionStorage, current.id);
+    await act(async () => reject(new OpeningApiError(409, "照片不可用", "CONFLICT", "work_source_rejected")));
+    expect(readPracticeDraft(scope, null, current.id)!.submission).toEqual(replacement);
+    expect(textarea.disabled).toBe(true);
+    expect(container.textContent).toContain("照片不可用");
+    expect(container.textContent).not.toContain("可以改页码、换照片或移除照片");
+    expect(api.submitAttempt).toHaveBeenCalledTimes(1);
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});

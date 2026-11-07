@@ -241,8 +241,8 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       setHelpOpen(false); setHelpOpenedOnce(false);
       onRecorded();
     } catch (reason) {
-      if (!usePhotoShell && isWorkSourceRejection(reason)) {
-        if (readPracticeDraft(scope, null, draft.id)?.submission?.input.clientKey === submission.input.clientKey) patch({ submission: null });
+      if (!usePhotoShell && isWorkSourceRejection(reason) && readPracticeDraft(scope, null, draft.id)?.submission?.input.clientKey === submission.input.clientKey) {
+        patch({ submission: null });
         setError(`${formatRetestSubmitError(reason)} 可以改页码、换照片或移除照片后再提交。`);
       } else setError(formatRetestSubmitError(reason));
     }
