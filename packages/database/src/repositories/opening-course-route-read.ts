@@ -56,6 +56,10 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
       ...(block?{evidenceContext:{responseFormat,elapsedSeconds}}:{}),questionIdentity,firstQuestionExposure:questionIdentity!==null&&first.get(questionIdentity)===row.attempt_id,
       ...(binding.success?{courseRequirement:binding.data}:{})};
   });
+  const {projectExamCourseEvidence,readExamCourseEvidenceLinks}=await import("./opening-course-exam-evidence-projection");
+  const links=await readExamCourseEvidenceLinks(db,scope,courseId);
+  const local=projectExamCourseEvidence(projected,new Map(observations.map(row=>[row.id,row.rootObservationId??row.id])),await readCourseRequirements(db,scope,courseId),links);
+  projected.splice(0,projected.length,...local);
   if(includeShared)projected.push(...await readSharedCourseEvidence(db,scope,courseId,{requirements:id=>readCourseRequirements(db,scope,id),observations:id=>readCourseRouteObservations(db,scope,id,false),sources:id=>readCourseRouteMaterials(db,scope,id),chunks:id=>readCourseRouteSourceChunks(db,scope,id)}));
   return {raw:observations,projected};
 }
