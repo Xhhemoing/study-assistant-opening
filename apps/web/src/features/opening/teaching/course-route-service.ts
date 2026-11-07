@@ -3,10 +3,11 @@ import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { createOpeningCourseRouteRepository,createOpeningCourseRouteRetestRepository,createOpeningCourseRouteVerificationRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 export function createCourseRouteService(sql:Sql,env:Record<string,string|undefined>=process.env){
-  // 启用确定性讲义判分（PR #263）后由后续任务开启。
-  const repository=createOpeningCourseRouteRepository(sql,{compilerEnabled:isTeachingCompilerEnabled(env),exactVerificationEnabled:false});
-  const retests=createOpeningCourseRouteRetestRepository(sql);
-  const verification=createOpeningCourseRouteVerificationRepository(sql);
+  // 程序判分的讲义题来自教学编译，确定性判定与编译共用一个开关。
+  const compilerEnabled=isTeachingCompilerEnabled(env);
+  const repository=createOpeningCourseRouteRepository(sql,{compilerEnabled,exactVerificationEnabled:compilerEnabled});
+  const retests=createOpeningCourseRouteRetestRepository(sql,{exactVerificationEnabled:compilerEnabled});
+  const verification=createOpeningCourseRouteVerificationRepository(sql,{exactVerificationEnabled:compilerEnabled});
   return {read(scope:Scope,courseId:string,activityId?:string){return repository.read(scope,uuidSchema.parse(courseId),activityId?uuidSchema.parse(activityId):undefined);},
     confirm(scope:Scope,courseId:string,raw:unknown){return repository.confirm(scope,uuidSchema.parse(courseId),courseRouteConfirmSchema.parse(raw));},
     start(scope:Scope,courseId:string,raw:unknown){return repository.start(scope,uuidSchema.parse(courseId),courseRouteStartSchema.parse(raw));},

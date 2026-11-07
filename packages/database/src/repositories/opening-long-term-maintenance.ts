@@ -11,7 +11,7 @@ export function learningMaintenanceDue(goal: Pick<LearningGoal, "lifecycle" | "m
   return lastAt === null || addLocalDays(localDateKeyInZone(new Date(lastAt), timeZone), goal.maintenanceIntervalDays) <= localDateKeyInZone(now, timeZone);
 }
 /** Suggestions retain real requirement/card identities; none is a scored learning fact. */
-export async function buildLongTermSuggestions(db: Sql | TransactionSql, scope: Scope, input: { date: string; timeZone: string; now: Date; goals: LearningGoal[]; tasks: TaskItem[] }) {
+export async function buildLongTermSuggestions(db: Sql | TransactionSql, scope: Scope, input: { date: string; timeZone: string; now: Date; goals: LearningGoal[]; tasks: TaskItem[]; exactVerificationEnabled?: boolean }) {
   const suggestions: SuggestedTask[] = [], snapshots: Record<string, unknown> = {};
   const courses = await db`SELECT id FROM courses WHERE workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
   const activeCourses = new Set(courses.map(row => String(row.id)));
@@ -21,7 +21,7 @@ export async function buildLongTermSuggestions(db: Sql | TransactionSql, scope: 
     if (pending.some(row => String(row.client_key).includes(`:maintenance:${goal.id}:`))) continue;
     for (const courseId of goal.courseIds) {
       if (!activeCourses.has(courseId)) continue;
-      const route = await readOpeningCourseRoute(db, scope, courseId);
+      const route = await readOpeningCourseRoute(db, scope, courseId, undefined, input.exactVerificationEnabled);
       if (route.scopeState !== "confirmed") continue;
       const observations = (await readCourseRouteObservations(db, scope, courseId)).projected;
       const row = route.requirements.find(row => row.requirement.lifecycle === "active" && row.sourcesAvailable && row.requirement.verification.status === "ready"
