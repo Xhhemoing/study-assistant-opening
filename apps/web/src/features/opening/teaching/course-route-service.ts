@@ -3,7 +3,8 @@ import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { createOpeningCourseRouteRepository,createOpeningCourseRouteRetestRepository,createOpeningCourseRouteVerificationRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 export function createCourseRouteService(sql:Sql,env:Record<string,string|undefined>=process.env){
-  const repository=createOpeningCourseRouteRepository(sql,{compilerEnabled:isTeachingCompilerEnabled(env)});
+  // 启用确定性讲义判分（PR #263）后由后续任务开启。
+  const repository=createOpeningCourseRouteRepository(sql,{compilerEnabled:isTeachingCompilerEnabled(env),exactVerificationEnabled:false});
   const retests=createOpeningCourseRouteRetestRepository(sql);
   const verification=createOpeningCourseRouteVerificationRepository(sql);
   return {read(scope:Scope,courseId:string,activityId?:string){return repository.read(scope,uuidSchema.parse(courseId),activityId?uuidSchema.parse(activityId):undefined);},

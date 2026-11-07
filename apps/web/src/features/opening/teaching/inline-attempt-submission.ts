@@ -85,6 +85,14 @@ export function createInlineAttemptSubmission(
   }
   let consumerPending: Promise<SubmissionResult> | null = null;
   return {
+    release() {
+      if (state.pending || state.result) throw new Error("Cannot release an active or saved submission");
+      const { answer: _answer, workSource: _workSource, ...input } = state.checkpoint.input;
+      const preparation: InlineAttemptPreparationCheckpoint = { input, attemptKey: state.checkpoint.attemptKey,
+        sessionId: state.checkpoint.sessionId, attemptId: state.checkpoint.attemptId };
+      if (submissions.get(state.checkpoint.attemptKey) === state) submissions.delete(state.checkpoint.attemptKey);
+      return { preparation, attempt: state.attempt };
+    },
     submit() {
       // Save the immutable answer and both keys before the first outgoing write.
       publish();

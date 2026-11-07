@@ -112,6 +112,8 @@ it("accepts an interval-driven maintenance task, enters the real course route, a
     goalIds: [c.goal.id], prerequisiteIds: [], sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], origin: "confirmed",
     verification: { kind: "rubric", status: "ready", exerciseKeys: ["saved-rank-question"], rubric: "用列数减秩，说明依据", missingReasons: [] },
   }] });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  await f.sql`UPDATE course_requirements SET verification=${f.sql.json({ kind: "rubric", status: "ready", exerciseKeys: ["saved-rank-question"], rubric: "用列数减秩，说明依据", missingReasons: [] })} WHERE id=${requirementId} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   await budget(); const draft = await preview();
   expect(draft.suggestedTasks?.some(row => row.key.endsWith(`:maintenance:${c.goal.id}:${requirementId}`))).toBe(true);
   await repo().command(f.scope, { action: "confirm", draftId: draft.id, expectedBaseVersion: 0, clientKey: randomUUID() });
