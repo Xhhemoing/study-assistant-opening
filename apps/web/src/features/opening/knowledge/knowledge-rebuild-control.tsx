@@ -4,10 +4,12 @@ import { LoaderCircle, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { ui } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
-import { createKnowledgeRebuildClient, type CourseKnowledgeRecord, type KnowledgeRebuildClient } from "./knowledge-rebuild-client";
+import { createKnowledgeRebuildClient, KnowledgeRebuildRequestError, type CourseKnowledgeRecord, type KnowledgeRebuildClient } from "./knowledge-rebuild-client";
 
 export const KNOWLEDGE_POLL_INTERVAL_MS = 3_000;
 export const KNOWLEDGE_POLL_TIMEOUT_MS = 180_000;
+const TERMINAL_READ_STATUSES = new Set([401, 403, 404]);
+const FAILED_COPY = "整理请求没有完成，请稍后重试。";
 
 type RebuildState =
   | { kind: "idle" }
@@ -67,8 +69,16 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
       setState({ kind: "polling" });
       // The rebuild job has no status route; a finished rebuild always stores a newer knowledge version.
       const tick = async () => {
-        // A failed read says nothing about the queued job, so the next tick reads again until the deadline.
-        const latest = await client.read(courseId, signal).catch(() => null);
+        let latest: CourseKnowledgeRecord | null = null;
+        try { latest = await client.read(courseId, signal); }
+        catch (reason) {
+          // Lost access or a missing course will not recover by waiting; other failures say nothing about the queued job.
+          if (live() && reason instanceof KnowledgeRebuildRequestError && TERMINAL_READ_STATUSES.has(reason.status)) {
+            stop(current);
+            setState({ kind: "failed", message: userFacingMessage(reason, FAILED_COPY) });
+            return;
+          }
+        }
         if (!live()) return;
         if (latest && latest.version > baseline) {
           stop(current);
@@ -80,7 +90,7 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
     } catch (reason) {
       if (!live()) return;
       stop(current);
-      setState({ kind: "failed", message: userFacingMessage(reason, "整理请求没有完成，请稍后重试。") });
+      setState({ kind: "failed", message: userFacingMessage(reason, FAILED_COPY) });
     }
   }
 
