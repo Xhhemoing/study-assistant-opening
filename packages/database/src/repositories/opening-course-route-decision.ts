@@ -7,7 +7,7 @@ import { courseRouteTeachingStep } from "./opening-course-route-decision-input";
 type Input = {
   courseId: string; goal: { id: string; revision: number }; request: CourseRouteStart | CourseRouteNext;
   entry: "start" | "next"; requestedId: string; progress: CourseRequirementProgress[];
-  excluded: CourseRequirementProgress[]; initialStep: CourseRouteStep | null; context: CourseRouteActivityContext; decisionInput: NextLearningStepInput;
+  returnBasis?: "verified" | "uncalibrated"; excluded: CourseRequirementProgress[]; initialStep: CourseRouteStep | null; context: CourseRouteActivityContext; decisionInput: NextLearningStepInput;
 };
 /** Capture before activity/compile/budget writes. These are this entry's real inputs,
  * not a new policy's hypothetical alternatives or a later reconstruction. */
@@ -21,7 +21,7 @@ export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scop
   const reasonCodes = [`entry:course-route-${input.entry}`, `progress:${selected.status}`,
     ...(context.retestId ? ["accepted_retest_transfer_check"] : []),
     ...(context.action === "prerequisite" ? ["weak_explicit_prerequisite"] : []),
-    ...(context.action === "return" ? ["verified_prerequisite_return"] : []),
+    ...(context.action === "return" ? [input.returnBasis === "uncalibrated" ? "uncalibrated_prerequisite_return" : "verified_prerequisite_return"] : []),
     ...(context.action === "comprehensive" ? ["current_scope_comprehensive_run"] : []),
     ...(initialStep && initialStep.action === context.action ? ["course_requirement_progress_rule"] : []),
     `teaching:${teaching.decision.reasonCode}`, ...(teachingOverride ? [`teaching_override:${teachingOverride.rule}`] : [])];
@@ -65,7 +65,7 @@ export async function captureOpeningCourseRouteDecision(tx: TransactionSql, scop
     // origin-bound request and the exact pre-override selector result. No session exists.
     intentVersion: JSON.stringify({ entry: `course-route-${input.entry}`, request: input.request, requestedId: input.requestedId,
       progress: input.progress, excluded: input.excluded, initialStep, context, decisionInput: input.decisionInput, teaching,
-      ...(teachingOverride ? { teachingOverride } : {}) }),
+      ...(teachingOverride ? { teachingOverride } : {}), ...(input.returnBasis === "uncalibrated" ? { returnBasis: "uncalibrated" } : {}) }),
     policyVersion: "course-route-1", sourceVersions, dataAsOf: state.dataAsOf,
     invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] };
 }
