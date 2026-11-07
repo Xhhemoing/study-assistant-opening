@@ -110,6 +110,10 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
     workSource: head.grading_work_source ?? null });
 }
 
+export function readOpeningAiGradingStatusInTx(tx: TransactionSql, scope: Scope, observationId: string): Promise<AiGradingStatus> {
+  return readStatus(tx, scope, observationId);
+}
+
 export function createOpeningAiGradingJobRepository(sql: Sql) {
   return {
     /** Truly read-only: never reserves budget, creates a job, or changes source versions. */
