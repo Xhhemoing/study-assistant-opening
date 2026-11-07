@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { courseRouteDelayedProtocolSchema,readOpeningCourseRouteRetestOutcome } from "./opening-course-route-retest-state";
 import type { CourseRouteObservation,CourseRouteSourceChunk } from "@aistudy/domain";
+import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
 import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
 const bindingSchema=z.object({id:z.string().uuid(),revision:z.number().int().positive(),stableSkillId:z.string().uuid(),requirementKey:z.string()}).strict();
@@ -75,7 +76,7 @@ export async function readCourseRouteMaterials(db:CourseRouteDb,scope:Scope,cour
     title:String(row.name),
     available:row.upload_state==="uploaded"&&row.parse_state==="ready"&&row.included===true}));
 }
-async function suggestions(db:CourseRouteDb,scope:Scope,courseId:string,requirements:CourseRequirement[]):Promise<CourseRouteRequirementInput[]>{
+async function suggestions(db:CourseRouteDb,scope:Scope,courseId:string,requirements:CourseRequirement[],exactVerificationEnabled:boolean):Promise<CourseRouteRequirementInput[]>{
   const [row]=await db`SELECT snapshot FROM opening_course_knowledge WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
   if(!row)return [];
   const graph=knowledgeSnapshotSchema.parse(row.snapshot);
@@ -85,13 +86,13 @@ async function suggestions(db:CourseRouteDb,scope:Scope,courseId:string,requirem
     JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.asset_id=s.id AND m.asset_type='source' AND m.course_id=${courseId}
     WHERE s.upload_state='uploaded' AND s.parse_state='ready' AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)`;
   const identities=new Map(nodes.map(node=>[node.id,{id:randomUUID(),skillId:randomUUID()}]));
-  return nodes.map((node,position)=>({id:identities.get(node.id)!.id,stableSkillId:identities.get(node.id)!.skillId,knowledgeNodeId:node.id,requirementKey:`knowledge:${node.id}`,title:node.label.slice(0,200),
+  return nodes.map((node,position)=>{ const sourceRefs=chunks.filter(chunk=>node.evidenceChunkIds.includes(String(chunk.id))).map(chunk=>({sourceId:String(chunk.source_id),sourceVersion:Number(chunk.source_version),chunkId:String(chunk.id),...(chunk.page?{page:Number(chunk.page)}:{})})); return ({id:identities.get(node.id)!.id,stableSkillId:identities.get(node.id)!.skillId,knowledgeNodeId:node.id,requirementKey:`knowledge:${node.id}`,title:node.label.slice(0,200),
     position:requirements.length+position,mandatory:true,goalIds:[],prerequisiteIds:graph.edges.filter(edge=>edge.kind==="prerequisite"&&edge.status==="supported"&&edge.to===node.id)
       .map(edge=>requirements.find(item=>item.knowledgeNodeId===edge.from)?.id??identities.get(edge.from)?.id).filter((id):id is string=>!!id),
-    sourceRefs:chunks.filter(chunk=>node.evidenceChunkIds.includes(String(chunk.id))).map(chunk=>({sourceId:String(chunk.source_id),sourceVersion:Number(chunk.source_version),chunkId:String(chunk.id),...(chunk.page?{page:Number(chunk.page)}:{})})),
-    verification:{kind:"unavailable",status:"missing",exerciseKeys:[],rubric:null,missingReasons:["尚未确认本要求的题目与判定标准"]},origin:"extracted"}));
+    sourceRefs,
+    verification:decideCourseRouteVerification({kind:exactVerificationEnabled?"exact":"unavailable",status:"missing",exerciseKeys:[],rubric:null,missingReasons:[]},null,sourceRefs.length>0,exactVerificationEnabled),origin:"extracted"});});
 }
-export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,courseId:string,activityId?:string):Promise<CourseRouteSnapshot>{
+export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,courseId:string,activityId?:string,exactVerificationEnabled=false):Promise<CourseRouteSnapshot>{
   await assertCourseRouteCourse(db,scope,courseId);
   const requirements=await readCourseRequirements(db,scope,courseId),materials=await readCourseRouteMaterials(db,scope,courseId);
   const observations=await readCourseRouteObservations(db,scope,courseId);
@@ -119,7 +120,7 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
   const currentHead=current?observations.raw.filter(row=>row.activityId===String(current.id))
     .sort((a,b)=>Date.parse(b.submittedAt??b.occurredAt)-Date.parse(a.submittedAt??a.occurredAt)||b.id.localeCompare(a.id))[0]:null;
   return {courseId,scopeState:!requirements.length?"missing":requirements.every(row=>row.approvedAt!==null)?"confirmed":"unconfirmed",requirements:progress,
-    suggestions:await suggestions(db,scope,courseId,requirements),materials,currentActivity:current?mapTeachingActivity(current):null,currentRoute,observationId:currentHead?.id??null,
+    suggestions:await suggestions(db,scope,courseId,requirements,exactVerificationEnabled),materials,currentActivity:current?mapTeachingActivity(current):null,currentRoute,observationId:currentHead?.id??null,
     summary:{total:progress.length,mandatory:progress.filter(row=>row.requirement.mandatory).length,
       verified:progress.filter(row=>row.status==="verified").length,blocked:progress.filter(row=>row.status==="blocked").length}};
 }

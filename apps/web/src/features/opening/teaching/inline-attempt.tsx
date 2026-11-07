@@ -17,7 +17,7 @@ import { LessonFlow } from "./lesson-flow";
 import { InlineAnswerInput } from "./inline-answer-input";
 import { FeedbackPanel } from "./feedback-panel";
 import { AiGradingResult, canGradeObservation } from "../learning/ai-grading-card";
-import { AiGradingPhotoFields, emptyGradingPhoto, type GradingPhotoSelection } from "../learning/ai-grading-photo";
+import { AiGradingPhotoFields, emptyGradingPhoto, isWorkSourceRejection, workSourceCapacityReached, type GradingPhotoSelection } from "../learning/ai-grading-photo";
 import { ObservationRevisionCard } from "../learning/observation-revision-card";
 import { LearnerStatePanel } from "./learner-state-panel";
 import { createInlineAttemptPreparation, type InlineAttemptPreparationCheckpoint } from "./inline-attempt-prepare";
@@ -128,6 +128,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const [restoring, setRestoring] = useState(true);
   const [restoreFailed, setRestoreFailed] = useState(false);
   const [restoreRetry, setRestoreRetry] = useState(0);
+  const restoredSubmission = useRef(Boolean(initialDraft?.submission));
   const submission = useRef<ReturnType<typeof createInlineAttemptSubmission> | null>(null);
   const preparation = useRef<ReturnType<typeof createInlineAttemptPreparation> | null>(null);
   const preparedCheckpoint = useRef<InlineAttemptPreparationCheckpoint | undefined>(initialDraft?.preparation);
@@ -142,11 +143,14 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     setSkillLabel(checkpoint.input.skillLabel);
     onDraftChange({ ...draftFields(latestDraft.current), skillLabel: checkpoint.input.skillLabel, preparation: checkpoint });
   }
-  if (!submission.current && initialDraft?.submission) submission.current = createInlineAttemptSubmission(initialDraft.submission.input, client, {
-    checkpoint: initialDraft.submission, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)),
-  });
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  function publishSubmission(checkpoint: InlineAttemptSubmissionCheckpoint) {
+    if (currentScope.current.courseId === context.courseId && currentScope.current.prompt === prompt) onDraftChange(submissionDraft(checkpoint));
+  }
+  if (!submission.current && restoredSubmission.current && initialDraft?.submission) submission.current = createInlineAttemptSubmission(initialDraft.submission.input, client, {
+    checkpoint: initialDraft.submission, onCheckpoint: publishSubmission,
+  });
   const inFlight = useRef(false);
   const revision = useRef<{ intent: string; clientKey: string } | null>(null);
   const onAttemptReady = useRef(context.onAttemptReady);
@@ -229,7 +233,8 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     void prepare();
   }, [ready, restoring, restoreFailed, draftConflict, recorded, attempt, context.courseId, context.status, skillLabel]);
 
-  const photoVisible = ready && !restoring && !restoreFailed && !recorded && context.status !== "completed" && Boolean(attempt || photo.workSourceId);
+  const photoCapacityReached = Boolean(attempt && workSourceCapacityReached(attempt));
+  const photoVisible = !photoCapacityReached && ready && !restoring && !restoreFailed && !recorded && context.status !== "completed" && Boolean(attempt || photo.workSourceId);
   // The server rejects the materials sealed into this question's attempt as answer photos.
   const photoSources = attempt ? sources.filter(source => !attempt.sourceIds.includes(source.id)) : sources;
   async function loadSources(isCurrent: () => boolean) {
@@ -283,19 +288,31 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     event.preventDefault();
     if (!ready || restoring || restoreFailed || draftConflict || !context.courseId || inFlight.current || context.status === "completed") return;
     inFlight.current = true; setPending(true); setError("");
-    submission.current ??= createInlineAttemptSubmission({ activityId: context.id, courseId: context.courseId, blockId, contentVersion: context.contentVersion, sourceIds: context.sourceIds, prompt, skillLabel: skillLabel.trim(), answer, ...photoWorkSource(photo) }, client, { preparation: preparedCheckpoint.current, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)) });
+    submission.current ??= createInlineAttemptSubmission({ activityId: context.id, courseId: context.courseId, blockId, contentVersion: context.contentVersion, sourceIds: context.sourceIds, prompt, skillLabel: skillLabel.trim(), answer, ...(photoCapacityReached ? {} : photoWorkSource(photo)) }, client, { preparation: preparedCheckpoint.current, onCheckpoint: publishSubmission });
     try {
       const result = await submission.current.submit();
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
-      const observation = initialDraft?.submission ? await readInlineAttemptObservationHead(result.observation.id, client) : result.observation;
+      const observation = restoredSubmission.current ? await readInlineAttemptObservationHead(result.observation.id, client) : result.observation;
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
       if (!observation) { setUnavailable(true); setError("这条作答记录已撤回，无法继续核对。"); return; }
       successfulInteractionHaptic();
       setRecorded(observation); setAttempt(result.attempt); setChecked(Boolean(observation.referenceCheck));
-      setAutoGrade(!initialDraft?.submission && !observation.aiEvaluation);
+      setAutoGrade(!restoredSubmission.current && !observation.aiEvaluation);
       context.onObservationReady?.(blockId, observation);
       context.onAttemptReady?.(blockId, result.attempt);
-    } catch (reason) { setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : userFacingMessage(reason, "答案保存未确认，可用相同请求重新确认。")); }
+    } catch (reason) {
+      if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
+      if (isWorkSourceRejection(reason)) {
+        const released = submission.current!.release();
+        submission.current = null;
+        restoredSubmission.current = false;
+        preparedCheckpoint.current = released.preparation;
+        preparation.current = createInlineAttemptPreparation(released.preparation.input, client, { checkpoint: released.preparation, onCheckpoint: prepared });
+        if (released.attempt) setAttempt(released.attempt);
+        onDraftChange({ ...draftFields(latestDraft.current), preparation: released.preparation });
+        setError(`${reason instanceof Error ? reason.message : "照片未通过检查。"} 可以改页码、换照片或移除照片后再提交。`);
+      } else setError(reason instanceof OpeningApiError && reason.status === 409 ? "学习内容或记录已更新，原答案和提交请求已保留。请重新读取活动或原课程学习记录后再确认。" : userFacingMessage(reason, "答案保存未确认，可用相同请求重新确认。"));
+    }
     finally { inFlight.current = false; setPending(false); }
   }
   async function compare(choice: "match" | "mismatch") {
@@ -352,7 +369,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       }
     }} onSubmit={(event) => { void submit(event); }}>
       {draftConflict ? <div role="status" className="space-y-1 text-xs text-warn"><p>{draftConflict === "course_changed" ? "此答案提交时所属课程已改变。原答案和提交请求已保留为只读，请到原课程的学习记录核实保存结果。" : "当前题目与之前作答的题目不一致。原答案已保留为只读，请重新读取活动，再继续作答。"}</p><p className="whitespace-pre-wrap">原题目：{initialDraft?.prompt}</p></div> : null}
-      {initialDraft?.submission && !draftConflict ? <p role="status" className="text-xs text-text-2">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
+      {restoredSubmission.current && !draftConflict ? <p role="status" className="text-xs text-text-2">已恢复上次提交的原答案。请重新确认保存结果，再继续查看参考；会沿用原来的作答记录。</p> : null}
       {diagnostics ? <details open={skillEditorOpen} onToggle={event => setSkillEditorOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
         <div className="space-y-2 pt-2">
@@ -363,6 +380,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       </details> : null}
       <p className="text-xs font-medium text-text-2">我的解答</p>
       <InlineAnswerInput interaction={context.interaction} value={answer} disabled={answerLocked} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt, photo }); }} />
+      {photoCapacityReached && !recorded ? <p role="status" className="text-xs text-text-3">这道题关联的资料已达上限，暂时不能附照片，可以用文字作答。</p> : null}
       {photoVisible ? <>
         <AiGradingPhotoFields sources={photoSources} value={photo} disabled={answerLocked} onRefresh={() => void loadSources(() => mounted.current)}
           onChange={next => { setPhoto(next); persistDraft({ answer, skillLabel, prompt, photo: next }); }} />
@@ -371,10 +389,10 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       <StageActionBar stage={pending && submission.current ? "processing" : error ? "failed" : "draft"}
         message={pending && submission.current ? "正在保存原答案…" : undefined}
         primary={{ type: "submit", label: draftConflict ? "原答案已保留（只读）" : submission.current ? "重新确认原答案已保存" : studentCopy.submit,
-          disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || (!answer.trim() && !photo.workSourceId) || context.status === "completed" }} />
+          disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || (!answer.trim() && (!photo.workSourceId || photoCapacityReached)) || context.status === "completed" }} />
     </form> : <FeedbackPanel verdict={feedbackVerdict} title={studentCopy.saved} evidence={recorded.aiEvaluation ? "批改结果已记录，可以查看评分要点，或纠正不准确的判断。" : canGradeObservation(recorded) ? "答案保存后可自动批改，也可以手动记录自己的判断。" : checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
       <LearnerStatePanel observation={recorded} />
-      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={submission.current && photo.workSourceId ? photo : undefined} completionAction={context.completionAction}
+      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={submission.current && !photoCapacityReached && photo.workSourceId ? photo : undefined} completionAction={context.completionAction}
         onUpdated={observation => { revisionReturnedHead.current = true; updatedObservation(observation); }} onChanged={() => {
           // Successful edits already returned the current head. Only withdrawal or
           // unavailability needs a read; a second read could overwrite a later edit.

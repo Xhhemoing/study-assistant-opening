@@ -43,10 +43,16 @@ it("does not reopen deterministic grading while admitting a photo", async () => 
 });
 it.each([{ rows: [] }, { rows: [{ id: photo, mime: "image/png", bytes: 100, version: 2 }] }])("rejects unavailable or changed work photos: %j", async ({ rows }) => {
   mocks.photo.mockReturnValue(rows);
-  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toMatchObject({ code: "CONFLICT", reason: "work_source_rejected" });
 });
 it("rejects using the original question as the work photo before source-version writes", async () => {
   mocks.item.mockReturnValue({ id, stem_snapshot: "sealed question", source_id: photo, attempt_source_ids: [original] });
-  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toMatchObject({ code: "VALIDATION", reason: "work_source_rejected" });
   expect(mocks.photo).not.toHaveBeenCalled();
+});
+it("preserves unrelated not-found errors without a rejection reason", async () => {
+  const error = Object.assign(new Error("missing"), { code: "NOT_FOUND" });
+  mocks.qualify.mockRejectedValue(error);
+  await expect(admitOpeningAiGradingWorkSource(tx as never, scope, id)).rejects.toBe(error);
+  expect(error).not.toHaveProperty("reason");
 });

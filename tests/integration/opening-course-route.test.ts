@@ -41,6 +41,8 @@ async function seed(count=1,sourceVersion=1){
     verification:{kind:"rubric",status:"ready",exerciseKeys:["saved-teaching-question"],rubric:"正确应用秩与零空间维数之和等于列数，并说明依据。",missingReasons:[]},origin:"confirmed"}));
   const repo=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true});
   await repo.confirm(f.scope,courseId,{expectedRevisions:[],requirements,confirmScope:true});
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  for (const requirement of requirements) await f.sql`UPDATE course_requirements SET verification=${f.sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   const start=(index=0,clientKey=randomUUID())=>repo.start(f.scope,courseId,{goalId:goal.id,expectedGoalRevision:1,requirementId:requirements[index]!.id,expectedRequirementRevision:1,clientKey,minutes:20});
   return {courseId,sourceId,chunkId,goals,goal,requirements,repo,start};
 }
@@ -481,7 +483,7 @@ it("runs a separate comprehensive check for every requirement before an idempote
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(4);
 });
 it("makes a real saved submitted question usable only after explicit verification confirmation, without upgrading old answers",async()=>{
-  const x=await seed();await x.repo.read(f.scope,x.courseId);const definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[]}};
+  const x=await seed();await x.repo.read(f.scope,x.courseId);const definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[],rubric:x.requirements[0]!.verification.rubric+" 新标准"}};
   await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:[{id:definition.id,revision:1}],requirements:[definition],confirmScope:true});
   const started=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:definition.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
   await compile(started.activity);const helped=await answer(started.activity,1,"correct","hinted",false);
@@ -538,7 +540,7 @@ it("makes a real saved submitted question usable only after explicit verificatio
   await expect(verification.confirm(f.otherScope,x.courseId,input)).rejects.toMatchObject({code:"NOT_FOUND"});
 });
 it("does not confirm a saved question against another goal or a later requirement standard",async()=>{
-  const x=await seed(),definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[]}};
+  const x=await seed(),definition={...x.requirements[0]!,verification:{...x.requirements[0]!.verification,status:"needs_check" as const,exerciseKeys:[],rubric:x.requirements[0]!.verification.rubric+" 新标准"}};
   await x.repo.confirm(f.scope,x.courseId,{expectedRevisions:[{id:definition.id,revision:1}],requirements:[definition],confirmScope:true});
   const started=ready(await x.repo.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:definition.id,expectedRequirementRevision:2,clientKey:randomUUID(),minutes:20}));
   await compile(started.activity);const answered=await answer(started.activity),verification=createOpeningCourseRouteVerificationRepository(f.sql);

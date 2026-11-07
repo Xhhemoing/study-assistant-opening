@@ -132,6 +132,7 @@ export {
   observationInputSchema,
   activityScopedObservationInputSchema,
   learningObservationSchema,
+  LEARNING_OBSERVATION_SOURCE_LIMIT,
   learningSummarySchema,
   retestCandidateSchema,
   learningSessionCreateInputSchema,
