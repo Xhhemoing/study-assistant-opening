@@ -48,9 +48,9 @@ bash "$release/infra/deploy/provision-worker.sh" \
 
 首次创建 worker 专用缓存目录（`--cache-dir`）时，把旧 `HF_HOME`（未配置时为旧应用的 `.local/hf-home`）复制到其中的 `hf-home`。复制保留 Hugging Face 内部相对 symlink，拒绝缺失链接和指向复制范围以外的链接，排除根目录的 `token` 和 `stored_tokens` 登录凭据；旧缓存不删除、不移动。已有 worker 缓存不被旧缓存覆盖，也不会被 root 递归改权；缓存目录本身必须是真实目录且属于专用用户，symlink 或未知所有权会阻止发布。
 
-独立的 `worker-runtime.env` 位于原 `EnvironmentFile` 之后，固定 `HOME`、HF/Torch/XDG 缓存、本地 Python、当前代码的 parser 目录与临时路径，避免旧配置覆盖这些路径。`PARSER_TEMP_DIR=/tmp/opening-parser`、`TMPDIR=/tmp` 配合 `PrivateTmp=true`；`ProtectSystem=strict` 只开放专用 cache，不再开放整棵源码。原 OCR 模型配置继续使用；模型文件需对 worker 只读可访问。
+独立的 `worker-runtime.env` 位于原 `EnvironmentFile` 之后，固定 `HOME`、HF/Torch/XDG 缓存、本地 Python、当前代码的 parser 目录与临时路径，避免旧配置覆盖这些路径。`PARSER_TEMP_DIR` 指向专用解析临时目录，`TMPDIR` 指向系统临时目录，配合 `PrivateTmp=true`；`ProtectSystem=strict` 只开放专用 cache，不再开放整棵源码。原 OCR 模型配置继续使用；模型文件需对 worker 只读可访问。
 
-venv 保留既有绝对路径。脚本将选定 venv 的普通目录和文件设为 root 持有、只读可执行，跳过 symlink 目标。解释器不能位于 `/root` 或 `/home`，因为 unit 启用 `ProtectHome=true`。venv 的父目录也必须允许专用用户搜索；若 `.local` 是私有目录，应先定向授予搜索权限或将 venv 准备到专用 `/opt` 路径，勿扩大生产密钥文件权限。
+venv 保留既有绝对路径。脚本将选定 venv 的普通目录和文件设为 root 持有、只读可执行，跳过 symlink 目标。解释器不能位于 `/root` 或 `/home`，因为 unit 启用 `ProtectHome=true`。venv 的父目录也必须允许专用用户搜索；若 `.local` 是私有目录，应先定向授予搜索权限或将 venv 准备到不受 `ProtectHome` 屏蔽的专用系统目录，勿扩大生产密钥文件权限。
 
 替换 unit 前，脚本通过 `runuser` 以专用用户和明确的空环境起点，在本次新 release 中执行 `python -m opening_parser --check`，再验证生成的 systemd unit。reload 后读取实际生效的用户、组、只读限制、代码/cache 路径和环境文件顺序；已有 drop-in 覆盖这些边界时停止并还原配置，不擅自删除现场 drop-in。缺少读取权限、OCR 文件或 Python 依赖同样会使发布失败。解析检查只验证导入与配置；现场验收还需在相同身份及 systemd 文件系统限制下运行真实 PDF/PPTX 转换、材料上传、队列消费及临时文件清理。不能把本地模拟测试称为线上切换成功。
 

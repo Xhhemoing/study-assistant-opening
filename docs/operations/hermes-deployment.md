@@ -1,4 +1,4 @@
-# Hermes 发布、检查与回退
+# 服务器发布、检查与回退
 
 `infra/deploy/deploy-hermes.sh` 先核对发布主干与真实 CI，再在服务器建立独立 release。构建或迁移失败不会替换当前代码；切换后健康或进程身份核验失败，在数据协议兼容时自动恢复前一应用目录与服务配置；Study 新 Web 启动后不自动退回忽略作答条件的旧 Web。数据库迁移保留，不自动回退数据库。
 
@@ -49,7 +49,7 @@ bash infra/deploy/deploy-hermes.sh rollback
 
 `MIN_FREE_KB` 可按已测量的构建与备份预算调大；变更部署目录可设置 `DIR`、`RELEASES_DIR`、`CURRENT_LINK`、`DEPLOY_STATE`、`BACKUP_DIR`。路径必须为规范绝对路径，仅允许字母、数字、下划线、短横线、点和路径分隔符。systemd / worker 配置目录默认使用系统路径。
 
-release 与备份迁往另一块磁盘时，可将 `RELEASES_DIR`、`BACKUP_DIR` 指向该磁盘上的目录，`DIR`、`CURRENT_LINK` 和 `DEPLOY_STATE` 保持原值，继续使用同一发布锁、服务配置和回退记录。目标检查同时允许新的 release 根与原默认 `${DIR}-releases` 根，因而可识别迁移前的版本；是否允许回退仍受数据协议兼容性约束，其余目录仍拒绝。操作前确认新磁盘确实挂载且空间足够，已有构建或发布必须先协调，不并行启动第二个发布者。原应用和备份不随迁移自动删除。
+release 与备份迁往另一块磁盘时，可将 `RELEASES_DIR`、`BACKUP_DIR` 指向该磁盘上的目录，`DIR`、`CURRENT_LINK` 和 `DEPLOY_STATE` 保持原值，继续使用同一发布锁、服务配置和回退记录。目标检查同时允许新的 release 根与脚本按 `DIR` 推导的原默认 release 根，因而可识别迁移前的版本；是否允许回退仍受数据协议兼容性约束，其余目录仍拒绝。操作前确认新磁盘确实挂载且空间足够，已有构建或发布必须先协调，不并行启动第二个发布者。原应用和备份不随迁移自动删除。
 
 Worker unit 的 `WorkingDirectory`、`EnvironmentFile` 是单路径设置，不添加包围引号；`ReadWritePaths` 仍按路径列表引用，所有 unit 路径继续转义 `%`。实际 systemd 解析器的回归覆盖普通路径、空格及字面百分号，避免 mock 校验漏掉不可启动或被忽略的配置。
 
@@ -106,12 +106,12 @@ OPENING_TEACHING_VALIDATION_ENABLED=1
 
 ## 排障
 
-- SSH 失败：核对网络、`hermes` 别名、密钥和已核实的主机指纹。若网络截断 PQ KEX，可由部署机管理员在该 Host 下显式配置 `KexAlgorithms curve25519-sha256`；脚本不会修改认证设置。
+- SSH 失败：核对网络、已配置的 SSH 别名、密钥和已核实的主机指纹。若网络截断 PQ KEX，可由部署机管理员在该 Host 下显式配置 `KexAlgorithms curve25519-sha256`；脚本不会修改认证设置。
 - 空间不足：先确认每个文件系统实际剩余空间及构建 / 备份预算。不要删除 current 或上一可回退构建来强行发布。
 - 健康接口成功但身份失败：检查 systemd 后加载的 drop-in、ExecStart、WorkingDirectory、User 和环境文件顺序；不要只看 HTTP 200。
 - 数据库备份失败：核实 PostgreSQL 工具版本、URL 参数、磁盘与权限。脚本不打印连接凭据；失败的 `.partial` 与原数据保留。
 - 自动恢复也失败：保持模型预算关闭，检查发布状态目录、`systemctl status` 和 `logs`，从保留的应用与配置恢复；数据库恢复须单独确认，不能盲目覆盖线上数据。
 
-模型路由键与 Hermes 配置说明见 [opening-model-routing.md](opening-model-routing.md)。本说明描述脚本行为与待现场核验的前提，不代表服务器已经执行新发布流程。
+模型路由键与服务器配置说明见 [opening-model-routing.md](opening-model-routing.md)。本说明描述脚本行为与待现场核验的前提，不代表服务器已经执行新发布流程。
 
 Worker 账号、缓存迁移与隔离配置的详细现场步骤见 [worker-service-hardening.md](worker-service-hardening.md)。

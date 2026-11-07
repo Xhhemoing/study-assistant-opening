@@ -31,9 +31,9 @@
 
 当日只读核实，未部署、重启、改配置或写生产数据库。以下是当时的结论，不代表当前状态；主机、目录、进程、工具版本与容量等明细不在公开文档中记录。
 
-web、worker 和反向代理都在运行；web 只监听回环地址，worker 以专用非 root 用户运行。当前应用目录里的发布记录为 `6c4a4ea8e78c8fe51fdee31bb1af9b09684e1d9d`，与目录名标示的版本不一致；这是发布记录，不能据目录名或单个记录证明全部文件版本。
+当日已完成服务运行、监听范围与运行身份核对，具体运行快照不公开。当前应用目录里的发布记录为 `6c4a4ea8e78c8fe51fdee31bb1af9b09684e1d9d`，与目录名标示的版本不一致；这是发布记录，不能据目录名或单个记录证明全部文件版本。
 
-数据库只读查询确认最新迁移`0074_opening_system_query_receipts.sql`，verification_state为verified。配置文件显示OPENING_RELEASE=0、三个TEACHING开关为1，SYSTEM_QUERY/ADAPTIVE_PLANNING/AUTH_TRUSTED_IP_HEADER未设置；未据此声称所有运行进程的有效配置相同。反向代理会设置客户端 IP 头，真实客户端IP限流隔离尚未实测。
+数据库只读查询确认最新迁移`0074_opening_system_query_receipts.sql`，verification_state为verified。已只读核对发布、教学、系统查询、自适应规划与可信 IP 头相关开关；具体生产配置值不在公开文档中记录，配置文件核对也不能证明所有运行进程的有效配置相同。反向代理会设置客户端 IP 头，真实客户端IP限流隔离尚未实测。
 
 系统默认的 pg_restore 版本过旧，读不了最近的备份；与数据库版本匹配的 pg_restore 能完整列出备份目录。备份恢复演练仍待执行，目录可读不等于已证明可恢复。后续部署前核对发布记录与实际制品版本，并用匹配的pg_restore执行隔离恢复验证。
 
