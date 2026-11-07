@@ -4,7 +4,10 @@ import { aiEvaluationSchema, type Scope } from "@aistudy/contracts";
 import { acceptedAiGradingOutcome, createInitialState, matrixErrorCardReference, solveSpanProblemWithSteps } from "@aistudy/domain";
 import { captureOpeningObservationCardOrigin } from "./opening-card-drafts";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
+import { teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
 import { writeState } from "./cards-ops";
+
+type Block = { id: string; type: string; content: Record<string, unknown> };
 
 /** Called under the observation transaction's workspace/root locks. Manual cards have no origin root. */
 export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: Scope, observationId: string): Promise<void> {
@@ -18,7 +21,7 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
   const assessment = aiEvaluationSchema.safeParse(head.ai_evaluation);
   const validAi = head.verdict_source === "ai_graded" && assessment.success && assessment.data.observationId === head.id
     && acceptedAiGradingOutcome(assessment.data) === "incorrect";
-  const server = head.server_evaluation as { observationId?: string; outcome?: string } | null;
+  const server = head.server_evaluation as { observationId?: string; outcome?: string; evaluatorVersion?: string } | null;
   const deterministic = head.verdict_source === "deterministic" && server?.observationId === head.id && server?.outcome === "incorrect";
   let reference: string | null = null;
   if (deterministic) {
@@ -29,6 +32,19 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
     if (span) {
       const solution = solveSpanProblemWithSteps(span);
       reference = `将两个向量和目标向量组成增广矩阵，检查每个坐标。\n行化简结果：${JSON.stringify(solution.reducedMatrix)}\n答案：${JSON.stringify(solution.solution)}`;
+    }
+    const teaching = item?.evaluation_spec as TeachingQuestionSpec | null | undefined;
+    if (server?.evaluatorVersion === "teaching-key-exact-v1" && teaching?.kind === "teaching_question"
+      && teaching.specVersion === "teaching-question-v1" && teaching.answerBlockId) {
+      // The back must show the same pinned answer key that decided this controlled verdict.
+      const [pinned] = await tx`SELECT r.blocks FROM opening_learning_item_versions v
+        JOIN library_revisions r ON r.id=v.teaching_revision_id AND r.workspace_id=v.workspace_id
+        WHERE v.id=${head.item_version_id} AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+          AND ${teachingQuestionIdentityMatches(tx)}`;
+      const key = Array.isArray(pinned?.blocks) ? (pinned.blocks as Block[])
+        .find(block => block.id === teaching.answerBlockId && ["answer_key", "solution"].includes(block.type)) : undefined;
+      const text = teachingQuestionText(key?.content);
+      if (text) reference = `参考答案：${text}`;
     }
   }
   const canCreate = head.revision_kind !== "retract" && head.outcome === "incorrect" && (validAi || reference !== null);
