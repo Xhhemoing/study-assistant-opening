@@ -14,6 +14,7 @@ function env(dir: string, extra: Record<string, string> = {}) {
     HERMES_HEAVY_LOCK_IMPL: "node",
     HERMES_HEAVY_LOCK: path.join(dir, "heavy.lock"),
     HERMES_HEAVY_LOCK_HELD: "",
+    HERMES_HEAVY_MIN_FREE_MB: "0",
     TYPECHECK_TSC_CMD: JSON.stringify([process.execPath, fake]),
     FAKE_TSC_DIR: dir,
     FAKE_TSC_MS: "200",
