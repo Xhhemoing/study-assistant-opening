@@ -45,7 +45,7 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 - 以文件、接口和资源隔离规划八条编码流，并配置独立评审与集成能力；这是目标容量，不是已运行数量或配额豁免。实际启动必须服从平台配额与本机资源；用户 2026-11-06 将同时运行的实现者上限定为 5（只读调查与审查不计），名额不足则按依赖排队，不绕过或虚报并行。
 - 项目不再以固定 3 个 Agent／3 棵 worktree 作为上限。worktree 按隔离需要和有效配额、资源及所有权准入；注册旧树不等于活跃写者，不为凑车道新建树或删除未知成果。
 - 持久 Kanban 是任务执行与交回入口，workspace=worktree；优先续接原卡、原 owner 和原会话，不重复建卡、实现或 dispatcher。目标、允许路径、parents、接口决定、限定 unit／包 types、风险与结果 metadata 必填；投递不等于接受或执行。
-- 同文件单 writer。共享契约、锁文件、迁移编号、schema、STATUS 及跨接口决定由唯一集成者独占协调；worker 不自行扩大 allowlist。接管须先核原 owner 已停止写入且明确交回，不能停他人任务抢权。
+- 同文件单 writer。共享契约、锁文件、迁移编号、schema、STATUS 及跨接口决定由唯一集成者独占协调；worker 不自行扩大 allowlist。接管须先核原 owner 已停止写入且明确交回，不能停他人任务抢权；因平台错误停滞的车道按 `docs/operations/agent-workflow.md` 长期授权第 4 条由集成会话接手。
 - 共享环境中的重验证经现有 run-heavy 串行；真正隔离运行资源且获准的 worker 才可并行验证，worktree 本身不隔离数据库、Redis、端口或锁。低资源时先限制新准入，不以本地全套测试阻塞已授权轻量实施，完整门禁交精确 CI。
 - 默认实现模型沿当前获准配置，委派支持时显式写模型与强度，不静默换模型；开发成本原则上不作为限流理由，但不解除执行配额、资源与安全门禁，也不改变产品计费、预算或费用策略。
 
