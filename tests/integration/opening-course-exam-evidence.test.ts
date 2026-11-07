@@ -6,6 +6,7 @@ import { createOpeningExamIntegrationRepository } from "../../packages/database/
 import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { readCourseRouteObservations } from "../../packages/database/src/repositories/opening-course-route-read";
+import { readExamCourseEvidenceLinks } from "../../packages/database/src/repositories/opening-course-exam-evidence-projection";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 const pack: ExamPack = {
@@ -76,4 +77,22 @@ it("does not count a published answer mapped to a different node", async () => {
   const x = await setup(); await x.confirm(); const first = await x.start();
   expect(first.currentAttempt!.questionId).toBe("other");
   await x.answer(first); expect((await x.progress()).status).toBe("unobserved");
+});
+
+it("does not expose links across courses, workspaces or owners", async () => {
+  const x = await setup(); await x.confirm(); await x.all();
+  expect(await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId)).toHaveLength(3);
+  expect(await readExamCourseEvidenceLinks(f.sql, f.scope, randomUUID())).toEqual([]);
+  expect(await readExamCourseEvidenceLinks(f.sql, { ...f.scope, workspaceId: randomUUID() }, x.courseId)).toEqual([]);
+  expect(await readExamCourseEvidenceLinks(f.sql, { ...f.scope, ownerUserId: randomUUID() }, x.courseId)).toEqual([]);
+});
+
+it("stops counting evidence when its current exam node binding is removed", async () => {
+  const x = await setup(); await x.confirm(); await x.all();
+  expect((await x.progress()).status).toBe("verified");
+  await f.sql`UPDATE opening_exam_bindings SET binding=jsonb_set(binding,'{skills}','[]'::jsonb) WHERE course_id=${x.courseId}`;
+  const links = await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId);
+  expect(links).toHaveLength(3);
+  expect(links.every(link => !link.identityCurrent)).toBe(true);
+  expect((await x.progress()).status).toBe("unobserved");
 });
