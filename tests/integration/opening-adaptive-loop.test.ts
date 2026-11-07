@@ -137,7 +137,7 @@ describe("opening adaptive loop (K02 Data)", () => {
     });
 
     // Assisted success must not count as checked independent mastery evidence.
-    const flags = await evidence.flagsForNode(f.scope, nodeA);
+    const flags = await evidence.flagsForNode(f.scope, courseId, nodeA);
     expect(flags.hasAssistance).toBe(true);
     expect(flags.hasCheckedIndependent).toBe(false);
     expect(flags.evidenceIds).toEqual([links[0]!.id]);
@@ -185,7 +185,7 @@ describe("opening adaptive loop (K02 Data)", () => {
         nodes: [{ id: nodeA, courseId: matrix.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
     const obs = await matrix.submit(await matrix.start());
     await evidence.link(f.scope, { nodeId: nodeA, observationId: obs.id, courseId: matrix.courseId, dimension: "transfer" });
-    const flags = await evidence.flagsForNode(f.scope, nodeA);
+    const flags = await evidence.flagsForNode(f.scope, matrix.courseId, nodeA);
     expect(flags.hasCheckedIndependent).toBe(true);
     expect(flags.hasAssistance).toBe(false);
     const byNode = await evidence.listByNode(f.scope, nodeA);
@@ -194,13 +194,48 @@ describe("opening adaptive loop (K02 Data)", () => {
     const revised = await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: obs.id,
       expectedHead: obs.id, revisionKind: "replace", reason: "Learner review", clientKey: randomUUID(),
       replacement: { answer: "[2,3]", outcome: "correct", assistance: "hinted", verdictSource: "self_report" } });
-    expect((await evidence.flagsForNode(f.scope, nodeA))).toMatchObject({ hasCheckedIndependent: false, hasAssistance: true });
+    expect((await evidence.flagsForNode(f.scope, matrix.courseId, nodeA))).toMatchObject({ hasCheckedIndependent: false, hasAssistance: true });
     await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: revised.headObservationId,
       expectedHead: revised.headObservationId, revisionKind: "retract", reason: "Withdraw record", clientKey: randomUUID() });
-    expect(await evidence.flagsForNode(f.scope, nodeA)).toEqual({ nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({ nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
     expect(await evidence.listByNode(f.scope, nodeA)).toHaveLength(1);
   });
 
+  it("keeps node evidence within the requested course for the same owner", async () => {
+    const matrix = await matrixAttemptFixture(f);
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES(${f.scope.workspaceId},${matrix.courseId},'source',${matrix.sourceId},'core','private')`;
+    await createOpeningKnowledgeRepository(f.sql).replace(f.scope, matrix.courseId, { expectedVersion: 0,
+      sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: matrix.courseId, version: 1, edges: [],
+        nodes: [{ id: nodeA, courseId: matrix.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
+    const obs = await matrix.submit(await matrix.start());
+    const link = await evidence.link(f.scope, { nodeId: nodeA, observationId: obs.id, courseId: matrix.courseId, dimension: "transfer" });
+    const otherCourseId = randomUUID();
+    await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
+      VALUES (${otherCourseId}, ${f.scope.workspaceId}, 'Other course', ${otherCourseId})`;
+
+    // Both courses have a live, supported node with the same ID and material basis.
+    // An empty result must come from course isolation, not an absent knowledge node.
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+      VALUES(${f.scope.workspaceId},${otherCourseId},'source',${matrix.sourceId},'core','private')`;
+    await createOpeningKnowledgeRepository(f.sql).replace(f.scope, otherCourseId, { expectedVersion: 0,
+      sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: otherCourseId, version: 1, edges: [],
+        nodes: [{ id: nodeA, courseId: otherCourseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
+
+    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({
+      nodeId: nodeA, hasCheckedIndependent: true, hasAssistance: false, evidenceIds: [link.id],
+    });
+    const emptyFlags = { nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] };
+    expect(await evidence.flagsForNode(f.scope, otherCourseId, nodeA)).toEqual(emptyFlags);
+    expect(await evidence.flagsForNode(f.otherScope, matrix.courseId, nodeA)).toEqual(emptyFlags);
+    expect(await evidence.flagsForNode(f.scope, randomUUID(), nodeA)).toEqual(emptyFlags);
+    await expect(evidence.flagsForNode({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, matrix.courseId, nodeA))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // A current graph alone does not make an archived course's evidence usable.
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${matrix.courseId}`;
+    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual(emptyFlags);
+  });
   it("does not pollute a sibling knowledge node (cross-skill isolation)", async () => {
     const { courseId, sourceId } = await seedCourseWithKnowledge();
     const session = await learning.createSession(f.scope, {
@@ -223,7 +258,7 @@ describe("opening adaptive loop (K02 Data)", () => {
 
     expect(await evidence.listByNode(f.scope, nodeA)).toHaveLength(1);
     expect(await evidence.listByNode(f.scope, nodeB)).toHaveLength(0);
-    const flagsB = await evidence.flagsForNode(f.scope, nodeB);
+    const flagsB = await evidence.flagsForNode(f.scope, courseId, nodeB);
     expect(flagsB).toEqual({
       nodeId: nodeB,
       hasCheckedIndependent: false,
