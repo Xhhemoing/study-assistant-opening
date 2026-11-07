@@ -19,10 +19,14 @@ export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnab
         await assertCourseRouteCourse(tx,scope,courseId);
         const current=await readCourseRequirements(tx,scope,courseId);
         const materials=await readCourseRouteMaterials(tx,scope,courseId);
-        const requirements=input.requirements.map(requirement=>({ ...requirement, verification:decideCourseRouteVerification(
-          requirement.verification,current.find(row=>row.id===requirement.id)?.verification??null,
-          requirement.sourceRefs.length>0&&requirement.sourceRefs.every(ref=>materials.some(material=>material.sourceId===ref.sourceId&&material.sourceVersion===ref.sourceVersion&&material.available)),
-          options.exactVerificationEnabled===true) }));
+        const requirements=input.requirements.map(requirement=>{
+          const previous=current.find(row=>row.id===requirement.id);
+          // Only an approved row's verification counts as an existing requirement.
+          return { ...requirement, verification:decideCourseRouteVerification(
+            requirement.verification,previous?.approvedAt!=null?previous.verification:null,
+            requirement.sourceRefs.length>0&&requirement.sourceRefs.every(ref=>materials.some(material=>material.sourceId===ref.sourceId&&material.sourceVersion===ref.sourceVersion&&material.available)),
+            options.exactVerificationEnabled===true) };
+        });
         const definitions=current.map(({courseId:_courseId,revision:_revision,lifecycle:_lifecycle,approvedAt:_approvedAt,...definition})=>definition);
         // An unknown response can replay the same full definition without raising revisions.
         if(current.every(row=>row.approvedAt!==null)&&isDeepStrictEqual(definitions,requirements))return readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);

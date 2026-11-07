@@ -37,3 +37,40 @@ describe("server verification policy", () => {
     });
   }
 });
+
+describe("unchanged stored verification", () => {
+  const oldReason = ["尚未提供验证题目或评分标准"];
+  it.each([
+    { kind: "unavailable" as const, status: "missing" as const, rubric: null, enabled: false },
+    { kind: "rubric" as const, status: "needs_check" as const, rubric: "  标准  ", enabled: false },
+    { kind: "manual" as const, status: "needs_check" as const, rubric: "  标准  ", enabled: false },
+    { kind: "exact" as const, status: "missing" as const, rubric: "标准", enabled: false },
+  ])("preserves old reason for $kind/$status", ({ kind, status, rubric, enabled }) => {
+    const previous: Verification = { kind, status, rubric, exerciseKeys: [], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted(kind, rubric?.trim() ?? null), previous, true, enabled)).toEqual(previous);
+  });
+  it("normalizes a non-ready row with exercise keys", () => {
+    const previous: Verification = { kind: "rubric", status: "needs_check", rubric: "标准", exerciseKeys: ["forged"], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted("rubric"), previous, true, false)).toEqual({
+      kind: "rubric", status: "needs_check", rubric: "标准", exerciseKeys: [], missingReasons: ["请先确认本要求的题目与判定标准"],
+    });
+  });
+  it("normalizes an incorrect status", () => {
+    const previous: Verification = { kind: "rubric", status: "missing", rubric: "标准", exerciseKeys: [], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted("rubric"), previous, true, false)).toMatchObject({ status: "needs_check", exerciseKeys: [], missingReasons: ["请先确认本要求的题目与判定标准"] });
+  });
+  it("normalizes a changed rubric", () => {
+    const previous: Verification = { kind: "rubric", status: "needs_check", rubric: "旧标准", exerciseKeys: [], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted("rubric"), previous, true, false)).toMatchObject({ status: "needs_check", rubric: "标准", exerciseKeys: [], missingReasons: ["请先确认本要求的题目与判定标准"] });
+  });
+  it("enables exact when capability and sources become available", () => {
+    const previous: Verification = { kind: "exact", status: "missing", rubric: "标准", exerciseKeys: [], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted("exact"), previous, true, true)).toEqual({ kind: "exact", status: "ready", rubric: "标准", exerciseKeys: [], missingReasons: [] });
+  });
+  it("preserves ready when both rubrics are null, but not when only one is null", () => {
+    const previous: Verification = { kind: "rubric", status: "ready", rubric: null, exerciseKeys: ["server"], missingReasons: [] };
+    expect(decideCourseRouteVerification(submitted("rubric", null), previous, true, false)).toEqual(previous);
+    expect(decideCourseRouteVerification(submitted("rubric", "标准"), previous, true, false)).toMatchObject({ status: "needs_check", exerciseKeys: [] });
+    expect(decideCourseRouteVerification(submitted("rubric", null), { ...previous, rubric: "标准" }, true, false)).toMatchObject({ status: "needs_check", exerciseKeys: [] });
+  });
+});

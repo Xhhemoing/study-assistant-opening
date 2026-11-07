@@ -72,6 +72,35 @@ it("ignores forged ready, preserves server confirmation across title edits, and 
   const update=await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[{id:edited.id,revision:3}],requirements:[changed],confirmScope:true});
   expect(update.requirements[0]!.requirement).toMatchObject({revision:4,verification:{status:"needs_check",exerciseKeys:[],rubric:"新评分标准"}});
 });
+it("rechecks restored ready verification and makes a replay idempotent", async () => {
+  const x=await setup();
+  await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[x.requirement],confirmScope:true});
+  const forged={...x.requirement.verification,status:"ready" as const,exerciseKeys:["forged-restored"]};
+  // Simulates backup restore: normalizeOpeningImportedEvaluation clears approved_at but preserves verification.
+  await f.sql`UPDATE course_requirements SET verification=${f.sql.json(forged)},approved_at=NULL
+    WHERE id=${x.requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  const request={expectedRevisions:[{id:x.requirement.id,revision:1}],requirements:[x.requirement],confirmScope:true as const};
+  const confirmed=await x.route.confirm(f.scope,x.courseId,request);
+  expect(confirmed.requirements[0]!.requirement).toMatchObject({revision:2,verification:{kind:"rubric",status:"needs_check",exerciseKeys:[]}});
+  expect((await x.route.confirm(f.scope,x.courseId,request)).requirements[0]!.requirement.revision).toBe(2);
+});
+it("does not revise an unchanged legacy row when another requirement changes", async () => {
+  const x=await setup(), second={...x.requirement,id:randomUUID(),stableSkillId:randomUUID(),requirementKey:"second",position:1};
+  await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[x.requirement,second],confirmScope:true});
+  const legacy={kind:"unavailable" as const,status:"missing" as const,exerciseKeys:[],rubric:null,missingReasons:["尚未提供验证题目或评分标准"]};
+  // Simulates a legacy row written by the frontend before deployment.
+  await f.sql`UPDATE course_requirements SET verification=${f.sql.json(legacy)}
+    WHERE id=${x.requirement.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  const snapshot=await x.route.read(f.scope,x.courseId);
+  const definitions=snapshot.requirements.map(({requirement:{courseId:_courseId,revision:_revision,lifecycle:_lifecycle,approvedAt:_approvedAt,...definition}})=>definition);
+  const updated=await x.route.confirm(f.scope,x.courseId,{expectedRevisions:snapshot.requirements.map(({requirement})=>({id:requirement.id,revision:requirement.revision})),
+    requirements:definitions.map(row=>row.id===second.id?{...row,title:"更新标题"}:row),confirmScope:true});
+  const firstRow=updated.requirements.find(({requirement})=>requirement.id===x.requirement.id)!.requirement;
+  const secondRow=updated.requirements.find(({requirement})=>requirement.id===second.id)!.requirement;
+  expect(firstRow.revision).toBe(1);
+  expect(firstRow.verification).toEqual(legacy);
+  expect(secondRow.revision).toBe(2);
+});
 it("exact readiness requires both capability and available sources", async () => {
   const x=await setup(), exact={...x.requirement,verification:{...x.requirement.verification,kind:"exact" as const}};
   const first=await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[exact],confirmScope:true});
