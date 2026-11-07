@@ -7,14 +7,31 @@ import type { ConversationEntry, QuestionStep, StudySessionPort, StudySessionVie
 
 vi.mock("../v3/motion/view-transition", () => ({ useTransitionRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }) }));
 
+const originalScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+function restoreScroll() {
+  if (originalScroll) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScroll);
+  else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+}
 beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); });
-afterEach(() => { vi.unstubAllGlobals(); document.body.innerHTML = ""; });
+afterEach(() => { restoreScroll(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete document.documentElement.dataset.motion; document.body.innerHTML = ""; });
 
 const question: QuestionStep = { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 };
 const base: StudySessionView = { step: question, position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: null }, answer: {}, sealed: false, result: null, next: null, photo: null };
 const learn = (id: string): StudySessionView => ({ ...base, step: { kind: "learn", id, title: `讲解 ${id}`, body: `正文 ${id}`, estimateMinutes: null } });
 const noop = () => {};
 const handlers = { onPrimary: noop, onHelp: noop, onPause: noop, onReload: noop, onEdit: noop, onChoosePhoto: noop, onRemovePhoto: noop };
+
+function stubScroll() {
+  const scroll = vi.fn();
+  // jsdom has no scrolling implementation; restore its original descriptor after each test.
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, writable: true, value: scroll });
+  return scroll;
+}
+
+function portFor(view: StudySessionView): StudySessionPort {
+  return { load: async () => view, primary: async () => view, edit: () => view, help: async () => view,
+    choosePhoto: async () => view, removePhoto: () => view, pause: async () => undefined };
+}
 
 function mountShell() {
   const host = document.createElement("div"); document.body.append(host);
@@ -33,7 +50,7 @@ async function mountSession(views: StudySessionView[]) {
   const root = createRoot(host);
   await act(async () => root.render(<StudySession port={port} />));
   const next = () => act(async () => host.querySelector<HTMLButtonElement>("[data-primary-action]")!.click());
-  const history = () => [...host.querySelectorAll("ol[aria-label='学习对话'] li[aria-label^='已完成']")];
+  const history = () => [...host.querySelectorAll("ol[aria-label='学习对话'] li[aria-label^='之前的步骤']")];
   return { host, next, history, unmount: () => act(async () => root.unmount()) };
 }
 
@@ -48,6 +65,7 @@ it("moves the previous step into read-only history when the step changes", async
     expect(ui.history()[0]!.querySelector("details")!.open).toBe(false);
     await ui.next();
     const [first, second] = ui.history();
+    expect(second!.getAttribute("aria-label")).toBe("之前的步骤：第 2 步：span");
     expect(second!.textContent).toContain("求系数");
     expect(second!.textContent).toContain("我的作答：属于 span；α = 2，β = -1");
     expect(second!.textContent).toContain("还没对，原答案已保留");
@@ -60,7 +78,7 @@ it("does not repeat a step that comes back, and keeps only the latest 20 entries
   const revisit = await mountSession([learn("a"), learn("b"), learn("a"), learn("b")]);
   try {
     await revisit.next(); await revisit.next(); await revisit.next();
-    expect(revisit.history().map(entry => entry.getAttribute("aria-label"))).toEqual(["已完成：讲解 b", "已完成：讲解 a"]);
+    expect(revisit.history().map(entry => entry.getAttribute("aria-label"))).toEqual(["之前的步骤：讲解 b", "之前的步骤：讲解 a"]);
   } finally { await revisit.unmount(); }
   const long = await mountSession(Array.from({ length: 23 }, (_, index) => learn(String(index))));
   try {
@@ -95,7 +113,7 @@ it("puts the only primary action into the successor card, with the notice visibl
   } finally { ui.unmount(); }
 });
 
-it("keeps exactly one primary action in every conversation state", () => {
+it("keeps exactly one primary action in the supported span conversation states", () => {
   const ui = mountShell();
   const incorrect = { outcome: "incorrect" as const, assistance: "hinted" as const };
   const states: [StudySessionView, "footer" | "card"][] = [
@@ -123,6 +141,137 @@ it("shows the sealed answer summary as my answer in the conversation", () => {
     expect(ui.host.querySelector("ol[aria-label='学习对话'] section[aria-label='我的作答']")?.textContent).toContain("不属于 span；α = 2，β = 2");
     ui.render({ ...base, answerSummary: "不属于 span" }, { history: [] });
     expect(ui.host.querySelector("section[aria-label='我的作答']")).toBeNull();
+  } finally { ui.unmount(); }
+});
+
+it("scrolls once after a port reload changes the step, but not on first load or a same-step reload", async () => {
+  const scroll = stubScroll();
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  let resolveLoad!: (view: StudySessionView) => void;
+  try {
+    await act(async () => root.render(<StudySession port={portFor(learn("a"))} />));
+    expect(scroll).not.toHaveBeenCalled();
+    const nextPort = { ...portFor(base), load: () => new Promise<StudySessionView>(resolve => { resolveLoad = resolve; }) };
+    await act(async () => root.render(<StudySession port={nextPort} />));
+    expect(host.querySelector("ol[aria-label='学习对话']")).toBeNull();
+    expect(host.textContent).toContain("正在准备这一步");
+    await act(async () => resolveLoad(base));
+    expect(host.querySelectorAll("li[aria-label^='之前的步骤']")).toHaveLength(1);
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.instances[0]).toBe(host.querySelector("ol[aria-label='学习对话'] > li:last-child"));
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest", behavior: "smooth" });
+    scroll.mockClear();
+    await act(async () => root.render(<StudySession port={portFor(base)} />));
+    expect(scroll).not.toHaveBeenCalled();
+    // A new lesson owner remounts StudySession: no history or scroll cursor leaks.
+    await act(async () => root.render(<StudySession key="new-session" port={portFor(learn("new"))} />));
+    expect(host.querySelectorAll("li[aria-label^='之前的步骤']")).toHaveLength(0);
+    expect(scroll).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); }
+});
+
+it("scrolls to a newly sealed answer after failed submission read-back, not for edits or repeated failures", async () => {
+  const scroll = stubScroll();
+  let current = base;
+  const port: StudySessionPort = { ...portFor(base),
+    edit: change => (current = { ...current, answer: { ...current.answer, ...change } }),
+    primary: async () => {
+      current = { ...current, sealed: true, answerSummary: "属于 span" };
+      throw new Error("结果还没读到，答案已保留，请重新读取。");
+    },
+    current: () => current,
+  };
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<StudySession port={port} />));
+    expect(scroll).not.toHaveBeenCalled();
+    await act(async () => {
+      const select = host.querySelector("select")!;
+      select.value = "in_span";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(host.querySelector<HTMLButtonElement>("[data-primary-action]")!.disabled).toBe(false);
+    expect(scroll).not.toHaveBeenCalled();
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-primary-action]")!.click());
+    expect(host.querySelector("section[aria-label='我的作答']")?.textContent).toContain("属于 span");
+    expect(host.querySelector("section[aria-label='作答结果']")).toBeNull();
+    expect(host.querySelector("[role='alert']")?.textContent).toContain("结果还没读到");
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.instances[0]).toBe(host.querySelector("section[aria-label='我的作答']")!.parentElement);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-primary-action]")!.click());
+    expect(scroll).toHaveBeenCalledTimes(1);
+  } finally { await act(async () => root.unmount()); }
+});
+
+it.each(["app", "system"])("uses instant scrolling for %s reduced motion and leaves focus alone", source => {
+  const scroll = stubScroll();
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: source === "system" })));
+  if (source === "app") document.documentElement.dataset.motion = "reduce";
+  const ui = mountShell();
+  try {
+    ui.render(base, { history: [] });
+    expect(scroll).not.toHaveBeenCalled();
+    const focus = ui.host.querySelector<HTMLSelectElement>("select")!;
+    focus.focus();
+    ui.render({ ...base, result: { outcome: "incorrect", assistance: "independent" }, canRedo: true }, { history: [] });
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest", behavior: "auto" });
+    expect(document.activeElement).toBe(focus);
+    ui.render({ ...base, result: { outcome: "incorrect", assistance: "independent" }, canRedo: true,
+      next: { href: "/x", label: "回到课程", alternatives: [] } }, { history: [] });
+    expect(scroll).toHaveBeenCalledTimes(2);
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest", behavior: "auto" });
+  } finally { ui.unmount(); }
+});
+
+it("does not scroll on first load with a restored answer or when scrolling is unavailable", () => {
+  const scroll = stubScroll();
+  const ui = mountShell();
+  try {
+    ui.render({ ...base, sealed: true, answerSummary: "属于 span", result: { outcome: "correct", assistance: "independent" } }, { history: [] });
+    expect(scroll).not.toHaveBeenCalled();
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    ui.render(learn("another"), { history: [] });
+    expect(ui.host.textContent).toContain("正文 another");
+  } finally { ui.unmount(); }
+});
+
+it("does not keep blocked placeholders as history", async () => {
+  // Reloading the port is the recovery path, rather than the disabled primary action.
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<StudySession port={portFor({ ...learn("blocked"), blocked: "资料不可用" })} />));
+    await act(async () => root.render(<StudySession port={portFor(learn("ready"))} />));
+    expect(host.querySelectorAll("li[aria-label^='之前的步骤']")).toHaveLength(0);
+  } finally { await act(async () => root.unmount()); }
+});
+
+it("keeps a successor's text and links without onContinue, without inventing a second action", () => {
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    act(() => root.render(<StudySessionShell {...handlers} onRedo={noop} conversation={{ history: [] }} view={{ ...base,
+      result: { outcome: "incorrect", assistance: "independent" }, canRedo: true,
+      next: { href: "/x", label: "回到课程", notice: "请先授权导师安排。", alternatives: [{ href: "/y", label: "回到今日" }] } }} />));
+    const card = host.querySelector("section[aria-label='下一步']")!;
+    expect(card.textContent).toContain("回到课程");
+    expect(card.textContent).toContain("请先授权导师安排。");
+    expect(card.querySelector("a[href='/y']")).not.toBeNull();
+    expect(card.querySelector("button")).toBeNull();
+    expect(host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    expect(host.querySelector("footer [data-primary-action]")?.textContent).toBe("改这道题");
+  } finally { act(() => root.unmount()); }
+});
+
+it("keeps the recorded photo exception at zero primary actions in the legacy layout", () => {
+  const ui = mountShell();
+  try {
+    ui.render({ ...base, sealed: true, step: { kind: "photo_practice", id: "photo", title: "照片练习", prompt: "题目", estimateMinutes: null, canSubmit: false, recorded: true } });
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(0);
+    expect(ui.host.querySelector("ol[aria-label='学习对话']")).toBeNull();
   } finally { ui.unmount(); }
 });
 

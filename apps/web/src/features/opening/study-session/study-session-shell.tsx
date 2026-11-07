@@ -23,7 +23,7 @@ type Handlers = {
  * With `conversation` the main area is the chronological thread and a successor card carries the primary action.
  */
 export function StudySessionShell({ view, pending = false, error = "", content, conversation, ...on }: {
-  view: StudySessionView; pending?: boolean; error?: string; content?: ReactNode; conversation?: { history: ConversationEntry[] };
+  view: StudySessionView; pending?: boolean; error?: string; content?: ReactNode; conversation?: { history: ConversationEntry[]; scrollCursor?: { current: string | null } };
 } & Handlers) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -74,7 +74,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
     </header>
 
     {conversation ? <main className="flex-1 space-y-6 px-4 py-6">
-      <ConversationThread history={conversation.history} view={view}
+      <ConversationThread history={conversation.history} scrollCursor={conversation.scrollCursor} view={view}
         step={<StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
           onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} content={content} />}
         feedbackActions={<>
@@ -139,10 +139,11 @@ export function StudySession({ port }: { port: StudySessionPort }) {
   const busy = useRef(false), generation = useRef(0);
   // Survives a port change (the lesson owner rebuilds the port after each saved move) for this page load only.
   const lastShown = useRef<StudySessionView | null>(null);
+  const scrollCursor = useRef<string | null>(null);
   const router = useTransitionRouter(true);
   function show(next: StudySessionView) {
     const previous = lastShown.current;
-    if (previous && previous.step.id !== next.step.id) setHistory(entries => appendConversationEntry(entries, conversationEntry(previous)));
+    if (previous && !previous.blocked && previous.step.id !== next.step.id) setHistory(entries => appendConversationEntry(entries, conversationEntry(previous)));
     lastShown.current = next;
     setView(next);
   }
@@ -176,7 +177,7 @@ export function StudySession({ port }: { port: StudySessionPort }) {
     if (view.next) go(view.next.href);
     else void run(port.primary);
   };
-  return <StudySessionShell view={view} pending={pending} error={error} conversation={{ history }}
+  return <StudySessionShell view={view} pending={pending} error={error} conversation={{ history, scrollCursor }}
     onPrimary={() => {
       if (primaryAction(view, pending).kind === "redo" && port.redo) void run(port.redo);
       else continueSession();

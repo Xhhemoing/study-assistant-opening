@@ -79,8 +79,11 @@ export function spanAnswerSummary(answer: Partial<SpanDraftAnswer>): string | un
   const [alpha, beta] = answer.coefficients ?? ["", ""];
   const text = [answer.membership === "in_span" ? "属于 span" : answer.membership === "not_in_span" ? "不属于 span" : "",
     alpha || beta ? `α = ${alpha || "未填"}，β = ${beta || "未填"}` : "",
-    answer.coordinateChecks?.some(Boolean) ? `代回后各坐标 ${answer.coordinateChecks.join(", ")}` : ""].filter(Boolean).join("；");
-  return !text ? undefined : text.length > 200 ? `${text.slice(0, 199)}…` : text;
+    answer.coordinateChecks?.some(Boolean) ? `代回后各坐标 ${answer.coordinateChecks.map(value => value || "未填").join(", ")}` : "",
+    answer.membership === "not_in_span" && answer.noSolutionWitness?.some(Boolean)
+      ? `矛盾坐标 ${answer.noSolutionWitness.map(value => value || "未填").join(", ")}` : ""].filter(Boolean).join("；");
+  const characters = Array.from(text);
+  return !text ? undefined : characters.length > 200 ? `${characters.slice(0, 199).join("")}…` : text;
 }
 
 function strongest(...levels: (HelpState["level"] | undefined)[]): HelpState["level"] {

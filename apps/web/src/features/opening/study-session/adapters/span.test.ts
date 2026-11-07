@@ -113,6 +113,19 @@ it("summarizes the sealed answer by membership and key fields within 200 charact
   expect(long.endsWith("…")).toBe(true);
 });
 
+it("keeps missing coordinates explicit and includes a no-solution witness", () => {
+  expect(spanAnswerSummary({ membership: "not_in_span", coordinateChecks: ["2", "", "2"], noSolutionWitness: ["1", "", "-1"] }))
+    .toBe("不属于 span；代回后各坐标 2, 未填, 2；矛盾坐标 1, 未填, -1");
+  expect(spanAnswerSummary({ membership: "in_span", noSolutionWitness: ["1", "0", "-1"] })).toBe("属于 span");
+});
+
+it("truncates by Unicode code point without splitting a surrogate pair", () => {
+  const summary = spanAnswerSummary({ membership: "in_span", coefficients: ["𝛼".repeat(200), ""] })!;
+  expect(Array.from(summary)).toHaveLength(200);
+  expect(summary.endsWith("𝛼…")).toBe(true);
+  expect(summary).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+});
+
 it("keeps a successor choice as a visible notice instead of a folded reason", () => {
   const next = adaptSpanNext({ kind: "choice", reason: "authorization_required", message: "请先授权导师安排。", primary: { href: `/opening/courses/${id}`, label: "回到课程" } }, id);
   expect(next).toMatchObject({ href: `/opening/courses/${id}`, label: "回到课程", notice: "请先授权导师安排。" });

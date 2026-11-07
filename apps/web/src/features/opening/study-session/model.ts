@@ -73,12 +73,13 @@ export type StudySessionView = {
   answerSummary?: string;
 };
 
-/** A finished step kept in this page's conversation; React state only, never persisted. */
+/** An earlier step kept in this page's conversation; React state only, never persisted. */
 export type ConversationEntry = { stepId: string; title: string; body?: string; answerSummary?: string; resultLabel?: string };
 export const CONVERSATION_HISTORY_LIMIT = 20;
 export function conversationEntry(view: StudySessionView): ConversationEntry {
   const body = view.step.kind === "learn" ? view.step.body : view.step.kind === "question" ? view.step.prompt : undefined;
-  return { stepId: view.step.id, title: view.step.title, body: body || undefined, answerSummary: view.answerSummary,
+  const title = view.step.kind === "question" ? `第 ${view.position.index + 1} 步：${view.step.title}` : view.step.title;
+  return { stepId: view.step.id, title, body: body || undefined, answerSummary: view.sealed ? view.answerSummary : undefined,
     resultLabel: view.result ? resultLabel(view.result) : undefined };
 }
 /** A revisited step replaces its older entry; the oldest entries drop past the limit. */

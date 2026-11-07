@@ -3,10 +3,13 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { LearningProse } from "../assistant/learning-prose";
 import { SuccessCheck } from "../v3/motion/feedback";
 import { ui } from "../design/ui";
+import { interactionMotionReduced } from "../design/haptics";
 import { resultLabel, type ConversationEntry, type StudySessionView } from "./model";
 
 type Props = {
   history: ConversationEntry[];
+  /** Owned by StudySession so temporary shell unmounts do not reset the scroll cursor. */
+  scrollCursor?: { current: string | null };
   view: StudySessionView;
   /** The current step, rendered by the shell's StepRenderer. */
   step: ReactNode;
@@ -17,23 +20,25 @@ type Props = {
 };
 
 /** The span session as one chronological conversation: earlier steps, the current step, my answer, feedback, then what comes next. */
-export function ConversationThread({ history, view, step, feedbackActions, successor }: Props) {
+export function ConversationThread({ history, scrollCursor, view, step, feedbackActions, successor }: Props) {
   const list = useRef<HTMLOListElement>(null);
-  const latest = `${history.length}:${view.step.id}:${view.result ? "result" : ""}:${successor ? "next" : ""}`;
-  const seen = useRef(latest);
+  const latest = JSON.stringify([view.step.id, Boolean(view.sealed && view.answerSummary), Boolean(view.result), Boolean(successor)]);
+  const localCursor = useRef<string | null>(null);
+  const seen = scrollCursor ?? localCursor;
   useEffect(() => {
-    if (seen.current === latest) return;
+    const previous = seen.current;
     seen.current = latest;
+    // A real first load is quiet, including a restored sealed answer or result.
+    if (previous === null || previous === latest) return;
     // Focus stays where the learner is; only the newest entry scrolls into view where the browser supports it.
     const last = list.current?.lastElementChild;
     if (!(last instanceof HTMLElement) || typeof last.scrollIntoView !== "function") return;
-    const reduced = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    last.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
-  }, [latest]);
+    last.scrollIntoView({ block: "nearest", behavior: interactionMotionReduced() ? "auto" : "smooth" });
+  }, [latest, seen]);
   const reasons = Boolean(view.result?.detail || view.result?.nextStep);
 
-  return <ol ref={list} aria-label="学习对话" className="space-y-6">
-    {history.map(entry => <li key={`history:${entry.stepId}`} aria-label={`已完成：${entry.title}`}
+  return <ol ref={list} aria-label="学习对话" className="space-y-6 [&>li]:scroll-mb-40 [&>li]:scroll-mt-24">
+    {history.map(entry => <li key={`history:${entry.stepId}`} aria-label={`之前的步骤：${entry.title}`}
       className="space-y-1 rounded-tile border border-line bg-surface-2 p-3 text-sm leading-7 text-text-2">
       {entry.body ? <details>
         <summary className="cursor-pointer font-medium text-text">{entry.title}</summary>

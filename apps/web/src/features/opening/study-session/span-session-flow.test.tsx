@@ -347,7 +347,7 @@ it("the v2 lesson owner PATCHes progress and renders the next question after a s
     expect(host.querySelector("section[aria-label='作答结果']")).toBeNull();
     expect(host.querySelector("select")).not.toBeNull();
     // The answered question stays above as a read-only entry while the new port loads the next one.
-    const done = host.querySelector(`ol[aria-label='学习对话'] li[aria-label^='已完成']`)!;
+    const done = host.querySelector(`ol[aria-label='学习对话'] li[aria-label^='之前的步骤']`)!;
     expect(done.textContent).toContain("独立答对");
     expect(done.querySelectorAll("input, select, textarea, button, fieldset")).toHaveLength(0);
   } finally { await act(async () => root.unmount()); host.remove(); }
