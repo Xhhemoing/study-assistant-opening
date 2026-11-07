@@ -82,6 +82,11 @@ describe("course route action canonical teaching decisions", () => {
     expect(mocks.record).toHaveBeenCalledTimes(1);
   });
 
+  it("读取路线时透传仓库的确定性判定开关", async () => {
+    await createOpeningCourseRouteActions(sql, { compilerEnabled: true, exactVerificationEnabled: true }).start(scope, "c", { goalId: "g", expectedGoalRevision: 1, requirementId: "r", expectedRequirementRevision: 1, clientKey: "request", minutes: 20 });
+    expect(mocks.read).toHaveBeenCalledWith(sql, scope, "c", undefined, true);
+  });
+
   it("旧缺绑定记录不进入决策，即使进度摘要说needs_correction", async () => {
     mocks.observations.mockResolvedValue({ projected: [row("legacy", { courseRequirement: undefined })], raw: [] });
     expect(await start()).toMatchObject({ kind: "ready", action: "diagnose", activity: { learnerFocus: { activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null } } });

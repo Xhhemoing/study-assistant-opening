@@ -261,7 +261,7 @@ describe("course-bound exam sprint canonical bridge", () => {
     expect((await summary()).groups[0]?.independentVerifiedCurrentCount).toBe(1);
     expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
     const skillEvidence = createOpeningSkillEvidenceRepository(f.sql);
-    expect((await skillEvidence.flagsForNode(f.scope, nodeId)).hasCheckedIndependent).toBe(true);
+    expect((await skillEvidence.flagsForNode(f.scope, courseId, nodeId)).hasCheckedIndependent).toBe(true);
     // The captured exam question uses the public pack source, not this external material.
     expect((await observation(String(oldLink.observation_id))).source_ids).not.toContain(material.sourceId);
     if (change === "privacy") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id)
@@ -274,7 +274,7 @@ describe("course-bound exam sprint canonical bridge", () => {
     // No summary repair/invalidation has touched the cached yes projection yet.
     expect((await f.sql`SELECT usable_for_current_version FROM opening_learning_eligibility WHERE root_observation_id=${String(oldLink.observation_id)}`)[0])
       .toMatchObject({ usable_for_current_version: "yes" });
-    expect(await skillEvidence.flagsForNode(f.scope, nodeId)).toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+    expect(await skillEvidence.flagsForNode(f.scope, courseId, nodeId)).toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
     expect((await knowledge.get(f.scope, courseId))!.snapshot.nodes[0]!.id).toBe(nodeId);
     expect(await eligibility(String(oldLink.observation_id))).toMatchObject({ usableForCurrentVersion: "no",
       reasonCodes: expect.arrayContaining(["version_unavailable"]) });

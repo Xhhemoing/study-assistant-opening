@@ -22,7 +22,7 @@ function receipt(row:Record<string,unknown>):CourseRouteRetestReceipt{
     taskStatus:row.task_status as CourseRouteRetestReceipt["taskStatus"],retestStatus:row.status as CourseRouteRetestReceipt["retestStatus"],
     href:`/opening/courses/${row.course_id}/study?task=${row.task_id}`};
 }
-export function createOpeningCourseRouteRetestRepository(sql:Sql){
+export function createOpeningCourseRouteRetestRepository(sql:Sql,options:{exactVerificationEnabled?:boolean}={}){
   return {async schedule(scope:Scope,courseId:string,raw:CourseRouteRetestSchedule):Promise<CourseRouteRetestReceipt>{
     const input=courseRouteRetestScheduleSchema.parse(raw);
     return sql.begin(async tx=>{
@@ -36,7 +36,7 @@ export function createOpeningCourseRouteRetestRepository(sql:Sql){
         return receipt(replay);}
       const goal=await assertLearningGoalAction(tx,scope,input.goalId,input.expectedGoalRevision);
       if(!goal.courseIds.includes(courseId))throw learningError("VALIDATION","目标不属于本课程。");
-      const snapshot=await readOpeningCourseRoute(tx,scope,courseId,input.activityId),context=await assertOpeningCourseRouteCurrent(tx,scope,input.activityId);
+      const snapshot=await readOpeningCourseRoute(tx,scope,courseId,input.activityId,options.exactVerificationEnabled),context=await assertOpeningCourseRouteCurrent(tx,scope,input.activityId);
       if(!context||context.goalId!==goal.id||snapshot.currentActivity?.pathVersion!==input.expectedPathVersion||snapshot.observationId!==input.observationId)
         throw learningError("CONFLICT","当前学习位置或有效评价已变化，请重新读取后安排。");
       const all=await readCourseRouteObservations(tx,scope,courseId),head=all.raw.find(item=>item.id===input.observationId),evidence=all.projected.find(item=>item.id===input.observationId);

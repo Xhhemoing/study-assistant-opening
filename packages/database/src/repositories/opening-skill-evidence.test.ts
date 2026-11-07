@@ -141,23 +141,32 @@ function flagsDatabase(options: { version?: number; excluded?: boolean; help?: b
 }
 
 describe("live node evidence flags", () => {
+  it("returns empty flags when no course-node evidence is found", async () => {
+    const sql = db(query => query.includes("FROM workspaces") ? [{ id: workspaceId }] : []);
+    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))
+      .toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+  });
+  it("rejects flags reads without workspace ownership", async () => {
+    await expect(createOpeningSkillEvidenceRepository(db(() => [])).flagsForNode(scope, courseId, nodeId))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
   it("qualifies an independent server-scored effective answer", async () => {
     const { sql, evidenceId } = flagsDatabase();
-    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, nodeId))
+    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))
       .toEqual({ nodeId, hasCheckedIndependent: true, hasAssistance: false, evidenceIds: [evidenceId] });
   });
   it.each([{ version: 2 }, { excluded: true }])("ignores a cached yes when current source facts disagree: %j", async options => {
     const { sql } = flagsDatabase(options);
-    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, nodeId))
+    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))
       .toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
   });
   it("uses delivered help instead of an independent assistance claim", async () => {
     const { sql, evidenceId } = flagsDatabase({ help: true });
-    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, nodeId))
+    expect(await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId))
       .toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: true, evidenceIds: [evidenceId] });
   });
   it("never upgrades a current learner self-report from cached yes values", async () => {
     const { sql } = flagsDatabase({ selfReport: true });
-    expect((await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, nodeId)).hasCheckedIndependent).toBe(false);
+    expect((await createOpeningSkillEvidenceRepository(sql).flagsForNode(scope, courseId, nodeId)).hasCheckedIndependent).toBe(false);
   });
 });

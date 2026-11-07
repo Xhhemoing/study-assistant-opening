@@ -18,8 +18,9 @@ export function decideCourseRouteVerification(
     if (previous?.kind === kind && previous.status === "ready" && normalize(previous.rubric) === normalize(rubric)) return previous;
     result = { kind, status: "needs_check", exerciseKeys: [], rubric, missingReasons: ["请先确认本要求的题目与判定标准"] };
   }
-  // Unchanged stored rows must not gain a revision just because the explanatory text differs.
-  if (result.status !== "ready" && previous?.kind === result.kind && previous.status === result.status &&
+  // Unchanged stored rows must not gain a revision just because the explanatory text differs;
+  // exact reasons always follow the current switch and sources.
+  if (result.kind !== "exact" && result.status !== "ready" && previous?.kind === result.kind && previous.status === result.status &&
       previous.exerciseKeys.length === 0 && normalize(previous.rubric) === normalize(rubric)) return previous;
   return result;
 }
