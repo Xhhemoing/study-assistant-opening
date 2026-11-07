@@ -23,12 +23,12 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
   return {kind:"choice",reason,message:messages[reason],courseId,href:href(courseId),requirementIds:ids};
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
-export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean}){
+export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
   async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin):Promise<CourseRouteActionResult>{
     const key=origin?`course-route-next:${origin.input.activityId}:${origin.input.observationId??"none"}`
       :"taskId" in input&&input.taskId?`course-route-task:${input.taskId}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
-    const snapshot=await readOpeningCourseRoute(tx,scope,courseId);
+    const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
       const context=courseRouteActivityContextSchema.parse((receipt.goal_json as {courseRoute:unknown}).courseRoute);
       if(context.goalId!==input.goalId)throw learningError("CONFLICT","原请求属于不同目标。");

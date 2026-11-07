@@ -112,6 +112,21 @@ it("exact readiness requires both capability and available sources", async () =>
   const third=await enabled.confirm(f.scope,x.courseId,{expectedRevisions:[{id:exact.id,revision:2}],requirements:[exact],confirmScope:true});
   expect(third.requirements[0]!.requirement.verification).toMatchObject({status:"missing",exerciseKeys:[]});
 });
+it("keeps a confirmed exact requirement ready through route start and next when the switch is on", async () => {
+  const x=await setup(), exact={...x.requirement,verification:{...x.requirement.verification,kind:"exact" as const}};
+  const enabled=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true,exactVerificationEnabled:true});
+  const confirmed=await enabled.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[exact],confirmScope:true});
+  expect(confirmed.requirements[0]).toMatchObject({status:"unobserved",sourcesAvailable:true,requirement:{revision:1,verification:{kind:"exact",status:"ready",exerciseKeys:[],missingReasons:[]}}});
+  const start=await enabled.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:exact.id,expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
+  if(start.kind!=="ready") throw new Error(JSON.stringify(start));
+  await compile(start.activity); const checked=await answer(start.activity);
+  const current=await enabled.read(f.scope,x.courseId,start.activity.id);
+  expect(current.requirements[0]).toMatchObject({status:"needs_verification",sourcesAvailable:true,requirement:{revision:1,verification:{kind:"exact",status:"ready"}}});
+  expect(current.summary.blocked).toBe(0);
+  // The action path only issues transfer_check for a ready requirement whose sources are available.
+  const next=await enabled.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20});
+  expect(next).toMatchObject({kind:"ready",requirementId:exact.id,action:"transfer_check"});
+});
 it("defaults suggested verification to unavailable until exact capability is enabled", async () => {
   const x=await setup(), nodeId=randomUUID();
   await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
