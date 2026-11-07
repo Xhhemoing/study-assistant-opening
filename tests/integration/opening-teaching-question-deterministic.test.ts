@@ -176,3 +176,18 @@ it("does not turn a second controlled answer to the same question into independe
   expect(repeated.observation.eligibility?.independentAttempt).not.toBe("yes");
   expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
 });
+
+it.each([
+  { outcome: "incorrect", firstAnswer: "1/2" },
+  { outcome: "correct", firstAnswer: "7/12" },
+])("keeps a fallback answer after a controlled $outcome verdict on the same question from becoming independent", async ({ outcome, firstAnswer }) => {
+  const x = await seed(), first = await x.submit(0, firstAnswer), fallback = await x.submit(0, "答案：7/12");
+  expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome });
+  expect(fallback.attempt.problemId).toBe(first.attempt.problemId);
+  expect(fallback.attempt.id).not.toBe(first.attempt.id);
+  expect(fallback.observation.verdictSource).toBe("self_report");
+  expect(fallback.observation.serverEvaluation).toBeUndefined();
+  expect(await gradingJobs(fallback.observation.id)).toHaveLength(1);
+  expect(fallback.observation.eligibility?.independentAttempt).not.toBe("yes");
+  expect(fallback.observation.allowsIndependent).toBe(false);
+});
