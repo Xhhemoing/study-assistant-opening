@@ -34,7 +34,7 @@ model: inherit
 
 - Conventional Commit；只 `git add` 具体路径，提交前 `git diff --check`；不 amend 他人提交。
 - 卡片授权推送时执行 `git push -u <remote> <branch>`，再 `gh pr create --base <卡片指定 base>`。
-- PR 正文写全相对 base 的改动、风险等级与依据、实际命令与退出码、unverified 范围和回滚方式（含迁移时必须写回滚方案），末尾注明"等待指定 Claude Opus 5.5 审查与精确 head CI"。
+- PR 正文写全相对 base 的改动、风险等级与依据、实际命令与退出码、unverified 范围和回滚方式（含迁移时必须写回滚方案），末尾注明"等待指定 Claude Opus 5.5 与 GPT 异家族审查及精确 head CI"。
 
 ## 红线
 
