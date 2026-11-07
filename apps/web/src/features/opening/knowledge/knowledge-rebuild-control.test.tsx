@@ -14,7 +14,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function server(patch: Partial<Server> = {}): Server { return { version: 2, nodes: 0, created: true, posts: [], reads: 0, signals: [], ...patch }; }
 // The fake transport ignores aborts on purpose, so a held request can still answer late.
@@ -138,6 +138,68 @@ it.each([
   expect([state.reads, state.posts.length]).toEqual([reads, posts]);
   expect(status()).toBe("没有看到新的整理结果，可以稍后刷新再看。");
   expect(onRebuilt).not.toHaveBeenCalled();
+});
+
+it("starts a fresh operation right after a timeout and ignores the old operation's late polling answer", async () => {
+  const gate = held();
+  const state = server({ read: read => read === 2 ? gate.response : undefined });
+  const onRebuilt = await render(state);
+  await act(async () => action().click());
+  await advance(KNOWLEDGE_POLL_TIMEOUT_MS);
+  expect(status()).toBe("没有看到新的整理结果，可以稍后刷新再看。");
+  expect(state.signals[2]?.aborted).toBe(true);
+  await act(async () => action().click());
+  expect([state.reads, state.posts.length]).toEqual([3, 2]);
+  expect(action().disabled).toBe(true);
+  await act(async () => { gate.release(Response.json(record({ ...state, version: 3, nodes: 2 }))); });
+  expect(status()).toContain("整理中");
+  expect(action().disabled).toBe(true);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(onRebuilt).not.toHaveBeenCalled();
+  expect([state.reads, state.posts.length]).toEqual([3, 2]);
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(state.reads).toBe(4);
+  expect(status()).toContain("整理中");
+  state.version = 4; state.nodes = 1;
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(status()).toBe("已整理：共 1 个知识点。刷新页面可查看新的知识图。");
+  expect(onRebuilt).toHaveBeenCalledTimes(1);
+  expect(onRebuilt.mock.calls[0]?.[0]).toMatchObject({ version: 4 });
+  expect([state.reads, state.posts.length]).toEqual([5, 2]);
+});
+
+it.each([
+  ["404 with the server's message", () => Response.json({ error: { code: "NOT_FOUND", message: "课程不存在或已无权访问" } }, { status: 404 }), "课程不存在或已无权访问"],
+  ["403 without a message", () => new Response(null, { status: 403 }), "整理请求没有完成，请稍后重试。"],
+] as const)("stops polling at once when a polling read returns %s", async (_label, failure, message) => {
+  const state = server({ read: read => read === 2 ? Promise.resolve(failure()) : undefined });
+  const onRebuilt = await render(state);
+  await act(async () => action().click());
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(message);
+  expect(action().disabled).toBe(false);
+  expect(action().textContent).toBe("整理知识点");
+  expect(state.signals.every(signal => signal.aborted)).toBe(true);
+  await advance(KNOWLEDGE_POLL_TIMEOUT_MS);
+  expect(state.reads).toBe(2);
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(message);
+  expect(onRebuilt).not.toHaveBeenCalled();
+});
+
+it("keeps polling through a 500 read until a newer version appears", async () => {
+  const state = server({ read: read => read === 2 ? Promise.resolve(Response.json({ error: { code: "INTERNAL", message: "服务暂时不可用" } }, { status: 500 })) : undefined });
+  const onRebuilt = await render(state);
+  await act(async () => action().click());
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(state.reads).toBe(2);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(action().disabled).toBe(true);
+  expect(state.signals.some(signal => signal.aborted)).toBe(false);
+  state.version = 3; state.nodes = 2;
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(state.reads).toBe(3);
+  expect(status()).toBe("已整理：共 2 个知识点。刷新页面可查看新的知识图。");
+  expect(onRebuilt).toHaveBeenCalledTimes(1);
 });
 
 it("stops polling once unmounted", async () => {
