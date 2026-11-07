@@ -165,7 +165,7 @@ npm run build
 
 ## Implementation Record
 
-**Delegation:** The configured project `worker` using `tokenfree-gpt/gpt-5.6-luna` was invoked after this plan was written. Pi blocked launch before the worker began because `C:\\Users\\86080\\.pi\\agent\\extensions\\price-sync-core.ts` does not export a valid factory. The main model then implemented this bounded slice test-first and performed the review.
+**Delegation:** The configured project `worker` using `tokenfree-gpt/gpt-5.6-luna` was invoked after this plan was written. Pi blocked launch before the worker began because `~/.pi/agent/extensions/price-sync-core.ts` does not export a valid factory. The main model then implemented this bounded slice test-first and performed the review.
 
 **Additional hardening completed after the initial implementation record:**
 

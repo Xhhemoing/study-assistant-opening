@@ -1,6 +1,6 @@
 # 开学版仓库 Review 与整理记录（2026-10-05）
 
-- 范围：`E:\Project\study-assistant-opening`，分支 `feat/opening-release`，审查基准 HEAD `2a10f57`（2026-10-05 11:39 UTC+8）。
+- 范围：`<repo>`，分支 `feat/opening-release`，审查基准 HEAD `2a10f57`（2026-10-05 11:39 UTC+8）。
 - 方式：只读审查代码、文档、Git 与 GitHub（`gh`）；本地实际运行了包级类型检查、全仓 ESLint 和计划校验器。没有运行数据库、Docker、浏览器或真实模型相关测试。
 - 标记约定：**[已核实]** 本次实际命令或读文件确认；**[未核实]** 只来自文档或推断，没有复跑。
 - 本文是 review 记录，不提升 `tasks.json` 状态，也不代表发布验收。
@@ -13,7 +13,7 @@
 4. **账本：43 项，25 verified / 1 active (C01) / 17 planned；校验器 PASS，Ready：Q03、V01、RP1–RP6** [已核实]。10-05 一次性把 11 项从 planned 提升为 verified（`4eaf858`），均明确不含浏览器验收。
 5. **RP1/RP2 的核心实现与测试在代码中已存在，但账本仍是 planned。** 按总计划，M2 门槛＝M01–M03＋RP1＋RP2，因此 **M2 在账本上未正式达成**（见 §3）。
 6. **浏览器 CI 的 20 个失败中，至少 5 个已确认是测试选择器/文案与现 UI 不一致**（auth 1 个、opening-shell 4 个）；其余 15 个根因未核实（§4.1）。
-7. **仓库卫生问题：** `b31feb7`（UI 提交）误提交了 2 个 tsx 编译缓存文件（`undefined/temp/tsx-86080/*`），同时夹带删除 `.learnings/`、`TODO.md`、`sync.sh` 等多处非 UI 改动；本地 `npm run lint` 因 `apps/web/.next-preview` 构建产物未被 ESLint 忽略而报 21111 个错误（源码本身无报错）。
+7. **仓库卫生问题：** `b31feb7`（UI 提交）误提交了 2 个 tsx 编译缓存文件（`undefined/temp/tsx-<user>/*`），同时夹带删除 `.learnings/`、`TODO.md`、`sync.sh` 等多处非 UI 改动；本地 `npm run lint` 因 `apps/web/.next-preview` 构建产物未被 ESLint 忽略而报 21111 个错误（源码本身无报错）。
 8. **Notion 开学版看板无法访问**（当前连接的是另一个工作区，页面 404），看板与仓库的一致性未核实。
 
 ## 2. 仓库现状（分支 / 远端 / worktree / CI）
@@ -32,7 +32,7 @@
 
 | Worktree / 分支 | HEAD | 与本分支关系 |
 |---|---|---|
-| `E:/Project/AIstudy` · `feat/complete-phase1-current-work` | `e7639c9` (09-06) | 已是本分支祖先（已包含）|
+| `AIstudy` · `feat/complete-phase1-current-work` | `e7639c9` (09-06) | 已是本分支祖先（已包含）|
 | `study-assistant-personal-use` · `codex/m4-integration` | `4382566` (09-25) | 自 `8d616c0` 分叉，独有 28 提交 |
 | `study-assistant-personal-use-next` · `codex/personal-use-integration-next` | `296358a` (09-27) | 自 `8d616c0` 分叉，独有 52 提交 |
 | `pu02`/`pu03`/`pu04`/`pu05`/`pu05b`/`pu06` · `codex/pu0x-*` | 09-25～09-27 | `git cherry` 显示其全部补丁已等价存在于 `codex/personal-use-integration-next`（各分支 not-in-next=0）|
@@ -60,9 +60,9 @@
 ### 3.2 证据与账本的不一致 [已核实]
 
 1. **P02 没有评审记录。** 队友描述的 “P02 CLOSED (Reviewer PASS)” 在仓库中找不到对应签字；`docs/superpowers/plans/2026-09-19-opening-grok-execution.md` 只有 09-20 的 Coder 自报与协调者复跑（day-planner 15/15、opening-plans handler 6/6）。P02 直到 10-05 才在 `4eaf858` 中提升，同样没有评审记录。
-2. **`m02-m03-active.md` 文件名与状态矛盾。** `docs/superpowers/evidence/2026-10-02-week-sprint/m02-m03-active.md` 被 M02、M03、U02 引为 verified 证据，但文件名是 “active”，正文写明浏览器验收待用户。
+2. **`m02-m03-active.md` 文件名与状态矛盾。** `docs/archive/superpowers/evidence/2026-10-02-week-sprint/m02-m03-active.md` 被 M02、M03、U02 引为 verified 证据，但文件名是 “active”，正文写明浏览器验收待用户。
 3. **P02/P03 证据计数不符。** `p02-p03-planning-reminders-verified.md`：integration 命令列出 4 个文件，输出却是 `Test Files 2 passed (2)`；repository 单测列出 3 个文件，输出 `2 passed (2)`。另外此文件使用 5433 端口，其它同批证据使用 15432。
-4. **RP1/RP2 与 M02 重叠。** M02 证据描述的 “历史/材料隐私准入” 与 “completeTurn 在工作区行锁下原子校验 epoch” 正是 RP1/RP2 的范围。代码抽查（§4.2）确认已实现，但 RP1/RP2 仍为 planned。`docs/superpowers/evidence/2026-09-21-opening-release/rp2-writeback-race.md:72` 写明 “worker 捕获错误并调用 fail() 的并发全链路未覆盖，不能宣称完整 RP2 verified”；`continuation-status.md` 记 RP1 “已实施，尚需合入门禁”。
+4. **RP1/RP2 与 M02 重叠。** M02 证据描述的 “历史/材料隐私准入” 与 “completeTurn 在工作区行锁下原子校验 epoch” 正是 RP1/RP2 的范围。代码抽查（§4.2）确认已实现，但 RP1/RP2 仍为 planned。`docs/archive/superpowers/evidence/2026-09-21-opening-release/rp2-writeback-race.md:72` 写明 “worker 捕获错误并调用 fail() 的并发全链路未覆盖，不能宣称完整 RP2 verified”；`continuation-status.md` 记 RP1 “已实施，尚需合入门禁”。
 5. **“prior M02 tip BLOCKED”** 对应 `2026-09-19-opening-grok-execution.md` 的 “BLOCKED / Coord” 段（09-20：worker 未把 `privacy` 传给 `createTutorTurnHandler`、job 仓库无 `workspacePrivacyEpoch`）。当前代码已接线：`apps/worker/src/index.ts:77`、`packages/database/src/repositories/opening-jobs.ts:141`。
 6. **任务数口径并存：** 27 项（09-12～09-14 的审计/证据）、37 项（`docs/design/2026-09-20-opening-frontend-review-plan.md:45`）、43 项（09-21 起至今）。旧文件是历史快照，不是错误，但读者容易误判。
 7. **10-05 批量提升（`4eaf858`）** 的 11 项（M01–M03、L01–L03、P02、P03、U02、U03 及 C01→active）都只有自动化测试证据，没有 PR/CI 绑定 SHA，也没有浏览器验收；而 `continuation-status.md` 自己约定 “合入验收须 PR/CI 绑定 SHA”。
@@ -114,7 +114,7 @@
 
 | 严重度 | 位置 | 发现 |
 |---|---|---|
-| 中 | `undefined/temp/tsx-86080/17909-*`（2 个文件，已被跟踪）| `b31feb7` 误提交的 tsx 编译缓存，内含 `packages/config/src/opening-model.ts` 的编译代码和本机绝对路径（`E:\Project\...`）。不含密钥，但不属于仓库。目录名 “undefined” 说明某处临时目录环境变量为空 [推断] |
+| 中 | `undefined/temp/tsx-<user>/17909-*`（2 个文件，已被跟踪）| `b31feb7` 误提交的 tsx 编译缓存，内含 `packages/config/src/opening-model.ts` 的编译代码和本机绝对路径（`<repo>\...`）。不含密钥，但不属于仓库。目录名 “undefined” 说明某处临时目录环境变量为空 [推断] |
 | 中 | `b31feb7` “feat: 深度优化界面 UI 和交互体验” | 一个 UI 提交混入大量非 UI 变更：删除 `.learnings/*`、`TODO.md`、`.hermes.md`、`sync.sh`、`demos/pelican-bicycle.html`、pi-sparkle 技能和一份 07-21 计划，重写 `AGENTS.md`，从 `eslint.config.mjs` 去掉 `.hermes/**`、`project/**` 忽略。建议 Heidi 确认这些删除是否有意 |
 | 低 | `eslint.config.mjs:7-17` | 忽略列表有 `**/.next/**`、`**/.next-opening-e2e/**`，但没有 `.next-preview`。本地 `eslint .` 报 21111 个错误，**全部**来自 `apps/web/.next-preview`；CI 中没有该目录，所以 CI 的 Lint 通过 [已核实] |
 | 低 | `package.json` 的 `typecheck/lint/test/build` | 都经 `bash scripts/run-heavy.sh` 执行；Windows 本机 PATH 中没有 `bash`，`npm run typecheck` 直接失败（`'bash' is not recognized`）。本次改为逐包直接运行 `tsc`，全部通过 [已核实] |
@@ -149,7 +149,7 @@
 ### 6.2 待 Heidi 确认（本次未执行）
 
 1. **推送** 13 个本地提交到 `study-assistant-opening`，让 CI 在 `2a10f57` 上重跑。
-2. **删除被误提交的 `undefined/temp/tsx-86080/*`**（2 个文件），并把 `undefined/` 加入 `.gitignore`。
+2. **删除被误提交的 `undefined/temp/tsx-<user>/*`**（2 个文件），并把 `undefined/` 加入 `.gitignore`。
 3. **确认 `b31feb7` 中的非 UI 删除**（`TODO.md`、`sync.sh`、`.hermes.md`、pi-sparkle 技能、demo、07-21 计划、ESLint 忽略项）是否有意；如非有意需恢复。
 4. **`eslint.config.mjs` 增加 `**/.next-preview/**` 忽略**（一行配置改动）。
 5. **修复浏览器 spec 漂移**：`auth.spec.ts:18` 改用 `getByRole('textbox', { name: '确认密码' })`；`opening-shell.spec.ts` 对齐 “学习工作台导航” 与当前空状态文案；其余 15 个失败逐个定位。是否授权 Agent 运行 Playwright 需你决定（AGENTS.md 默认不允许）。
@@ -235,9 +235,9 @@ Heidi 回复“请你分析并解决”后，按授权范围处理。分支 `fea
 
 ### Worktree / 分支清理
 
-- 已移除 worktree（普通 `git worktree remove`，不带 `--force`）：pu02、pu04、pu05、pu06。移除前已确认 `status --porcelain` 干净，`git cherry` 相对 `codex/personal-use-integration-next` 为 0 个未包含补丁。被忽略的 `.local/` 本地证据日志已先备份到 `E:\Project\.worktree-local-archive-2026-10-05\`。
-- pu05b：git 已注销该 worktree，但目录 `E:\Project\study-assistant-pu05b\node_modules` 残留。里面是指向 `study-assistant-personal-use\node_modules` 的 junction，目标已核实完好。残留目录未手工删除。
-- pu03：未移除。`.local/docling-venv` 和 `hf-home` 是指向 `C:\Users\86080\.cache\...` 与 `D:\CodexTaskCache\...` 的 junction，为避免误删外部缓存，暂不处理。
+- 已移除 worktree（普通 `git worktree remove`，不带 `--force`）：pu02、pu04、pu05、pu06。移除前已确认 `status --porcelain` 干净，`git cherry` 相对 `codex/personal-use-integration-next` 为 0 个未包含补丁。被忽略的 `.local/` 本地证据日志已先备份到仓库外的本地目录 `.worktree-local-archive-2026-10-05\`。
+- pu05b：git 已注销该 worktree，但目录 `<worktree>\node_modules` 残留。里面是指向 `study-assistant-personal-use\node_modules` 的 junction，目标已核实完好。残留目录未手工删除。
+- pu03：未移除。`.local/docling-venv` 和 `hf-home` 是指向 `<home>\.cache\...` 与本机缓存目录 `CodexTaskCache\...` 的 junction，为避免误删外部缓存，暂不处理。
 - 分支：6 个分支执行 `git branch -d` 全部被拒（"not fully merged"）。它们的补丁只是以等价补丁的形式存在于 integration-next，并没有合并进当前 HEAD。按约定未使用 `-D`，分支保留。
 
 ### 仍需 Heidi 决定

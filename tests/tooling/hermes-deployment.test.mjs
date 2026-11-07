@@ -826,3 +826,18 @@ test("release build receives the exact verified commit", t => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.log, new RegExp(`build-commit=${f.sha} verified=1`));
 });
+
+for (const [setting, value, attributes] of [["core.autocrlf", "true"], ["core.eol", "crlf", "* text\n"]]) {
+  test(`deploy archives the committed bytes despite local ${setting}=${value}`, t => {
+    const f = fixture(t, { MOCK_ARTIFACT_PROTOCOL: "delivery-leases-study-v2" });
+    // core.eol only converts files marked as text; the fixture commits no attributes.
+    if (attributes) {
+      mkdirSync(join(f.repo, ".git/info"), { recursive: true });
+      writeFileSync(join(f.repo, ".git/info/attributes"), attributes);
+    }
+    f.git("config", setting, value);
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(readlinkSync(f.current), "services/parser/placeholder"), "utf8"), "parser source\n");
+  });
+}

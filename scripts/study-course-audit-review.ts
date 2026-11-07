@@ -7,6 +7,7 @@ import { z } from "zod";
 import { courseRequirementProgressSchema, courseRequirementSchema, courseRouteSnapshotSchema } from "../packages/contracts/src/opening/course-route";
 import { activitySpecSchema } from "../packages/contracts/src/opening/teaching-content";
 import { uuidSchema } from "../packages/contracts/src/opening/foundation";
+import { binomialRatio } from "../packages/domain/src/opening/binomial-bound";
 import type { createCourseAuditSample } from "./study-course-audit-sample";
 import { createSolverEvidence } from "./study-course-audit-solver-evidence";
 
@@ -105,11 +106,35 @@ export function createCourseAuditReview(rawSample: unknown, rawReviews: unknown,
     const reviewed = correct + incorrect + unjudgeable;
     return { total: items.length, reviewed, pending: items.length - reviewed, correct, incorrect, unjudgeable };
   };
-  return { ...sample, format: "course-audit-review-v1",
+  // Acceptance is the point estimate <= 2%; the upper bound is reported, never a default gate.
+  const errorRate = (counts: ReturnType<typeof summarize>, population: number) => {
+    const judged = counts.correct + counts.incorrect, complete = counts.pending === 0;
+    const point = binomialRatio(counts.incorrect, judged);
+    const conservative = binomialRatio(counts.incorrect + counts.unjudgeable, judged + counts.unjudgeable);
+    return { population, sampleSize: counts.total, complete, judged, incorrect: counts.incorrect, unjudgeable: counts.unjudgeable,
+      rate: point.rate, upper95: point.upper95,
+      conservative: { errors: conservative.numerator, denominator: conservative.denominator, rate: conservative.rate, upper95: conservative.upper95 },
+      // A verdict only once every sampled answer is judged: pending or unjudgeable answers must be resolved first,
+      // otherwise a mostly-unjudgeable sample could read as passing. Integer form of incorrect / judged <= 2/100.
+      pointEstimateWithin2Percent: complete && counts.unjudgeable === 0 && judged > 0 ? counts.incorrect * 50 <= judged : null };
+  };
+  const groups = { all: samples, mandatory: samples.filter(item => item.requirement.mandatory),
+    optional: samples.filter(item => !item.requirement.mandatory) };
+  const reviewCounts = { all: summarize(groups.all), mandatory: summarize(groups.mandatory), optional: summarize(groups.optional) };
+  return { ...sample, format: "course-audit-review-v2",
     notice: "人工输入汇总，不证明审查独立性、整课通过、发布资格；缺口和未审样本不计作正确。",
     reviewDefinition: "reviewed = correct + incorrect + unjudgeable; total = reviewed + pending. Counts describe the entire selected sample, not the whole course.",
-    reviewCounts: { all: summarize(samples), mandatory: summarize(samples.filter(item => item.requirement.mandatory)),
-      optional: summarize(samples.filter(item => !item.requirement.mandatory)) }, samples };
+    errorRateDefinition: "rate = incorrect / judged, judged = correct + incorrect; conservative counts unjudgeable as errors over correct + incorrect + unjudgeable."
+      + " upper95 is a one-sided 95% Clopper–Pearson bound assuming independent binomial draws; correlation within a question family is not modelled."
+      + " pointEstimateWithin2Percent is a verdict only when complete (pending = 0), no answer is unjudgeable and at least one answer is judged (judged > 0); otherwise null."
+      + " upper95 <= 2% is not a default acceptance condition."
+      + " population is the eligible sampling frame and sampleSize the simple random sample drawn from it (for mandatory/optional, the part of that sample falling in the group, a random-sized subsample);"
+      + " sampling is without replacement, so the binomial bound is conservative relative to the hypergeometric one."
+      + " Questions picked by targeted error hunting are not random samples and must not be counted here.",
+    reviewCounts,
+    errorRate: { all: errorRate(reviewCounts.all, sample.counts.population),
+      mandatory: errorRate(reviewCounts.mandatory, sample.mandatory.eligible),
+      optional: errorRate(reviewCounts.optional, sample.optional.eligible) }, samples };
 }
 
 export async function runCourseAuditReview(args: string[]) {
@@ -124,6 +149,8 @@ Reviews: {courseId,results:[{identity,outcome:'correct'|'incorrect'|'unjudgeable
 Copy identity fields exactly from the sample: courseId, full requirement, activityId, specId, teachingUnitId,
 contentVersion, documentId, revisionNumber, questionBlockId, answerBlockId. No extra authority fields.
 Partial reviews leave pending samples; reviewed = correct + incorrect + unjudgeable. All denominators and gaps remain.
+errorRate (all/mandatory/optional): incorrect/judged with one-sided 95% upper bound (independence assumed), plus a
+conservative rate counting unjudgeable as errors; the 2% point-estimate check is null unless pending = 0, unjudgeable = 0 and judged > 0.
 Output is a NEW private (0600) file; no overwrites, database, network, model calls or automatic verification.
 Human input does not establish independence, whole-course correctness or release eligibility. No private content is printed.`);
     return;

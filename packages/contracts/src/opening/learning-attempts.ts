@@ -7,6 +7,10 @@ import { referenceCheckInputSchema, sourceVersionsSchema } from "./learning-evid
 import { matrixExerciseInputSchema, matrixExerciseSpecSchema } from "./matrix-evaluation";
 import { aiGradingWorkSourceSchema } from "./ai-evaluation";
 
+/** The submit transaction rolled back because the answer photo was not admitted: nothing is saved under this clientKey and the attempt is still unsubmitted. */
+export const observationSubmitRejectionReasonSchema = z.enum(["work_source_rejected"]);
+export type ObservationSubmitRejectionReason = z.infer<typeof observationSubmitRejectionReasonSchema>;
+
 export const learningAttemptProblemInputSchema = z.object({
   sourceId: uuidSchema.optional(),
   physicalPage: z.number().int().positive().nullable().optional(),

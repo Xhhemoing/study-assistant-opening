@@ -102,3 +102,9 @@ it("validates successor links with the legacy rule and keeps choices", () => {
   expect(() => adaptSpanNext({ kind: "choice", reason: "source_unavailable", message: "资料不可用", primary: { href: "https://evil.test", label: "继续" } }, id)).toThrow();
   expect(() => adaptSpanNext({ kind: "ready", href: `/opening/courses/${id}/study/span?lesson=${id}`, activityId: id, sessionId: id, courseId: "22222222-2222-4222-8222-222222222222", label: "x", resumed: false }, id)).toThrow();
 });
+
+it("keeps a successor choice as a visible notice instead of a folded reason", () => {
+  const next = adaptSpanNext({ kind: "choice", reason: "authorization_required", message: "请先授权导师安排。", primary: { href: `/opening/courses/${id}`, label: "回到课程" } }, id);
+  expect(next).toMatchObject({ href: `/opening/courses/${id}`, label: "回到课程", notice: "请先授权导师安排。" });
+  expect(next).not.toHaveProperty("reason");
+});

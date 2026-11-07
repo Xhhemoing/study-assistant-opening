@@ -56,7 +56,11 @@ Chromium (`playwright install chromium --with-deps` fails) and the image's newer
 `pg_dump` writes `SET transaction_timeout = 0;`, which `pg_restore` into the PG16
 service rejects (`opening-measurement-recovery`). Move off the pin only together
 with a Playwright upgrade, a PG16-compatible dump client, and a green CI run on
-the new image.
+the new image. The parser-venv cache key does not include the runner image, so
+when unpinning, bump its prefix to `parser-venv-v2` (or put the image into the key:
+`ImageOS`/`ImageVersion` are runner environment variables, not `env` context values,
+so first write them to a step output, e.g. `echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"`,
+and use that output in the key); otherwise a venv built on the old image is restored on the new one.
 
 The parser virtualenv cache (`parser-venv-v1-…`, keyed by the lockfile and the
 install script) is the only Python dependency cache. `setup-python` no longer uses
@@ -164,12 +168,22 @@ Playwright Chromium plus an isolated E2E database whose name ends in `_e2e`.
 The existing CI browser step remains required. Neither a scoped check nor a
 full local run replaces the remote CI result for the current commit.
 
-By default, `run-heavy.sh` uses `flock`, `nice`, `ionice`, and `taskset` only when each tool
-is available. On Windows Git Bash or minimal containers, unavailable host
-scheduling controls produce one warning and the requested command still runs;
-its exit code is preserved. This fallback removes a portability blocker but
-does not provide cross-process serialization. Set `HERMES_HEAVY_ENABLED=0` only
-when the caller has an isolated environment and does not need those host controls.
+npm scripts call `node scripts/run-heavy.mjs`. On POSIX it delegates to
+`run-heavy.sh`, which uses `flock`, `nice`, `ionice`, and `taskset` only when each
+tool is available. In minimal containers, unavailable host scheduling controls
+produce one warning and the requested command still runs with its exit code
+preserved, but without cross-process serialization. On Windows, or with
+`HERMES_HEAVY_LOCK_IMPL=node`, the wrapper uses a portable Node directory lock
+instead and needs no Bash. The Node lock and `flock` do not exclude each other, so
+callers on one host serialize only when they use the same implementation and the
+same `HERMES_HEAVY_LOCK` path; do not mix them on a POSIX host. With either lock,
+waiting longer than `HERMES_HEAVY_LOCK_TIMEOUT` seconds (default 120) exits with
+code 75. The Node lock holder also waits, within that same timeout, until available
+memory reaches `HERMES_HEAVY_MIN_FREE_MB` (default 1024; `0` disables) and
+otherwise exits with code 75 before starting the command. Negative or non-numeric
+values for either setting exit with code 64. Set
+`HERMES_HEAVY_ENABLED=0` only when the caller has an isolated environment and does
+not need those host controls.
 
 ### Authoritative merge gate
 
@@ -195,11 +209,18 @@ Machine index for the opening-release candidate tip (RP7). Cite the tip SHA plus
 the quality Actions URL; do not treat index presence as packaging verified or
 prod cutover.
 
-- JSON: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json)
-- Companion MD: [`docs/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md`](../superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md)
+- JSON: [`docs/archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json`](../archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.json)
+- Companion MD: [`docs/archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md`](../archive/superpowers/evidence/2026-10-10-opening-release/release-evidence-index.md)
 
 Rows whose commit SHA differs from the index tip are marked `stale` and need
 re-run on tip. Q03 ledger status is independent of this index.
+
+Evidence of completed slices now lives under `docs/archive/superpowers/evidence/`
+and is read-only apart from privacy redaction; plan lines that point there record
+where that evidence ended up. Ordinary development does not create evidence files:
+only when a plan explicitly requires merge- or release-stage evidence does it go to
+the `docs/superpowers/evidence/<date>…/` path that plan names. The CI classifier
+protects both trees, so changes in either take the full CI path.
 
 ## Opening parser and isolated test bootstrap
 
@@ -214,7 +235,7 @@ pinned Python dependencies and required model resources before running real
 parser tests. Runtime document conversion remains offline; preparing the model
 cache is a separate setup operation.
 
-The [2026-09-27 execution record](../superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)
+The [2026-09-27 execution record](../archive/superpowers/evidence/2026-09-27-opening-hardening/verification-entry.md)
 contains the observed failure, minimal changes, local verification and outstanding
 checks for OP-01–OP-03 (B02/F03/Q01/RP5/Q03). It is not a replacement for the
 merged-commit GitHub Actions result or the original task ledger.

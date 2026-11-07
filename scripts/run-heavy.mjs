@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 // Cross-platform entry for heavy validation tasks.
 // POSIX: delegate to run-heavy.sh (flock + nice/ionice/taskset).
-// Windows (or HERMES_HEAVY_LOCK_IMPL=node): take the same machine-wide slot with the
-// portable directory lock in heavy-lock.mjs, then run the command.
+// Windows (or HERMES_HEAVY_LOCK_IMPL=node): serialize with the portable directory lock in
+// heavy-lock.mjs, then run the command. That lock does not exclude flock holders, so
+// callers on one POSIX host share a slot only if they all use the same implementation.
+// The lock holder then waits, within the same timeout, for HERMES_HEAVY_MIN_FREE_MB
+// (default 1024; 0 disables) of available memory before starting the command.
 // HERMES_HEAVY_ENABLED=0 skips local host controls, for isolated CI runners.
 // In both cases the wrapper forwards SIGINT/SIGTERM/SIGHUP to the whole child tree
 // and releases the slot when the child exits.
 import { spawn, spawnSync } from "node:child_process";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { acquireHeavyLock, defaultLockPath } from "./heavy-lock.mjs";
 
@@ -26,6 +30,31 @@ export function killTree(child, signal = "SIGTERM") {
   try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* gone */ } }
 }
 
+/**
+ * Starting a heavy task on a nearly exhausted host pushes it, and every other session,
+ * into the page file, so the lock holder waits for headroom before spawning.
+ */
+export async function waitForFreeMemory({ minFreeBytes, deadline, pollMs = 1000, freemem = os.freemem }) {
+  for (let first = true; ; first = false) {
+    const enough = freemem() >= minFreeBytes;
+    const remaining = deadline - Date.now();
+    if (enough && (first || remaining >= 0)) return true;
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remaining)));
+  }
+}
+
+function nonNegativeEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`${name} must be a non-negative number, got "${raw}".`);
+    process.exit(64);
+  }
+  return value;
+}
+
 const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
 
 async function run() {
@@ -42,17 +71,22 @@ async function run() {
   // even when there is intentionally no lock to acquire in CI.
   if (!enabled) env.HERMES_HEAVY_LOCK_HELD = "1";
   if (useNodeLock && process.env.HERMES_HEAVY_LOCK_HELD !== "1") {
+    const timeoutSeconds = nonNegativeEnv("HERMES_HEAVY_LOCK_TIMEOUT", 120);
+    const minFreeMb = nonNegativeEnv("HERMES_HEAVY_MIN_FREE_MB", 1024);
+    const deadline = Date.now() + timeoutSeconds * 1000;
     try {
-      release = await acquireHeavyLock({
-        lockPath: defaultLockPath(),
-        timeoutMs: Number(process.env.HERMES_HEAVY_LOCK_TIMEOUT ?? 120) * 1000,
-      });
+      release = await acquireHeavyLock({ lockPath: defaultLockPath(), timeoutMs: deadline - Date.now() });
     } catch (error) {
       if (error.code === "ELOCKTIMEOUT") {
         console.error("Another project validation task is running; refusing to overlap.");
         process.exit(75);
       }
       throw error;
+    }
+    if (!(await waitForFreeMemory({ minFreeBytes: minFreeMb * 1024 * 1024, deadline }))) {
+      console.error(`Available memory stayed below ${minFreeMb} MB; refusing to start a heavy task.`);
+      release();
+      process.exit(75);
     }
     env.HERMES_HEAVY_LOCK_HELD = "1";
   }

@@ -1,30 +1,6 @@
 import { aiGradingProposalSchema, gradingEvaluationDatasetSchema, gradingEvaluationRunSchema } from "@aistudy/contracts";
-import { acceptedAiGradingOutcome, checkArithmeticAnswer, corroborateArithmeticGrade } from "@aistudy/domain";
+import { acceptedAiGradingOutcome, binomialRatio as ratio, checkArithmeticAnswer, corroborateArithmeticGrade } from "@aistudy/domain";
 import { parseModelJson } from "./latex-json";
-
-/** Solve P(Binomial(n, p) <= k) = 0.05 in log space (one-sided Clopper–Pearson). */
-function upper95(k: number, n: number): number | null {
-  if (!n) return null;
-  if (k === n) return 1;
-  if (!k) return -Math.expm1(Math.log(0.05) / n);
-  let low = k / n, high = 1;
-  for (let iteration = 0; iteration < 60; iteration += 1) {
-    const p = (low + high) / 2;
-    let logTerm = n * Math.log1p(-p), logSum = logTerm;
-    for (let j = 1; j <= k; j += 1) {
-      logTerm += Math.log(n - j + 1) - Math.log(j) + Math.log(p) - Math.log1p(-p);
-      const maximum = Math.max(logSum, logTerm);
-      logSum = maximum + Math.log(Math.exp(logSum - maximum) + Math.exp(logTerm - maximum));
-    }
-    if (logSum > Math.log(0.05)) low = p;
-    else high = p;
-  }
-  return high;
-}
-
-function ratio(numerator: number, denominator: number) {
-  return { numerator, denominator, rate: denominator ? numerator / denominator : null, upper95: upper95(numerator, denominator) };
-}
 
 /** Offline evaluation only: never imports scores into a learner's history or treats AI labels as truth. */
 export function evaluateGradingRun(rawDataset: unknown, rawRun: unknown) {

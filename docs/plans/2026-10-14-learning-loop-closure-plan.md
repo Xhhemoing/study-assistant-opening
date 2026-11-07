@@ -355,7 +355,7 @@ apps/web/src/features/opening/inbox/*.test.ts
 3. **支线 A**：S1 → S2 → S3 → S7（S2/S3 都改 `teaching-workspace.tsx`，须串行该文件）。
 4. **支线 B**：S4 → S6（S8 后置）。
 5. **串行**：S9 → S10（`packages/contracts` 归属按 Codex 协作约定串行分配）。
-6. 每条切片完成后按 `docs/operations/codex-team.md` 做一次独立审查，再交付用户浏览器验收。
+6. 每条切片完成后按 `docs/archive/operations/codex-team.md` 做一次独立审查，再交付用户浏览器验收。
 
 ## 证据分层（沿用项目约定）
 

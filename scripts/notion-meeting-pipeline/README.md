@@ -251,7 +251,7 @@ ffmpeg -i teacher_full.mp4 -vn -c:a aac -b:a 64k teacher_full_64k.m4a
 
 ### 6.1 完整源与准备产物
 
-本课使用的完整源是 `E:/Mathematics I/recordings/6108854/teacher_full.mp4`，不是试听片段、分段文件或截断文件：
+本课使用的完整源是 `<recordings>/6108854/teacher_full.mp4`，不是试听片段、分段文件或截断文件：
 
 | 项 | 实测值 |
 |----|--------|

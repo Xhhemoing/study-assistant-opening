@@ -31,7 +31,7 @@
 
 - 评价与 UI 线索：`docs/quality/teaching-v2-evaluation.md`
 - 计划：`docs/superpowers/plans/ai-led-learning-v2/plan.md`（V2-02、§5.1–5.3）
-- Experience 证据：`docs/superpowers/evidence/2026-10-11-opening-release/v2-02-experience-ui-acceptance-implement.md`
+- Experience 证据：`docs/archive/superpowers/evidence/2026-10-11-opening-release/v2-02-experience-ui-acceptance-implement.md`
 
 ---
 

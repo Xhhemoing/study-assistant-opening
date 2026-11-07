@@ -45,7 +45,7 @@ function NextControl({ activity, courseId, client: suppliedClient, onNavigate = 
   const retestCancelled = retest && (retest.taskStatus === "skipped" || ["cancelled", "declined", "invalidated", "superseded"].includes(retest.retestStatus));
   const retestDone = retest && (retest.taskStatus === "done" || retest.retestStatus === "completed");
   return <section className="space-y-2 border-t border-line pt-3" aria-label="课程路线下一步">
-    <p className="text-xs leading-6 text-text-3">根据本次真实结果核对下一步：独立验证、纠偏、前置补课或整体验证。当前通过与延迟验证分开记录，不自动视作长期掌握。</p>
+    <p className="text-xs leading-6 text-text-3">根据本次结果安排下一步；普通学习的未校准判定不计入验证，可继续学习，前置练习完成后返回原要求。当前通过与延迟验证分开记录，不自动视作长期掌握。</p>
     <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={busy || requirementChanged || Boolean(pending && pending.kind !== "next")} onClick={() => void execute("next")}>{busy && pending?.kind === "next" ? "正在核对…" : pending?.kind === "next" ? "重新确认这次下一步" : "核对结果并安排下一步"}</button><button type="button" className={ui.quiet} disabled={busy || requirementChanged || Boolean(pending && pending.kind !== "retest")} onClick={() => void execute("retest")}>{pending?.kind === "retest" ? "重新确认这次复测" : "安排3天后复测"}</button></div>
     {pending ? <p role="status" className="text-xs text-warn">{pending.kind === "retest" ? "复测安排结果尚未确认" : "下一步结果尚未确认"}；原活动、版本和证据引用已保留。</p> : null}
     {storageWarning ? <p className="text-xs text-warn">恢复信息无法保存，请保留本页；刷新后可能无法恢复这次请求。</p> : null}

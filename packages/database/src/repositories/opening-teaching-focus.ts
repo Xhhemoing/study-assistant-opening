@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { knowledgeSnapshotSchema, teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
+import { buildDecisionInput, evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { plannerSuggestionKind } from "./opening-task-fields";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
@@ -20,6 +20,9 @@ export async function readOpeningTeachingTaskFocus(sql: Sql, scope: Scope, taskI
   } : null;
 }
 
+/** Written by opening-course-route-actions for route-managed activities. */
+const COURSE_ROUTE_STRATEGY_VERSION = "course-route-1";
+
 export type TeachingCompilerFocus = {
   learnerFocus?: TeachingLearnerFocus;
   focusAttempt?: { question: string; answer: string };
@@ -33,10 +36,12 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
     && (learnerFocus.requirementKey === undefined || (row.requirementKey ?? null) === learnerFocus.requirementKey));
   if (summaries.length !== 1) return {};
   const target = summaries[0]!;
-  const observations = mapped.observations.filter(row => normalizeSkillLabelKey(row.skillLabel) === labelKey
-    && (row.requirementKey ?? null) === (target.requirementKey ?? null))
-    .sort((a, b) => Date.parse(b.attemptedAt) - Date.parse(a.attemptedAt) || a.id.localeCompare(b.id));
-  const next = nextLearningStep({ status: target.status, observations, wantsFullExplanation: false });
+  const input = buildDecisionInput({ wantsFullExplanation: false,
+    observations: mapped.observations.filter(row => normalizeSkillLabelKey(row.skillLabel) === labelKey
+      && (row.requirementKey ?? null) === (target.requirementKey ?? null)),
+  });
+  const { observations } = input;
+  const next = nextLearningStep(input);
   if (!observations.some(row => row.usableForCurrentVersion === "yes")) return {};
   if (next.activityKind !== learnerFocus.activityKind || next.focusObservationId !== learnerFocus.focusObservationId) {
     const { recentErrors: _errors, prerequisiteRepair: _repair, ...base } = learnerFocus;
@@ -103,11 +108,15 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   if (!parsed.success) return {};
   const courseId = activity?.course_id ? String(activity.course_id) : null;
   const storedFocus = parsed.data;
+  // Course-route activities keep the route's requirement-qualified snapshot (also
+  // recorded in the activity receipt and revalidated by the agenda). Re-deriving it
+  // here from label/key-scoped evidence would silently replace the route's action.
+  const routeSnapshot = storedFocus.strategyVersion === COURSE_ROUTE_STRATEGY_VERSION;
   const needsEvidence = Boolean(storedFocus.prerequisiteRepair || storedFocus.focusObservationId
-    || (storedFocus.activityKind !== "full_explain" && storedFocus.activityKind !== "diagnose"));
+    || (!routeSnapshot && storedFocus.activityKind !== "full_explain" && storedFocus.activityKind !== "diagnose"));
   const evidence = needsEvidence && courseId ? await readOpeningCourseEvidence(sql, scope, courseId) : undefined;
   const learnerFocus = await recheckPrerequisite(sql, scope, courseId, storedFocus, evidence);
-  if (!learnerFocus.focusObservationId && (learnerFocus.activityKind === "full_explain" || learnerFocus.activityKind === "diagnose")) return { learnerFocus };
+  if (!learnerFocus.focusObservationId && (routeSnapshot || learnerFocus.activityKind === "full_explain" || learnerFocus.activityKind === "diagnose")) return { learnerFocus };
   if (!evidence) return withoutCurrentEvidence(learnerFocus);
   if (!learnerFocus.focusObservationId) {
     const checked = recheckDerivedFocus(learnerFocus, evidence);
@@ -123,6 +132,8 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   )) return withoutCurrentEvidence(learnerFocus);
   const qualified = evaluateEvidenceEligibility(eligibility.observation, eligibility.context);
   if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return withoutCurrentEvidence(learnerFocus);
+  // The focused answer is still current and incorrect: attach it, keep the route's action.
+  if (routeSnapshot) return withFocusAttempt(sql, scope, learnerFocus, evidence);
   const refreshed = recheckDerivedFocus(learnerFocus, evidence);
   if (!refreshed.learnerFocus) return withoutCurrentEvidence(learnerFocus);
   return withFocusAttempt(sql, scope, refreshed.learnerFocus, evidence);
