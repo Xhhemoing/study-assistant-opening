@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   aggregateHighestExposure,
   buildTutorActions,
-  createSkillEvidenceDepsFromDatabase,
   listTutorActionsForCourse,
   parseTutorActionsSearchParams,
   type TutorActionObservationDeps,
@@ -22,9 +21,7 @@ function createDeps(
     getSession: vi.fn(async () => null),
     listDeliveredExposures: vi.fn(async () => []),
     listDueRetests: vi.fn(async () => []),
-    listSkillEvidenceForNode: vi.fn(async () => []),
-    hasAssistanceForNode: vi.fn(async () => false),
-    hasCheckedIndependentForNode: vi.fn(async () => false),
+    flagsForNode: vi.fn(async () => ({ hasAssistance: false, hasCheckedIndependent: false, evidenceIds: [] })),
     ...overrides,
   };
 }
@@ -204,43 +201,6 @@ describe("aggregateHighestExposure", () => {
   });
 });
 
-describe("createSkillEvidenceDepsFromDatabase", () => {
-  it("stubs empty flags when the SkillEvidence repository is not landed", () => {
-    const deps = createSkillEvidenceDepsFromDatabase({} as never, {});
-    expect(deps).toBeTruthy();
-  });
-
-  it("binds to createOpeningSkillEvidenceRepository when present", async () => {
-    const listByNode = vi.fn(async () => [
-      { nodeId: NODE, observationId: OBS, dimension: "procedure" as const },
-    ]);
-    const flagsForNode = vi.fn(async () => ({
-      nodeId: NODE,
-      hasAssistance: true,
-      hasCheckedIndependent: false,
-      evidenceIds: [OBS],
-    }));
-    const deps = createSkillEvidenceDepsFromDatabase({} as never, {
-      createOpeningSkillEvidenceRepository: () => ({
-        listByNode,
-        flagsForNode,
-      }),
-    });
-    await expect(deps.listSkillEvidenceForNode(scope, NODE)).resolves.toEqual([
-      { nodeId: NODE, observationId: OBS, dimension: "procedure" },
-    ]);
-    await expect(deps.hasAssistanceForNode(scope, NODE)).resolves.toBe(true);
-    await expect(deps.hasCheckedIndependentForNode(scope, NODE)).resolves.toBe(
-      false,
-    );
-    await expect(deps.flagsForNode?.(scope, NODE)).resolves.toEqual({
-      hasAssistance: true,
-      hasCheckedIndependent: false,
-      evidenceIds: [OBS],
-    });
-  });
-});
-
 describe("listTutorActionsForCourse authorization", () => {
   it("gates the real recommendation consumer with effective intervention preferences", async () => {
     const deps = createDeps({
@@ -374,33 +334,15 @@ describe("listTutorActionsForCourse authorization", () => {
     expect(actions[0]!.kind).toBe("independent_variant");
     expect(actions[0]!.nodeId).toBe(NODE);
     expect(actions[0]!.evidenceIds).toEqual([OBS]);
-    expect(flagsForNode).toHaveBeenCalledWith(scope, NODE);
+    expect(flagsForNode).toHaveBeenCalledWith(scope, COURSE, NODE);
   });
 
-  it("falls back to discrete flag loaders when flagsForNode is absent", async () => {
-    const deps = createDeps({
-      flagsForNode: undefined,
-      listSkillEvidenceForNode: vi.fn(async () => [
-        { nodeId: NODE, observationId: OBS, dimension: "transfer" as const },
-      ]),
-      hasAssistanceForNode: vi.fn(async () => true),
-      hasCheckedIndependentForNode: vi.fn(async () => false),
-    });
-    const actions = await listTutorActionsForCourse(
-      {} as never,
-      scope,
-      COURSE,
-      new URLSearchParams({
-        skillLabel: "chain rule",
-        currentPage: "2",
-        nodeId: NODE,
-      }),
-      deps,
+  it("does not load node flags on the thin path", async () => {
+    const deps = createDeps();
+    await listTutorActionsForCourse(
+      {} as never, scope, COURSE,
+      new URLSearchParams({ skillLabel: "chain rule", currentPage: "2" }), deps,
     );
-    expect(actions[0]!.kind).toBe("independent_variant");
-    expect(actions[0]!.evidenceIds).toEqual([OBS]);
-    expect(deps.listSkillEvidenceForNode).toHaveBeenCalledWith(scope, NODE);
-    expect(deps.hasAssistanceForNode).toHaveBeenCalledWith(scope, NODE);
-    expect(deps.hasCheckedIndependentForNode).toHaveBeenCalledWith(scope, NODE);
+    expect(deps.flagsForNode).not.toHaveBeenCalled();
   });
 });
