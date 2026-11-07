@@ -79,9 +79,35 @@ describe("choice answer and key boundaries", () => {
     expect(check(question, choice, "B", answer)).toBe("unparseable");
   });
 
-  it("takes the saved id before the first delimiter, not the submitted label", () => {
-    expect(check(question, choice, "B", "B. 1/2. other text")).toBe("correct");
-    expect(check(question, choice, "B", "A. 7/12")).toBe("incorrect");
+  it("requires the entire submitted option to match its saved id and label", () => {
+    expect(check(question, choice, "B", "B. 1/2. other text")).toBe("unparseable");
+    expect(check(question, choice, "B", "A. 7/12")).toBe("unparseable");
+    expect(check(question, choice, "B", "B. 1/2")).toBe("unparseable");
+  });
+
+  it("uses the full submitted option when an id contains the delimiter", () => {
+    const options = [{ id: "B", label: "2" }, { id: "B. 1", label: "3" }];
+    // The submission uniquely identifies B. 1, whose value is incorrect.
+    expect(check("1+1", { kind: "choice", options }, "B", "B. 1. 3")).toBe("incorrect");
+  });
+
+  it("does not control submissions matching multiple complete options", () => {
+    const options = [{ id: "B", label: "1. 3" }, { id: "B. 1", label: "3" }, { id: "C", label: "2" }];
+    expect(check("1+1", { kind: "choice", options }, "C", "B. 1. 3")).toBeNull();
+  });
+
+  it("rejects overlapping key ids regardless of option order", () => {
+    const options = [{ id: "B", label: "2" }, { id: "B.1", label: "3" }];
+    for (const ordered of [options, [...options].reverse()]) {
+      expect(check("1+1", { kind: "choice", options: ordered }, "B.1", "B. 2")).toBeNull();
+    }
+  });
+
+  it("rejects overlapping closing-parenthesis key ids regardless of option order", () => {
+    const options = [{ id: "A", label: "2" }, { id: "A)", label: "3" }];
+    for (const ordered of [options, [...options].reverse()]) {
+      expect(check("1+1", { kind: "choice", options: ordered }, "(A)", "A. 2")).toBeNull();
+    }
   });
 
   it("only matches option labels that are single numeric literals", () => {

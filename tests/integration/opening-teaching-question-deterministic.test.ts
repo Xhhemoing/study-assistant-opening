@@ -123,7 +123,7 @@ it.each([
 ])("keeps $name unknown and queues ordinary AI feedback", async ({ question, answer }) => {
   const x = await seed([question]), result = await x.submit(0, answer);
   expect(result.observation.verdictSource).toBe("self_report");
-  expect(result.observation.serverEvaluation).toBeNull();
+  expect(result.observation.serverEvaluation).toBeUndefined();
   expect(result.observation.eligibility?.verifiedCorrect).not.toBe("yes");
   expect(result.observation.allowsIndependent).toBe(false);
   expect(await gradingJobs(result.observation.id)).toHaveLength(1);

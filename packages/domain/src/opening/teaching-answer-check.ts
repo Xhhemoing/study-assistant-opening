@@ -24,7 +24,7 @@ export function evaluateTeachingAnswer(question: string, interaction: TeachingQu
   });
   if (matches.length !== 1) return null;
   const trimmed = key.trim();
-  const prefix = interaction.options.find(option => {
+  const prefixIds = new Set(interaction.options.filter(option => {
     for (const lead of ["", "(", "（"]) {
       const start = lead + option.id;
       if (!trimmed.startsWith(start)) continue;
@@ -33,10 +33,11 @@ export function evaluateTeachingAnswer(question: string, interaction: TeachingQu
       if (!tail || /^[\s.．、:：,，]/u.test(tail)) return true;
     }
     return false;
-  });
-  if (prefix ? prefix.id !== matches[0]!.id : checkArithmeticAnswer(question, key) !== "correct") return null;
-  const split = answer.indexOf(". ");
-  const id = split < 0 ? "" : answer.slice(0, split);
-  if (!interaction.options.some(option => option.id === id)) return "unparseable";
-  return id === matches[0]!.id ? "correct" : "incorrect";
+  }).map(option => option.id));
+  if (prefixIds.size > 1) return null;
+  if (prefixIds.size === 1 ? !prefixIds.has(matches[0]!.id) : checkArithmeticAnswer(question, key) !== "correct") return null;
+  const submitted = interaction.options.filter(option => answer === `${option.id}. ${option.label}`);
+  if (submitted.length === 0) return "unparseable";
+  if (submitted.length > 1) return null;
+  return submitted[0]!.id === matches[0]!.id ? "correct" : "incorrect";
 }
