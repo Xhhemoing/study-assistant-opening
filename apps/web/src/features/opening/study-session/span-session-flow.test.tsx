@@ -248,8 +248,13 @@ it.each(["self-faded", "self-independent", "last move", "overview", "challenge"]
       expect(save).not.toHaveBeenCalled();
       expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), expect.objectContaining({ method: "POST" }));
       expect(JSON.parse(mocks.request.mock.calls[0]![2].body)).toEqual({ activityId, expectedRevision: 1, observationId: record.id, clientKey: `span-next:${activityId}:1:${record.id}` });
-      const notice = [...ui.host.querySelectorAll("section[aria-label='作答结果'] p")].find(node => node.textContent === "请先授权导师安排。");
+      // The successor card carries the visible notice and the continue action; the footer keeps the redo primary.
+      const card = ui.host.querySelector("ol[aria-label='学习对话'] section[aria-label='下一步']")!;
+      const notice = [...card.querySelectorAll("p")].find(node => node.textContent === "请先授权导师安排。");
       expect(notice?.closest("details")).toBeNull();
+      expect(ui.host.querySelector("footer [data-primary-action]")?.textContent).toBe("改这道题");
+      expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+      expect([...card.querySelectorAll("button")].map(node => node.textContent)).toEqual(["看下一步安排"]);
       await ui.click("看下一步安排");
       expect(mocks.push).toHaveBeenCalledExactlyOnceWith(`/opening/courses/${courseId}`);
       expect(mocks.request).toHaveBeenCalledTimes(1);
@@ -341,6 +346,10 @@ it("the v2 lesson owner PATCHes progress and renders the next question after a s
     expect(host.querySelector("ol[aria-label='第 4 步，共 4 步']")).not.toBeNull();
     expect(host.querySelector("section[aria-label='作答结果']")).toBeNull();
     expect(host.querySelector("select")).not.toBeNull();
+    // The answered question stays above as a read-only entry while the new port loads the next one.
+    const done = host.querySelector(`ol[aria-label='学习对话'] li[aria-label^='之前的步骤']`)!;
+    expect(done.textContent).toContain("独立答对");
+    expect(done.querySelectorAll("input, select, textarea, button, fieldset")).toHaveLength(0);
   } finally { await act(async () => root.unmount()); host.remove(); }
 });
 
@@ -435,6 +444,7 @@ it("seals the last confidence choice with the first answer and keeps it read-onl
     // Without an estimate the top bar shows the learner's own session time.
     expect(ui.host.querySelector("header")!.textContent).toContain("本次时长 20 分钟");
     await ui.select("in_span");
+    expect(ui.host.querySelector("section[aria-label='我的作答']")).toBeNull();
     await ui.click("没把握"); expect(ui.confidence()).toEqual({ pressed: ["没把握"], locked: false });
     await ui.click("有把握"); expect(ui.confidence()).toEqual({ pressed: ["有把握"], locked: false });
     await ui.click("有把握"); expect(ui.confidence()).toEqual({ pressed: [], locked: false });
@@ -448,6 +458,7 @@ it("seals the last confidence choice with the first answer and keeps it read-onl
     expect(ui.confidence()).toEqual({ pressed: ["有点把握"], locked: true });
     expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("重新确认提交");
     expect(ui.host.querySelector("fieldset")!.disabled).toBe(true);
+    expect(ui.host.querySelector("section[aria-label='我的作答']")?.textContent).toContain("属于 span");
     const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
     mocks.submitAttempt.mockResolvedValueOnce(saved);
     mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
