@@ -246,7 +246,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
   if (paths.openingActions && mode === "sprint") return <CourseSprintMode key={id} course={course} />;
 
   const studyActions = <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />;
-  const settings = <CourseSettingsPanel key={id} course={course} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
+  const settings = <CourseSettingsPanel key={id} course={course} grouped={grouped} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
   const goal = <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>;
   const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
