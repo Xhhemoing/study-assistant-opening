@@ -6,7 +6,7 @@ import type { AiGradingStatus, LearningAttempt, LearningObservation } from "@ais
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 
 const api = vi.hoisted(() => ({
-  getSubmittedAttempt: vi.fn(), getSummary: vi.fn(), getCourseKnowledge: vi.fn(),
+  getSubmittedAttempt: vi.fn(), getSummary: vi.fn(), getCourseKnowledge: vi.fn(), listSources: vi.fn(),
   createSession: vi.fn(), createAttempt: vi.fn(), submitAttempt: vi.fn(), gradeObservation: vi.fn(), getGradingStatus: vi.fn(),
   getObservationHistory: vi.fn(), reviseObservation: vi.fn(), listRevisionCourses: vi.fn(), associateTeachingActivityCourse: vi.fn(),
 }));
@@ -49,7 +49,7 @@ beforeEach(() => {
   vi.resetAllMocks(); vi.useFakeTimers(); head = record;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   api.getSubmittedAttempt.mockResolvedValue(null);
-  api.getSummary.mockResolvedValue([]); api.getCourseKnowledge.mockResolvedValue({ snapshot: null });
+  api.getSummary.mockResolvedValue([]); api.getCourseKnowledge.mockResolvedValue({ snapshot: null }); api.listSources.mockResolvedValue([]);
   api.createSession.mockResolvedValue({ id: record.sessionId }); api.createAttempt.mockResolvedValue(attempt);
   // Saving enqueues on the server; GET + history recover the worker's durable result.
   api.submitAttempt.mockImplementation(async () => { head = graded; return record; });

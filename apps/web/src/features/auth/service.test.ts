@@ -100,3 +100,12 @@ describe("mapDomainError course membership conflicts", () => {
     expect((await archived.json()).error.businessCode).toBeUndefined();
   });
 });
+
+it.each(["VALIDATION", "CONFLICT"] as const)("maps only a known photo rejection reason for %s", async code => {
+  for (const reason of ["work_source_rejected", undefined, null, "unknown", 3]) {
+    const response = jsonError(mapDomainError(Object.assign(new Error("拒收"), { code, reason })));
+    expect(response.status).toBe(code === "VALIDATION" ? 400 : 409);
+    const body = await response.json();
+    expect(body.error).toEqual(reason === "work_source_rejected" ? { code, message: "拒收", reason } : { code, message: "拒收" });
+  }
+});

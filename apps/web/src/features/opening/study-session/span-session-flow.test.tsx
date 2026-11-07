@@ -9,8 +9,9 @@ import type { SpanLessonDetails } from "../teaching/span/span-session-client";
 import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
 import { StudySession, StudySessionShell } from "./study-session-shell";
-import { primaryAction, type StudySessionView } from "./model";
+import { primaryAction, type QuestionStep, type StudySessionPort, type StudySessionView } from "./model";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
+import { parsePracticeDraftCollection } from "../learning/practice-draft-storage";
 
 const mocks = vi.hoisted(() => ({ createAttempt: vi.fn(), submitAttempt: vi.fn(), getAttemptContext: vi.fn(), preparePhotoWorkSource: vi.fn(),
   read: vi.fn(), request: vi.fn(), hint: vi.fn(), ack: vi.fn(async () => undefined), uploadFile: vi.fn(), addToCourse: vi.fn(), push: vi.fn() }));
@@ -67,7 +68,11 @@ async function mount(port: ReturnType<typeof createSpanStudySession>) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     await act(async () => { setter.call(node, value); node.dispatchEvent(new Event("input", { bubbles: true })); });
   };
-  return { host, root, button, click, select, type, unmount: () => act(async () => root.unmount()) };
+  const confidence = () => {
+    const options = [...host.querySelectorAll("footer [role='group'][aria-label='作答前的把握'] button")] as HTMLButtonElement[];
+    return options.length ? { pressed: options.filter(node => node.getAttribute("aria-pressed") === "true").map(node => node.textContent), locked: options.every(node => node.disabled) } : null;
+  };
+  return { host, root, button, click, select, type, confidence, unmount: () => act(async () => root.unmount()) };
 }
 
 it("submits a gradable self-study answer and saves the next lesson move without tutor authorization", async () => {
@@ -87,6 +92,7 @@ it("submits a gradable self-study answer and saves the next lesson move without 
   try {
     expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
     expect(ui.host.textContent).toContain("约 12 分钟");
+    expect(ui.confidence()).toEqual({ pressed: [], locked: false });
     // Faded example opens with hint 1 exactly once (legacy rule); it is disclosed, not hidden.
     expect(mocks.hint).toHaveBeenCalledTimes(1);
     expect(ui.button("提示 · 已看 1")).toBeDefined();
@@ -98,6 +104,9 @@ it("submits a gradable self-study answer and saves the next lesson move without 
     const input = mocks.submitAttempt.mock.calls[0]![1];
     expect(verifySpanAnswer(problem, JSON.parse(input.answer)).outcome).toBe("correct");
     expect(input.assistance).toBe("hinted");
+    // Skipping sends no key at all, and leaves no locked choice to show.
+    expect(input).not.toHaveProperty("preAnswerConfidence");
+    expect(ui.confidence()).toBeNull();
     expect(ui.host.textContent).toContain("用提示后答对");
     // Help stays reachable after the first answer; that is when the full demonstration opens.
     expect(ui.button("提示 · 已看 1")).toBeDefined();
@@ -131,8 +140,11 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
   const save = vi.fn(async () => true), ui = await mount(createSpanStudySession(details, save));
   try {
     await ui.select("in_span"); await ui.type("α", "9"); await ui.type("β", "9");
+    await ui.click("有把握");
     await ui.click("提交");
     const first = structuredClone(observations.get(attempt.id));
+    expect(mocks.submitAttempt.mock.calls[0]![1].preAnswerConfidence).toBe("confident");
+    expect(ui.confidence()).toEqual({ pressed: ["有把握"], locked: true });
     expect(ui.host.textContent).toContain("还没对");
     expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("改这道题");
     expect(ui.button("看下一步安排")).toBeDefined();
@@ -142,6 +154,7 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
     expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
     expect(ui.host.querySelector("select")!.disabled).toBe(false);
     expect([...ui.host.querySelectorAll("input")].some(input => input.value === "9")).toBe(true);
+    expect(ui.confidence()).toEqual({ pressed: [], locked: false });
     const exercise = attempt.spanExercise!;
     await ui.type("α·v + β·w = u 中的 v", exercise.vectors[0].join(", "));
     await ui.type("α·v + β·w = u 中的 w", exercise.vectors[1].join(", "));
@@ -155,6 +168,7 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
       await ui.select("0", "导出系数所用坐标 1"); await ui.select("2", "导出系数所用坐标 2");
     }
     await ui.click("提交");
+    expect(mocks.submitAttempt.mock.calls[1]![1]).not.toHaveProperty("preAnswerConfidence");
     expect(ui.host.textContent).toContain("用提示后答对");
     expect(ui.button("改这道题")).toBeUndefined();
     expect(observations.size).toBe(2);
@@ -173,6 +187,7 @@ it.each(["span-faded-3d", "span-independent-3d"])("redos %s through the real for
     expect(mocks.hint).toHaveBeenCalledTimes(hintCount);
     expect(ui.host.querySelector("section[aria-label='作答结果']")).toBeNull();
     expect(ui.host.querySelector("select")!.value).toBe("");
+    expect(ui.confidence()).toEqual({ pressed: [], locked: false });
     expect(variant.spanExercise!.familyId).toBe(exercise.familyId);
     expect(variant.spanExercise!.target).not.toEqual(exercise.target);
     const request = mocks.request.mock.calls.find(call => String(call[0]).endsWith("/reserved"))!;
@@ -233,7 +248,8 @@ it.each(["self-faded", "self-independent", "last move", "overview", "challenge"]
       expect(save).not.toHaveBeenCalled();
       expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), expect.objectContaining({ method: "POST" }));
       expect(JSON.parse(mocks.request.mock.calls[0]![2].body)).toEqual({ activityId, expectedRevision: 1, observationId: record.id, clientKey: `span-next:${activityId}:1:${record.id}` });
-      expect(ui.host.textContent).toContain("请先授权导师安排。");
+      const notice = [...ui.host.querySelectorAll("section[aria-label='作答结果'] p")].find(node => node.textContent === "请先授权导师安排。");
+      expect(notice?.closest("details")).toBeNull();
       await ui.click("看下一步安排");
       expect(mocks.push).toHaveBeenCalledExactlyOnceWith(`/opening/courses/${courseId}`);
       expect(mocks.request).toHaveBeenCalledTimes(1);
@@ -343,7 +359,7 @@ it.each(["last move", "retest", "overview"])("%s keeps the authorized adaptive n
   expect(save).not.toHaveBeenCalled();
   expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), expect.objectContaining({ method: "POST" }));
   expect(JSON.parse(mocks.request.mock.calls[0]![2].body)).toEqual({ activityId, expectedRevision: 1, observationId: record.id, clientKey: `span-next:${activityId}:1:${record.id}` });
-  expect(view.next).toMatchObject({ reason: "请先授权导师安排。", href: `/opening/courses/${courseId}` });
+  expect(view.next).toMatchObject({ notice: "请先授权导师安排。", href: `/opening/courses/${courseId}` });
 });
 
 it("a failed lesson save preserves the result for retry without requesting adaptive next", async () => {
@@ -386,11 +402,156 @@ it("replays the same sealed request after a network failure", async () => {
   const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
   mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved);
   await expect(port.primary()).rejects.toThrow("network");
+  expect(port.current!()?.sealed).toBe(true);
+  // A skipped choice is sealed as skipped: a late choice cannot change the replayed request.
+  expect(() => port.setConfidence!("confident")).toThrow("答案已提交");
   mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
   const view = await port.primary();
   expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
+  expect(mocks.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("preAnswerConfidence");
   expect(view.result?.outcome).toBe("incorrect");
+  expect(view.confidence).toBeUndefined();
   expect(() => port.edit({ membership: "not_in_span" })).toThrow();
+});
+
+it("reads nothing back after a failed first load or before the first answer is sealed", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockRejectedValueOnce(new Error("offline")).mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const port = createSpanStudySession(details, vi.fn());
+  await expect(port.load()).rejects.toThrow("offline");
+  expect(port.current!()).toBeNull();
+  await port.load(); port.edit({ membership: "in_span" });
+  expect(port.current!()).toBeNull();
+});
+
+it("seals the last confidence choice with the first answer and keeps it read-only", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  details.estimateMinutes = null;
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  try {
+    // Without an estimate the top bar shows the learner's own session time.
+    expect(ui.host.querySelector("header")!.textContent).toContain("本次时长 20 分钟");
+    await ui.select("in_span");
+    await ui.click("没把握"); expect(ui.confidence()).toEqual({ pressed: ["没把握"], locked: false });
+    await ui.click("有把握"); expect(ui.confidence()).toEqual({ pressed: ["有把握"], locked: false });
+    await ui.click("有把握"); expect(ui.confidence()).toEqual({ pressed: [], locked: false });
+    await ui.click("有点把握");
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    mocks.submitAttempt.mockRejectedValueOnce(new Error("network"));
+    await ui.click("提交");
+    expect(mocks.submitAttempt.mock.calls[0]![1].preAnswerConfidence).toBe("somewhat_confident");
+    // The first request is sealed: the failed screen is read-only at once and the retry sends the same request.
+    expect(ui.host.querySelector("[role='alert']")?.textContent).toBe("network");
+    expect(ui.confidence()).toEqual({ pressed: ["有点把握"], locked: true });
+    expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("重新确认提交");
+    expect(ui.host.querySelector("fieldset")!.disabled).toBe(true);
+    const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+    mocks.submitAttempt.mockResolvedValueOnce(saved);
+    mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
+    await ui.click("重新确认提交");
+    expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
+    expect(ui.confidence()).toEqual({ pressed: ["有点把握"], locked: true });
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    // A refresh reads the value back from the sealed request in the saved draft.
+    const key = Object.keys(sessionStorage).find(name => name.startsWith("opening-practice:v2:"))!;
+    const stored = parsePracticeDraftCollection(JSON.parse(sessionStorage.getItem(key)!), key.slice("opening-practice:v2:".length));
+    expect(stored?.drafts[0]?.submission?.input.preAnswerConfidence).toBe("somewhat_confident");
+    mocks.getAttemptContext.mockResolvedValue({ attempt });
+    expect((await createSpanStudySession(details, vi.fn()).load()).confidence).toEqual({ value: "somewhat_confident", locked: true });
+  } finally { await ui.unmount(); }
+});
+
+it("shows the same sealed screen when the answer is saved but its result is not read yet", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.submitAttempt.mockResolvedValue(saved);
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  try {
+    await ui.select("in_span");
+    await ui.click("有把握");
+    await ui.click("提交");
+    expect(ui.host.querySelector("[role='alert']")?.textContent).toContain("结果还没读到");
+    expect(ui.confidence()).toEqual({ pressed: ["有把握"], locked: true });
+    expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("重新确认提交");
+    expect(ui.host.querySelector("fieldset")!.disabled).toBe(true);
+    await ui.click("提示");
+    expect(ui.host.querySelector("aside[aria-label='提示']")?.textContent).toContain("先确认原答案已保存，再继续看提示。");
+    mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
+    await ui.click("重新确认提交");
+    expect(mocks.submitAttempt).toHaveBeenCalledTimes(2);
+    expect(mocks.submitAttempt.mock.calls[1]![1]).toEqual(mocks.submitAttempt.mock.calls[0]![1]);
+    expect(ui.host.querySelector("[role='alert']")).toBeNull();
+    expect(ui.host.textContent).toContain("还没对，原答案已保留");
+    expect(ui.confidence()).toEqual({ pressed: ["有把握"], locked: true });
+  } finally { await ui.unmount(); }
+});
+
+it("a skipped choice stays hidden after a failed submit while the answer and photo turn read-only", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.submitAttempt.mockRejectedValueOnce(new Error("network"));
+  const ui = await mount(createSpanStudySession(details, vi.fn(), { photoEnabled: true }));
+  try {
+    const photo = () => ui.host.querySelector<HTMLInputElement>("input[type='file']")!;
+    expect(photo().disabled).toBe(false);
+    await ui.select("in_span");
+    await ui.click("提交");
+    expect(mocks.submitAttempt.mock.calls[0]![1]).not.toHaveProperty("preAnswerConfidence");
+    expect(ui.host.querySelector("[role='alert']")?.textContent).toBe("network");
+    expect(ui.confidence()).toBeNull();
+    expect(ui.host.querySelector("fieldset")!.disabled).toBe(true);
+    expect(photo().disabled).toBe(true);
+    expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("重新确认提交");
+  } finally { await ui.unmount(); }
+});
+
+it("a refresh after a failed submit shows the same sealed choice and replay action as the failed screen", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  const port = createSpanStudySession(details, vi.fn());
+  await port.load(); port.edit({ membership: "in_span" }); port.setConfidence!("not_confident");
+  mocks.submitAttempt.mockRejectedValueOnce(new Error("network"));
+  await expect(port.primary()).rejects.toThrow("network");
+  mocks.getAttemptContext.mockResolvedValue({ attempt });
+  for (const view of [port.current!()!, await createSpanStudySession(details, vi.fn()).load()]) {
+    expect(view.sealed).toBe(true);
+    expect(view.confidence).toEqual({ value: "not_confident", locked: true });
+    expect(primaryAction(view, false).label).toBe("重新确认提交");
+  }
+});
+
+it.each(["confident", null] as const)("a new tab reads the server's saved choice %s back read-only", async saved => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  details.attempts = [{ ...attempt, preAnswerConfidence: saved }];
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), attemptId: attempt.id, assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } }, deliveredAssistance: "none" });
+  const view = await createSpanStudySession(details, vi.fn()).load();
+  expect(view.sealed).toBe(false);
+  expect(view.result?.outcome).toBe("incorrect");
+  expect(view.confidence).toEqual(saved ? { value: saved, locked: true } : undefined);
+});
+
+it("a retest can record confidence while help stays closed", async () => {
+  const { attempt, details } = fixture("self-independent", "span-independent-3d");
+  details.session!.retestId = uuid();
+  details.attempts = [{ ...attempt, spanExercise: { ...attempt.spanExercise!, id: "span-reserved-fraction" } }];
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.submitAttempt.mockRejectedValueOnce(new Error("stop"));
+  const ui = await mount(createSpanStudySession(details, vi.fn()));
+  try {
+    expect(ui.button("提示")).toBeUndefined();
+    expect(ui.confidence()).toEqual({ pressed: [], locked: false });
+    await ui.select("in_span");
+    await ui.click("没把握");
+    await ui.click("提交");
+    expect(mocks.submitAttempt.mock.calls[0]![1]).toMatchObject({ retestId: details.session!.retestId, preAnswerConfidence: "not_confident" });
+  } finally { await ui.unmount(); }
 });
 
 it("a no-solution answer filled in the real form is graded by the real verifier", async () => {
@@ -494,4 +655,72 @@ it("hides help before an unanswered retest and closes help when the same shell c
   expect([...host.querySelectorAll("button")].some(button => button.textContent?.includes("提示"))).toBe(false);
   expect(host.querySelector("aside[aria-label='提示']")).toBeNull();
   act(() => root.unmount()); host.remove();
+});
+
+it("folds reasons under 为什么, keeps choices and blocks visible, shows time, and keeps one primary action beside confidence", () => {
+  const question: QuestionStep = { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 };
+  const base: StudySessionView = { step: question, position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: null }, answer: {}, sealed: false, result: null, next: null, photo: null };
+  const host = document.createElement("div"); const root = createRoot(host); document.body.append(host);
+  const noop = () => {};
+  const render = (view: StudySessionView) => act(() => root.render(<StudySessionShell view={view} onPrimary={noop} onHelp={noop} onPause={noop} onReload={noop} onEdit={noop} onChoosePhoto={noop} onRemovePhoto={noop} onConfidence={noop} />));
+  const visible = (text: string) => [...host.querySelectorAll("p")].some(node => node.textContent === text && !node.closest("details"));
+  try {
+    render({ ...base, result: { outcome: "incorrect", assistance: "independent", detail: "第 2 个坐标对不上", nextStep: { label: "先回到原题重算", action: "重算第 2 个坐标" } },
+      next: { href: "/x", label: "回到课程", notice: "请先授权导师安排。", reason: "最近两题都卡在同一步", alternatives: [] } });
+    const section = host.querySelector("section[aria-label='作答结果']")!;
+    expect(section.getAttribute("aria-live")).toBe("polite");
+    const why = section.querySelector("details")!;
+    expect(why.open).toBe(false);
+    expect(why.querySelector("summary")?.textContent).toBe("为什么");
+    for (const text of ["第 2 个坐标对不上", "下一步：先回到原题重算", "最近两题都卡在同一步"]) expect(why.textContent).toContain(text);
+    expect(visible("还没对，原答案已保留")).toBe(true);
+    expect(visible("请先授权导师安排。")).toBe(true);
+    render({ ...base, result: { outcome: "correct", assistance: "independent" } });
+    expect(host.querySelector("section[aria-label='作答结果']")).not.toBeNull();
+    expect(host.querySelector("section[aria-label='作答结果'] details")).toBeNull();
+    render({ ...base, blocked: "资料不可用" });
+    expect(host.querySelector("[role='alert']")?.textContent).toBe("资料不可用");
+    render({ ...base, budgetMinutes: 20 });
+    expect(host.querySelector("header")?.textContent).toContain("本次时长 20 分钟");
+    expect(host.querySelector("header")?.textContent).not.toMatch(/约|预计/);
+    render({ ...base, step: { ...question, estimateMinutes: 12 }, budgetMinutes: 20 });
+    expect(host.querySelector("header")?.textContent).toContain("约 12 分钟");
+    expect(host.querySelector("header")?.textContent).not.toContain("本次时长");
+    const states: StudySessionView[] = [base, { ...base, answer: { membership: "in_span" } }, { ...base, sealed: true },
+      { ...base, sealed: true, canRedo: true, result: { outcome: "incorrect", assistance: "independent" } }];
+    for (const confidence of [{ value: null, locked: false }, { value: "confident", locked: false }, { value: "confident", locked: true }] as const) {
+      for (const view of states) {
+        render({ ...view, confidence });
+        expect(host.querySelectorAll("[role='group'][aria-label='作答前的把握'] button")).toHaveLength(3);
+        expect(host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+      }
+    }
+  } finally { act(() => root.unmount()); host.remove(); }
+});
+
+it.each(["no read-back", "a null read-back", "a throwing read-back"] as const)("keeps the screen and the original error after a failure with %s", async readBack => {
+  const view: StudySessionView = { step: { kind: "question", id: "q", title: "span", prompt: "求系数", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 3 },
+    position: { index: 1, total: 4 }, help: { level: "none", hints: [], next: null }, answer: { membership: "in_span" }, sealed: false, result: null, next: null, photo: null };
+  const current = vi.fn((): StudySessionView | null => { if (readBack === "a throwing read-back") throw new Error("read-back"); return null; });
+  const port: StudySessionPort = { load: async () => view, edit: () => view, primary: vi.fn(async () => { throw new Error("network"); }),
+    help: async () => view, choosePhoto: async () => view, removePhoto: () => view, pause: async () => undefined,
+    ...(readBack === "no read-back" ? {} : { current }) };
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown) => { rejections.push(reason); };
+  process.on("unhandledRejection", onRejection);
+  const host = document.createElement("div"), root = createRoot(host); document.body.append(host);
+  const primary = () => host.querySelector<HTMLButtonElement>("[data-primary-action]")!;
+  try {
+    await act(async () => root.render(<StudySession port={port} />));
+    expect(primary().textContent).toBe("提交");
+    await act(async () => primary().click());
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(port.primary).toHaveBeenCalledTimes(1);
+    expect(current).toHaveBeenCalledTimes(readBack === "no read-back" ? 0 : 1);
+    expect(host.querySelector("[role='alert']")?.textContent).toBe("network");
+    expect(primary().textContent).toBe("提交");
+    expect(primary().disabled).toBe(false);
+    expect(host.querySelector("fieldset")!.disabled).toBe(false);
+    expect(rejections).toEqual([]);
+  } finally { process.off("unhandledRejection", onRejection); await act(async () => root.unmount()); host.remove(); }
 });
