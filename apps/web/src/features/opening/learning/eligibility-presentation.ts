@@ -33,6 +33,7 @@ const REASON_LABELS: Record<string, string> = {
   ai_evaluation_criteria_inconsistent: "评分要点之间仍有矛盾",
   ai_graded_correct: "AI 按评分要点判断答案正确",
   ai_graded_incorrect: "AI 按评分要点发现需要改进之处",
+  ai_evaluation_uncalibrated: "AI 批改还没校准，结果仅供参考，暂不计入已验证",
   reference_check_incomplete: "缺少参考依据、核对方法或检查者",
   reference_check_scope_incomplete: "参考核对未覆盖完整答案",
   reference_check_identity_mismatch: "参考核对与本次题目或版本不一致",
