@@ -180,7 +180,8 @@ same `HERMES_HEAVY_LOCK` path; do not mix them on a POSIX host. With either lock
 waiting longer than `HERMES_HEAVY_LOCK_TIMEOUT` seconds (default 120) exits with
 code 75. The Node lock holder also waits, within that same timeout, until available
 memory reaches `HERMES_HEAVY_MIN_FREE_MB` (default 1024; `0` disables) and
-otherwise exits with code 75 before starting the command. Set
+otherwise exits with code 75 before starting the command. Negative or non-numeric
+values for either setting exit with code 64. Set
 `HERMES_HEAVY_ENABLED=0` only when the caller has an isolated environment and does
 not need those host controls.
 

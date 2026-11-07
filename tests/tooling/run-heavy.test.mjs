@@ -65,6 +65,32 @@ test("memory admission starts once headroom returns and gives up at the deadline
   assert.equal(await waitForFreeMemory({ minFreeBytes: 0, deadline: 0, freemem: () => 0 }), true);
 });
 
+test("memory admission rejects headroom first observed after the deadline", async () => {
+  const deadline = Date.now() + 50;
+  let calls = 0;
+  const lateRecovery = () => {
+    calls += 1;
+    if (calls === 1) return 0;
+    while (Date.now() <= deadline) { /* sample lands after the deadline */ }
+    return 100;
+  };
+  assert.equal(await waitForFreeMemory({ minFreeBytes: 100, deadline, pollMs: 1, freemem: lateRecovery }), false);
+});
+
+test("invalid admission settings are rejected before taking the lock", (t) => {
+  const { dir, env } = lockedEnvironment(t);
+  const lockPath = path.join(dir, "free.lock");
+  for (const [name, value] of [["HERMES_HEAVY_LOCK_TIMEOUT", "oops"], ["HERMES_HEAVY_MIN_FREE_MB", "-1"]]) {
+    const result = spawnSync(process.execPath, [wrapper, process.execPath, "-e", "console.log('must-not-run')"], {
+      cwd: root, env: { ...env, HERMES_HEAVY_LOCK: lockPath, [name]: value }, encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(result.status, 64, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, new RegExp(`${name} must be a non-negative number`));
+    assert.equal(existsSync(`${lockPath}.d`), false);
+  }
+});
+
 test("CI bypass executes without acquiring the host lock and preserves argv and exit status", (t) => {
   const { env, lockPath } = lockedEnvironment(t);
   const result = spawnSync(process.execPath, [

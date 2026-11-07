@@ -35,12 +35,24 @@ export function killTree(child, signal = "SIGTERM") {
  * into the page file, so the lock holder waits for headroom before spawning.
  */
 export async function waitForFreeMemory({ minFreeBytes, deadline, pollMs = 1000, freemem = os.freemem }) {
-  for (;;) {
-    if (freemem() >= minFreeBytes) return true;
+  for (let first = true; ; first = false) {
+    const enough = freemem() >= minFreeBytes;
     const remaining = deadline - Date.now();
+    if (enough && (first || remaining >= 0)) return true;
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, remaining)));
   }
+}
+
+function nonNegativeEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`${name} must be a non-negative number, got "${raw}".`);
+    process.exit(64);
+  }
+  return value;
 }
 
 const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
@@ -59,7 +71,9 @@ async function run() {
   // even when there is intentionally no lock to acquire in CI.
   if (!enabled) env.HERMES_HEAVY_LOCK_HELD = "1";
   if (useNodeLock && process.env.HERMES_HEAVY_LOCK_HELD !== "1") {
-    const deadline = Date.now() + Number(process.env.HERMES_HEAVY_LOCK_TIMEOUT ?? 120) * 1000;
+    const timeoutSeconds = nonNegativeEnv("HERMES_HEAVY_LOCK_TIMEOUT", 120);
+    const minFreeMb = nonNegativeEnv("HERMES_HEAVY_MIN_FREE_MB", 1024);
+    const deadline = Date.now() + timeoutSeconds * 1000;
     try {
       release = await acquireHeavyLock({ lockPath: defaultLockPath(), timeoutMs: deadline - Date.now() });
     } catch (error) {
@@ -69,7 +83,6 @@ async function run() {
       }
       throw error;
     }
-    const minFreeMb = Number(process.env.HERMES_HEAVY_MIN_FREE_MB ?? 1024);
     if (!(await waitForFreeMemory({ minFreeBytes: minFreeMb * 1024 * 1024, deadline }))) {
       console.error(`Available memory stayed below ${minFreeMb} MB; refusing to start a heavy task.`);
       release();
