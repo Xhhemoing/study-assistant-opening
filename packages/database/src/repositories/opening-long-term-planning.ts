@@ -71,7 +71,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
     maintenanceTasks: maintenance.flatMap(row => { const match = /^planner:\d{4}-\d{2}-\d{2}:maintenance:([a-f0-9-]{36}):([a-f0-9-]{36})$/.exec(String(row.client_key));
       return match ? [{ taskId: row.id, version: Number(row.version), goalId: match[1], requirementId: match[2] }] : []; }) });
 }
-export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => new Date(), options: { compilerEnabled?: boolean } = {}) {
+export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => new Date(), options: { compilerEnabled?: boolean; exactVerificationEnabled?: boolean } = {}) {
   return {
     read: (scope: Scope, date?: string) => sql.begin("isolation level repeatable read read only", tx => overview(learningTransactionClient(tx), scope, date, clock())),
     async command(scope: Scope, raw: unknown) {
@@ -121,7 +121,7 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
           free: [...future, ...state.blocks.map(block => ({ start: block.start, end: block.end, kind: "locked" as const }))], accepted: [], reservations: [] });
         const free = capacity.free;
         if (!free.length) return { overview: await overview(db, scope, input.date, now), draft: null };
-        const extra = await buildLongTermSuggestions(tx, scope, { date: input.date, timeZone: state.timeZone, now, goals: allowed, tasks });
+        const extra = await buildLongTermSuggestions(tx, scope, { date: input.date, timeZone: state.timeZone, now, goals: allowed, tasks, exactVerificationEnabled: options.exactVerificationEnabled });
         const allRefs = allowed.filter(goal => [...candidates, ...extra.tasks].some(task => task.courseId && goal.courseIds.includes(task.courseId))).map(goal => ({ goalId: goal.id, revision: goal.revision }));
         const result = await proposeOpeningLocalPlan(db, scope, { date: input.date, expectedAcceptedVersion: input.expectedAcceptedVersion, clientKey: input.clientKey }, { now, allowOtherDay: true, preserveAll: true, free,
           taskIds: candidates.map(task => task.id), additional: async () => ({ tasks: extra.tasks, suggestedTasks: extra.suggestions, origin: "user", snapshot: {

@@ -44,7 +44,6 @@ describe("unchanged stored verification", () => {
     { kind: "unavailable" as const, status: "missing" as const, rubric: null, enabled: false },
     { kind: "rubric" as const, status: "needs_check" as const, rubric: "  标准  ", enabled: false },
     { kind: "manual" as const, status: "needs_check" as const, rubric: "  标准  ", enabled: false },
-    { kind: "exact" as const, status: "missing" as const, rubric: "标准", enabled: false },
   ])("preserves old reason for $kind/$status", ({ kind, status, rubric, enabled }) => {
     const previous: Verification = { kind, status, rubric, exerciseKeys: [], missingReasons: oldReason };
     expect(decideCourseRouteVerification(submitted(kind, rubric?.trim() ?? null), previous, true, enabled)).toEqual(previous);
@@ -72,5 +71,21 @@ describe("unchanged stored verification", () => {
     expect(decideCourseRouteVerification(submitted("rubric", null), previous, true, false)).toEqual(previous);
     expect(decideCourseRouteVerification(submitted("rubric", "标准"), previous, true, false)).toMatchObject({ status: "needs_check", exerciseKeys: [] });
     expect(decideCourseRouteVerification(submitted("rubric", null), { ...previous, rubric: "标准" }, true, false)).toMatchObject({ status: "needs_check", exerciseKeys: [] });
+  });
+  it("recomputes a stored exact reason when the switch turns on", () => {
+    const previous: Verification = { kind: "exact", status: "missing", rubric: "标准", exerciseKeys: [], missingReasons: ["确定性判定能力尚未开启"] };
+    expect(decideCourseRouteVerification(submitted("exact"), previous, false, true)).toEqual({ ...previous, missingReasons: ["本要求的来源材料不可用"] });
+    expect(decideCourseRouteVerification(submitted("exact"), previous, true, true)).toEqual({ ...previous, status: "ready", missingReasons: [] });
+  });
+  it("rewrites an old exact reason but keeps an identical server reason deep-equal", () => {
+    const server: Verification = { kind: "exact", status: "missing", rubric: "标准", exerciseKeys: [], missingReasons: ["确定性判定能力尚未开启"] };
+    expect(decideCourseRouteVerification(submitted("exact"), { ...server, missingReasons: oldReason }, true, false)).toEqual(server);
+    expect(decideCourseRouteVerification(submitted("exact"), server, true, false)).toStrictEqual(server);
+  });
+  it("does not keep a stored row of another kind", () => {
+    const previous: Verification = { kind: "rubric", status: "needs_check", rubric: "标准", exerciseKeys: [], missingReasons: oldReason };
+    expect(decideCourseRouteVerification(submitted("manual"), previous, true, false)).toEqual({
+      kind: "manual", status: "needs_check", rubric: "标准", exerciseKeys: [], missingReasons: ["请先确认本要求的题目与判定标准"],
+    });
   });
 });
