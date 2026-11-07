@@ -66,7 +66,7 @@ test("memory admission starts once headroom returns and gives up at the deadline
 });
 
 test("memory admission rejects headroom first observed after the deadline", async () => {
-  const deadline = Date.now() + 50;
+  const deadline = Date.now() + 1_000;
   let calls = 0;
   const lateRecovery = () => {
     calls += 1;
@@ -75,6 +75,7 @@ test("memory admission rejects headroom first observed after the deadline", asyn
     return 100;
   };
   assert.equal(await waitForFreeMemory({ minFreeBytes: 100, deadline, pollMs: 1, freemem: lateRecovery }), false);
+  assert.equal(calls, 2);
 });
 
 test("invalid admission settings are rejected before taking the lock", (t) => {
