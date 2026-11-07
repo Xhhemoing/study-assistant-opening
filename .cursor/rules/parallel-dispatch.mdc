@@ -9,7 +9,7 @@ alwaysApply: false
 
 ## 会话分工
 
-用户 2026-11-06 起由三个会话分工：
+用户 2026-11-06 起在 Cursor 中按三个会话分工；这是角色映射，不要求唯一集成者运行在 Cursor 中（当前由 Claude 会话承担）：
 
 - 规划会话：只读调查、拆卡、核接口，把完整任务卡写进仓库外卡片目录的 `ready/`；不派单、不实现。
 - 派单与审查会话：即下文的“主控”。取卡、建 worktree、派实现者、发起两路审查，合入自己开的 `integration/opening` PR。
@@ -40,7 +40,7 @@ alwaysApply: false
 2. 共享独占项留给集成会话：STATUS、迁移编号与 schema、`package-lock.json`、env 示例与 `packages/config/src/registry.ts`、`ci.yml`、`.cursor/**`、`AGENTS.md`。卡里写明由集成者处理；集成者对共享项的改动在送审前推到该 PR 分支，或另开 PR 走同样门禁，不在审查之后直接落到 `integration/opening`。
 3. 先核接口再写卡：写卡的会话（规划会话，或自行起草卡的派单会话）按卡的允许路径列出会触及的公开契约、schema、枚举、函数签名、版本号或白名单、与其他车道共用的文件，以及卡依赖的数据可信来源（例如答案键、客户端提交的状态）。逐项写进卡的"接口决定"：计划或决定表已定的直接引用；计划范围内能定的由写卡的会话当场定；涉及产品方向、数据迁移或跨包 API 的交用户拍板（规划会话攒起来每天集中问一两次），未定的卡不派。不让两条车道各写一份契约，也不把这些问题留给实现者中途返回 NEEDS_CONTEXT。
 4. 卡从仓库外卡片目录的 `ready/` 取，满足就绪条件即可派：前置卡已合入或在途；改动文件与在途车道不重叠；接口决定全部定下；写明风险、目标分支、实现者（Codex 或 Cursor）和要跑的测试；验收列出审查常抓的边界情况（卸载或取消后不再发请求、超时与迟到的响应、匹配必须唯一且与顺序无关、数据库空值读出来是 undefined、费用说明与实际一致）。取卡时移到 `active/`，合入后移到 `done/`。总计划附录 F 是总览，由集成会话随 STATUS 批量同步，派卡不必等它。
-5. 任务卡字段：目标、owner、worktree/分支、base（分支名与建树时的 SHA）、允许路径、只读要求、红线、parents、接口决定、共享独占项、限定验证、风险、Git 授权、预算（实现 1 次、审查 1 次、集中修复 1 次）、汇报格式。
+5. 任务卡字段：目标、owner、worktree/分支、base（分支名与建树时的 SHA）、允许路径、只读要求、红线、parents、接口决定、共享独占项、限定验证、风险、Git 授权、预算（实现 1 次、两路审查各 1 次、集中修复 1 次）、汇报格式。
 6. 互相独立的子 Agent 在同一条消息里一起发出；耗时任务用 `run_in_background: true`。
 
 ## 集成节奏
@@ -48,5 +48,5 @@ alwaysApply: false
 1. 实现返回 DONE 后，主控核对实际 diff 与 PR 正文，再并行派 `aistudy-pr-reviewer` 与 `codex exec` 两路审查（每个 PR 都要两路，含纯文档、配置改动；提升 PR 见第 4 步）。两路都无阻塞才算通过；某一路失败或没读完范围记为未审查，不用同家族自检代替。各路结论由主控以 PR 评论留档（同一账号不能 approve 自己的 PR）。
 2. CHANGES_REQUESTED：resume 原实现子 Agent 集中修复一次，之后只复核修复部分。
 3. 低风险：第 1 步两路审查都通过且精确 head 的 required CI 全绿，由开 PR 的会话用 `gh pr merge --merge --match-head-commit <head-sha>` 合入 `integration/opening`。高风险：独立 PR 到 `feat/opening-release`，满足长期授权条件时由集成会话合入，否则等用户批准。
-4. `integration/opening` 有达标结果，集成会话就开提升 PR 到 `feat/opening-release`。正文列出每个所含 PR 的已审补丁与实际带入补丁的 SHA-256；满足 `agent-workflow.md`“提升 PR 复用审查”的条件时不再派两路审查，精确 head CI 全绿即合入。不满足的部分（只经指定审查的旧 PR、冲突解决、集成者补的提交）补齐缺的那一路再合入。
+4. `integration/opening` 有达标结果，集成会话就开提升 PR 到 `feat/opening-release`。正文绑定当前 base/head 的完整 SHA，列出每个所含 PR 的已审补丁与实际带入补丁的端点和 SHA-256，以及相对当前 base 的预期与最终完整补丁 SHA-256；base/head 变化后重新核对。满足 `agent-workflow.md`“提升 PR 复用审查”的条件时不再派两路审查，精确 head CI 全绿即合入。不满足的部分（只经指定审查的旧 PR、冲突解决、集成者补的提交）补齐缺的那一路再合入。
 5. 合入主线后由集成会话更新 `docs/STATUS.md`，每个结果一行，附录 F 同批同步。

@@ -40,7 +40,7 @@ For UI work, consult the relevant sections of `docs/product/UX_AND_AI_POLICY.md`
 
 ## 多工具协作
 
-主控 PM 负责目标、Kanban 调度、验收与交接，不写业务代码、不计编码车道；实现与测试由已授权 worker 执行，集成由唯一集成者执行。先读原卡目标、允许路径、parents、接口决定和最近断点；按需只读 STATUS，写入由集成者独占。分工和门禁见 [多工具开发分工](docs/operations/agent-workflow.md)，取代旧角色与派单流程；分工本身不授予提交、推送、合并或发布权限。在 Cursor 中由三个会话分工（用户 2026-11-06）：规划会话只读调查、拆卡、核接口并写卡，不派单、不实现；派单与审查会话取卡、建 worktree、派实现者并发起两路审查；集成会话是唯一集成者，负责提升与高风险合入、STATUS 与共享独占项、部署。合并权按分支分开：`integration/opening` 的 PR 由开它的会话在门禁齐全后合入，`feat/opening-release` 只由集成会话合入。子 Agent 映射见该文档的“Cursor 中的执行映射”，派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
+主控 PM 负责目标、Kanban 调度、验收与交接，不写业务代码、不计编码车道；实现与测试由已授权 worker 执行，集成由唯一集成者执行。先读原卡目标、允许路径、parents、接口决定和最近断点；按需只读 STATUS，写入由集成者独占。分工和门禁见 [多工具开发分工](docs/operations/agent-workflow.md)，取代旧角色与派单流程；分工本身不授予提交、推送、合并或发布权限。当前唯一集成者由 Claude 会话承担；下述 Cursor 映射不限定该会话所在工具。在 Cursor 中由三个会话分工（用户 2026-11-06）：规划会话只读调查、拆卡、核接口并写卡，不派单、不实现；派单与审查会话取卡、建 worktree、派实现者并发起两路审查；集成会话是唯一集成者，负责提升与高风险合入、STATUS 与共享独占项、部署。合并权按分支分开：`integration/opening` 的 PR 由开它的会话在门禁齐全后合入，`feat/opening-release` 只由集成会话合入。子 Agent 映射见该文档的“Cursor 中的执行映射”，派单操作见 `.cursor/rules/parallel-dispatch.mdc`。
 
 - 以文件、接口和资源隔离规划八条编码流，并配置独立评审与集成能力；这是目标容量，不是已运行数量或配额豁免。实际启动必须服从平台配额与本机资源；用户 2026-11-06 将同时运行的实现者上限定为 5（只读调查与审查不计），名额不足则按依赖排队，不绕过或虚报并行。
 - 项目不再以固定 3 个 Agent／3 棵 worktree 作为上限。worktree 按隔离需要和有效配额、资源及所有权准入；注册旧树不等于活跃写者，不为凑车道新建树或删除未知成果。
