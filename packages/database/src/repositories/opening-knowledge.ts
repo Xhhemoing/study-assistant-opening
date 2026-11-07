@@ -57,6 +57,21 @@ function parseSourceVersions(value: unknown): Record<string, number> {
   return out;
 }
 
+function sameVersions(left: Record<string, number>, right: Record<string, number>): boolean {
+  return Object.keys(left).length === Object.keys(right).length
+    && Object.entries(left).every(([id, version]) => right[id] === version);
+}
+
+/** Evidence is compared and stored as a set: sorted unique chunk ids. */
+function evidenceSet(chunkIds: readonly string[]): string[] {
+  return [...new Set(chunkIds)].sort();
+}
+
+function nodeSourceVersions(chunkIds: readonly string[], chunks: readonly SourceChunk[]): Record<string, number> {
+  const ids = new Set(chunkIds);
+  return Object.fromEntries(chunks.filter(chunk => ids.has(chunk.id)).map(chunk => [chunk.sourceId, chunk.sourceVersion]));
+}
+
 function mapRecord(row: Record<string, unknown>): OpeningKnowledgeRecord {
   const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
   return {
@@ -187,6 +202,74 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       return mapRecord(rows[0] as Record<string, unknown>);
     },
 
+    /** A strict transition, not an idempotent replay: stale/duplicate submissions conflict. */
+    async confirmNode(scope: Scope, courseId: string, nodeId: string, input: {
+      expectedVersion: number; sourceVersions: Record<string, number>;
+    }): Promise<OpeningKnowledgeRecord> {
+      if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0
+        || Object.values(input.sourceVersions).some(version => !Number.isInteger(version) || version < 0)) {
+        throw new OpeningKnowledgeError("VALIDATION", "invalid confirmation versions");
+      }
+      return sql.begin(async tx => {
+        // Match replace/source actions' workspace-first lock order, serializing permission changes.
+        const owner = await tx`SELECT w.id FROM workspaces w JOIN courses c ON c.workspace_id=w.id
+          WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
+            AND c.id=${courseId} AND c.archived_at IS NULL FOR UPDATE`;
+        if (!owner.length) throw new OpeningKnowledgeError("NOT_FOUND", "course not found");
+        const [row] = await tx`SELECT version,snapshot,source_versions FROM opening_course_knowledge
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} FOR UPDATE`;
+        if (!row) throw new OpeningKnowledgeError("NOT_FOUND", "knowledge not found");
+        const current = mapRecord(row);
+        const node = current.snapshot.nodes.find(item => item.id === nodeId);
+        if (!node) throw new OpeningKnowledgeError("NOT_FOUND", "node not found");
+        if (current.version !== input.expectedVersion || node.status !== "needs_check"
+          || !sameVersions(current.sourceVersions, input.sourceVersions)) {
+          throw new OpeningKnowledgeError("CONFLICT", "课程知识已变化，请重新读取并核对材料。");
+        }
+        if (!node.evidenceChunkIds.length) throw new OpeningKnowledgeError("CONFLICT", "尚无材料依据，请先补充材料。");
+        const evidenceIds = evidenceSet(node.evidenceChunkIds);
+        // Live source rows are locked until commit. markNeedsCheck does not bump graph versions.
+        // Validate the complete observed source set as well as the selected node's evidence.
+        const sourceIds = Object.keys(input.sourceVersions).sort();
+        const sources = sourceIds.length ? await tx`SELECT s.id,s.version FROM opening_sources s
+          JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=s.version
+          JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.asset_type='source'
+            AND m.asset_id=s.id AND m.course_id=${courseId}
+          WHERE s.workspace_id=${scope.workspaceId} AND s.id IN ${tx(sourceIds)}
+            AND s.upload_state='uploaded' AND s.parse_state='ready' AND v.availability='available'
+            AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+          ORDER BY s.id FOR SHARE` : [];
+        if (!sameVersions(input.sourceVersions, Object.fromEntries(sources.map(source => [String(source.id), Number(source.version)])))) {
+          throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化（有材料更新了版本、移出了课程或被排除），课程知识需要按当前材料重新整理后才能确认；已有知识点保留。");
+        }
+        let chunks: SourceChunk[];
+        try {
+          const rows = await tx`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
+            WHERE s.workspace_id=${scope.workspaceId} AND c.id IN ${tx(evidenceIds)} FOR SHARE`;
+          const versions = Object.fromEntries(rows.map(chunk => [String(chunk.source_id), Number(chunk.source_version)]));
+          chunks = await assertAuthorizedChunks(tx, scope, courseId, evidenceIds, versions);
+          if (Object.entries(versions).some(([id, version]) => input.sourceVersions[id] !== version)) {
+            throw new OpeningKnowledgeError("VALIDATION", "stale evidence");
+          }
+        } catch (error) {
+          if (error instanceof OpeningKnowledgeError && error.code === "VALIDATION") {
+            throw new OpeningKnowledgeError("CONFLICT", "材料依据已变化，请重新读取并核对材料。");
+          }
+          throw error;
+        }
+        const version = current.version + 1;
+        const snapshot: KnowledgeSnapshot = { ...current.snapshot, version,
+          nodes: current.snapshot.nodes.map(item => item.id === nodeId ? { ...item, status: "supported" } : item) };
+        await tx`UPDATE opening_course_knowledge SET version=${version},snapshot=${tx.json(snapshot as never)},updated_at=now()
+          WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}`;
+        await tx`INSERT INTO opening_knowledge_confirmations
+          (id,workspace_id,owner_user_id,course_id,node_id,node_label,node_kind,graph_version_before,graph_version_after,source_versions,evidence_chunk_ids)
+          VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${courseId},${nodeId},${node.label},${node.kind},${current.version},${version},
+            ${tx.json(nodeSourceVersions(evidenceIds, chunks))},${tx.json(evidenceIds)})`;
+        return { ...current, version, snapshot };
+      });
+    },
+
     async getVersion(scope: Scope, courseId: string): Promise<number | null> {
       await assertOwnedCourse(sql, scope, courseId);
       const rows = await sql`
@@ -299,7 +382,29 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           }
         }
 
-        const stored: KnowledgeSnapshot = { ...draft, version: newVersion };
+        // Restore only this exact confirmed evidence/version set, after normal worker classification.
+        // UUID/definition guards above still apply. A changed source is never a permanent exemption.
+        const confirmations = await tx`SELECT DISTINCT ON (node_id) node_id,node_label,node_kind,source_versions,evidence_chunk_ids
+          FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+          ORDER BY node_id,graph_version_after DESC`;
+        const nodes = draft.nodes.map(node => {
+          const existing = previous?.snapshot.nodes.find(item => item.id === node.id);
+          const confirmation = confirmations.find(item => item.node_id === node.id);
+          const confirmed = existing && confirmation && node.label === confirmation.node_label && node.kind === confirmation.node_kind
+            && node.evidenceChunkIds.length > 0
+            && JSON.stringify(evidenceSet(node.evidenceChunkIds)) === JSON.stringify(confirmation.evidence_chunk_ids)
+            && sameVersions(nodeSourceVersions(node.evidenceChunkIds, evidence), parseSourceVersions(confirmation.source_versions));
+          if (input.expectedReferencedNodeIds && confirmed && (node.status === "needs_check" || node.status === "supported")) {
+            return { ...node, status: "supported" as const };
+          }
+          if (existing?.status === "needs_check" && node.status !== "needs_check") {
+            if (input.expectedReferencedNodeIds) return { ...node, status: "needs_check" as const };
+            throw new OpeningKnowledgeError("CONFLICT", "需要先核对材料并确认此知识点。");
+          }
+          return node;
+        });
+        const stored: KnowledgeSnapshot = { ...draft, nodes, version: newVersion };
         const rows = await tx`
           INSERT INTO opening_course_knowledge (
             workspace_id, owner_user_id, course_id, version, snapshot, source_versions, node_definitions, updated_at
@@ -317,6 +422,18 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           WHERE opening_course_knowledge.version = ${input.expectedVersion}
           RETURNING version, snapshot, source_versions`;
         if (!rows.length) throw new OpeningKnowledgeError("CONFLICT", "knowledge replace raced");
+        // Withdrawn confirmations never come back: a node removed from the graph, or manually moved off
+        // supported, must be re-checked by the learner even if the same UUID/evidence reappears later.
+        // markNeedsCheckForSources does not pass through here and keeps confirmations; the restore
+        // condition above already requires the exact confirmed source versions.
+        const nextStatus = new Map(nodes.map(node => [node.id, node.status]));
+        const revoked = (previous?.snapshot.nodes ?? []).filter(node => !nextStatus.has(node.id)
+          || (!input.expectedReferencedNodeIds && node.status === "supported" && nextStatus.get(node.id) !== "supported"))
+          .map(node => node.id).sort();
+        if (revoked.length) {
+          await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND node_id IN ${tx(revoked)}`;
+        }
         return mapRecord(rows[0] as Record<string, unknown>);
       });
     },
