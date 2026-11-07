@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { createSpanTeachingSequence, getSpanProblem, solveSpanProblem, spanModeForIntent, verifySpanAnswer } from "@aistudy/domain";
 import type { LearningAttempt, LearningObservation, StudySessionIntent } from "@aistudy/contracts";
 import { updateSpanDraftAnswer } from "../../teaching/span/span-answer";
-import { adaptSpanHelp, adaptSpanNext, adaptSpanResult } from "./span";
+import { adaptSpanHelp, adaptSpanNext, adaptSpanResult, spanAnswerSummary } from "./span";
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { spanSessionProblemIds } from "../../teaching/span/session-service";
 import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
@@ -101,6 +101,16 @@ it("validates successor links with the legacy rule and keeps choices", () => {
   expect(adaptSpanNext({ kind: "ready", href, activityId: id, sessionId: id, courseId: id, label: "继续新题", resumed: false }, id)).toMatchObject({ href, label: "继续新题" });
   expect(() => adaptSpanNext({ kind: "choice", reason: "source_unavailable", message: "资料不可用", primary: { href: "https://evil.test", label: "继续" } }, id)).toThrow();
   expect(() => adaptSpanNext({ kind: "ready", href: `/opening/courses/${id}/study/span?lesson=${id}`, activityId: id, sessionId: id, courseId: "22222222-2222-4222-8222-222222222222", label: "x", resumed: false }, id)).toThrow();
+});
+
+it("summarizes the sealed answer by membership and key fields within 200 characters", () => {
+  expect(spanAnswerSummary({})).toBeUndefined();
+  expect(spanAnswerSummary({ membership: "in_span", coefficients: ["2", "-1"] })).toBe("属于 span；α = 2，β = -1");
+  expect(spanAnswerSummary({ membership: "not_in_span", coefficients: ["2", ""], coordinateChecks: ["2", "4", "2"] }))
+    .toBe("不属于 span；α = 2，β = 未填；代回后各坐标 2, 4, 2");
+  const long = spanAnswerSummary({ membership: "in_span", coefficients: ["1".repeat(160), "2".repeat(160)] })!;
+  expect(long).toHaveLength(200);
+  expect(long.endsWith("…")).toBe(true);
 });
 
 it("keeps a successor choice as a visible notice instead of a folded reason", () => {
