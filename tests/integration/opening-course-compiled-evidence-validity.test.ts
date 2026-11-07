@@ -52,6 +52,8 @@ it("requires each current spec chunk/page to match exactly through PG → strict
     sourceRefs: [{ sourceId, sourceVersion: 1 }], verification: { kind: "rubric", status: "ready", exerciseKeys: ["arithmetic"], rubric: "精确运算", missingReasons: [] }, origin: "confirmed" }));
   const repo = createOpeningCourseRouteRepository(sql, { compilerEnabled: true });
   await repo.confirm(scope, courseId, { expectedRevisions: [], requirements, confirmScope: true });
+  // Ready is a server-side fixture fact, never trusted from a confirmation request.
+  for (const requirement of requirements) await sql`UPDATE course_requirements SET verification=${sql.json(requirement.verification)} WHERE id=${requirement.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const start = await repo.start(scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirements[0]!.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   if (start.kind !== "ready") throw new Error(JSON.stringify(start));
   const content = createOpeningTeachingContentRepository(sql);

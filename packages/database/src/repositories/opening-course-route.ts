@@ -2,13 +2,14 @@ import { isDeepStrictEqual } from "node:util";
 import { courseRouteConfirmSchema, type CourseRouteConfirm, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { assertCourseRouteCourse, readCourseRequirements, readOpeningCourseRoute } from "./opening-course-route-read";
+import { assertCourseRouteCourse, readCourseRequirements, readCourseRouteMaterials, readOpeningCourseRoute } from "./opening-course-route-read";
+import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
 import { readLearningGoal } from "./opening-learning-goals";
 import { createOpeningCourseRouteActions } from "./opening-course-route-actions";
 export { readOpeningCourseRoute } from "./opening-course-route-read";
 
-export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnabled:boolean}){
-  return {read:(scope:Scope,courseId:string,activityId?:string)=>readOpeningCourseRoute(sql,scope,courseId,activityId),
+export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
+  return {read:(scope:Scope,courseId:string,activityId?:string)=>readOpeningCourseRoute(sql,scope,courseId,activityId,options.exactVerificationEnabled),
     ...createOpeningCourseRouteActions(sql,options),
     async confirm(scope:Scope,courseId:string,raw:CourseRouteConfirm){
       const input=courseRouteConfirmSchema.parse(raw);
@@ -17,12 +18,17 @@ export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnab
         await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         await assertCourseRouteCourse(tx,scope,courseId);
         const current=await readCourseRequirements(tx,scope,courseId);
+        const materials=await readCourseRouteMaterials(tx,scope,courseId);
+        const requirements=input.requirements.map(requirement=>({ ...requirement, verification:decideCourseRouteVerification(
+          requirement.verification,current.find(row=>row.id===requirement.id)?.verification??null,
+          requirement.sourceRefs.length>0&&requirement.sourceRefs.every(ref=>materials.some(material=>material.sourceId===ref.sourceId&&material.sourceVersion===ref.sourceVersion&&material.available)),
+          options.exactVerificationEnabled===true) }));
         const definitions=current.map(({courseId:_courseId,revision:_revision,lifecycle:_lifecycle,approvedAt:_approvedAt,...definition})=>definition);
         // An unknown response can replay the same full definition without raising revisions.
-        if(current.every(row=>row.approvedAt!==null)&&isDeepStrictEqual(definitions,input.requirements))return readOpeningCourseRoute(tx,scope,courseId);
+        if(current.every(row=>row.approvedAt!==null)&&isDeepStrictEqual(definitions,requirements))return readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
         if(current.length!==input.expectedRevisions.length||current.some(row=>!input.expectedRevisions.some(expected=>expected.id===row.id&&expected.revision===row.revision)))
           throw learningError("CONFLICT","课程要求已修改，请重新读取完整范围后确认。");
-        for(const requirement of input.requirements){
+        for(const requirement of requirements){
           const previous=current.find(row=>row.id===requirement.id);
           if(previous){const {courseId:_course,revision:_revision,lifecycle:_lifecycle,approvedAt:_approved,...definition}=previous;
             if(previous.approvedAt!==null&&isDeepStrictEqual(definition,requirement))continue;}
@@ -50,10 +56,10 @@ export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnab
             VALUES(${requirement.id},${scope.workspaceId},${scope.ownerUserId},${courseId},${requirement.stableSkillId},${requirement.knowledgeNodeId},${requirement.requirementKey},
               ${requirement.title},${requirement.position},${requirement.mandatory},${requirement.goalIds},${requirement.prerequisiteIds},${tx.json(requirement.sourceRefs)},${tx.json(requirement.verification)},${requirement.evidenceConditions?tx.json(requirement.evidenceConditions):null},${requirement.origin},now())`;
         }
-        const ids=input.requirements.map(row=>row.id);
+        const ids=requirements.map(row=>row.id);
         await tx`UPDATE course_requirements SET lifecycle='archived',revision=revision+1,updated_at=now() WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND lifecycle='active' AND NOT(id=ANY(${ids}::uuid[]))`;
-        return readOpeningCourseRoute(tx,scope,courseId);
+        return readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
       });
     }};
 }
