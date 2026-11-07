@@ -37,6 +37,7 @@ import {
 } from "@aistudy/database";
 import { UploadPolicyError } from "../opening/sources/upload-policy";
 import {
+  observationSubmitRejectionReasonSchema,
   createDocumentRelationRequestSchema,
   documentTagsUpdateSchema,
   documentPropertiesResponseSchema,
@@ -371,9 +372,12 @@ export function mapDomainError(error: unknown): ApiError {
   }
   if (error instanceof Error && "code" in error) {
     const code = (error as { code?: unknown }).code;
-    if (code === "VALIDATION") return new ApiError("VALIDATION", error.message, 400);
+    if (code === "VALIDATION" || code === "CONFLICT") {
+      const mapped = new ApiError(code, error.message, code === "VALIDATION" ? 400 : 409);
+      const reason = observationSubmitRejectionReasonSchema.safeParse("reason" in error ? error.reason : undefined);
+      return reason.success ? Object.assign(mapped, { reason: reason.data }) : mapped;
+    }
     if (code === "NOT_FOUND") return new ApiError("NOT_FOUND", error.message, 404);
-    if (code === "CONFLICT") return new ApiError("CONFLICT", error.message, 409);
   }
   // Unexpected driver/provider errors can contain SQL, internal URLs or secrets.
   const errorType = error instanceof TypeError ? "TypeError"

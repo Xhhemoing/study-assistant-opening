@@ -6,7 +6,7 @@ import { createOpeningApi } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { AssistantView } from "../assistant/assistant-view";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
-import { AiGradingPhotoFields } from "./ai-grading-photo";
+import { AiGradingPhotoFields, isWorkSourceRejection } from "./ai-grading-photo";
 import { ObservationRevisionCard } from "./observation-revision-card";
 import { StageActionBar } from "./stage-action-bar";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
@@ -240,7 +240,12 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       setAssistance(current.observation.assistance);
       setHelpOpen(false); setHelpOpenedOnce(false);
       onRecorded();
-    } catch (reason) { setError(formatRetestSubmitError(reason)); }
+    } catch (reason) {
+      if (!usePhotoShell && isWorkSourceRejection(reason)) {
+        if (readPracticeDraft(scope, null, draft.id)?.submission?.input.clientKey === submission.input.clientKey) patch({ submission: null });
+        setError(`${formatRetestSubmitError(reason)} 可以改页码、换照片或移除照片后再提交。`);
+      } else setError(formatRetestSubmitError(reason));
+    }
     finally { pendingRef.current = false; setPending(false); }
   }
 
@@ -473,7 +478,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                 className="mt-1 min-h-24 w-full rounded border border-line bg-surface px-3 py-2"
               />
             </label>
-            {attempt.problemId ? <AiGradingPhotoFields sources={sources} value={gradingPhoto} onChange={next => patch({ fields: { workSourceId: next.workSourceId, workSourceVersion: next.workSourceVersion, workPhysicalPage: next.physicalPage } })} disabled={pending || Boolean(draft.submission)} onRefresh={() => void refreshSources()} /> : null}
+            {attempt.problemId ? <AiGradingPhotoFields sources={usePhotoShell ? sources : sources.filter(source => !attempt.sourceIds.includes(source.id))} value={gradingPhoto} onChange={next => patch({ fields: { workSourceId: next.workSourceId, workSourceVersion: next.workSourceVersion, workPhysicalPage: next.physicalPage } })} disabled={pending || Boolean(draft.submission)} onRefresh={() => void refreshSources()} /> : null}
             <label className="block text-sm text-text">
               自报结果
               <select

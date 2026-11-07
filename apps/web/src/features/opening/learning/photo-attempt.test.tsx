@@ -58,3 +58,49 @@ it("retains the confirmed image-version anchor when the server rejects an upgrad
     expect(api.createAttempt.mock.calls[1]).toEqual(api.createAttempt.mock.calls[0]);
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
+
+it.each([
+  { shell: false, known: true }, { shell: false, known: false }, { shell: true, known: true },
+])("only releases a known rejection in ordinary practice: $shell $known", async ({ shell, known }) => {
+  const { OpeningApiError } = await import("../client/api");
+  const { OpeningCapabilitiesContext } = await import("../capabilities/capabilities-provider");
+  const { CLOSED_CAPABILITIES } = await import("@aistudy/config/public");
+  vi.resetAllMocks(); window.sessionStorage.clear(); Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID(), workId = crypto.randomUUID(), sessionId = crypto.randomUUID();
+  const attempt: LearningAttempt = { id: crypto.randomUUID(), workspaceId: courseId, courseId, sessionId, skillLabel: "随手练习", requirementKey: null,
+    sourceIds: [sourceId], sourceVersions: { [sourceId]: 2 }, problemId: sourceId, itemVersionId: sessionId, stemSnapshot: "计算 1+1",
+    observationId: null, submittedAt: null, startedAt: "2026-10-22T00:00:00Z", historyRevision: 0 };
+  const source = (id: string, name: string) => ({ id, workspaceId: courseId, name, mime: "image/png", bytes: 100, sha256: "a".repeat(64), version: 2,
+    uploadState: "uploaded", parseState: "ready", error: null, createdAt: "2026-10-22T00:00:00Z" });
+  api.listSources.mockResolvedValue([source(sourceId, "原题.png"), source(workId, "作答.png")]); api.getSummary.mockResolvedValue([]);
+  api.createSession.mockResolvedValue({ id: sessionId }); api.createAttempt.mockResolvedValue(attempt);
+  api.getAttempt.mockResolvedValue({ attemptId: attempt.id, sessionId, deliveredAssistance: "none" }); api.listObservations.mockResolvedValue([]);
+  api.submitAttempt.mockRejectedValue(new OpeningApiError(409, "照片不可用", "CONFLICT", known ? "work_source_rejected" : null));
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  try {
+    await act(async () => root.render(createElement(OpeningCapabilitiesContext.Provider, { value: { ...CLOSED_CAPABILITIES, studySessionV2: shell } },
+      createElement(LearningAttemptForm, { photoSession: shell, courseId, initialProblem: { sourceId, sourceVersion: 2, stem: "计算 1+1" }, onRecorded() {} }))));
+    const select = [...container.querySelectorAll("select")].find(item => item.closest("label")?.textContent?.includes("作答图片或文档"))!;
+    expect([...select.options].some(option => option.textContent === "原题.png")).toBe(shell);
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "我的答案");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      select.value = `${workId}:2`; select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    const input = api.submitAttempt.mock.calls[0]![1];
+    expect(input.workSource.id).toBe(workId);
+    expect(input.answer).toBe("我的答案");
+    expect(textarea.value).toBe("我的答案");
+    expect(select.value).toBe(`${workId}:2`);
+    expect(select.disabled).toBe(shell || !known);
+    if (!shell && known) {
+      expect(container.textContent).toContain("可以改页码、换照片或移除照片");
+      await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+      expect(api.submitAttempt.mock.calls[1]![0]).toBe(attempt.id);
+      expect(api.submitAttempt.mock.calls[1]![1].clientKey).not.toBe(input.clientKey);
+      expect(api.submitAttempt.mock.calls[1]![1].workSource).toEqual(input.workSource);
+    }
+  } finally { await act(async () => root.unmount()); container.remove(); }
+});
