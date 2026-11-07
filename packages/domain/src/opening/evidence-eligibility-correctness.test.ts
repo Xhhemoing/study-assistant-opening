@@ -115,3 +115,11 @@ it("requires the span verifier's complete core evidence before accepting its cor
   expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation }).verifiedCorrect).toBe("unknown");
   expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation: { ...serverEvaluation, coreEvidenceComplete: true } }).verifiedCorrect).toBe("yes");
 });
+
+it("recognizes the exact teaching evaluator and preserves assistance and version checks", () => {
+  const answer = { ...observation, observationId: "obs", verdictSource: "deterministic" as const };
+  const evaluation = { observationId: "obs", attemptId: answer.attemptId!, problemId: answer.problemId!, itemVersionId: answer.itemVersionId!, requirementKey: answer.requirementKey!, evaluatorVersion: "teaching-key-exact-v1" as const, specVersion: "teaching-key-v1" as const, decision: "correct" as const, outcome: "correct" as const, reasonCodes: ["match"], evaluatedAt: "2026-11-06T00:00:00.000Z" };
+  expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation: evaluation })).toMatchObject({ independentAttempt: "yes", verifiedCorrect: "yes" });
+  expect(evaluateEvidenceEligibility({ ...answer, assistance: "hinted" }, { ...context, serverEvaluation: evaluation })).toMatchObject({ independentAttempt: "no", usableForDelayedCheck: "no" });
+  expect(evaluateEvidenceEligibility(answer, { ...context, serverEvaluation: { ...evaluation, specVersion: "span-v1" } as never }).verifiedCorrect).toBe("unknown");
+});
