@@ -22,7 +22,7 @@ Implemented locally and covered by unit tests. The earlier default-port service
 blocker is now removed by isolated PostgreSQL/Redis/MinIO. Source/storage and
 application integration checks plus the Opening browser workflow have run locally;
 this does not establish a complete backup/restore drill. Commands and boundaries:
-`docs/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md`.
+`docs/archive/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md`.
 
 - Owner-scoped backup source inventory, object staging, snapshot recheck
   (`packages/database/src/repositories/opening-backup-*.ts`,
@@ -54,7 +54,7 @@ Not implemented yet (blocked or deliberately deferred):
 - Docker **image build / compose up / packaging gates** green. Scaffold paths
   exist (`Dockerfile.opening-*`, `compose.opening.yml`, `opening.env.example`);
   packaging success is not deploy. See
-  `docs/superpowers/evidence/2026-10-09-opening-release/q03-packaging-gaps.md`.
+  `docs/archive/superpowers/evidence/2026-10-09-opening-release/q03-packaging-gaps.md`.
 - CI-run evidence for the release SHA (see `docs/operations/ci.md`).
 
 ## Real export validation (2026-09-25)
@@ -62,7 +62,7 @@ Not implemented yet (blocked or deliberately deferred):
 The real PostgreSQL/MinIO draft-to-encrypted-archive path now passes: 31 new
 focused integration cases, with the full local suites at 209 unit files / 1112
 tests and 47 integration files / 255 tests. See
-`docs/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`.
+`docs/archive/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`.
 Scope capture, malformed lineage, filtered-session descendants, citation version
 types and case-insensitive references are covered. Deleted and unsourced memories
 are omitted under the existing restore provenance rules; preserving handwritten
@@ -207,6 +207,6 @@ These stay explicitly blocked and cannot be claimed from local runs:
 
 ## Exclusive file publication (2026-09-25)
 
-Archive/encrypt/decrypt publish closed temporary files using an exclusive hard link. Competing destinations and unowned temporary files are preserved. Cleanup failures explicitly identify whether publication occurred; callers must inspect that state before considering retries. Parent-run backup units (170) and real DB/MinIO integrations (31) passed; evidence: `docs/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md`.
+Archive/encrypt/decrypt publish closed temporary files using an exclusive hard link. Competing destinations and unowned temporary files are preserved. Cleanup failures explicitly identify whether publication occurred; callers must inspect that state before considering retries. Parent-run backup units (170) and real DB/MinIO integrations (31) passed; evidence: `docs/archive/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md`.
 
 This does not yet establish DB publication fencing, restore apply, crash durability or Windows private-staging ACLs. Short writes and suppressed sync errors remain in the PU05 handoff. Work now follows the personal-use plan from PU00; no published artifact or production deployment is implied.

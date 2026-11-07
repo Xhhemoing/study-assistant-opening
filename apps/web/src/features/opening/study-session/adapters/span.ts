@@ -22,7 +22,7 @@ import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
 import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, readPracticeDraft, assertPracticeDraftSaved, switchPracticeDraft } from "../../learning/practice-draft-storage";
 import { assertPracticeAttempt, readPracticeRecord } from "../../learning/practice-draft";
-import type { HelpState, NextAction, PhotoState, StepResult, StudySessionPort, StudySessionView, StudyStep } from "../model";
+import type { HelpState, NextAction, PhotoState, PreAnswerConfidence, StepResult, StudySessionPort, StudySessionView, StudyStep } from "../model";
 
 const SKILL = "线性组合与 span";
 type Move = ReturnType<typeof spanLessonMoves>[number];
@@ -71,7 +71,7 @@ export function adaptSpanHelp(level: HelpState["level"], hints: { level: SpanHin
 export function adaptSpanNext(raw: unknown, courseId: string): NextAction {
   const next = readSpanNextResult(raw, courseId);
   return next.kind === "ready" ? { href: next.href, label: next.label, alternatives: [] }
-    : { href: next.primary.href, label: next.primary.label, reason: next.message, alternatives: next.secondary ? [next.secondary] : [] };
+    : { href: next.primary.href, label: next.primary.label, notice: next.message, alternatives: next.secondary ? [next.secondary] : [] };
 }
 
 function strongest(...levels: (HelpState["level"] | undefined)[]): HelpState["level"] {
@@ -88,6 +88,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   const move = moves[index];
   const problemId = move && index > 0 ? spanLessonProblemId(mode, index, moves.length) : null;
   const position = { index: Math.max(0, index), total: moves.length };
+  const budgetMinutes = session.intent.timeBudgetMinutes;
   const client = createOpeningLearningClient();
   const scope = spanPracticeScope(session.courseId, retestId, undefined, session.activityId, problemId ?? undefined);
   const storage = () => window.sessionStorage;
@@ -102,6 +103,9 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   let hints: { level: SpanHintLevel; text: string }[] = [];
   let delivered: HelpState["level"] = "none";
   let photo: PhotoState | null = options.photoEnabled ? { status: "none" } : null;
+  // Kept out of the shared draft schema: an unsent choice is lost on refresh and never follows a redo or variant.
+  let confidence: { attemptId: string; value: PreAnswerConfidence } | null = null;
+  const chosenConfidence = () => confidence && confidence.attemptId === attempt?.id ? confidence.value : null;
   const variantOrigin = () => draft()?.start?.clientKey.startsWith("span-variant:") ? draft()!.start!.clientKey.slice("span-variant:".length) : null;
   const correctedRedo = () => Boolean(record && attempt && adaptSpanResult(record).outcome === "correct"
     && session.intent.purpose === "self_study" && !retestId && !variantOrigin()
@@ -109,13 +113,17 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       && row.itemVersionId === attempt!.itemVersionId && details.observations.some(observation => observation.attemptId === row.id && observation.serverEvaluation?.decision === "incorrect"))));
 
   const blockedView = (step: StudyStep, blocked: string): StudySessionView =>
-    ({ step, position, help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, blocked, result: null, next: null, photo: null });
+    ({ step, position, help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, blocked, result: null, next: null, photo: null, budgetMinutes });
   function refresh(next: NextAction | null = view?.next ?? null): StudySessionView {
     const current = draft();
     const sealed = Boolean(current?.submission);
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
+    // After the first answer this tab's sealed request is shown, otherwise the value the server saved; a skipped choice shows nothing.
+    const savedConfidence = sealed ? current?.submission?.input.preAnswerConfidence : attempt?.preAnswerConfidence;
     view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
       sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo,
+      confidence: sealed || record ? savedConfidence ? { value: savedConfidence, locked: true } : undefined
+        : { value: chosenConfidence(), locked: false },
       canPracticeVariant: correctedRedo(),
       canRedo: Boolean(record && adaptSpanResult(record).outcome !== "correct" && !retestId && !photo?.workSource
         && !current?.submission?.input.workSource && !current?.start?.clientKey.startsWith("span-redo:")) };
@@ -193,7 +201,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     }
     const prompt = spanProblemText(current.spanExercise).chinese;
     view = { step: { ...step, id: current.id, prompt, coordinates: current.spanExercise.target.length },
-      position, help: adaptSpanHelp(delivered, hints, Boolean(record), false), answer: {}, sealed: false, result: null, next: null, photo };
+      position, help: adaptSpanHelp(delivered, hints, Boolean(record), false), answer: {}, sealed: false, result: null, next: null, photo, budgetMinutes };
     return refresh(null);
   }
 
@@ -218,16 +226,26 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
           body: JSON.stringify({ courseId: session.courseId, sourceId, sessionId: session.sessionId, kind, clientKey: `span-demo:${session.sessionId}:${sourceId}:${kind}:v1` }) });
         await acknowledgeStudyExposure(raw.exposureReceipt);
         view = { step: adaptSpanLearn(raw, move, details.estimateMinutes ?? null, details.targetedFocus), position,
-          help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, result: null, next: null, photo: null };
+          help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, result: null, next: null, photo: null, budgetMinutes };
         return view;
       }
       return loadQuestion();
+    },
+    current() {
+      return view?.step.kind === "question" && attempt && view.step.id === attempt.id && draft()?.submission?.attemptId === attempt.id ? refresh() : null;
     },
     edit(change: Partial<SpanDraftAnswer>) {
       const current = draft();
       if (!current || view.step.kind !== "question") return view;
       if (current.submission) throw new Error("答案已提交，不能再修改。");
       update({ fields: { answer: updateSpanDraftAnswer(current.fields.answer, change) } });
+      return refresh();
+    },
+    setConfidence(value: PreAnswerConfidence | null) {
+      const current = draft();
+      if (!current || !attempt || view.step.kind !== "question") return view;
+      if (current.submission) throw new Error("答案已提交，作答前的把握不能再修改。");
+      confidence = value ? { attemptId: attempt.id, value } : null;
       return refresh();
     },
     async redo() {
@@ -281,10 +299,12 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       const sealed = draft()!.submission;
       const readyPhoto = photo?.status === "ready" && photo.workSource ? photo.workSource : null;
       if (!sealed && photo && photo.status !== "none" && !readyPhoto) throw new Error("照片还没准备好。可以移除照片后用文字作答，或重新选择照片。");
+      // Skipping omits the key rather than sending null, so the request keeps the shape it had before this field existed.
+      const chosen = chosenConfidence();
       const submission = sealed ?? update(previous => ({ submission: { attemptId: current.id, input: {
         clientKey: `span-first-answer:${crypto.randomUUID()}`, answer: previous.fields.answer, ...(retestId ? { retestId } : {}),
         assistance: delivered === "none" ? "independent" : delivered, outcome: "unverified", verdictSource: "self_report",
-        ...(readyPhoto ? { workSource: readyPhoto } : {}) } } })).submission!;
+        ...(readyPhoto ? { workSource: readyPhoto } : {}), ...(chosen ? { preAnswerConfidence: chosen } : {}) } } })).submission!;
       const saved = await client.submitAttempt(current.id, submission.input);
       update({ observationId: saved.id });
       record = (await readPracticeRecord(client, session.courseId, current, saved.id)).observation;

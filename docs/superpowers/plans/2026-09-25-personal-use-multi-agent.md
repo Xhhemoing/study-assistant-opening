@@ -27,7 +27,7 @@
 | [H] 缺问题/版本/可信核验的学习记录可能升独立状态 | `learning-summary.ts`、learning/read-service、observation-service；PU04先复现，已有通过则记反证，不盲修 |
 | [V] 现有恢复组件不等于发布和apply | [当前运维边界](../../operations/opening-release.md)、[9/25备份集成计划](2026-09-25-opening-backup-integration.md)；PU05沿用现成组件 |
 | [H] 无材料source的记忆删除需在独立journal保留memory身份 | `opening-memory-delete.ts`只为实际source写exclusion；PU05A0用旧包恢复负例核验 |
-| [T] 真实模型效果/费用、真机、完整恢复与SHA绑定交付仍需各自证据 | [9/24记录含9/25续验](../evidence/2026-09-24-opening-isolated-acceptance/verification.md)的fixture/local边界；不按测试数量推定长期可用 |
+| [T] 真实模型效果/费用、真机、完整恢复与SHA绑定交付仍需各自证据 | [9/24记录含9/25续验](../../archive/superpowers/evidence/2026-09-24-opening-isolated-acceptance/verification.md)的fixture/local边界；不按测试数量推定长期可用 |
 
 原设计已包含G2/R2c接续卡和微学习闭环；本计划细化首切片，不另建学习平台。只读首切片没有用户确认的“下一步”，明确返回null；完整R2c保存/修改确认断点继续留在原G2，不虚报完成。PU07报告收集其实际需求与负担，为后续写入切片提供验收样本。
 

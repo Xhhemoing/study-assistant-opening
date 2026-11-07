@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
-import type { LearningAttempt, LearningObservation, TeachingActivity, TeachingAnswerKey, TeachingHintLevel, TeachingHintResponse, TeachingQuestionInteraction } from "@aistudy/contracts";
+import type { LearningAttempt, LearningObservation, SourceRecord, TeachingActivity, TeachingAnswerKey, TeachingHintLevel, TeachingHintResponse, TeachingQuestionInteraction } from "@aistudy/contracts";
 import { createOpeningApi, OpeningApiError } from "../client/api";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { buildSelfCompareRevision, referenceCheckFailure, selfCompareRevisionIntentKey } from "../learning/reference-check";
@@ -17,6 +17,7 @@ import { LessonFlow } from "./lesson-flow";
 import { InlineAnswerInput } from "./inline-answer-input";
 import { FeedbackPanel } from "./feedback-panel";
 import { AiGradingResult, canGradeObservation } from "../learning/ai-grading-card";
+import { AiGradingPhotoFields, emptyGradingPhoto, type GradingPhotoSelection } from "../learning/ai-grading-photo";
 import { ObservationRevisionCard } from "../learning/observation-revision-card";
 import { LearnerStatePanel } from "./learner-state-panel";
 import { createInlineAttemptPreparation, type InlineAttemptPreparationCheckpoint } from "./inline-attempt-prepare";
@@ -66,8 +67,23 @@ export function InlineAttempt({ blockId, prompt, context }: { blockId: string; p
   </>;
 }
 
+type InlineDraftFields = Pick<InlineAttemptDraft, "answer" | "skillLabel" | "prompt"> & { photo: GradingPhotoSelection };
+
+function photoSelection(workSource: InlineAttemptDraft["workSource"]): GradingPhotoSelection {
+  return workSource ? { workSourceId: workSource.id, workSourceVersion: workSource.version, physicalPage: workSource.physicalPage } : emptyGradingPhoto;
+}
+
+function photoWorkSource(photo: GradingPhotoSelection): Pick<InlineAttemptDraft, "workSource"> {
+  return photo.workSourceId ? { workSource: { id: photo.workSourceId, version: photo.workSourceVersion, physicalPage: photo.physicalPage } } : {};
+}
+
+function draftFields({ photo, ...fields }: InlineDraftFields): InlineAttemptDraft {
+  return { ...fields, ...photoWorkSource(photo) };
+}
+
 function submissionDraft(checkpoint: InlineAttemptSubmissionCheckpoint): InlineAttemptDraft {
-  return { answer: checkpoint.input.answer, skillLabel: checkpoint.input.skillLabel, prompt: checkpoint.input.prompt, submission: checkpoint };
+  const { answer, skillLabel, prompt, workSource } = checkpoint.input;
+  return { answer, skillLabel, prompt, ...(workSource ? { workSource } : {}), submission: checkpoint };
 }
 
 export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraft, onDraftChange }: { blockId: string; prompt: string; context: InlineAttemptContext; ready: boolean; initialDraft?: InlineAttemptDraft; onDraftChange: (draft: InlineAttemptDraft | null) => void }) {
@@ -79,6 +95,9 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const currentScope = useRef({ courseId: context.courseId, prompt });
   currentScope.current = { courseId: context.courseId, prompt };
   const [answer, setAnswer] = useState(initialDraft?.answer ?? "");
+  const [photo, setPhoto] = useState(() => photoSelection(initialDraft?.workSource));
+  const [sources, setSources] = useState<SourceRecord[]>([]);
+  const [sourcesUnavailable, setSourcesUnavailable] = useState(false);
   const [skillLabel, setSkillLabel] = useState(() => defaultInlineAttemptSkill({
     draftSkillLabel: initialDraft?.skillLabel, questionSkillLabel: context.questionSkillLabel,
     learnerSkillLabel: context.learnerFocus?.skillLabel, outlineTitle: context.outlineTitle,
@@ -113,15 +132,15 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const preparation = useRef<ReturnType<typeof createInlineAttemptPreparation> | null>(null);
   const preparedCheckpoint = useRef<InlineAttemptPreparationCheckpoint | undefined>(initialDraft?.preparation);
   const autoPrepared = useRef(false);
-  const latestDraft = useRef({ answer, skillLabel, prompt });
-  latestDraft.current = { answer, skillLabel, prompt };
-  function persistDraft(value: Pick<InlineAttemptDraft, "answer" | "skillLabel" | "prompt">) {
-    onDraftChange({ ...value, ...(preparedCheckpoint.current ? { preparation: preparedCheckpoint.current } : {}) });
+  const latestDraft = useRef<InlineDraftFields>({ answer, skillLabel, prompt, photo });
+  latestDraft.current = { answer, skillLabel, prompt, photo };
+  function persistDraft(value: InlineDraftFields) {
+    onDraftChange({ ...draftFields(value), ...(preparedCheckpoint.current ? { preparation: preparedCheckpoint.current } : {}) });
   }
   function prepared(checkpoint: InlineAttemptPreparationCheckpoint) {
     preparedCheckpoint.current = checkpoint;
     setSkillLabel(checkpoint.input.skillLabel);
-    onDraftChange({ ...latestDraft.current, skillLabel: checkpoint.input.skillLabel, preparation: checkpoint });
+    onDraftChange({ ...draftFields(latestDraft.current), skillLabel: checkpoint.input.skillLabel, preparation: checkpoint });
   }
   if (!submission.current && initialDraft?.submission) submission.current = createInlineAttemptSubmission(initialDraft.submission.input, client, {
     checkpoint: initialDraft.submission, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)),
@@ -210,6 +229,22 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     void prepare();
   }, [ready, restoring, restoreFailed, draftConflict, recorded, attempt, context.courseId, context.status, skillLabel]);
 
+  const photoVisible = ready && !restoring && !restoreFailed && !recorded && context.status !== "completed" && Boolean(attempt || photo.workSourceId);
+  // The server rejects the materials sealed into this question's attempt as answer photos.
+  const photoSources = attempt ? sources.filter(source => !attempt.sourceIds.includes(source.id)) : sources;
+  async function loadSources(isCurrent: () => boolean) {
+    try {
+      const rows = await api.listSources();
+      if (isCurrent()) { setSources(rows.filter(source => source.uploadState === "uploaded")); setSourcesUnavailable(false); }
+    } catch { if (isCurrent()) setSourcesUnavailable(true); }
+  }
+  useEffect(() => {
+    if (!photoVisible) return;
+    let active = true;
+    void loadSources(() => active);
+    return () => { active = false; };
+  }, [api, photoVisible]);
+
   async function bindCourse() {
     if (context.courseId || inFlight.current) return;
     inFlight.current = true; setPending(true); setError("");
@@ -248,7 +283,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
     event.preventDefault();
     if (!ready || restoring || restoreFailed || draftConflict || !context.courseId || inFlight.current || context.status === "completed") return;
     inFlight.current = true; setPending(true); setError("");
-    submission.current ??= createInlineAttemptSubmission({ activityId: context.id, courseId: context.courseId, blockId, contentVersion: context.contentVersion, sourceIds: context.sourceIds, prompt, skillLabel: skillLabel.trim(), answer }, client, { preparation: preparedCheckpoint.current, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)) });
+    submission.current ??= createInlineAttemptSubmission({ activityId: context.id, courseId: context.courseId, blockId, contentVersion: context.contentVersion, sourceIds: context.sourceIds, prompt, skillLabel: skillLabel.trim(), answer, ...photoWorkSource(photo) }, client, { preparation: preparedCheckpoint.current, onCheckpoint: checkpoint => onDraftChange(submissionDraft(checkpoint)) });
     try {
       const result = await submission.current.submit();
       if (!mounted.current || currentScope.current.courseId !== context.courseId || currentScope.current.prompt !== prompt) return;
@@ -305,6 +340,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const nextHint = answerKey ? null : recorded ? 4 : Math.min(4, 1 + hints.reduce((level, hint) => Math.max(level, hint.level), 0)) as TeachingHintLevel;
   const assessed = Boolean(recorded?.aiEvaluation || recorded?.serverEvaluation);
   const feedbackVerdict = assessed ? recorded!.outcome : "unverified";
+  const answerLocked = !ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed";
   return <div className="mt-3 space-y-3 border-t border-line pt-3" data-inline-attempt={blockId}>
     <LessonFlow phase={hintPending ? "hint" : recorded ? checked ? "next" : "feedback" : pending && submission.current ? "submit" : "attempt"}>
     {!context.courseId && context.status !== "completed" ? <div className="space-y-2"><p role="status" className="text-xs text-text-2">正在准备本次学习…</p>{error ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => void bindCourse()}>{studentCopy.retry}</button> : null}</div> : null}
@@ -320,20 +356,25 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       {diagnostics ? <details open={skillEditorOpen} onToggle={event => setSkillEditorOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
         <div className="space-y-2 pt-2">
-          <label className="block text-xs text-text-2">记录的技能<input className="mt-1 block w-full rounded-md border border-line bg-surface px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); persistDraft({ answer, skillLabel: event.target.value, prompt }); }} /></label>
+          <label className="block text-xs text-text-2">记录的技能<input className="mt-1 block w-full rounded-md border border-line bg-surface px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); persistDraft({ answer, skillLabel: event.target.value, prompt, photo }); }} /></label>
           <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
-          {skillReuseHint ? <p className="text-xs leading-6 text-warn" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-accent underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); persistDraft({ answer, skillLabel: skillReuseHint, prompt }); }}>使用「{skillReuseHint}」</button></p> : null}
+          {skillReuseHint ? <p className="text-xs leading-6 text-warn" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-accent underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); persistDraft({ answer, skillLabel: skillReuseHint, prompt, photo }); }}>使用「{skillReuseHint}」</button></p> : null}
         </div>
       </details> : null}
       <p className="text-xs font-medium text-text-2">我的解答</p>
-      <InlineAnswerInput interaction={context.interaction} value={answer} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed"} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt }); }} />
+      <InlineAnswerInput interaction={context.interaction} value={answer} disabled={answerLocked} onChange={value => { setAnswer(value); persistDraft({ answer: value, skillLabel, prompt, photo }); }} />
+      {photoVisible ? <>
+        <AiGradingPhotoFields sources={photoSources} value={photo} disabled={answerLocked} onRefresh={() => void loadSources(() => mounted.current)}
+          onChange={next => { setPhoto(next); persistDraft({ answer, skillLabel, prompt, photo: next }); }} />
+        {sourcesUnavailable && !submission.current ? <p role="status" className="text-xs text-warn">暂时读不到作答照片列表，可以稍后点“刷新文件”再试；文字答案照常可以提交。</p> : null}
+      </> : null}
       <StageActionBar stage={pending && submission.current ? "processing" : error ? "failed" : "draft"}
         message={pending && submission.current ? "正在保存原答案…" : undefined}
         primary={{ type: "submit", label: draftConflict ? "原答案已保留（只读）" : submission.current ? "重新确认原答案已保存" : studentCopy.submit,
-          disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || !answer.trim() || context.status === "completed" }} />
+          disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || (!answer.trim() && !photo.workSourceId) || context.status === "completed" }} />
     </form> : <FeedbackPanel verdict={feedbackVerdict} title={studentCopy.saved} evidence={recorded.aiEvaluation ? "批改结果已记录，可以查看评分要点，或纠正不准确的判断。" : canGradeObservation(recorded) ? "答案保存后可自动批改，也可以手动记录自己的判断。" : checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
       <LearnerStatePanel observation={recorded} />
-      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} completionAction={context.completionAction}
+      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={submission.current && photo.workSourceId ? photo : undefined} completionAction={context.completionAction}
         onUpdated={observation => { revisionReturnedHead.current = true; updatedObservation(observation); }} onChanged={() => {
           // Successful edits already returned the current head. Only withdrawal or
           // unavailability needs a read; a second read could overwrite a later edit.

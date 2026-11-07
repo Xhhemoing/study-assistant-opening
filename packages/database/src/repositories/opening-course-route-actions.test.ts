@@ -137,10 +137,12 @@ describe("course route next: return and comprehensive paths", () => {
       questionIdentity: "pq-2", firstQuestionExposure: true });
     const earlier = row("p-earlier", { ...correct, requirementKey: "pkey", courseRequirement: bound(p), attemptedAt: "2026-10-26T00:00:00Z",
       questionIdentity: "pq-1", firstQuestionExposure: true });
+    // The detour really happened: p was judged wrong before its two independent successes.
+    const wrong = row("p-wrong", { requirementKey: "pkey", courseRequirement: bound(p), attemptedAt: "2026-10-25T06:00:00Z" });
     query.mockResolvedValueOnce([{ id: f.activityId, path_version: 1, goal_json: { courseRoute: context } }]);
     mocks.goal.mockResolvedValue({ id: f.goalId, revision: 1, courseIds: ["c"] });
     mocks.read.mockResolvedValue({ scopeState: "confirmed", materials, requirements: [progressRow(p, "needs_verification", f.observationId), progressRow(r, "needs_correction", "r-new")] });
-    mocks.observations.mockResolvedValue({ projected: [current, earlier, row("r-old", { courseRequirement: bound(r), attemptedAt: "2026-10-25T00:00:00Z" }),
+    mocks.observations.mockResolvedValue({ projected: [current, earlier, wrong, row("r-old", { courseRequirement: bound(r), attemptedAt: "2026-10-25T00:00:00Z" }),
       row("r-new", { courseRequirement: bound(r), attemptedAt: "2026-10-26T12:00:00Z" })], raw: [{ id: f.observationId, activityId: f.activityId, submittedAt: current.attemptedAt }] });
     const result = await next(f);
     // Route navigation says "return"; selectCourseRouteStep alone would say targeted_explain.
@@ -151,19 +153,30 @@ describe("course route next: return and comprehensive paths", () => {
     expect(mocks.create.mock.calls[0]![2].intentSummary).toMatch(/^返回原要求/);
   });
 
-  const comprehensive = (current: Partial<CourseRouteObservation>, a: Partial<CourseRequirement> = {}) => {
+  type ComprehensiveOptions = { b?: Partial<CourseRequirement>; bProgress?: [string, string | null]; extra?: (reqB: CourseRequirement) => CourseRouteObservation[] };
+  /** Production enters a comprehensive run only after every requirement is verified
+   * (opening-course-route-actions.ts, no remaining step), and verified needs two
+   * independent first-exposure successes on different questions. So each requirement
+   * carries that history, earlier than the run and outside its run key. */
+  const comprehensive = (current: Partial<CourseRouteObservation>, options: ComprehensiveOptions = {}) => {
     const f = { goalId: randomUUID(), activityId: randomUUID(), observationId: randomUUID() };
-    const reqA: CourseRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID(), requirementKey: "akey", title: "甲", position: 0, ...a };
-    const reqB: CourseRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID(), requirementKey: "bkey", title: "乙", position: 1 };
+    const reqA: CourseRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID(), requirementKey: "akey", title: "甲", position: 0 };
+    const verifiedB: CourseRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID(), requirementKey: "bkey", title: "乙", position: 1 };
+    const reqB: CourseRequirement = { ...verifiedB, ...options.b };
+    const history = (r: CourseRequirement, prefix: string) => [1, 2].map(i => row(`${prefix}-verified-${i}`, { ...correct, requirementKey: r.requirementKey,
+      courseRequirement: bound(r), attemptedAt: `2026-10-2${i}T00:00:00Z`, questionIdentity: `${prefix}-question-${i}`, firstQuestionExposure: true }));
     const runKey = "course-route-start:c:comprehensive-run";
     const context = { goalId: f.goalId, goalRevision: 1, requirementId: reqA.id, requirementRevision: 1, stableSkillId: reqA.stableSkillId,
       requirementKey: "akey", action: "comprehensive", coveredRequirementIds: [reqA.id, reqB.id], comprehensiveRunKey: runKey };
     const head = row(f.observationId, { requirementKey: "akey", courseRequirement: bound(reqA), activityId: f.activityId, routeAction: "comprehensive",
-      comprehensiveRunKey: runKey, errors: [], ...current });
+      comprehensiveRunKey: runKey, questionIdentity: "a-question-run", errors: [], ...current });
     query.mockResolvedValueOnce([{ id: f.activityId, path_version: 1, goal_json: { courseRoute: context } }]);
     mocks.goal.mockResolvedValue({ id: f.goalId, revision: 1, courseIds: ["c"] });
-    mocks.read.mockResolvedValue({ scopeState: "confirmed", materials, requirements: [progressRow(reqA, "verified", null), progressRow(reqB, "verified", null)] });
-    mocks.observations.mockResolvedValue({ projected: [head], raw: [{ id: f.observationId, activityId: f.activityId, submittedAt: head.attemptedAt }] });
+    const [bStatus, bObservation] = options.bProgress ?? ["verified", "b-verified-2"];
+    mocks.read.mockResolvedValue({ scopeState: "confirmed", materials, requirements: [progressRow(reqA, "verified", "a-verified-2"), progressRow(reqB, bStatus, bObservation)] });
+    // B's history stays bound to the revision it was recorded under.
+    mocks.observations.mockResolvedValue({ projected: [head, ...history(reqA, "a"), ...history(verifiedB, "b"), ...(options.extra?.(reqB) ?? [])],
+      raw: [{ id: f.observationId, activityId: f.activityId, submittedAt: head.attemptedAt }] });
     return { f, reqA, reqB };
   };
 
@@ -174,23 +187,42 @@ describe("course route next: return and comprehensive paths", () => {
     expect(mocks.capture.mock.calls[0]![2].context).toMatchObject({ action: "comprehensive", coveredRequirementIds: [reqA.id, reqB.id] });
   });
 
-  it("综合检查当前观察判对（受助，仍需本项检查）时，焦点为null", async () => {
+  it("综合检查当前观察判对（受助，仍需本项检查）时，经路线覆盖进入减少帮助练习，焦点为null", async () => {
     const { f, reqA } = comprehensive({ verifiedCorrect: "yes", independentAttempt: "no", assistance: "hinted" });
+    // With A's two earlier independent checks the canonical result is diagnose/needs_check,
+    // which the route overrides (same as the it.each([1, 2]) retest case above).
     expect(await next(f)).toMatchObject({ kind: "ready", action: "comprehensive", requirementId: reqA.id, activity: { learnerFocus: {
-      activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null } } });
+      activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null,
+      recentAssistance: ["hinted", "independent", "independent"] } } });
+    expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ requestedId: reqA.id, context: { action: "comprehensive" }, decisionInput: {
+      status: "needs_check", observations: [{ id: f.observationId }, { id: "a-verified-2" }, { id: "a-verified-1" }] } });
   });
 
-  it("综合检查转到其他要求时，不把原要求当前观察的id当作焦点", async () => {
+  it("综合检查转到其他要求时，不把原要求当前观察的id当作焦点，决策只用该要求自己的历史", async () => {
     const { f, reqB } = comprehensive({ ...correct, firstQuestionExposure: true });
     expect(await next(f)).toMatchObject({ kind: "ready", action: "comprehensive", requirementId: reqB.id, activity: { learnerFocus: {
-      requirementKey: "bkey", activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null } } });
-    expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ requestedId: reqB.id, decisionInput: { observations: [] } });
+      requirementKey: "bkey", activityKind: "transfer_check", reasonCode: "independent", focusObservationId: null,
+      recentAssistance: ["independent", "independent"] } } });
+    const binding = { courseRequirement: { id: reqB.id } };
+    expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ requestedId: reqB.id, decisionInput: { status: "observed_independent",
+      observations: [{ id: "b-verified-2", ...binding }, { id: "b-verified-1", ...binding }] } });
   });
 
-  it("综合检查的验证材料未就绪时返回verification_unavailable，不创建活动或预留预算", async () => {
-    const { f, reqA } = comprehensive({ verifiedCorrect: "yes", independentAttempt: "no", assistance: "hinted" },
-      { verification: { ...requirement.verification, status: "missing" } });
-    expect(await next(f)).toMatchObject({ kind: "choice", reason: "verification_unavailable", requirementIds: [reqA.id] });
+  it("综合检查转到的要求自己有更早的判错观察时，焦点是那条观察的id", async () => {
+    // b-wrong is newer than B's verified history but outside the run key: B still needs this run's check.
+    const { f, reqB } = comprehensive({ ...correct, firstQuestionExposure: true }, { bProgress: ["needs_correction", "b-wrong"],
+      extra: target => [row("b-wrong", { requirementKey: "bkey", courseRequirement: bound(target), attemptedAt: "2026-10-25T00:00:00Z" })] });
+    expect(await next(f)).toMatchObject({ kind: "ready", action: "comprehensive", requirementId: reqB.id, activity: { learnerFocus: {
+      requirementKey: "bkey", activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "b-wrong" } } });
+    expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ requestedId: reqB.id, context: { action: "comprehensive", requirementId: reqB.id },
+      decisionInput: { observations: [{ id: "b-wrong" }, { id: "b-verified-2" }, { id: "b-verified-1" }] } });
+  });
+
+  it("综合检查转到的要求验证材料未就绪时返回verification_unavailable，不创建活动或预留预算", async () => {
+    // Writing verification bumps the revision, so B's verified history (revision 1) no longer qualifies.
+    const { f, reqB } = comprehensive({ ...correct, firstQuestionExposure: true }, { bProgress: ["unobserved", null],
+      b: { revision: 2, verification: { ...requirement.verification, status: "missing" } } });
+    expect(await next(f)).toMatchObject({ kind: "choice", reason: "verification_unavailable", requirementIds: [reqB.id] });
     expect(mocks.create).not.toHaveBeenCalled();
     expect(mocks.reserve).not.toHaveBeenCalled();
   });

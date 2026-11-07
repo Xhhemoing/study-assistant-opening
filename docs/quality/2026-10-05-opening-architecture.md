@@ -6,8 +6,8 @@
 > 状态截至 2026-10-05（上海时间）：plan 43 项中约 25 项已 verified；K02a（tip `a33b824`）门禁已绿，**正在等 Reviewer PASS → Ops push**；完整 K02 等 K01；C01 学校适配器有 503 阻塞需要你处理；Lab 双 Agent 仍是**设计草案，没有开票**。
 > 请重点看 §4.3（B 的 Decide 顺序和 K02a 现有代码**不一致**，需要你拍板）和 §6 的“明确不做”。
 
-- **仓库：** `Xhhemoing/study-assistant-opening` · 分支 `feat/opening-release` · 本地 `E:\Project\study-assistant-opening`
-- **依据（box）：** `/workspace/opening-research/` 下的 `2026-10-05-lab-agent-duo-research.md`、`2026-10-05-lab-duo-design-for-heidi-review.md`、`2026-10-05-k02-deeptutor-fold-in.md`、`contracts-f02-i02-t01-t02.md`、`learning-flow-t01-t02.md`、`repo-extract/{k02-extract*,lab-duo-extract}.txt`（其中有 `tasks.json` 快照，以及 `a33b824` 的 `tutor-policy.ts`、`tutor-turn.ts`、`page-selection.ts`）
+- **仓库：** `Xhhemoing/study-assistant-opening` · 分支 `feat/opening-release` · 本地 `<repo>`
+- **依据（box）：** `opening-research/` 下的 `2026-10-05-lab-agent-duo-research.md`、`2026-10-05-lab-duo-design-for-heidi-review.md`、`2026-10-05-k02-deeptutor-fold-in.md`、`contracts-f02-i02-t01-t02.md`、`learning-flow-t01-t02.md`、`repo-extract/{k02-extract*,lab-duo-extract}.txt`（其中有 `tasks.json` 快照，以及 `a33b824` 的 `tutor-policy.ts`、`tutor-turn.ts`、`page-selection.ts`）
 - **证据规则（全局硬约束）：** 只有三种判定 `FLOW_VERIFIED` / `LEARNING_EFFECT_OBSERVED` / `MASTERY_NOT_ESTABLISHED`；**不出现掌握度 %**；`hinted` / `revealed` **永远不会**变成 `observed_independent`。
 
 ---

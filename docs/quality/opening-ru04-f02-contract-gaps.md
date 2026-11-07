@@ -1,7 +1,7 @@
 # RU-04 → F02 契约缺口清单（learning-loop / Wave1）
 
 状态：**产品分叉已裁定；对照 contracts 残余缺口见 §0b；等 F02 语义审完再动 T03/L01；本波不改业务代码。**
-基线：`feat/opening-release` 本地 `E:\Project\study-assistant-opening`；对照 `opening-real-use-audit.md` RU-04、`interfaces.md`、`05-learning.md`、`03-tutor.md` T03、`07-experience.md` U03、`tasks.json`。
+基线：`feat/opening-release` 本地 `<repo>`；对照 `opening-real-use-audit.md` RU-04、`interfaces.md`、`05-learning.md`、`03-tutor.md` T03、`07-experience.md` U03、`tasks.json`。
 硬约束：**保留 `P02.dependsOn` 含 `L01`；闲聊不强制建学习 session；验收钉 AC06 / AC10。**
 
 ## 裁定（F02 / opening-lead，2026-09-13）

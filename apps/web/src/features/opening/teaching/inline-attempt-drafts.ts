@@ -1,9 +1,11 @@
+import { aiGradingWorkSourceSchema } from "@aistudy/contracts";
 import { z } from "zod";
-import { inlineAttemptSubmissionCheckpointSchema } from "./inline-attempt-submission";
+import { inlineAttemptSubmissionCheckpointSchema, inlineAttemptWorkSourceKey } from "./inline-attempt-submission";
 import { inlineAttemptPreparationCheckpointSchema } from "./inline-attempt-prepare";
 
 const draftSchema = z.object({
   answer: z.string().max(20_000), skillLabel: z.string().max(200), prompt: z.string().max(100_000),
+  workSource: aiGradingWorkSourceSchema.optional(),
   submission: inlineAttemptSubmissionCheckpointSchema.optional(),
   preparation: inlineAttemptPreparationCheckpointSchema.optional(),
 }).strict();
@@ -37,7 +39,8 @@ function readDraft(key: string, raw: string): InlineAttemptDraft | undefined {
     if (prepared && (inlineAttemptIdentityKey(prepared.activityId, prepared.blockId, prepared.contentVersion) !== key
       || prepared.skillLabel !== draft.skillLabel || prepared.prompt !== draft.prompt || draft.submission)) return;
     if (submitted && (inlineAttemptIdentityKey(submitted.activityId, submitted.blockId, submitted.contentVersion) !== key
-      || submitted.answer !== draft.answer || submitted.skillLabel !== draft.skillLabel || submitted.prompt !== draft.prompt)) return;
+      || submitted.answer !== draft.answer || submitted.skillLabel !== draft.skillLabel || submitted.prompt !== draft.prompt
+      || inlineAttemptWorkSourceKey(submitted.workSource) !== inlineAttemptWorkSourceKey(draft.workSource))) return;
     return draft;
   } catch { return; } // Persisted browser data is an untrusted boundary.
 }

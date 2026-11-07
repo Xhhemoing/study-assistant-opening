@@ -25,10 +25,10 @@ Alternatives rejected: holding long global table locks during object streaming u
 
 ## Evidence and remaining scope
 
-Keep RED/GREEN logs under `.local/opening-e2e/evidence/q03-exclusive-*` / `q03-publication-*` and summarize the failure → cause → fix → recheck chain in `docs/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md`.
+Keep RED/GREEN logs under `.local/opening-e2e/evidence/q03-exclusive-*` / `q03-publication-*` and summarize the failure → cause → fix → recheck chain in `docs/archive/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md`.
 
 Restore apply, a new-empty-database/storage recovery drill, CLI wrappers, retention/journal lifecycle, Windows private staging verification and packaging remain required Q03 work after these steps. The previous slice intentionally omitted memories without verifiable provenance; preserving legitimate handwritten memories needs an explicit contract before claiming complete preservation. Do not silently replace any of these requirements with a round-trip or a mock.
 
 ## Execution redirect — 2026-09-25
 
-A is complete locally; parent checks and limitations are recorded in ../evidence/2026-09-25-opening-backup-publication/verification.md. B–F remain uncompleted and are transferred to personal-use PU05A0–PU05C after PU00/PU01, per the user's new priority. This is not a Q03 promotion.
+A is complete locally; parent checks and limitations are recorded in ../../archive/superpowers/evidence/2026-09-25-opening-backup-publication/verification.md. B–F remain uncompleted and are transferred to personal-use PU05A0–PU05C after PU00/PU01, per the user's new priority. This is not a Q03 promotion.

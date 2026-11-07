@@ -69,7 +69,7 @@ export declare function applyOpeningRestore(sql:Sql, scope:OpeningScope, paths:R
 **Existing files:** `tests/integration/opening-backup-records-{repository,json-repository,snapshot-repository}.test.ts`、`opening-backup-records-fixture.ts`、`opening-backup-compose-repository.test.ts`；`packages/database/src/repositories/opening-backup-record-{table-queries,predicates,privacy}.ts`只修实际复现问题。
 - [ ] 依原计划运行完整17表非空关联、双principal、陈旧/仅citation lineage、malformed JSON、deleted/excluded memory与MinIO真实字节测试；先red，记录cause，再最小fix后重跑原命令。
 - [ ] 覆盖归档反序/重复/并发读取、错误口令、篡改、缺对象、暂存时版本/删除变化及sentinel不被清理；不mock SQL或业务API。
-- [ ] 写 `docs/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`，记录实际工作树SHA/差异、命令、结果、日志与清理；通过只代表draft/archive，仍不代表发布或恢复。
+- [ ] 写 `docs/archive/superpowers/evidence/2026-09-25-opening-backup-integration/verification.md`，记录实际工作树SHA/差异、命令、结果、日志与清理；通过只代表draft/archive，仍不代表发布或恢复。
 
 ### PU05B / B1: 维护窗口下的DB与对象发布协议
 

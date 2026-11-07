@@ -4,7 +4,7 @@
 
 范围：对照本机 **T03 HTTP 联调切片**（conversations / resume / turns / submitTurn + sources HTTP 由 materials 持有），评估计划依赖 **T02、I03**（及上游）哪些是硬依赖、哪些可降为契约依赖。
 
-证据基线：`docs/superpowers/evidence/2026-09-13-opening-release/t03-tutor-http-slice.md`；相关 unit 曾跑 **49 passed**。T03 现 `blocked`（因 T02/I03 未 verified）。
+证据基线：`docs/archive/superpowers/evidence/2026-09-13-opening-release/t03-tutor-http-slice.md`；相关 unit 曾跑 **49 passed**。T03 现 `blocked`（因 T02/I03 未 verified）。
 
 ---
 

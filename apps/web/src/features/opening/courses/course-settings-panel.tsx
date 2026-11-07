@@ -17,7 +17,7 @@ const fields: Array<{ key: keyof LearningPreferences; label: string }> = [
   { key: "automaticRemindersEnabled", label: "自动学习提醒" },
 ];
 
-export function CourseSettingsPanel({ course, onChange }: { course: CourseSummary; onChange: (course: CourseSummary) => void }) {
+export function CourseSettingsPanel({ course, grouped = false, onChange }: { course: CourseSummary; grouped?: boolean; onChange: (course: CourseSummary) => void }) {
   const [draft, setDraft] = useState(() => courseRestrictionDraft(course.learningPreferenceOverrides));
   const [account, setAccount] = useState<LearningPreferences | null>(null);
   const [effective, setEffective] = useState<LearningPreferences | null>(null);
@@ -70,7 +70,7 @@ export function CourseSettingsPanel({ course, onChange }: { course: CourseSummar
     </div>)}<button className={ui.secondary} disabled={busy || !effective || !changed} onClick={() => void save()} type="button"><Save aria-hidden="true" size={14} />{busy ? "保存中…" : "保存课程设置"}</button></div>}
     {error ? <LoadError message={error} onRetry={() => setRetry((value) => value + 1)} /> : null}
     {message ? <p className="text-xs leading-6 text-text-2" role="status">{message}</p> : null}
-    <CourseLifecycleControl courseId={course.id} />
+    <CourseLifecycleControl courseId={course.id} grouped={grouped} />
     <div className="space-y-2 border-t border-line pt-3">
       {confirmArchive && !course.archivedAt ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">归档会暂停自动学习行为。原件、其他课程引用、笔记、证据和已接受任务都会保留。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void changeArchive()} type="button">确认归档</button><button className={ui.quiet} disabled={busy} onClick={() => setConfirmArchive(false)} type="button">取消</button></div></div> : <button className={ui.secondary} disabled={busy || loading} onClick={() => course.archivedAt ? void changeArchive() : setConfirmArchive(true)} type="button">{course.archivedAt ? <ArchiveRestore aria-hidden="true" size={14} /> : <Archive aria-hidden="true" size={14} />}{course.archivedAt ? "恢复课程" : "归档课程"}</button>}
     </div>

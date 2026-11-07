@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Original `E:/Project/AIstudy` working tree is read-only for this task.
+- Original `AIstudy` working tree is read-only for this task.
 - No dependency upgrades, no production credentials, no global npm config edits.
 - First failure: plain npm ci -> ECONNRESET on a Tencent mirror URL. Direct probe: mirror 503, official tarball 200.
 - Second experiment: host replacement retained `/npm/` and produced official-source 404. Correct the path, not just the hostname.

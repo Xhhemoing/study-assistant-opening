@@ -30,7 +30,7 @@ vi.mock("./lesson-shortcuts", () => ({ useLessonArrowKeys: shortcuts.set }));
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("./activity-client", () => ({ createTeachingActivityClient: () => api }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => ({ ...api, getSummary: async () => [] }) }));
-vi.mock("../client/api", async original => ({ ...await original<typeof import("../client/api")>(), createOpeningApi: () => ({ getCourseKnowledge: async () => ({ snapshot: null }) }) }));
+vi.mock("../client/api", async original => ({ ...await original<typeof import("../client/api")>(), createOpeningApi: () => ({ getCourseKnowledge: async () => ({ snapshot: null }), listSources: async () => [] }) }));
 import { InlineAttemptForm, type InlineAttemptContext } from "./inline-attempt";
 import { TeachingWorkspace, type TeachingWorkspaceProps } from "./teaching-workspace";
 import { HintLadder } from "./hint-ladder";

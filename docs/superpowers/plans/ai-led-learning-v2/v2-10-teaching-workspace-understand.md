@@ -107,7 +107,7 @@ When V2-10 is **done** (after later Implement + independent Accept — **not** t
   - Free chat = `ui.quiet` secondary only.
 - `apps/web/src/features/opening/teaching/today-activity.ts`
   - `todayActivityCtaLabel`, `teachingActivityContentHonesty`, `buildStartLearningCreateInput`.
-- Evidence: `docs/superpowers/evidence/2026-10-11-opening-release/ct-03-today-activity-accept.md` — ACCEPT; no MediaReader seek.
+- Evidence: `docs/archive/superpowers/evidence/2026-10-11-opening-release/ct-03-today-activity-accept.md` — ACCEPT; no MediaReader seek.
 
 **V2-10 attach rule:** replace/extend the **main pane body** that currently mounts `TeachingActivityPanel` with `TeachingWorkspace` when flag on + clientInit available; keep CTA / empty / honesty paths; do not re-embed `AssistantView`.
 

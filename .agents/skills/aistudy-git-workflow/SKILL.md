@@ -5,16 +5,17 @@ description: Use when working in the AIstudy repository and asked to pull remote
 
 # AIstudy Git Workflow
 
-仓库专属安全 Git 同步与质量验证流程。保持 `main` 可部署、保留用户现有改动、对每个实际运行的门禁报告证据。
+仓库专属安全 Git 同步与质量验证流程。保持主线 `feat/opening-release` 可部署、保留用户现有改动、对每个实际运行的门禁报告证据。
 
 ## Project Facts
 
+- 正式仓库:`Xhhemoing/study-assistant-opening`,remote 名 `study-assistant-opening`;主线 `feat/opening-release`,低风险 PR 先进 `integration/opening`。
 - 包管理器:npm。始终遵守 `package-lock.json`;干净安装用 `npm ci`。
 - 运行时:Node.js `>=20`,CI 用 Node.js 22。
 - 布局:npm workspaces(`apps/*`、`packages/*`、`spikes/*`)。
 - CI 工作流:`.github/workflows/ci.yml`;运维参考:`docs/operations/ci.md`。
 - 本地服务:PostgreSQL `5432`、隔离 E2E PostgreSQL `5433`、Redis `6379`、MinIO `9000`。
-- 质量脚本调用 `bash scripts/run-heavy.sh`。Windows 上用 WSL 或 Git Bash;`bash` 不可用时报告环境阻塞,而不是声称质量命令通过或静默改写 runner。
+- 重任务入口:`node scripts/run-heavy.mjs`,根 `lint`/`test`/`build` 与 web、worker 的 `typecheck` 已经过它。POSIX 委托 `run-heavy.sh`,Windows 用 Node 目录锁,不需要 Bash。拿不到全机槽位时退出码 75,记为未验证,不算通过也不算产品失败;需要排队时设 `HERMES_HEAVY_LOCK_TIMEOUT`(秒,默认 120)。
 
 ## 不可协商的安全规则
 
@@ -28,7 +29,7 @@ description: Use when working in the AIstudy repository and asked to pull remote
 
 - **Pull / Update:** 仅在干净工作树且目标分支明确验证后做 fast-forward-only 更新;脏树时展示路径让用户决定(提交/worktree/显式 stash),不静默 stash。冲突保持可见并询问解决方案。
 - **Commit:** 确定范围 → `git diff --check` → 窄测试先行 → 仅暂存目标路径 → 审查完整 staged 补丁 → 一个 Conventional Commit → `git status` + `git log -1` 验证。除非明确要求否则不 amend;push 是独立的用户授权动作。
-- **Merge:** 优先 PR 进入 `main`（现有 CI 是合并门禁）；合并前按需更新特性分支，仅 push 命名特性分支。完整本地检查仅在用户明确请求时运行，不重复作为开发、提交或 PR 的前置。绝不 force-push `main`；本地合并且冲突时停止，保持冲突标记待用户解决。
+- **Merge:** 一律走 PR，base 与门禁以根 `AGENTS.md` 为准：低风险 PR 进 `integration/opening`，再由提升 PR 进主线；高风险 PR 独立以主线为 base。每个 PR 须指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准，并通过精确 head 的 required CI（见 `docs/operations/agent-workflow.md`）。合并前按需更新特性分支，仅 push 命名特性分支。完整本地检查仅在用户明确请求时运行，不重复作为开发、提交或 PR 的前置。绝不 force-push 主线或 `integration/opening`；本地合并且冲突时停止，保持冲突标记待用户解决。
 
 ## Build and Test
 
