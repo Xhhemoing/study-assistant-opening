@@ -73,14 +73,29 @@ function parse(text: string): Rational | null {
   }
 }
 
+/** The same question grammar used by the existing arithmetic corroborator. */
+export function evaluateArithmeticQuestion(question: string): Rational | null {
+  if (question.length > 400) return null;
+  const expression = question.trim().replace(/^(?:计算|求值|calculate|evaluate)\s*[:：]?\s*/i, "")
+    .replace(/\s*(?:=\s*[?？]?|[?？。])\s*$/, "");
+  if (!/[+*/]|\d\s*[-−]|\\(?:frac|times|div)|[×÷]/.test(expression)) return null;
+  return parse(expression);
+}
+
+/** A single literal, excluding expressions and implicit mixed fractions. */
+export function parseArithmeticLiteral(text: string): Rational | null {
+  const value = text.trim();
+  if (!/^-?(?:\d+(?:\.\d+)?|\.\d+|\d+\/\d+|\\frac\{\d+\}\{\d+\})$/.test(value)) return null;
+  return parse(value);
+}
+
+export function equalArithmeticValues(a: Rational, b: Rational): boolean { return equal(a, b); }
+
 /** A corroboration of a full arithmetic answer, never authority for proofs, photos or general mathematics. */
 export function checkArithmeticAnswer(question: string, answer: string): "correct" | "incorrect" | null {
   if (question.length > 400 || answer.length > 1200) return null;
-  const expression = question.trim().replace(/^(?:计算|求值|calculate|evaluate)\s*[:：]?\s*/i, "")
-    .replace(/\s*(?:=\s*[?？]?|[?？。])\s*$/, "");
-  const expected = parse(expression);
-  // A bare number is not sufficient to identify the question's requested operation.
-  if (!expected || !/[+*/]|\d\s*[-−]|\\(?:frac|times|div)|[×÷]/.test(expression)) return null;
+  const expected = evaluateArithmeticQuestion(question);
+  if (!expected) return null;
   const steps = answer.trim().replace(/^(?:答案|答|answer)\s*[:：]\s*/i, "").split("=");
   if (steps.length > 12) return null;
   const values = steps.map(parse);

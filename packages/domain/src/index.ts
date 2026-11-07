@@ -525,6 +525,7 @@ export { matrixErrorCardReference } from "./srs/error-card";
 export { tutorLearnerContextInstruction } from "./opening/tutor-learner-context";
 
 export { checkArithmeticAnswer, corroborateArithmeticGrade } from "./opening/arithmetic-check";
+export { evaluateTeachingAnswer } from "./opening/teaching-answer-check";
 export * from "./opening/long-term-planning";
 export * from "./opening/course-route";
 export * from "./opening/course-route-retest";
