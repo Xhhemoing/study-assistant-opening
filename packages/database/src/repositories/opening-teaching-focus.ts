@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
-import { knowledgeSnapshotSchema, teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, knowledgeSnapshotSchema, teachingLearnerFocusSchema, type Scope, type TeachingLearnerFocus } from "@aistudy/contracts";
 import { buildDecisionInput, evaluateEvidenceEligibility, nextLearningStep, normalizeSkillLabelKey, selectPrerequisiteRepair, toSnapshotEvidence, toSupportedKnowledgeNodes, type CourseEvidence } from "@aistudy/domain";
+import { readCourseRouteObservations } from "./opening-course-route-read";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { plannerSuggestionKind } from "./opening-task-fields";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
@@ -99,6 +100,21 @@ async function withFocusAttempt(sql: Sql, scope: Scope, learnerFocus: TeachingLe
   } : {}) };
 }
 
+/**
+ * A route may focus an answer whose raw key/label differ from the requirement (e.g. exam
+ * answers keyed `exam-skill:<nodeId>`) only because the route's own course projection bound
+ * it to this exact requirement identity. Re-run that projection; text never qualifies it.
+ */
+async function routeProjectionBindsFocus(sql: Sql, scope: Scope, courseId: string, goalJson: unknown,
+  learnerFocus: TeachingLearnerFocus): Promise<boolean> {
+  const context = courseRouteActivityContextSchema.safeParse((goalJson as { courseRoute?: unknown } | null)?.courseRoute);
+  if (!context.success || learnerFocus.requirementKey !== context.data.requirementKey) return false;
+  const { projected } = await readCourseRouteObservations(sql, scope, courseId, false);
+  const bound = projected.find(row => row.id === learnerFocus.focusObservationId)?.courseRequirement;
+  return bound !== undefined && bound.id === context.data.requirementId && bound.revision === context.data.requirementRevision
+    && bound.stableSkillId === context.data.stableSkillId && bound.requirementKey === context.data.requirementKey;
+}
+
 /** Only the chosen effective observation's question and answer may enter the prompt. */
 export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, activityId: string): Promise<TeachingCompilerFocus> {
   const [activity] = await sql`SELECT a.goal_json, a.course_id FROM opening_teaching_activities a
@@ -129,7 +145,8 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   if (learnerFocus.requirementKey !== undefined && (
     learnerFocus.requirementKey !== (observation.requirementKey ?? null) ||
     normalizeSkillLabelKey(learnerFocus.skillLabel) !== normalizeSkillLabelKey(observation.skillLabel)
-  )) return withoutCurrentEvidence(learnerFocus);
+  ) && !(routeSnapshot && courseId && await routeProjectionBindsFocus(sql, scope, courseId, activity?.goal_json, learnerFocus)))
+    return withoutCurrentEvidence(learnerFocus);
   const qualified = evaluateEvidenceEligibility(eligibility.observation, eligibility.context);
   if (qualified.verifiedCorrect !== "no" || qualified.usableForCurrentVersion !== "yes") return withoutCurrentEvidence(learnerFocus);
   // The focused answer is still current and incorrect: attach it, keep the route's action.

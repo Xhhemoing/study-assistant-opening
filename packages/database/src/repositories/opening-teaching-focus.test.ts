@@ -5,8 +5,10 @@ import { buildDecisionInput, nextLearningStep, toSnapshotEvidence, type CourseEv
 import { learningObservation, qualifiedInput } from "../../../domain/src/opening/learning-summary-fixtures";
 import { readOpeningTeachingCompilerFocus } from "./opening-teaching-focus";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
+import { readCourseRouteObservations } from "./opening-course-route-read";
 
 vi.mock("./opening-learning-read", () => ({ readOpeningCourseEvidence: vi.fn() }));
+vi.mock("./opening-course-route-read", () => ({ readCourseRouteObservations: vi.fn() }));
 const scope = { workspaceId: learningObservation.workspaceId, ownerUserId: "22222222-2222-4222-8222-222222222222" };
 const oldId = "44444444-4444-4444-8444-444444444441";
 const newId = "44444444-4444-4444-8444-444444444442";
@@ -161,9 +163,9 @@ describe("compiler focus canonical decision input with independent admission gua
 
   it("clears a course-route focused answer whose requirementKey matches but whose skill label differs", async () => {
     // Pins the existing fail-closed behaviour: the focused answer must match the stored focus on
-    // requirementKey AND normalized skill label, otherwise no focused answer is attached. The #231
-    // review suggested scoping this by requirementKey plus the requirement binding instead; if that
-    // change is made, update this case with it.
+    // requirementKey AND normalized skill label, otherwise no focused answer is attached. This
+    // activity has no valid goal_json.courseRoute, so the identity-bound route projection path
+    // (covered by the exam-answer cases below) cannot qualify it either.
     const facts = evidence(), captured = facts.evidenceContexts[oldId]!;
     captured.observation = { ...captured.observation, outcome: "incorrect" };
     captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
@@ -179,5 +181,95 @@ describe("compiler focus canonical decision input with independent admission gua
     const stored = { ...focus, activityKind: "full_explain" as const, reasonCode: "requested_full" };
     expect(await readOpeningTeachingCompilerFocus(sqlFor(stored) as unknown as Sql, scope, newId)).toEqual({ learnerFocus: stored });
     expect(readOpeningCourseEvidence).not.toHaveBeenCalled();
+  });
+});
+
+describe("compiler focus for a course-route correction of an exam answer bound by node identity", () => {
+  const itemVersionId = "88888888-8888-4888-8888-888888888882", stem = "Exam: simplify 6/8.";
+  const route = { goalId: "99999999-9999-4999-8999-999999999991", goalRevision: 1, requirementId: "99999999-9999-4999-8999-999999999992",
+    requirementRevision: 2, stableSkillId: "99999999-9999-4999-8999-999999999993", requirementKey: "knowledge:node", action: "targeted_explain" as const };
+  const binding = { id: route.requirementId, revision: route.requirementRevision, stableSkillId: route.stableSkillId, requirementKey: route.requirementKey };
+  // The route's learner focus uses the requirement title and key; the raw exam answer keeps its exam identity.
+  const stored: TeachingLearnerFocus = { skillLabel: "Simplifying fractions", requirementKey: route.requirementKey, activityKind: "targeted_explain",
+    reasonCode: "verified_incorrect", focusObservationId: oldId, recentAssistance: [], strategyVersion: "course-route-1" };
+  function examEvidence(): CourseEvidence {
+    const facts = evidence(), captured = facts.evidenceContexts[oldId]!;
+    captured.observation = { ...captured.observation, outcome: "incorrect", requirementKey: "exam-skill:node" };
+    captured.context = { ...captured.context, referenceCheck: { ...captured.context.referenceCheck!, outcome: "incorrect" } };
+    return { ...facts, observations: facts.observations.map(row => row.id === oldId
+      ? { ...row, itemVersionId, skillLabel: "exam node", requirementKey: "exam-skill:node", outcome: "incorrect" as const } : row) };
+  }
+  function projectionWith(courseRequirement: unknown, id = oldId) {
+    vi.mocked(readCourseRouteObservations).mockResolvedValue({ raw: [], projected: [{ id, courseRequirement }] } as never);
+  }
+  function routeSql(focusSnapshot: TeachingLearnerFocus, courseRoute: unknown = route) {
+    const activity = [{ course_id: learningObservation.courseId, goal_json: { courseRoute, learnerFocus: focusSnapshot } }];
+    return vi.fn().mockResolvedValueOnce(activity).mockResolvedValueOnce([{ stem_snapshot: stem }]);
+  }
+  const read = (sql: ReturnType<typeof routeSql>) => readOpeningTeachingCompilerFocus(sql as unknown as Sql, scope, newId);
+
+  it("attaches the exam question and original answer when the route projection binds it to the activity's requirement", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    projectionWith(binding);
+    const sql = routeSql(stored);
+    expect(await read(sql)).toEqual({ learnerFocus: stored, focusAttempt: { question: stem, answer: learningObservation.answer } });
+    // Same owner/workspace/course-scoped projection the route decision used, without shared evidence.
+    expect(readCourseRouteObservations).toHaveBeenCalledWith(sql, scope, learningObservation.courseId, false);
+    expect(sql.mock.calls[1]).toEqual(expect.arrayContaining([itemVersionId, learningObservation.problemId, scope.workspaceId, scope.ownerUserId]));
+  });
+
+  it.each([
+    ["the current binding was removed", undefined],
+    ["the requirement has a new revision", { ...binding, revision: 3 }],
+    ["another requirement is bound", { ...binding, id: "99999999-9999-4999-8999-999999999994" }],
+    ["the stable skill differs", { ...binding, stableSkillId: "99999999-9999-4999-8999-999999999995" }],
+    ["the requirement key differs", { ...binding, requirementKey: "knowledge:other" }],
+  ])("returns no focus when %s", async (_name, courseRequirement) => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    projectionWith(courseRequirement);
+    const sql = routeSql(stored);
+    expect(await read(sql)).toEqual({});
+    expect(sql).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns no focus when the answer was retracted or replaced and left the effective projection", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    projectionWith(binding, newId);
+    expect(await read(routeSql(stored))).toEqual({});
+  });
+
+  it("returns no focus when the learner focus key or route context does not match", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    projectionWith(binding);
+    expect(await read(routeSql({ ...stored, requirementKey: "knowledge:other" }))).toEqual({});
+    expect(await read(routeSql(stored, null))).toEqual({});
+    expect(await read(routeSql(stored, { ...route, requirementId: "not-a-uuid" }))).toEqual({});
+    expect(readCourseRouteObservations).not.toHaveBeenCalled();
+  });
+
+  it("still requires the raw answer to be current and incorrect", async () => {
+    const facts = examEvidence(), captured = facts.evidenceContexts[oldId]!;
+    captured.context = { ...captured.context, version: { applicability: "unavailable" } };
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    projectionWith(binding);
+    expect(await read(routeSql(stored))).toEqual({});
+    const correct = examEvidence(), checked = correct.evidenceContexts[oldId]!;
+    checked.observation = { ...checked.observation, outcome: "correct" };
+    checked.context = { ...checked.context, referenceCheck: { ...checked.context.referenceCheck!, outcome: "correct" } };
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(correct);
+    expect(await read(routeSql(stored))).toEqual({});
+  });
+
+  it("does not consult the route projection for non-route activities", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    projectionWith(binding);
+    expect(await read(routeSql({ ...stored, strategyVersion: "adaptive-1" }))).toEqual({});
+    expect(readCourseRouteObservations).not.toHaveBeenCalled();
+  });
+
+  it("propagates projection read failures", async () => {
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(examEvidence());
+    vi.mocked(readCourseRouteObservations).mockRejectedValue(new Error("db down"));
+    await expect(read(routeSql(stored))).rejects.toThrow("db down");
   });
 });
