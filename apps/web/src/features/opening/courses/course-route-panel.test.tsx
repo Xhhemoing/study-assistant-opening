@@ -295,15 +295,22 @@ it("keeps an open scope draft and re-reads the route only after it is confirmed"
   try {
     sessionStorage.clear();
     const api = client();
+    const edited = { ...requirement, title: "概念一（按大纲改名）" };
+    vi.mocked(api.read).mockResolvedValueOnce(snapshot).mockResolvedValue({ ...confirmed, requirements: [{ ...confirmed.requirements[0]!, requirement: { ...confirmed.requirements[0]!.requirement, title: edited.title } }] });
     const { state, knowledge } = rebuildingKnowledge();
     await render(api, { knowledge });
     await act(async () => button("检查与确认课程范围").click());
+    const title = host.querySelector<HTMLInputElement>("fieldset input:not([type])");
+    if (!title) throw new Error("missing requirement title input");
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(title, edited.title); title.dispatchEvent(new Event("input", { bubbles: true })); });
     await finishRebuild(state);
     expect(api.read).toHaveBeenCalledTimes(1);
     expect(host.textContent).toContain("知识点已重新整理；完成当前编辑或确认后会重新读取课程路线，显示新的建议。");
+    expect(host.querySelector<HTMLInputElement>("fieldset input:not([type])")?.value).toBe(edited.title);
     await act(async () => button("确认这份全课范围").click());
-    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [edited], confirmScope: true });
     expect(api.read).toHaveBeenCalledTimes(2);
     expect(host.textContent).not.toContain("知识点已重新整理；");
+    expect([...host.querySelectorAll("li h3")].map(heading => heading.textContent)).toContain(`${edited.title} · 必修`);
   } finally { vi.useRealTimers(); }
 });

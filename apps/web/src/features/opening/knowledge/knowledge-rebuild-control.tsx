@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderCircle, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { ui } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { createKnowledgeRebuildClient, type CourseKnowledgeRecord, type KnowledgeRebuildClient } from "./knowledge-rebuild-client";
@@ -12,10 +12,19 @@ export const KNOWLEDGE_POLL_TIMEOUT_MS = 180_000;
 type RebuildState =
   | { kind: "idle" }
   | { kind: "requesting" }
-  | { kind: "polling"; baseline: number; startedAt: number }
+  | { kind: "polling" }
   | { kind: "done"; nodeCount: number }
   | { kind: "timeout" }
   | { kind: "failed"; message: string };
+
+type RebuildOperation = { controller: AbortController; deadline?: ReturnType<typeof setTimeout>; poll?: ReturnType<typeof setTimeout> };
+
+function stopOperation(operation: MutableRefObject<RebuildOperation | null>, current: RebuildOperation) {
+  current.controller.abort();
+  clearTimeout(current.deadline);
+  clearTimeout(current.poll);
+  if (operation.current === current) operation.current = null;
+}
 
 function statusText(state: RebuildState): string {
   if (state.kind === "requesting" || state.kind === "polling") return "整理中：正在从已解析的资料里整理知识点，可能需要几分钟，可以留在本页等待。";
@@ -32,43 +41,46 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
 }) {
   const client = useMemo(() => suppliedClient ?? createKnowledgeRebuildClient(), [suppliedClient]);
   const [state, setState] = useState<RebuildState>({ kind: "idle" });
-  const running = useRef(false), active = useRef(true), notify = useRef(onRebuilt);
+  const operation = useRef<RebuildOperation | null>(null), notify = useRef(onRebuilt);
   useEffect(() => { notify.current = onRebuilt; }, [onRebuilt]);
-  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
-  const polling = state.kind === "polling" ? state : null;
-  useEffect(() => {
-    if (!polling) return;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // The rebuild job has no status route; a finished rebuild always stores a newer knowledge version.
-    const tick = async () => {
-      // A failed read says nothing about the queued job, so the next tick reads again until the deadline.
-      const latest = await client.read(courseId, controller.signal).catch(() => null);
-      if (controller.signal.aborted) return;
-      if (latest && latest.version > polling.baseline) {
-        running.current = false;
-        setState({ kind: "done", nodeCount: latest.snapshot.nodes.length });
-        notify.current?.(latest);
-      } else if (Date.now() - polling.startedAt >= KNOWLEDGE_POLL_TIMEOUT_MS) {
-        running.current = false;
-        setState({ kind: "timeout" });
-      } else timer = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
-    };
-    timer = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [client, courseId, polling]);
+  useEffect(() => () => { if (operation.current) stopOperation(operation, operation.current); }, []);
+  const stop = (current: RebuildOperation) => stopOperation(operation, current);
 
+  // Aborting only stops this page from waiting; a rebuild the server already queued keeps running.
   async function start() {
-    if (running.current) return;
-    running.current = true;
+    if (operation.current) return;
+    const current: RebuildOperation = { controller: new AbortController() };
+    const { signal } = current.controller;
+    const live = () => operation.current === current;
+    operation.current = current;
+    current.deadline = setTimeout(() => {
+      if (!live()) return;
+      stop(current);
+      setState({ kind: "timeout" });
+    }, KNOWLEDGE_POLL_TIMEOUT_MS);
     setState({ kind: "requesting" });
     try {
-      const { version } = await client.read(courseId);
-      await client.rebuild(courseId, `knowledge-rebuild:${crypto.randomUUID()}`);
-      if (active.current) setState({ kind: "polling", baseline: version, startedAt: Date.now() });
+      const { version: baseline } = await client.read(courseId, signal);
+      if (!live()) return;
+      await client.rebuild(courseId, `knowledge-rebuild:${crypto.randomUUID()}`, signal);
+      if (!live()) return;
+      setState({ kind: "polling" });
+      // The rebuild job has no status route; a finished rebuild always stores a newer knowledge version.
+      const tick = async () => {
+        // A failed read says nothing about the queued job, so the next tick reads again until the deadline.
+        const latest = await client.read(courseId, signal).catch(() => null);
+        if (!live()) return;
+        if (latest && latest.version > baseline) {
+          stop(current);
+          setState({ kind: "done", nodeCount: latest.snapshot.nodes.length });
+          notify.current?.(latest);
+        } else current.poll = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
+      };
+      current.poll = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
     } catch (reason) {
-      running.current = false;
-      if (active.current) setState({ kind: "failed", message: userFacingMessage(reason, "整理请求没有完成，请稍后重试。") });
+      if (!live()) return;
+      stop(current);
+      setState({ kind: "failed", message: userFacingMessage(reason, "整理请求没有完成，请稍后重试。") });
     }
   }
 

@@ -41,8 +41,8 @@ export function createKnowledgeRebuildClient(transport: typeof fetch = (input, i
     async read(courseId: string, signal?: AbortSignal): Promise<CourseKnowledgeRecord> {
       return parseOpeningResponse(knowledgeRecordSchema, await request(knowledgePath(courseId), { method: "GET", signal }));
     },
-    async rebuild(courseId: string, clientKey: string): Promise<KnowledgeRebuildReceipt> {
-      return parseOpeningResponse(rebuildReceiptSchema, await request(`${knowledgePath(courseId)}/rebuild`, { method: "POST", body: JSON.stringify({ clientKey }) }));
+    async rebuild(courseId: string, clientKey: string, signal?: AbortSignal): Promise<KnowledgeRebuildReceipt> {
+      return parseOpeningResponse(rebuildReceiptSchema, await request(`${knowledgePath(courseId)}/rebuild`, { method: "POST", body: JSON.stringify({ clientKey }), signal }));
     },
   };
 }

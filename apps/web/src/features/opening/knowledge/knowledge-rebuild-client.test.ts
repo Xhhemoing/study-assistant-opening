@@ -13,6 +13,13 @@ it("posts only the client key to the course rebuild route and accepts an existin
   expect(JSON.parse(String(init?.body))).toEqual({ clientKey: "knowledge-rebuild:key-1" });
 });
 
+it("forwards the abort signal to the rebuild request unchanged", async () => {
+  const transport = vi.fn<typeof fetch>(async () => Response.json({ jobId, kind: "build-course-knowledge", created: true }));
+  const controller = new AbortController();
+  await createKnowledgeRebuildClient(transport).rebuild(courseId, "knowledge-rebuild:key-1", controller.signal);
+  expect(transport.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
+});
+
 it("reads the current knowledge record without the HTTP cache and forwards the abort signal", async () => {
   const transport = vi.fn<typeof fetch>(async () => Response.json(record));
   const controller = new AbortController();
