@@ -74,6 +74,15 @@ export function adaptSpanNext(raw: unknown, courseId: string): NextAction {
     : { href: next.primary.href, label: next.primary.label, notice: next.message, alternatives: next.secondary ? [next.secondary] : [] };
 }
 
+/** Membership plus the key fields the learner filled, at most 200 characters. */
+export function spanAnswerSummary(answer: Partial<SpanDraftAnswer>): string | undefined {
+  const [alpha, beta] = answer.coefficients ?? ["", ""];
+  const text = [answer.membership === "in_span" ? "属于 span" : answer.membership === "not_in_span" ? "不属于 span" : "",
+    alpha || beta ? `α = ${alpha || "未填"}，β = ${beta || "未填"}` : "",
+    answer.coordinateChecks?.some(Boolean) ? `代回后各坐标 ${answer.coordinateChecks.join(", ")}` : ""].filter(Boolean).join("；");
+  return !text ? undefined : text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
 function strongest(...levels: (HelpState["level"] | undefined)[]): HelpState["level"] {
   return levels.includes("revealed") ? "revealed" : levels.includes("hinted") ? "hinted" : "none";
 }
@@ -120,7 +129,8 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const help = retestId && !record ? { level: delivered, hints: [], next: null } : adaptSpanHelp(delivered, hints, Boolean(record), sealed);
     // After the first answer this tab's sealed request is shown, otherwise the value the server saved; a skipped choice shows nothing.
     const savedConfidence = sealed ? current?.submission?.input.preAnswerConfidence : attempt?.preAnswerConfidence;
-    view = { ...view, help, answer: readSpanDraftAnswer(current?.fields.answer ?? ""),
+    const answer = readSpanDraftAnswer(current?.fields.answer ?? "");
+    view = { ...view, help, answer, answerSummary: sealed ? spanAnswerSummary(answer) : undefined,
       sealed, result: record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null, next, photo,
       confidence: sealed || record ? savedConfidence ? { value: savedConfidence, locked: true } : undefined
         : { value: chosenConfidence(), locked: false },
