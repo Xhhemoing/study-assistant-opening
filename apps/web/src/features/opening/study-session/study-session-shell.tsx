@@ -5,7 +5,8 @@ import { SuccessCheck } from "../v3/motion/feedback";
 import { useTransitionRouter } from "../v3/motion/view-transition";
 import { ui } from "../design/ui";
 import { ConfidenceChoice } from "./confidence-choice";
-import { primaryAction, resultLabel, type PreAnswerConfidence, type StudySessionPort, type StudySessionView } from "./model";
+import { ConversationThread } from "./conversation-thread";
+import { appendConversationEntry, conversationEntry, primaryAction, resultLabel, type ConversationEntry, type PreAnswerConfidence, type StudySessionPort, type StudySessionView } from "./model";
 import { StepRenderer } from "./step-renderers";
 
 type Handlers = {
@@ -17,8 +18,13 @@ type Handlers = {
   onConfidence?: (value: PreAnswerConfidence | null) => void;
 };
 
-/** One session screen: top bar, the current step, one primary action. Help and "more" open on demand. */
-export function StudySessionShell({ view, pending = false, error = "", content, ...on }: { view: StudySessionView; pending?: boolean; error?: string; content?: ReactNode } & Handlers) {
+/**
+ * One session screen: top bar, the current step, one primary action. Help and "more" open on demand.
+ * With `conversation` the main area is the chronological thread and a successor card carries the primary action.
+ */
+export function StudySessionShell({ view, pending = false, error = "", content, conversation, ...on }: {
+  view: StudySessionView; pending?: boolean; error?: string; content?: ReactNode; conversation?: { history: ConversationEntry[]; scrollCursor?: { current: string | null } };
+} & Handlers) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const helpId = useId(), moreId = useId();
@@ -40,6 +46,13 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [helpOpen, moreOpen]);
+  const primaryButton = <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
+    {pending ? "正在保存…" : primary.label}
+  </button>;
+  const continueButton = primary.kind === "redo" && on.onContinue
+    ? <button type="button" className={ui.secondary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onContinue}>看下一步安排</button> : null;
+  const successorCard = Boolean(conversation && (view.next || primary.kind === "next"));
+  const primaryInThread = successorCard && primary.kind === "next";
 
   return <section className="mx-auto flex min-h-full max-w-(--layout-prose) flex-col text-text" aria-label="学习会话">
     <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/95 px-4 py-2 backdrop-blur">
@@ -60,7 +73,18 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
       </div> : null}
     </header>
 
-    <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
+    {conversation ? <main className="flex-1 space-y-6 px-4 py-6">
+      <ConversationThread history={conversation.history} scrollCursor={conversation.scrollCursor} view={view}
+        step={<StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
+          onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} content={content} />}
+        feedbackActions={<>
+          {view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
+          {successorCard ? null : continueButton}
+        </>}
+        successor={successorCard ? { action: primaryInThread ? primaryButton : continueButton } : null} />
+      {view.blocked ? <p role="alert" className="text-sm text-warn">{view.blocked}</p> : null}
+      {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
+    </main> : <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
       <StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
         onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} content={content} />
       {view.result ? <section aria-live="polite" aria-label="作答结果" className="space-y-2 rounded-tile border border-line bg-surface p-4 motion-safe:animate-pop">
@@ -83,16 +107,14 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
         <a key={link.href} className={ui.quiet} href={link.href}>{link.label}</a>)}</div> : null}
       {view.blocked ? <p role="alert" className="text-sm text-warn">{view.blocked}</p> : null}
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
-    </main>
+    </main>}
 
     {view.step.kind !== "photo_practice" || primary.kind !== "none" ? <footer className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t border-line bg-bg/95 px-4 py-3 backdrop-blur">
       {helpAllowed ? <button ref={helpButton} type="button" className={ui.quiet} aria-expanded={helpOpen} aria-controls={helpId}
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
       {view.confidence && on.onConfidence ? <ConfidenceChoice value={view.confidence.value} disabled={pending || view.confidence.locked} onChange={on.onConfidence}
         className="order-first w-full sm:order-none sm:ml-auto sm:w-auto" /> : null}
-      <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
-        {pending ? "正在保存…" : primary.label}
-      </button>
+      {primaryInThread ? null : primaryButton}
     </footer> : null}
 
     {helpAllowed && helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
@@ -111,24 +133,34 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
 /** State owner. It only talks to the port; every API detail lives in the adapter. */
 export function StudySession({ port }: { port: StudySessionPort }) {
   const [view, setView] = useState<StudySessionView | null>(null);
+  const [history, setHistory] = useState<ConversationEntry[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const busy = useRef(false), generation = useRef(0);
+  // Survives a port change (the lesson owner rebuilds the port after each saved move) for this page load only.
+  const lastShown = useRef<StudySessionView | null>(null);
+  const scrollCursor = useRef<string | null>(null);
   const router = useTransitionRouter(true);
+  function show(next: StudySessionView) {
+    const previous = lastShown.current;
+    if (previous && !previous.blocked && previous.step.id !== next.step.id) setHistory(entries => appendConversationEntry(entries, conversationEntry(previous)));
+    lastShown.current = next;
+    setView(next);
+  }
   async function run(operation: () => Promise<StudySessionView | void>) {
     if (busy.current) return;
     busy.current = true; const current = generation.current; setPending(true); setError("");
-    try { const next = await operation(); if (current === generation.current && next) setView(next); }
+    try { const next = await operation(); if (current === generation.current && next) show(next); }
     catch (reason) {
       if (current === generation.current) {
         setError(reason instanceof Error ? reason.message : "这一步还没确认，答案已保留，请重新读取。");
-        try { const shown = port.current?.(); if (shown) setView(shown); } catch { /* a failed read-back keeps the screen and the error above */ }
+        try { const shown = port.current?.(); if (shown) show(shown); } catch { /* a failed read-back keeps the screen and the error above */ }
       }
     }
     finally { if (current === generation.current) { busy.current = false; setPending(false); } }
   }
   function sync(operation: () => StudySessionView) {
-    try { setView(operation()); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "答案还没保存。"); }
+    try { show(operation()); setError(""); } catch (reason) { setError(reason instanceof Error ? reason.message : "答案还没保存。"); }
   }
   useEffect(() => {
     generation.current++; busy.current = false; setView(null);
@@ -145,7 +177,7 @@ export function StudySession({ port }: { port: StudySessionPort }) {
     if (view.next) go(view.next.href);
     else void run(port.primary);
   };
-  return <StudySessionShell view={view} pending={pending} error={error}
+  return <StudySessionShell view={view} pending={pending} error={error} conversation={{ history, scrollCursor }}
     onPrimary={() => {
       if (primaryAction(view, pending).kind === "redo" && port.redo) void run(port.redo);
       else continueSession();

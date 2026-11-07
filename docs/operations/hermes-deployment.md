@@ -1,4 +1,4 @@
-# Hermes 发布、检查与回退
+# 服务器发布、检查与回退
 
 `infra/deploy/deploy-hermes.sh` 先核对发布主干与真实 CI，再在服务器建立独立 release。构建或迁移失败不会替换当前代码；切换后健康或进程身份核验失败，在数据协议兼容时自动恢复前一应用目录与服务配置；Study 新 Web 启动后不自动退回忽略作答条件的旧 Web。数据库迁移保留，不自动回退数据库。
 
@@ -14,17 +14,19 @@ bash infra/deploy/deploy-hermes.sh rollback
 
 ## 目录与前提
 
-| 用途 | 默认路径 / 配置 |
+各目录由下表中的变量指定，默认值见 `infra/deploy/deploy-hermes.sh`；本说明不记录服务器上的实际目录布局。
+
+| 用途 | 变量 / 配置 |
 |---|---|
-| 稳定配置、既有 Python venv、旧应用 | `/opt/aistudy`；不清空、不覆盖旧构建 |
-| 当前应用软链 | `/opt/aistudy-current`；首次发布先指向旧应用 |
-| 新应用 | `/opt/aistudy-releases/<完整 SHA>-<UTC 时间>-<PID>` |
-| 发布锁、日志、服务配置快照与 worker 暂停记录 | `/opt/aistudy-deployment`；目录权限 0700 |
-| PostgreSQL custom 备份 | `/opt/aistudy-backups/*.dump`；目录 0700，文件 0600 |
-| 生产配置 | `/opt/aistudy/.env.production`；release 仅链接至此文件 |
-| Web | `aistudy-web.service`，`127.0.0.1:18090`，Next standalone |
+| 稳定配置、既有 Python venv、旧应用 | `DIR`；不清空、不覆盖旧构建 |
+| 当前应用软链 | `CURRENT_LINK`；首次发布先指向旧应用 |
+| 新应用 | `RELEASES_DIR` 下每次发布新建的独立目录，不复用已有目录 |
+| 发布锁、日志、服务配置快照与 worker 暂停记录 | `DEPLOY_STATE`；目录权限 0700 |
+| PostgreSQL custom 备份 | `BACKUP_DIR` 下的 `*.dump`；目录 0700，文件 0600 |
+| 生产配置 | `DIR` 下的 `.env.production`；release 仅链接至此文件 |
+| Web | `aistudy-web.service`，只监听回环地址，Next standalone |
 | Worker | `aistudy-worker.service`，专用非 root 用户 `aistudy-worker` |
-| Worker 固定运行参数 | `/etc/aistudy/worker-runtime.env`；在原配置之后加载 |
+| Worker 固定运行参数 | `WORKER_CONFIG_DIR` 下的 `worker-runtime.env`；在原配置之后加载 |
 | 既有数据依赖 | PostgreSQL 16、Redis、MinIO；本脚本不重建这些服务 |
 
 服务器需要 Node.js 22+、npm、Python 3、既有 Docling venv 与离线模型、与数据库版本匹配的 `pg_dump` / `pg_restore`、`flock`、`sha256sum`、systemd、curl。部署账号需要安装服务与读取 `/proc/<PID>/environ` 的权限；worker 仍以专用非 root 身份运行。`provision-worker.sh` 会验证该身份读取新代码、venv 和离线缓存并执行 parser `--check`。
@@ -47,7 +49,7 @@ bash infra/deploy/deploy-hermes.sh rollback
 
 `MIN_FREE_KB` 可按已测量的构建与备份预算调大；变更部署目录可设置 `DIR`、`RELEASES_DIR`、`CURRENT_LINK`、`DEPLOY_STATE`、`BACKUP_DIR`。路径必须为规范绝对路径，仅允许字母、数字、下划线、短横线、点和路径分隔符。systemd / worker 配置目录默认使用系统路径。
 
-迁往独立 `/www` 磁盘时，可将 `RELEASES_DIR` 指向 `/www/aistudy-releases`、`BACKUP_DIR` 指向 `/www/aistudy-backups`；保留 `DIR=/opt/aistudy`、`CURRENT_LINK=/opt/aistudy-current` 和 `DEPLOY_STATE=/opt/aistudy-deployment`，继续使用同一发布锁、服务配置和回退记录。目标检查同时允许新的 release 根与原默认 `${DIR}-releases` 根，因而可识别原 `/opt` 版本；是否允许回退仍受数据协议兼容性约束，其余目录仍拒绝。操作前确认 `/www` 确实挂载且空间足够，已有构建或发布必须先协调，不并行启动第二个发布者。原应用和备份不随迁移自动删除。
+release 与备份迁往另一块磁盘时，可将 `RELEASES_DIR`、`BACKUP_DIR` 指向该磁盘上的目录，`DIR`、`CURRENT_LINK` 和 `DEPLOY_STATE` 保持原值，继续使用同一发布锁、服务配置和回退记录。目标检查同时允许新的 release 根与脚本按 `DIR` 推导的原默认 release 根，因而可识别迁移前的版本；是否允许回退仍受数据协议兼容性约束，其余目录仍拒绝。操作前确认新磁盘确实挂载且空间足够，已有构建或发布必须先协调，不并行启动第二个发布者。原应用和备份不随迁移自动删除。
 
 Worker unit 的 `WorkingDirectory`、`EnvironmentFile` 是单路径设置，不添加包围引号；`ReadWritePaths` 仍按路径列表引用，所有 unit 路径继续转义 `%`。实际 systemd 解析器的回归覆盖普通路径、空格及字面百分号，避免 mock 校验漏掉不可启动或被忽略的配置。
 
@@ -104,12 +106,12 @@ OPENING_TEACHING_VALIDATION_ENABLED=1
 
 ## 排障
 
-- SSH 失败：核对网络、`hermes` 别名、密钥和已核实的主机指纹。若网络截断 PQ KEX，可由部署机管理员在该 Host 下显式配置 `KexAlgorithms curve25519-sha256`；脚本不会修改认证设置。
+- SSH 失败：核对网络、已配置的 SSH 别名、密钥和已核实的主机指纹。若网络截断 PQ KEX，可由部署机管理员在该 Host 下显式配置 `KexAlgorithms curve25519-sha256`；脚本不会修改认证设置。
 - 空间不足：先确认每个文件系统实际剩余空间及构建 / 备份预算。不要删除 current 或上一可回退构建来强行发布。
 - 健康接口成功但身份失败：检查 systemd 后加载的 drop-in、ExecStart、WorkingDirectory、User 和环境文件顺序；不要只看 HTTP 200。
 - 数据库备份失败：核实 PostgreSQL 工具版本、URL 参数、磁盘与权限。脚本不打印连接凭据；失败的 `.partial` 与原数据保留。
 - 自动恢复也失败：保持模型预算关闭，检查发布状态目录、`systemctl status` 和 `logs`，从保留的应用与配置恢复；数据库恢复须单独确认，不能盲目覆盖线上数据。
 
-模型路由键与 Hermes 配置说明见 [opening-model-routing.md](opening-model-routing.md)。本说明描述脚本行为与待现场核验的前提，不代表服务器已经执行新发布流程。
+模型路由键与服务器配置说明见 [opening-model-routing.md](opening-model-routing.md)。本说明描述脚本行为与待现场核验的前提，不代表服务器已经执行新发布流程。
 
 Worker 账号、缓存迁移与隔离配置的详细现场步骤见 [worker-service-hardening.md](worker-service-hardening.md)。

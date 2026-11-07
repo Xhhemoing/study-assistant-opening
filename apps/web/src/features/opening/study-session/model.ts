@@ -69,7 +69,23 @@ export type StudySessionView = {
   confidence?: { value: PreAnswerConfidence | null; locked: boolean };
   /** The learner's session time, shown only when the step has no estimate. */
   budgetMinutes?: number;
+  /** Short read-only summary of the sealed first answer; only the span adapter fills it. */
+  answerSummary?: string;
 };
+
+/** An earlier step kept in this page's conversation; React state only, never persisted. */
+export type ConversationEntry = { stepId: string; title: string; body?: string; answerSummary?: string; resultLabel?: string };
+export const CONVERSATION_HISTORY_LIMIT = 20;
+export function conversationEntry(view: StudySessionView): ConversationEntry {
+  const body = view.step.kind === "learn" ? view.step.body : view.step.kind === "question" ? view.step.prompt : undefined;
+  const title = view.step.kind === "question" ? `第 ${view.position.index + 1} 步：${view.step.title}` : view.step.title;
+  return { stepId: view.step.id, title, body: body || undefined, answerSummary: view.sealed ? view.answerSummary : undefined,
+    resultLabel: view.result ? resultLabel(view.result) : undefined };
+}
+/** A revisited step replaces its older entry; the oldest entries drop past the limit. */
+export function appendConversationEntry(history: ConversationEntry[], entry: ConversationEntry): ConversationEntry[] {
+  return [...history.filter(row => row.stepId !== entry.stepId), entry].slice(-CONVERSATION_HISTORY_LIMIT);
+}
 
 export type StudySessionPort = {
   load(): Promise<StudySessionView>;
