@@ -14,9 +14,14 @@ export type TeachingQuestionSpec = {
   courseRequirement?: { id:string; revision:number; stableSkillId:string; requirementKey:string };
 };
 
-export function teachingQuestionText(content: Record<string, unknown> | undefined): string | null {
+export function teachingQuestionBody(content: Record<string, unknown> | undefined): string | null {
   const value = content && [content.text, content.markdown, content.prompt, content.question, content.answer, content.solution]
     .find((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()));
+  return value ?? null;
+}
+
+export function teachingQuestionText(content: Record<string, unknown> | undefined): string | null {
+  const value = teachingQuestionBody(content);
   if (!value) return null;
   const interaction = teachingQuestionInteractionSchema.safeParse(content?.interaction).data;
   return interaction?.kind === "choice" ? `${value}\n${interaction.options.map(option => `${option.id}. ${option.label}`).join("\n")}`

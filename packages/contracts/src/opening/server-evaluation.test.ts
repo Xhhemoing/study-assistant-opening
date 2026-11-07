@@ -30,4 +30,9 @@ describe("controlled server evaluation contracts", () => {
     expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, verdictSource: "deterministic" }).success).toBe(false);
     expect(learningAttemptSubmitInputSchema.safeParse({ ...submit, serverEvaluation: facts }).success).toBe(false);
   });
+
+  it("pairs the teaching evaluator with its own specification", () => {
+    expect(serverEvaluationSchema.safeParse({ ...facts, evaluatorVersion: "teaching-key-exact-v1", specVersion: "teaching-key-v1" }).success).toBe(true);
+    expect(serverEvaluationSchema.safeParse({ ...facts, evaluatorVersion: "teaching-key-exact-v1", specVersion: "span-v1" }).success).toBe(false);
+  });
 });

@@ -268,6 +268,21 @@ export async function readOpeningLearningEvidenceContexts(
     const entries = feedbackByCatalogue.get(key) ?? [];
     entries.push(row); feedbackByCatalogue.set(key, entries);
   }
+  const teachingItems = items.filter(row => row.teaching_revision_id != null && row.teaching_block_id != null);
+  // Controlled teaching verdicts never enter AI grading, so later fallback answers to the same pinned question must inherit that feedback here.
+  const teachingFeedback = teachingItems.length ? await db`WITH ranked AS (
+    SELECT o.id,o.attempt_id,o.problem_id,o.recorded_at,o.course_id,v.teaching_revision_id,v.teaching_block_id,
+      row_number() OVER (PARTITION BY o.course_id,v.teaching_revision_id,v.teaching_block_id ORDER BY o.recorded_at,o.id) AS feedback_rank
+    FROM opening_learning_observations o
+    JOIN opening_learning_item_versions v ON v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}
+      AND o.course_id =ANY(${[...new Set(records.map(row => row.courseId))]}::uuid[])
+      AND v.teaching_revision_id =ANY(${teachingItems.map(row => String(row.teaching_revision_id))}::uuid[])
+      AND v.teaching_block_id =ANY(${teachingItems.map(row => String(row.teaching_block_id))}::uuid[])
+      AND o.verdict_source='deterministic' AND o.server_evaluation->>'evaluatorVersion'='teaching-key-exact-v1'
+      AND o.server_evaluation->>'decision' IN ('correct','incorrect')
+      AND o.attempt_id IS NOT NULL AND o.recorded_at IS NOT NULL
+  ) SELECT * FROM ranked WHERE feedback_rank<=2` : [];
   // Reference comparisons expose answers even when low-trust or subsequently revised.
   // Read immutable events, not only current heads: corrections cannot erase exposure.
   const priorReferenceHeads = problemIds.length ? await db`SELECT o.id, o.attempt_id, o.problem_id, o.item_version_id, o.verdict_source,
@@ -363,6 +378,14 @@ export async function readOpeningLearningEvidenceContexts(
     for (const prior of catalogue ? feedbackByCatalogue.get(`${catalogue.courseId}:${JSON.stringify(catalogue.spec)}`) ?? [] : []) {
       if (prior.attempt_id === record.attemptId) continue;
       history.push({ id: `catalogue-feedback:${prior.id}`, attempt_id: prior.attempt_id, problem_id: prior.problem_id,
+        kind: "evaluation_feedback", same_question: true, level: "hinted", delivered: true,
+        delivered_at: prior.recorded_at, history_revision: 0 });
+    }
+    const teachingPriors = item?.teaching_revision_id != null && item.teaching_block_id != null ? teachingFeedback.filter(prior =>
+      prior.course_id === record.courseId && prior.teaching_revision_id === item.teaching_revision_id
+        && prior.teaching_block_id === item.teaching_block_id && prior.attempt_id !== record.attemptId) : [];
+    for (const prior of teachingPriors) {
+      history.push({ id: `teaching-feedback:${prior.id}`, attempt_id: prior.attempt_id, problem_id: prior.problem_id,
         kind: "evaluation_feedback", same_question: true, level: "hinted", delivered: true,
         delivered_at: prior.recorded_at, history_revision: 0 });
     }
