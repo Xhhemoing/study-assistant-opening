@@ -69,6 +69,25 @@ describe("teaching key evaluation", () => {
     },
   );
 
+  it("falls back before reading the answer key or prior feedback when prompt repair can collide choices", async () => {
+    const readKeyId = vi.fn(() => "a");
+    const answerKey = { get id() { return readKeyId(); }, type: "answer_key", content: { answer: "2" } };
+    const interaction = { kind: "choice", options: [
+      { id: "B. \\times", label: "2" }, { id: "B", label: "\times. 2" },
+    ] };
+    const f = setup({ blocks: [block({ text: "1+1", interaction }), answerKey] });
+    expect(await f.run("B. \\times. 2")).toBeNull();
+    expect(readKeyId).not.toHaveBeenCalled();
+    expect(f.tx.mock.calls.some(([parts]) => parts.join(" ").includes("SELECT o.id"))).toBe(false);
+  });
+
+  it("still evaluates the same choice when prompt content needs no repair", async () => {
+    const interaction = { kind: "choice", options: [
+      { id: "B. \\times", label: "2" }, { id: "B", label: "other. 2" },
+    ] };
+    const f = setup({ blocks: [block({ text: "1+1", interaction }), key("2")] });
+    expect(await f.run("B. \\times. 2")).toMatchObject({ decision: "correct" });
+  });
   it.each([
     ["missing attempt", undefined],
     ["missing item version", { ...attempt, item_version_id: null }],

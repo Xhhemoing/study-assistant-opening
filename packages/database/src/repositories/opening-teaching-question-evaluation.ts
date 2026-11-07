@@ -1,3 +1,4 @@
+import { repairDecodedLatexInJson } from "@aistudy/ai";
 import type { Scope } from "@aistudy/contracts";
 import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
@@ -21,6 +22,7 @@ export async function evaluateOpeningTeachingKeyAttempt(tx: TransactionSql, scop
   if (spec?.kind !== "teaching_question" || spec.specVersion !== "teaching-question-v1" || !spec.answerBlockId) return null;
   const blocks = row.blocks as Block[];
   const prompt = blocks.find(block => block.id === spec.blockId && ["prompt", "question"].includes(block.type));
+  if (prompt && repairDecodedLatexInJson(prompt.content).repairs > 0) return null;
   const key = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
   const body = teachingQuestionBody(prompt?.content);
   const interaction = teachingQuestionInteractionSchema.safeParse(prompt?.content?.interaction);
