@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import type { CourseRouteActionResult, CourseRouteRequirementInput, TeachingQuestionInteraction } from "@aistudy/contracts";
-import { createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository } from "@aistudy/database";
+import { createCardRepository, createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -99,6 +99,7 @@ it("verifies a ready requirement after two different first-seen arithmetic quest
   expect((await x.route.read(f.scope, x.courseId)).requirements[0]).toMatchObject({ status: "verified", requirement: { verification: { status: "ready" } } });
   expect(await gradingJobs(first.observation.id)).toHaveLength(0);
   expect(await gradingJobs(second.observation.id)).toHaveLength(0);
+  expect(await createCardRepository(f.sql).listCards(f.scope)).toEqual([]);
 });
 
 it("records a controlled incorrect answer and enters the existing route correction flow", async () => {
@@ -113,6 +114,29 @@ it("records a controlled incorrect answer and enters the existing route correcti
     observationId: result.observation.id, clientKey: randomUUID(), minutes: 20 }));
   expect(next.action).toBe("targeted_explain");
   expect(await gradingJobs(result.observation.id)).toHaveLength(0);
+});
+
+it("creates mistake cards from the pinned answer keys for controlled incorrect answers", async () => {
+  const x = await seed(), cards = createCardRepository(f.sql);
+  const wrongNumeric = await x.submit(0, "1/2"), wrongChoice = await x.submit(1, "A. 1/2");
+  for (const { observation } of [wrongNumeric, wrongChoice]) {
+    expect(observation).toMatchObject({ outcome: "incorrect", verdictSource: "deterministic",
+      serverEvaluation: { evaluatorVersion: "teaching-key-exact-v1", decision: "incorrect", outcome: "incorrect" } });
+  }
+  const list = await cards.listCards(f.scope);
+  expect(list).toHaveLength(2);
+  const numericCard = list.find(card => card.originObservationRootId === wrongNumeric.observation.id);
+  const choiceCard = list.find(card => card.originObservationRootId === wrongChoice.observation.id);
+  expect(numericCard).toMatchObject({ originObservationRootId: wrongNumeric.observation.id, autoPaused: false });
+  expect(choiceCard).toMatchObject({ originObservationRootId: wrongChoice.observation.id, autoPaused: false });
+  expect(numericCard!.back).toContain("参考答案：7/12");
+  expect(numericCard!.back).not.toContain("1/2");
+  expect(choiceCard!.back).toContain("参考答案：B");
+  for (const card of [numericCard!, choiceCard!]) {
+    expect(await cards.getState({ ...f.scope, cardId: card.id })).toMatchObject({ cardId: card.id, reps: 0 });
+  }
+  expect(await gradingJobs(wrongNumeric.observation.id)).toHaveLength(0);
+  expect(await gradingJobs(wrongChoice.observation.id)).toHaveLength(0);
 });
 
 it.each([
