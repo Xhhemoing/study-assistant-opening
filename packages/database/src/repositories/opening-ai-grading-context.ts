@@ -40,11 +40,19 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   return readContextInternal(tx, scope, raw, options);
 }
 
-/** Seal only the student's owned photo. Losing a question reference cannot erase
- * an already issued answer; this path does not authorize model execution. */
+/** Admit a student's photo inside the submit transaction; rejection rolls the entire transaction back.
+ * Validation and conflict rejections carry the work_source_rejected reason. This does not authorize model execution. */
 export async function admitOpeningAiGradingWorkSource(tx: TransactionSql, scope: Scope, observationId: string) {
-  const context = await readContextInternal(tx, scope, { observationId }, { photoAdmissionOnly: true });
-  return { sourceIds: context.sourceIds, sourceVersions: context.sourceVersions };
+  try {
+    const context = await readContextInternal(tx, scope, { observationId }, { photoAdmissionOnly: true });
+    return { sourceIds: context.sourceIds, sourceVersions: context.sourceVersions };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error.code === "VALIDATION" || error.code === "CONFLICT")) {
+      const reason: import("@aistudy/contracts").ObservationSubmitRejectionReason = "work_source_rejected";
+      Object.assign(error, { reason });
+    }
+    throw error;
+  }
 }
 
 async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGradingInput,

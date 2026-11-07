@@ -178,3 +178,10 @@ it("reads a 201-observation service response through the strict HTTP client", as
   expect(result[0]?.recentPerformance?.evidenceIds).toHaveLength(20);
   expect(result[0]?.evidenceEligibility?.map(row => row.observationId)).toEqual(result[0]?.evidenceIds);
 });
+
+it.each([400, 409])("passes only the known photo rejection reason from HTTP %s", async status => {
+  for (const reason of ["work_source_rejected", undefined, null, "unknown", 3]) {
+    const client = createOpeningLearningClient(async () => Response.json({ error: { code: status === 400 ? "VALIDATION" : "CONFLICT", message: "拒收", reason } }, { status }));
+    await expect(client.getSummary(COURSE)).rejects.toMatchObject({ status, reason: reason === "work_source_rejected" ? reason : null });
+  }
+});

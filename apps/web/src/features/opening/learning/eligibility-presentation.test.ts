@@ -24,6 +24,11 @@ describe("learning eligibility presentation", () => {
     expect(new Set(labels).size).toBe(3);
     expect(labels).toEqual(["引用来源已被隐私排除", "引用来源或历史版本不可用", "材料或题目已变化，旧记录需复核"]);
   });
+  it("explains why an AI-graded answer is not counted as verified instead of using the fallback", () => {
+    const labels = eligibilityReasonLabels({ ...eligibility, reasonCodes: ["ai_graded_correct", "ai_evaluation_uncalibrated"] });
+    expect(labels).toEqual(["AI 按评分要点判断答案正确", "AI 批改还没校准，结果仅供参考，暂不计入已验证"]);
+    expect(labels).not.toContain("暂时无法说明原因，先保留");
+  });
   it("keeps reference checking scope distinct from system grading", () => {
     const html = renderToStaticMarkup(createElement(LearningEvidenceEligibilityDetails, { eligibility: { ...eligibility, verifiedCorrect: "yes", reasonCodes: ["reference_checked_correct"] } }));
     expect(html).toContain("有依据的参考核对");

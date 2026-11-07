@@ -1,9 +1,10 @@
-import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
+import { aiGradingWorkSourceSchema, type LearningAttempt, type LearningObservation } from "@aistudy/contracts";
 import { z } from "zod";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { assertInlinePreparedAttempt, inlineAttemptKeySchema, inlineAttemptPreparationInputSchema, type InlineAttemptPreparationCheckpoint } from "./inline-attempt-prepare";
 
-const identitySchema = inlineAttemptPreparationInputSchema.extend({ answer: z.string().max(20_000) }).strict();
+// Checkpoints saved before photo answers omit workSource and replay as text-only requests.
+const identitySchema = inlineAttemptPreparationInputSchema.extend({ answer: z.string().max(20_000), workSource: aiGradingWorkSourceSchema.optional() }).strict();
 
 /** Only request identity is persisted. Browser data never proves that an answer was saved. */
 export const inlineAttemptSubmissionCheckpointSchema = z.object({
@@ -22,6 +23,10 @@ type SubmissionState = { checkpoint: InlineAttemptSubmissionCheckpoint; attempt:
 // A route change can unmount the form while its HTTP request is still running.
 // Returning in the same document shares that request instead of starting a second session.
 const submissions = new Map<string, SubmissionState>();
+
+export function inlineAttemptWorkSourceKey(workSource: InlineAttemptIdentity["workSource"]): string {
+  return workSource ? `${workSource.id}:${workSource.version}:${workSource.physicalPage}` : "";
+}
 
 /** Idempotent submit replays return the original row; resume from the server's effective head. */
 export async function readInlineAttemptObservationHead(observationId: string, client: Pick<LearningClient, "getObservationHistory">): Promise<LearningObservation | null> {
@@ -42,7 +47,7 @@ export function createInlineAttemptSubmission(
     sessionId: options.preparation?.sessionId ?? null, attemptId: options.preparation?.attemptId ?? null, status: "pending" as const,
   };
   const cached = submissions.get(checkpoint.attemptKey);
-  const sameInput = (value: InlineAttemptIdentity) => JSON.stringify([value.activityId, value.courseId, value.blockId, value.contentVersion, value.sourceIds, value.prompt, value.skillLabel, value.answer]);
+  const sameInput = (value: InlineAttemptIdentity) => JSON.stringify([value.activityId, value.courseId, value.blockId, value.contentVersion, value.sourceIds, value.prompt, value.skillLabel, value.answer, inlineAttemptWorkSourceKey(value.workSource)]);
   const state = cached && cached.checkpoint.submitKey === checkpoint.submitKey && sameInput(cached.checkpoint.input) === sameInput(checkpoint.input)
     ? cached : { checkpoint, attempt: null, result: null, pending: null };
   if (!cached) submissions.set(checkpoint.attemptKey, state);
@@ -68,7 +73,8 @@ export function createInlineAttemptSubmission(
       publish();
     }
     const attempt = state.attempt;
-    const observation = await client.submitAttempt(attempt.id, { clientKey: captured.submitKey, answer: answer.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report" });
+    const observation = await client.submitAttempt(attempt.id, { clientKey: captured.submitKey, answer: answer.answer, outcome: "unverified", assistance: "unknown", verdictSource: "self_report",
+      ...(answer.workSource ? { workSource: answer.workSource } : {}) });
     if (observation.attemptId !== attempt.id || observation.courseId !== attempt.courseId || observation.sessionId !== attempt.sessionId) {
       throw new Error("保存结果和你的作答对不上，答案还在，请到课程学习记录看一下。");
     }
@@ -79,6 +85,14 @@ export function createInlineAttemptSubmission(
   }
   let consumerPending: Promise<SubmissionResult> | null = null;
   return {
+    release() {
+      if (state.pending || state.result) throw new Error("Cannot release an active or saved submission");
+      const { answer: _answer, workSource: _workSource, ...input } = state.checkpoint.input;
+      const preparation: InlineAttemptPreparationCheckpoint = { input, attemptKey: state.checkpoint.attemptKey,
+        sessionId: state.checkpoint.sessionId, attemptId: state.checkpoint.attemptId };
+      if (submissions.get(state.checkpoint.attemptKey) === state) submissions.delete(state.checkpoint.attemptKey);
+      return { preparation, attempt: state.attempt };
+    },
     submit() {
       // Save the immutable answer and both keys before the first outgoing write.
       publish();

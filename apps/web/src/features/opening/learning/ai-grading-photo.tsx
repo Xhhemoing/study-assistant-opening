@@ -1,7 +1,16 @@
 "use client";
 
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import type { SourceRecord } from "@aistudy/contracts";
+import { LEARNING_OBSERVATION_SOURCE_LIMIT, type LearningAttempt, type SourceRecord } from "@aistudy/contracts";
+import { OpeningApiError } from "../client/api";
+
+export function isWorkSourceRejection(error: unknown): boolean {
+  return error instanceof OpeningApiError && error.reason === "work_source_rejected";
+}
+
+export function workSourceCapacityReached(attempt: LearningAttempt): boolean {
+  return new Set([...attempt.sourceIds, ...Object.keys(attempt.sourceVersions)]).size >= LEARNING_OBSERVATION_SOURCE_LIMIT;
+}
 
 export type GradingPhotoSelection = { workSourceId: string; workSourceVersion: number; physicalPage: number };
 export const emptyGradingPhoto: GradingPhotoSelection = { workSourceId: "", workSourceVersion: 0, physicalPage: 1 };
