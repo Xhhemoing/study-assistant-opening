@@ -136,3 +136,36 @@ describe("choice answer and key boundaries", () => {
     }, "(BB)", "BB. 7/12")).toBe("correct");
   });
 });
+
+describe("meaning after Markdown rendering", () => {
+  const products = { kind: "choice" as const, options: [{ id: "A", label: "10" }, { id: "B", label: "127" }] };
+  const optionA = (label: string) => ({ kind: "choice" as const, options: [{ id: "A", label }, { id: "B", label: "99" }] });
+
+  it.each(["A. 10", "B. 127"])("does not grade %s when emphasis hides the multiplication signs", answer => {
+    expect(check("1*2*3+4", products, "10", answer)).toBeNull();
+  });
+
+  it("grades the same product written as inline math", () => {
+    expect(check("$1*2*3+4$", products, "10", "A. 10")).toBe("correct");
+  });
+
+  it("does not trust inline math split by a blank line", () => {
+    expect(check("$1\n\n*2*3+4$", products, "10", "A. 10")).toBeNull();
+  });
+
+  it("does not grade a numeric answer when emphasis hides the multiplication signs", () => {
+    expect(check("1*2*3+4", numeric, "10", "10")).toBeNull();
+  });
+
+  it.each([
+    ["- 3 + 4", "1"], ["3\n-\n2", "1"], ["(1+\n1) - 1", "1"], ["3\n---\n2", "1"], ["3\n-- --\n2", "5"],
+  ])("does not grade %j when a list, heading or rule hides an operator", (prompt, value) => {
+    expect(check(prompt, optionA(value), value, `A. ${value}`)).toBeNull();
+  });
+
+  it.each(["$10$", "*10*"])("does not grade when option %j does not render as its saved number", label => {
+    const interaction = { kind: "choice" as const, options: [{ id: "A", label: "10" }, { id: "B", label }] };
+    expect(check("5+5", interaction, "10", "A. 10")).toBeNull();
+    expect(check("5+5", interaction, "10", `B. ${label}`)).toBeNull();
+  });
+});

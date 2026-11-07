@@ -3,7 +3,7 @@ import type { Scope } from "@aistudy/contracts";
 import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
-import { teachingQuestionBody, teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
+import { teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
@@ -24,9 +24,10 @@ export async function evaluateOpeningTeachingKeyAttempt(tx: TransactionSql, scop
   const prompt = blocks.find(block => block.id === spec.blockId && ["prompt", "question"].includes(block.type));
   if (prompt && repairDecodedLatexInJson(prompt.content).repairs > 0) return null;
   const key = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
-  const body = teachingQuestionBody(prompt?.content);
+  // The client displays a string `text` as the stem; it orders the other stem fields differently.
+  const body = prompt?.content?.text;
   const interaction = teachingQuestionInteractionSchema.safeParse(prompt?.content?.interaction);
-  if (!body || !interaction.success || !key) return null;
+  if (typeof body !== "string" || !body.trim() || !interaction.success || !key) return null;
   const outcome = evaluateTeachingAnswer(body, interaction.data, teachingQuestionText(key.content), answer);
   if (!outcome || outcome === "unparseable") return null;
   const prior = await tx`SELECT o.id FROM opening_learning_observations o

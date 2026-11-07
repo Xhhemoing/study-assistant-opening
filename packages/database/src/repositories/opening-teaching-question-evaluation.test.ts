@@ -17,6 +17,11 @@ const numeric = { kind: "numeric" };
 const choice = { kind: "choice", options: [{ id: "A", label: "1" }, { id: "B", label: "2" }] };
 const block = (content: unknown, type = "prompt", id = "q") => ({ id, type, content });
 const key = (answer: string) => block({ answer }, "answer_key", "a");
+/** Watch content, not id: looking up the prompt may visit the key's id in any fixture order. */
+function watchedKey(answer: string) {
+  const read = vi.fn(() => ({ answer }));
+  return { read, block: { id: "a", type: "answer_key", get content() { return read(); } } };
+}
 const numericBlocks = [block({ text: "1+1", interaction: numeric }), key("2")];
 
 type FixtureOptions = { evaluationSpec?: unknown; blocks?: unknown; missingRow?: boolean; priorFeedback?: boolean };
@@ -70,23 +75,40 @@ describe("teaching key evaluation", () => {
   );
 
   it("falls back before reading the answer key or prior feedback when prompt repair can collide choices", async () => {
-    const readKeyId = vi.fn(() => "a");
-    const answerKey = { get id() { return readKeyId(); }, type: "answer_key", content: { answer: "2" } };
+    const answerKey = watchedKey("2");
     const interaction = { kind: "choice", options: [
       { id: "B. \\times", label: "2" }, { id: "B", label: "\times. 2" },
     ] };
-    const f = setup({ blocks: [block({ text: "1+1", interaction }), answerKey] });
+    const f = setup({ blocks: [block({ text: "1+1", interaction }), answerKey.block] });
     expect(await f.run("B. \\times. 2")).toBeNull();
-    expect(readKeyId).not.toHaveBeenCalled();
+    expect(answerKey.read).not.toHaveBeenCalled();
     expect(f.tx.mock.calls.some(([parts]) => parts.join(" ").includes("SELECT o.id"))).toBe(false);
   });
 
   it("still evaluates the same choice when prompt content needs no repair", async () => {
     const interaction = { kind: "choice", options: [
-      { id: "B. \\times", label: "2" }, { id: "B", label: "other. 2" },
+      { id: "B. \\times", label: "2" }, { id: "B", label: "3" },
     ] };
     const f = setup({ blocks: [block({ text: "1+1", interaction }), key("2")] });
     expect(await f.run("B. \\times. 2")).toMatchObject({ decision: "correct" });
+  });
+
+  const twoChoices = { kind: "choice", options: [{ id: "A", label: "2" }, { id: "B", label: "3" }] };
+  it.each([
+    ["question and latex without text", { question: "1+1", latex: "1+2" }],
+    ["prompt without text", { prompt: "1+1" }],
+    ["empty text before markdown", { text: "", markdown: "1+1" }],
+  ] satisfies Array<[string, Record<string, unknown>]>)("falls back before reading the answer key for %s", async (_name, content) => {
+    const answerKey = watchedKey("2");
+    const f = setup({ blocks: [block({ ...content, interaction: twoChoices }), answerKey.block] });
+    expect(await f.run("A. 2")).toBeNull();
+    expect(answerKey.read).not.toHaveBeenCalled();
+    expect(f.tx.mock.calls.some(([parts]) => parts.join(" ").includes("SELECT o.id"))).toBe(false);
+  });
+
+  it("evaluates the text stem even when another stem field disagrees", async () => {
+    const f = setup({ blocks: [block({ text: "1+1", question: "9+9", interaction: twoChoices }), key("2")] });
+    expect(await f.run("A. 2")).toMatchObject({ decision: "correct" });
   });
   it.each([
     ["missing attempt", undefined],
@@ -146,7 +168,7 @@ describe("teaching key evaluation", () => {
     expect(await f.run(answer)).toBeNull();
   });
   it("accepts question and solution blocks from the pinned revision", async () => {
-    const f = setup({ blocks: [block({ question: "1+1", interaction: numeric }, "question"), block({ solution: "2" }, "solution", "a")] });
+    const f = setup({ blocks: [block({ text: "1+1", interaction: numeric }, "question"), block({ solution: "2" }, "solution", "a")] });
     expect(await f.run("2")).toMatchObject({ decision: "correct" });
   });
 });

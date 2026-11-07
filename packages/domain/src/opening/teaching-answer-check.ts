@@ -1,9 +1,19 @@
 import type { TeachingQuestionInteraction } from "@aistudy/contracts";
 import { checkArithmeticAnswer, equalArithmeticValues, evaluateArithmeticQuestion, parseArithmeticLiteral } from "./arithmetic-check";
 
+/** The client renders the stem and option labels as Markdown; only content whose meaning survives rendering can be graded. */
+function keepsMeaningWhenRendered(question: string, interaction: TeachingQuestionInteraction | undefined): boolean {
+  // A $ pair is trusted as math only within one line; a blank line splits it into separate paragraphs.
+  if (question.replace(/\$[^$\r\n]*\$/g, "").includes("*")) return false;
+  // Per line rather than /m: a multiline ^\s* rescans runs of blank lines quadratically.
+  if (question.split(/\r\n?|\n/).some(line => /^\s*(?:-+|[+*]|\d{1,9}[.)])(?:\s|$)/.test(line))) return false;
+  return interaction?.kind !== "choice" || interaction.options.every(option => parseArithmeticLiteral(option.label) !== null);
+}
+
 /** Independent evaluation of the pinned question and key; null means no authority. */
 export function evaluateTeachingAnswer(question: string, interaction: TeachingQuestionInteraction | undefined,
   key: string | null, answer: string): "correct" | "incorrect" | "unparseable" | null {
+  if (!keepsMeaningWhenRendered(question, interaction)) return null;
   const expected = evaluateArithmeticQuestion(question);
   if (!expected || !interaction || !key?.trim()) return null;
   if (interaction.kind === "numeric") {
