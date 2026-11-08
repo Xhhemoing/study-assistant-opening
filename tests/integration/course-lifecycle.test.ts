@@ -77,6 +77,11 @@ describe("course lifecycle through authenticated routes", () => {
 
   it("keeps another course relationship and the original source when unlinking", async () => {
     const learning = await learningAttemptFixture(f), courses = createCourseMembershipRepository(f.sql);
+    const membership = await f.sql`UPDATE course_asset_memberships SET visibility='private'
+      WHERE workspace_id=${f.scope.workspaceId} AND course_id=${learning.courseId}
+        AND asset_type='source' AND asset_id=${learning.sourceId}
+      RETURNING role, visibility, purpose`;
+    expect(membership).toEqual([{ role: "core", visibility: "private", purpose: null }]);
     const other = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "Second", slug: randomUUID() });
     for (const courseId of [other.id]) await courses.addAssetMembership({
       workspaceId: f.scope.workspaceId, courseId, assetType: "source", assetId: learning.sourceId, role: "core", visibility: "private",
