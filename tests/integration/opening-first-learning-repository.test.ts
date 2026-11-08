@@ -117,6 +117,31 @@ it("normalizes the course UUID for goal lookup and starts an imminent goal with 
   } });
 });
 
+it.each(["version", "membership", "privacy"] as const)(
+  "keeps uppercase source UUID receipts current on creation and replay, then invalidates %s changes", async kind => {
+    const sourceId = await source(), submittedId = sourceId.toUpperCase(), request = input([submittedId], 1);
+    const first = await repository().initialize(fixture.scope, request), saved = await receipts(first.activity.id);
+    expect(saved).toHaveLength(1);
+    expect(JSON.parse(saved[0]!.intentVersion).createIntent.sourceIds).toEqual([submittedId]);
+    expect(saved[0]!.sourceVersions).toEqual({ [sourceId]: [1] });
+    expect(first.activity.sourceIds).toEqual([sourceId]);
+    expect((await createOpeningLearnerStateService(fixture.sql).read(fixture.scope)).features).toEqual([]);
+    expect(await decisions().explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: true, invalidationReasons: [] });
+    const replay = await repository().initialize(fixture.scope, request);
+    expect(replay).toMatchObject({ replayed: true, activity: { id: first.activity.id }, firstTaskId: first.firstTaskId });
+    expect(await receipts(first.activity.id)).toEqual(saved);
+    expect(await decisions().explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: true, invalidationReasons: [] });
+    expect(await counts()).toEqual({ courses: 1, activities: 1, tasks: 1, jobs: 1, outbox: 1 });
+    // Identity normalization must not relax the submitted payload's replay contract.
+    await expect(repository().initialize(fixture.scope, { ...request, intent: { ...request.intent, sourceIds: [sourceId] } }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    if (kind === "version") await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${sourceId}`;
+    if (kind === "membership") await fixture.sql`DELETE FROM course_asset_memberships WHERE course_id=${first.courseId!} AND asset_id=${sourceId}`;
+    if (kind === "privacy") await fixture.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${fixture.scope.workspaceId},${sourceId})`;
+    expect(await decisions().explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: false, invalidationReasons: ["source_changed"] });
+    expect(await receipts(first.activity.id)).toEqual(saved);
+  });
+
 it("replays the saved calendar without restoring goals, memberships, task dates or course names changed by the learner", async () => {
   const sourceId = await source(), request = input([sourceId]);
   const first = await repository().initialize(fixture.scope, request);

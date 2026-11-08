@@ -50,14 +50,17 @@ async function explainFirstLearning(tx: TransactionSql, scope: Scope, decision: 
     && createIntent.source === "onboarding" && createIntent.clientKey === captured.createIntent.clientKey;
   const persistedIntent = { protocol: "first-learning-1", courseId: activity?.course_id ?? null,
     goalId: captured.goalId, createIntent, plan };
-  const sourcesMatch = isDeepStrictEqual([...(activity?.source_ids ?? [])].sort(), [...captured.createIntent.sourceIds].sort());
+  // UUID identity is case-insensitive; keep submitted intent JSON untouched for replay equality.
+  const activitySourceIds = new Set((activity?.source_ids as string[] | undefined ?? []).map(id => id.toLowerCase()));
+  const capturedSourceIds = [...new Set(captured.createIntent.sourceIds.map(id => id.toLowerCase()))].sort();
+  const sourcesMatch = isDeepStrictEqual([...activitySourceIds].sort(), capturedSourceIds);
   const goalMatches = goalJson.learningGoal === captured.createIntent.goal && goalJson.targetDate === captured.createIntent.targetDate;
   const intentVersion = identityMatches && sourcesMatch && goalMatches && isDeepStrictEqual(persistedIntent, raw)
     ? decision.intentVersion : "first-learning-persisted-intent-changed";
   const goal = await readLearningGoal(tx, scope, captured.goalId);
   const goalVersion = goal?.courseIds.includes(captured.courseId)
     ? `goal:${goal.id}:v${goal.revision}:${goal.lifecycle}` : "first-learning-goal-unavailable";
-  const ids = captured.createIntent.sourceIds.filter(id => Object.hasOwn(decision.sourceVersions, id));
+  const ids = capturedSourceIds.filter(id => Object.hasOwn(decision.sourceVersions, id));
   const sources = ids.length && identityMatches ? await tx`SELECT s.id,s.version FROM opening_sources s
     JOIN course_asset_memberships m ON m.asset_id=s.id AND m.workspace_id=s.workspace_id
       AND m.course_id=${captured.courseId} AND m.asset_type='source'
@@ -65,8 +68,8 @@ async function explainFirstLearning(tx: TransactionSql, scope: Scope, decision: 
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)` : [];
   const sourceVersions = structuredClone(state.sourceVersions);
   for (const id of ids) {
-    const source = sources.find(row => row.id === id);
-    sourceVersions[id] = source && (activity?.source_ids as string[]).includes(id)
+    const source = sources.find(row => String(row.id).toLowerCase() === id);
+    sourceVersions[id] = source && activitySourceIds.has(id)
       ? [...new Set([...(sourceVersions[id] ?? []), Number(source.version)])].sort((a, b) => a - b) : [];
   }
   const invalidationReasons = learningDecisionInvalidation(decision, { stateVersion: state.stateVersion, sourceVersions,
