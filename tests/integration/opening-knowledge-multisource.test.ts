@@ -78,6 +78,79 @@ it("persists exact-source unions and same-name different-text candidates without
   expect(await createOpeningKnowledgeRepository(sql).get(scope, courseId)).toEqual(saved);
 });
 
+it("preserves only the manually confirmed definition across rebuilds and rechecks changed source versions", async () => {
+  const { sql, scope } = fixture, courseId = randomUUID();
+  await sql`INSERT INTO courses(id,workspace_id,title,slug)
+    VALUES(${courseId},${scope.workspaceId},'Manual review course',${courseId})`;
+  const a = await material(courseId, "x² + x₁", 1, 2);
+  const b = await material(courseId, "x² - x₁", 1, 3);
+  const original = await rebuild(courseId);
+  expect(original.snapshot.nodes.map(node => node.status)).toEqual(["needs_check", "needs_check"]);
+  const selected = original.snapshot.nodes.find(node => node.evidenceChunkIds.includes(a.chunkId))!;
+  const other = original.snapshot.nodes.find(node => node.evidenceChunkIds.includes(b.chunkId))!;
+  const knowledge = createOpeningKnowledgeRepository(sql);
+  const confirmed = await knowledge.confirmNode(scope, courseId, selected.id,
+    { expectedVersion: original.version, sourceVersions: original.sourceVersions });
+  expect(confirmed.snapshot.nodes.find(node => node.id === selected.id)!.status).toBe("supported");
+  expect(confirmed.snapshot.nodes.find(node => node.id === other.id)!.status).toBe("needs_check");
+  const preserved = await rebuild(courseId);
+  expect(preserved.snapshot.nodes.find(node => node.id === selected.id)).toMatchObject({ ...selected, status: "supported" });
+  expect(preserved.snapshot.nodes.find(node => node.id === other.id)).toEqual(other);
+  // Same complete text/UUID but a changed source version still invalidates the confirmation.
+  await sql`UPDATE opening_sources SET version=2 WHERE id=${a.sourceId}`;
+  await sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${a.sourceId}`;
+  await sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${a.chunkId}`;
+  await knowledge.markNeedsCheckForSources(scope, [a.sourceId]);
+  const changed = await rebuild(courseId);
+  expect(changed.snapshot.nodes.map(node => node.status)).toEqual(["needs_check", "needs_check"]);
+  expect(changed.snapshot.nodes.find(node => node.id === selected.id)!.evidenceChunkIds).toEqual([a.chunkId]);
+  expect(changed.sourceVersions).toEqual({ [a.sourceId]: 2, [b.sourceId]: 1 });
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  // Restore the old live source/chunk version in this isolated fixture. The old receipt must
+  // stay revoked even when the original graph, UUIDs, evidence and versions reappear.
+  await sql`UPDATE opening_sources SET version=1 WHERE id=${a.sourceId}`;
+  await sql`UPDATE opening_source_chunks SET source_version=1 WHERE id=${a.chunkId}`;
+  const returned = await rebuild(courseId);
+  expect(returned.sourceVersions).toEqual(original.sourceVersions);
+  expect(returned.snapshot.nodes.map(node => node.status)).toEqual(["needs_check", "needs_check"]);
+  expect(returned.snapshot.nodes.find(node => node.id === selected.id)!.evidenceChunkIds).toEqual(selected.evidenceChunkIds);
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  const reconfirmed = await knowledge.confirmNode(scope, courseId, selected.id,
+    { expectedVersion: returned.version, sourceVersions: returned.sourceVersions });
+  const [newReceipt] = await sql`SELECT graph_version_before,graph_version_after,source_versions
+    FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+  expect(newReceipt).toMatchObject({ graph_version_before: returned.version,
+    graph_version_after: reconfirmed.version, source_versions: { [a.sourceId]: 1 } });
+  expect(reconfirmed.snapshot.nodes.find(node => node.id === selected.id)!.status).toBe("supported");
+  expect(reconfirmed.snapshot.nodes.find(node => node.id === other.id)!.status).toBe("needs_check");
+  const rebuiltAgain = await rebuild(courseId);
+  expect(rebuiltAgain.snapshot.nodes.find(node => node.id === selected.id)!.status).toBe("supported");
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(1);
+});
+
+it("rejects confirming a node that cites only source A after source B, also in the course, changed version", async () => {
+  const { sql, scope } = fixture, courseId = randomUUID();
+  await sql`INSERT INTO courses(id,workspace_id,title,slug)
+    VALUES(${courseId},${scope.workspaceId},'Whole source set course',${courseId})`;
+  const a = await material(courseId, "x² + x₁", 1, 2);
+  const b = await material(courseId, "x² - x₁", 1, 3);
+  const original = await rebuild(courseId);
+  const onlyA = original.snapshot.nodes.find(node => node.evidenceChunkIds.includes(a.chunkId))!;
+  expect(onlyA.evidenceChunkIds).toEqual([a.chunkId]);
+  expect(onlyA.status).toBe("needs_check");
+  // B moves to v2 without a graph-version bump; A and the selected node's own evidence are unchanged.
+  await sql`UPDATE opening_sources SET version=2 WHERE id=${b.sourceId}`;
+  await sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${b.sourceId}`;
+  await sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${b.chunkId}`;
+  const knowledge = createOpeningKnowledgeRepository(sql);
+  await expect(knowledge.confirmNode(scope, courseId, onlyA.id,
+    { expectedVersion: original.version, sourceVersions: original.sourceVersions })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await knowledge.get(scope, courseId)).toEqual(original);
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+});
+
 it("keeps exact complete definitions supported through real extraction merge, replacement and readback", async () => {
   const { sql, scope } = fixture, courseId = randomUUID();
   await sql`INSERT INTO courses(id,workspace_id,title,slug)

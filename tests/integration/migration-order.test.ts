@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import {
   applyMigrations,
   createSqlClient,
   MigrationRegistryError,
+  preflightConfirmationRecovery,
 } from "@aistudy/database";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -147,6 +149,97 @@ describe("migration registry order and verification", () => {
     ).rejects.toMatchObject({
       code: "MIGRATION_INVALID_VERIFICATION_STATE",
     } satisfies Partial<MigrationRegistryError>);
+  });
+
+  it("checks real 107 -> 108 recovery read-only and refuses unknown history, drift, missing schema and incompatible artifacts", async () => {
+    const migrations = path.resolve("packages/database/src/migrations");
+    const names = (await readdir(migrations)).filter(name => name.endsWith(".sql")).sort();
+    const { schema, directory } = await createFixture(Object.fromEntries(await Promise.all(names.slice(0, 107)
+      .map(async name => [name, await readFile(path.join(migrations, name), "utf8")]))));
+    await applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 });
+    const artifactRoot = path.resolve(".");
+    const artifactPaths = ["packages/database/src/migrate.ts", "packages/database/src/repositories/opening-knowledge.ts", "infra/deploy/hermes-db.mjs"];
+    const hash = createHash("sha256");
+    for (const relative of artifactPaths) hash.update(relative).update("\0").update(await readFile(relative)).update("\0");
+    const expectedArtifactContentDigest = hash.digest("hex");
+    const preflight = () => preflightConfirmationRecovery(sql, { artifactRoot, expectedArtifactContentDigest });
+    const ledger = async () => [...await sql`SELECT * FROM schema_migrations ORDER BY id`];
+    const before107 = await ledger();
+    await expect(preflight()).rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+    expect(await ledger()).toEqual(before107);
+    // Apply the real, untouched SQL only in this isolated test database; never fake a ledger row.
+    await writeFile(path.join(directory, names[107]!), await readFile(path.join(migrations, names[107]!)));
+    expect((await applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 })).applied).toEqual([names[107]]);
+    const before108 = await ledger();
+    const report = await preflight();
+    expect(report).toMatchObject({ ledgerThrough: 108, readOnly: true, automaticRecovery: false,
+      writerProtocol: "graph-source-revocation-v1", artifactContentDigest: expectedArtifactContentDigest });
+    expect(await ledger()).toEqual(before108);
+    const config = path.join(directory, "test.env");
+    const scopedUrl = new URL(databaseUrl!);
+    scopedUrl.searchParams.set("options", `-c search_path=${schema},public`);
+    await writeFile(config, `DATABASE_URL=${scopedUrl.href}\n`);
+    const helper = spawnSync(process.execPath, ["infra/deploy/hermes-db.mjs", "confirmation-recovery-preflight",
+      config, artifactRoot, expectedArtifactContentDigest], { encoding: "utf8" });
+    expect(helper.status, helper.stderr || helper.stdout).toBe(0);
+    expect(JSON.parse(helper.stdout)).toEqual(report);
+    expect(await ledger()).toEqual(before108);
+
+    // An actual 107 runner inventory still refuses 108; the new report does not loosen applyMigrations.
+    await rm(path.join(directory, names[107]!));
+    await expect(applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 }))
+      .rejects.toMatchObject({ code: "MIGRATION_UNKNOWN_HISTORY" });
+    expect(await ledger()).toEqual(before108);
+    const [kindCheck] = await sql`SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+      WHERE conrelid='opening_knowledge_confirmations'::regclass AND conname='opening_knowledge_confirmations_node_kind_check'`;
+    for (const [label, mutate, expectedCode] of [
+      ["unknown109", async () => { await sql`INSERT INTO schema_migrations(id,checksum,verification_state)
+        VALUES('0109_unknown.sql','unknown','verified')`; }, "MIGRATION_UNKNOWN_HISTORY"],
+      ["drift", async () => { await sql`UPDATE schema_migrations SET checksum='drift' WHERE id=${names[107]!}`; }, "MIGRATION_CHECKSUM_DRIFT"],
+      ["legacy", async () => { await sql`UPDATE schema_migrations SET verification_state='legacy-unverified' WHERE id=${names[107]!}`; }, "MIGRATION_RECOVERY_INCOMPATIBLE"],
+      ["missing-table", async () => { await sql.unsafe(`ALTER TABLE ${schema}.opening_knowledge_confirmations RENAME TO hidden_confirmations`); }, "MIGRATION_RECOVERY_INCOMPATIBLE"],
+      ["missing-check", async () => { await sql.unsafe(`ALTER TABLE ${schema}.opening_knowledge_confirmations DROP CONSTRAINT opening_knowledge_confirmations_node_kind_check`); }, "MIGRATION_RECOVERY_INCOMPATIBLE"],
+    ] as const) {
+      await mutate();
+      try {
+        const observed = await ledger();
+        await expect(preflight()).rejects.toMatchObject({ code: expectedCode });
+        expect(await ledger(), label).toEqual(observed);
+        if (label === "unknown109") {
+          const denied = spawnSync(process.execPath, ["infra/deploy/hermes-db.mjs", "confirmation-recovery-preflight",
+            config, artifactRoot, expectedArtifactContentDigest], { encoding: "utf8" });
+          expect(denied.status).toBe(1);
+          expect(JSON.parse(denied.stdout)).toEqual({ eligible: false, code: "MIGRATION_UNKNOWN_HISTORY", automaticRecovery: false });
+          expect(denied.stdout).not.toContain(databaseUrl);
+          expect(await ledger()).toEqual(observed);
+        }
+      } finally {
+        // Test-fixture cleanup only; production preflight has no repair/attestation path.
+        if (label === "unknown109") await sql`DELETE FROM schema_migrations WHERE id='0109_unknown.sql'`;
+        if (label === "drift" || label === "legacy") await sql`UPDATE schema_migrations
+          SET checksum=${before108[107]!.checksum}, verification_state=${before108[107]!.verification_state} WHERE id=${names[107]!}`;
+        if (label === "missing-table") await sql.unsafe(`ALTER TABLE ${schema}.hidden_confirmations RENAME TO opening_knowledge_confirmations`);
+        if (label === "missing-check") await sql.unsafe(`ALTER TABLE ${schema}.opening_knowledge_confirmations
+          ADD CONSTRAINT opening_knowledge_confirmations_node_kind_check ${kindCheck!.definition}`);
+      }
+    }
+    for (const relative of artifactPaths.slice(0, 2)) {
+      const old = await mkdtemp(path.join(os.tmpdir(), "aistudy-old-anchor-"));
+      directories.push(old);
+      for (const entry of artifactPaths) {
+        await mkdir(path.dirname(path.join(old, entry)), { recursive: true });
+        await cp(entry, path.join(old, entry));
+      }
+      await cp(migrations, path.join(old, "packages/database/src/migrations"), { recursive: true });
+      // Negative integrity fixture, not a claimed historical-release restore drill.
+      await writeFile(path.join(old, relative), "// incompatible reader/writer contents\n");
+      await expect(preflightConfirmationRecovery(sql, { artifactRoot: old, expectedArtifactContentDigest }))
+        .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+      expect(await ledger()).toEqual(before108);
+    }
+    await expect(preflightConfirmationRecovery(sql, { artifactRoot, expectedArtifactContentDigest: "0".repeat(64) }))
+      .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+    expect(await ledger()).toEqual(before108);
   });
 
   it("fails closed for verified checksum drift", async () => {

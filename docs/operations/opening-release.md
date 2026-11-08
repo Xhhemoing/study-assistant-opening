@@ -48,6 +48,27 @@ This is an unexecuted runbook, not evidence that 0108, a backup, rehearsal,
 rollback or recovery has run. Browser acceptance remains with the user; this
 change does not claim it passed.
 
+### Compatibility follow-up: read-only report, not an approved recovery
+
+The full manual-confirmation stack remains migration-bearing, including inherited #230;
+this follow-up adds no migration and does not alter the approved sequence above. Neither
+#230 nor this stack may merge before the first migration-free bridge release is actually healthy.
+
+The new **compatibility reader/writer anchor** is described in
+[database migrations §7](database-migrations.md#7-0108-确认协议的兼容恢复边界执行仍需另批).
+Only an exact independently reviewed compatible artifact can be a proposed recovery object.
+Old runners still reject unknown 0108; old writers lacking graph/source/revocation maintenance
+remain ineligible. Keep writers stopped and propose a forward fix if the managed old target
+is insufficient; do not change OLD_TARGET, transition state, ledger or tables to force recovery.
+
+`hermes-db.mjs confirmation-recovery-preflight` checks the trusted anchor, exact 0001..0108
+verified checksums, confirmation-table catalog and reviewed source-content digest. That digest
+is **not a signature, deployment authorization or proof of recoverability**. The action emits
+only a read-only report. Existing managed deploy/release scripts are unchanged and do **not**
+consume it; no migration, pointer switch or writer resume occurs. Exact-head independent
+reviews/CI and separately authorized backup/rehearsal/deployment/recovery operations are still
+required. No historical artifact is automatically allowlisted and no actual recovery was verified.
+
 ## System query default (2026-10-21)
 
 `OPENING_SYSTEM_QUERY` now defaults to `1` when unset, including on existing
