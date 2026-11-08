@@ -184,6 +184,39 @@ it("caps conflicting goals/courses once and preserves accepted history through a
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
 });
 
+it("suppresses and restores real maintenance suggestions through course and goal archive/resume with spare capacity", async () => {
+  const c = await requirement(await course());
+  await budget(60);
+  await task(c.id, 20);
+  const { draft } = await preview();
+  await confirm(draft.id);
+  const accepted = await plans().getToday(f.scope, date);
+  await management().lifecycle(f.scope, { goalId: c.goal.id, expectedRevision: 1,
+    lifecycle: "maintenance", maintenanceIntervalDays: 1, acceptedPolicy: "keep" });
+  const expected = { key: `planner:${date}:maintenance:${c.goal.id}:${c.input.id}`,
+    kind: "new_skill", courseId: c.id, requirementKey: c.input.requirementKey, minutes: 10 };
+  async function suggestions() {
+    const result = await management().command(f.scope, { action: "preview", date, expectedAcceptedVersion: 1,
+      expectedBudgetRevision: 1, clientKey: randomUUID() });
+    expect(result.overview).toMatchObject({ committedMinutes: 20, remainingMinutes: 40, acceptedVersion: 1 });
+    expect(await plans().getToday(f.scope, date)).toEqual(accepted);
+    expect(await plans().listTasks(f.scope)).toHaveLength(1); // Previews never materialize another task.
+    return result.draft?.suggestedTasks ?? [];
+  }
+  expect(await suggestions()).toEqual([expect.objectContaining(expected)]);
+  const courses = createCourseMembershipRepository(f.sql);
+  await courses.setArchived({ ...f.scope, courseId: c.id, archived: true });
+  expect(await suggestions()).toEqual([]);
+  await courses.setArchived({ ...f.scope, courseId: c.id, archived: false });
+  expect(await suggestions()).toEqual([expect.objectContaining(expected)]);
+  await management().lifecycle(f.scope, { goalId: c.goal.id, expectedRevision: 2, lifecycle: "archived", acceptedPolicy: "keep" });
+  expect(await suggestions()).toEqual([]);
+  await management().lifecycle(f.scope, { goalId: c.goal.id, expectedRevision: 3,
+    lifecycle: "maintenance", maintenanceIntervalDays: 1, acceptedPolicy: "keep" });
+  expect(await suggestions()).toEqual([expect.objectContaining(expected)]);
+  expect(await f.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+
 it("shares persisted independent evidence without duplicating answers, maintenance tasks or capacity; source assets stay scoped", async () => {
   const x = await sharedPair(), actualNow = new Date();
   await budget(60, actualNow);
@@ -256,7 +289,11 @@ async function withRolledBackCardFixture(run: () => Promise<void>) {
 }
 
 it("deduplicates multi-goal shared-card work and budget, but never copies its grade into course evidence", async () => withRolledBackCardFixture(async () => {
-  const x = await sharedPair(), clock = new Date(), startedAt = new Date(clock.getTime() - 180000);
+  const x = await sharedPair(), actualNow = new Date();
+  const startedAt = new Date(`${actualNow.toISOString().slice(0, 10)}T00:00:00.000Z`);
+  // Keep the reservation on the same UTC day, with at least three real elapsed
+  // fixture minutes even at 00:00; leave Date and PostgreSQL event clocks real.
+  const clock = new Date(Math.max(actualNow.getTime(), startedAt.getTime() + 180000));
   await budget(30, clock);
   const cards = createCardRepository(f.sql), courses = createCourseMembershipRepository(f.sql);
   const card = await cards.createCard({ ...f.scope, front: "分数加法", back: "通分相加", courseId: x.source.id });
