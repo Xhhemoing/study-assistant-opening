@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { CourseRequirement } from "@aistudy/contracts";
 import { courseRequirementProgress, type CourseRouteObservation } from "@aistudy/domain";
+import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
+import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
+import { createExamSprintState } from "@aistudy/domain";
 import { projectExamCourseEvidence, type ExamCourseEvidenceLink } from "./opening-course-exam-evidence-projection";
 
 const requirement: CourseRequirement = { id: "r", courseId: "c", stableSkillId: "skill", knowledgeNodeId: "node", requirementKey: "knowledge:node", title: "same", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "exact", status: "ready", exerciseKeys: [], rubric: null, missingReasons: [] }, revision: 2, lifecycle: "active", origin: "confirmed", approvedAt: "2026-11-06T12:00:00Z" };
@@ -8,6 +11,50 @@ const observation: CourseRouteObservation = { id: "head", skillLabel: "same", re
 const link: ExamCourseEvidenceLink = { observationId: "root", nodeId: "node", requirementKey: "exam-skill:node", capturedAt: "2026-11-06T12:01:00Z", identityCurrent: true };
 const roots = new Map([["head", "root"]]);
 const project = (r: CourseRequirement[] = [requirement], l: ExamCourseEvidenceLink[] = [link], o: CourseRouteObservation = observation) => projectExamCourseEvidence([o], roots, r, l)[0]!;
+
+describe("private per-part projection and snapshot boundary", () => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const second = { ...requirement, id: "r2", stableSkillId: "skill2", knowledgeNodeId: "node2", requirementKey: "key2" };
+  const parts = [requirement, second].map((r, i) => ({ partId: `part-${i}`, identityRefId: uuid(i + 1), requirementKey: r.requirementKey,
+    id: r.id, revision: r.revision, stableSkillId: r.stableSkillId, nodeId: r.knowledgeNodeId,
+    outcome: i === 0 ? "incorrect" as const : "correct" as const, assistance: "independent" as const, identityCurrent: true }));
+  const projectParts = (overrides: Partial<ExamCourseEvidenceLink> = {}, reqs = [requirement, second]) =>
+    projectExamCourseEvidence([observation], roots, reqs, [{ ...link, parts, ...overrides }]);
+  it("replaces rather than double counts whole-question evidence, preserving original facts", () => {
+    const projected = projectParts();
+    expect(projected.map(p => [p.courseRequirement?.id, p.verifiedCorrect])).toEqual([["r", "no"], ["r2", "yes"]]);
+    expect(projected.every(p => p.id === observation.id)).toBe(true);
+    expect(observation.verifiedCorrect).toBe("yes");
+    expect(projectParts({ parts: [...parts].reverse() }).map(p => p.courseRequirement?.id)).toEqual(["r2", "r"]);
+  });
+  it("keeps missing/assisted results orthogonal to sibling correctness", () => {
+    const projected = projectParts({ parts: [{ ...parts[0]!, outcome: "unknown", assistance: "unknown" }, { ...parts[1]!, assistance: "revealed" }] });
+    expect(projected[0]).toMatchObject({ verifiedCorrect: "unknown", independentAttempt: "no" });
+    expect(projected[1]).toMatchObject({ verifiedCorrect: "yes", assistance: "revealed", independentAttempt: "no" });
+  });
+  it("does not project a changed key/revision/node, unavailable root, or absent part results", () => {
+    expect(projectParts({ parts: [] })).toEqual([]);
+    expect(projectParts({ identityCurrent: false })).toEqual([]);
+    expect(projectParts({}, [{ ...requirement, requirementKey: "changed" }, { ...second, revision: 3 }])).toEqual([]);
+    expect(projectParts({ parts: parts.map(p => ({ ...p, identityCurrent: false })) })).toEqual([]);
+  });
+  it("persists declared refs losslessly, leaves legacy shape untouched and rejects foreign/duplicate refs", () => {
+    const pack = structuredClone(EXAM_SPRINT_PACK), state = createExamSprintState("2026-11-08T12:00:00.000Z");
+    expect(parseExamSprintSnapshot(pack, state)).toEqual({ pack, state });
+    const q = pack.questions[0]!;
+    q.partSnapshot = { packId: pack.id, packVersion: pack.version, questionId: q.id, familyId: q.familyId,
+      questionIdentityRefId: uuid(10), parts: parts.map(p => ({ partId: p.partId, identityRefId: p.identityRefId, requirementKey: p.requirementKey })) };
+    expect(parseExamSprintSnapshot(JSON.parse(JSON.stringify(pack)), state).pack).toEqual(pack);
+    for (const invalid of [
+      { ...q.partSnapshot, packVersion: "foreign" }, { ...q.partSnapshot, questionId: "foreign" },
+      { ...q.partSnapshot, parts: [q.partSnapshot.parts[0]!, q.partSnapshot.parts[0]!] },
+      { ...q.partSnapshot, parts: [q.partSnapshot.parts[0]!, { ...q.partSnapshot.parts[1]!, identityRefId: q.partSnapshot.parts[0]!.identityRefId }] },
+    ]) {
+      const bad = structuredClone(pack); bad.questions[0]!.partSnapshot = invalid;
+      expect(() => parseExamSprintSnapshot(bad, state)).toThrow("无法校验");
+    }
+  });
+});
 
 describe("course exam evidence projection", () => {
   it("binds current requirement identity and key without changing the source", () => {

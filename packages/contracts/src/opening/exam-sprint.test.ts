@@ -28,6 +28,7 @@ describe("exam sprint HTTP commands", () => {
   it("rejects answer injection, unknown properties, invalid confidence, ids and unbounded inputs", () => {
     const valid = { action: "answer", clientKey, attemptId: "attempt-1", answer: "A", confidence: 3 };
     for (const invalid of [
+      { ...valid, parts: [] }, { ...valid, resultMetadata: {} }, { ...valid, questionEvaluation: {} }, { ...valid, partSnapshot: {} },
       { ...valid, correct: true }, { ...valid, confidence: 0 }, { ...valid, confidence: 6 }, { ...valid, confidence: 2.5 },
       { ...valid, clientKey: "short" }, { ...valid, clientKey: "x".repeat(201) }, { ...valid, attemptId: "x".repeat(101) },
       { ...valid, answer: "" }, { ...valid, answer: "x".repeat(21) }, { ...valid, action: "reset" },

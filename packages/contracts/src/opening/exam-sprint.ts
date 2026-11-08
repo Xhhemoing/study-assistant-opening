@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ExamPredictionSnapshot } from "./exam-integration";
+import type { ExamPartResult, ExamPredictionSnapshot, ExamQuestionParts } from "./exam-integration";
 
 export const examErrorCauseSchema = z.enum(["concept", "method", "calculation", "conditions", "modeling", "reading", "time"]);
 export type ExamErrorCause = z.infer<typeof examErrorCauseSchema>;
@@ -21,6 +21,8 @@ export type ExamQuestion = {
   pool: "training" | "mock-a" | "mock-b"; difficulty: "foundation" | "transfer";
   prompt: string; options: Array<{ id: string; label: string }>;
   answer: string; explanation: string; hint: string; estimatedMinutes: number;
+  /** Private server snapshot. Omitted entirely for legacy single-skill questions. */
+  partSnapshot?: ExamQuestionParts;
 };
 export type ExamPack = {
   id: string; version: string; title: string; description: string;
@@ -39,6 +41,8 @@ export type ExamAttempt = {
   help: Array<{ kind: "hint" | "solution" | "external"; at: string }>;
   errorCause: ExamErrorCause | null;
   prediction?: ExamPredictionSnapshot;
+  /** Server publication metadata; never returned by the browser overview. */
+  resultMetadata?: ExamPartResult;
   /** Captured before submission and permanently frozen once answered. */
   lessonExposureIds?: string[];
   seenExampleExposureIds?: string[];
@@ -62,7 +66,7 @@ export type ExamSprintState = {
   lessonExposures?: ExamLessonExposure[];
 };
 export type ExamAttemptView = ExamAttempt & {
-  question: Omit<ExamQuestion, "answer" | "explanation" | "hint" | "pool">;
+  question: Omit<ExamQuestion, "answer" | "explanation" | "hint" | "pool" | "partSnapshot">;
   feedback: { answer: string; explanation: string } | null; hint: string | null;
   independent: boolean;
 };

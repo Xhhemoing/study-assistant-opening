@@ -8,6 +8,7 @@ import { insertOpeningLearningObservationInTx } from "./opening-learning-observa
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { examSkillLabel, readCurrentExamNodeIds, readExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { projectExamSourceRecord } from "./opening-exam-integration-sources";
+import { captureExamPartRequirements, publishExamPartResult } from "./opening-exam-integration-evaluation";
 
 
 async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack: ExamPack, binding: ExamCourseBinding,
@@ -35,11 +36,12 @@ async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack:
   const revision = await nextLearningHistoryRevision(tx, scope, binding.courseId);
   await nextWorkspaceLearningHistoryRevision(tx, scope);
   const learningAttemptId = randomUUID(), linkId = randomUUID();
+  const partRequirements = question.partSnapshot ? await captureExamPartRequirements(tx, scope, binding.courseId, question) : undefined;
   await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,requirement_key,
     problem_id,item_version_id,source_ids,source_versions,client_key,create_intent,history_revision,started_at)
     VALUES(${learningAttemptId},${scope.workspaceId},${scope.ownerUserId},${sessionId},${binding.courseId},${activityId},${skillLabel},${skill.requirementKey},
       ${problemId},${itemVersionId},${sourceIds},${tx.json(sourceVersions)},${`exam-attempt:${linkId}`},
-      ${tx.json({ examSprint: { sprintId, examAttemptId: attempt.id, spec }, nodeId: skill.nodeId })},${revision},${attempt.presentedAt})`;
+      ${tx.json({ examSprint: { sprintId, examAttemptId: attempt.id, spec, ...(partRequirements ? { partRequirements, partSnapshot: question.partSnapshot } : {}) }, nodeId: skill.nodeId })},${revision},${attempt.presentedAt})`;
   const firstFamily = examAttemptExposureQualification(attempt, state, pack).firstFamilyExposure === true;
   const run = state.runs.find(item => item.id === attempt.runId)!;
   const delayedEarliest = run.mode === "retest" ? examSprintOverview(before, pack, now,
@@ -113,6 +115,7 @@ async function publish(tx: TransactionSql, scope: Scope, sprintId: string, pack:
     outcome: "unverified", assistance, clientKey: `exam-publication:${String(row.link_id)}`, nodeId: String(row.node_id),
     dimension: run.mode === "mock-a" || run.mode === "mock-b" ? "timed" : "procedure",
   }, { examSprintPublication: true });
+  await publishExamPartResult(tx, scope, sprintId, pack, state, attempt, row, observation.id, assistance);
   await tx`UPDATE opening_exam_attempt_links SET observation_id=${observation.id},publication='published' WHERE id=${String(row.link_id)}`;
   await tx`UPDATE opening_teaching_activities SET status='completed',updated_at=clock_timestamp()
     WHERE id=${String(row.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;

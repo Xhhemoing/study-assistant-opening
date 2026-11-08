@@ -60,7 +60,7 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
   const links=await readExamCourseEvidenceLinks(db,scope,courseId);
   const local=projectExamCourseEvidence(projected,new Map(observations.map(row=>[row.id,row.rootObservationId??row.id])),await readCourseRequirements(db,scope,courseId),links);
   projected.splice(0,projected.length,...local);
-  if(includeShared)projected.push(...await readSharedCourseEvidence(db,scope,courseId,{requirements:id=>readCourseRequirements(db,scope,id),observations:id=>readCourseRouteObservations(db,scope,id,false),sources:id=>readCourseRouteMaterials(db,scope,id),chunks:id=>readCourseRouteSourceChunks(db,scope,id)}));
+  if(includeShared)projected.push(...await readSharedCourseEvidence(db,scope,courseId,{requirements:id=>readCourseRequirements(db,scope,id),observations:async id=>{const source=await readCourseRouteObservations(db,scope,id,false);const partRoots=new Set((await readExamCourseEvidenceLinks(db,scope,id)).filter(link=>link.parts!==undefined).map(link=>link.observationId));const roots=new Map(source.raw.map(row=>[row.id,row.rootObservationId??row.id]));return {projected:source.projected.filter(row=>!partRoots.has(roots.get(row.id)??row.id))};},sources:id=>readCourseRouteMaterials(db,scope,id),chunks:id=>readCourseRouteSourceChunks(db,scope,id)}));
   return {raw:observations,projected};
 }
 export async function readCourseRouteSourceChunks(db:CourseRouteDb,scope:Scope,courseId:string):Promise<CourseRouteSourceChunk[]>{

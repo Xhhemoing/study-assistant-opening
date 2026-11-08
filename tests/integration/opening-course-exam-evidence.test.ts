@@ -47,6 +47,108 @@ async function setup() {
   return { courseId, route, target, confirm, start, answer, next, all, progress };
 }
 
+async function setupParts(missing = false) {
+  const x = await setup(); await x.confirm();
+  const requirements = (await x.route.read(f.scope, x.courseId)).requirements.map(row => row.requirement);
+  const other = requirements.find(row => row.id !== x.target.id)!;
+  const [stored] = await f.sql`SELECT id,pack_snapshot FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  const frozen = stored!.pack_snapshot as ExamPack;
+  for (const q of frozen.questions.filter(q => q.skillId === "target-skill")) {
+    // Trusted server revision fixture, not browser bindings or a fabricated grader outcome.
+    q.partSnapshot = { packId: frozen.id, packVersion: frozen.version, questionId: q.id, familyId: q.familyId,
+      questionIdentityRefId: randomUUID(), parts: [
+        { partId: "left", identityRefId: randomUUID(), requirementKey: x.target.requirementKey,
+          evaluator: { kind: "choice-options-v1", correctOptionIds: ["b"] } },
+        { partId: "right", identityRefId: randomUUID(), requirementKey: other.requirementKey,
+          ...(!missing ? { evaluator: { kind: "choice-options-v1" as const, correctOptionIds: ["a"] } } : {}) },
+      ] };
+  }
+  await f.sql`UPDATE opening_exam_sprints SET pack_snapshot=${f.sql.json(frozen as never)} WHERE id=${stored!.id}`;
+  const first = await x.start();
+  const view = await x.next(await x.answer(first));
+  return { ...x, other, view, frozen, sprintId: String(stored!.id) };
+}
+
+it("persists two-part trusted evaluation, projects one wrong/one correct, and replays without changing whole score", async () => {
+  const x = await setupParts();
+  const answerKey = key();
+  const repo = createOpeningExamSprintRepository(f.sql, pack);
+  const command = { action: "answer" as const, attemptId: x.view.currentAttempt!.id, answer: "a", confidence: 4, clientKey: answerKey };
+  const view = await repo.act(f.scope, command);
+  expect(view.currentAttempt!.correct).toBe(true); // Original whole-question score, NOT the left part.
+  expect(JSON.stringify(view)).not.toMatch(/partSnapshot|resultMetadata|correctOptionIds/);
+  const [stored] = await f.sql`SELECT state FROM opening_exam_sprints WHERE id=${x.sprintId}`;
+  const state = stored!.state as import("@aistudy/contracts").ExamSprintState;
+  const result = state.attempts.find(a => a.id === command.attemptId)!.resultMetadata!.questionEvaluation;
+  expect(result.parts.map(p => [p.partId, p.outcome])).toEqual([["left", "incorrect"], ["right", "correct"]]);
+  const evidence = await readCourseRouteObservations(f.sql, f.scope, x.courseId, false);
+  const projected = evidence.projected.filter(o => o.id === result.evaluationRefId);
+  expect(projected).toHaveLength(2);
+  expect(projected.map(o => [o.requirementKey, o.verifiedCorrect])).toEqual([[x.target.requirementKey, "no"], [x.other.requirementKey, "yes"]]);
+  expect(evidence.raw.find(o => o.id === result.evaluationRefId)?.outcome).toBe("correct");
+  expect((await x.progress()).status).toBe("needs_correction");
+  await repo.act(f.scope, command);
+  const [replay] = await f.sql`SELECT state FROM opening_exam_sprints WHERE id=${x.sprintId}`;
+  expect(replay!.state).toEqual(stored!.state);
+  const reversed = structuredClone(x.frozen);
+  reversed.questions.forEach(q => q.partSnapshot?.parts.reverse());
+  await f.sql`UPDATE opening_exam_sprints SET pack_snapshot=${f.sql.json(reversed as never)} WHERE id=${x.sprintId}`;
+  const links = await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId);
+  // Ref order is not identity: persisted results stay usable after deterministic order changes.
+  expect(links.find(l => l.observationId === result.evaluationRefId)?.parts).toHaveLength(2);
+});
+
+it("keeps revealed correct part assisted rather than copying sibling failure", async () => {
+  const x = await setupParts();
+  await createOpeningExamSprintRepository(f.sql, pack).act(f.scope, { action: "help", attemptId: x.view.currentAttempt!.id, kind: "solution", clientKey: key() });
+  await x.answer(x.view);
+  const evidence = await readCourseRouteObservations(f.sql, f.scope, x.courseId, false);
+  const link = (await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId)).find(l => l.parts !== undefined)!;
+  expect(evidence.projected.find(o => o.id === link.observationId && o.requirementKey === x.other.requirementKey))
+    .toMatchObject({ verifiedCorrect: "yes", assistance: "revealed", independentAttempt: "no" });
+});
+
+it("leaves a missing part unknown and preserves revealed correctness without independent credit", async () => {
+  const x = await setupParts(true);
+  const repo = createOpeningExamSprintRepository(f.sql, pack);
+  await repo.act(f.scope, { action: "help", attemptId: x.view.currentAttempt!.id, kind: "solution", clientKey: key() });
+  await x.answer(x.view);
+  const evidence = await readCourseRouteObservations(f.sql, f.scope, x.courseId, false);
+  const links = await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId);
+  const link = links.find(l => l.parts !== undefined)!;
+  const projected = evidence.projected.filter(o => o.id === link.observationId);
+  expect(projected.find(o => o.requirementKey === x.other.requirementKey)).toMatchObject({ verifiedCorrect: "unknown", assistance: "unknown", independentAttempt: "no" });
+  expect(projected.find(o => o.requirementKey === x.target.requirementKey)).toMatchObject({ verifiedCorrect: "no", assistance: "revealed", independentAttempt: "no" });
+});
+
+it.each(["key", "version", "retract", "binding", "source", "identity"])("does not project current part credit after %s changes", async change => {
+  const x = await setupParts(); await x.answer(x.view);
+  const link = (await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId)).find(l => l.parts !== undefined)!;
+  if (change === "identity") {
+    const altered = structuredClone(x.frozen);
+    altered.questions.filter(q => q.partSnapshot).forEach(q => { q.partSnapshot!.parts[0]!.identityRefId = randomUUID(); });
+    await f.sql`UPDATE opening_exam_sprints SET pack_snapshot=${f.sql.json(altered as never)} WHERE id=${x.sprintId}`;
+    await expect(readCourseRouteObservations(f.sql, f.scope, x.courseId, false)).rejects.toMatchObject({ code: "CONFLICT" });
+    return;
+  }
+  if (change === "key") await f.sql`UPDATE course_requirements SET requirement_key='changed-key' WHERE id=${x.target.id}`;
+  if (change === "version") await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.target.id}`;
+  if (change === "retract") {
+    const { reviseOpeningLearningObservation } = await import("../../packages/database/src/repositories/opening-observation-revisions");
+    await reviseOpeningLearningObservation(f.sql, f.scope, { revisionKind: "retract", rootObservationId: link.observationId,
+      revisesObservationId: link.observationId, expectedHead: link.observationId, clientKey: key(), reason: "fixture retract" });
+  }
+  if (change === "binding") await f.sql`UPDATE opening_exam_bindings SET binding=jsonb_set(binding,'{skills}','[]'::jsonb) WHERE course_id=${x.courseId}`;
+  if (change === "source") {
+    const [source] = await f.sql`SELECT binding->>'packSourceId' AS id FROM opening_exam_bindings WHERE course_id=${x.courseId}`;
+    await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${source!.id}`;
+  }
+  const projected = (await readCourseRouteObservations(f.sql, f.scope, x.courseId, false)).projected.filter(o => o.id === link.observationId);
+  expect(projected.some(o => o.courseRequirement?.id === x.target.id)).toBe(false);
+  expect(await readExamCourseEvidenceLinks(f.sql, { ...f.scope, ownerUserId: randomUUID() }, x.courseId)).toEqual([]);
+  expect(await readExamCourseEvidenceLinks(f.sql, f.scope, randomUUID())).toEqual([]);
+});
+
 it("counts two distinct independently correct questions at the bound node", async () => {
   const x = await setup(); await x.confirm(); await x.all();
   expect((await x.progress()).status).toBe("verified");
