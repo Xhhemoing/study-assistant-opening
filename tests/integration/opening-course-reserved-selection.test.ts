@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { readOpeningBackupRecords, createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
@@ -178,10 +179,9 @@ async function insertExposure(overrides: { ownerUserId?: string; itemVersionId?:
   return id;
 }
 it("creates empty private exposure slots, defaults incomplete and preserves historical source snapshots",async()=>{
-  expect(await f.sql`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
-  await f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
-    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,0)`;
-  expect((await f.sql`SELECT complete FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`)[0]!.complete).toBe(false);
+  expect(await f.sql`SELECT protocol,history_revision,complete,invalidated,covered_surface_count FROM opening_course_question_exposure_coverage
+    WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`)
+    .toEqual([{protocol:'course-question-exposure-1',history_revision:'0',complete:false,invalidated:false,covered_surface_count:'0'}]);
   const sourceId=randomUUID(), versions={ [sourceId]: 1 }, id=await insertExposure({versions});
   const [stored]=await f.sql`SELECT exact_content,source_versions FROM opening_course_question_exposures WHERE id=${id}`;
   expect(stored).toMatchObject({exact_content:null,source_versions:versions});
@@ -198,6 +198,10 @@ it("rejects cross-owner exposures and coverage, malformed facts and duplicate su
     VALUES(${f.scope.workspaceId},${f.otherScope.ownerUserId},'course-question-exposure-1',0,0)`).rejects.toMatchObject({code:'23514'});
   for(const patch of [{kind:'answer_key'},{surfaceKey:''},{exact:[]},{revision:-1},{versions:{bad:1}},{versions:{[randomUUID()]:-1}},{versions:{[randomUUID()]:'1'}}])
     await expect(insertExposure(patch)).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,0)`).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`UPDATE opening_course_question_exposure_coverage SET owner_user_id=${f.otherScope.ownerUserId}
+    WHERE workspace_id=${f.scope.workspaceId}`).rejects.toMatchObject({code:'23514'});
   const surfaceKey=randomUUID(); await insertExposure({surfaceKey});
   await expect(insertExposure({surfaceKey})).rejects.toMatchObject({code:'23505'});
   await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
@@ -222,4 +226,110 @@ it("binds optional issued item to the same scope and does not rewrite old exposu
     throw new Error('privacy transaction rollback');
   })).rejects.toThrow('privacy transaction rollback');
   expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE id=${id}`).toHaveLength(1);
+});
+
+async function coverageInvalidated() {
+  const [row]=await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage
+    WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  return row;
+}
+it("rolls back source history invalidation with its transaction, then keeps deletion gaps sticky across scanner updates",async()=>{
+  const rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  await expect(f.sql.begin(async tx=>{
+    await tx`UPDATE opening_source_chunks SET text='changed historical question' WHERE id=${chunkId}`;
+    expect((await tx`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`)[0]!.invalidated).toBe(true);
+    throw new Error('rollback history edit');
+  })).rejects.toThrow('rollback history edit');
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  await f.sql`DELETE FROM opening_sources WHERE id=${sourceId} AND workspace_id=${f.scope.workspaceId}`;
+  expect(await f.sql`SELECT id FROM opening_source_chunks WHERE id=${chunkId}`).toHaveLength(0);
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  // A simulated scanner metadata UPDATE cannot resurrect a gap. This is not a
+  // completeness-positive fixture and never seeds complete=true as evidence.
+  await f.sql`UPDATE opening_course_question_exposure_coverage SET invalidated=false,complete=true,history_revision=1,covered_surface_count=0
+    WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  expect((await f.sql`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.otherScope.workspaceId}`)[0]!.invalidated).toBe(false);
+});
+it.each(['text','image','delete'] as const)("invalidates a chunk %s change without cross-scope mutation",async change=>{
+  const rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
+  if(change==='text') await f.sql`UPDATE opening_source_chunks SET text='replaced question' WHERE id=${chunkId}`;
+  else if(change==='image') await f.sql`UPDATE opening_source_chunks SET image_object_key='replaced/image' WHERE id=${chunkId}`;
+  else await f.sql`DELETE FROM opening_source_chunks WHERE id=${chunkId}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  expect((await f.sql`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.otherScope.workspaceId}`)[0]!.invalidated).toBe(false);
+});
+it.each(['text','snapshot','delete'] as const)("invalidates a turn %s change while retaining the immutable history guard",async change=>{
+  const rows=backupRows(f.sql,f.scope),conversation=await rows.conversation(),turn=await rows.turn(conversation);
+  if(change==='text') await f.sql`UPDATE opening_turns SET text='edited question' WHERE id=${turn}`;
+  else if(change==='snapshot') await f.sql`UPDATE opening_turns SET help_input_snapshot=${f.sql.json({question:'edited question'})} WHERE id=${turn}`;
+  else await f.sql`DELETE FROM opening_turns WHERE id=${turn}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+});
+it.each(['card_update','card_delete','help_delete','item_delete'] as const)("invalidates %s historical loss",async kind=>{
+  const x=await setup();
+  if(kind.startsWith('card')){
+    const id=randomUUID();
+    await f.sql`INSERT INTO cards(id,workspace_id,owner_user_id,front,back) VALUES(${id},${f.scope.workspaceId},${f.scope.ownerUserId},'saved question','saved answer')`;
+    if(kind==='card_update') await f.sql`UPDATE cards SET front='edited question' WHERE id=${id}`;
+    else await f.sql`DELETE FROM cards WHERE id=${id}`;
+  }else if(kind==='item_delete'){
+    const id=randomUUID();
+    await f.sql`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,source_id,source_version,stem_snapshot,artifact_kind)
+      VALUES(${id},${f.scope.workspaceId},${f.scope.ownerUserId},${x.courseId},${x.activityId},${randomUUID()},NULL,NULL,'historical question','unknown')`;
+    await f.sql`DELETE FROM opening_learning_item_versions WHERE id=${id}`;
+  }else{
+    const rows=backupRows(f.sql,f.scope),conversation=await rows.conversation(),turn=await rows.turn(conversation);
+    const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:x.activityId,courseId:x.courseId,skillLabel:'Arithmetic',sourceIds:[]});
+    const id=await rows.help(session.id,turn);
+    await f.sql`DELETE FROM opening_help_exposures WHERE id=${id}`;
+  }
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+});
+it("preserves library append-only rejection and rolls back the attempted invalidation",async()=>{
+  const doc=randomUUID(),revision=randomUUID();
+  await f.sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES(${doc},${f.scope.workspaceId},'History','candidate')`;
+  await f.sql`INSERT INTO library_revisions(id,workspace_id,document_id,revision_number,title,lifecycle,blocks)
+    VALUES(${revision},${f.scope.workspaceId},${doc},1,'History','candidate',${f.sql.json([])})`;
+  await expect(f.sql`UPDATE library_revisions SET blocks=${f.sql.json([{text:'changed'}])} WHERE id=${revision}`).rejects.toMatchObject({code:'23000'});
+  await expect(f.sql`DELETE FROM library_revisions WHERE id=${revision}`).rejects.toMatchObject({code:'23000'});
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+});
+it("does not backfill pre-0109 workspaces when applying the real migration and seeds only later workspace births",async()=>{
+  const schema=`reserved_genesis_${randomUUID().replaceAll('-','')}`;
+  const body=await readFile(new URL('../../packages/database/src/migrations/0109_opening_course_reserved_questions.sql',import.meta.url),'utf8');
+  await f.sql.begin(async tx=>{
+    await tx`CREATE SCHEMA ${tx(schema)}`;
+    await tx`SET LOCAL search_path TO ${tx(schema)}`;
+    // Minimal prior storage surfaces only; the ENTIRE real 0109 is executed.
+    await tx.unsafe(`CREATE TABLE users(id uuid PRIMARY KEY);
+      CREATE TABLE workspaces(id uuid PRIMARY KEY,owner_user_id uuid NOT NULL);
+      CREATE TABLE courses(id uuid,workspace_id uuid,UNIQUE(workspace_id,id));
+      CREATE TABLE course_requirements(id uuid,workspace_id uuid,UNIQUE(workspace_id,id));
+      CREATE TABLE opening_teaching_activities(id uuid PRIMARY KEY);
+      CREATE TABLE opening_learning_item_versions(id uuid PRIMARY KEY,workspace_id uuid,owner_user_id uuid);
+      CREATE TABLE library_revisions(id uuid PRIMARY KEY,workspace_id uuid,blocks jsonb);
+      CREATE TABLE opening_sources(id uuid PRIMARY KEY,workspace_id uuid);
+      CREATE TABLE opening_source_chunks(id uuid PRIMARY KEY,source_id uuid,text text,image_object_key text);
+      CREATE TABLE opening_turns(id uuid PRIMARY KEY,workspace_id uuid,text text,help_input_snapshot jsonb);
+      CREATE TABLE cards(id uuid PRIMARY KEY,workspace_id uuid,front text);
+      CREATE TABLE opening_help_exposures(id uuid PRIMARY KEY,workspace_id uuid);`);
+    const oldOwner=randomUUID(),oldWorkspace=randomUUID(),newOwner=randomUUID(),newWorkspace=randomUUID();
+    await tx`INSERT INTO users(id) VALUES(${oldOwner}),(${newOwner})`;
+    await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${oldWorkspace},${oldOwner})`;
+    await tx.unsafe(body);
+    expect(await tx`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${oldWorkspace}`).toHaveLength(0);
+    expect(await tx`UPDATE opening_course_question_exposure_coverage SET complete=false WHERE workspace_id=${oldWorkspace} RETURNING workspace_id`).toHaveLength(0);
+    await tx.savepoint(async nested=>{
+      await expect(nested`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+        VALUES(${oldWorkspace},${oldOwner},'course-question-exposure-1',0,0)`).rejects.toMatchObject({code:'23514'});
+      // Return a rejected savepoint to clear PostgreSQL's failed statement state.
+      throw new Error('expected insert blocked');
+    }).catch(error=>{expect(error.message).toBe('expected insert blocked');});
+    await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${newWorkspace},${newOwner})`;
+    expect(await tx`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${newWorkspace}`)
+      .toEqual([{complete:false,invalidated:false}]);
+    await tx`DROP SCHEMA ${tx(schema)} CASCADE`;
+  });
 });
