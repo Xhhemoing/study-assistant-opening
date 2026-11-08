@@ -64,14 +64,14 @@ it.each(["correct", "incorrect", "abstain"] as const)("strictly reads historical
   expect(serverEvaluationSchema.safeParse({ ...parsed, secret: true }).success).toBe(false);
 });
 
-it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-2"])(
   "reads %s including the saved v3 decision without selecting it anew", policyVersion => {
     const ruleDecision = { activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success" };
     expect(spanTutorReceiptDecision({ policyVersion, intentVersion: JSON.stringify({ ruleDecision }) })).toEqual(ruleDecision);
   });
-it("keeps the v2 writer and rejects unknown policy combinations", () => {
-  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-2");
-  expect(SPAN_TUTOR_EXECUTION_POLICY_VERSION).toBe("next-learning-step-2/span-tutor-execution-2");
+it("keeps bridge v2 ordinary selection under the v5 protocol and rejects unknown combinations", () => {
+  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-5");
+  expect(SPAN_TUTOR_EXECUTION_POLICY_VERSION).toBe("next-learning-step-5/span-tutor-execution-2");
   const capture = captureNextLearningStep({ observations: [], wantsFullExplanation: false });
   expect(capture.decision.reasonCode).toBe("no_evidence");
   const assisted = captureNextLearningStep({ wantsFullExplanation: false, observations: [
@@ -82,7 +82,7 @@ it("keeps the v2 writer and rejects unknown policy combinations", () => {
   ] });
   expect(assisted.decision).toMatchObject({ activityKind: "diagnose", reasonCode: "needs_check" });
   expect(assisted.candidates.some(candidate => candidate.reasonCodes.includes("assisted_success"))).toBe(false);
-  for (const policyVersion of ["next-learning-step-3/span-tutor-execution-1", "next-learning-step-4/span-tutor-execution-2"]) {
+  for (const policyVersion of ["next-learning-step-3/span-tutor-execution-1", "next-learning-step-6/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-3"]) {
     expect(spanTutorReceiptDecision({ policyVersion, intentVersion: "not JSON" })).toBeNull();
   }
 });

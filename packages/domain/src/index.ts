@@ -479,6 +479,7 @@ export {
 
 export * from "./opening/adaptive";
 export { buildDecisionInput } from "./opening/adaptive/decision-input";
+export { summarizeRemediationCycles, remediationLimitEvidence, type RemediationCycleSummary, type RemediationCycleActivity } from "./opening/remediation-cycle";
 
 export {
   createRulesSkillStateEstimator,
