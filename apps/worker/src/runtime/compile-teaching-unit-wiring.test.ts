@@ -24,7 +24,7 @@ const readFocus = vi.hoisted(() => vi.fn());
 const readRequirements = vi.hoisted(() => vi.fn(async () => [] as unknown[]));
 const assertRoute = vi.hoisted(() => vi.fn(async () => null as unknown));
 vi.mock("../../../../packages/database/src/repositories/opening-course-route-read", () => ({ readCourseRequirements: readRequirements }));
-const admitReserved = vi.hoisted(() => vi.fn(async () => ({ privateRefId: "private-ref" })));
+const admitReserved = vi.hoisted(() => vi.fn<typeof import("@aistudy/database").admitOpeningReservedCandidate>(async () => ({ privateRefId: "private-ref" })));
 const purposePins = vi.hoisted(() => ({ readSourcePurposePin: vi.fn(), assertSourcePurposePin: vi.fn(),
   readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn() }));
 vi.mock("./model-gateway", async (importOriginal) => {
@@ -801,7 +801,14 @@ describe("private reserved producer isolation", () => {
       resultRef: `teaching_activity:${ACTIVITY}`, parentBudget });
     expect(model.complete).toHaveBeenCalledTimes(2);
     expect(admitReserved).toHaveBeenCalledExactlyOnceWith(jobStateSql, scope, ACTIVITY,
-      { courseId, requirementId, requirementRevision: 1, sourceVersions: { [SOURCE]: 1 } }, candidate);
+      { courseId, requirementId, requirementRevision: 1, sourceVersions: { [SOURCE]: 1 } }, candidate,
+      { assertPinnedContext: expect.any(Function) });
+    const originalPin = purposePins.readSourcePurposePin.mock.results[0]!.value;
+    const tx = {} as import("postgres").TransactionSql;
+    await admitReserved.mock.calls[0]![5].assertPinnedContext(tx);
+    expect(purposePins.assertSourcePurposePin).toHaveBeenLastCalledWith(scope, await originalPin, tx);
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(input)).not.toContain("purposeRevision");
     expect(dependencies.budget.reserve).toHaveBeenCalledWith(scope, expect.objectContaining({
       requestId: `compile-teaching-unit:${job.id}:reserved`, parentBudget,
     }));

@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { courseRequirementSchema, questionSourceRefSchema, teachingQuestionInteractionSchema, type CourseRequirement, type Scope } from "@aistudy/contracts";
 import { checkArithmeticAnswer } from "@aistudy/domain";
-import { evaluateArithmeticQuestion } from "../../../domain/src/opening/arithmetic-check";
+import { reservedArithmeticIdentity } from "./opening-reserved-arithmetic-identity";
+export { reservedArithmeticIdentity } from "./opening-reserved-arithmetic-identity";
 import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
@@ -31,16 +32,8 @@ export type OpeningReservedExposureResult = { coverage: "complete" | "unknown"; 
 export type OpeningReservedExposureReader = (db: Db, scope: Scope, input: OpeningReservedExposureInput) => Promise<OpeningReservedExposureResult>;
 export type OpeningReservedPorts = { readExposure: OpeningReservedExposureReader };
 
-/** Small exact grammar only. Unknown conditions/figures never receive an invented identity. */
-export function reservedArithmeticIdentity(text: string) {
-  const value = evaluateArithmeticQuestion(text);
-  if (!value) return null;
-  const expression = text.trim().replace(/^(?:计算|求值|calculate|evaluate)\s*[:：]?\s*/i, "")
-    .replace(/\s*(?:=\s*[?？]?|[?？。])\s*$/, "").replace(/\\(?:dfrac|tfrac|frac)\{(-?\d{1,18})\}\{(-?\d{1,18})\}/g, "($1/$2)")
-    .replace(/\\times|×|·/g, "*").replace(/\\div|÷/g, "/").replace(/−/g, "-").replace(/\s/g, "");
-  return { expression, familyId: `arithmetic:${[...new Set(expression.match(/[+*/-]/g))].sort().join("")}`,
-    value: `${value.n}/${value.d}` };
-}
+/** Server-only capability, captured before generation; never accepted in candidate JSON. */
+type AdmissionOptions = { assertPinnedContext: (tx: TransactionSql) => Promise<void> };
 
 async function currentRequirement(db: Db, scope: Scope, courseId: string, requirementId: string) {
   const [row] = await db`SELECT * FROM course_requirements WHERE id=${requirementId} AND course_id=${courseId}
@@ -80,15 +73,19 @@ function trustedRow(row: Record<string, unknown>, requirement: CourseRequirement
     || row.family_id !== exact.familyId || key.keyRefId !== row.key_ref_id || !isDeepStrictEqual(key.identity, identity.data)
     || !isDeepStrictEqual(key.verification, { kind: "deterministic_evaluator", evaluatorId: "arithmetic", evaluatorVersion: "reserved-arithmetic-1" })
     || !isDeepStrictEqual(row.source_versions, Object.fromEntries(refs.map(ref => [ref.sourceId, ref.version])))
-    || checkArithmeticAnswer(question.data.text, question.data.answer) !== "correct") return null;
+    || checkArithmeticAnswer(exact.expression, question.data.answer) !== "correct") return null;
   return { question: question.data, exact, identity: identity.data };
 }
 
-async function persistCandidates(sql: Sql, scope: Scope, activityId: string, raw: unknown, pinned?: OpeningReservedPinnedContext): Promise<string[]> {
+async function persistCandidates(sql: Sql, scope: Scope, activityId: string, raw: unknown,
+  options: AdmissionOptions, pinned?: OpeningReservedPinnedContext): Promise<string[]> {
+  if (typeof options?.assertPinnedContext !== "function") throw learningError("CONFLICT", "保留题缺少原始生成用途授权。");
   // Dedicated provider output is untrusted. No key/history/identity claims are accepted.
   const candidates = candidateSchema.array().max(12).parse(raw);
   return sql.begin(async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
+    // Same transaction as INSERT: source/membership locks survive until commit.
+    await options.assertPinnedContext(tx);
     const context = await assertOpeningCourseRouteCurrent(tx, scope, activityId);
     if (!context) throw learningError("VALIDATION", "保留题只能由课程编译供给。");
     const [activity] = await tx`SELECT course_id FROM opening_teaching_activities WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -104,7 +101,7 @@ async function persistCandidates(sql: Sql, scope: Scope, activityId: string, raw
     const saved: string[] = [];
     for (const question of candidates) {
       const exact = reservedArithmeticIdentity(question.text);
-      if (!exact || question.interaction.kind !== "numeric" || question.interaction.unit || checkArithmeticAnswer(question.text, question.answer) !== "correct") continue;
+      if (!exact || question.interaction.kind !== "numeric" || question.interaction.unit || checkArithmeticAnswer(exact.expression, question.answer) !== "correct") continue;
       const previous = await tx`SELECT identity_json FROM opening_course_reserved_questions WHERE workspace_id=${scope.workspaceId}
         AND owner_user_id=${scope.ownerUserId} AND course_id=${requirement.courseId} AND requirement_id=${requirement.id} AND requirement_revision=${requirement.revision}`;
       if (previous.some(row => (row.identity_json as { expression?: string }).expression === exact.expression)) continue;
@@ -127,13 +124,13 @@ async function persistCandidates(sql: Sql, scope: Scope, activityId: string, raw
   });
 }
 
-/** Transitional worker slot; phase 2 uses pinned single-candidate admission below. */
-export async function saveOpeningReservedCandidates(sql: Sql, scope: Scope, activityId: string, raw: unknown): Promise<number> {
-  return (await persistCandidates(sql, scope, activityId, raw)).length;
+/** Legacy batch API has no production caller; it requires the same original-pin capability. */
+export async function saveOpeningReservedCandidates(sql: Sql, scope: Scope, activityId: string, raw: unknown, options: AdmissionOptions): Promise<number> {
+  return (await persistCandidates(sql, scope, activityId, raw, options)).length;
 }
 export async function admitOpeningReservedCandidate(sql: Sql, scope: Scope, activityId: string,
-  pinned: OpeningReservedPinnedContext, candidate: OpeningReservedCandidate): Promise<{ privateRefId: string } | null> {
-  const [privateRefId] = await persistCandidates(sql, scope, activityId, [candidate], pinned);
+  pinned: OpeningReservedPinnedContext, candidate: OpeningReservedCandidate, options: AdmissionOptions): Promise<{ privateRefId: string } | null> {
+  const [privateRefId] = await persistCandidates(sql, scope, activityId, [candidate], options, pinned);
   return privateRefId ? { privateRefId } : null;
 }
 

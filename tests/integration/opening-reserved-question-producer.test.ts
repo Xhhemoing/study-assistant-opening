@@ -10,6 +10,7 @@ import { produceReservedQuestion } from "../../packages/ai/src/opening/reserved-
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
+import type { TransactionSql } from "postgres";
 import { readCourseQuestionExposure } from "../../packages/database/src/repositories/opening-course-question-exposure";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
@@ -40,13 +41,114 @@ async function setup() {
   if (activity.kind !== "ready") throw new Error("activity not ready");
   const input = { scope: f.scope, courseId, requirementId: requirement.id, requirementRevision: 1, sourceVersions: { [sourceId]: 1 },
     requirementText: "rational arithmetic", evidence: { chunks: [] } };
+  const purposes = createOpeningCourseReadySourcesRepository(f.sql);
+  const pin = await purposes.readSourcePurposePin(f.scope, { activityId: activity.activity.id, sourceIds: [sourceId], materialUse: "teaching" });
+  const admission = { assertPinnedContext: (tx: TransactionSql) => purposes.assertSourcePurposePin(f.scope, pin, tx) };
   const admit = async (candidate: Parameters<Parameters<typeof produceReservedQuestion>[1]["admitAndPersist"]>[0]) => {
     const { scope, text, interaction, answer, ...pinned } = candidate;
-    return admitOpeningReservedCandidate(f.sql, scope, activity.activity.id, pinned, { text, interaction, answer });
+    return admitOpeningReservedCandidate(f.sql, scope, activity.activity.id, pinned, { text, interaction, answer }, admission);
   };
-  return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit };
+  return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit, admission };
 }
 const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, answer: "2603" };
+it.each([
+  ["137*19", "Example: 137 · 19"], ["$137*19$", "137*19"], ["137*19", "$137*19$"],
+  ["\\(137 \\times 19\\)", "137*19"],
+])("real consumer never reserves exposed alias %s from %s", async (text, history) => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify({ ...candidate, text }), admitAndPersist: x.admit });
+  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "ready", available: 1 });
+  await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+    VALUES(${randomUUID()},${x.sourceId},1,2,${history})`;
+  expect(await readCourseQuestionExposure(f.sql, f.scope, { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
+    text, interaction: candidate.interaction, familyId: "arithmetic:*" })).toMatchObject({ coverage: "complete", exactExposed: true });
+  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "missing", available: 0 });
+  await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
+});
+it.each(["Example: 137 · 19 +", "137*19 if x>0", "See (137+2)*19 in figure", "Example: x+1"])("keeps unresolved history unknown with zero reservation: %s", async history => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+    VALUES(${randomUUID()},${x.sourceId},1,2,${history})`;
+  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "unknown", available: 0 });
+  await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
+});
+it("does not launder a legacy incomplete descriptor through a successful current rescan", async () => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  // Actual old grammar's output for Example: 137 · 19. Original history remains
+  // present for a real rescan; the immutable legacy omission must still fail closed.
+  await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+    VALUES(${randomUUID()},${x.sourceId},1,2,'Example: 137 · 19')`;
+  await f.sql`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},'legacy-middle-dot','teaching',
+      ${f.sql.json({ complete: true, expressions: [], families: [] })},'{}',0)`;
+  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "unknown", available: 0 });
+  const [legacy] = await f.sql`SELECT exact_content FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} AND surface_key='legacy-middle-dot'`;
+  expect(legacy!.exact_content).toEqual({ complete: true, expressions: [], families: [] });
+  await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+});
+it("rejects the original private pin after purpose changes back without inserting a candidate", async () => {
+  const x = await setup();
+  await f.sql`UPDATE course_asset_memberships SET purpose='reference',updated_at=updated_at+interval '1 microsecond'
+    WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
+  await f.sql`UPDATE course_asset_memberships SET purpose=NULL,updated_at=updated_at+interval '1 microsecond'
+    WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
+  await expect(produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+it("rejects a purpose writer committed before the admission pin lock", async () => {
+  const x = await setup();
+  await f.sql`UPDATE course_asset_memberships SET purpose='reference',updated_at=updated_at+interval '1 microsecond'
+    WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
+  await expect(x.admit({ ...x.input, ...candidate })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+it("holds original purpose locks until candidate INSERT commit, using PG writer barriers", async () => {
+  const x = await setup();
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  // Delegate every statement to real PG. Hold the real transaction AFTER its
+  // INSERT has completed but BEFORE begin commits, not just inside the pin callback.
+  const commitBarrierSql = new Proxy(f.sql, { get(target, property) {
+    if (property !== "begin") return Reflect.get(target, property);
+    return (run: (tx: TransactionSql) => Promise<unknown>) => target.begin(async tx => {
+      const result = await run(tx);
+      expect(await tx`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+      entered(); await held;
+      return result;
+    });
+  } });
+  const admission = admitOpeningReservedCandidate(commitBarrierSql, f.scope, x.activityId, x.input, candidate, x.admission);
+  await ready;
+  try {
+    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    await expect(f.sql.begin(async tx => {
+      await tx`SET LOCAL lock_timeout='100ms'`;
+      await tx`UPDATE course_asset_memberships SET purpose='reference' WHERE workspace_id=${f.scope.workspaceId}
+        AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
+    })).rejects.toMatchObject({ code: "55P03" });
+  } finally { release(); await admission; }
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+  await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE workspace_id=${f.scope.workspaceId}
+    AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
+});
+it("fails closed without the server-only admission capability, including the legacy batch API", async () => {
+  const x = await setup();
+  const { saveOpeningReservedCandidates } = await import("../../packages/database/src/repositories/opening-course-reserved-selection");
+  // Runtime calls can omit a required TypeScript parameter; neither public entry may bypass it.
+  // @ts-expect-error intentionally missing server-only capability
+  await expect(admitOpeningReservedCandidate(f.sql, f.scope, x.activityId, x.input, candidate)).rejects.toMatchObject({ code: "CONFLICT" });
+  // @ts-expect-error intentionally missing server-only capability
+  await expect(saveOpeningReservedCandidates(f.sql, f.scope, x.activityId, [candidate])).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
 it("generates into authoritative private admission, never a public block/config/backup", async () => {
   const x = await setup();
   const result = await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });

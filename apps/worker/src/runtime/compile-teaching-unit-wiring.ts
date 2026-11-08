@@ -88,13 +88,15 @@ export function createCompileTeachingUnitWorkerDeps(
           if (snapshot) generatorSnapshots.set(output, snapshot);
           const pinned = reservedContexts.get(input);
           if (pinned) {
+            const generation = generationPins.get(input);
+            if (!generation) throw Object.assign(new Error("original private generation purpose pin missing"), { code: "CONFLICT" });
             const activityId = options.resultRef.replace(/^teaching_activity:/, "");
             const assertPrivateCurrent = async () => {
               const jobId = options.operationId.replace(/^compile-teaching-unit:/, "");
               const [job] = await sql`SELECT state FROM opening_jobs WHERE id=${jobId} AND workspace_id=${scope.workspaceId}
                 AND owner_user_id=${scope.ownerUserId}`;
               if (job?.state !== "running") throw new Error("private generation job no longer running");
-              await assertGenerationCurrent(scope, generationPins.get(input)!);
+              await assertGenerationCurrent(scope, generation);
               await assertOpeningCourseRouteReady(sql, scope, activityId);
               await options.beforeSend?.();
             };
@@ -109,7 +111,9 @@ export function createCompileTeachingUnitWorkerDeps(
                     await admitReservedQuestionOutput(pinned, privateOutput.text, async candidate => {
                       await assertPrivateCurrent();
                       const { text, interaction, answer, scope: ownedScope, ...context } = candidate;
-                      return admitOpeningReservedCandidate(sql, ownedScope, activityId, context, { text, interaction, answer });
+                      return admitOpeningReservedCandidate(sql, ownedScope, activityId, context, { text, interaction, answer }, {
+                        assertPinnedContext: tx => purposes.assertSourcePurposePin(scope, generation.pin, tx),
+                      });
                     });
                   },
             });

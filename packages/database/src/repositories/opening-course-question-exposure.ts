@@ -4,11 +4,13 @@ import type { Sql, TransactionSql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { reservedArithmeticIdentity, type OpeningReservedExposureInput, type OpeningReservedExposureResult } from "./opening-course-reserved-selection";
+import type { OpeningReservedExposureInput, OpeningReservedExposureResult } from "./opening-course-reserved-selection";
+import { reservedArithmeticIdentity, reservedArithmeticExposureText } from "./opening-reserved-arithmetic-identity";
 
 type Db = Sql | TransactionSql;
 const protocol = "course-question-exposure-1";
-const descriptorSchema = z.object({ complete: z.literal(true), expressions: z.array(z.string()), families: z.array(z.string()) }).strict();
+const grammar = "reserved-arithmetic-2";
+const descriptorSchema = z.object({ grammar: z.literal(grammar), complete: z.literal(true), expressions: z.array(z.string()), families: z.array(z.string()) }).strict();
 export type CourseQuestionExposureInput = {
   surfaceKey: string; kind: "teaching" | "example" | "hint" | "presented";
   text?: string; body?: unknown; identityRefId?: string; itemVersionId?: string; sourceVersions: Record<string, number>;
@@ -19,18 +21,9 @@ export function extractCourseQuestionExposure(body: unknown) {
   let complete = body != null;
   function visit(value: unknown) {
     if (typeof value === "string") {
-      if (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)) return;
-      const whole = reservedArithmeticIdentity(value);
-      if (whole) { expressions.add(whole.expression); families.add(whole.familyId); return; }
-      // Fragment matching cannot resolve parenthesized, LaTeX or multi-step
-      // conditions embedded in prose. Do not claim the partial parse is complete.
-      if (/\d/.test(value) && /[(){}]|\\frac|=/.test(value)) complete = false;
-      const fragments = value.match(/[-+]?\d+(?:\.\d+)?(?:\s*(?:[+*/×÷−-]|\\times|\\div)\s*[-+]?\d+(?:\.\d+)?)+/g) ?? [];
-      for (const fragment of fragments) {
-        const exact = reservedArithmeticIdentity(fragment);
-        if (!exact) complete = false;
-        else { expressions.add(exact.expression); families.add(exact.familyId); }
-      }
+      const parsed = reservedArithmeticExposureText(value);
+      if (!parsed.complete) complete = false;
+      if (parsed.identity) { expressions.add(parsed.identity.expression); families.add(parsed.identity.familyId); }
     } else if (Array.isArray(value)) value.forEach(visit);
     else if (value && typeof value === "object") for (const [key, entry] of Object.entries(value)) {
       if (/image|figure|vector|drawing|photo|attachment/i.test(key) && entry != null && entry !== ""
@@ -40,7 +33,7 @@ export function extractCourseQuestionExposure(body: unknown) {
     }
   }
   visit(body);
-  return { complete, expressions: [...expressions].sort(), families: [...families].sort() };
+  return { grammar, complete, expressions: [...expressions].sort(), families: [...families].sort() };
 }
 
 /** Caller owns the history transaction. Store exact descriptors only, never keys or raw model output. */
@@ -156,8 +149,12 @@ export async function refreshCourseQuestionExposure(tx: TransactionSql, scope: S
     if (!previous.length) await tx`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
       VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${String(row.surface) + ":" + randomUUID()},'teaching',${tx.json(exact)},'{}',${history!.revision})`;
   }
+  // A rescan adds current facts but cannot repair omitted expressions in an old
+  // immutable descriptor whose original text may no longer exist. Never rewrite
+  // history or turn an old unknown into complete under the new interpretation.
   const unknown = await tx`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${scope.workspaceId}
-    AND owner_user_id=${scope.ownerUserId} AND (exact_content IS NULL OR exact_content->>'complete'<>'true') LIMIT 1`;
+    AND owner_user_id=${scope.ownerUserId} AND (exact_content IS NULL OR exact_content->>'complete' IS DISTINCT FROM 'true'
+      OR exact_content->>'grammar' IS DISTINCT FROM ${grammar}) LIMIT 1`;
   if (unknown.length) complete = false;
   await tx`UPDATE opening_course_question_exposure_coverage SET complete=${complete},history_revision=${history!.revision},covered_surface_count=${rows.length}
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
