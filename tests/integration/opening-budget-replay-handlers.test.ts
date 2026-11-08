@@ -209,6 +209,12 @@ describe("compile-teaching-unit completed replay", () => {
     expect(second.loadReplayedResult).toHaveBeenCalledWith(expect.anything(), `teaching_activity:${ACTIVITY}`);
     expect(second.provider.complete).not.toHaveBeenCalled();
     expect(second.publishActivitySpec).not.toHaveBeenCalled();
+    const receipts = { block: { protocol: "teaching-blind-solve-1", decision: "unknown", reasonCodes: ["fixture"] } };
+    const persistedJob = { ...job(), result: { teachingBlindSolveReceipts: receipts } };
+    await expect(second.run(persistedJob, payload)).resolves.toEqual({ replayed: true, activityId: ACTIVITY, generateStatus: "needs_check", teachingBlindSolveReceipts: receipts });
+    await expect(second.run({ ...job(), result: { teachingBlindSolveReceipts: {} } }, payload)).resolves.toEqual({ replayed: true, activityId: ACTIVITY, generateStatus: "needs_check" });
+    expect(second.provider.complete).not.toHaveBeenCalled();
+    expect(second.publishActivitySpec).not.toHaveBeenCalled();
     const after = await ledger();
     expect(after).toEqual(before);
     record("compile-teaching-unit completed replay (result persisted)", 2, 1, after, "loaded teaching_activity via resultRef");

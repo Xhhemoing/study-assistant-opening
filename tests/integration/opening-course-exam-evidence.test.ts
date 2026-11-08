@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ExamPack, ExamSprintOverview } from "@aistudy/contracts";
-import { createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningLearningAttemptRepository, createOpeningLearningGoalRepository, createOpeningLearningRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository } from "@aistudy/database";
+import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
+import { readOpeningTeachingCompilerFocus } from "../../packages/database/src/repositories/opening-teaching-focus";
+import * as materialRetrieval from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
 import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
@@ -18,7 +21,7 @@ const pack: ExamPack = {
 };
 let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
-afterEach(async () => { await f?.close(); });
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await f?.close(); });
 const key = () => `route-exam:${randomUUID()}`;
 async function setup() {
   const courseId = randomUUID();
@@ -37,11 +40,11 @@ async function setup() {
     await f.sql`SELECT pg_sleep(0.01)`;
   };
   const start = () => sprint.act(f.scope, { action: "start", mode: "diagnostic", clientKey: key() });
-  const answer = (view: ExamSprintOverview) => sprint.act(f.scope, { action: "answer", attemptId: view.currentAttempt!.id, answer: "a", confidence: 4, clientKey: key() });
+  const answer = (view: ExamSprintOverview, answerValue = "a") => sprint.act(f.scope, { action: "answer", attemptId: view.currentAttempt!.id, answer: answerValue, confidence: 4, clientKey: key() });
   const next = (view: ExamSprintOverview) => sprint.act(f.scope, { action: "next", runId: view.activeRun!.id, clientKey: key() });
   const progress = async () => (await route.read(f.scope, courseId)).requirements.find(row => row.requirement.id === target.id)!;
   const all = async () => { let view = await start(); for (let i = 0; i < 3; i++) { await answer(view); if (i < 2) view = await next(view); } };
-  return { courseId, route, target, confirm, start, answer, all, progress };
+  return { courseId, route, target, confirm, start, answer, next, all, progress };
 }
 
 it("counts two distinct independently correct questions at the bound node", async () => {
@@ -52,6 +55,73 @@ it("counts two distinct independently correct questions at the bound node", asyn
   expect(projected).toHaveLength(2);
   expect(projected.every(row => row.requirementKey === x.target.requirementKey)).toBe(true);
   expect(evidence.raw.filter(row => projected.some(p => p.id === row.id)).every(row => row.requirementKey?.startsWith("exam-skill:"))).toBe(true);
+});
+
+it("carries a real independently incorrect target exam answer through route start into compiler input", async () => {
+  const x = await setup();
+  const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, { clientKey: key(), courseIds: [x.courseId], title: "Exam route goal", kind: "custom", targetDate: null,
+    examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "独立解释目标题型" });
+  expect(goal).toMatchObject({ lifecycle: "active", courseIds: [x.courseId] });
+  await x.confirm();
+  // Diagnostic sorting starts with an unrelated skill; do not mistake it for the target.
+  const first = await x.start();
+  expect(first.currentAttempt!.questionId).toBe("other");
+  const targetView = await x.next(await x.answer(first));
+  const question = pack.questions.find(row => row.id === targetView.currentAttempt!.questionId)!;
+  expect(question.skillId).toBe("target-skill");
+  const wrongAnswer = question.options.find(option => option.id !== question.answer)!.id;
+  const answered = await x.answer(targetView, wrongAnswer);
+  expect(answered.currentAttempt).toMatchObject({ questionId: question.id, answer: wrongAnswer, correct: false, independent: true });
+
+  const progress = await x.progress();
+  expect(progress.status).toBe("needs_correction");
+  const { requirement } = progress;
+  const evidence = await readCourseRouteObservations(f.sql, f.scope, x.courseId, false);
+  const raw = evidence.raw.filter(row => row.requirementKey === `exam-skill:${x.target.knowledgeNodeId}`);
+  expect(raw).toHaveLength(1);
+  const incorrect = raw[0]!;
+  expect(incorrect).toMatchObject({ answer: wrongAnswer, outcome: "incorrect", assistance: "independent",
+    itemVersionId: expect.any(String), serverEvaluation: { evaluatorVersion: "exam-choice-exact-v1", decision: "incorrect" } });
+  const projected = evidence.projected.find(row => row.id === incorrect.id)!;
+  const binding = { id: requirement.id, revision: requirement.revision, stableSkillId: requirement.stableSkillId, requirementKey: requirement.requirementKey };
+  expect(projected).toMatchObject({ usableForCurrentVersion: "yes", independentAttempt: "yes", verifiedCorrect: "no", requirementKey: requirement.requirementKey });
+  expect(projected.courseRequirement).toEqual(binding);
+  expect(incorrect.requirementKey).toBe(`exam-skill:${requirement.knowledgeNodeId}`);
+  expect(incorrect.requirementKey).not.toBe(requirement.requirementKey);
+  const link = (await readExamCourseEvidenceLinks(f.sql, f.scope, x.courseId)).find(row => row.observationId === incorrect.id)!;
+  expect(link).toMatchObject({ identityCurrent: true, nodeId: requirement.knowledgeNodeId, requirementKey: incorrect.requirementKey });
+  expect(Date.parse(link.capturedAt!)).toBeGreaterThan(Date.parse(requirement.approvedAt!));
+
+  // Exam activities are not route-managed predecessors: enter through start, not next.
+  const started = await x.route.start(f.scope, x.courseId, { goalId: goal.id, expectedGoalRevision: goal.revision,
+    requirementId: requirement.id, expectedRequirementRevision: requirement.revision, clientKey: key(), minutes: 20 });
+  expect(started).toMatchObject({ kind: "ready", action: "targeted_explain", requirementId: requirement.id });
+  if (started.kind !== "ready") throw new Error(JSON.stringify(started));
+  const expectedFocus = { skillLabel: requirement.title, requirementKey: requirement.requirementKey, activityKind: "targeted_explain",
+    reasonCode: "verified_incorrect", focusObservationId: incorrect.id, recentAssistance: ["independent"], strategyVersion: "course-route-1" };
+  expect(started.activity.learnerFocus).toEqual(expectedFocus);
+  const focusAttempt = { question: question.prompt, answer: wrongAnswer };
+  expect(focusAttempt.answer).not.toBe(question.answer);
+  expect(await readOpeningTeachingCompilerFocus(f.sql, f.scope, started.activity.id))
+    .toEqual({ learnerFocus: expectedFocus, focusAttempt });
+
+  vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+  // Only the external embedding/ranking leaf is deterministic; all PG reads above
+  // and inside the production worker builder remain real, including focus projection.
+  const retrieve = vi.spyOn(materialRetrieval, "createOpeningMaterialRetriever").mockReturnValue(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" }));
+  const pageImages = vi.fn(async () => []);
+  const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql),
+    chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql), pageImages });
+  const input = await deps.buildProviderInput!(f.scope, { mode: "generate", activityId: started.activity.id,
+    expectedContentVersion: started.activity.contentVersion, sourceIds: started.activity.sourceIds, clientKey: key() });
+  expect(retrieve).toHaveBeenCalledOnce();
+  expect(input.chunks.length).toBeGreaterThan(0);
+  expect(pageImages).not.toHaveBeenCalled();
+  expect(input.imageParts).toEqual([]);
+  // Inspect the structured learner data, not a snapshot of the surrounding prompt.
+  const focusLine = input.text.split("\n").find(line => line.includes('"focusObservationId"'))!;
+  const providerFocus = JSON.parse(focusLine.slice(focusLine.indexOf("{")));
+  expect(providerFocus).toEqual({ ...expectedFocus, focusAttempt });
 });
 
 it("keeps exam evidence local even when an earlier local answer is unverified", async () => {

@@ -159,6 +159,13 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     expect(loaderSpy).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: f.scope.workspaceId }), `teaching_activity:${activity.id}`);
     expect(modelRequests).toHaveLength(1);
     expect(publishSpy).toHaveBeenCalledTimes(1);
+    const receipts = { block: { protocol: "teaching-blind-solve-1", decision: "unknown", reasonCodes: ["fixture"] } };
+    expect(await run({ ...job, result: { teachingBlindSolveReceipts: receipts } }, payload)).toEqual({
+      replayed: true, activityId: activity.id, generateStatus: "needs_check", teachingBlindSolveReceipts: receipts,
+    });
+    expect(await run({ ...job, result: { teachingBlindSolveReceipts: {} } }, payload)).toEqual({ replayed: true, activityId: activity.id, generateStatus: "needs_check" });
+    expect(modelRequests).toHaveLength(1);
+    expect(publishSpy).toHaveBeenCalledTimes(1);
     const after = await ledger();
     expect(after).toEqual(before);
     expect((await activities.get(f.scope, activity.id))?.generateStatus).toBe("needs_check");

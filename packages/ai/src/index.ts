@@ -51,6 +51,7 @@ export {
   selectedOpeningModelId, selectedModelIdForTask, selectedFallbackModelIdForTask, resolveOpeningModel,
   resolveModelForTask, resolveFallbackModelForTask, openingModelSnapshot, OpeningModelRoutingError,
 } from "./opening/model-routing";
+export { solveTeachingBlind, independentTeachingSolver, teachingBlindSolveMatchesCurrent, type TeachingBlindSolveConfig, type TeachingBlindSolveIdentity, type TeachingBlindSolveReceipt, type TeachingModelIdentity } from "./opening/teaching-blind-solve";
 export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
 export { buildAnswerGradingInput } from "./opening/answer-grading";
 export { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "./opening/ai-grading-service";

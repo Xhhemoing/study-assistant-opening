@@ -4,11 +4,15 @@ import { z } from "zod";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS, calendarDateSchema, firstLearningInputSchema, isoDateTimeSchema,
   openingAdaptivePrefsSchema, type FirstLearningInput, type Scope, type TaskItem, type TeachingActivity } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import { ADAPTIVE_STRATEGY_VERSION, localDateKeyInZone, nextLearningStep, resolveGoalLearningContext } from "@aistudy/domain";
+import { ADAPTIVE_STRATEGY_VERSION, buildDecisionInput, captureNextLearningStep, localDateKeyInZone,
+  NEXT_LEARNING_STEP_VERSION, resolveGoalLearningContext } from "@aistudy/domain";
 import { admitLearningSources, learningError, lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { createOpeningTeachingActivityInTransaction, mapTeachingActivity } from "./opening-teaching-activities";
 import { projectOpeningAdaptiveGoals, writeOpeningCourseGoalInTx } from "./opening-learning-goal-bridge";
 import { withTaskPlanningFields } from "./opening-task-fields";
+import { readLearningGoals } from "./opening-learning-goals";
+import { readOpeningLearnerState } from "./opening-learner-state-read";
+import { recordOpeningLearningDecision } from "./opening-learning-decisions";
 
 const daySeedSchema = z.object({ date: calendarDateSchema, title: z.string().min(1).max(240),
   minutes: z.number().int().min(1).max(180), notBefore: isoDateTimeSchema, dueAt: isoDateTimeSchema }).strict();
@@ -51,7 +55,7 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
         const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner) throw learningError("NOT_FOUND", "workspace not found");
         // Sources are admitted before any course, goal or task is created, including on replay.
-        await admitLearningSources(tx, scope, intent.sourceIds);
+        const sources = await admitLearningSources(tx, scope, intent.sourceIds);
         const [existing] = await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey} FOR UPDATE`;
         if (existing) {
@@ -93,6 +97,9 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
         const prefs = await writeOpeningCourseGoalInTx(tx, scope, parsed.data, { courseId, expectedRevision: 0,
           goal: { targetDate: intent.targetDate, weeklyMinutes: (dailyMinutes ?? 0) * 7, learningMode: "auto", priority: 1 } });
         const goal = (await projectOpeningAdaptiveGoals(tx, scope, prefs)).prefs.courseGoals[courseId]!;
+        const goals = await readLearningGoals(tx, scope, courseId);
+        const formalGoal = goal.goalId ? goals.find(row => row.id === goal.goalId) : goals.length === 1 ? goals[0] : undefined;
+        if (!formalGoal) throw learningError("CONFLICT", "首次学习目标无法确认，未创建本次计划");
         await tx`INSERT INTO workspace_preferences(workspace_id,adaptive_planning) VALUES(${scope.workspaceId},${tx.json(prefs)})
           ON CONFLICT(workspace_id) DO UPDATE SET adaptive_planning=EXCLUDED.adaptive_planning,updated_at=now()`;
         // The activity id must be known to retain the established first-task -> activity shortcut.
@@ -100,7 +107,8 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
           scheduled ? `每天可用 ${intent.minutes} 分钟` : `本次学习 ${intent.minutes} 分钟`,
           !scheduled && dailyMinutes !== undefined ? `每天可用 ${dailyMinutes} 分钟` : null].filter(Boolean).join("\n");
         const provisionalPlan = { startDate, endDate: days.at(-1)?.date ?? startDate, timeZone: raw.planTimeZone };
-        const learnerFocus = { skillLabel: intent.topic, ...nextLearningStep({ status: "unobserved", observations: [], wantsFullExplanation: false }),
+        const rule = captureNextLearningStep(buildDecisionInput({ observations: [], wantsFullExplanation: false }));
+        const learnerFocus = { skillLabel: intent.topic, ...rule.decision,
           goalContext: resolveGoalLearningContext(goal, startDate), recentAssistance: [], strategyVersion: ADAPTIVE_STRATEGY_VERSION };
         const activity = await createOpeningTeachingActivityInTransaction(tx, scope, {
           clientKey, courseId, intentKind: intent.goal || intent.targetDate ? "goal" : "topic",
@@ -122,6 +130,25 @@ export function createOpeningFirstLearningRepository(sql: Sql) {
         await tx`UPDATE opening_teaching_activities SET create_intent=${tx.json({ ...createIntent, firstLearningPlan: plan })}
           WHERE id=${activity.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
+        // Capture after every initialization mutation, so our own writes cannot stale the receipt.
+        // Workspace scope matches the existing decision explanation reader; no learner profile is copied.
+        const state = await readOpeningLearnerState(tx, scope);
+        const sourceVersions = structuredClone(state.sourceVersions);
+        for (const source of sources) sourceVersions[String(source.id)] = [...new Set([
+          ...(sourceVersions[String(source.id)] ?? []), Number(source.version),
+        ])].sort((a, b) => a - b);
+        await recordOpeningLearningDecision(tx, scope, {
+          layer: "activity", targetId: activity.id, parentDecisionId: null,
+          selectedAction: rule.decision.activityKind, candidates: rule.candidates,
+          reasonCodes: ["entry:first-learning", rule.decision.reasonCode],
+          evidenceRefs: [`course:${courseId}`, `goal:${formalGoal.id}:v${formalGoal.revision}`,
+            ...sources.map(source => `source:${source.id}:v${source.version}`)],
+          stateVersion: state.stateVersion, dataAsOf: state.dataAsOf, sourceVersions,
+          goalVersion: `goal:${formalGoal.id}:v${formalGoal.revision}:${formalGoal.lifecycle}`,
+          intentVersion: JSON.stringify({ protocol: "first-learning-1", courseId, goalId: formalGoal.id, createIntent, plan }),
+          policyVersion: `first-learning-1/${NEXT_LEARNING_STEP_VERSION}`,
+          invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"],
+        }, `${clientKey}:decision`);
         const tasks = await readTasks(tx, scope, taskKeys);
         return { courseId, activity, ...tasks, startDate, endDate: plan.endDate, replayed: false, legacy: false };
       }) as Promise<FirstLearningInitializationResult>;

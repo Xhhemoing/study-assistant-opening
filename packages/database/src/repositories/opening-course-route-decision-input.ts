@@ -24,7 +24,7 @@ export function courseRouteDecisionInput(requirement: CourseRequirement, observa
   return buildDecisionInput({ observations: matching, wantsFullExplanation: false, ...(options.dueRetest ? { dueRetest: true } : {}) });
 }
 
-/** Route-only reason; deliberately not a shared NextStepReasonCode. */
+/** Route-only bridge override; historical shared v3 reasons remain readable. */
 export const COURSE_ROUTE_ASSISTED_CORRECTION = "route_assisted_correction";
 export type CourseRouteTeachingOverride = {
   rule: typeof COURSE_ROUTE_ASSISTED_CORRECTION;
@@ -35,17 +35,14 @@ export type CourseRouteTeachingOverride = {
 export type CourseRouteTeachingStep = {
   /** Exactly what the shared policy returns for the canonical input. */
   canonical: ReturnType<typeof captureNextLearningStep>;
-  /** The teaching step the route uses: canonical, or the explicit override below. */
+  /** The route keeps its accepted correction behavior over the v2 canonical policy. */
   decision: { activityKind: NextLearningStep["activityKind"]; reasonCode: string; focusObservationId: string | null };
   override: CourseRouteTeachingOverride | null;
 };
 
-/** Course routes keep their accepted assisted-correction behaviour as an explicit,
- * route-level override instead of borrowing the learner's "consolidate" request.
- * It applies only when the shared policy falls through to diagnose/needs_check
- * while the latest usable, requirement-qualified observation is a verified
- * correct answer reached with a hint or revealed solution and no retest is due.
- * Agenda/span keep the canonical result; the receipt records both.
+/** During the v2 bridge, preserve the accepted route-only correction override.
+ * Qualification and canonical ordering above remain unchanged; agenda/span use
+ * the canonical result, and route receipts record both decisions.
  */
 export function courseRouteTeachingStep(input: NextLearningStepInput): CourseRouteTeachingStep {
   const canonical = captureNextLearningStep(input);
