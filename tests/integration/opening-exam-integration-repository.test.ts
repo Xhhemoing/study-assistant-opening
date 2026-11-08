@@ -274,7 +274,7 @@ describe("course-bound exam sprint canonical bridge", () => {
     // No summary repair/invalidation has touched the cached yes projection yet.
     expect((await f.sql`SELECT usable_for_current_version FROM opening_learning_eligibility WHERE root_observation_id=${String(oldLink.observation_id)}`)[0])
       .toMatchObject({ usable_for_current_version: "yes" });
-    expect(await skillEvidence.flagsForNode(f.scope, courseId, nodeId)).toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+    expect(await skillEvidence.flagsForNode(f.scope, courseId, nodeId)).toEqual({ nodeId, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [], observationIds: [] });
     expect((await knowledge.get(f.scope, courseId))!.snapshot.nodes[0]!.id).toBe(nodeId);
     expect(await eligibility(String(oldLink.observation_id))).toMatchObject({ usableForCurrentVersion: "no",
       reasonCodes: expect.arrayContaining(["version_unavailable"]) });
