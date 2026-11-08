@@ -68,6 +68,26 @@ it.each([
     .rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
 });
+it.each(["opening_learning_observations", "opening_teaching_activities"] as const)("fails closed while %s has a real maintenance lock", async table => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  const input = { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
+    text: candidate.text, interaction: candidate.interaction, familyId: "arithmetic:*" };
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const holder = f.sql.begin(async tx => {
+    await tx`LOCK TABLE ${tx(table)} IN SHARE UPDATE EXCLUSIVE MODE`;
+    entered(); await held;
+  });
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error("maintenance barrier exited before release"); })]);
+    await expect(readCourseQuestionExposure(f.sql, f.scope, input)).rejects.toMatchObject({ code: "55P03" });
+    await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+      .rejects.toMatchObject({ code: "55P03" });
+    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
+  } finally { release(); await holder; }
+});
 it.each(["Example: 137 · 19 +", "137*19 if x>0", "See (137+2)*19 in figure", "Example: x+1"])("keeps unresolved history unknown with zero reservation: %s", async history => {
   const x = await setup();
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
