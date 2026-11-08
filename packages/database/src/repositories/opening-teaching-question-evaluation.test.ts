@@ -129,6 +129,67 @@ describe("teaching key evaluation", () => {
       spec.activityId, spec.blockId, "1+1", attempt.id]);
   });
 
+  const citationBinding = (role: "prompt" | "answer_key" = "prompt") => ({
+    blockId: role === "prompt" ? id(1) : id(2), role, status: "bound",
+    refs: [{ sourceId: id(7), sourceVersion: 1, chunkId: id(8), page: 1 }], factualSupport: "unverified",
+  });
+  it.each(["bound", "missing", "mismatch"])("does not change correct/incorrect verdicts or identity for valid %s citation metadata", async status => {
+    const metadata = { citationBinding: { ...citationBinding(), status, refs: status === "bound" ? citationBinding().refs : [] },
+      citedChunkIds: status === "bound" ? [id(8)] : [], rejectedCitationCount: status === "mismatch" ? 1 : 0 };
+    const f = setup({ blocks: [block({ text: "1+1", interaction: numeric, ...metadata }),
+      block({ answer: "2", citationBinding: { ...citationBinding("answer_key"), status: "missing", refs: [] } }, "answer_key", "a")] });
+    expect(await f.run("2")).toEqual({ evaluatorVersion: "teaching-key-exact-v1", specVersion: "teaching-key-v1",
+      decision: "correct", outcome: "correct", reasonCodes: ["teaching_key_match"], priorFeedback: false });
+    expect(await f.run("3")).toEqual({ evaluatorVersion: "teaching-key-exact-v1", specVersion: "teaching-key-v1",
+      decision: "incorrect", outcome: "incorrect", reasonCodes: ["teaching_key_mismatch"], priorFeedback: false });
+    const legacy = setup();
+    expect(await readResolvedTeachingQuestion(f.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec))
+      .toEqual(await readResolvedTeachingQuestion(legacy.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec));
+  });
+
+  it.each([
+    { citationBinding: null },
+    { citationBinding: { ...citationBinding(), blockId: id(9) } },
+    { citationBinding: { ...citationBinding(), blockId: "invalid" } },
+    { citationBinding: { ...citationBinding(), role: "teach" } },
+    { citationBinding: { ...citationBinding(), status: "verified" } },
+    { citationBinding: { ...citationBinding(), factualSupport: "verified" } },
+    { citationBinding: { ...citationBinding(), image: "hidden-figure" } },
+    { citationBinding: { ...citationBinding(), refs: null } },
+    ...[
+      { sourceId: "invalid" }, { chunkId: "invalid" }, { sourceVersion: -1 }, { sourceVersion: "1" },
+      { sourceVersion: 1.5 }, { sourceVersion: Number.MAX_SAFE_INTEGER + 1 }, { page: 0 }, { page: "1" },
+      { page: 1.5 }, { figure: "hidden-figure" },
+    ].map(ref => ({ citationBinding: { ...citationBinding(), refs: [{ ...citationBinding().refs[0], ...ref }] } })),
+    { citationBinding: { ...citationBinding(), refs: [{ sourceId: id(7), sourceVersion: 1, chunkId: id(8) }] } },
+    { citedChunkIds: "invalid" }, { citedChunkIds: ["invalid"] }, { citedChunkIds: [1] },
+    { rejectedCitationCount: -1 }, { rejectedCitationCount: "1" }, { rejectedCitationCount: 0.5 },
+    { rejectedCitationCount: Number.MAX_SAFE_INTEGER + 1 },
+    { unknown: { text: "hidden condition" } }, { figure: { text: "hidden figure" } },
+  ])("keeps malformed/misbound/unknown prompt metadata fail-closed: %j", async metadata => {
+    const f = setup({ blocks: [block({ text: "1+1", interaction: numeric, ...metadata }), key("2")] });
+    expect(await f.run("2")).toBeNull();
+    expect(await readResolvedTeachingQuestion(f.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec)).toBeNull();
+  });
+
+  it.each([
+    { citationBinding: { ...citationBinding("answer_key"), blockId: id(1) } },
+    { citationBinding: { ...citationBinding("answer_key"), role: "prompt" } },
+    { citationBinding: { ...citationBinding("answer_key"), refs: [{ ...citationBinding().refs[0], page: -1 }] } },
+    { citedChunkIds: ["invalid"] }, { rejectedCitationCount: -1 },
+  ])("keeps malformed key citation metadata fail-closed: %j", async metadata => {
+    const f = setup({ blocks: [numericBlocks[0], block({ answer: "2", ...metadata }, "answer_key", "a")] });
+    expect(await f.run("2")).toBeNull();
+  });
+
+  it("accepts version zero/null-page locations but never masks visual stem conditions with valid metadata", async () => {
+    const binding = { ...citationBinding(), refs: [{ ...citationBinding().refs[0], sourceVersion: 0, page: null }] };
+    const f = setup({ blocks: [block({ text: "1+1", interaction: numeric, citationBinding: binding }), key("2")] });
+    expect(await f.run("2")).toMatchObject({ decision: "correct" });
+    const visual = setup({ blocks: [block({ text: "见图计算1+1", interaction: numeric, citationBinding: binding }), key("2")] });
+    expect(await visual.run("2")).toBeNull();
+  });
+
   it.each([["B. 2", "correct"], ["A. 1", "incorrect"]] as const)(
     "evaluates choice %s from prompt body without option lines", async (answer, decision) => {
       const f = setup({ blocks: [block({ text: "1+1", interaction: choice }), key("B")] });
