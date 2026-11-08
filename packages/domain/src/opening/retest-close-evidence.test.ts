@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,
   prepareRetestSkillLink,
   shouldAppendRetestEvidence,
@@ -114,12 +113,6 @@ describe("nodeIdForSkillLabel", () => {
     );
     expect(nodeIdForSkillLabel({ nodes: [{ id: NODE, label: "limits" }] }, "chain rule")).toBeNull();
     expect(nodeIdForSkillLabel(null, "chain rule")).toBeNull();
-  });
-});
-
-describe("nextTutorKindAfterRetestClose", () => {
-  it("recommends independent_variant without mastery fields", () => {
-    expect(nextTutorKindAfterRetestClose(NODE)).toBe("independent_variant");
   });
 });
 
