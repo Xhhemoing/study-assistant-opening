@@ -415,7 +415,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             && JSON.stringify(evidenceSet(node.evidenceChunkIds)) === JSON.stringify(confirmation.evidence_chunk_ids)
             && sameVersions(nodeSourceVersions(node.evidenceChunkIds, evidence), parseSourceVersions(confirmation.source_versions));
           if (confirmation && !confirmed) return { ...node, status: "needs_check" as const };
-          if (input.expectedReferencedNodeIds && confirmed && (node.status === "needs_check" || node.status === "supported")) {
+          // Worker status classification cannot revoke a still-valid explicit confirmation.
+          // Manual edits omit expectedReferencedNodeIds and retain the withdrawal path below.
+          if (input.expectedReferencedNodeIds && confirmed) {
             return { ...node, status: "supported" as const };
           }
           if (existing?.status === "needs_check" && node.status !== "needs_check") {

@@ -401,6 +401,25 @@ describe("opening knowledge manual confirmation", () => {
     expect(result.snapshot.edges).toEqual(snapshot.edges);
   });
 
+  it.each(["needs_check", "suggested"] as const)("preserves the original receipt and supported readback after worker status-only %s classification", async status => {
+    const { repo, courseId, nodeId, record } = await pending();
+    const confirmed = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions });
+    const receipts = await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+    expect(receipts).toHaveLength(1);
+    const draft = structuredClone(confirmed.snapshot);
+    draft.nodes.find(node => node.id === nodeId)!.status = status;
+    const rebuilt = await repo.replace(f.scope, courseId, { expectedVersion: confirmed.version,
+      expectedReferencedNodeIds: [], snapshot: draft, sourceVersions: confirmed.sourceVersions });
+    expect(rebuilt.version).toBe(confirmed.version + 1);
+    expect(rebuilt.snapshot.nodes).toEqual(confirmed.snapshot.nodes);
+    expect(rebuilt.snapshot.edges).toEqual(confirmed.snapshot.edges);
+    expect(rebuilt.sourceVersions).toEqual(confirmed.sourceVersions);
+    expect(await repo.get(f.scope, courseId)).toEqual(rebuilt);
+    // Includes the same receipt UUID and original confirmation versions/time: no delete/reinsert.
+    expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toEqual(receipts);
+  });
+
   it("withdraws the confirmation when the node is removed; re-adding the same UUID needs a new check", async () => {
     const { repo, courseId, nodeId, record } = await pending();
     const confirmed = await repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
@@ -437,21 +456,31 @@ describe("opening knowledge manual confirmation", () => {
       .toEqual([{ graph_version_after: checked.version }]);
   });
 
-  it("withdraws the confirmation when a manual edit moves the node back to needs_check", async () => {
+  it.each(["needs_check", "suggested"] as const)("withdraws the confirmation when a manual edit moves the node to %s", async status => {
     const { repo, courseId, nodeId, record } = await pending();
     const confirmed = await repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
     const reverted = structuredClone(confirmed.snapshot);
-    reverted.nodes.find(node => node.id === nodeId)!.status = "needs_check";
+    reverted.nodes.find(node => node.id === nodeId)!.status = status;
     await repo.replace(f.scope, courseId, { expectedVersion: 2, snapshot: reverted, sourceVersions: record.sourceVersions });
     expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    expect((await repo.get(f.scope, courseId))!.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe(status);
+    // Worker status-only rebuild must not resurrect a manually withdrawn receipt.
+    const draft = structuredClone(record.snapshot);
+    draft.nodes.find(node => node.id === nodeId)!.status = status;
     const rebuilt = await repo.replace(f.scope, courseId, { expectedVersion: 3, expectedReferencedNodeIds: [],
-      snapshot: structuredClone(record.snapshot), sourceVersions: record.sourceVersions });
-    expect(rebuilt.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe("needs_check");
+      snapshot: draft, sourceVersions: record.sourceVersions });
+    expect(rebuilt.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe(status);
     expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
-    const checked = await repo.confirmNode(f.scope, courseId, nodeId,
-      { expectedVersion: rebuilt.version, sourceVersions: rebuilt.sourceVersions });
-    expect(await f.sql`SELECT graph_version_after FROM opening_knowledge_confirmations WHERE course_id=${courseId}`)
-      .toEqual([{ graph_version_after: checked.version }]);
+    if (status === "needs_check") {
+      const checked = await repo.confirmNode(f.scope, courseId, nodeId,
+        { expectedVersion: rebuilt.version, sourceVersions: rebuilt.sourceVersions });
+      expect(await f.sql`SELECT graph_version_after FROM opening_knowledge_confirmations WHERE course_id=${courseId}`)
+        .toEqual([{ graph_version_after: checked.version }]);
+    } else {
+      await expect(repo.confirmNode(f.scope, courseId, nodeId,
+        { expectedVersion: rebuilt.version, sourceVersions: rebuilt.sourceVersions })).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    }
   });
 
   it("confirms a node whose evidence repeats a chunk id and keeps it through an identical rebuild", async () => {

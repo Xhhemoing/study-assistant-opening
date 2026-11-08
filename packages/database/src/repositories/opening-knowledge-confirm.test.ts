@@ -127,10 +127,12 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     await expect(f.repo.confirmNode(scope, courseId, nodeId, input)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(f.state().version).toBe(1); expect(f.audits()).toHaveLength(0);
   });
-  it.each(["same", "version", "evidence", "different-node", "label"])("rebuild applies only exact confirmed provenance: %s", async change => {
+  it.each((["needs_check", "suggested"] as const).flatMap(status =>
+    ["same", "version", "evidence", "different-node", "label"].map(change => ({ status, change }))))(
+    "rebuild applies only exact confirmed provenance: $status / $change", async ({ status, change }) => {
     const old: KnowledgeSnapshot = { courseId, version: 2, nodes: [{ id: nodeId, courseId, label: "函数", kind: "concept",
       evidenceChunkIds: [chunkId], status: "supported" }], edges: [] };
-    const draft = structuredClone(old); draft.nodes[0]!.status = "needs_check";
+    const draft = structuredClone(old); draft.nodes[0]!.status = status;
     if (change === "evidence") draft.nodes[0]!.evidenceChunkIds = [id(7)];
     if (change === "different-node") draft.nodes[0]!.id = id(8);
     const chunk = { id: draft.nodes[0]!.evidenceChunkIds[0]!, sourceId, sourceVersion: change === "version" ? 2 : 1,
@@ -157,7 +159,10 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     sql.begin = ((callback: (tx: Sql) => unknown) => callback(sql)) as Sql["begin"];
     const result = await createOpeningKnowledgeRepository(sql).replace(scope, courseId,
       { expectedVersion: 2, expectedReferencedNodeIds: [], snapshot: draft, sourceVersions: versions });
-    expect(result.snapshot.nodes[0]!.status).toBe(change === "same" ? "supported" : "needs_check");
+    // A new UUID has no confirmation to inherit: retain its worker classification, never
+    // elevate it using the retired node's receipt. Changed provenance of the same UUID is pending.
+    expect(result.snapshot.nodes[0]!.status).toBe(change === "same" ? "supported"
+      : change === "different-node" ? status : "needs_check");
     expect(result.snapshot.nodes[0]!.id).toBe(draft.nodes[0]!.id);
     expect(result.snapshot.nodes[0]!.evidenceChunkIds).toEqual(draft.nodes[0]!.evidenceChunkIds);
     expect(result.sourceVersions).toEqual(versions);
@@ -169,6 +174,7 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     ["manual supported -> suggested", undefined, "suggested", [nodeId]],
     ["manual supported unchanged", undefined, "supported", []],
     ["worker reclassifies to needs_check", [] as string[], "needs_check", []],
+    ["worker reclassifies to suggested", [] as string[], "suggested", []],
   ] as const)("withdraws confirmations only when the node is removed or manually moved off supported: %s", async (_name, refs, status, expected) => {
     const f = replaceFixture(graph([node()]));
     const result = await f.repo.replace(scope, courseId, { expectedVersion: 2, expectedReferencedNodeIds: refs,
