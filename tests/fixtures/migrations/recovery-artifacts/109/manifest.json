@@ -1,0 +1,42 @@
+{
+  "repository": "Xhhemoing/study-assistant-opening",
+  "commit": "e2b9166adeb790e6a5f63520389aa38d7c69199a",
+  "controls": [
+    {
+      "path": "packages/database/src/migrate.ts",
+      "sha256": "dac78d4303d5a410d4480e0536daeafb99d0350b42ade6f4f2c9d3a1031c2348",
+      "fixture": "108/packages/database/src/migrate.ts.bin"
+    },
+    {
+      "path": "packages/database/src/repositories/opening-knowledge.ts",
+      "sha256": "eaa2c6408df29882fcdb0b525d64eb0a686b66e7f6f9cc328e9708b74a102385",
+      "fixture": "108/packages/database/src/repositories/opening-knowledge.ts.bin"
+    },
+    {
+      "path": "infra/deploy/hermes-db.mjs",
+      "sha256": "26a927a28a7476deb9cc8a8735df1ceaf98732560df721e206e55407bac83605",
+      "fixture": "108/infra/deploy/hermes-db.mjs.bin"
+    }
+  ],
+  "runtimeFiles": [
+    {
+      "path": "packages/database/src/migration-preflight.ts",
+      "sha256": "6cfbe60cb3797c7bcaec1f84f34ce5171a97934c609129e4491d856fef2315d2"
+    },
+    {
+      "path": "package.json",
+      "sha256": "b4881ae0185d7a83bb0b380961d358c6299fb596aabec674ccbadb3452ef12f8"
+    },
+    {
+      "path": "packages/database/package.json",
+      "sha256": "4371bcac50a3c3e256755e4bcf17ce6555d11e749d5358f0c175268dab2b5d18"
+    }
+  ],
+  "baseManifest": "108/manifest.json",
+  "migrations": [
+    {
+      "filename": "0109_opening_course_reserved_questions.sql",
+      "sha256": "754e21dd24e1964f7400a16616c52fd49ae291a7ca3c06bfefcb371bf032431a"
+    }
+  ]
+}
