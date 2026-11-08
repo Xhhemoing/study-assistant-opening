@@ -188,16 +188,18 @@ describe("opening adaptive loop (K02 Data)", () => {
     const flags = await evidence.flagsForNode(f.scope, matrix.courseId, nodeA);
     expect(flags.hasCheckedIndependent).toBe(true);
     expect(flags.hasAssistance).toBe(false);
+    expect(flags.observationIds).toEqual([obs.id]);
     const byNode = await evidence.listByNode(f.scope, nodeA);
     expect(byNode).toHaveLength(1);
     expect(byNode[0]!.dimension).toBe("transfer");
     const revised = await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: obs.id,
       expectedHead: obs.id, revisionKind: "replace", reason: "Learner review", clientKey: randomUUID(),
       replacement: { answer: "[2,3]", outcome: "correct", assistance: "hinted", verdictSource: "self_report" } });
-    expect((await evidence.flagsForNode(f.scope, matrix.courseId, nodeA))).toMatchObject({ hasCheckedIndependent: false, hasAssistance: true });
+    expect((await evidence.flagsForNode(f.scope, matrix.courseId, nodeA))).toMatchObject({ hasCheckedIndependent: false, hasAssistance: true,
+      observationIds: [revised.headObservationId], evidenceIds: [byNode[0]!.id] });
     await matrix.learning.reviseObservation(f.scope, { rootObservationId: obs.id, revisesObservationId: revised.headObservationId,
       expectedHead: revised.headObservationId, revisionKind: "retract", reason: "Withdraw record", clientKey: randomUUID() });
-    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({ nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] });
+    expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({ nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [], observationIds: [] });
     expect(await evidence.listByNode(f.scope, nodeA)).toHaveLength(1);
   });
 
@@ -223,9 +225,9 @@ describe("opening adaptive loop (K02 Data)", () => {
         nodes: [{ id: nodeA, courseId: otherCourseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
 
     expect(await evidence.flagsForNode(f.scope, matrix.courseId, nodeA)).toEqual({
-      nodeId: nodeA, hasCheckedIndependent: true, hasAssistance: false, evidenceIds: [link.id],
+      nodeId: nodeA, hasCheckedIndependent: true, hasAssistance: false, evidenceIds: [link.id], observationIds: [obs.id],
     });
-    const emptyFlags = { nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [] };
+    const emptyFlags = { nodeId: nodeA, hasCheckedIndependent: false, hasAssistance: false, evidenceIds: [], observationIds: [] };
     expect(await evidence.flagsForNode(f.scope, otherCourseId, nodeA)).toEqual(emptyFlags);
     expect(await evidence.flagsForNode(f.otherScope, matrix.courseId, nodeA)).toEqual(emptyFlags);
     expect(await evidence.flagsForNode(f.scope, randomUUID(), nodeA)).toEqual(emptyFlags);

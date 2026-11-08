@@ -2,12 +2,18 @@ import { uuidSchema, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import {
-  recommendTutorAction,
+  buildDecisionInput,
+  nextLearningStep,
+  normalizeSkillLabelKey,
+  toSnapshotEvidence,
   assertNoMasteryPercentage,
   decideIntervention,
   gateTutorRecommendAfterDecision,
   type ThinTutorAction,
   type AdaptiveTutorActionKind,
+  type CourseEvidence,
+  type NextLearningStep,
+  type SnapshotObservation,
 } from "@aistudy/domain";
 import type { InterventionSettingsResponse } from "@aistudy/contracts";
 import {
@@ -15,6 +21,7 @@ import {
   createOpeningSkillEvidenceRepository,
   createOpeningRetestActivityRepository,
   createOpeningInterventionSettingsRepository,
+  readOpeningCourseEvidence,
 } from "@aistudy/database";
 import { ApiError } from "../../auth/service";
 
@@ -50,6 +57,7 @@ export type NodeSkillEvidenceFlagsView = {
   hasAssistance: boolean;
   hasCheckedIndependent: boolean;
   evidenceIds: string[];
+  observationIds: string[];
 };
 
 export type TutorActionSkillEvidenceDeps = {
@@ -58,6 +66,7 @@ export type TutorActionSkillEvidenceDeps = {
 
 export type TutorActionObservationDeps = {
   assertOwnedCourse(scope: Scope, courseId: string): Promise<void>;
+  readCourseEvidence(scope: Scope, courseId: string): Promise<CourseEvidence>;
   getSession(scope: Scope, sessionId: string): Promise<{
     id: string;
     courseId: string;
@@ -80,6 +89,7 @@ function createDefaultObservationDeps(sql: Sql): TutorActionObservationDeps {
   const skillEvidence = createOpeningSkillEvidenceRepository(sql);
   return {
     assertOwnedCourse: (scope, courseId) => learning.assertOwnedCourse(scope, courseId),
+    readCourseEvidence: (scope, courseId) => readOpeningCourseEvidence(sql, scope, courseId),
     getSession: (scope, sessionId) => learning.getSession(scope, sessionId),
     listDeliveredExposures: (scope, sessionId) =>
       learning.listDeliveredExposures(scope, sessionId),
@@ -115,54 +125,47 @@ const adaptiveReason: Record<AdaptiveTutorActionKind, string> = {
     "L02 delayed retest is due; start a new session with empty exposure.",
   independent_variant:
     "Assisted or prior independent evidence for this node; try a new independent variant.",
-  clarify: "No reliable SkillEvidence for this node yet; clarify the target first.",
-  guided: "Material-linked node selected; start with a next-step guided hint.",
+  clarify: "No reliable current evidence yet; clarify the target first.",
+  guided: "Current evidence identifies an error; start with a next-step guided hint.",
   worked_example: "Offer a full worked example if still stuck.",
 };
 
-/** Pure recommendation wrapper; all observation inputs are server-derived. */
+const actionKind: Record<Exclude<NextLearningStep["activityKind"], "transfer_check">, AdaptiveTutorActionKind> = {
+  diagnose: "clarify",
+  targeted_explain: "guided",
+  full_explain: "worked_example",
+  reduced_help_practice: "independent_variant",
+};
+
+/** Pure seam over server-scoped, canonical snapshot evidence; material/exposure is not a score. */
 export function buildTutorActions(input: {
   skillLabel: string;
   currentPage?: number | null;
   nodeId?: string | null;
-  sourceIds: string[];
-  sessionExposures: Array<"hinted" | "revealed">;
+  observations: readonly SnapshotObservation[];
   retestDue: boolean;
-  hasAssistance?: boolean;
-  hasCheckedIndependent?: boolean;
+  /** Node responses retain SkillEvidence link IDs, not internal observation IDs. */
   evidenceIds?: string[];
 }): ThinTutorAction[] {
-  if (input.nodeId) {
-    const kind = recommendTutorAction({
-      nodeId: input.nodeId,
-      hasAssistance: input.hasAssistance ?? false,
-      hasCheckedIndependent: input.hasCheckedIndependent ?? false,
-      retestDue: input.retestDue,
-    });
-    const action: ThinTutorAction = {
-      kind,
-      skillLabel: input.skillLabel.trim(),
-      currentPage: input.currentPage ?? null,
-      nodeId: input.nodeId,
-      problemRef: kind === "independent_variant" ? "variant:1" : null,
-      reason: adaptiveReason[kind],
-      evidenceIds: input.evidenceIds ?? [],
-    };
-    assertNoMasteryPercentage({ ...action } as Record<string, unknown>);
-    return [action];
-  }
-
-  const action = recommendTutorAction({
-    skillLabel: input.skillLabel,
-    currentPage: input.currentPage ?? null,
-    sourceIds: input.sourceIds,
-    nodeId: null,
-    sessionExposures: input.sessionExposures,
-    // B02 is intentionally not implemented; v1 has no micro-question path.
-    assistedSuccessOnCurrentItem: false,
-    retestDue: input.retestDue,
-    evidenceIds: [],
+  const decisionInput = buildDecisionInput({
+    observations: input.observations,
+    wantsFullExplanation: false,
+    dueRetest: input.retestDue,
   });
+  const next = nextLearningStep(decisionInput);
+  const kind = next.activityKind === "transfer_check"
+    ? input.retestDue ? "delayed_retest" : "independent_variant"
+    : actionKind[next.activityKind];
+  const action: ThinTutorAction = {
+    kind,
+    skillLabel: input.skillLabel.trim(),
+    currentPage: input.currentPage ?? null,
+    nodeId: input.nodeId ?? null,
+    problemRef: kind === "independent_variant" ? "variant:1" : null,
+    reason: adaptiveReason[kind],
+    evidenceIds: input.evidenceIds ?? decisionInput.observations
+      .filter(row => row.usableForCurrentVersion === "yes").map(row => row.id),
+  };
   assertNoMasteryPercentage({ ...action } as Record<string, unknown>);
   return [action];
 }
@@ -229,10 +232,13 @@ export async function listTutorActionsForCourse(
       await deps.listDeliveredExposures(scope, parsed.query.sessionId),
     );
   }
+  const now = new Date();
+  const evidence = await deps.readCourseEvidence(scope, parsed.courseId);
+  const snapshot = toSnapshotEvidence(evidence, now);
   const dueRetests = await deps.listDueRetests(
     scope,
     parsed.courseId,
-    new Date().toISOString(),
+    now.toISOString(),
   );
   const retestDue = dueRetests.some(
     (activity) => activity.skillLabel === parsed.query.skillLabel,
@@ -248,27 +254,17 @@ export async function listTutorActionsForCourse(
   };
 
   const nodeId = parsed.query.nodeId ?? null;
-  if (nodeId) {
-    const flags = await deps.flagsForNode(scope, parsed.courseId, nodeId);
-    return gate(buildTutorActions({
-      skillLabel: parsed.query.skillLabel,
-      currentPage: parsed.query.currentPage ?? null,
-      nodeId,
-      sourceIds: parsed.sourceIds,
-      sessionExposures: exposures,
-      retestDue,
-      hasAssistance: flags.hasAssistance,
-      hasCheckedIndependent: flags.hasCheckedIndependent,
-      evidenceIds: flags.evidenceIds,
-    }), "prompt", flags.hasAssistance || flags.hasCheckedIndependent ? "ok" : "low");
-  }
-
+  const flags = nodeId ? await deps.flagsForNode(scope, parsed.courseId, nodeId) : null;
+  const nodeObservationIds = new Set(flags?.observationIds);
+  const observations = snapshot.observations.filter(row => nodeId
+    ? nodeObservationIds.has(row.id)
+    : normalizeSkillLabelKey(row.skillLabel) === normalizeSkillLabelKey(parsed.query.skillLabel));
   return gate(buildTutorActions({
     skillLabel: parsed.query.skillLabel,
     currentPage: parsed.query.currentPage ?? null,
-    nodeId: null,
-    sourceIds: parsed.sourceIds,
-    sessionExposures: exposures,
+    nodeId,
+    observations,
     retestDue,
-  }), "teach", "ok");
+    ...(flags ? { evidenceIds: flags.evidenceIds } : {}),
+  }), nodeId ? "prompt" : "teach", !nodeId || observations.some(row => row.usableForCurrentVersion === "yes") ? "ok" : "low");
 }
