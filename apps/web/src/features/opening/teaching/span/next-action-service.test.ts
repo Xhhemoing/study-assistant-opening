@@ -24,9 +24,11 @@ it("explains the two-cycle limit and offers explicit method changes without anno
   const result = await createSpanNextActionService({} as Sql).next(scope, body);
   expect(result).toMatchObject({ kind: "choice", reason: "remediation_limit",
     primary: { label: "换讲法：回原活动选择串讲例题", href: `/opening/courses/${courseId}/study/span?lesson=${id}` },
-    secondary: { href: `/opening/courses/${courseId}/study` } });
+    secondary: { label: "到课程路线重新选择", href: `/opening/courses/${courseId}?tab=units#course-learning-route` } });
   expect("message" in result && result.message).toContain("没有自动发第三轮题");
   expect(result).not.toHaveProperty("activityId");
+  expect("message" in result && result.message).toContain("到课程路线重新选择");
+  expect("message" in result && result.message).not.toContain("重新诊断");
 });
 it("offers actual ordinary practice after the unseen bank is unavailable without claiming new independent evidence", async () => {
   dependency.next.mockResolvedValue({ kind: "choice", reason: "unseen_unavailable", courseId, originSession: session });

@@ -9,7 +9,7 @@ type Session = { activityId: string; sessionId: string; courseId: string; revisi
 const linkSchema = z.object({ label: z.string().min(1).max(200), href: z.string() });
 const resultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("ready"), href: z.string(), activityId: z.string().uuid(), sessionId: z.string().uuid(), courseId: z.string().uuid(), label: z.string().min(1).max(200), resumed: z.boolean() }),
-  z.object({ kind: z.literal("choice"), reason: z.enum(["unknown_evidence", "evidence_changed", "source_unavailable", "authorization_required", "cancelled", "expired", "unseen_unavailable"]), message: z.string().min(1).max(3000), primary: linkSchema, secondary: linkSchema.optional() }),
+  z.object({ kind: z.literal("choice"), reason: z.enum(["unknown_evidence", "evidence_changed", "source_unavailable", "authorization_required", "cancelled", "expired", "unseen_unavailable", "remediation_limit"]), message: z.string().min(1).max(3000), primary: linkSchema, secondary: linkSchema.optional() }),
 ]);
 export type SpanNextResult = z.infer<typeof resultSchema>;
 type Result = SpanNextResult;
@@ -38,14 +38,20 @@ export function readSpanNextResult(body: unknown, courseId: string): Result {
       || url.searchParams.has("retest") && (!z.string().uuid().safeParse(url.searchParams.get("retest")).success || url.searchParams.getAll("retest").length !== 1)) throw new Error("服务器未返回本次活动的完整入口。");
   } else {
     for (const action of [result.primary, result.secondary].filter((value): value is z.infer<typeof linkSchema> => Boolean(value))) localCourseHref(action.href, courseId);
+    if (result.reason === "remediation_limit" && result.secondary) {
+      const url = localCourseHref(result.secondary.href, courseId);
+      if (url.pathname !== `/opening/courses/${courseId}` || url.search !== "?tab=units" || url.hash !== "#course-learning-route") throw new Error("服务器未返回本课程的路线选择入口。");
+    }
   }
   return result;
 }
-export function SpanNextActionControl({ session, observationId, onNavigate, onReload, disabled = false }: {
+export function SpanNextActionControl({ session, observationId, onNavigate, onReload, onChangeExplanation, onPause, disabled = false }: {
   session: Session; observationId: string | null; onNavigate?: (href: string) => void; onReload?: () => void; disabled?: boolean;
+  onChangeExplanation?: () => Promise<boolean | void>; onPause?: () => Promise<boolean | void>;
 }) {
   const [status, setStatus] = useState<"idle" | "pending" | "unknown" | "error" | "done">("idle");
   const [error, setError] = useState(""), [result, setResult] = useState<Result | null>(null);
+  const [choicePending, setChoicePending] = useState(false);
   const attempt = useRef<Request | null>(null), busy = useRef(false), alive = useRef(true), origin = useRef(session.activityId);
   origin.current = session.activityId;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -74,9 +80,23 @@ export function SpanNextActionControl({ session, observationId, onNavigate, onRe
       if (alive.current && origin.current === request.activityId) { setStatus(definitiveFailure ? "error" : "unknown"); setError(`${definitiveFailure ? "" : "结果尚未确认。"}${userFacingMessage(reason, "原答案和学习位置保留，请确认这次安排。")}`); }
     } finally { busy.current = false; }
   }
-  return <section className="space-y-2" aria-label="下一步学习安排">
+  async function choose(operation: () => Promise<boolean | void>) {
+    if (disabled || busy.current) return;
+    busy.current = true; setChoicePending(true); setError("");
+    const activityId = session.activityId;
+    try {
+      if (await operation() === false) throw new Error("进度保存未确认，原学习位置保留，请重试。");
+    } catch (reason) {
+      if (alive.current && origin.current === activityId) setError(userFacingMessage(reason, "进度保存未确认，原学习位置保留，请重试。"));
+    } finally {
+      busy.current = false;
+      if (alive.current && origin.current === activityId) setChoicePending(false);
+    }
+  }
+  const choiceLocked = disabled || choicePending;
+  return <section className="space-y-2" aria-label="下一步学习安排" aria-busy={choicePending || undefined}>
     {result ? result.kind === "ready" ? <p role="status" className="text-sm text-text-2">下一步已准备好：<Link className={ui.primary} href={result.href}>{result.label}</Link></p>
-      : <div className="space-y-2"><p role="status" className="text-sm leading-7 text-text-2">{result.message}</p><div className="flex flex-wrap gap-2"><Link className={ui.primary} href={result.primary.href}>{result.primary.label}</Link>{result.secondary ? <Link className={ui.quiet} href={result.secondary.href}>{result.secondary.label}</Link> : null}{result.reason === "authorization_required" ? <button type="button" className={ui.secondary} disabled={disabled} onClick={() => void advance(true)}>授权后重新核对下一步</button> : null}</div></div>
+      : <div className="space-y-2"><p role="status" className="text-sm leading-7 text-text-2">{result.message}</p><div className="flex flex-wrap gap-2">{result.reason === "remediation_limit" && onChangeExplanation ? <button type="button" className={ui.primary} disabled={choiceLocked} onClick={() => void choose(onChangeExplanation)}>换个讲法</button> : <Link className={ui.primary} href={result.primary.href} aria-disabled={choiceLocked || undefined} onClick={event => { if (choiceLocked) event.preventDefault(); }}>{result.primary.label}</Link>}{result.secondary ? <Link className={ui.quiet} href={result.secondary.href} aria-disabled={choiceLocked || undefined} onClick={event => { if (choiceLocked) event.preventDefault(); }}>{result.reason === "remediation_limit" ? "到课程路线重新选择" : result.secondary.label}</Link> : null}{result.reason === "remediation_limit" && onPause ? <button type="button" className={ui.secondary} disabled={choiceLocked} onClick={() => void choose(onPause)}>暂缓并保存</button> : null}{result.reason === "authorization_required" ? <button type="button" className={ui.secondary} disabled={disabled} onClick={() => void advance(true)}>授权后重新核对下一步</button> : null}</div></div>
       : <button type="button" className={ui.primary} disabled={disabled || status === "pending" || status === "error"} onClick={() => void advance()}>{status === "pending" ? "正在核对下一步…" : status === "unknown" ? "重新确认这次安排" : "安排下一步学习"}</button>}
     {status === "unknown" ? <p className="text-xs leading-6 text-text-3">保留原活动版本和作答记录，继续确认同一次安排；不会自动换一项任务。</p> : null}
     {error ? <p role="alert" className="text-xs leading-6 text-danger">{error}</p> : null}
