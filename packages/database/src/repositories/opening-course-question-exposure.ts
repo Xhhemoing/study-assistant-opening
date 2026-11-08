@@ -109,14 +109,14 @@ export async function refreshCourseQuestionExposure(tx: TransactionSql, scope: S
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND surface_key LIKE ${String(row.surface) + ":%"} AND exact_content=${tx.json(exact)}::jsonb LIMIT 1`;
     if (!previous.length) await tx`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
-      VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${String(row.surface) + ":" + randomUUID()},'teaching',${tx.json(exact)},'{}',${history!.revision})`; 
+      VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${String(row.surface) + ":" + randomUUID()},'teaching',${tx.json(exact)},'{}',${history!.revision})`;
   }
   const unknown = await tx`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND (exact_content IS NULL OR exact_content->>'complete'<>'true') LIMIT 1`;
   if (unknown.length) complete = false;
   await tx`UPDATE opening_course_question_exposure_coverage SET complete=${complete},history_revision=${history!.revision},covered_surface_count=${rows.length}
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-      AND to_jsonb(opening_course_question_exposure_coverage)->>'invalidated'='false'`; 
+      AND to_jsonb(opening_course_question_exposure_coverage)->>'invalidated'='false'`;
   return complete;
 }
 
