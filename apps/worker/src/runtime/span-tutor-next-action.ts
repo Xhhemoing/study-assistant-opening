@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import type { SpanLessonSnapshot } from "@aistudy/contracts";
 import { createOpeningSpanTutorContextRepository, createOpeningLearningAgendaRepository } from "@aistudy/database";
-import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import type { TutorNextAction, TutorNextActionContext, TutorNextActionService } from "../jobs/tutor-next-action";
 
 function action(session: SpanLessonSnapshot): TutorNextAction {
@@ -27,9 +27,23 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
         href: changed.reason === "evidence_changed" && changed.originSession ? action(changed.originSession).href : `/opening/courses/${context!.courseId}#course-learning-records`,
       } : undefined;
       const agenda = context?.resumeSession ? await agendaRepository.get(scope, context.courseId, context.resumeSession.activityId) : null;
+      const exactReplay = context?.historicalOperationId === request.operationId;
+      // A method change may update an existing ordinary lesson only. The
+      // repository must still authorize/revalidate and reject any actual issue.
+      const intentOnlyOverview = context?.needsIntentUpdate && context.intent.purpose === "overview"
+        && context.resumeSession?.status === "active" && context.resumeSession.intent.purpose !== "overview"
+        && !context.resumeSession.retestId && !context.resumeSession.moveId.endsWith("-reserved")
+        && !context.dueRetestId && !context.needsReservedIssue && !context.intentChangeRequiresChoice;
+      const remediationChoice = context && !exactReplay && !intentOnlyOverview
+        && nextLearningStep(context.decisionInput).reasonCode === "remediation_limit" ? {
+          message: "已完成两轮有据纠偏，仍重复错误或依赖帮助。请回原活动明确换讲法（串讲例题）、到课程学习入口重新诊断，或暂缓；原答案和历史保留，没有新增题目、活动或预算。",
+          label: context.resumeSession ? "回原活动选择换讲法或暂缓" : "到课程学习入口明确换方式或暂缓",
+          href: context.resumeSession ? action(context.resumeSession).href : `/opening/courses/${context.courseId}/study`,
+        } : undefined;
       return context ? { courseId: context.courseId, privacyEpoch: context.privacyEpoch, sourceRefs: context.sourceRefs,
         decisionInput: context.decisionInput, spanContext: context, historicalDecision: context.historicalDecision,
         agenda,
+        ...(remediationChoice ? { unavailableAction: remediationChoice } : {}),
         ...(changeAction ? { unavailableAction: changeAction } : {}),
         ...(context.needsReservedIssue || context.needsIntentUpdate ? { resumeRequiresExecution: true } : {}),
         ...(context.intentChangeRequiresChoice ? { unavailableAction: {

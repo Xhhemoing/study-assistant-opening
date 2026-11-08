@@ -345,6 +345,27 @@ it("applies explicit phases to an existing ordinary lesson without charging agai
   }
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
 });
+it("updates an ordinary lesson to explicit overview without issuing a question or charging, and preserves admission checks", async () => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question: "串讲" }))!;
+  const decision = nextLearningStep(context.decisionInput), operationId = randomUUID();
+  expect(context).toMatchObject({ needsIntentUpdate: true, intent: { purpose: "overview" } });
+  const before = await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`;
+  await expect(f.repo.execute({ ...scope, ownerUserId: randomUUID() }, { context, decision, operationId: randomUUID() })).rejects.toThrow();
+  const updated = await f.repo.execute(scope, { context, decision, operationId });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, moveId: "overview-links", intent: { purpose: "overview" } });
+  expect(await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  const replay = (await f.repo.read(scope, { ...f.request, question: "串讲", operationId }))!;
+  expect((await f.repo.execute(scope, { context: replay, decision, operationId })).activityId).toBe(updated.activityId);
+  const fresh = (await f.repo.read(scope, { ...f.request, question: "自学" }))!;
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(f.repo.execute(scope, { context: fresh, decision: nextLearningStep(fresh.decisionInput), operationId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await lessons.get(scope, session.activityId)).toEqual(updated);
+});
 it("does not start or resume after the account is disabled between reading and executing", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,

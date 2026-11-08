@@ -152,6 +152,19 @@ describe("tutor next action orchestration", () => {
     expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, choice: unavailableAction });
     expect(executions).toEqual([]);
   });
+  it.each(["new", "early_resume", "execute_resume"])("keeps a server remediation choice ahead of the %s branch", async branch => {
+    const unavailableAction = { message: "两轮有据纠偏后，请换讲法、重新诊断或暂缓。没有新增活动。", label: "明确换方式",
+      href: "/opening/courses/course/study" };
+    const base = context({ unavailableAction, ...(branch === "new" ? {} : { resume: { activityId: "old", sessionId: "session", href: "/existing" } }),
+      ...(branch === "execute_resume" ? { resumeRequiresExecution: true } : {}) });
+    base.decisionInput.remediationCycles = { completedCycles: ["one", "two"].map(failureRootId => ({ failureRootId,
+      persistentDeliveredAssistance: true, repeatedVerifiedError: false, evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`] })) };
+    const { deps, executions } = service(base);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, resumed: false,
+      choice: unavailableAction, decision: { reasonCode: "remediation_limit" } });
+    expect(deps.assertCurrent).toHaveBeenCalledWith(scope, base);
+    expect(executions).toEqual([]);
+  });
   it("executes a reserved resume that still needs its actual attempt allocated", async () => {
     const { deps, executions } = service(context({ resume: { activityId: "old", sessionId: "old-session", href: "/existing" }, resumeRequiresExecution: true }));
     await prepareTutorNextAction(deps, scope, request);

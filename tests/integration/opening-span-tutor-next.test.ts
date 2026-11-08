@@ -16,6 +16,8 @@ import { readOpeningSpanTutorOriginChange } from "../../packages/database/src/re
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
 import { createSpanDelayedRetestService } from "../../apps/web/src/features/opening/teaching/span/delayed-retest-service";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
+import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tutor-next-action";
+import { prepareTutorNextAction } from "../../apps/worker/src/jobs/tutor-next-action";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 let fixture: OpeningFixture;
@@ -577,6 +579,47 @@ it.each(["correct", "unlabelled_error"] as const)("stops a same-activity two-rou
   const afterRevision = (await repository.read(scope, survivingRequest))!;
   expect(afterRevision.decisionInput.remediationCycles).toBeUndefined();
   expect(nextLearningStep(afterRevision.decisionInput).reasonCode).not.toBe("remediation_limit");
+});
+it("delivers a worker remediation choice and an admitted overview-only change after two cycles without issuing or charging", async () => {
+  const f = await seed(), { sql, scope } = fixture, origin = await f.create();
+  await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q01", false, "labelled_error");
+  await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q02", true, "unlabelled_error");
+  await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q03", false, "labelled_error");
+  await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q05", true, "unlabelled_error");
+  const adapter = createSpanTutorNextAction(sql), request = { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 },
+    question: "继续学习", userTurnId: randomUUID(), operationId: `tutor-next:${randomUUID()}` };
+  const before = await cyclePersisted(f);
+  const choice = await prepareTutorNextAction(adapter, scope, request);
+  expect(choice).toMatchObject({ action: null, decision: { reasonCode: "remediation_limit" },
+    choice: { href: `/opening/courses/${f.courseId}/study/span?lesson=${origin.activityId}` } });
+  expect(await cyclePersisted(f)).toEqual(before);
+  // The same decision cannot bypass the limit by minting an operation id.
+  const ordinary = (await adapter.read(scope, request))!;
+  await expect(adapter.execute(scope, { ...request, context: ordinary, decision: nextLearningStep(ordinary.decisionInput) }))
+    .rejects.toMatchObject({ code: "SPAN_REMEDIATION_LIMIT" });
+  expect(await cyclePersisted(f)).toEqual(before);
+  const overviewRequest = { ...request, question: "串讲", operationId: `tutor-next:${randomUUID()}` };
+  const overviewContext = (await adapter.read(scope, overviewRequest))!;
+  expect(overviewContext.unavailableAction).toBeUndefined();
+  await expect(adapter.execute({ ...scope, ownerUserId: randomUUID() }, { ...overviewRequest, context: overviewContext,
+    decision: nextLearningStep(overviewContext.decisionInput) })).rejects.toThrow();
+  // Job cancellation is still checked before the intent-only exception.
+  await expect(adapter.execute(scope, { ...overviewRequest, context: overviewContext, decision: nextLearningStep(overviewContext.decisionInput),
+    jobLease: { jobId: randomUUID(), claimToken: randomUUID() } })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await cyclePersisted(f)).toEqual(before);
+  const changed = await prepareTutorNextAction(adapter, scope, overviewRequest);
+  expect(changed).toMatchObject({ action: { activityId: origin.activityId }, resumed: false });
+  expect(await f.lessons.get(scope, origin.activityId)).toMatchObject({ moveId: "overview-links", intent: { purpose: "overview" } });
+  const after = await cyclePersisted(f);
+  expect(after.activities).toHaveLength(before.activities.length);
+  expect(after.attempts).toEqual(before.attempts); expect(after.observations).toEqual(before.observations);
+  expect(after.help).toEqual(before.help); expect(after.capacity).toEqual(before.capacity); expect(after.money).toEqual(before.money);
+  expect(await prepareTutorNextAction(adapter, scope, overviewRequest)).toMatchObject({ resumed: true, action: { activityId: origin.activityId } });
+  expect(await cyclePersisted(f)).toEqual(after);
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(adapter.execute(scope, { ...overviewRequest, context: overviewContext, operationId: `tutor-next:${randomUUID()}`,
+    decision: nextLearningStep(overviewContext.decisionInput) })).rejects.toMatchObject({ code: "CONFLICT" });
 });
 it.each([1, 4] as const)("counts original-attempt help level %i through two real redo roots without delivering new help", async level => {
   const f = await seed(), { sql, scope } = fixture, origin = await f.create();
