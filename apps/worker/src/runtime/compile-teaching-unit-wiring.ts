@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readStoredTeachingOutline } from "./teaching-outline";
 import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
-import { teachingQuestionInteractionSchema, type Scope, type ProviderOutput, type OpeningModelSnapshot } from "@aistudy/contracts";
+import { type Scope, type ProviderOutput, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
@@ -14,6 +14,8 @@ import {
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
 } from "@aistudy/database";
+// Repository helper shares the authoritative saved question/key projection (not a new provider channel).
+import { resolveOpeningTeachingBlindSolveQuestion } from "../../../../packages/database/src/repositories/opening-teaching-question-evaluation";
 import { createCompilerProviderInput, solveTeachingBlind, type TeachingBlindSolveReceipt } from "@aistudy/ai";
 import { createDbModelGateway, scopeBudget, teachingBlindSolveConfig } from "./model-gateway";
 import { createOpeningMaterialRetriever } from "./material-retrieval";
@@ -168,7 +170,16 @@ export function createCompileTeachingUnitWorkerDeps(
           return result;
         }
       : undefined,
-    blindSolveBeforePublish: async (scope, { job, publishInput, providerOutput, beforeSend }) => {
+    persistBlindSolveReceipts: async (scope, job, receipts, beforePersist) => {
+      await beforePersist();
+      const rows = await sql`UPDATE opening_jobs SET result=jsonb_set(COALESCE(result,'{}'::jsonb),
+        ARRAY['teachingBlindSolveReceipts'], ${sql.json(Object.fromEntries(receipts.map(receipt => [receipt.identity.blockId, receipt])) as never)})
+        WHERE id=${job.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND state='running' AND privacy_epoch=${job.privacyEpoch}
+          AND claim_token IS NOT DISTINCT FROM ${job.claimToken ?? null}::uuid RETURNING id`;
+      if (!rows.length) throw new Error("blind solve job claim changed");
+    },
+    blindSolveBeforePublish: async (scope, { job, publishInput, providerOutput, parentBudget, beforeSend }) => {
       // Legacy/unconfigured runs remain unknown without a provider or extra persistence I/O.
       if (!teachingBlindSolveConfig()) return [];
       const unit = await teachingContent.getUnit(scope, publishInput.teachingUnitId);
@@ -197,26 +208,25 @@ export function createCompileTeachingUnitWorkerDeps(
       };
       const receipts: TeachingBlindSolveReceipt[] = [];
       const order = [...publishInput.blockOrder].sort((a, b) => a.position - b.position);
+      // First usable slice: at most ONE optional solve per compile job, preserving call headroom.
+      // Unknown billing still blocks this SAME parent through the existing ledger, including repairs.
+      let attemptedSolve = false;
       for (let i = 0; i < order.length; i++) {
         const ref = order[i]!;
-        if (ref.role === "answer_key" || !["prompt", "question"].includes(ref.blockType)) continue;
-        const prompt = revision.blocks.find(block => block.id === ref.blockId);
-        const next = order[i + 1];
-        const key = next && (next.role === "answer_key" || ["answer_key", "solution"].includes(next.blockType))
-          ? revision.blocks.find(block => block.id === next.blockId) : undefined;
-        const body = prompt?.content.text;
-        const interaction = teachingQuestionInteractionSchema.safeParse(prompt?.content.interaction).data;
-        const question = typeof body === "string" ? body : "";
-        const pinnedKey = key && [key.content.text, key.content.answer, key.content.solution].find((value): value is string => typeof value === "string");
+        if (ref.role === "answer_key" || !(ref.role === "prompt" || ["prompt", "question"].includes(ref.blockType))) continue;
+        const pinned = resolveOpeningTeachingBlindSolveQuestion(revision.blocks, order, ref.blockId);
+        const solveConfig = !attemptedSolve && versionsKnown && revision.id && pinned.reliable && pinned.keyText ? config : null;
+        if (solveConfig) attemptedSolve = true;
         const operationId = `teaching-solve:${job.id}:${ref.blockId}`;
         const receipt = await solveTeachingBlind({
-          scope, config: versionsKnown && revision.id && question ? config : null,
+          scope, config: solveConfig,
           identity: { activityId: publishInput.activityId, teachingRevisionId: revision.id,
-            blockId: ref.blockId, contentVersion: publishInput.expectedVersion + 1, sourceVersions,
+            blockId: ref.blockId, answerBlockId: pinned.answerBlockId, questionText: pinned.questionText, keyText: pinned.keyText,
+            contentVersion: publishInput.expectedVersion + 1, sourceVersions,
             generatorModelIdentity: config?.generator ?? null },
-          question, interaction, pinnedKey: pinnedKey ?? null, gateway: models,
+          question: pinned.body, interaction: pinned.interaction, pinnedKey: pinned.keyText, gateway: models,
           options: { budget: scopeBudget(budget, scope), operationId, resultRef: `job:${job.id}:blind-solve:${ref.blockId}`,
-            parentBudget: { id: `study-activity:${publishInput.activityId}` }, beforeSend: assertCurrent },
+            parentBudget, beforeSend: assertCurrent },
           persist: async value => {
             // Existing private job/result JSON, not generationConfig (which client-init projects).
             // Keep the claim and cancellation fence; a late solver cannot publish its receipt.

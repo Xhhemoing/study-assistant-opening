@@ -1,7 +1,9 @@
 import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus, TeachingPartialHints } from "@aistudy/contracts";
-import type { OpeningJobRecord } from "@aistudy/database";
+import { OpeningBudgetError, type OpeningJobRecord } from "@aistudy/database";
+import type { TeachingBlindSolveReceipt } from "@aistudy/contracts";
+import { readOpeningTeachingBlindSolveKeyMetadata } from "../../../../packages/database/src/repositories/opening-teaching-question-evaluation";
 
 const activities = vi.hoisted(() => ({
   get: vi.fn(),
@@ -176,6 +178,75 @@ const payload = {
   sourceIds: [SOURCE],
 };
 
+async function blindFixture(lineage: string, failure?: string) {
+  for (const [name, value] of Object.entries({ OPENING_TEACHING_SOLVER_PROVIDER_ID: "solver-p", OPENING_TEACHING_SOLVER_MODEL: "solver-model",
+    OPENING_TEACHING_SOLVER_FAMILY: "family-b", OPENING_TEACHING_GENERATOR_PROVIDER_ID: "p", OPENING_TEACHING_GENERATOR_MODEL: "real-model",
+    OPENING_TEACHING_GENERATOR_FAMILY: "family-a" })) vi.stubEnv(name, value);
+  const questionId = "22222222-2222-4222-8222-222222222222", keyId = "33333333-3333-4333-8333-333333333333";
+  const revisionId = "11111111-1111-4111-8111-111111111111", sourceTurnId = "server-owned-user-turn";
+  const parentId = lineage === "study-turn" ? `study-turn:${sourceTurnId}` : `study-activity:${ACTIVITY}`;
+  const blocks = [{ id: questionId, type: "prompt", content: { text: "2+2", interaction: { kind: "numeric" } } },
+    { id: keyId, type: "answer_key", content: { text: "", markdown: "4" } }] as Array<{ id: string; type: string; content: Record<string, unknown> }>;
+  let currentVersion = 0;
+  let currentInput: ActivitySpecPublishInput;
+  let persisted: Record<string, TeachingBlindSolveReceipt> = {};
+  const sql = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.join("?");
+    if (query.includes("SELECT a.course_id, a.create_intent")) return [{ course_id: "course", create_intent: lineage === "study-turn" ? { sourceTurnId } : {} }];
+    if (query.includes("SELECT t.id FROM opening_turns")) {
+      expect(values).toEqual([sourceTurnId, scope.workspaceId, scope.workspaceId, scope.ownerUserId, "course"]);
+      return [{ id: sourceTurnId }];
+    }
+    if (query.includes("SELECT state FROM opening_jobs")) return [{ state: "running" }];
+    if (query.includes("UPDATE opening_jobs")) {
+      const patch = values.find(value => value && typeof value === "object" && questionId in value) as Record<string, TeachingBlindSolveReceipt>;
+      persisted = { ...persisted, ...structuredClone(patch) }; return [{ id: job.id }];
+    }
+    if (query.includes("AS receipt,r.blocks")) {
+      if (values[1] !== scope.workspaceId || values[2] !== scope.ownerUserId || values[5] !== currentVersion) return [];
+      return [{ receipt: persisted[questionId], blocks, block_order: currentInput.blockOrder, source_refs: currentInput.sourceRefs }];
+    }
+    return [{ id: SOURCE }];
+  }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
+  sql.json = ((value: unknown) => value) as typeof sql.json;
+  const dependencies = shared();
+  const reservations: Array<{ purpose: string; requestId: string; parentBudget?: { id: string } }> = [];
+  const ledger = new Map<string, { id: string; state: string; resultRef?: string; requestId: string }>();
+  let parentUnknown = false;
+  dependencies.budget.reserve = vi.fn(async (_scope, input) => {
+    reservations.push(input);
+    expect(input.parentBudget?.id).toBe(parentId);
+    const existing = ledger.get(input.requestId);
+    if (existing) return existing;
+    if (parentUnknown) throw new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "same parent unknown");
+    if (input.purpose === "teaching-solve" && failure?.startsWith("PARENT_")) throw new OpeningBudgetError(failure as never, "parent refuses continuation");
+    const row = { id: input.requestId, requestId: input.requestId, state: "reserved" };
+    ledger.set(input.requestId, row); return row;
+  }) as typeof dependencies.budget.reserve;
+  dependencies.budget.settle = vi.fn(async (_scope, id, _cents, options) => {
+    const row = ledger.get(id)!; row.state = "completed"; row.resultRef = options?.resultRef; return row;
+  }) as typeof dependencies.budget.settle;
+  dependencies.budget.markUnknown = vi.fn(async (_scope, id) => { parentUnknown = true; return ledger.get(id)!; }) as typeof dependencies.budget.markUnknown;
+  content.readRevision.mockImplementation(async () => ({ id: revisionId, blocks }));
+  content.publishActivitySpec.mockImplementation(async (_scope, input: ActivitySpecPublishInput) => {
+    expect(input.expectedVersion).toBe(currentVersion);
+    currentVersion++; currentInput = input; return { version: currentVersion };
+  });
+  model.complete.mockImplementation(async (input: { instruction: string }) => {
+    if (input.instruction.startsWith("Solve only") && failure === "solver_unknown") throw new Error("fake uncertain send");
+    return { text: input.instruction.startsWith("Solve only") ? '{"answer":"4"}' : "compiled", citedChunkIds: [], requestId: "fake", candidates: [], inputTokens: 1, outputTokens: 1 };
+  });
+  activities.get.mockResolvedValue({ id: ACTIVITY, generateStatus: "needs_check" });
+  const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
+  deps.buildProviderInput = async () => ({ instruction: "compile", text: "authorized sources", mode: "explain", chunks: [], imageParts: [], mediaCapability: "text_only", maxOutputTokens: 32 });
+  deps.buildPublishInput = async () => ({ activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
+    sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
+      { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
+      { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" },
+    ] });
+  return { deps, sql, blocks, questionId, keyId, parentId, reservations, version: () => currentVersion, persisted: () => persisted };
+}
+
 describe("compile-teaching-unit worker wiring (compiler on)", () => {
   it.each([undefined, "0"])("keeps formula validation disabled for flag %s", (flag) => {
     vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", flag);
@@ -282,12 +353,13 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       return [{ id: SOURCE }];
     }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
     sql.json = ((value: unknown) => value) as typeof sql.json;
-    const deps = createCompileTeachingUnitWorkerDeps(sql, shared());
+    const dependencies = shared();
+    const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
     const input = { instruction: "compile", text: "question", mode: "explain" as const, chunks: [], imageParts: [], mediaCapability: "text_only" as const, maxOutputTokens: 32 };
     const output = await deps.callModel!(scope, input, { operationId: "compile:fake", resultRef: `teaching_activity:${ACTIVITY}` });
     model.complete.mockResolvedValue({ text: '{"answer":"4","family":"ignored"}', citedChunkIds: [], requestId: "fake", candidates: [], inputTokens: 1, outputTokens: 1 });
     const beforeSend = vi.fn(async () => {});
-    const receipts = await deps.blindSolveBeforePublish!(scope, { job, providerOutput: output, beforeSend,
+    const receipts = await deps.blindSolveBeforePublish!(scope, { job, providerOutput: output, beforeSend, parentBudget: { id: `study-turn:server-turn` },
       publishInput: { activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
         sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
           { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
@@ -297,9 +369,78 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(model.task).toHaveBeenLastCalledWith("teaching.solve");
     expect(model.complete.mock.calls.at(-1)![0]).toMatchObject({ text: "2+2", chunks: [] });
     expect(JSON.stringify(model.complete.mock.calls.at(-1)![0])).not.toContain('"4"');
+    expect(dependencies.budget.reserve).toHaveBeenLastCalledWith(scope, expect.objectContaining({ parentBudget: { id: "study-turn:server-turn" } }));
     expect(stored).toHaveLength(1);
     expect(stored[0]).toEqual(expect.arrayContaining([job.id, scope.workspaceId, scope.ownerUserId]));
     expect(content.publishActivitySpec).not.toHaveBeenCalled();
+  });
+
+  it.each(["study-turn", "study-activity"])("publishes, promotes, reads and replays a receipt at the exact final version with %s lineage", async lineage => {
+    const f = await blindFixture(lineage);
+    f.deps.verifyAfterPublish = async () => ({ nextVerificationStatus: "structure_ok" });
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "1");
+    const result = await createCompileTeachingUnitHandler(f.deps)(job, payload) as { teachingBlindSolveReceipts: Record<string, TeachingBlindSolveReceipt> };
+    expect(f.version()).toBe(2);
+    const receipt = result.teachingBlindSolveReceipts[f.questionId]!;
+    expect(receipt.identity).toMatchObject({ contentVersion: 2, answerBlockId: f.keyId, questionText: "2+2", keyText: "4" });
+    expect(receipt.decision).toBe("match");
+    expect(f.persisted()[f.questionId]).toEqual(receipt);
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(f.sql as never, scope, receipt.identity)).toMatchObject({ eligibility: "matched_current" });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(f.sql as never, scope, { ...receipt.identity, contentVersion: 1 })).toMatchObject({ eligibility: "unknown" });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(f.sql as never, { ...scope, ownerUserId: "foreign" }, receipt.identity)).toMatchObject({ eligibility: "unknown" });
+    expect(f.reservations.map(row => row.parentBudget?.id)).toEqual([f.parentId, f.parentId]);
+    expect(f.reservations.map(row => row.purpose)).toEqual(["compile-teaching-unit", "teaching-solve"]);
+    const replay = await createCompileTeachingUnitHandler(f.deps)({ ...job, result }, payload);
+    expect(replay).toMatchObject({ replayed: true, teachingBlindSolveReceipts: result.teachingBlindSolveReceipts });
+    expect(model.complete).toHaveBeenCalledTimes(2);
+    expect(f.version()).toBe(2);
+  });
+
+  it.each([
+    ["study-turn", "PARENT_BUDGET_EXCEEDED"], ["study-turn", "PARENT_BUDGET_CALL_LIMIT"],
+    ["study-turn", "PARENT_BUDGET_OUTCOME_UNKNOWN"], ["study-activity", "PARENT_BUDGET_OUTCOME_UNKNOWN"],
+  ] as const)("does not call solver when original %s parent rejects with %s", async (lineage, code) => {
+    const f = await blindFixture(lineage, code);
+    const result = await createCompileTeachingUnitHandler(f.deps)(job, payload);
+    expect(result).toMatchObject({ generateStatus: "needs_check", teachingBlindSolveReceipts: { [f.questionId]: { decision: "unknown" } } });
+    expect(model.complete).toHaveBeenCalledTimes(1); // compilation only
+    expect(f.reservations.map(row => row.parentBudget?.id)).toEqual([f.parentId, f.parentId]);
+  });
+
+  it("an unknown solve blocks later ordinary-activity recompiles on the same parent; no exemption", async () => {
+    const f = await blindFixture("study-activity", "solver_unknown");
+    expect(await createCompileTeachingUnitHandler(f.deps)(job, payload)).toMatchObject({ generateStatus: "needs_check" });
+    await expect(createCompileTeachingUnitHandler(f.deps)({ ...job, id: "next-job" }, payload)).rejects.toMatchObject({ code: "PARENT_BUDGET_OUTCOME_UNKNOWN" });
+    expect(model.complete).toHaveBeenCalledTimes(2); // compile + one unknown solve; zero continuation
+    expect(new Set(f.reservations.map(row => row.parentBudget?.id))).toEqual(new Set([f.parentId]));
+  });
+
+  it.each(["wrong-key-type", "unreliable-latex", "numeric-unit", "empty-key"]) (
+    "configured fake never matches an invalid pair or incomplete interpretation: %s", async variant => {
+      const f = await blindFixture("study-turn");
+      if (variant === "wrong-key-type") f.blocks[1]!.type = "text";
+      if (variant === "unreliable-latex") f.blocks[0]!.content.text = "2\times2";
+      if (variant === "numeric-unit") f.blocks[0]!.content.interaction = { kind: "numeric", unit: "m" };
+      if (variant === "empty-key") f.blocks[1]!.content = { text: " " };
+      const result = await createCompileTeachingUnitHandler(f.deps)(job, payload) as { teachingBlindSolveReceipts: Record<string, TeachingBlindSolveReceipt> };
+      expect(result.teachingBlindSolveReceipts[f.questionId]!.decision).toBe("unknown");
+      if (variant === "numeric-unit") expect(model.complete.mock.calls.at(-1)![0]).toMatchObject({ text: "2+2\n单位：m" });
+      else expect(model.complete).toHaveBeenCalledTimes(1);
+    });
+
+  it("bounds optional solves to one per job, leaves other questions unknown", async () => {
+    const f = await blindFixture("study-turn");
+    const originalBuild = f.deps.buildPublishInput!;
+    f.deps.buildPublishInput = async (...args) => {
+      const input = await originalBuild(...args);
+      const q2 = "55555555-5555-4555-8555-555555555555";
+      f.blocks.push({ id: q2, type: "prompt", content: { text: "3+1", interaction: { kind: "numeric" } } });
+      return { ...input, blockOrder: [...input.blockOrder, { blockId: q2, position: 2, blockType: "prompt", role: "prompt" },
+        { blockId: f.keyId, position: 3, blockType: "answer_key", role: "answer_key" }] };
+    };
+    const result = await createCompileTeachingUnitHandler(f.deps)(job, payload) as { teachingBlindSolveReceipts: Record<string, TeachingBlindSolveReceipt> };
+    expect(Object.values(result.teachingBlindSolveReceipts).map(receipt => receipt.decision)).toEqual(["match", "unknown"]);
+    expect(model.complete).toHaveBeenCalledTimes(2);
   });
 
   it("does not call the solver or reserve extra budget when server identities are unconfigured", async () => {

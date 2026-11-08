@@ -54,6 +54,7 @@ export const teachingBlindSolveReceiptSchema = z.object({
   protocol: z.literal("teaching-blind-solve-1"),
   identity: z.object({
     activityId: uuidSchema, teachingRevisionId: uuidSchema, blockId: uuidSchema, itemVersionId: uuidSchema.optional(),
+    answerBlockId: uuidSchema.nullable(), questionText: z.string().max(8000).nullable(), keyText: z.string().max(8000).nullable(),
     contentVersion: z.number().int().nonnegative(), sourceVersions: z.record(uuidSchema, z.number().int().nonnegative()),
     generatorModelIdentity: teachingModelIdentitySchema.nullable(),
   }).strict(),
@@ -67,6 +68,7 @@ export const teachingBlindSolveReceiptSchema = z.object({
   costLedgerRef: z.string().min(1).max(200).nullable(),
 }).strict().superRefine((receipt, ctx) => {
   if (receipt.decision !== "unknown" && (!receipt.modelSnapshot || !receipt.family || !receipt.costLedgerRef || !receipt.solverAnswer
+    || !receipt.identity.answerBlockId || !receipt.identity.questionText?.trim() || !receipt.identity.keyText?.trim()
     || !receipt.identity.generatorModelIdentity || receipt.family.trim().toLowerCase() === receipt.identity.generatorModelIdentity.family.trim().toLowerCase()
     || (receipt.modelSnapshot.providerId === receipt.identity.generatorModelIdentity.providerId
       && receipt.modelSnapshot.modelName === receipt.identity.generatorModelIdentity.modelName))) {

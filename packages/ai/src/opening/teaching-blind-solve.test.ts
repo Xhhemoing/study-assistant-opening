@@ -10,7 +10,7 @@ const config: TeachingBlindSolveConfig = {
 };
 const identity: TeachingBlindSolveIdentity = {
   activityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", teachingRevisionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-  blockId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", contentVersion: 2,
+  blockId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", answerBlockId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", questionText: "2 + 2 = ?", keyText: "4", contentVersion: 2,
   sourceVersions: { "dddddddd-dddd-4ddd-8ddd-dddddddddddd": 1 }, generatorModelIdentity: config.generator,
 };
 const scope = { workspaceId: "workspace-a", ownerUserId: "owner-a" };
@@ -57,7 +57,7 @@ describe("teaching blind solve protocol", () => {
     expect(f.persist.mock.invocationCallOrder[0]).toBeLessThan(f.budget.settle.mock.invocationCallOrder[0]!);
     expect(teachingBlindSolveMatchesCurrent(result, structuredClone(identity))).toBe(true);
     for (const changed of [{ ...identity, blockId: "other" }, { ...identity, teachingRevisionId: "other" },
-      { ...identity, contentVersion: 3 }, { ...identity, itemVersionId: "new" }, { ...identity, sourceVersions: {} },
+      { ...identity, contentVersion: 3 }, { ...identity, answerBlockId: "other" }, { ...identity, keyText: "5" }, { ...identity, questionText: "changed" }, { ...identity, itemVersionId: "new" }, { ...identity, sourceVersions: {} },
       { ...identity, generatorModelIdentity: { ...config.generator, modelName: "new" } }]) {
       expect(teachingBlindSolveMatchesCurrent(result, changed)).toBe(false);
     }
@@ -69,12 +69,12 @@ describe("teaching blind solve protocol", () => {
   });
   it("does not invent authority for non-deterministic questions", async () => {
     const f = fixture("a proof");
-    const result = await solveTeachingBlind({ ...f.input, question: "Prove the theorem", pinnedKey: "a proof" });
+    const result = await solveTeachingBlind({ ...f.input, question: "Prove the theorem", pinnedKey: "a proof", identity: { ...identity, questionText: "Prove the theorem", keyText: "a proof" } });
     expect(result).toMatchObject({ decision: "unknown", reasonCodes: ["comparison_unsupported"] });
   });
   it("compares supported choices without sending the pinned choice", async () => {
     const f = fixture("B. 4");
-    const result = await solveTeachingBlind({ ...f.input, pinnedKey: "B", interaction: { kind: "choice", options: [{ id: "A", label: "3" }, { id: "B", label: "4" }] } });
+    const result = await solveTeachingBlind({ ...f.input, pinnedKey: "B", identity: { ...identity, keyText: "B", questionText: "2 + 2 = ?\nA. 3\nB. 4" }, interaction: { kind: "choice", options: [{ id: "A", label: "3" }, { id: "B", label: "4" }] } });
     expect(result.decision).toBe("match");
     expect(f.complete.mock.calls[0]![0]).toMatchObject({ text: "2 + 2 = ?\nA. 3\nB. 4" });
   });

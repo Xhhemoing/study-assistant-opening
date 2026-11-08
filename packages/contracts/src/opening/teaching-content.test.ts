@@ -16,11 +16,11 @@ const now = "2026-10-11T03:00:00.000Z";
 
 it("validates private blind-solve receipts without upgrading missing/forged identity", () => {
   const receipt = { protocol: "teaching-blind-solve-1", identity: { activityId: uuid, teachingRevisionId: uuid2,
-    blockId: uuid, contentVersion: 1, sourceVersions: { [uuid2]: 2 }, generatorModelIdentity: { providerId: "g", modelName: "g", family: "a" } },
+    blockId: uuid, answerBlockId: uuid2, questionText: "2+2", keyText: "4", contentVersion: 1, sourceVersions: { [uuid2]: 2 }, generatorModelIdentity: { providerId: "g", modelName: "g", family: "a" } },
     operationId: "teaching-solve:job:block", modelSnapshot: { id: "s", providerId: "s", modelName: "s", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
     family: "b", decision: "match", solverAnswer: "4", reasonCodes: ["pinned_key_match"], costLedgerRef: "ledger" };
   expect(teachingBlindSolveReceiptSchema.safeParse(receipt).success).toBe(true);
-  for (const patch of [{ family: "A" }, { costLedgerRef: null }, { modelSnapshot: null }, { solverAnswer: null }, { unexpected: true }]) {
+  for (const patch of [{ family: "A" }, { costLedgerRef: null }, { modelSnapshot: null }, { solverAnswer: null }, { identity: { ...receipt.identity, answerBlockId: undefined } }, { identity: { ...receipt.identity, keyText: undefined } }, { unexpected: true }]) {
     expect(teachingBlindSolveReceiptSchema.safeParse({ ...receipt, ...patch }).success).toBe(false);
   }
   expect(teachingBlindSolveReceiptSchema.safeParse(undefined).success).toBe(false);

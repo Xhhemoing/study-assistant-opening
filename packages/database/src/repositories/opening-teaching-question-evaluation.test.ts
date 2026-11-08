@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TransactionSql } from "postgres";
-import { evaluateOpeningTeachingKeyAttempt, readOpeningTeachingBlindSolveKeyMetadata } from "./opening-teaching-question-evaluation";
+import { evaluateOpeningTeachingKeyAttempt, readOpeningTeachingBlindSolveKeyMetadata, resolveOpeningTeachingBlindSolveQuestion } from "./opening-teaching-question-evaluation";
 import { teachingQuestionBody, teachingQuestionText } from "./opening-teaching-question";
 
 const exposure = vi.hoisted(() => ({ reveal: vi.fn(), insert: vi.fn(), generate: vi.fn(), release: vi.fn() }));
@@ -49,19 +49,48 @@ afterEach(() => {
 describe("private blind-solve key metadata", () => {
   it("requires a matched receipt bound to the current revision/source/item identity and reads only", async () => {
     const identity = { activityId: "11111111-1111-4111-8111-111111111111", teachingRevisionId: "22222222-2222-4222-8222-222222222222",
-      blockId: "33333333-3333-4333-8333-333333333333", contentVersion: 1, sourceVersions: {},
+      blockId: "33333333-3333-4333-8333-333333333333", answerBlockId: "44444444-4444-4444-8444-444444444444", questionText: "2+2", keyText: "4", contentVersion: 1, sourceVersions: {},
       generatorModelIdentity: { providerId: "g", modelName: "g", family: "a" } };
     const receipt = { protocol: "teaching-blind-solve-1", identity, operationId: "solve:job:block",
       modelSnapshot: { id: "s", providerId: "s", modelName: "s", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
       family: "b", decision: "match", solverAnswer: "4", reasonCodes: ["pinned_key_match"], costLedgerRef: "ledger" };
-    const query = vi.fn(async (..._args: unknown[]): Promise<Array<{ receipt: unknown }>> => [{ receipt }]);
+    const blocks = [block({ text: "2+2", interaction: numeric }, "prompt", identity.blockId), block({ text: "", markdown: "4" }, "answer_key", identity.answerBlockId)];
+    const block_order = [{ blockId: identity.blockId, position: 0, role: "prompt", blockType: "prompt" },
+      { blockId: identity.answerBlockId, position: 1, role: "answer_key", blockType: "answer_key" }];
+    const row = { receipt, blocks, block_order, source_refs: [] };
+    const query = vi.fn(async (..._args: unknown[]): Promise<Record<string, unknown>[]> => [row]);
     const tx = Object.assign(query, { json: (value: unknown) => value }) as unknown as TransactionSql;
     expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toMatchObject({ eligibility: "matched_current", receipt });
     expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, contentVersion: 2 })).toEqual({ eligibility: "unknown", receipt: null });
     expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, itemVersionId: identity.blockId })).toEqual({ eligibility: "unknown", receipt: null });
+    for (const mismatch of [{ ...row, blocks: [blocks[0], { ...blocks[1], type: "text" }] },
+      { ...row, blocks: [blocks[0], block({ answer: "5" }, "answer_key", identity.answerBlockId)] },
+      { ...row, block_order: [block_order[0], { ...block_order[1], blockId: identity.blockId }] },
+      { ...row, receipt: { ...receipt, identity: { ...identity, answerBlockId: undefined } } }]) {
+      query.mockResolvedValue([mismatch]);
+      expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toEqual({ eligibility: "unknown", receipt: null });
+    }
     query.mockResolvedValue([{ receipt: undefined }]);
     expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toEqual({ eligibility: "unknown", receipt: null });
     expect(JSON.stringify(query.mock.calls)).not.toMatch(/INSERT|UPDATE|DELETE/);
+  });
+});
+
+describe("blind solver canonical saved pair", () => {
+  const order = [{ blockId: "q", position: 0, role: "prompt" as const, blockType: "prompt" },
+    { blockId: "a", position: 1, role: "answer_key" as const, blockType: "answer_key" }];
+  it("uses the first NONEMPTY key field including markdown and preserves numeric units", () => {
+    const result = resolveOpeningTeachingBlindSolveQuestion([block({ text: "2+2", interaction: { kind: "numeric", unit: "m" } }),
+      block({ text: "", markdown: "4", answer: "wrong" }, "solution", "a")], order, "q");
+    expect(result).toMatchObject({ reliable: true, answerBlockId: "a", questionText: "2+2\n单位：m", keyText: "4" });
+  });
+  it.each([
+    [block({ text: "2+2", interaction: numeric }), block({ answer: "4" }, "text", "a")],
+    [block({ text: "2\times2", interaction: numeric }), key("4")],
+    [block({ question: "2+2", interaction: numeric }), key("4")],
+    [block({ text: "2+2", interaction: numeric }), block({ answer: "4\times1" }, "answer_key", "a")],
+  ])("does not authorize unreliable prompt/key rendering or a non-key block", (prompt, answer) => {
+    expect(resolveOpeningTeachingBlindSolveQuestion([prompt, answer], order, "q").reliable).toBe(false);
   });
 });
 

@@ -1,5 +1,6 @@
+import { isDeepStrictEqual } from "node:util";
 import { repairDecodedLatexInJson, teachingBlindSolveMatchesCurrent } from "@aistudy/ai";
-import type { Scope } from "@aistudy/contracts";
+import type { Scope, TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionInteractionSchema, teachingBlindSolveReceiptSchema, type TeachingBlindSolveIdentity } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
@@ -7,9 +8,25 @@ import { teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQue
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
+/** Same pinned pair/text rules as attempt issuance; exact evaluation additionally needs reliable rendered text. */
+export function resolveOpeningTeachingBlindSolveQuestion(blocks: Block[], blockOrder: TeachingBlockRef[], blockId: string) {
+  const ordered = [...blockOrder].sort((a, b) => a.position - b.position);
+  const index = ordered.findIndex(ref => ref.blockId === blockId && ref.role !== "answer_key"
+    && (ref.role === "prompt" || ["prompt", "question"].includes(ref.blockType)));
+  const prompt = blocks.find(block => block.id === blockId && ["prompt", "question"].includes(block.type));
+  const following = ordered[index + 1];
+  const key = index >= 0 && following && (following.role === "answer_key" || ["answer_key", "solution"].includes(following.blockType))
+    ? blocks.find(block => block.id === following.blockId && ["answer_key", "solution"].includes(block.type)) : undefined;
+  const interaction = teachingQuestionInteractionSchema.safeParse(prompt?.content.interaction).data;
+  const reliable = index >= 0 && prompt && key && interaction && typeof prompt.content.text === "string" && !!prompt.content.text.trim()
+    && repairDecodedLatexInJson(prompt.content).repairs === 0 && repairDecodedLatexInJson(key.content).repairs === 0;
+  return { answerBlockId: key?.id ?? null, questionText: teachingQuestionText(prompt?.content), keyText: teachingQuestionText(key?.content),
+    body: typeof prompt?.content.text === "string" ? prompt.content.text : "", interaction, reliable: !!reliable };
+}
+
 /** Read-only key metadata for a future non-deterministic evaluator. Never a learner verdict. */
 export async function readOpeningTeachingBlindSolveKeyMetadata(tx: TransactionSql, scope: Scope, identity: TeachingBlindSolveIdentity) {
-  const rows = await tx`SELECT j.result->'teachingBlindSolveReceipts'->${identity.blockId} AS receipt
+  const rows = await tx`SELECT j.result->'teachingBlindSolveReceipts'->${identity.blockId} AS receipt,r.blocks,s.block_order,s.source_refs
     FROM opening_jobs j
     JOIN opening_teaching_activity_specs s ON s.workspace_id=j.workspace_id AND s.owner_user_id=j.owner_user_id
       AND s.activity_id::text=j.payload->>'activityId'
@@ -25,7 +42,18 @@ export async function readOpeningTeachingBlindSolveKeyMetadata(tx: TransactionSq
     ORDER BY j.created_at DESC`;
   for (const row of rows) {
     const receipt = teachingBlindSolveReceiptSchema.safeParse(row.receipt);
-    if (receipt.success && teachingBlindSolveMatchesCurrent(receipt.data, identity)) {
+    if (!receipt.success || !teachingBlindSolveMatchesCurrent(receipt.data, identity)
+      || !Array.isArray(row.blocks) || !Array.isArray(row.block_order) || !Array.isArray(row.source_refs)) continue;
+    const pinned = resolveOpeningTeachingBlindSolveQuestion(row.blocks as Block[], row.block_order as TeachingBlockRef[], identity.blockId);
+    const sourceVersions: Record<string, number> = {};
+    let versionsKnown = true;
+    for (const ref of row.source_refs as Array<{ sourceId: string; version?: unknown }>) {
+      const version = ref.version == null ? NaN : Number(ref.version);
+      if (!Number.isSafeInteger(version) || version < 0 || (ref.sourceId in sourceVersions && sourceVersions[ref.sourceId] !== version)) versionsKnown = false;
+      else sourceVersions[ref.sourceId] = version;
+    }
+    if (pinned.reliable && pinned.answerBlockId === identity.answerBlockId && pinned.questionText === identity.questionText
+      && pinned.keyText === identity.keyText && versionsKnown && isDeepStrictEqual(sourceVersions, identity.sourceVersions)) {
       return { eligibility: "matched_current" as const, receipt: receipt.data };
     }
   }
