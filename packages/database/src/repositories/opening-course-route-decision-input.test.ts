@@ -26,7 +26,7 @@ describe("course route repository decision qualification", () => {
       .toEqual({ activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null });
   });
 
-  it.each([1, 2])("最新受助判对、之前%d次独立判对：规范输入不注入阶段，路线覆盖单独记录", priorChecks => {
+  it.each([0, 1, 2])("最新受助判对、之前%d次独立判对：共享策略一致且不注入阶段或路线覆盖", priorChecks => {
     const previous = Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, { attemptedAt: `2026-10-${24 + i}T00:00:00Z` }));
     for (const assistance of ["hinted", "revealed"] as const) {
       const current = row("helped", { assistance, independentAttempt: "no" });
@@ -36,12 +36,12 @@ describe("course route repository decision qualification", () => {
       expect(input).not.toHaveProperty("phaseSource");
       expect(input.observations.map(observation => observation.id)).toEqual(["helped", ...previous.map(observation => observation.id).reverse()]);
       // agenda/span see exactly this canonical result for the same facts.
-      const canonical = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null };
+      const canonical = { activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null };
       expect(nextLearningStep(input)).toEqual(canonical);
       const step = courseRouteTeachingStep(input);
       expect(step.canonical.decision).toEqual(canonical);
-      expect(step.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null });
-      expect(step.override).toEqual({ rule: "route_assisted_correction", observationId: "helped", from: canonical, to: step.decision });
+      expect(step.decision).toEqual(canonical);
+      expect(step.override).toBeNull();
       expect(step.decision.reasonCode).not.toMatch(/consolidate/);
       const due = courseRouteTeachingStep(courseRouteDecisionInput(requirement, [current, ...previous], { dueRetest: true }));
       expect(due.decision).toMatchObject({ activityKind: "transfer_check", reasonCode: "due_retest" });
@@ -53,7 +53,7 @@ describe("course route repository decision qualification", () => {
     const rows = [row("old", { attemptedAt: "2026-10-25T00:00:00Z", assistance: "hinted", independentAttempt: "no" }),
       row("new", { assistance: "revealed", independentAttempt: "no" })];
     const step = courseRouteTeachingStep(courseRouteDecisionInput(requirement, rows));
-    expect(step.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null });
+    expect(step.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
     expect(step.override).toBeNull();
     expect(step.decision).toEqual(nextLearningStep(buildDecisionInput({ observations: rows, wantsFullExplanation: false })));
   });

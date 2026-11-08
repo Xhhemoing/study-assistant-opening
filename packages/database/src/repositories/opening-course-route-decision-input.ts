@@ -24,7 +24,7 @@ export function courseRouteDecisionInput(requirement: CourseRequirement, observa
   return buildDecisionInput({ observations: matching, wantsFullExplanation: false, ...(options.dueRetest ? { dueRetest: true } : {}) });
 }
 
-/** Route-only reason; deliberately not a shared NextStepReasonCode. */
+/** Historical route-only reason, retained for interpreting stored overrides. */
 export const COURSE_ROUTE_ASSISTED_CORRECTION = "route_assisted_correction";
 export type CourseRouteTeachingOverride = {
   rule: typeof COURSE_ROUTE_ASSISTED_CORRECTION;
@@ -35,27 +35,16 @@ export type CourseRouteTeachingOverride = {
 export type CourseRouteTeachingStep = {
   /** Exactly what the shared policy returns for the canonical input. */
   canonical: ReturnType<typeof captureNextLearningStep>;
-  /** The teaching step the route uses: canonical, or the explicit override below. */
+  /** New route decisions use the shared policy without a route-only override. */
   decision: { activityKind: NextLearningStep["activityKind"]; reasonCode: string; focusObservationId: string | null };
   override: CourseRouteTeachingOverride | null;
 };
 
-/** Course routes keep their accepted assisted-correction behaviour as an explicit,
- * route-level override instead of borrowing the learner's "consolidate" request.
- * It applies only when the shared policy falls through to diagnose/needs_check
- * while the latest usable, requirement-qualified observation is a verified
- * correct answer reached with a hint or revealed solution and no retest is due.
- * Agenda/span keep the canonical result; the receipt records both.
+/** Assisted success is owned by the shared policy. Historical overrides remain
+ * readable in stored receipts; selecting a new step never recreates them.
  */
 export function courseRouteTeachingStep(input: NextLearningStepInput): CourseRouteTeachingStep {
   const canonical = captureNextLearningStep(input);
   const { activityKind, reasonCode, focusObservationId } = canonical.decision;
-  const latest = input.observations.find(row => row.usableForCurrentVersion === "yes");
-  if (input.dueRetest || input.learningPhase || input.wantsFullExplanation || !latest
-    || activityKind !== "diagnose" || reasonCode !== "needs_check"
-    || latest.verifiedCorrect !== "yes" || (latest.assistance !== "hinted" && latest.assistance !== "revealed")) {
-    return { canonical, decision: { activityKind, reasonCode, focusObservationId }, override: null };
-  }
-  const to = { activityKind: "reduced_help_practice", reasonCode: COURSE_ROUTE_ASSISTED_CORRECTION, focusObservationId: null } as const;
-  return { canonical, decision: to, override: { rule: COURSE_ROUTE_ASSISTED_CORRECTION, observationId: latest.id, from: { activityKind, reasonCode, focusObservationId }, to } };
+  return { canonical, decision: { activityKind, reasonCode, focusObservationId }, override: null };
 }

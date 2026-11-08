@@ -93,6 +93,22 @@ describe("system recommendation canonical evidence input", () => {
       .toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "newer" });
   });
 
+  it.each([0, 1, 2])("explains the latest assisted success after %i independent successes using the shared reason", async priorChecks => {
+    for (const assistance of ["hinted", "revealed"] as const) {
+      const rows = [row("helped", 301), ...Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, 300 - i))];
+      const contexts = Object.fromEntries(rows.map((r, i) => [r.id, input(301 - i)]));
+      contexts.helped = input(301, { observation: { ...qualifiedInput.observation, requirementKey: null, submittedAt: 301, assistance },
+        context: { ...qualifiedInput.context, helpHistory: { complete: true, exposures: [
+          { attemptId: "attempt-2", problemId: "problem-1", delivered: true, deliveredAt: 250, level: assistance },
+        ] } } });
+      const out = await read(rows, contexts);
+      expect(out.data[0]?.step).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
+      expect(out.data[0]?.summary).toContain("最近一次在获得帮助后答对，接下来减少帮助练习");
+      contexts.helped.context = { ...contexts.helped.context, version: { applicability: "unavailable" } };
+      expect((await read(rows, contexts)).data[0]?.step).not.toMatchObject({ reasonCode: "assisted_success" });
+    }
+  });
+
   it("leaves unqualified legacy identity unknown and does not invent a usable observation", async () => {
     const out = await read([row("legacy", 300)], { legacy: { observation: { courseId: learningObservation.courseId,
       assistance: "independent", outcome: "correct", verdictSource: "reference_checked" }, context: {} } });
