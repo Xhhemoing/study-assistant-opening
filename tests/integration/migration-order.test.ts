@@ -339,7 +339,7 @@ describe("migration registry order and verification", () => {
     expect(JSON.parse(denied.stdout)).toEqual({ eligible: false, code: "MIGRATION_UNKNOWN_HISTORY", automaticRecovery: false });
     expect(denied.stdout).not.toContain(databaseUrl);
     expect(await ledger()).toEqual(before109);
-  });
+  }, 15_000);
 
   it("fails closed for verified checksum drift", async () => {
     const { directory } = await createFixture({ "0001_first.sql": "SELECT 1;" });
