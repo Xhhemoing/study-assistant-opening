@@ -12,7 +12,11 @@ vi.mock("./opening-study-exposure", () => ({
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const attempt = { id: "attempt", course_id: "course", problem_id: "problem", item_version_id: "item", create_intent: { teachingBlock: {} } };
-const spec = { kind: "teaching_question", specVersion: "teaching-question-v1", blockId: "q", answerBlockId: "a", revisionId: "r" };
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const spec = { kind: "teaching_question", specVersion: "teaching-question-v1", blockId: id(1), answerBlockId: id(2), revisionId: id(3),
+  activityId: id(4), teachingUnitId: id(5), documentId: id(6), contentVersion: 1, revisionNumber: 1 };
+const order = [{ blockId: id(1), position: 0, role: "prompt", blockType: "prompt" },
+  { blockId: id(2), position: 1, role: "answer_key", blockType: "answer_key" }];
 const numeric = { kind: "numeric" };
 const choice = { kind: "choice", options: [{ id: "A", label: "1" }, { id: "B", label: "2" }] };
 const block = (content: unknown, type = "prompt", id = "q") => ({ id, type, content });
@@ -24,15 +28,29 @@ function watchedKey(answer: string) {
 }
 const numericBlocks = [block({ text: "1+1", interaction: numeric }), key("2")];
 
-type FixtureOptions = { evaluationSpec?: unknown; blocks?: unknown; missingRow?: boolean; priorFeedback?: boolean };
+type FixtureOptions = { evaluationSpec?: unknown; blocks?: unknown; missingRow?: boolean; priorFeedback?: boolean;
+  blockOrder?: unknown; sourceVersion?: number; missingIdentity?: boolean; priorSpec?: unknown; priorSameBinding?: boolean };
 function setup(options: FixtureOptions = {}) {
+  const savedBlocks = () => {
+    const input = "blocks" in options ? options.blocks : numericBlocks;
+    return Array.isArray(input) ? input.map(entry => Object.defineProperties({}, {
+      ...Object.getOwnPropertyDescriptors(entry),
+      id: { value: entry.id === "q" ? id(1) : entry.id === "a" ? id(2) : entry.id, enumerable: true },
+    })) : input;
+  };
   const tx = vi.fn((parts: TemplateStringsArray, ..._values: unknown[]) => {
     const sql = parts.join("?");
+    if (sql === "" || sql.startsWith("FOR SHARE")) return "lock clause";
     if (sql.includes("SELECT v.evaluation_spec,r.blocks")) return Promise.resolve(options.missingRow ? [] : [{
       evaluation_spec: "evaluationSpec" in options ? options.evaluationSpec : spec,
-      blocks: "blocks" in options ? options.blocks : numericBlocks,
+      blocks: savedBlocks(),
     }]);
-    if (sql.includes("SELECT o.id")) return Promise.resolve(options.priorFeedback ? [{ id: "previous" }] : []);
+    if (sql.includes("SELECT r.blocks,s.block_order,s.source_refs")) return Promise.resolve(options.missingIdentity ? [] : [{
+      blocks: savedBlocks(), block_order: options.blockOrder ?? order, source_refs: [{ sourceId: id(7), version: 1 }],
+    }]);
+    if (sql.includes("SELECT s.version,s.mime")) return Promise.resolve([{ version: options.sourceVersion ?? 1, mime: "text/plain", has_figures: false }]);
+    if (sql.includes("SELECT o.id")) return Promise.resolve(options.priorFeedback ? [{ id: "previous", evaluation_spec: options.priorSpec ?? spec,
+      activity_id: options.priorSameBinding ? spec.activityId : id(20), teaching_block_id: options.priorSameBinding ? spec.blockId : id(21) }] : []);
     if (sql.startsWith("(v.teaching_revision_id IS NULL")) return "identity predicate";
     throw new Error(`Unexpected SQL during grading: ${sql}`);
   });
@@ -106,7 +124,8 @@ describe("teaching key evaluation", () => {
       reasonCodes: [decision === "correct" ? "teaching_key_match" : "teaching_key_mismatch"], priorFeedback,
     });
     const priorQuery = f.tx.mock.calls.find(([parts]) => parts.join(" ").includes("SELECT o.id"));
-    expect(priorQuery?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, attempt.course_id, spec.revisionId, spec.blockId, attempt.id]);
+    expect(priorQuery?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, attempt.course_id,
+      spec.activityId, spec.blockId, "1+1", attempt.id]);
   });
 
   it.each([["B. 2", "correct"], ["A. 1", "incorrect"]] as const)(
@@ -218,6 +237,22 @@ describe("teaching key evaluation", () => {
   it("accepts question and solution blocks from the pinned revision", async () => {
     const f = setup({ blocks: [block({ text: "1+1", interaction: numeric }, "question"), block({ solution: "2" }, "solution", "a")] });
     expect(await f.run("2")).toMatchObject({ decision: "correct" });
+  });
+});
+
+describe("private identity consumer", () => {
+  it("keeps an unrelated unresolved history from invalidating the pinned key without claiming unseen", async () => {
+    expect(await setup({ priorFeedback: true, priorSpec: { kind: "unresolved" } }).run("2"))
+      .toMatchObject({ decision: "correct", priorFeedback: true });
+    expect(await setup({ priorFeedback: true, priorSpec: { kind: "unresolved" } }).run("3"))
+      .toMatchObject({ decision: "incorrect", priorFeedback: true });
+  });
+  it.each([
+    { missingIdentity: true }, { sourceVersion: 2 }, { blockOrder: [...order].reverse().map((ref, position) => ({ ...ref, position })) },
+    { blockOrder: [order[0], { ...order[1], role: "teach" }] },
+    { priorFeedback: true, priorSpec: { kind: "unresolved" }, priorSameBinding: true },
+  ])("withholds evaluation for unavailable/current-version/wrong-key/unknown-history bindings %j", async options => {
+    expect(await setup(options).run("2")).toBeNull();
   });
 });
 

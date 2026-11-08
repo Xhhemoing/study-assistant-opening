@@ -129,6 +129,24 @@ it("reads evaluator-era verification after two different first-seen arithmetic q
   expect(await createCardRepository(f.sql).listCards(f.scope)).toEqual([]);
 });
 
+it("does not double-count independent evidence when identical published questions receive different UUIDs", async () => {
+  const x = await seed([numeric, numeric]);
+  const first = await x.submit(0, "7/12"), renamed = await x.submit(1, "7/12");
+  expect(renamed.attempt.problemId).not.toBe(first.attempt.problemId);
+  expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", allowsIndependent: true });
+  expect(renamed.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted", allowsIndependent: false });
+  expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+
+it("keeps unrelated unknown history from blocking a different question's incorrect verdict and error card", async () => {
+  const x = await seed(), first = await x.submit(0, "7/12");
+  await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=${f.sql.json({ kind: "unresolved" })}
+    WHERE id=${first.attempt.itemVersionId!}`;
+  const wrong = await x.submit(1, "A. 1/2");
+  expect(wrong.observation).toMatchObject({ verdictSource: "deterministic", outcome: "incorrect" });
+  expect((await createCardRepository(f.sql).listCards(f.scope)).some(card => card.originObservationRootId === wrong.observation.id)).toBe(true);
+});
+
 it("records a controlled incorrect answer and enters the existing route correction flow", async () => {
   const x = await seed(), result = await x.submit(0, "1/2");
   expect(result.observation).toMatchObject({ outcome: "incorrect", verdictSource: "deterministic",
