@@ -47,7 +47,8 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it("captures standard decisions before execution and replays the original operation without rewriting history", async () => {
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+  "reads and replays saved %s without selecting a new decision or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
   const state = await import("../../packages/database/src/repositories/opening-learner-state-read");
@@ -56,20 +57,36 @@ it("captures standard decisions before execution and replays the original operat
   const session = await f.repo.execute(fixture.scope, input);
   const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+  // The bridge always writes v2. Seed an archived receipt (including a v3-only
+  // reason) separately, so replay proves reader compatibility, not v3 execution.
+  const written = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
+  expect(written[0]!.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
+  const savedDecision = policyVersion.startsWith("next-learning-step-3/")
+    ? { ...input.decision, activityKind: "reduced_help_practice", reasonCode: "assisted_success" } : input.decision;
+  const captured = { ...JSON.parse(written[0]!.intentVersion), ruleDecision: savedDecision };
+  await fixture.sql`UPDATE opening_learning_decisions SET receipt=receipt || ${fixture.sql.json({ policyVersion,
+    intentVersion: JSON.stringify(captured), reasonCodes: [savedDecision.reasonCode] })}::jsonb
+    WHERE target_id=${session.activityId} AND workspace_id=${fixture.scope.workspaceId}`;
   const receipts = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
   expect(receipts).toHaveLength(1);
   const receipt = receipts[0]!;
   expect(await decisions.get(fixture.scope, receipt.id)).toEqual(receipt);
   expect(receipt.stateVersion).toBe(before.stateVersion);
-  expect(receipt.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
-  expect(JSON.parse(receipt.intentVersion)).toMatchObject({ decisionInput: originalInput, ruleDecision: input.decision,
+  expect(receipt.policyVersion).toBe(policyVersion);
+  expect(JSON.parse(receipt.intentVersion)).toMatchObject({ decisionInput: originalInput, ruleDecision: savedDecision,
     execution: { kind: "create", moveId: "self_study-reserved", problemId: "span-reserved-fraction" } });
   expect(receipt.parentDecisionId).toBeTruthy();
   await createOpeningSpanSessionRepository(fixture.sql).save(fixture.scope, session.activityId,
     { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" });
   await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
     { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
-  expect((await f.repo.execute(fixture.scope, input)).activityId).toBe(session.activityId);
+  const replay = (await f.repo.read(fixture.scope, { ...f.request, operationId: input.operationId }))!;
+  expect(replay.historicalDecision).toEqual(savedDecision);
+  expect(replay.decisionInput).toEqual(originalInput);
+  const changedInput = { ...originalInput, wantsFullExplanation: true };
+  const changedDecision = nextLearningStep(changedInput);
+  expect(changedDecision).not.toEqual(savedDecision);
+  expect((await f.repo.execute(fixture.scope, { ...input, context: { ...replay, decisionInput: changedInput }, decision: changedDecision })).activityId).toBe(session.activityId);
   expect(await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId })).toEqual(receipts);
 });
 it("keeps source version zero and does not invent decisions for a legacy resume", async () => {
