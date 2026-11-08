@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { readStoredTeachingOutline } from "./teaching-outline";
 import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
-import { type Scope, type ProviderOutput, type OpeningModelSnapshot } from "@aistudy/contracts";
+import { type Scope, type ProviderOutput, type OpeningModelSnapshot, type ActivitySpecPublishInput } from "@aistudy/contracts";
 import {
+  createLibraryRepository,
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
   createOpeningCourseReadySourcesRepository,
@@ -49,14 +51,28 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
+  const library = createLibraryRepository(sql);
   const purposes = createOpeningCourseReadySourcesRepository(sql);
   type PurposePin = Awaited<ReturnType<typeof purposes.readSourcePurposePin>>;
   type PinnedGeneration = { pin: PurposePin; assertRetrievalCurrent?: () => Promise<void> };
   const generationPins = new WeakMap<object, PinnedGeneration>();
-  const publicationPins = new WeakMap<object, PinnedGeneration>();
+  type StagedPublication = {
+    pinned: PinnedGeneration;
+    compiled: Parameters<typeof teachingContent.publishCompiledActivity>[2];
+    input: ActivitySpecPublishInput;
+  };
+  const publicationPins = new WeakMap<object, StagedPublication>();
   // Handler metadata promotion shallow-copies input but retains its blockOrder.
   // Bind that server-created graph as well; never key authority by an activity id.
-  const publicationGraphPins = new WeakMap<object, PinnedGeneration>();
+  const publicationGraphPins = new WeakMap<object, StagedPublication>();
+  const stagedPublication = (input: ActivitySpecPublishInput) => {
+    const staged = publicationPins.get(input) ?? publicationGraphPins.get(input.blockOrder);
+    if (!staged || !isDeepStrictEqual({ ...input, expectedVersion: staged.input.expectedVersion,
+      verificationStatus: staged.input.verificationStatus }, staged.input)) {
+      throw Object.assign(new Error("compiler publication graph missing or changed"), { code: "CONFLICT" });
+    }
+    return staged;
+  };
   const assertGenerationCurrent = async (scope: Scope, pinned: PinnedGeneration) => {
     await purposes.assertSourcePurposePin(scope, pinned.pin);
     await pinned.assertRetrievalCurrent?.();
@@ -188,10 +204,9 @@ export function createCompileTeachingUnitWorkerDeps(
       ? Promise.resolve()
       : teachingContent.validateActivitySourceRefs(scope, input),
     publishActivitySpec: (scope, input) => {
-      const pinned = publicationPins.get(input) ?? publicationGraphPins.get(input.blockOrder);
-      if (!pinned) throw Object.assign(new Error("compiler publication purpose pin missing"), { code: "CONFLICT" });
-      return teachingContent.publishActivitySpec(scope, input, undefined,
-        tx => purposes.assertSourcePurposePin(scope, pinned.pin, tx));
+      const staged = stagedPublication(input);
+      return teachingContent.publishCompiledActivity(scope, input, staged.compiled,
+        tx => purposes.assertSourcePurposePin(scope, staged.pinned.pin, tx));
     },
     loadReplayedResult: async (scope, resultRef) => {
       const match = /^teaching_activity:(.+)$/.exec(resultRef);
@@ -207,7 +222,7 @@ export function createCompileTeachingUnitWorkerDeps(
     ensureTeachingUnitId: async (scope, payload) => {
       if (payload.teachingUnitId) return payload.teachingUnitId;
       // A library document needs at least one block; the compiled blocks
-      // replace this placeholder as the next revision before publish.
+      // replace this placeholder atomically with publication as the next revision.
       // The unit is a learner-visible library document (search, notes, citations),
       // so title it after what the learner asked to study, never an internal label.
       const activity = await teachingActivities.get(scope, payload.activityId);
@@ -221,8 +236,8 @@ export function createCompileTeachingUnitWorkerDeps(
     buildPublishInput: teachingCompilerOn
       ? async (scope, payload, providerOutput, providerInput) => {
           const pinned = providerInput ? generationPins.get(providerInput) : undefined;
-          if (providerInput && !pinned) throw Object.assign(new Error("original compiler purpose pin missing"), { code: "CONFLICT" });
-          if (pinned) await assertGenerationCurrent(scope, pinned);
+          if (!pinned) throw Object.assign(new Error("original compiler purpose pin missing"), { code: "CONFLICT" });
+          await assertGenerationCurrent(scope, pinned);
           const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
           const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
             const rows = await loadChunks(ownedScope, sourceIds);
@@ -258,14 +273,24 @@ export function createCompileTeachingUnitWorkerDeps(
           // Fail before saving model bodies, even when post-publish validation is off.
           await teachingContent.validateActivitySourceRefs(scope, publishInput);
           if (pinned) await assertGenerationCurrent(scope, pinned);
-          const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
-          // Publication revalidates atomically; preflight cannot authorize a later write.
-          const result = { ...publishInput, revisionNumber: written.revisionNumber };
+          const unit = await teachingContent.getUnit(scope, payload.teachingUnitId!);
+          if (!unit) throw new Error("compiled teaching unit missing");
+          const document = await library.getDocument({ workspaceId: scope.workspaceId, documentId: unit.documentId });
+          // Only predict the number here. Final publication proves the original CAS;
+          // no compiled body reaches ordinary library readers before that commit.
+          const result: ActivitySpecPublishInput = JSON.parse(JSON.stringify({
+            ...publishInput, revisionNumber: document.currentRevisionNumber + 1,
+          }));
+          const staged: StagedPublication = { pinned, input: structuredClone(result), compiled: {
+            // Match the library JSON persistence representation (optional undefined
+            // fields are absent), while retaining every compiled body and answer.
+            blocks: JSON.parse(JSON.stringify((compiledBlocks as Parameters<typeof teachingContent.writeUnitBlocks>[2])
+              .map(({ id, type, content }) => ({ id, type, content })))),
+            expectedDocumentRevision: document.currentRevisionNumber, revisionId: randomUUID(),
+          } };
           preflightedInputs.add(result);
-          if (pinned) {
-            publicationPins.set(result, pinned);
-            publicationGraphPins.set(result.blockOrder, pinned);
-          }
+          publicationPins.set(result, staged);
+          publicationGraphPins.set(result.blockOrder, staged);
           return result;
         }
       : undefined,
@@ -281,9 +306,8 @@ export function createCompileTeachingUnitWorkerDeps(
     blindSolveBeforePublish: async (scope, { job, publishInput, providerOutput, parentBudget, beforeSend }) => {
       // Legacy/unconfigured runs remain unknown without a provider or extra persistence I/O.
       if (!teachingBlindSolveConfig()) return [];
-      const unit = await teachingContent.getUnit(scope, publishInput.teachingUnitId);
-      if (!unit) throw new Error("blind solve teaching unit missing");
-      const revision = await teachingContent.readRevision(scope, unit.documentId, publishInput.revisionNumber);
+      const staged = stagedPublication(publishInput);
+      const revision = { id: staged.compiled.revisionId, blocks: staged.compiled.blocks };
       const snapshot = providerOutput ? generatorSnapshots.get(providerOutput) : undefined;
       const configured = teachingBlindSolveConfig();
       const config = configured && snapshot?.providerId === configured.generator.providerId
@@ -297,6 +321,7 @@ export function createCompileTeachingUnitWorkerDeps(
       }
       const assertCurrent = async () => {
         await beforeSend();
+        await assertGenerationCurrent(scope, staged.pinned);
         await assertOpeningCourseRouteReady(sql, scope, publishInput.activityId);
         for (const [sourceId, version] of Object.entries(sourceVersions)) {
           const rows = await sql`SELECT id FROM opening_sources WHERE id=${sourceId} AND workspace_id=${scope.workspaceId}

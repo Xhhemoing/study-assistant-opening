@@ -278,7 +278,18 @@ it("uses the actual compiler/retriever caller and publishes with the original se
   ] }), citedChunkIds: [], requestId: "fake-provider-fixture", candidates: [], inputTokens: 1, outputTokens: 1 };
   const publish = await deps.buildPublishInput!(f.scope, { ...payload, teachingUnitId: unit }, output, providerInput);
   expect(JSON.stringify(publish)).not.toContain("purposeRevision");
+  const teachingUnit = await createOpeningTeachingContentRepository(f.sql).getUnit(f.scope, unit);
+  const [before] = await f.sql`SELECT current_revision_number FROM library_documents WHERE id=${teachingUnit!.documentId}`;
+  expect(Number(before!.current_revision_number)).toBe(1);
+  expect(await f.sql`SELECT id FROM library_blocks WHERE document_id=${teachingUnit!.documentId} AND content->>'text'='draft'`).toHaveLength(1);
+  expect(await f.sql`SELECT id FROM library_revisions WHERE document_id=${teachingUnit!.documentId}`).toHaveLength(1);
   await deps.publishActivitySpec(f.scope, publish);
+  const [revision] = await f.sql`SELECT id FROM library_revisions WHERE document_id=${teachingUnit!.documentId} AND revision_number=2`;
+  expect(revision!.id).toBeTruthy();
+  const graph = JSON.stringify(await f.sql`SELECT * FROM library_revisions WHERE document_id=${teachingUnit!.documentId} ORDER BY revision_number`);
+  await deps.publishActivitySpec(f.scope, publish);
+  await deps.publishActivitySpec(f.scope, { ...publish, expectedVersion: 1, verificationStatus: "structure_ok" });
+  expect(JSON.stringify(await f.sql`SELECT * FROM library_revisions WHERE document_id=${teachingUnit!.documentId} ORDER BY revision_number`)).toBe(graph);
   expect(await f.sql`SELECT id FROM opening_teaching_activity_specs WHERE activity_id=${x.activityId}`).toHaveLength(1);
   await f.sql`UPDATE course_asset_memberships SET updated_at=updated_at+interval '1 microsecond'
     WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${x.sourceId}`;
@@ -341,6 +352,8 @@ it("runs fake-provider generation through the production worker, real budget led
     const budget = await f.sql`SELECT state,result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY request_id`;
     expect(budget).toHaveLength(2); expect(budget.every(row => row.state === "completed")).toBe(true);
     expect(await handler(job, payload)).toMatchObject({ replayed: true }); expect(requests).toHaveLength(2);
+    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(2);
+    expect(JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`)).toBe(revisions);
     expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }

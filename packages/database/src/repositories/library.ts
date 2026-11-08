@@ -6,7 +6,7 @@ import {
   LifecycleTransitionError,
   type AssetLifecycle,
 } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { RevisionBlockSnapshot } from "../schema/library";
 import { wrapLikePattern } from "../search-pattern";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
@@ -163,6 +163,9 @@ export type LibraryRepository = {
     blocks: BlockInput[];
     reason?: string;
   }): Promise<DocumentRecord>;
+
+  /** Server-only composition: caller owns the transaction and commit. */
+  updateDocumentInTx(tx: TransactionSql, input: Parameters<LibraryRepository["updateDocument"]>[0], revisionId?: string): Promise<DocumentRecord>;
 
   softDeleteDocument(input: {
     workspaceId: string;
@@ -369,9 +372,9 @@ function mapRevisionRow(row: {
 }
 
 export function createLibraryRepository(sql: SqlClient): LibraryRepository {
-  async function ensureWorkspace(workspaceId: string): Promise<void> {
+  async function ensureWorkspace(workspaceId: string, client: SqlClient = sql): Promise<void> {
     assertUuid(workspaceId, "workspaceId");
-    const rows = await sql`
+    const rows = await client`
       SELECT id FROM workspaces WHERE id = ${workspaceId} LIMIT 1
     `;
     if (!rows.length) {
@@ -441,10 +444,12 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       lifecycle: AssetLifecycle;
       reason: string;
       blocks: RevisionBlockSnapshot[];
+      revisionId?: string;
     },
   ): Promise<void> {
     await tx`
       INSERT INTO library_revisions (
+        id,
         workspace_id,
         document_id,
         revision_number,
@@ -454,6 +459,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         reason,
         blocks
       ) VALUES (
+        COALESCE(${input.revisionId ?? null}::uuid, gen_random_uuid()),
         ${input.workspaceId},
         ${input.documentId},
         ${input.revisionNumber},
@@ -743,10 +749,14 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async updateDocument(input) {
+      return sql.begin(tx => this.updateDocumentInTx(tx, input));
+    },
+
+    async updateDocumentInTx(tx, input, revisionId) {
       if (input.jobScope && input.jobScope.workspaceId !== input.workspaceId) {
         throw new LibraryError("CONFLICT", "job execution workspace differs from document workspace");
       }
-      await ensureWorkspace(input.workspaceId);
+      await ensureWorkspace(input.workspaceId, tx);
       if (!Number.isInteger(input.expectedRevisionNumber) || input.expectedRevisionNumber <= 0) {
         throw new LibraryError(
           "VALIDATION",
@@ -755,8 +765,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       }
       const blocks = normalizeBlocks(input.blocks);
 
-      await sql.begin(async (tx) => {
-        if (input.jobScope) await lockOpeningJobExecution(tx, input.jobScope);
+      if (input.jobScope) await lockOpeningJobExecution(tx, input.jobScope);
         const rows = await tx`
           SELECT *
           FROM library_documents
@@ -808,13 +817,14 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
 
         const nextRevision = currentRevisionNumber + 1;
 
-        await tx`
+        const updated = await tx`
           UPDATE library_documents
           SET title = ${nextTitle},
               lifecycle = ${nextLifecycle},
               current_revision_number = ${nextRevision},
               updated_at = now()
           WHERE id = ${input.documentId} AND workspace_id = ${input.workspaceId}
+          RETURNING *
         `;
 
         await replaceProjectionBlocks(
@@ -832,13 +842,9 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           lifecycle: nextLifecycle,
           reason: input.reason ?? "edit",
           blocks,
+          revisionId,
         });
-      });
-
-      return this.getDocument({
-        workspaceId: input.workspaceId,
-        documentId: input.documentId,
-      });
+        return mapDocRow(updated[0] as Parameters<typeof mapDocRow>[0], blocks);
     },
 
     async softDeleteDocument(input) {
