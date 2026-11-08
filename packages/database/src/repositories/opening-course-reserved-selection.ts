@@ -7,6 +7,7 @@ import { evaluateArithmeticQuestion } from "../../../domain/src/opening/arithmet
 import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import { readCourseQuestionExposure, recordCourseQuestionExposure } from "./opening-course-question-exposure";
 
 type Db = Sql | TransactionSql;
 // Private storage identity, NOT a member of the public questionRef union. No invented library IDs.
@@ -143,7 +144,7 @@ export async function readOpeningReservedSupply(db: Db, scope: Scope, requiremen
 async function eligibleRows(db: Db, scope: Scope, requirement: CourseRequirement, demand: OpeningReservedDemand, reservationActivityId?: string, ports?: OpeningReservedPorts) {
   if (requirement.requirementKey !== "arithmetic" || requirement.verification.kind !== "exact") return { rows: [],
     supply: { status: "missing", available: 0, reason: "本要求的私有生成与身份校验题型尚不支持" } as OpeningReservedSupply };
-  if (!ports) return { rows: [], supply: { status: "unknown", available: 0, reason: "完整曝光历史适配器尚未接入" } as OpeningReservedSupply };
+  const exposure = ports ?? { readExposure: readCourseQuestionExposure };
   if (!await sourcesCurrent(db, scope, requirement)) return { rows: [], supply: { status: "missing", available: 0, reason: "当前要求材料不可用" } as OpeningReservedSupply };
   const candidates = await db`SELECT * FROM opening_course_reserved_questions WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
     AND course_id=${requirement.courseId} AND requirement_id=${requirement.id} AND requirement_revision=${requirement.revision}
@@ -152,7 +153,7 @@ async function eligibleRows(db: Db, scope: Scope, requirement: CourseRequirement
   for (const row of candidates) {
     const trusted = trustedRow(row, requirement);
     if (!trusted) continue;
-    const history = await ports.readExposure(db, scope, { reservedQuestionId: String(row.id), identityRefId: String(row.identity_ref_id),
+    const history = await exposure.readExposure(db, scope, { reservedQuestionId: String(row.id), identityRefId: String(row.identity_ref_id),
       courseId: requirement.courseId, requirementId: requirement.id, requirementRevision: requirement.revision,
       sourceVersions: row.source_versions as Record<string, number>, text: trusted.question.text,
       interaction: trusted.question.interaction, familyId: trusted.exact.familyId });
@@ -226,6 +227,9 @@ export async function issueOpeningReservedQuestion(tx: TransactionSql, scope: Sc
     teachingBlock: { blockId, contentVersion: 1 } });
   await tx`UPDATE opening_course_reserved_questions SET state='issued',issued_item_version_id=${attempt.itemVersionId!},issued_at=clock_timestamp()
     WHERE id=${String(reserved.id)} AND state='reserved'`;
+  await recordCourseQuestionExposure(tx, scope, { surfaceKey: `issued:${reserved.id}`, kind: "presented",
+    text: trusted.question.text, identityRefId: String(reserved.identity_ref_id), itemVersionId: attempt.itemVersionId!,
+    sourceVersions: reserved.source_versions as Record<string, number> });
 }
 
 /** Server grading only. Never return the private row/key via a client-facing mapper. */

@@ -10,16 +10,16 @@ import {
   readOpeningTeachingParentBudget,
   assertOpeningCourseRouteReady,
   readOpeningCourseRouteEvidenceRefs,
-  saveOpeningReservedCandidates,
+  admitOpeningReservedCandidate,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
 } from "@aistudy/database";
 // Repository helper shares the authoritative saved question/key projection (not a new provider channel).
 import { resolveOpeningTeachingBlindSolveQuestion } from "../../../../packages/database/src/repositories/opening-teaching-question-evaluation";
+import { readCourseRequirements } from "../../../../packages/database/src/repositories/opening-course-route-read";
 import { createCompilerProviderInput, parseModelJson, solveTeachingBlind, type TeachingBlindSolveReceipt } from "@aistudy/ai";
-import { z } from "zod";
-import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
+import { admitReservedQuestionOutput, buildReservedQuestionProviderInput, type ReservedQuestionProducerInput } from "../../../../packages/ai/src/opening/reserved-question-producer";
 import { createDbModelGateway, scopeBudget, teachingBlindSolveConfig } from "./model-gateway";
 import { createOpeningMaterialRetriever } from "./material-retrieval";
 import { createSourcePageImages, openingPageStorage } from "./source-page-images";
@@ -55,6 +55,7 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
   const generatorSnapshots = new WeakMap<ProviderOutput, OpeningModelSnapshot>();
+  const reservedContexts = new WeakMap<object, ReservedQuestionProducerInput>();
   const retrieveContext = createOpeningMaterialRetriever(sql, budget);
   const pageImages = shared.pageImages ?? createSourcePageImages(sql, openingPageStorage());
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
@@ -66,6 +67,33 @@ export function createCompileTeachingUnitWorkerDeps(
             onModel: model => { snapshot = model.modelSnapshot; },
             beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } });
           if (snapshot) generatorSnapshots.set(output, snapshot);
+          const pinned = reservedContexts.get(input);
+          if (pinned) {
+            const activityId = options.resultRef.replace(/^teaching_activity:/, "");
+            const assertPrivateCurrent = async () => {
+              const jobId = options.operationId.replace(/^compile-teaching-unit:/, "");
+              const [job] = await sql`SELECT state FROM opening_jobs WHERE id=${jobId} AND workspace_id=${scope.workspaceId}
+                AND owner_user_id=${scope.ownerUserId}`;
+              if (job?.state !== "running") throw new Error("private generation job no longer running");
+              await assertOpeningCourseRouteReady(sql, scope, activityId);
+              await options.beforeSend?.();
+            };
+            await models.call(scope, "teaching.compile", {
+                  budget: scopeBudget(budget, scope), input: buildReservedQuestionProviderInput(pinned),
+                  operationId: `${options.operationId}:reserved`, resultRef: `reserved-generation:${activityId}`,
+                  parentBudget: options.parentBudget,
+                  beforeSend: assertPrivateCurrent,
+                  // Admission precedes settlement. Nothing persists the raw response
+                  // in a job, public config, replay body or library revision.
+                  persistResult: async privateOutput => {
+                    await admitReservedQuestionOutput(pinned, privateOutput.text, async candidate => {
+                      await assertPrivateCurrent();
+                      const { text, interaction, answer, scope: ownedScope, ...context } = candidate;
+                      return admitOpeningReservedCandidate(sql, ownedScope, activityId, context, { text, interaction, answer });
+                    });
+                  },
+            });
+          }
           return output;
         },
         buildProviderInput: async (scope, payload, options) => {
@@ -88,7 +116,17 @@ export function createCompileTeachingUnitWorkerDeps(
             intentKind: activity?.intentKind,
             ...focus,
           })(scope, payload);
-          if (activity?.routeManaged) input.instruction += "\n另在顶层 reservedQuestions 生成至多4道私有保留题，格式 {text,interaction:{kind:'numeric'},answer}。只支持纯算式有理数运算；不支持时返回空数组。不得在 blocks、讲解、例题、提示、标题中重复或引用任何保留题或其答案。保留题不是迁移能力证明，不提供身份或未曝光声明。";
+          if (activity?.routeManaged && activity.courseId) {
+            const route = await assertOpeningCourseRouteReady(sql, scope, payload.activityId);
+            const requirement = route && (await readCourseRequirements(sql, scope, activity.courseId)).find(row => row.id === route.requirementId);
+            const sourceVersions = Object.fromEntries(requirement?.sourceRefs.map(ref => [ref.sourceId, ref.sourceVersion]) ?? []);
+            if (requirement?.requirementKey === "arithmetic" && input.chunks.length && !input.chunks.some(chunk => chunk.imageObjectKey)) reservedContexts.set(input, {
+              scope, courseId: activity.courseId, requirementId: requirement.id,
+              requirementRevision: requirement.revision, sourceVersions,
+              requirementText: "Generate a pure rational arithmetic expression, with all conditions in text and no units or figures.",
+              evidence: { chunks: input.chunks },
+            });
+          }
           return input;
         },
       }
@@ -164,28 +202,17 @@ export function createCompileTeachingUnitWorkerDeps(
             learnerFocus: activity?.learnerFocus,
             writeLibraryBlocks: async (blocks) => { compiledBlocks = blocks; },
           });
-          // Dedicated private slot is consumed before public library serialization.
-          // The model cannot supply identity, trust or exposure receipts.
-          let publicOutput = providerOutput;
-          let reserved: unknown = [];
-          if (activity?.routeManaged && providerOutput) {
-            const raw: unknown = parseModelJson(providerOutput.text);
-            if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid compile output");
-            const { reservedQuestions, ...publicBody } = raw as Record<string, unknown>;
-            reserved = z.array(z.object({text:z.string().trim().min(1).max(400),answer:z.string().trim().min(1).max(1200),
-              interaction:teachingQuestionInteractionSchema}).strict()).max(12).parse(reservedQuestions ?? []);
-            const publicText = JSON.stringify(publicBody);
-            for (const question of reserved as Array<{text:string;answer:string}>) {
-              if (publicText.includes(question.text) || publicText.includes(question.answer))
-                throw new Error("private reserved output overlaps public teaching content");
-            }
-            publicOutput = { ...providerOutput, text: publicText };
+          // Private output has a separate provider call and may never piggyback
+          // on the public compiler response, even if the model ignores instructions.
+          if (providerOutput) {
+            const raw = parseModelJson(providerOutput.text);
+            if (raw && typeof raw === "object" && "reservedQuestions" in raw)
+              throw new Error("private reserved output is forbidden in public compile response");
           }
-          const publishInput = await build(scope, payload, publicOutput);
+          const publishInput = await build(scope, payload, providerOutput);
           if (compiledBlocks == null) throw new Error("compiled blocks were not built");
           // Fail before saving model bodies, even when post-publish validation is off.
           await teachingContent.validateActivitySourceRefs(scope, publishInput);
-          if (activity?.routeManaged) await saveOpeningReservedCandidates(sql, scope, payload.activityId, reserved);
           const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
           // Publication revalidates atomically; preflight cannot authorize a later write.
           const result = { ...publishInput, revisionNumber: written.revisionNumber };
