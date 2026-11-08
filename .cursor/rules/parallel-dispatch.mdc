@@ -9,18 +9,18 @@ alwaysApply: false
 
 ## 会话分工
 
-用户 2026-11-06 起在 Cursor 中按三个会话分工；这是角色映射，不要求唯一集成者运行在 Cursor 中（当前由 Claude 会话承担）：
+以下仅为 Cursor 专属角色映射，合并门禁按 2026-11-08 v2／2A；不要求唯一集成者运行在 Cursor，也不把 Cursor shell 建树流程推广到 T3。
 
-- 规划会话：只读调查、拆卡、核接口，把完整任务卡写进仓库外卡片目录的 `ready/`；不派单、不实现。
-- 派单与审查会话：即下文的“主控”。取卡、建 worktree、派实现者、发起两路审查，合入自己开的 `integration/opening` PR。
-- 集成会话：唯一合入 `feat/opening-release` 的会话（提升 PR 与高风险 PR），独占 STATUS 与共享独占项，随 STATUS 批量同步总计划附录 F。
+- 规划会话：只读调查、拆卡、核接口，把完整任务卡写进仓库外卡片目录的 `ready/`；公共接口起草后交集成者确认，不派单、不实现。
+- 派单与审查会话：即下文的“主控”。取已就绪卡、建 Cursor worktree、派实现者、发起对应风险的独立审查，候选交唯一集成者，不自行合入。
+- 集成会话：唯一合入 `integration/opening` 与 `feat/opening-release`，独占 STATUS 与共享独占项，按实际 PR 事实批量同步总计划附录 F。
 
-合并权按分支分开：`integration/opening` 的 PR 由开它的会话在门禁齐全后合入；`feat/opening-release` 只由集成会话合入。
+开 PR、派单、接管都不产生第二合并权；接管前须核原 owner 停写且明确交回。T3 子树由平台 `isolation: "worktree"` 准备，不让 worker shell 建树；当前 full-access runtime 不扩张 allowlist、Git 或生产权限。
 
 ## 子 Agent 分工
 
 - 实现：主控先建 worktree 与卡片分支（`git worktree add --no-track -b <卡片分支> <路径> <remote>/<base>`），需要本地验证且资源允许时再经 run-heavy 装依赖；然后派发 `aistudy-lane-worker`，附完整任务卡与 worktree 路径，要求每个 Shell 调用以该路径为 working_directory、文件工具只用该路径下的绝对路径。该类型不在可用列表时改派 `generalPurpose`，prompt 第一句要求它先完整阅读主 checkout 中的 `.cursor/agents/aistudy-lane-worker.md`（给出该文件在本机的绝对路径）。不用 `best-of-n-runner`：本机 IDE 中它不提供隔离，会在主 checkout 启动，2026-11-06 的一次派发还把主 checkout 切到了默认分支。
-- 迁移、事务、跨包卡：跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出）。按 2026-10-28 决策表交 Codex CLI 实现（`codex exec -s workspace-write -C <worktree> -m gpt-6.1-terra -c model_reasoning_effort=xhigh -`），由 `aistudy-pr-reviewer` 做异家族审查（GPT 一路照常）；改由 Cursor 子 Agent 承接须用户决定。主控先用 `git worktree add` 建好 worktree 与卡片分支，卡片要求本地验证且资源允许时再经 run-heavy 装依赖；brief 经 stdin 传入完整任务卡和 lane-worker 的写入边界与红线；codex 返回后由主控核对 diff、提交、推送并开 PR（workspace-write 沙箱通常不能写主仓库的 git 元数据，也不联网）。
+- 迁移、事务、跨包卡：跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出）。按 2026-10-28 决策表交 Codex CLI 实现（`codex exec -s workspace-write -C <worktree> -m gpt-6.1-terra -c model_reasoning_effort=xhigh -`），由 `aistudy-pr-reviewer` 做指定 Opus 审查（GPT 一路独立进行，时点按 v2 风险门禁）；改由 Cursor 子 Agent 承接须用户决定。主控先用 `git worktree add` 建好 worktree 与卡片分支，卡片要求本地验证且资源允许时再经 run-heavy 装依赖；brief 经 stdin 传入完整任务卡和 lane-worker 的写入边界与红线；codex 返回后由主控核对 diff、提交、推送并开 PR（workspace-write 沙箱通常不能写主仓库的 git 元数据，也不联网）。
 - 只读调查：`aistudy-explorer` 或内置 `explore`，可多个并行，开工前的盘点和任务卡草稿都交给它们。
 - 指定审查：`aistudy-pr-reviewer`，传入 PR 号、base 与精确 head SHA；派单前先 `git fetch` 对应分支，因为审查者不能 fetch。该类型不在可用列表时改派 `generalPurpose`，要求它先完整阅读 `.cursor/agents/aistudy-pr-reviewer.md` 并按其只读边界执行，模型要求不变；它带有写工具，只读只靠指令约束，审查评论注明用了回退。主控不是 Claude Opus 5.5 时，派单显式指定 Opus 5.5（强度不低于 high）；高风险 PR 的审查评论记录实际模型与强度。
 - GPT 审查：每个 PR 都由主控在 shell 中另跑 `codex exec -s read-only -C <repo> -m gpt-6.1-sol -c model_reasoning_effort=high -o <仓库外的结论文件> "<brief>"` 作为 GPT 一路；Cursor 子 Agent 都是 Claude，对它们实现的改动，这一路就是异家族审查。brief 写全目标、PR、base 与 head SHA、审查边界、红线和输出格式（同 `aistudy-pr-reviewer`），不要假设它读过 `AGENTS.md`；并要求差分用 `git diff <base-sha>...<head-sha>`，其余文件、搜索和调用链用 `git show <head-sha>:<path>`、`git grep -n <pattern> <head-sha> -- <path>` 从 head 对象读取，不以 `-C` 指向的共享工作区为证据。长 brief 写成文件经 stdin 传入（prompt 参数用 `-`）；认证报 401 时先查 `CODEX_API_KEY` 等环境变量是否覆盖了登录方式。
@@ -28,25 +28,26 @@ alwaysApply: false
 
 ## 并发与资源
 
-- 同时运行的实现者最多 5 个（Cursor 实现子 Agent 与 Codex 实现合计）；只读调查和审查不占名额，同时运行的子 Agent 总数建议不超过 8。
+- v2 同时运行的实现者最多 5 个（Cursor 与其他工具合计），待审 PR 不占实现名额；L 不占 H 积压容量但仍计 writer。新增前 available 至少 500 MiB，否则不新增；已有获准轻量实施继续。未合入 H 栈最多 2 层，未合入 H PR 超过 4 个则暂停新 H，优先 L 或修复。独立 GPT 审查最多 3 个并发；Opus available 至少 1.2 GiB 时最多 2 个，否则最多 1 个，并服从实际资源。
 - 子 Agent 默认共享主控 checkout，会互相覆盖改动：写文件的子 Agent 一律放进独立 worktree，同一 checkout 里只跑只读任务。主 checkout 保持在含 `.cursor/agents/` 的分支上：切到没有该目录的分支后，`aistudy-*` 类型会从可用列表消失。每条车道或每次审查结束后，核对主 checkout 的分支与 `git status` 没有被改动。
 - 平台限流或 503 会让后台子 Agent 成批中断，完成通知也可能延迟或重复送达。恢复前先查 worktree、PR 和子 Agent 转录的实际进度：接近完成的续接，未开工的重派，并减少同时运行的数量。长时间没有回报时直接查状态，不靠沉默推断进度。
 - 内存是本机并行的主要瓶颈：worktree 安装依赖经 `node scripts/run-heavy.mjs npm ci ...` 串行，同一时刻只跑一个 web/worker typecheck 或 build（run-heavy 锁会自动串行）。本机没有 PostgreSQL/Redis 时，数据库集成、handler、浏览器和 build 交给精确 head CI。
-- worktree 全机上限 25 个。只有已完全合入主线 `feat/opening-release` 且干净的 worktree 才由集成会话按长期授权清理；只合入 `integration/opening` 时保留。
+- 不把历史固定 worktree 数当当前配额，按平台、写权和资源准入。只有已完全合入主线 `feat/opening-release`、无独有提交且干净的 worktree 才由唯一集成者按长期授权清理；只合入 `integration/opening` 时保留。
 
 ## 派单前
 
 1. 各卡写集合互不重叠，同一文件只有一个 writer。纵向切片（contracts → repository → domain → web/worker → tests）放在同一车道。
 2. 共享独占项留给集成会话：STATUS、迁移编号与 schema、`package-lock.json`、env 示例与 `packages/config/src/registry.ts`、`ci.yml`、`.cursor/**`、`AGENTS.md`。卡里写明由集成者处理；集成者对共享项的改动在送审前推到该 PR 分支，或另开 PR 走同样门禁，不在审查之后直接落到 `integration/opening`。
-3. 先核接口再写卡：写卡的会话（规划会话，或自行起草卡的派单会话）按卡的允许路径列出会触及的公开契约、schema、枚举、函数签名、版本号或白名单、与其他车道共用的文件，以及卡依赖的数据可信来源（例如答案键、客户端提交的状态）。逐项写进卡的"接口决定"：计划或决定表已定的直接引用；计划范围内能定的由写卡的会话当场定；涉及产品方向、数据迁移或跨包 API 的交用户拍板（规划会话攒起来每天集中问一两次），未定的卡不派。不让两条车道各写一份契约，也不把这些问题留给实现者中途返回 NEEDS_CONTEXT。
-4. 卡从仓库外卡片目录的 `ready/` 取，满足就绪条件即可派：前置卡已合入或在途；改动文件与在途车道不重叠；接口决定全部定下；写明风险、目标分支、实现者（Codex 或 Cursor）和要跑的测试；验收列出审查常抓的边界情况（卸载或取消后不再发请求、超时与迟到的响应、匹配必须唯一且与顺序无关、数据库空值读出来是 undefined、费用说明与实际一致）。取卡时移到 `active/`，合入后移到 `done/`。总计划附录 F 是总览，由集成会话随 STATUS 批量同步，派卡不必等它。
-5. 任务卡字段：目标、owner、worktree/分支、base（分支名与建树时的 SHA）、允许路径、只读要求、红线、parents、接口决定、共享独占项、限定验证、风险、Git 授权、预算（实现 1 次、两路审查各 1 次、集中修复 1 次）、汇报格式。
-6. 互相独立的子 Agent 在同一条消息里一起发出；耗时任务用 `run_in_background: true`。
+3. 先核接口再写卡：写卡的会话（规划会话，或自行起草卡的派单会话）按卡的允许路径列出会触及的公开契约、schema、枚举、函数签名、版本号或白名单、与其他车道共用的文件，以及卡依赖的数据可信来源（例如答案键、客户端提交的状态）。逐项起草卡的"接口决定"：计划或决定表已定的直接引用，公共接口交集成者确认后才派，变更重新确认；计划内产品细则由 PM 按现有规则设默认值，产品方向、迁移及未授权事项仍交用户，集中问题每 12 小时最多一次。未定的卡不派。不让两条车道各写一份契约，也不把这些问题留给实现者中途返回 NEEDS_CONTEXT。
+4. 卡从仓库外卡片目录的 `ready/` 取，满足就绪条件即可派：前置卡已满足，或经 PM 明确准入且不超过 2 层的 H 栈有可用父候选；改动文件与在途车道不重叠；接口决定全部定下；写明风险、目标分支、实现者（Codex 或 Cursor）和要跑的测试；验收列出审查常抓的边界情况（卸载或取消后不再发请求、超时与迟到的响应、匹配必须唯一且与顺序无关、数据库空值读出来是 undefined、费用说明与实际一致）。取卡时移到 `active/`，由唯一集成者按实际合入及交付事实确认完成，不把投递或候选交回当 `done/`。总计划附录 F 是总览，由集成会话随 STATUS 批量同步，派卡不必等它。
+5. 任务卡字段：目标、owner、worktree/分支、base（分支名与建树时的 SHA）、允许路径、只读要求、红线、parents、接口决定、共享独占项、限定验证、风险、Git 授权、预算（实现 1 次、对应风险独立审查各 1 次，L Opus 后补、必要集中修复 1 次）、汇报格式。
+6. 仅对依赖、写集合、接口确认和资源全部就绪的独立卡派发，不为凑并行固定唤醒角色；具体调用服从当前工具规则。T3 不沿用 Cursor 后台参数，使用平台隔离能力。
 
 ## 集成节奏
 
-1. 实现返回 DONE 后，主控核对实际 diff 与 PR 正文，再并行派 `aistudy-pr-reviewer` 与 `codex exec` 两路审查（每个 PR 都要两路，含纯文档、配置改动；提升 PR 见第 4 步）。两路都无阻塞才算通过；某一路失败或没读完范围记为未审查，不用同家族自检代替。各路结论由主控以 PR 评论留档（同一账号不能 approve 自己的 PR）。
-2. CHANGES_REQUESTED：resume 原实现子 Agent 集中修复一次，之后只复核修复部分。
-3. 低风险：第 1 步两路审查都通过且精确 head 的 required CI 全绿，由开 PR 的会话用 `gh pr merge --merge --match-head-commit <head-sha>` 合入 `integration/opening`。高风险：独立 PR 到 `feat/opening-release`，满足长期授权条件时由集成会话合入，否则等用户批准。
-4. `integration/opening` 有达标结果，集成会话就开提升 PR 到 `feat/opening-release`。正文绑定当前 base/head 的完整 SHA，列出每个所含 PR 的已审补丁与实际带入补丁的端点和 SHA-256，以及相对当前 base 的预期与最终完整补丁 SHA-256；base/head 变化后重新核对。满足 `agent-workflow.md`“提升 PR 复用审查”的条件时不再派两路审查，精确 head CI 全绿即合入。不满足的部分（只经指定审查的旧 PR、冲突解决、集成者补的提交）补齐缺的那一路再合入。
-5. 合入主线后由集成会话更新 `docs/STATUS.md`，每个结果一行，附录 F 同批同步。
+1. 实现交回稳定候选后，主控核对完整实际 diff 与 PR 正文，PM 标明 L／H／U；实现者自查不替代独立审查。按风险安排 GPT／指定 Opus，结论绑定精确 head，工具失败或未读完记未审，不自行换模型或反复探测不可用渠道。各路结论以 PR 评论留档（同一账号不能 approve 自己的 PR）。
+2. CHANGES_REQUESTED：由原 owner 集中修复，复核改动及其影响；新 head 的审查覆盖与 required CI 重新确认，不靠旧批准放行。
+3. L 仅限测试、文档、无行为变化的纯删死代码：独立 GPT 批准＋精确 head required CI 后，唯一集成者用 `gh pr merge --merge --match-head-commit <head-sha>` 合入 `integration/opening`，进入 Opus 后补队列，真实缺陷最高优先修复。H 为行为、数据、契约、公共接口变化（含 UI 行为），独立 PR 到 `feat/opening-release`，指定 Opus high＋独立 GPT 批准及精确 CI 后，由唯一集成者按原用户授权合入。U 审批不放宽。
+4. 提升按 v2：至少 3 个 L 合入或距上次提升约 6 小时后批量进行，唯一集成者开到 `feat/opening-release` 的提升 PR，须 GPT 快审完整当前 base-to-head＋精确 head CI，L 仍补 Opus；不采用补丁等价只跑 CI 或自称 11-06 授权的免审方案。额外行为／接口变化回 PM 分级补 H 门禁。
+5. STATUS 仅唯一集成者写，附录 F 按实际 PR 事实同批同步；实现、合入、部署、用户验收分别记录。L 先合后审不扩张部署条件，生产／迁移／真实数据审批不放宽。
+6. 事件驱动，不设定时器／轮询／sleep。截止为 2026-11-10 23:59 北京时间（15:59 UTC），前 12 小时停止新开 H，只修缺陷、合入、按原授权部署与验收。

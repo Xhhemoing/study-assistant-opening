@@ -9,7 +9,7 @@ description: Use when working in the AIstudy repository and asked to pull remote
 
 ## Project Facts
 
-- 正式仓库:`Xhhemoing/study-assistant-opening`,remote 名 `study-assistant-opening`;主线 `feat/opening-release`,低风险 PR 先进 `integration/opening`。
+- 正式仓库:`Xhhemoing/study-assistant-opening`,remote 名 `study-assistant-opening`;主线 `feat/opening-release`,L（仅测试、文档、无行为变化的纯删死代码）先进 `integration/opening`,H（行为、数据、契约、公共接口变化）独立进主线。
 - 包管理器:npm。始终遵守 `package-lock.json`;干净安装用 `npm ci`。
 - 运行时:Node.js `>=20`,CI 用 Node.js 22。
 - 布局:npm workspaces(`apps/*`、`packages/*`、`spikes/*`)。
@@ -29,7 +29,7 @@ description: Use when working in the AIstudy repository and asked to pull remote
 
 - **Pull / Update:** 仅在干净工作树且目标分支明确验证后做 fast-forward-only 更新;脏树时展示路径让用户决定(提交/worktree/显式 stash),不静默 stash。冲突保持可见并询问解决方案。
 - **Commit:** 确定范围 → `git diff --check` → 窄测试先行 → 仅暂存目标路径 → 审查完整 staged 补丁 → 一个 Conventional Commit → `git status` + `git log -1` 验证。除非明确要求否则不 amend;push 是独立的用户授权动作。
-- **Merge:** 一律走 PR，base 与门禁以根 `AGENTS.md` 为准：低风险 PR 进 `integration/opening`，再由提升 PR 进主线；高风险 PR 独立以主线为 base。每个 PR 须指定 Claude Opus 5.5 high 与 GPT 异家族审查都批准，并通过精确 head 的 required CI；与已双审 PR 补丁等价的提升 PR 沿用原审查，只跑 CI（条件见 `docs/operations/agent-workflow.md`）。合并前按需更新特性分支，仅 push 命名特性分支。完整本地检查仅在用户明确请求时运行，不重复作为开发、提交或 PR 的前置。绝不 force-push 主线或 `integration/opening`；本地合并且冲突时停止，保持冲突标记待用户解决。
+- **Merge:** 交付合入一律走 PR，按 2026-11-08 v2／2A：只有唯一集成者合 integration 和主线，worker／开 PR 会话不自合，接管不产生第二合并权。L 须独立 GPT 批准＋精确 head required CI，合入 integration 后补指定 Claude Opus 5.5 high；H 须两路批准＋精确 CI，独立主线 PR；U 原审批不放宽。提升按至少 3 个 L 合入或约 6 小时批量，GPT 快审完整差分＋精确 CI，L 仍补审；不再以补丁等价免审。部署条件仍按 `docs/operations/agent-workflow.md` 原授权，不由 L 延后审查推导。候选分支仅在卡片明确授权时普通 merge 已核精确父提交／目标分支，保留原历史，不等于获准合入目标分支；冲突保持可见，仅按明确授权解决，否则停止交集成者。合并前按需更新特性分支，仅 push 获准命名特性分支到正式 remote，不推 integration／主线。T3 子树由平台 `isolation: "worktree"` 准备，worker 不 shell 建树；full-access runtime 不扩大 Git 权限。完整本地检查不作默认前置，纯文档仅 diff-check 与完整差分核对，绝不 force/reset/clean/覆盖他人成果。
 
 ## Build and Test
 
