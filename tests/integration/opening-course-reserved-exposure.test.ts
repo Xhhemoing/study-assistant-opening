@@ -9,10 +9,10 @@ afterEach(async () => { await f?.close(); });
 const question = () => ({ reservedQuestionId: randomUUID(), identityRefId: randomUUID(), courseId: randomUUID(),
   requirementId: randomUUID(), requirementRevision: 1, sourceVersions: {}, text: "137*19",
   interaction: { kind: "numeric" as const }, familyId: "arithmetic:*" });
-it("requires sticky protection beyond DB genesis and cannot retrofit unknown historical coverage", async () => {
+it("requires DB genesis plus a real scan and cannot retrofit unknown historical coverage", async () => {
   const [genesis] = await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
   expect(genesis).toMatchObject({ complete: false, invalidated: false });
-  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
+  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "complete", exactExposed: false });
   await f.sql`DELETE FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
   await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,complete,covered_surface_count)
     VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,true,0)`).rejects.toMatchObject({ code: "23514" });
@@ -29,11 +29,11 @@ it("persists a presentation before answer, keeps replay idempotent and rolls bac
     throw new Error("presentation failed");
   })).rejects.toThrow("presentation failed");
   expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
-  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
+  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "complete", exactExposed: true });
   await expect(f.sql.begin(tx => recordCourseQuestionExposure(tx, f.scope, { ...input, text: "139*23" })))
     .rejects.toMatchObject({ code: "CONFLICT" });
 });
-it("does not claim unseen for examples, hints, unanswered prompts or old versions with missing history guards", async () => {
+it("scans examples, hints, unanswered prompts and retained old source versions", async () => {
   const rows = backupRows(f.sql, f.scope), sourceId = await rows.source(), chunkId = randomUUID();
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
     VALUES(${chunkId},${sourceId},1,1,'Example: 137*19')`;
@@ -51,7 +51,7 @@ it("does not claim unseen for examples, hints, unanswered prompts or old version
       ${f.sql.json([{ id: randomUUID(), type: "prompt", position: 0, content: { text: "141*29" } }])})`;
   for (const text of ["计算 137 × 19", "139*23", "141*29"]) {
     expect(await readCourseQuestionExposure(f.sql, f.scope, { ...question(), text }))
-      .toMatchObject({ coverage: "unknown" });
+      .toMatchObject({ coverage: "complete", exactExposed: true, familyExposed: true });
   }
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
   await f.sql`DELETE FROM opening_sources WHERE id=${sourceId}`;
@@ -74,13 +74,13 @@ it("rejects a scan immediately when a concurrent surface writer already owns its
   await ready;
   try { await expect(readCourseQuestionExposure(f.sql, f.scope, question())).rejects.toMatchObject({ code: "55P03" }); }
   finally { release(); await writer; }
-  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
+  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "complete", exactExposed: true });
 });
 it("holds every surface fence through the scanner transaction, releasing it on rollback", async () => {
   let release!: () => void, entered!: () => void;
   const ready = new Promise<void>(resolve => { entered = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  const scanner = f.sql.begin(async tx => { expect(await refreshCourseQuestionExposure(tx, f.scope)).toBe(false); entered(); await held; });
+  const scanner = f.sql.begin(async tx => { expect(await refreshCourseQuestionExposure(tx, f.scope)).toBe(true); entered(); await held; });
   await ready;
   try {
     await expect(f.sql.begin(async tx => { await tx`SET LOCAL lock_timeout='100ms'`;
@@ -90,5 +90,5 @@ it("holds every surface fence through the scanner transaction, releasing it on r
   } finally { release(); await scanner; }
   await f.sql`INSERT INTO cards(id,workspace_id,owner_user_id,front,back)
     VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},'137*19','example')`;
-  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
+  expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "complete", exactExposed: true });
 });

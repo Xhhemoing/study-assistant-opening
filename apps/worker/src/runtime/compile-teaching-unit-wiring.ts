@@ -6,6 +6,7 @@ import { type Scope, type ProviderOutput, type OpeningModelSnapshot } from "@ais
 import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
+  createOpeningCourseReadySourcesRepository,
   readOpeningTeachingCompilerFocus,
   readOpeningTeachingParentBudget,
   assertOpeningCourseRouteReady,
@@ -48,6 +49,18 @@ export function createCompileTeachingUnitWorkerDeps(
   const { budget, chunks, privacy: privacyRepo } = shared;
   const teachingActivities = createOpeningTeachingActivitiesRepository(sql);
   const teachingContent = createOpeningTeachingContentRepository(sql);
+  const purposes = createOpeningCourseReadySourcesRepository(sql);
+  type PurposePin = Awaited<ReturnType<typeof purposes.readSourcePurposePin>>;
+  type PinnedGeneration = { pin: PurposePin; assertRetrievalCurrent?: () => Promise<void> };
+  const generationPins = new WeakMap<object, PinnedGeneration>();
+  const publicationPins = new WeakMap<object, PinnedGeneration>();
+  // Handler metadata promotion shallow-copies input but retains its blockOrder.
+  // Bind that server-created graph as well; never key authority by an activity id.
+  const publicationGraphPins = new WeakMap<object, PinnedGeneration>();
+  const assertGenerationCurrent = async (scope: Scope, pinned: PinnedGeneration) => {
+    await purposes.assertSourcePurposePin(scope, pinned.pin);
+    await pinned.assertRetrievalCurrent?.();
+  };
   // Real lessons always use the model gateway. An explicit off switch fails the job
   // before budget/content writes instead of publishing an empty placeholder lesson.
   // V2-09: optional post-publish validation when OPENING_TEACHING_VALIDATION_ENABLED; off → leave needs_check.
@@ -65,7 +78,13 @@ export function createCompileTeachingUnitWorkerDeps(
           let snapshot: OpeningModelSnapshot | undefined;
           const output = await models.call(scope, input.imageParts.length ? "teaching.compile-visual" : "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options,
             onModel: model => { snapshot = model.modelSnapshot; },
-            beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } });
+            beforeSend: async () => {
+              const pinned = generationPins.get(input);
+              if (!pinned) throw Object.assign(new Error("compiler source purpose pin missing"), { code: "CONFLICT" });
+              await assertGenerationCurrent(scope, pinned);
+              await assertOpeningCourseRouteReady(sql, scope, options.resultRef.replace(/^teaching_activity:/, ""));
+              await options.beforeSend?.();
+            } });
           if (snapshot) generatorSnapshots.set(output, snapshot);
           const pinned = reservedContexts.get(input);
           if (pinned) {
@@ -75,6 +94,7 @@ export function createCompileTeachingUnitWorkerDeps(
               const [job] = await sql`SELECT state FROM opening_jobs WHERE id=${jobId} AND workspace_id=${scope.workspaceId}
                 AND owner_user_id=${scope.ownerUserId}`;
               if (job?.state !== "running") throw new Error("private generation job no longer running");
+              await assertGenerationCurrent(scope, generationPins.get(input)!);
               await assertOpeningCourseRouteReady(sql, scope, activityId);
               await options.beforeSend?.();
             };
@@ -97,6 +117,10 @@ export function createCompileTeachingUnitWorkerDeps(
           return output;
         },
         buildProviderInput: async (scope, payload, options) => {
+          const pin = await purposes.readSourcePurposePin(scope, {
+            activityId: payload.activityId, sourceIds: payload.sourceIds, materialUse: "teaching",
+          });
+          const pinned: PinnedGeneration = { pin };
           const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
           const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
             const rows = await loadChunks(ownedScope, sourceIds);
@@ -108,7 +132,14 @@ export function createCompileTeachingUnitWorkerDeps(
           const outline = readStoredTeachingOutline(spec?.generationConfig.extras?.outline, payload.activityId, payload.sourceIds ?? []);
           const input = await createCompilerProviderInput({
             loadChunks: scopedLoadChunks,
-            retrieveContext,
+            retrieveContext: async (ownedScope, request) => {
+              await assertGenerationCurrent(scope, pinned);
+              const result = await retrieveContext(ownedScope, { ...request,
+                courseContext: { courseId: pin.courseId, materialUse: pin.materialUse } });
+              pinned.assertRetrievalCurrent = result.assertCurrent;
+              await assertGenerationCurrent(scope, pinned);
+              return result;
+            },
             loadPageImages: (ownedScope, input) => pageImages(ownedScope as Scope, input),
             readOutline: () => outline,
             parentBudget: options?.parentBudget,
@@ -116,6 +147,7 @@ export function createCompileTeachingUnitWorkerDeps(
             intentKind: activity?.intentKind,
             ...focus,
           })(scope, payload);
+          generationPins.set(input, pinned);
           if (activity?.routeManaged && activity.courseId) {
             const route = await assertOpeningCourseRouteReady(sql, scope, payload.activityId);
             const requirement = route && (await readCourseRequirements(sql, scope, activity.courseId)).find(row => row.id === route.requirementId);
@@ -151,7 +183,12 @@ export function createCompileTeachingUnitWorkerDeps(
     validateSourceRefs: (scope, input) => preflightedInputs.delete(input)
       ? Promise.resolve()
       : teachingContent.validateActivitySourceRefs(scope, input),
-    publishActivitySpec: (scope, input) => teachingContent.publishActivitySpec(scope, input),
+    publishActivitySpec: (scope, input) => {
+      const pinned = publicationPins.get(input) ?? publicationGraphPins.get(input.blockOrder);
+      if (!pinned) throw Object.assign(new Error("compiler publication purpose pin missing"), { code: "CONFLICT" });
+      return teachingContent.publishActivitySpec(scope, input, undefined,
+        tx => purposes.assertSourcePurposePin(scope, pinned.pin, tx));
+    },
     loadReplayedResult: async (scope, resultRef) => {
       const match = /^teaching_activity:(.+)$/.exec(resultRef);
       if (!match) return null;
@@ -179,6 +216,9 @@ export function createCompileTeachingUnitWorkerDeps(
     },
     buildPublishInput: teachingCompilerOn
       ? async (scope, payload, providerOutput, providerInput) => {
+          const pinned = providerInput ? generationPins.get(providerInput) : undefined;
+          if (providerInput && !pinned) throw Object.assign(new Error("original compiler purpose pin missing"), { code: "CONFLICT" });
+          if (pinned) await assertGenerationCurrent(scope, pinned);
           const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
           const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
             const rows = await loadChunks(ownedScope, sourceIds);
@@ -213,10 +253,15 @@ export function createCompileTeachingUnitWorkerDeps(
           if (compiledBlocks == null) throw new Error("compiled blocks were not built");
           // Fail before saving model bodies, even when post-publish validation is off.
           await teachingContent.validateActivitySourceRefs(scope, publishInput);
+          if (pinned) await assertGenerationCurrent(scope, pinned);
           const written = await teachingContent.writeUnitBlocks(scope, payload.teachingUnitId!, compiledBlocks);
           // Publication revalidates atomically; preflight cannot authorize a later write.
           const result = { ...publishInput, revisionNumber: written.revisionNumber };
           preflightedInputs.add(result);
+          if (pinned) {
+            publicationPins.set(result, pinned);
+            publicationGraphPins.set(result.blockOrder, pinned);
+          }
           return result;
         }
       : undefined,

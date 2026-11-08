@@ -25,6 +25,8 @@ const readRequirements = vi.hoisted(() => vi.fn(async () => [] as unknown[]));
 const assertRoute = vi.hoisted(() => vi.fn(async () => null as unknown));
 vi.mock("../../../../packages/database/src/repositories/opening-course-route-read", () => ({ readCourseRequirements: readRequirements }));
 const admitReserved = vi.hoisted(() => vi.fn(async () => ({ privateRefId: "private-ref" })));
+const purposePins = vi.hoisted(() => ({ readSourcePurposePin: vi.fn(), assertSourcePurposePin: vi.fn(),
+  readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn() }));
 vi.mock("./model-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./model-gateway")>();
   const { createModelGateway } = await import("@aistudy/ai");
@@ -47,6 +49,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@aistudy/database")>()),
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
+  createOpeningCourseReadySourcesRepository: () => purposePins,
   readOpeningTeachingCompilerFocus: readFocus,
   admitOpeningReservedCandidate: admitReserved,
   assertOpeningCourseRouteReady: assertRoute,
@@ -117,6 +120,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   readFocus.mockResolvedValue({});
   assertRoute.mockResolvedValue(null); readRequirements.mockResolvedValue([]);
+  const pin = { activityId: ACTIVITY, courseId: null, materialUse: "teaching", sources: [{ sourceId: SOURCE, sourceVersion: 1,
+    membershipId: null, purposeRevision: null, purpose: null }] };
+  purposePins.readSourcePurposePin.mockResolvedValue(pin);
+  purposePins.assertSourcePurposePin.mockResolvedValue(undefined);
+  purposePins.readMaterialPurposePin.mockResolvedValue({ courseId: null, materialUse: "teaching", sources: pin.sources });
+  purposePins.assertMaterialPurposePin.mockResolvedValue(undefined);
   content.getActivitySpec.mockResolvedValue(null);
   content.validateActivitySourceRefs.mockResolvedValue(undefined);
   model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
@@ -244,12 +253,15 @@ async function blindFixture(lineage: string, failure?: string) {
   });
   activities.get.mockResolvedValue({ id: ACTIVITY, generateStatus: "needs_check" });
   const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
-  deps.buildProviderInput = async () => ({ instruction: "compile", text: "authorized sources", mode: "explain", chunks: [], imageParts: [], mediaCapability: "text_only", maxOutputTokens: 32 });
-  deps.buildPublishInput = async () => ({ activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
-    sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
+  const productionBuild = deps.buildPublishInput!;
+  deps.buildPublishInput = async (ownedScope, body, _output, providerInput) => {
+    const result = await productionBuild(ownedScope, body, modelAnswer({ text: CHUNK, chunks: [chunk] }), providerInput);
+    // Retain the real pinned graph object while selecting this fixture's pair.
+    result.blockOrder.splice(0, result.blockOrder.length,
       { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
-      { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" },
-    ] });
+      { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" });
+    return result;
+  };
   return { deps, sql, blocks, questionId, keyId, parentId, reservations, version: () => currentVersion, persisted: () => persisted };
 }
 
@@ -361,7 +373,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     sql.json = ((value: unknown) => value) as typeof sql.json;
     const dependencies = shared();
     const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
-    const input = { instruction: "compile", text: "question", mode: "explain" as const, chunks: [], imageParts: [], mediaCapability: "text_only" as const, maxOutputTokens: 32 };
+    const input = await deps.buildProviderInput!(scope, payload);
     const output = await deps.callModel!(scope, input, { operationId: "compile:fake", resultRef: `teaching_activity:${ACTIVITY}` });
     model.complete.mockResolvedValue({ text: '{"answer":"4","family":"ignored"}', citedChunkIds: [], requestId: "fake", candidates: [], inputTokens: 1, outputTokens: 1 });
     const beforeSend = vi.fn(async () => {});
@@ -441,8 +453,9 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       const input = await originalBuild(...args);
       const q2 = "55555555-5555-4555-8555-555555555555";
       f.blocks.push({ id: q2, type: "prompt", content: { text: "3+1", interaction: { kind: "numeric" } } });
-      return { ...input, blockOrder: [...input.blockOrder, { blockId: q2, position: 2, blockType: "prompt", role: "prompt" },
-        { blockId: f.keyId, position: 3, blockType: "answer_key", role: "answer_key" }] };
+      input.blockOrder.push({ blockId: q2, position: 2, blockType: "prompt", role: "prompt" },
+        { blockId: f.keyId, position: 3, blockType: "answer_key", role: "answer_key" });
+      return input;
     };
     const result = await createCompileTeachingUnitHandler(f.deps)(job, payload) as { teachingBlindSolveReceipts: Record<string, TeachingBlindSolveReceipt> };
     expect(Object.values(result.teachingBlindSolveReceipts).map(receipt => receipt.decision)).toEqual(["match", "unknown"]);
@@ -721,6 +734,50 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
   });
 });
 
+
+describe("server-owned compiler purpose pin", () => {
+  it("passes the owned activity course/use to the real retriever and checks the original pin in the final transaction", async () => {
+    const pin = { activityId: ACTIVITY, courseId: "owned-course", materialUse: "teaching", sources: [{ sourceId: SOURCE,
+      sourceVersion: 1, membershipId: "membership", purposeRevision: "2026-11-08T00:00:00.123456Z", purpose: "teaching" }] };
+    purposePins.readSourcePurposePin.mockResolvedValue(pin);
+    activities.get.mockResolvedValue({ id: ACTIVITY, courseId: "owned-course", intentSummary: "Lesson", intentKind: "material" });
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    expect(purposePins.readMaterialPurposePin).toHaveBeenCalledWith(scope, {
+      courseId: "owned-course", materialUse: "teaching", sourceIds: [SOURCE],
+    });
+    const output = await deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`, resultRef: `teaching_activity:${ACTIVITY}` });
+    const publish = await deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, output, input);
+    await deps.publishActivitySpec(scope, publish);
+    const callback = content.publishActivitySpec.mock.calls.at(-1)![3] as (tx: typeof jobStateSql) => Promise<void>;
+    const originalTx = {} as typeof jobStateSql;
+    await callback(originalTx);
+    expect(purposePins.assertSourcePurposePin).toHaveBeenLastCalledWith(scope, pin, originalTx);
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(publish)).not.toContain("purposeRevision");
+    expect(JSON.stringify(input)).not.toContain("membership");
+  });
+  it("rejects changed-back purpose pins before send without recapture or model call", async () => {
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    const error = Object.assign(new Error("original purpose revision changed"), { code: "CONFLICT" });
+    purposePins.assertSourcePurposePin.mockRejectedValue(error);
+    await expect(deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`, resultRef: `teaching_activity:${ACTIVITY}` }))
+      .rejects.toBe(error);
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+  });
+  it("retains the same purpose authority for metadata promotion and rejects missing provenance", async () => {
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    const output = modelAnswer({ text: CHUNK, chunks: [chunk] });
+    const publish = await deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, output, input);
+    await deps.publishActivitySpec(scope, { ...publish, expectedVersion: publish.expectedVersion + 1, verificationStatus: "structure_ok" });
+    expect(content.publishActivitySpec).toHaveBeenCalled();
+    expect(() => deps.publishActivitySpec(scope, { ...publish, blockOrder: [...publish.blockOrder] }))
+      .toThrow("purpose pin missing");
+  });
+});
 
 describe("private reserved producer isolation", () => {
   it("calls a separate budgeted provider and persists only through pinned authoritative admission", async () => {
