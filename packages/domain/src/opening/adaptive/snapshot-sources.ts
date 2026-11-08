@@ -92,6 +92,7 @@ export type NextStepReasonCode =
   | "unverified_only"
   | "verified_incorrect"
   | "repeated_assisted_error"
+  | "assisted_success"
   | "assistance_dependent"
   | "independent"
   | "correct_needs_independent_check"

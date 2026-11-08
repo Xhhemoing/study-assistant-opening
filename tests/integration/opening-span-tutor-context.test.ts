@@ -47,7 +47,8 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it("captures standard decisions before execution and replays the original operation without rewriting history", async () => {
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+  "restores and replays %s by the original key without recomputing or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
   const state = await import("../../packages/database/src/repositories/opening-learner-state-read");
@@ -56,12 +57,17 @@ it("captures standard decisions before execution and replays the original operat
   const session = await f.repo.execute(fixture.scope, input);
   const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+  // Seed an archived policy label to exercise the reader's explicit compatibility list.
+  // The recorded input, rule result and execution remain the originally saved facts.
+  if (policyVersion !== "next-learning-step-3/span-tutor-execution-2") await fixture.sql`
+    UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',${fixture.sql.json(policyVersion)}::jsonb)
+    WHERE target_id=${session.activityId} AND workspace_id=${fixture.scope.workspaceId}`;
   const receipts = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
   expect(receipts).toHaveLength(1);
   const receipt = receipts[0]!;
   expect(await decisions.get(fixture.scope, receipt.id)).toEqual(receipt);
   expect(receipt.stateVersion).toBe(before.stateVersion);
-  expect(receipt.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
+  expect(receipt.policyVersion).toBe(policyVersion);
   expect(JSON.parse(receipt.intentVersion)).toMatchObject({ decisionInput: originalInput, ruleDecision: input.decision,
     execution: { kind: "create", moveId: "self_study-reserved", problemId: "span-reserved-fraction" } });
   expect(receipt.parentDecisionId).toBeTruthy();
@@ -69,7 +75,17 @@ it("captures standard decisions before execution and replays the original operat
     { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" });
   await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope,
     { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
-  expect((await f.repo.execute(fixture.scope, input)).activityId).toBe(session.activityId);
+  const replay = (await f.repo.read(fixture.scope, { ...f.request, operationId: input.operationId }))!;
+  expect(replay.historicalDecision).toEqual(input.decision);
+  expect(replay.decisionInput).toEqual(originalInput);
+  // Today's rule would choose a different action for these later facts. The same
+  // operation key must return its original activity, even after grant withdrawal.
+  const changedInput = { ...originalInput, observations: [{ id: randomUUID(), skillLabel: SPAN_SKILL_LABEL,
+    attemptedAt: new Date().toISOString(), assistance: "hinted" as const, verifiedCorrect: "yes" as const,
+    independentAttempt: "no" as const, usableForCurrentVersion: "yes" as const, problemId: null }] };
+  const changedDecision = nextLearningStep(changedInput);
+  expect(changedDecision.reasonCode).toBe("assisted_success");
+  expect((await f.repo.execute(fixture.scope, { ...input, context: { ...replay, decisionInput: changedInput }, decision: changedDecision })).activityId).toBe(session.activityId);
   expect(await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId })).toEqual(receipts);
 });
 it("keeps source version zero and does not invent decisions for a legacy resume", async () => {
