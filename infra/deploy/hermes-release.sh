@@ -30,6 +30,18 @@ WORKER_HELPER=''
 RELEASE=''
 TRANSITION=''
 DEGRADED=0
+FORWARD_ONLY=0
+ACTIVATION_BEGUN=0
+FORWARD_GUARD="$STATE/migration-forward-only"
+managed() {
+  local session_target=''
+  if [[ "$ACTION" == deploy ]]; then session_target=$RELEASE; fi
+  HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" node "$HERMES_SUPERVISOR_HELPER" request "$1"
+}
+if [[ "$ACTION" != status && "$ACTION" != logs ]]; then
+  [[ -n "${HERMES_SUPERVISOR_SOCKET:-}" && -f "${HERMES_SUPERVISOR_HELPER:-}" ]] || fail 'Managed supervisor entry is required.'
+  managed ping || fail 'Managed supervisor identity could not be confirmed.'
+fi
 
 atomic_link() {
   local target=$1 link=$2 temporary="${2}.next.$$"
@@ -72,6 +84,7 @@ worker_required() {
   printf 0
 }
 begin_activation() {
+  ACTIVATION_BEGUN=1
   printf '%s\n' "$TRANSITION" > "$INCOMPLETE.next.$$"
   mv -Tf -- "$INCOMPLETE.next.$$" "$INCOMPLETE"
 }
@@ -149,18 +162,8 @@ worker_command() {
   bash "$WORKER_HELPER" "$1" --state-dir "$2" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG"
 }
 stop_worker() {
-  local load_state
-  if ! load_state=$(systemctl show --property=LoadState --value aistudy-worker.service); then
-    [[ "$load_state" == not-found ]] || return 1
-  fi
-  [[ -n "$load_state" ]] || return 1
-  # A failed/auto-restart unit may be inactive now and still start later.
-  # stop cancels that pending restart; first installation has no unit to stop.
-  if [[ "$load_state" != not-found ]]; then systemctl stop aistudy-worker.service || return 1; fi
-  if systemctl is-active --quiet aistudy-worker.service; then
-    echo 'Worker may still be active; manual service intervention is required.' >&2
-    return 1
-  fi
+  # Recovery also requires BOTH writers to be proven stopped.
+  managed stop
 }
 snapshot_configuration() {
   local destination=$1
@@ -224,6 +227,16 @@ health() {
 finish() {
   local result=$1 rollback_result=0 restored_required can_restore=1
   trap - EXIT INT TERM
+  if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" ) ]]; then
+    echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
+    managed stop || echo 'UNCONFIRMED: one or both writers may still exist.' >&2
+    # A dead owner/runner is not a dead PostgreSQL session. This independent
+    # read-only observation may itself fail, and never authorizes writer resume.
+    node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/failure-quiescence.json" \
+      && echo 'Database quiescence observed after failure (point-in-time only; guard retained).' >&2 \
+      || echo 'UNCONFIRMED: database activity/backend completion; guard retained.' >&2
+    RECOVERY_REQUIRED=0
+  fi
   if [[ "$result" != 0 && "$RECOVERY_REQUIRED" == 1 ]]; then
     set +e
     echo 'Activation failed; restoring the previous release and service configuration.' >&2
@@ -240,8 +253,9 @@ finish() {
       restore_configuration "$RECOVERY_STATE" || { echo 'Rollback service configuration restoration failed.' >&2; rollback_result=1; can_restore=0; }
     fi
     if [[ "$can_restore" == 1 ]]; then
-      restart_services "$restored_required" "$RECOVERY_TARGET" || { echo 'Rollback service restart failed.' >&2; rollback_result=1; }
-      health "$restored_required" "$RECOVERY_TARGET" "$RECOVERY_STATE/worker-identity.json" || { echo 'Rollback health/identity verification failed.' >&2; rollback_result=1; }
+      if restart_services "$restored_required" "$RECOVERY_TARGET"; then
+        health "$restored_required" "$RECOVERY_TARGET" "$RECOVERY_STATE/worker-identity.json" || { echo 'Rollback health/identity verification failed.' >&2; rollback_result=1; }
+      else echo 'Rollback service restart failed.' >&2; rollback_result=1; fi
     else
       echo 'Rollback activation halted; inspect the current pointer and service configuration before manual intervention.' >&2
     fi
@@ -252,6 +266,9 @@ finish() {
     if [[ "$rollback_result" == 0 ]] && worker_paused "$RECOVERY_TARGET"; then report_worker_pause "$RECOVERY_TARGET"
     elif [[ "$rollback_result" == 0 ]]; then echo 'Previous release restored; database migrations were retained.' >&2
     else echo 'Automatic application rollback failed; inspect the retained deployment state immediately.' >&2; fi
+  fi
+  if [[ -n "${HERMES_SUPERVISOR_SOCKET:-}" && "$FORWARD_ONLY" == 0 && ! -e "$FORWARD_GUARD" && "$rollback_result" == 0 ]]; then
+    if [[ "$ACTIVATION_BEGUN" == 0 || "$RECOVERY_REQUIRED" == 1 ]]; then managed settled || true; fi
   fi
   if [[ -n "$ARCHIVE" && "$ARCHIVE" =~ ^/tmp/aistudy-source\.[A-Za-z0-9]+\.tar\.gz$ ]]; then rm -f -- "$ARCHIVE"; fi
   if [[ -n "$CONTROL_ARCHIVE" && "$CONTROL_ARCHIVE" =~ ^/tmp/aistudy-control\.[A-Za-z0-9]+\.tar\.gz$ ]]; then rm -f -- "$CONTROL_ARCHIVE"; fi
@@ -264,6 +281,7 @@ trap 'exit 143' TERM
 
 case "$ACTION" in deploy|restart|rollback) ;;
   status)
+    if [[ -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ]]; then echo 'FORWARD FIX REQUIRED: active migration guard; writer state must be inspected.' >&2; exit 3; fi
     target=$(current_target); validate_target "$target"
     printf 'Current: %s\nSHA: ' "$target"
     if [[ -f "$target/.release-sha" ]]; then cat "$target/.release-sha"; else printf 'unrecorded legacy release\n'; fi
@@ -284,8 +302,8 @@ esac
 
 mkdir -p -- "$STATE"
 chmod 700 -- "$STATE"
-exec 9> "$STATE/deploy.lock"
-flock -n 9 || fail 'Another deployment/restart/rollback is already running.'
+# The managed supervisor holds deploy.lock through owner exit and crash fencing.
+[[ ! -e "$FORWARD_GUARD" && ! -e "$STATE/writers-fenced" ]] || { echo 'FORWARD FIX REQUIRED: active migration guard.' >&2; exit 3; }
 if [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]]; then
   validate_target "$DIR"
   atomic_link "$DIR" "$CURRENT"
@@ -296,10 +314,12 @@ WORKER_REQUIRED=$(worker_required)
 if [[ "$ACTION" == restart ]]; then
   if [[ -f "$INCOMPLETE" ]]; then report_incomplete; exit 3; fi
   if worker_paused "$OLD_TARGET"; then report_worker_pause "$OLD_TARGET"; exit 3; fi
+  ACTIVATION_BEGUN=1
   restart_services "$WORKER_REQUIRED" "$OLD_TARGET"
   profile=''
   if [[ -L "$STATE/current-identity" ]]; then profile=$(readlink -f -- "$STATE/current-identity"); fi
   health "$WORKER_REQUIRED" "$OLD_TARGET" "$profile"
+  managed success
   echo 'Current release restarted and healthy.'
   exit
 fi
@@ -315,6 +335,7 @@ if [[ "$ACTION" == rollback ]]; then
   [[ -L "$STATE/last-transition" ]] || fail 'No successful managed transition is available for rollback.'
   PREVIOUS_STATE=$(readlink -f -- "$STATE/last-transition")
   [[ "$PREVIOUS_STATE" == "$STATE/releases/"* && ( -f "$PREVIOUS_STATE/succeeded" || -f "$PREVIOUS_STATE/degraded" ) ]] || fail 'Previous release metadata is incomplete.'
+  [[ ! -f "$PREVIOUS_STATE/forward-armed" ]] || fail 'Refusing rollback across a migration boundary; old writers are not schema-compatible by proof.'
   RELEASE=$(cat "$PREVIOUS_STATE/from-target")
   validate_target "$RELEASE"
   if study_v2_release "$OLD_TARGET" && ! study_v2_release "$RELEASE"; then
@@ -413,8 +434,19 @@ else
   # Claim-token fencing changes the worker write protocol. Drain/stop the old
   # process before migrating so unfenced code cannot write across the transition.
   stop_worker
-  node "$CONTROL_DIR/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
-  touch "$TRANSITION/migration-succeeded"
+  node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/quiescence.json"
+  node "$CONTROL_DIR/hermes-db.mjs" plan "$CONFIG" "$RELEASE" > "$TRANSITION/migration-plan.json"
+  if node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1])); process.exit(p.readOnly===true && p.registryReadyWithoutWrites===true && Array.isArray(p.pending) && p.pending.length===0 ? 0 : 1)' "$TRANSITION/migration-plan.json"; then
+    echo 'Registry ready and no pending migrations proven; write runner skipped.'
+  else
+    FORWARD_ONLY=1
+    managed arm || fail 'Migration guard persistence/fence failed; runner was not invoked.'
+    # Close the observation window between the initial stop and installation of
+    # the start/boot fence. A condition does not stop an already running unit.
+    managed stop || fail 'Writers not confirmed stopped behind the migration fence; runner was not invoked.'
+    node "$CONTROL_DIR/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
+    touch "$TRANSITION/migration-succeeded"
+  fi
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   printf '%s\n' "$release_protocol" > "$RELEASE/.worker-protocol"
   bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
@@ -431,6 +463,7 @@ UNIT
   chmod 644 -- "$WEB_OVERRIDE"
   systemctl daemon-reload
   atomic_link "$RELEASE" "$CURRENT"
+  managed activate
   restart_services "$WORKER_REQUIRED" "$RELEASE"
   health "$WORKER_REQUIRED" "$RELEASE"
 fi
@@ -443,6 +476,7 @@ else
 fi
 atomic_link "$TRANSITION" "$STATE/last-transition"
 rm -f -- "$INCOMPLETE"
+managed success
 RECOVERY_REQUIRED=0
 if [[ "$DEGRADED" == 1 ]]; then report_worker_pause "$RELEASE"; exit 3; fi
 printf '部署完成: %s (%s)\n' "$RELEASE" "$ACTION"

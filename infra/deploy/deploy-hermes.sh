@@ -103,4 +103,14 @@ remote_command='bash -o pipefail -s --'
 for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive" "$artifact_digest" "$remote_control"; do
   remote_command+=" $(quote "$value")"
 done
-ssh_run "$remote_command" < "$SCRIPT_DIR/hermes-release.sh"
+if [[ "$ACTION" == status || "$ACTION" == logs ]]; then
+  ssh_run "$remote_command" < "$SCRIPT_DIR/hermes-release.sh"
+else
+  # The reviewed entry owns both supervisor and owner bytes. No remote installed
+  # helper or operator-started systemctl process is needed for crash fencing.
+  remote_command='entry=$(mktemp -d /tmp/aistudy-entry.XXXXXXXX) || exit; trap '\''rm -rf -- "$entry"'\'' EXIT; tar -xzf - -C "$entry" || exit; node "$entry/hermes-supervisor.mjs" run "$entry/hermes-release.sh"'
+  for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive" "$artifact_digest" "$remote_control"; do
+    remote_command+=" $(quote "$value")"
+  done
+  tar -czf - -C "$SCRIPT_DIR" hermes-release.sh hermes-supervisor.mjs hermes-db.mjs | ssh_run "$remote_command"
+fi

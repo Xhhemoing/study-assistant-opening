@@ -69,7 +69,9 @@ export function createMigrationSqlClient(databaseUrl: string, options: { max?: n
     lock_timeout: "5s", statement_timeout: "120s", idle_in_transaction_session_timeout: "30s",
     application_name: "aistudy-release-migration",
   })) url.searchParams.set(key, value);
-  return postgres(url.href, { max: options.max ?? 1 });
+  // Notices may contain schema/object names or SQL details; the deployment
+  // adapter emits only its structured, redacted report, never driver notices.
+  return postgres(url.href, { max: options.max ?? 1, onnotice: () => {} });
 }
 
 async function loadMigrationFiles(migrationsDir: string): Promise<MigrationFile[]> {

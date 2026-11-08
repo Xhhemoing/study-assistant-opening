@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { postgresBackupEnvironment } from "../../infra/deploy/hermes-db.mjs";
+import { cgroupEmpty, stopWriters } from "../../infra/deploy/hermes-supervisor.mjs";
 import { VISIBLE_FLAGS, verifyProcessSnapshot } from "../../infra/deploy/hermes-health.mjs";
 
 const release = "/opt/aistudy-releases/new-sha";
@@ -24,6 +25,32 @@ const worker = {
   unitArgumentPaths: ["/usr/bin/node", `${release}/node_modules/tsx/dist/cli.mjs`, `${release}/apps/worker/src/index.ts`],
   environment: { ...configured },
 };
+
+test('cgroup proof visits nested groups and rejects unreadable or populated groups', t => {
+  const root = mkdtempSync(join(tmpdir(), 'hermes-cgroup-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'service/child'), { recursive: true });
+  writeFileSync(join(root, 'service/cgroup.procs'), '');
+  writeFileSync(join(root, 'service/child/cgroup.procs'), '12345\n');
+  assert.equal(cgroupEmpty('/service', root), false);
+  writeFileSync(join(root, 'service/child/cgroup.procs'), '');
+  assert.equal(cgroupEmpty('/service', root), true);
+  rmSync(join(root, 'service/child/cgroup.procs'));
+  assert.equal(cgroupEmpty('/service', root), false);
+  assert.equal(cgroupEmpty('/../escape', root), false);
+  assert.equal(cgroupEmpty('/absent-service', root), true);
+});
+test('failed web stop cannot prevent the independent worker stop and full observations', () => {
+  const calls = [];
+  const result = stopWriters(args => {
+    calls.push(args);
+    if (args[0] === 'stop') return { ok: args[1] !== 'aistudy-web.service', stdout: '' };
+    return { ok: true, stdout: 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n' };
+  });
+  assert.equal(result, false);
+  assert.deepEqual(calls.filter(call => call[0] === 'stop').map(call => call[1]), ['aistudy-web.service', 'aistudy-worker.service']);
+  assert.equal(calls.filter(call => call[0] === 'show').length, 2);
+});
 
 test("runtime identity checks the actual cwd and command paths and returns only allowlisted flags", () => {
   const result = verifyProcessSnapshot(web, release, configured);
