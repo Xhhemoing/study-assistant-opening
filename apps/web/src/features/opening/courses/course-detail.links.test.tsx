@@ -51,6 +51,21 @@ it("preserves original material identity, note anchors and course filters while 
   expect(hrefs).toContain("#course-assets");
 });
 
+it("mounts a real source-only purpose entry without changing note actions or original material identity", async () => {
+  const courseId = "55555555-5555-4555-8555-555555555555";
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json({ assets: [{
+    id: "66666666-6666-4666-8666-666666666666", courseId, assetType: "source", assetId: source,
+    purpose: "practice", updatedAt: "2026-11-08T12:00:00.123Z",
+  }] }));
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(<CourseAssets courseId={courseId} assets={assets} onRemoved={() => undefined} libraryHref="/opening/library?tab=notes" />));
+  expect(host.querySelectorAll('[aria-label$="的本课程用途"]')).toHaveLength(1);
+  expect(host.textContent).toContain("用途：练习材料");
+  expect(host.textContent).toContain("原笔记"); expect(host.textContent).toContain("原材料");
+  expect(host.querySelector(`[aria-label="将 原材料 移出此课程"]`)).not.toBeNull();
+  expect(fetcher).toHaveBeenCalledWith(`/api/courses/${courseId}/assets`, expect.objectContaining({ method: "GET" }));
+});
+
 it("does not append conversation references to the legacy library URL", async () => {
   await act(async () => root.render(createElement(ObjectConversationContext.Provider, { value: conversation }, createElement(CourseAssets, { courseId: "course", assets: [assets[0]!], onRemoved: () => undefined, libraryHref: "/library?tab=notes" }))));
   expect(host.querySelector("a")?.getAttribute("href")).toBe(`/library?tab=notes#document-${note}`);
