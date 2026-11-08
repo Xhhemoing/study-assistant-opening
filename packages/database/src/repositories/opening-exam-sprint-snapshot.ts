@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { examErrorCauseSchema, type ExamPack, type ExamSprintState } from "@aistudy/contracts";
+import { examErrorCauseSchema, examQuestionPartsSchema, examPartResultSchema, type ExamPack, type ExamSprintState } from "@aistudy/contracts";
 import { validExamLessonExposure } from "@aistudy/domain";
 
 const id = z.string().min(1);
@@ -17,6 +17,7 @@ const questionSchema = z.object({
   pool: z.enum(["training", "mock-a", "mock-b"]), difficulty: z.enum(["foundation", "transfer"]),
   prompt: z.string(), options: z.array(z.object({ id, label: z.string() }).strict()).min(2),
   answer: id, explanation: z.string(), hint: z.string(), estimatedMinutes: z.number().positive(),
+  partSnapshot: examQuestionPartsSchema.optional(),
 }).strict().refine(question => question.options.some(option => option.id === question.answer)
   && new Set(question.options.map(option => option.id)).size === question.options.length);
 const packSchema: z.ZodType<ExamPack> = z.object({
@@ -47,6 +48,7 @@ const stateSchema: z.ZodType<ExamSprintState> = z.object({
     prediction: z.object({ predictedAt: timestamp, skillId: id, historyAttemptIds: z.array(id),
       modelVersion: z.string().min(1).max(100), calibrated: z.literal(false),
       bktCorrect: z.number().min(0).max(1), baselineCorrect: z.number().min(0).max(1) }).strict().optional(),
+    resultMetadata: examPartResultSchema.optional(),
     errorCause: examErrorCauseSchema.nullable() }).strict()),
   sourceRecords: z.array(z.object({ id, sourceId: id, phase: z.enum(["first", "blind", "delayed", "variant"]),
     outcome: z.enum(["correct", "partial", "incorrect", "read"]), assistance: z.enum(["none", "hint", "solution"]),
@@ -76,6 +78,17 @@ export function parseExamSprintSnapshot(rawPack: unknown, rawState: unknown): { 
   if (!parsedPack.success || !parsedState.success) return corrupt();
   const pack = parsedPack.data, state = parsedState.data;
   if (![pack.topics, pack.lessons, pack.questions, pack.sourceItems, state.runs, state.attempts, state.sourceRecords, state.lessonExposures!].every(unique)) return corrupt();
+  const identityOwners = new Map<string, string>();
+  for (const question of pack.questions) {
+    const snapshot = question.partSnapshot;
+    if (!snapshot) continue;
+    if (snapshot.packId !== pack.id || snapshot.packVersion !== pack.version || snapshot.questionId !== question.id
+      || snapshot.familyId !== question.familyId || snapshot.parts.some(part => part.evaluator?.correctOptionIds.some(id => !question.options.some(option => option.id === id)))) return corrupt();
+    for (const identity of [snapshot.questionIdentityRefId, ...snapshot.parts.map(part => part.identityRefId)]) {
+      if (identityOwners.has(identity)) return corrupt();
+      identityOwners.set(identity, question.id);
+    }
+  }
   const topics = new Set(pack.topics.map(topic => topic.id));
   const lessons = new Map(pack.lessons.map(lesson => [lesson.id, lesson]));
   const questions = new Map(pack.questions.map(question => [question.id, question]));
@@ -109,6 +122,13 @@ export function parseExamSprintSnapshot(rawPack: unknown, rawState: unknown): { 
       const question = questions.get(attempt.questionId), run = runs.get(attempt.runId);
       if (!question || !run?.questionIds.includes(attempt.questionId)
         || Date.parse(attempt.presentedAt) < Date.parse(run.startedAt)) return true;
+      if (attempt.resultMetadata) {
+        const evaluation = attempt.resultMetadata.questionEvaluation, snapshot = question.partSnapshot;
+        if (!snapshot || !attempt.answeredAt || (run.mode === "mock-a" || run.mode === "mock-b") && !run.completedAt
+          || evaluation.questionIdentityRefId !== snapshot.questionIdentityRefId
+          || evaluation.parts.length !== snapshot.parts.length || evaluation.parts.some(part => !snapshot.parts.some(binding =>
+            binding.partId === part.partId && binding.identityRefId === part.identityRefId && binding.requirementKey === part.requirementKey))) return true;
+      }
       const cutoff = Date.parse(attempt.answeredAt ?? "9999-12-31T23:59:59.999Z");
       if ([attempt.lessonExposureIds ?? [], attempt.seenExampleExposureIds ?? [], attempt.partialExampleExposureIds ?? []].some(ids => new Set(ids).size !== ids.length)
         || (attempt.lessonExposureIds ?? []).some(id => {

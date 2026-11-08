@@ -44,6 +44,13 @@ describe("explicit model routing", () => {
     expect(resolveFallbackModelForTask([first, { ...second, availability: "missing_key" }], settings, "knowledge.extract")).toBeNull();
     expect(resolveModelForTask([first, second], { ...settings, mode: "manual" as const, manualModelId: "one" }, "tutor.explain", "two")).toBe(first);
   });
+  it("requires an explicit solve route and never inherits manual/default/fallback compilation routes", () => {
+    const settings = { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual" as const, manualModelId: "one", defaultModelId: "one" };
+    expect(() => resolveModelForTask([first], settings, "teaching.solve", "one")).toThrow();
+    const explicit = { ...settings, taskRoutes: { "teaching.solve": { primary: "two", fallback: "one" } } };
+    expect(resolveModelForTask([first, second], explicit, "teaching.solve", "one")).toBe(second);
+    expect(resolveFallbackModelForTask([first, second], explicit, "teaching.solve")).toBeNull();
+  });
   it("snapshots only routing identity and actual configured rates", () => {
     expect(openingModelSnapshot({ ...second, apiKey: "private" } as never)).toEqual({ id: "two", providerId: "b", modelName: "model-2", inputCentsPerMillion: 10, outputCentsPerMillion: 20 });
   });

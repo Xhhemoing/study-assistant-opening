@@ -1,5 +1,37 @@
-import type { Scope } from "@aistudy/contracts";
-import { evaluateExamChoice, parseExamChoiceSpec } from "@aistudy/domain";
+import { isDeepStrictEqual } from "node:util";
+import { examQuestionPartsSchema } from "@aistudy/contracts";
+import type { ExamAttempt, ExamPack, ExamQuestion, ExamSprintState, QuestionPartAssistance, Scope } from "@aistudy/contracts";
+import { evaluateExamChoice, evaluateExamQuestionParts, parseExamChoiceSpec } from "@aistudy/domain";
+import { readCourseRequirements } from "./opening-course-route-read";
+
+/** Resolve declared keys only inside the owner/course; never infer from labels or positions. */
+export async function captureExamPartRequirements(tx: TransactionSql, scope: Scope, courseId: string, question: ExamQuestion) {
+  const requirements = await readCourseRequirements(tx, scope, courseId);
+  return question.partSnapshot!.parts.map(part => {
+    const matches = requirements.filter(row => row.requirementKey === part.requirementKey && row.approvedAt);
+    if (matches.length !== 1) throw learningError("CONFLICT", "分项要求尚未在本课程唯一确认");
+    const row = matches[0]!;
+    return { partId: part.partId, identityRefId: part.identityRefId, requirementKey: part.requirementKey,
+      id: row.id, revision: row.revision, stableSkillId: row.stableSkillId, nodeId: row.knowledgeNodeId };
+  });
+}
+
+/** Existing private state JSON owns part results. Whole-question facts/score remain untouched. */
+export async function publishExamPartResult(tx: TransactionSql, scope: Scope, sprintId: string, pack: ExamPack,
+  state: ExamSprintState, attempt: ExamAttempt, row: Record<string, unknown>, observationId: string, assistance: QuestionPartAssistance) {
+  const question = pack.questions.find(item => item.id === attempt.questionId)!;
+  if (!question.partSnapshot) return;
+  const intent = row.create_intent as { examSprint?: { partSnapshot?: unknown } } | null;
+  const pinned = examQuestionPartsSchema.safeParse(intent?.examSprint?.partSnapshot);
+  const normalize = (snapshot: NonNullable<typeof question.partSnapshot>) => ({ ...snapshot,
+    parts: [...snapshot.parts].sort((a, b) => a.partId.localeCompare(b.partId)) });
+  if (!pinned.success || !isDeepStrictEqual(normalize(pinned.data), normalize(question.partSnapshot)))
+    throw learningError("CONFLICT", "分项题目版本与首次展示快照不符");
+  const questionEvaluation = evaluateExamQuestionParts(question, pack, attempt.answer!, observationId, assistance)!;
+  attempt.resultMetadata = { questionEvaluation };
+  await tx`UPDATE opening_exam_sprints SET state=${tx.json(state as never)}
+    WHERE id=${sprintId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+}
 import type { TransactionSql } from "postgres";
 import { learningError, learningIso } from "./opening-learning-facts";
 import { parseExamBinding } from "./opening-exam-integration-facts";

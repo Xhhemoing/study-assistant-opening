@@ -1,13 +1,21 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { beforeEach, afterEach, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { CourseRouteRequirementInput, CourseRouteSnapshot, LearningGoal, LearningGoalList } from "@aistudy/contracts";
 import { CourseRoutePanel, parsePhysicalPages, routeStartBlockers } from "./course-route-panel";
 import { createCourseRouteClient } from "./course-route-client";
 import type { CourseRouteClient } from "./course-route-client";
 import type { KnowledgeRebuildClient } from "../knowledge/knowledge-rebuild-client";
 import { KNOWLEDGE_POLL_INTERVAL_MS } from "../knowledge/knowledge-rebuild-control";
+const spanNext = vi.hoisted(() => vi.fn());
+vi.mock("@aistudy/database", () => ({ createOpeningSpanTutorNextRepository: () => ({ next: spanNext }) }));
+// Load the real service and shared consumer before any per-test React act scope.
+// Cold module transforms must not outlive a timed-out test and overlap the next root's cleanup.
+beforeAll(async () => {
+  await import("../teaching/span/next-action-service");
+  await import("../teaching/span/span-next-action-control");
+}, 30_000);
 const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const requirement: CourseRouteRequirementInput = { id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "concept-one", title: "概念一", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "manual", status: "needs_check", exerciseKeys: [], rubric: "独立解释概念", missingReasons: [] }, origin: "confirmed" };
 const snapshot: CourseRouteSnapshot = { courseId, scopeState: "unconfirmed", requirements: [], suggestions: [requirement], summary: { total: 0, mandatory: 0, verified: 0, blocked: 0 }, materials: Array.from({ length: 33 }, (_, index) => ({ sourceId: id, sourceVersion: index, title: `资料 ${index + 1}`, available: true })), currentActivity: null, currentRoute: null, observationId: null };
@@ -205,6 +213,54 @@ const goalId = "55555555-5555-4555-8555-555555555555";
 const goal: LearningGoal = { id: goalId, workspaceId: courseId, title: "期末复习", courseIds: [courseId], kind: "custom", targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "独立解释", revision: 3, lifecycle: "active", maintenanceIntervalDays: null, milestones: [], createdAt: "2026-10-27T00:00:00Z", updatedAt: "2026-10-27T00:00:00Z" };
 const selectedGoal: LearningGoalList = { goals: [goal], selectedGoalIds: { [courseId]: goalId }, legacyConflicts: [] };
 const confirmed: CourseRouteSnapshot = { ...snapshot, scopeState: "confirmed", suggestions: [], summary: { total: 1, mandatory: 1, verified: 0, blocked: 0 }, requirements: [{ requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [] }] };
+it.each(["fresh", "pending start", "pending confirm"] as const)("mounts the server remediation route without writes for %s until an explicit user choice", async mode => {
+  sessionStorage.clear();
+  const command = { goalId, expectedGoalRevision: goal.revision, requirementId: id, expectedRequirementRevision: 1, minutes: 20, clientKey: "route-start:preserved" };
+  const saved = mode === "pending start" ? { kind: "start", input: command }
+    : { kind: "confirm", input: { expectedRevisions: [{ id, revision: 1 }], requirements: [requirement], confirmScope: true } };
+  if (mode !== "fresh") sessionStorage.setItem(`aistudy:route-command:${courseId}`, JSON.stringify(saved));
+  const { createSpanNextActionService } = await import("../teaching/span/next-action-service");
+  const { readSpanNextResult } = await import("../teaching/span/span-next-action-control");
+  spanNext.mockResolvedValue({ kind: "choice", reason: "remediation_limit", courseId, originSession: { activityId: id, sessionId: id, courseId, retestId: null } });
+  const result = readSpanNextResult(await createSpanNextActionService({} as import("postgres").Sql).next({ workspaceId: id, ownerUserId: id }, { activityId: id, expectedRevision: 1, observationId: null, clientKey: "span-next:route-choice" }), courseId);
+  if (result.kind !== "choice" || !result.secondary) throw new Error("expected server route choice");
+  const target = new URL(result.secondary.href, "https://opening.local");
+  expect(target.pathname).toBe(`/opening/courses/${courseId}`);
+  expect(target.search).toBe("?tab=units"); expect(target.hash).toBe("#course-learning-route");
+  window.history.replaceState(null, "", `${target.pathname}${target.search}${target.hash}`);
+  const transport = vi.fn<typeof fetch>(async (path, init) => {
+    expect(init?.method ?? "GET").toBe("GET");
+    expect(String(path)).toBe(`/api/opening/courses/${courseId}/learning-route`);
+    return Response.json(confirmed);
+  });
+  const api = createCourseRouteClient(transport), start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  const goals = { list: vi.fn(async () => ({ ...selectedGoal, selectedGoalIds: {} })) }, knowledge = knowledgeClient();
+  // Any accidental default API activity/execute call is captured, not hidden by cancelling a link click.
+  const unexpected = vi.fn(async () => { throw new Error("unexpected automatic request"); });
+  vi.stubGlobal("fetch", unexpected);
+  try {
+    const targetCourseId = target.pathname.split("/").at(-1)!;
+    await act(async () => root.render(<CourseRoutePanel courseId={targetCourseId} client={api} goalsClient={goals} knowledgeClient={knowledge} />));
+    expect(host.querySelector(target.hash)).not.toBeNull();
+    expect(transport).toHaveBeenCalledTimes(1); expect(goals.list).toHaveBeenCalledExactlyOnceWith(courseId);
+    expect(knowledge.read).toHaveBeenCalledTimes(1); expect(knowledge.rebuild).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled(); expect(unexpected).not.toHaveBeenCalled();
+    expect(button("学习这一项").disabled).toBe(true);
+    if (mode === "fresh") {
+      start.mockResolvedValue({ kind: "choice", reason: "configuration", message: "请核对配置", courseId, href: `/opening/courses/${courseId}?tab=units#course-learning-route`, requirementIds: [id] });
+      const select = host.querySelector("select")!;
+      await act(async () => { select.value = goalId; select.dispatchEvent(new Event("change", { bubbles: true })); });
+      expect(start).not.toHaveBeenCalled();
+      await act(async () => button("学习这一项").click());
+      expect(start).toHaveBeenCalledExactlyOnceWith(courseId, { ...command, clientKey: expect.stringMatching(/^route-start:/) });
+      expect(confirm).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1); expect(unexpected).not.toHaveBeenCalled();
+    } else {
+      expect(host.textContent).toContain("安排结果尚未确认");
+      expect(JSON.parse(sessionStorage.getItem(`aistudy:route-command:${courseId}`)!)).toEqual(saved);
+    }
+  } finally { sessionStorage.clear(); window.history.replaceState(null, "", "/"); }
+});
+
 function rebuildingKnowledge() {
   const state = { version: 1, nodes: 0 };
   const knowledge: KnowledgeRebuildClient = { read: vi.fn(async () => knowledgeRecord(state.version, state.nodes)), rebuild: vi.fn(async () => ({ jobId: id, kind: "build-course-knowledge" as const, created: true })) };

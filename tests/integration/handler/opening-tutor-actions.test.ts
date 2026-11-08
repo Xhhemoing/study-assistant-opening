@@ -31,6 +31,8 @@ function assistedSuccessGold(policyVersion: string) {
   const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
   const clarify = { kind: "clarify", problemRef: null } as const;
   switch (policyVersion) {
+    // v5 adds D4 cycles but keeps bridge v2 ordinary policy; D5 stays paused.
+    case "next-learning-step-5":
     case "next-learning-step-2": return [variant, clarify, clarify] as const;
     case "next-learning-step-3": return [variant, variant, variant] as const;
     default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);

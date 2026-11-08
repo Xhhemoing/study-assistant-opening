@@ -87,6 +87,9 @@ function assistedSuccessGold(policyVersion: string) {
   const correction = { activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null } as const;
   const shared = { activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null } as const;
   switch (policyVersion) {
+    // D4 summaries are not supplied here: v5 retains v2 route correction,
+    // while historical v3 keeps its own explicit shared-policy gold below.
+    case "next-learning-step-5":
     case "next-learning-step-2": return [
       { canonical: majority, route: majority, override: false },
       { canonical: fallback, route: correction, override: true },

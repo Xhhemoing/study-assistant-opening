@@ -9,7 +9,7 @@ import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptR
 import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { reserveSpanTutorActivityBudget } from "../../packages/database/src/repositories/opening-span-tutor-budget";
-import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
+import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision, spanTutorQuestionInScope } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
@@ -53,7 +53,14 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+it("does not widen historical receipt compatibility to unknown policy/execution pairs", () => {
+  const intentVersion = JSON.stringify({ ruleDecision: { activityKind: "diagnose", focusObservationId: null, reasonCode: "needs_check" } });
+  for (const policyVersion of ["next-learning-step-6/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-1",
+    "next-learning-step-1/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-3"]) {
+    expect(spanTutorReceiptDecision({ policyVersion, intentVersion })).toBeNull();
+  }
+});
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-2"])(
   "restores and replays %s by the original key without recomputing or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
@@ -63,9 +70,10 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   const session = await f.repo.execute(fixture.scope, input);
   const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
-  // New receipts are v2; archived labels and a v3-only result are seeded separately.
+  // New receipts are v5 (bridge v2 + D4); archived labels and a v3-only
+  // historical result remain separate fixtures, never new writer authority.
   const written = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
-  expect(written[0]!.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
+  expect(written[0]!.policyVersion).toBe("next-learning-step-5/span-tutor-execution-2");
   const savedDecision = policyVersion.startsWith("next-learning-step-3/")
     ? { ...input.decision, activityKind: "reduced_help_practice", reasonCode: "assisted_success" } : input.decision;
   const captured = { ...JSON.parse(written[0]!.intentVersion), ruleDecision: savedDecision };
@@ -336,6 +344,29 @@ it("applies explicit phases to an existing ordinary lesson without charging agai
     await f.repo.assertCurrent(fixture.scope, context);
   }
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
+it("updates an ordinary lesson to explicit overview without issuing a question or charging, and preserves admission checks", async () => {
+  expect(spanTutorQuestionInScope("串讲")).toBe(true);
+  for (const question of ["为什么串讲", "例如串讲", "不要串讲", "请解释特征值"]) expect(spanTutorQuestionInScope(question)).toBe(false);
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question: "串讲" }))!;
+  const decision = nextLearningStep(context.decisionInput), operationId = randomUUID();
+  expect(context).toMatchObject({ needsIntentUpdate: true, intent: { purpose: "overview" } });
+  const before = await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`;
+  await expect(f.repo.execute({ ...scope, ownerUserId: randomUUID() }, { context, decision, operationId: randomUUID() })).rejects.toThrow();
+  const updated = await f.repo.execute(scope, { context, decision, operationId });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, moveId: "overview-links", intent: { purpose: "overview" } });
+  expect(await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  const replay = (await f.repo.read(scope, { ...f.request, question: "串讲", operationId }))!;
+  expect((await f.repo.execute(scope, { context: replay, decision, operationId })).activityId).toBe(updated.activityId);
+  const fresh = (await f.repo.read(scope, { ...f.request, question: "span 自学" }))!;
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(f.repo.execute(scope, { context: fresh, decision: nextLearningStep(fresh.decisionInput), operationId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await lessons.get(scope, session.activityId)).toEqual(updated);
 });
 it("does not start or resume after the account is disabled between reading and executing", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;

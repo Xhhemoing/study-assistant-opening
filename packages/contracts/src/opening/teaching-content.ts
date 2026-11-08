@@ -45,6 +45,41 @@ export const teachingSourceRefSchema = z
   })
   .strict();
 
+const teachingModelIdentitySchema = z.object({
+  providerId: z.string().trim().min(1).max(200), modelName: z.string().trim().min(1).max(200), family: z.string().trim().min(1).max(120),
+}).strict();
+
+/** Private job/result metadata; never embed in a teaching provider request or client answer. */
+export const teachingBlindSolveReceiptSchema = z.object({
+  protocol: z.literal("teaching-blind-solve-1"),
+  identity: z.object({
+    activityId: uuidSchema, teachingRevisionId: uuidSchema, blockId: uuidSchema, itemVersionId: uuidSchema.optional(),
+    answerBlockId: uuidSchema.nullable(), questionText: z.string().max(8000).nullable(), keyText: z.string().max(8000).nullable(),
+    contentVersion: z.number().int().nonnegative(), sourceVersions: z.record(uuidSchema, z.number().int().nonnegative()),
+    generatorModelIdentity: teachingModelIdentitySchema.nullable(),
+  }).strict(),
+  operationId: z.string().min(1).max(500),
+  modelSnapshot: z.object({
+    id: z.string().min(1), providerId: z.string().min(1), modelName: z.string().min(1),
+    inputCentsPerMillion: z.number().nonnegative(), outputCentsPerMillion: z.number().nonnegative(),
+  }).strict().nullable(),
+  family: z.string().trim().min(1).nullable(), decision: z.enum(["match", "disagree", "unknown"]),
+  solverAnswer: z.string().max(8000).nullable(), reasonCodes: z.array(z.string().min(1).max(120)).min(1).max(16),
+  costLedgerRef: z.string().min(1).max(200).nullable(),
+}).strict().superRefine((receipt, ctx) => {
+  if (receipt.decision !== "unknown" && (!receipt.modelSnapshot || !receipt.family || !receipt.costLedgerRef || !receipt.solverAnswer
+    || !receipt.identity.answerBlockId || !receipt.identity.questionText?.trim() || !receipt.identity.keyText?.trim()
+    || !receipt.identity.generatorModelIdentity || receipt.family.trim().toLowerCase() === receipt.identity.generatorModelIdentity.family.trim().toLowerCase()
+    || (receipt.modelSnapshot.providerId === receipt.identity.generatorModelIdentity.providerId
+      && receipt.modelSnapshot.modelName === receipt.identity.generatorModelIdentity.modelName))) {
+    ctx.addIssue({ code: "custom", message: "decided receipt requires independent configured identity, answer and ledger" });
+  }
+});
+
+export type TeachingBlindSolveReceipt = z.infer<typeof teachingBlindSolveReceiptSchema>;
+export type TeachingBlindSolveIdentity = TeachingBlindSolveReceipt["identity"];
+export type TeachingModelIdentity = NonNullable<TeachingBlindSolveIdentity["generatorModelIdentity"]>;
+
 export const teachingGenerationConfigSchema = z
   .object({
     providerHint: z.string().min(1).max(120).optional(),

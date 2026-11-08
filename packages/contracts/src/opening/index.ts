@@ -293,3 +293,5 @@ export * from "./course-route";
 export * from "./answer-interpretation";
 export * from "./learning-asset-links";
 export * from "./course-shared-skill";
+export * from "./question-identity";
+export * from "./question-evaluation";

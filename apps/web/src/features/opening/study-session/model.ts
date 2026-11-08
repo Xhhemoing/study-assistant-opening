@@ -48,7 +48,7 @@ export type PhotoWorkSource = { id: string; version: number; physicalPage: numbe
 export type PhotoState = { status: "none" | "uploading" | "preparing" | "ready" | "pending" | "unavailable" | "failed"; name?: string; workSource?: PhotoWorkSource; message?: string };
 
 /** `notice` asks the learner to choose and stays visible; `reason` only explains the step and is folded. */
-export type NextAction = { href: string; label: string; reason?: string; notice?: string; alternatives: { href: string; label: string }[] };
+export type NextAction = { href: string; label: string; reason?: string; notice?: string; choiceReason?: string; alternatives: { href: string; label: string }[] };
 
 export type StudySessionView = {
   step: StudyStep;
@@ -94,6 +94,8 @@ export type StudySessionPort = {
   setConfidence?(value: PreAnswerConfidence | null): StudySessionView;
   primary(): Promise<StudySessionView>;
   redo?(): Promise<StudySessionView>;
+  /** Span only: change the original lesson's explanation through its progress owner. */
+  changeExplanation?(): Promise<StudySessionView>;
   help(): Promise<StudySessionView>;
   choosePhoto(file: File): Promise<StudySessionView>;
   removePhoto(): StudySessionView;
