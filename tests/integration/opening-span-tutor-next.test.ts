@@ -630,6 +630,67 @@ it("delivers a worker remediation choice and an admitted overview-only change af
   await expect(adapter.execute(scope, { ...overviewRequest, context: overviewContext, operationId: `tutor-next:${randomUUID()}`,
     decision: nextLearningStep(overviewContext.decisionInput) })).rejects.toMatchObject({ code: "CONFLICT" });
 });
+it.each(["overview", "challenge"] as const)("does not restart an existing %s as a new method after two real remediation cycles", async purpose => {
+  const f = await seed(), { sql, scope } = fixture;
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose };
+  const session = await f.lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  await recordCycleAnswer(f, session.sessionId, "span-reserved-20261021-q01", false, "labelled_error");
+  await recordCycleAnswer(f, session.sessionId, "span-reserved-20261021-q02", true, "unlabelled_error");
+  await recordCycleAnswer(f, session.sessionId, "span-reserved-20261021-q03", false, "labelled_error");
+  await recordCycleAnswer(f, session.sessionId, "span-reserved-20261021-q05", true, "unlabelled_error");
+  const adapter = createSpanTutorNextAction(sql), request = { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 },
+    question: "span 慢一点", userTurnId: randomUUID(), operationId: randomUUID() };
+  const context = (await adapter.read(scope, request))!;
+  expect(context.spanContext).toMatchObject({ needsIntentUpdate: true, intent: { purpose, pace: "slow" } });
+  const before = await cyclePersisted(f);
+  expect(await prepareTutorNextAction(adapter, scope, request)).toMatchObject({ action: null, decision: { reasonCode: "remediation_limit" } });
+  await expect(adapter.execute(scope, { ...request, context, decision: nextLearningStep(context.decisionInput) }))
+    .rejects.toMatchObject({ code: "SPAN_REMEDIATION_LIMIT" });
+  expect(await cyclePersisted(f)).toEqual(before);
+});
+it.each([
+  ["self_study", "full_explain", "self-independent", "self-example"],
+  ["self_study", "reduced_help_practice", "self-independent", "self-faded"],
+  ["overview", "full_explain", "overview-contrast", "overview-contrast"],
+  ["overview", "reduced_help_practice", "overview-mixed", "overview-mixed"],
+  ["challenge", "full_explain", "challenge-transfer", "challenge-transfer"],
+  ["challenge", "reduced_help_practice", "challenge-transfer", "challenge-transfer"],
+] as const)("consumes %s pace preferences with %s on its real teaching moves without issuing or charging", async (purpose, activityKind, currentMove, expectedMove) => {
+  const f = await seed(), { sql, scope } = fixture;
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose,
+    ...(activityKind === "full_explain" ? { explanationStyle: "full" as const } : {}) };
+  const started = await f.lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  const session = await f.lessons.save(scope, started.activityId,
+    { expectedRevision: started.revision, intent, moveId: currentMove, status: "active" });
+  if (activityKind === "reduced_help_practice") await recordCycleAnswer(f, session.sessionId, "span-reserved-20261021-q02", true, "correct");
+  const adapter = createSpanTutorNextAction(sql), request = { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 },
+    question: "span 慢一点", userTurnId: randomUUID(), operationId: `old preference key:${randomUUID()}` };
+  const context = (await adapter.read(scope, request))!;
+  expect(context.spanContext).toMatchObject({ needsIntentUpdate: true, intent: { purpose, pace: "slow" } });
+  expect(nextLearningStep(context.decisionInput).activityKind).toBe(activityKind);
+  const before = await cyclePersisted(f);
+  expect(await prepareTutorNextAction(adapter, scope, request)).toMatchObject({ action: { activityId: session.activityId }, resumed: false });
+  const updated = (await f.lessons.get(scope, session.activityId))!;
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, revision: session.revision + 1,
+    intent: { ...intent, pace: "slow" }, moveId: expectedMove });
+  const after = await cyclePersisted(f);
+  expect(after.activities).toHaveLength(before.activities.length);
+  expect(after.attempts).toEqual(before.attempts); expect(after.observations).toEqual(before.observations);
+  expect(after.help).toEqual(before.help); expect(after.money).toEqual(before.money);
+  expect(after.activities.map(row => row.goal_json.tutorBudget)).toEqual(before.activities.map(row => row.goal_json.tutorBudget));
+  expect(after.receipts).toHaveLength(before.receipts.length + 1);
+  expect(after.receipts.find(row => row.client_key === `span-tutor-decision:${request.operationId}`)?.receipt.policyVersion)
+    .toBe("next-learning-step-5/span-tutor-execution-2");
+  // Exact old/noncanonical operation keys win over a later request's preferences.
+  expect(await prepareTutorNextAction(adapter, scope, { ...request, question: "span 自学，完整讲解" }))
+    .toMatchObject({ resumed: true, action: { activityId: session.activityId }, decision: { activityKind } });
+  expect(await cyclePersisted(f)).toEqual(after);
+  // A different operation cannot consume the pre-update revision or turn CONFLICT into success.
+  await expect(adapter.execute(scope, { ...request, operationId: randomUUID(), context, decision: nextLearningStep(context.decisionInput) }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await cyclePersisted(f)).toEqual(after);
+});
+
 it.each([1, 4] as const)("counts original-attempt help level %i through two real redo roots without delivering new help", async level => {
   const f = await seed(), { sql, scope } = fixture, origin = await f.create();
   const learning = createOpeningLearningRepository(sql), attempts = createOpeningLearningAttemptRepository(sql);

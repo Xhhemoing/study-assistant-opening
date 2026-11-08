@@ -1,5 +1,5 @@
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
-import { buildDecisionInput, captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
+import { buildDecisionInput, captureNextLearningStep, createSpanTeachingSequence, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
@@ -424,8 +424,15 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await saveDecision(context.resumeSession, "resume_issue");
           }
           if (context.needsIntentUpdate) {
-            const moveId = intentOnlyOverview ? "overview-links" : input.decision.activityKind === "full_explain" ? "self-example"
-              : input.decision.activityKind === "reduced_help_practice" ? "self-faded" : context.resumeSession.moveId;
+            if (context.resumeSession.status !== "active") throw conflict("当前学习已暂停或结束，请回原学习进度明确调整。");
+            const mode = spanModeForIntent(context.intent), moves = createSpanTeachingSequence(mode);
+            const firstMove = mode === "overview" ? "overview-links" : mode === "challenge" ? "challenge-predict" : "self-example";
+            // Presentation preferences do not restart an existing overview or
+            // challenge as a new method. Only self-study has full/faded moves.
+            const moveId = intentOnlyOverview ? firstMove
+              : mode === "self_study" && input.decision.activityKind === "full_explain" ? "self-example"
+                : mode === "self_study" && input.decision.activityKind === "reduced_help_practice" ? "self-faded"
+                  : moves.some(move => move.id === context.resumeSession!.moveId) ? context.resumeSession.moveId : firstMove;
             context.resumeSession = await sessions.save(scope, context.resumeSession.activityId, { expectedRevision: context.resumeSession.revision,
               intent: context.intent, moveId, status: context.resumeSession.status });
             await saveDecision(context.resumeSession, "resume_issue");
