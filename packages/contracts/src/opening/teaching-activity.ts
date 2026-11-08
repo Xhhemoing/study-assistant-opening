@@ -91,6 +91,8 @@ export const teachingActivitySchema = z
     routeManaged: z.boolean().optional(),
     /** Response-only qualification from the owned persisted activity/session JOIN. */
     staticLesson: z.object({ protocol: z.literal("span-lesson-v1"), sessionId: uuidSchema, retestId: uuidSchema.optional() }).strict().optional(),
+    /** Response-only unavailable association; preserves course identity without a fabricated session. */
+    staticLessonUnavailable: z.literal("retest_unavailable").optional(),
     workspaceId: uuidSchema,
     ownerUserId: uuidSchema,
     courseId: uuidSchema.nullable(),
@@ -108,7 +110,11 @@ export const teachingActivitySchema = z
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
   })
-  .strict();
+  .strict().superRefine((value, ctx) => {
+    if (value.staticLesson !== undefined && value.staticLessonUnavailable !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["staticLessonUnavailable"], message: "An unavailable static lesson cannot also expose a resumable session" });
+    }
+  });
 
 export const teachingActivityAssociateCourseInputSchema = z.union([z
   .object({

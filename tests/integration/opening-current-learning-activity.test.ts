@@ -68,6 +68,44 @@ it.each(["active", "paused"] as const)("restores a real %s delayed retest via DT
   await expect(openCourseStudy(api, { courseId, courseTitle: "Delayed", compilerEnabled: true, archived: false, sourceIds: [] })).rejects.toThrow("原延迟复测");
   expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(await readFootprint()).toEqual(cancelled);
 });
+it.each(["cancelled", "completed"] as const)("isolates an active/paused lesson with %s retest from another course's ordinary/static progress", async retestStatus => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const broken = await staticLesson(retestId), brokenCourseId = courseId;
+  const sessions = createOpeningSpanSessionRepository(f.sql), teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  const staticCourseId = randomUUID(), ordinaryCourseId = randomUUID();
+  for (const id of [staticCourseId, ordinaryCourseId]) await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${id},${f.scope.workspaceId},'Unaffected course',${id})`;
+  courseId = staticCourseId; const valid = await staticLesson(); courseId = brokenCourseId;
+  const ordinaryId = await activity({ course: ordinaryCourseId });
+  const options = (id: string) => ({ courseId: id, courseTitle: "Isolation", compilerEnabled: true, archived: false, sourceIds: [] });
+  const api = { listTasks: vi.fn(async () => ({ tasks: [] })), listTeachingActivities: () => teaching.listByOwner(f.scope),
+    getTeachingActivity: (id: string) => teaching.assertOwnedActivity(f.scope, id), createTeachingActivity: vi.fn() };
+  await f.sql`UPDATE opening_retest_activities SET status=${retestStatus} WHERE id=${retestId}`;
+  for (const status of ["active", "paused"] as const) {
+    const current = (await sessions.get(f.scope, broken.activityId))!;
+    await sessions.save(f.scope, broken.activityId, { expectedRevision: current.revision, intent: current.intent, moveId: current.moveId, status });
+    const before = await readFootprint();
+    const rows = await teaching.listByOwner(f.scope);
+    const unavailable = teachingActivitySchema.parse(rows.find(row => row.id === broken.activityId));
+    expect(unavailable.staticLessonUnavailable).toBe("retest_unavailable");
+    expect(unavailable).not.toHaveProperty("staticLesson");
+    expect(unavailable.courseId).toBe(brokenCourseId);
+    expect(teachingActivitySchema.safeParse({ ...unavailable, staticLesson: { protocol: "span-lesson-v1", sessionId: broken.sessionId } }).success).toBe(false);
+    expect(teachingActivityCreateInputSchema.safeParse({ clientKey: randomUUID(), intentKind: "topic", intentSummary: "No unavailable input", createIntent: {}, staticLessonUnavailable: "retest_unavailable" }).success).toBe(false);
+    const ordinary = await teaching.assertOwnedActivity(f.scope, ordinaryId);
+    expect(await openCourseStudy(api, options(ordinaryCourseId))).toEqual({ kind: "activity", activity: ordinary });
+    const validDto = await teaching.assertOwnedActivity(f.scope, valid.activityId);
+    expect(await openCourseStudy(api, options(staticCourseId))).toEqual({ kind: "static-lesson", activity: validDto, href: `/opening/courses/${staticCourseId}/study/span?lesson=${valid.activityId}` });
+    await expect(openCourseStudy(api, options(brokenCourseId))).rejects.toThrow("原延迟复测");
+    await expect(openCourseStudy(api, { ...options(brokenCourseId), activityId: broken.activityId })).rejects.toThrow("原延迟复测");
+    expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(await readFootprint()).toEqual(before);
+  }
+  // Terminal teaching history remains readable without the active-resume rejection.
+  const paused = (await sessions.get(f.scope, broken.activityId))!;
+  await sessions.save(f.scope, broken.activityId, { expectedRevision: paused.revision, intent: paused.intent, moveId: paused.moveId, status: "completed" });
+  expect((await teaching.assertOwnedActivity(f.scope, broken.activityId)).status).toBe("completed");
+});
 it("rejects a persisted retest reference after its course identity no longer matches", async () => {
   const retestId = randomUUID();
   await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)

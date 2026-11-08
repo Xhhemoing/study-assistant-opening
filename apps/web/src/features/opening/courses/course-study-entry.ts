@@ -7,7 +7,11 @@ import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, cur
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
 export type CourseStudyEntry = { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
 
+function assertStaticLessonAvailable(activity: TeachingActivity): void {
+  if (activity.staticLessonUnavailable) throw new Error("原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
+}
 function activityEntry(activity: TeachingActivity): CourseStudyEntry {
+  assertStaticLessonAvailable(activity);
   return activity.staticLesson && activity.courseId
     ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?${new URLSearchParams({ lesson: activity.id,
       ...(activity.staticLesson.retestId ? { retest: activity.staticLesson.retestId } : {}) })}` }
@@ -99,6 +103,11 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     return activityEntry(activity);
   }
   const activities = enabled ? await api.listTeachingActivities() : [];
+  // A workspace list may contain another course's unavailable association. Only
+  // the selected course can block this entry; never erase its identity into create.
+  for (const activity of activities) {
+    if (activity.courseId === options.courseId && (activity.status === "active" || activity.status === "paused")) assertStaticLessonAvailable(activity);
+  }
   const current = currentCourseActivity(activities, options.courseId);
   if (current) return activityEntry(current);
   if (!enabled || !options.compilerEnabled) return { kind: "practice" };

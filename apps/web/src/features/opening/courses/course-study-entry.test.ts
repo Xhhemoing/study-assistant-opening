@@ -295,6 +295,15 @@ it("retains completed retest review despite a now unavailable teaching binding",
   expect(await openCourseStudy(client, { ...options, taskId })).toMatchObject({ kind: "retest-review", task: selected });
   expect(client.createTeachingActivity).not.toHaveBeenCalled();
 });
+it("isolates unavailable static associations to their selected course and never creates a replacement", async () => {
+  const unavailable = activity({ intentKind: "course_continue", contentVersion: 0, staticLessonUnavailable: "retest_unavailable" });
+  const valid = activity({ id: otherCourseId, courseId: otherCourseId });
+  const client = api([unavailable, valid]);
+  expect(await openCourseStudy(client, { ...options, courseId: otherCourseId })).toEqual({ kind: "activity", activity: valid });
+  await expect(openCourseStudy(client, options)).rejects.toThrow("原延迟复测");
+  await expect(openCourseStudy(client, { ...options, activityId })).rejects.toThrow("原延迟复测");
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
 it("returns the precise static lesson navigation without ordinary creation or teaching resume", async () => {
   const lesson = activity({ intentKind: "course_continue", contentVersion: 0, staticLesson: { protocol: "span-lesson-v1", sessionId: taskId } });
   const client = api([lesson]);

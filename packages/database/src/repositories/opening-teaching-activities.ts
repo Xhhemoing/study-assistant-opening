@@ -17,7 +17,6 @@ import {
 } from "./opening-learning-facts";
 
 export function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
-  if (row.static_lesson_retest_unavailable === true) throw learningError("CONFLICT", "原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
   const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
   const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
   return {
@@ -35,7 +34,8 @@ export function mapTeachingActivity(row: Record<string, unknown>): TeachingActiv
     checkpointJson: (row.checkpoint_json ?? undefined) as TeachingActivity["checkpointJson"],
     ...(focus.success ? { learnerFocus: focus.data } : {}),
     ...(goal?.courseRoute ? { routeManaged: true } : {}),
-    ...(typeof row.static_lesson_session_id === "string"
+    ...(row.static_lesson_retest_unavailable === true ? { staticLessonUnavailable: "retest_unavailable" as const } : {}),
+    ...(row.static_lesson_retest_unavailable !== true && typeof row.static_lesson_session_id === "string"
       ? { staticLesson: { protocol: "span-lesson-v1" as const, sessionId: row.static_lesson_session_id,
         ...(typeof row.static_lesson_retest_id === "string" ? { retestId: row.static_lesson_retest_id } : {}) } } : {}),
     clientKey: String(row.client_key),
@@ -66,6 +66,7 @@ export async function assertOwnedActivity(
       AND a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}`;
   if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+  if (rows[0]!.static_lesson_retest_unavailable === true) throw learningError("CONFLICT", "原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
   return mapTeachingActivity(rows[0] as Record<string, unknown>);
 }
 
