@@ -57,7 +57,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
   const primaryInThread = successorCard && primary.kind === "next";
   const remediationActions = remediation ? <div className="flex flex-wrap gap-2">
     {primaryButton}
-    {view.next!.alternatives.map(link => <a key={link.href} className={ui.quiet} href={link.href} aria-disabled={pending || undefined} onClick={event => { if (pending) event.preventDefault(); }}>重新诊断：到学习入口明确选择</a>)}
+    {view.next!.alternatives.map(link => <a key={link.href} className={ui.quiet} href={link.href} aria-disabled={pending || undefined} onClick={event => { if (pending) event.preventDefault(); }}>到课程路线重新选择</a>)}
     <button type="button" className={ui.secondary} disabled={pending} onClick={on.onPause}>暂缓并保存</button>
   </div> : null;
 

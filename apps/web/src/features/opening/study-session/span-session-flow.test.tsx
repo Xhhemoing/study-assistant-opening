@@ -372,7 +372,7 @@ it.each(["last move", "retest", "overview"])("%s keeps the authorized adaptive n
   expect(view.next).toMatchObject({ notice: "请先授权导师安排。", href: `/opening/courses/${courseId}` });
 });
 
-it.each(["explanation", "diagnostic", "pause"])("remediation_limit exposes three choices and only the explicit %s action runs", async action => {
+it.each(["explanation", "route choice", "pause"])("remediation_limit exposes three choices and only the explicit %s action runs", async action => {
   const { attempt, details, courseId } = fixture("self_study-reserved", "span-independent-3d");
   attempt.spanExercise = { ...attempt.spanExercise!, id: "span-reserved-fraction" };
   details.attempts = [attempt];
@@ -387,9 +387,9 @@ it.each(["explanation", "diagnostic", "pause"])("remediation_limit exposes three
     expect(save).not.toHaveBeenCalled(); expect(mocks.request).not.toHaveBeenCalled(); expect(mocks.createAttempt).not.toHaveBeenCalled();
     await ui.click("看下一步安排");
     expect(save).not.toHaveBeenCalled();
-    const choice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、重新诊断或暂缓。原记录保留。",
+    const choice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、到课程路线重新选择或暂缓。原记录保留。",
       primary: { label: "回原活动选择串讲", href: `/opening/courses/${courseId}/study/span?lesson=${details.session!.activityId}` },
-      secondary: { label: "到学习入口明确选择", href: `/opening/courses/${courseId}/study` } };
+      secondary: { label: "到课程路线重新选择", href: `/opening/courses/${courseId}?tab=units#course-learning-route` } };
     await act(async () => respond(choice));
     const card = ui.host.querySelector("section[aria-label='下一步']")!;
     expect(card.textContent).toContain(choice.message);
@@ -398,9 +398,9 @@ it.each(["explanation", "diagnostic", "pause"])("remediation_limit exposes three
     expect(ui.button("改这道题")).toBeUndefined();
     const diagnostic = card.querySelector("a")!;
     expect(diagnostic.getAttribute("href")).toBe(choice.secondary.href);
-    expect(diagnostic.textContent).toContain("重新诊断");
+    expect(diagnostic.textContent).toBe("到课程路线重新选择");
     expect(save).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
-    if (action === "diagnostic") {
+    if (action === "route choice") {
       diagnostic.addEventListener("click", event => event.preventDefault());
       await act(async () => diagnostic.click());
       expect(save).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
@@ -432,7 +432,7 @@ it("the v2 progress owner supplies the revision when switching to overview after
   mocks.request.mockImplementation(async (path: string, _schema: unknown, init?: RequestInit) => {
     if (!init) return details;
     if (init.method === "PATCH") return { ...details.session, ...JSON.parse(String(init.body)), revision: 9 };
-    if (path.endsWith("/next")) return { kind: "choice", reason: "remediation_limit", message: "请选择换讲法、诊断或暂缓。", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, label: "回原活动" }, secondary: { href: `/opening/courses/${courseId}/study`, label: "重新诊断" } };
+    if (path.endsWith("/next")) return { kind: "choice", reason: "remediation_limit", message: "请选择换讲法、课程路线或暂缓。", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, label: "回原活动" }, secondary: { href: `/opening/courses/${courseId}?tab=units#course-learning-route`, label: "到课程路线重新选择" } };
     if (path.endsWith("/presentation")) return { problem, solution, exposureReceipt: { id: uuid() } };
     throw new Error(`Unexpected request: ${path}`);
   });

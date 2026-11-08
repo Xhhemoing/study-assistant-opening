@@ -104,13 +104,14 @@ it("validates successor links with the legacy rule and keeps choices", () => {
 });
 
 it("propagates the validated remediation choice reason and message without inventing an action or href", () => {
-  const choice = { kind: "choice", reason: "remediation_limit", message: "请换讲法、重新诊断或暂缓。原记录保留。",
+  const choice = { kind: "choice", reason: "remediation_limit", message: "请换讲法、到课程路线重新选择或暂缓。原记录保留。",
     primary: { label: "回原活动选择串讲", href: `/opening/courses/${id}/study/span?lesson=${id}` },
-    secondary: { label: "到学习入口明确选择", href: `/opening/courses/${id}/study` } };
+    secondary: { label: "到课程路线重新选择", href: `/opening/courses/${id}?tab=units#course-learning-route` } };
   expect(adaptSpanNext(choice, id)).toEqual({ href: choice.primary.href, label: choice.primary.label, choiceReason: "remediation_limit", notice: choice.message, alternatives: [choice.secondary] });
   for (const href of ["https://evil.test", "/opening/courses/22222222-2222-4222-8222-222222222222/study"]) {
     for (const key of ["primary", "secondary"] as const) expect(() => adaptSpanNext({ ...choice, [key]: { href, label: "x" } }, id)).toThrow();
   }
+  expect(() => adaptSpanNext({ ...choice, secondary: { ...choice.secondary, href: `/opening/courses/${id}/study` } }, id)).toThrow();
 });
 
 it("summarizes the sealed answer by membership and key fields within 200 characters", () => {

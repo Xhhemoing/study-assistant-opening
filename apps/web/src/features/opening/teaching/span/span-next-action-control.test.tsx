@@ -9,9 +9,9 @@ beforeAll(async () => { await import("./span-lesson"); }, 30_000);
 const id = "11111111-1111-4111-8111-111111111111", nextId = "22222222-2222-4222-8222-222222222222", courseId = "33333333-3333-4333-8333-333333333333";
 const session = { activityId: id, sessionId: id, courseId, revision: 3 };
 const href = `/opening/courses/${courseId}/study/span?lesson=${nextId}`;
-const limitChoice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、重新诊断或暂缓。原答案保留。",
+const limitChoice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、到课程路线重新选择或暂缓。原答案保留。",
   primary: { label: "回原活动选择串讲", href: `/opening/courses/${courseId}/study/span?lesson=${id}` },
-  secondary: { label: "到学习入口明确选择", href: `/opening/courses/${courseId}/study` } };
+  secondary: { label: "到课程路线重新选择", href: `/opening/courses/${courseId}?tab=units#course-learning-route` } };
 const ready = { kind: "ready", href, activityId: nextId, sessionId: nextId, courseId, label: "开始下一道新题", resumed: false };
 let host: HTMLDivElement, root: Root;
 beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); vi.stubGlobal("fetch", vi.fn(async () => Response.json(ready))); host = document.createElement("div"); document.body.append(host); root = createRoot(host); });
@@ -82,6 +82,14 @@ it.each(["primary", "secondary"] as const)("rejects cross-course and external re
   for (const href of ["https://evil.test", `/opening/courses/${id}/study`, `//opening.local/opening/courses/${courseId}/study`]) {
     expect(() => readSpanNextResult({ ...limitChoice, [key]: { label: "x", href } }, courseId)).toThrow();
   }
+});
+
+it("rejects remediation links that could enter automatic study initialization or alter the route choice", () => {
+  for (const suffix of ["", "/study", "/study?tab=units#course-learning-route", "?tab=units", "?tab=units#course-units", "?tab=overview#course-learning-route", "?tab=units&tab=units#course-learning-route", "?tab=units&activity=" + id + "#course-learning-route", "?tab=units&diagnose=true#course-learning-route"]) {
+    expect(() => readSpanNextResult({ ...limitChoice, secondary: { label: "选择", href: `/opening/courses/${courseId}${suffix}` } }, courseId)).toThrow();
+  }
+  // Unrelated choice reasons keep their existing same-course navigation behavior.
+  expect(readSpanNextResult({ ...limitChoice, reason: "unknown_evidence", secondary: { label: "原入口", href: `/opening/courses/${courseId}/study` } }, courseId).kind).toBe("choice");
 });
 
 it("only changes explanation on click, blocks duplicate actions, and preserves the choice for a failed save retry", async () => {
