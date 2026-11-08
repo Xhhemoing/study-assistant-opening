@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { beforeEach, afterEach, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { CourseRouteRequirementInput, CourseRouteSnapshot, LearningGoal, LearningGoalList } from "@aistudy/contracts";
 import { CourseRoutePanel, parsePhysicalPages, routeStartBlockers } from "./course-route-panel";
 import { createCourseRouteClient } from "./course-route-client";
@@ -9,7 +9,13 @@ import type { CourseRouteClient } from "./course-route-client";
 import type { KnowledgeRebuildClient } from "../knowledge/knowledge-rebuild-client";
 import { KNOWLEDGE_POLL_INTERVAL_MS } from "../knowledge/knowledge-rebuild-control";
 const spanNext = vi.hoisted(() => vi.fn());
-vi.mock("@aistudy/database", async original => ({ ...await original<object>(), createOpeningSpanTutorNextRepository: () => ({ next: spanNext }) }));
+vi.mock("@aistudy/database", () => ({ createOpeningSpanTutorNextRepository: () => ({ next: spanNext }) }));
+// Load the real service and shared consumer before any per-test React act scope.
+// Cold module transforms must not outlive a timed-out test and overlap the next root's cleanup.
+beforeAll(async () => {
+  await import("../teaching/span/next-action-service");
+  await import("../teaching/span/span-next-action-control");
+}, 30_000);
 const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const requirement: CourseRouteRequirementInput = { id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "concept-one", title: "概念一", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "manual", status: "needs_check", exerciseKeys: [], rubric: "独立解释概念", missingReasons: [] }, origin: "confirmed" };
 const snapshot: CourseRouteSnapshot = { courseId, scopeState: "unconfirmed", requirements: [], suggestions: [requirement], summary: { total: 0, mandatory: 0, verified: 0, blocked: 0 }, materials: Array.from({ length: 33 }, (_, index) => ({ sourceId: id, sourceVersion: index, title: `资料 ${index + 1}`, available: true })), currentActivity: null, currentRoute: null, observationId: null };
