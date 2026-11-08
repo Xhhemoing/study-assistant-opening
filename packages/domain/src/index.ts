@@ -214,7 +214,6 @@ export {
 } from "./opening/tutor-policy";
 export { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, TUTOR_MODEL_SETUP_MESSAGE, TUTOR_STALE_MESSAGE } from "./opening/tutor-failure";
 export {
-  nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,
   prepareRetestSkillLink,
   shouldAppendRetestEvidence,
