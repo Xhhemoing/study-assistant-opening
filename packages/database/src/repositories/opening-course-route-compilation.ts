@@ -3,6 +3,7 @@ import { checkArithmeticAnswer } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import type { TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionText } from "./opening-teaching-question";
+import { readOpeningReservedSupply } from "./opening-course-reserved-selection";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
@@ -85,7 +86,9 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
       ? await readQuestionCoverage(db, scope, courseId, String(row!.id), String(row!.revision_id), row!.block_order as TeachingBlockRef[], row!.blocks as Block[])
       : { coverage: { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const },
         referenceChecks: { matched: 0, mismatched: 0, unsupported: 0 } };
-    item.questionCoverage = facts.coverage;
+    const supply = await readOpeningReservedSupply(db, scope, item.requirement);
+    item.reservedSupply = supply;
+    item.questionCoverage = { ...facts.coverage, unexposedEligibility: supply.status };
     item.referenceChecks = facts.referenceChecks;
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({
       activityId: row ? String(row.id) : null, generateStatus: row?.generate_status ?? null,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { issueOpeningReservedQuestion, type OpeningReservedPorts } from "./opening-course-reserved-selection";
 import { assertReferenceTextRevision } from "./opening-teaching-reference-revision";
 
 type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
@@ -266,7 +267,7 @@ async function assertPublishSourceRefs(
   }
 }
 
-export function createOpeningTeachingContentRepository(sql: Sql) {
+export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?: OpeningReservedPorts) {
   const library = createLibraryRepository(sql);
 
   return {
@@ -605,6 +606,10 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
     },
 
     async getClientInit(scope: Scope, activityId: string): Promise<ActivitySpecClientInit | null> {
+      await sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        await issueOpeningReservedQuestion(tx, scope, activityId, reservedPorts);
+      });
       const activity = await assertOwnedActivity(sql, scope, activityId);
       const spec = await this.getActivitySpec(scope, activityId);
       if (!spec) return null;

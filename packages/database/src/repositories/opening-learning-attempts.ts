@@ -1,4 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { readOpeningReservedIssuedItem } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
@@ -127,10 +128,12 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   if (teachingQuestion) {
     const spec = teachingQuestion.spec;
     itemStem = Array.from(teachingQuestion.stem).slice(0, 2000).join("");
-    const [existing] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
+    const issued = await readOpeningReservedIssuedItem(tx, scope, String(session.activity_id), spec.blockId);
+    const [saved] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
         AND activity_id=${String(session.activity_id)} AND teaching_revision_id=${spec.revisionId} AND teaching_block_id=${spec.blockId}
         AND evaluation_spec=${tx.json(spec)} ORDER BY created_at,id LIMIT 1`;
+    const existing = issued ?? saved;
     problemId = existing ? String(existing.problem_id) : randomUUID();
     itemVersionId = existing ? String(existing.id) : randomUUID();
     if (!existing) {

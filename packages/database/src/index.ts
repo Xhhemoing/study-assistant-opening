@@ -1,4 +1,6 @@
 export const DATABASE_PACKAGE = "@aistudy/database" as const;
+export { saveOpeningReservedCandidates, admitOpeningReservedCandidate, type OpeningReservedCandidate, type OpeningReservedPinnedContext,
+  type OpeningReservedExposureInput, type OpeningReservedExposureResult, type OpeningReservedExposureReader, type OpeningReservedPorts } from "./repositories/opening-course-reserved-selection";
 export * from "./schema/library";
 export * from "./schema/courses";
 export * from "./schema/goals";

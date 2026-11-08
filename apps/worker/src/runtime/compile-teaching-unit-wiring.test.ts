@@ -21,6 +21,7 @@ const content = vi.hoisted(() => ({
 
 const model = vi.hoisted(() => ({ complete: vi.fn(), task: vi.fn() }));
 const readFocus = vi.hoisted(() => vi.fn());
+const saveReserved = vi.hoisted(() => vi.fn(async () => 1));
 vi.mock("./model-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./model-gateway")>();
   const { createModelGateway } = await import("@aistudy/ai");
@@ -44,6 +45,7 @@ vi.mock("@aistudy/database", async (importOriginal) => ({
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
   readOpeningTeachingCompilerFocus: readFocus,
+  saveOpeningReservedCandidates: saveReserved,
   assertOpeningCourseRouteReady: vi.fn(async () => {}),
   readOpeningCourseRouteEvidenceRefs: vi.fn(async () => null),
   createOpeningSourceEmbeddingsRepository: () => ({
@@ -709,5 +711,36 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(published).toEqual([]);
     expect(content.writeUnitBlocks).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
+  });
+});
+
+
+describe("private reserved producer slot",()=>{
+  it("persists the dedicated slot before public blocks and never copies private bytes into config",async()=>{
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");
+    activities.get.mockResolvedValue({id:ACTIVITY,intentSummary:"Arithmetic",intentKind:"goal",routeManaged:true,generateStatus:"queued"});
+    const deps=createCompileTeachingUnitWorkerDeps(jobStateSql,shared());
+    const base=modelAnswer({text:CHUNK,chunks:[chunk]});
+    const candidate={text:"137*19",interaction:{kind:"numeric"},answer:"2603"};
+    const raw={...JSON.parse(base.text),reservedQuestions:[candidate]};
+    const result=await deps.buildPublishInput!(scope,{...payload,teachingUnitId:UNIT},{...base,text:JSON.stringify(raw)});
+    expect(saveReserved).toHaveBeenCalledWith(jobStateSql,scope,ACTIVITY,[candidate]);
+    expect(saveReserved.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
+    expect(JSON.stringify(writtenBlocks)).not.toContain(candidate.text);
+    expect(JSON.stringify(writtenBlocks)).not.toContain(candidate.answer);
+    expect(JSON.stringify(result)).not.toContain("reservedQuestions");
+    expect(JSON.stringify(result)).not.toContain(candidate.answer);
+  });
+  it("rejects overlap and model trust claims before any public/private persistence",async()=>{
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1");
+    activities.get.mockResolvedValue({id:ACTIVITY,intentSummary:"Arithmetic",intentKind:"goal",routeManaged:true});
+    const deps=createCompileTeachingUnitWorkerDeps(jobStateSql,shared()),base=modelAnswer({text:CHUNK,chunks:[chunk]});
+    const raw=JSON.parse(base.text);
+    raw.reservedQuestions=[{text:raw.blocks[0].text,interaction:{kind:"numeric"},answer:"2603"}];
+    await expect(deps.buildPublishInput!(scope,{...payload,teachingUnitId:UNIT},{...base,text:JSON.stringify(raw)})).rejects.toThrow("overlaps");
+    raw.reservedQuestions=[{text:"137*19",interaction:{kind:"numeric"},answer:"2603",trusted:true}];
+    await expect(deps.buildPublishInput!(scope,{...payload,teachingUnitId:UNIT},{...base,text:JSON.stringify(raw)})).rejects.toThrow();
+    expect(saveReserved).not.toHaveBeenCalled();
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
   });
 });
