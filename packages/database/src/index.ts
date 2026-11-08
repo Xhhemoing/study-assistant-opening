@@ -1,4 +1,6 @@
 export const DATABASE_PACKAGE = "@aistudy/database" as const;
+export { saveOpeningReservedCandidates, admitOpeningReservedCandidate, type OpeningReservedCandidate, type OpeningReservedPinnedContext,
+  type OpeningReservedExposureInput, type OpeningReservedExposureResult, type OpeningReservedExposureReader, type OpeningReservedPorts } from "./repositories/opening-course-reserved-selection";
 export * from "./schema/library";
 export * from "./schema/courses";
 export * from "./schema/goals";
@@ -138,7 +140,7 @@ export {
 
 export * from "./schema/opening-teaching-activities";
 export * from "./schema/opening-teaching-content";
-export { openingCourseReservedQuestions } from "./schema/opening-course-reserved-questions";
+export { openingCourseReservedQuestions, openingCourseQuestionExposures, openingCourseQuestionExposureCoverage } from "./schema/opening-course-reserved-questions";
 export {
   createOpeningTeachingContentRepository,
   redactBlocksForClientInit,
@@ -280,6 +282,7 @@ export * from "./repositories/opening-learner-state-read";
 
 export * from "./repositories/opening-learning-decisions";
 export * from "./repositories/opening-learning-agenda";
+export * from "./repositories/opening-current-learning-activity";
 
 export * from "./schema/opening-learning-decisions";
 

@@ -3,6 +3,7 @@ import { checkArithmeticAnswer } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import type { TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionText } from "./opening-teaching-question";
+import { readOpeningReservedSupply } from "./opening-course-reserved-selection";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
@@ -85,6 +86,11 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
       ? await readQuestionCoverage(db, scope, courseId, String(row!.id), String(row!.revision_id), row!.block_order as TeachingBlockRef[], row!.blocks as Block[])
       : { coverage: { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const },
         referenceChecks: { matched: 0, mismatched: 0, unsupported: 0 } };
+    const supply = await readOpeningReservedSupply(db, scope, item.requirement);
+    item.reservedSupply = supply;
+    // Inventory is not exposure evidence for the saved/public questions above.
+    // In particular an unsupported private producer or an empty pool cannot turn
+    // their unknown historical qualification into either unseen or exhausted.
     item.questionCoverage = facts.coverage;
     item.referenceChecks = facts.referenceChecks;
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({

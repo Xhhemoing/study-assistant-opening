@@ -25,7 +25,7 @@ const taskTeachingTargetSchema = z.object({
 export const taskOriginSchema = z.enum(["manual", "course_seed", "retest", "planner", "agent"]);
 export const suggestionKindSchema = z.enum(["weak_skill", "review_cards", "new_skill", "course_pace"]);
 
-export const taskItemSchema = z.object({
+const taskItemObjectSchema = z.object({
   id: uuidSchema,
   version: z.number().int().positive().optional(),
   title: z.string().min(1).max(240),
@@ -41,6 +41,10 @@ export const taskItemSchema = z.object({
   retest: taskRetestProjectionSchema.nullable().optional(),
   /** Present only for an owned, course-matched resumable teaching activity. Always re-read on entry. */
   teachingTarget: taskTeachingTargetSchema.optional(),
+  /** Response-only completed lineage tail; requires a new explicit user confirmation. */
+  teachingContinuation: z.object({ activityId: uuidSchema, courseId: uuidSchema }).strict().optional(),
+  /** A persisted binding exists but must not resume, select latest or create a replacement. */
+  teachingTargetUnavailable: z.enum(["conflicting_binding", "unavailable_binding"]).optional(),
   /** Adaptive planning (0061); omitted when unset. */
   courseId: uuidSchema.optional(),
   skillLabel: z.string().min(1).max(200).optional(),
@@ -53,6 +57,12 @@ export const taskItemSchema = z.object({
   /** Planners must not place the task before this instant (deferral). */
   notBefore: isoDateTimeSchema.optional(),
 }).strict();
+function exclusiveTeachingTarget(value: { teachingTarget?: unknown; teachingTargetUnavailable?: unknown; teachingContinuation?: unknown }, ctx: z.RefinementCtx) {
+  if ([value.teachingTarget, value.teachingTargetUnavailable, value.teachingContinuation].filter(item => item !== undefined).length > 1) {
+    ctx.addIssue({ code: "custom", path: ["teachingTargetUnavailable"], message: "An unavailable binding cannot also expose a teaching target" });
+  }
+}
+export const taskItemSchema = taskItemObjectSchema.superRefine(exclusiveTeachingTarget);
 
 /** Stored with a retest-origin task. Not a calendar schedule. */
 export const retestTaskSnapshotSchema = z.object({
@@ -109,7 +119,7 @@ export const taskCreateInputSchema = z.object({
 });
 
 /** Explicit candidateRef clients receive review metadata; legacy responses remain flat. */
-export const taskCreateResultSchema = taskItemSchema.extend({ reviewResult: reviewResultSchema.optional() });
+export const taskCreateResultSchema = taskItemObjectSchema.extend({ reviewResult: reviewResultSchema.optional() }).superRefine(exclusiveTeachingTarget);
 /** Planning feedback only; never a scored answer or mastery observation. */
 export const taskFeedbackReasonSchema = z.enum([
   "time_short", "too_hard", "too_easy", "not_relevant", "other", "prefer_not_say",
