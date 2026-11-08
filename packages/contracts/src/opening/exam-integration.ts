@@ -1,5 +1,32 @@
 import { z } from "zod";
 import { uuidSchema } from "./foundation";
+import { questionPartBindingSchema, questionEvaluationSchema } from "./question-evaluation";
+
+/** PRIVATE server-owned immutable question revision. Never a browser input. */
+export const examQuestionPartsSchema = z.object({
+  questionIdentityRefId: uuidSchema,
+  packId: z.string().min(1).max(100), packVersion: z.string().min(1).max(100),
+  questionId: z.string().min(1).max(100), familyId: z.string().min(1).max(100),
+  parts: z.array(questionPartBindingSchema.extend({
+    /** A reviewed deterministic rule for THIS part; absence means ungraded, not whole-question credit. */
+    evaluator: z.object({ kind: z.literal("choice-options-v1"),
+      correctOptionIds: z.array(z.string().min(1).max(100)).min(1).max(64),
+    }).strict().optional(),
+  }).strict()).min(1).max(64),
+}).strict().superRefine((value, ctx) => {
+  const seen = new Set<string>();
+  value.parts.forEach((part, index) => {
+    if (seen.has(part.partId)) ctx.addIssue({ code: "custom", path: ["parts", index, "partId"], message: "Duplicate partId" });
+    seen.add(part.partId);
+    if (part.evaluator && new Set(part.evaluator.correctOptionIds).size !== part.evaluator.correctOptionIds.length)
+      ctx.addIssue({ code: "custom", path: ["parts", index, "evaluator"], message: "Duplicate option" });
+  });
+});
+export type ExamQuestionParts = z.infer<typeof examQuestionPartsSchema>;
+
+/** Private result metadata in the existing sprint state JSON; not a submitted verdict. */
+export const examPartResultSchema = z.object({ questionEvaluation: questionEvaluationSchema }).strict();
+export type ExamPartResult = z.infer<typeof examPartResultSchema>;
 
 export type ExamPredictionSnapshot = {
   predictedAt: string; skillId: string; historyAttemptIds: string[];

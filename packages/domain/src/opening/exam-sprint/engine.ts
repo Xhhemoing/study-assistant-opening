@@ -2,7 +2,25 @@ import type {
   ExamAttempt, ExamAttemptView, ExamExposureCoverage, ExamMode, ExamPack, ExamQuestion, ExamRun,
   ExamSkillSummary, ExamSourceRecord, ExamSprintCommand, ExamSprintOverview, ExamSprintState,
 } from "@aistudy/contracts";
+import { examQuestionPartsSchema, questionEvaluationSchema, type QuestionEvaluation, type QuestionPartAssistance } from "@aistudy/contracts";
 import { validExamLessonExposure } from "./lesson-exposure-mapping";
+
+/** Only called with a server-resolved immutable question; shape alone never grants authority. */
+export function evaluateExamQuestionParts(question: ExamQuestion, pack: Pick<ExamPack, "id" | "version">,
+  answer: string, evaluationRefId: string, assistance: QuestionPartAssistance): QuestionEvaluation | null {
+  if (!question.partSnapshot) return null;
+  const snapshot = examQuestionPartsSchema.parse(question.partSnapshot);
+  if (snapshot.packId !== pack.id || snapshot.packVersion !== pack.version || snapshot.questionId !== question.id
+    || snapshot.familyId !== question.familyId) throw new Error("Part snapshot question revision mismatch");
+  const optionIds = new Set(question.options.map(option => option.id));
+  return questionEvaluationSchema.parse({ protocolVersion: "question-evaluation-1", evaluationRefId,
+    questionIdentityRefId: snapshot.questionIdentityRefId, parts: snapshot.parts.map(part => {
+      const valid = part.evaluator && part.evaluator.correctOptionIds.every(id => optionIds.has(id)) && optionIds.has(answer);
+      return { partId: part.partId, identityRefId: part.identityRefId, requirementKey: part.requirementKey,
+        outcome: valid ? part.evaluator!.correctOptionIds.includes(answer) ? "correct" : "incorrect" : "unknown",
+        assistance: valid ? assistance : "unknown" };
+    }) });
+}
 import { snapshotExamPrediction } from "./analytics";
 import { captureExamAttemptExposures, examAttemptExposureQualification } from "./exposure-qualification";
 export { examAttemptExposureQualification } from "./exposure-qualification";
@@ -347,11 +365,11 @@ export function applyExamSprintCommand(state: ExamSprintState, command: ExamSpri
 
 function attemptView(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): ExamAttemptView {
   const original = questionFor(pack, attempt.questionId);
-  const { answer, explanation, hint, pool: _pool, ...question } = original;
+  const { answer, explanation, hint, pool: _pool, partSnapshot: _partSnapshot, ...question } = original;
   const run = state.runs.find(item => item.id === attempt.runId);
   const sealed = Boolean(run && isMock(run.mode) && !run.completedAt);
   const reveal = !sealed && (attempt.answeredAt !== null || attempt.help.some(help => help.kind === "solution") || Boolean(run && isMock(run.mode) && run.completedAt));
-  const { prediction, ...publicAttempt } = structuredClone(attempt);
+  const { prediction, resultMetadata: _resultMetadata, ...publicAttempt } = structuredClone(attempt);
   return {
     ...publicAttempt, ...(!sealed && prediction ? { prediction } : {}), correct: sealed ? null : attempt.correct, question: structuredClone(question),
     feedback: reveal ? { answer, explanation } : null,

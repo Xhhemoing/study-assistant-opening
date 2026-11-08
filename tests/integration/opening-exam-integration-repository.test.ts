@@ -106,6 +106,22 @@ async function source(options: { image?: boolean; version?: number; history?: bo
 }
 
 describe("course-bound exam sprint canonical bridge", () => {
+  it("keeps legacy single-skill snapshots and exact command replay free of invented part metadata", async () => {
+    await bind();
+    const view = await start(), clientKey = key();
+    await answer(view, clientKey);
+    const [before] = await f.sql`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    expect((before!.pack_snapshot as ExamPack).questions.every(q => !("partSnapshot" in q))).toBe(true);
+    expect((before!.state as { attempts: object[] }).attempts.every(a => !("resultMetadata" in a))).toBe(true);
+    await answer(view, clientKey);
+    const [after] = await f.sql`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    expect(after).toEqual(before);
+    const link = await linkFor(view.currentAttempt!.id);
+    const [attempt] = await f.sql`SELECT create_intent FROM opening_learning_attempts WHERE id=${String(link.learning_attempt_id)}`;
+    expect(attempt!.create_intent.examSprint).not.toHaveProperty("partRequirements");
+    expect(attempt!.create_intent.examSprint).not.toHaveProperty("partSnapshot");
+  });
+
   it("serializes concurrent bind replay into one source and graph, and rejects conflicting same-key intent", async () => {
     const originals: Array<{ sourceId: string; body: Uint8Array }> = [];
     const withStorage = createOpeningExamIntegrationRepository(f.sql, pack, {
