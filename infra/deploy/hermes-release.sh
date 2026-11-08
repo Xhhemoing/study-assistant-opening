@@ -32,11 +32,13 @@ TRANSITION=''
 DEGRADED=0
 FORWARD_ONLY=0
 ACTIVATION_BEGUN=0
+SUCCESS_REQUESTED=0
 FORWARD_GUARD="$STATE/migration-forward-only"
 managed() {
-  local session_target=''
+  local session_target='' exact_target=''
   if [[ "$ACTION" == deploy ]]; then session_target=$RELEASE; fi
-  HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" node "$HERMES_SUPERVISOR_HELPER" request "$1"
+  case "$1" in activate|success|query-success) exact_target=$(current_target) || return 1;; esac
+  HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" node "$HERMES_SUPERVISOR_HELPER" request "$1"
 }
 if [[ "$ACTION" != status && "$ACTION" != logs ]]; then
   [[ -n "${HERMES_SUPERVISOR_SOCKET:-}" && -f "${HERMES_SUPERVISOR_HELPER:-}" ]] || fail 'Managed supervisor entry is required.'
@@ -228,6 +230,18 @@ health() {
 finish() {
   local result=$1 rollback_result=0 restored_required can_restore=1
   trap - EXIT INT TERM
+  if [[ "$result" != 0 && "$SUCCESS_REQUESTED" == 1 ]]; then
+    # Lost ACK is not failed commit. One authenticated read; never replay success/start.
+    if managed query-success; then
+      RECOVERY_REQUIRED=0
+      FORWARD_ONLY=0 # Authenticated committed implies both durable guards are absent.
+      if [[ "$DEGRADED" == 1 ]]; then result=3; else result=0; fi
+      echo "Durable activation commit confirmed after missing acknowledgement." >&2
+    else
+      FORWARD_ONLY=1
+      echo "Commit fenced or unprovable; forward repair required (health is not commit proof)." >&2
+    fi
+  fi
   if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" ) ]]; then
     echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
     managed refence || echo 'UNCONFIRMED: refence persistence failed; old writers must not be restored.' >&2
@@ -313,6 +327,12 @@ fi
 OLD_TARGET=$(current_target)
 validate_target "$OLD_TARGET"
 WORKER_REQUIRED=$(worker_required)
+# Restart also needs an owner-scoped durable receipt; no restart of the writers is added here.
+mkdir -p -- "$STATE/releases"
+TRANSITION="$STATE/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
+mkdir -- "$TRANSITION"
+printf '%s\n' "$OLD_TARGET" > "$TRANSITION/from-target"
+printf '%s\n' "$WORKER_REQUIRED" > "$TRANSITION/worker-required"
 if [[ "$ACTION" == restart ]]; then
   if [[ -f "$INCOMPLETE" ]]; then report_incomplete; exit 3; fi
   if worker_paused "$OLD_TARGET"; then report_worker_pause "$OLD_TARGET"; exit 3; fi
@@ -321,16 +341,13 @@ if [[ "$ACTION" == restart ]]; then
   profile=''
   if [[ -L "$STATE/current-identity" ]]; then profile=$(readlink -f -- "$STATE/current-identity"); fi
   health "$WORKER_REQUIRED" "$OLD_TARGET" "$profile"
+  SUCCESS_REQUESTED=1
   managed success
+  SUCCESS_REQUESTED=0
   echo 'Current release restarted and healthy.'
   exit
 fi
 
-mkdir -p -- "$STATE/releases"
-TRANSITION="$STATE/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
-mkdir -- "$TRANSITION"
-printf '%s\n' "$OLD_TARGET" > "$TRANSITION/from-target"
-printf '%s\n' "$WORKER_REQUIRED" > "$TRANSITION/worker-required"
 RECOVERY_TARGET=$OLD_TARGET
 RECOVERY_STATE=$TRANSITION
 if [[ "$ACTION" == rollback ]]; then
@@ -477,7 +494,9 @@ else
 fi
 atomic_link "$TRANSITION" "$STATE/last-transition"
 rm -f -- "$INCOMPLETE"
+SUCCESS_REQUESTED=1
 managed success
+SUCCESS_REQUESTED=0
 RECOVERY_REQUIRED=0
 if [[ "$DEGRADED" == 1 ]]; then report_worker_pause "$RELEASE"; exit 3; fi
 printf '部署完成: %s (%s)\n' "$RELEASE" "$ACTION"

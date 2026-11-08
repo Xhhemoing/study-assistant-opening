@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, createConnection } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
@@ -108,10 +108,10 @@ async function request(action) {
   return new Promise((resolve, reject) => {
     let body = "";
     socket.setTimeout(90_000, () => socket.destroy(new Error("Managed supervisor response timed out")));
-    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: process.env.HERMES_SUPERVISOR_TOKEN, transition: process.env.HERMES_TRANSITION, release: process.env.HERMES_RELEASE })}\n`));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: process.env.HERMES_SUPERVISOR_TOKEN, transition: process.env.HERMES_TRANSITION, release: process.env.HERMES_RELEASE, target: process.env.HERMES_TARGET })}\n`));
     socket.on("data", data => { body += data; if (body.includes("\n")) { socket.end(); try { resolve(JSON.parse(body)); } catch (error) { reject(error); } } });
     socket.on("error", reject);
-    socket.on("end", () => { if (!body) reject(new Error("Managed supervisor disconnected")); });
+    socket.on("end", () => { if (!body.includes("\n")) reject(new Error("Managed supervisor disconnected before a complete response")); });
   });
 }
 async function supervise(script, args) {
@@ -120,6 +120,19 @@ async function supervise(script, args) {
   const fence = join(state, "writers-fenced");
   const socketPath = join(state, `owner-${process.pid}.sock`);
   const token = randomBytes(32).toString("hex");
+  const ownerIdentity = randomBytes(16).toString("hex"); // Non-secret commit scope, never the bearer token.
+  let activationTarget, committed;
+  function successState(message) {
+    if (!transition || message.transition !== transition || message.target !== activationTarget
+      || (message.release || "") !== (release || "")) return "unknown";
+    try {
+      if (realpathSync(args[3]) !== activationTarget) return "unknown";
+      if (armed || existsSync(guard) || existsSync(fence)) return "fenced";
+      // Existence alone is insufficient: rename may have succeeded before directory fsync failed.
+      if (!committed || readFileSync(join(transition, "success-record"), "utf8") !== committed) return "unknown";
+      return "committed";
+    } catch { return "unknown"; }
+  }
   let armed = existsSync(guard) || existsSync(fence), settled = false, owner, transition, ownerStart, ownerPid, release, configuration;
   function signalOwnerGroup(signal) {
     if (!signalVerifiedGroup(owner?.pid, ownerStart, signal)) {
@@ -167,24 +180,42 @@ async function supervise(script, args) {
     crashFence(); return 3;
   }
   const server = createServer(socket => {
-    let body = "";
+    let body = "", handled = false;
     socket.setTimeout(90_000, () => socket.destroy());
     socket.on("error", () => {});
     socket.on("data", data => {
+      if (handled) return;
       body += data;
       if (body.length > 4096) { socket.destroy(); return; }
       if (!body.includes("\n")) return;
-      let message;
+      handled = true;
+      let message, successStarted = false;
       try {
-        message = JSON.parse(body);
+        message = JSON.parse(body.slice(0, body.indexOf("\n")));
         if (message.token !== token) throw new Error("Owner identity mismatch");
+        if (message.action === "query-success") {
+          // Strictly read-only: never bind or replace transition/release/target from a query.
+          const state = successState(message);
+          socket.end(`${JSON.stringify({ ok: state === "committed", state })}\n`);
+          return;
+        }
         if (message.transition) {
+          if (transition && message.transition !== transition) throw new Error("Transition identity mismatch");
+          if (resolve(message.transition) !== message.transition) throw new Error("Noncanonical transition");
           if (!resolve(message.transition).startsWith(`${resolve(state)}/releases/`)) throw new Error("Invalid transition");
           transition = message.transition;
         }
         if (message.release) {
+          if (release && message.release !== release) throw new Error("Release identity mismatch");
+          if (resolve(message.release) !== message.release) throw new Error("Noncanonical release");
           if (!resolve(message.release).startsWith(`${resolve(args[2])}/`)) throw new Error("Invalid migration session target");
           release = message.release;
+        }
+        if (["activate", "success"].includes(message.action)) {
+          const target = realpathSync(args[3]);
+          if (!message.target || message.target !== target || (activationTarget && target !== activationTarget)
+            || (action === "deploy" && target !== release)) throw new Error("Activation target mismatch");
+          activationTarget = target;
         }
         switch (message.action) {
           case "ping": break;
@@ -200,7 +231,12 @@ async function supervise(script, args) {
             configuration = captureConfiguration(args, command);
             break;
           case "success":
-            if (!transition && action !== "restart") throw new Error("Missing success transition");
+            if (!transition || message.transition !== transition || (message.release || "") !== (release || "")) throw new Error("Missing or mismatched success scope");
+            if (committed) {
+              if (successState(message) !== "committed") throw new Error("Committed identity is no longer provable");
+              break; // Idempotent; no repeated configuration write, fsync, or start.
+            }
+            successStarted = true;
             if (armed) throw new Error("Fenced activation has no verified candidate startup");
             if (action === "deploy") {
               if (!configuration) throw new Error("Missing activation configuration identity");
@@ -218,11 +254,14 @@ async function supervise(script, args) {
               syncDirectory(dirname(transition));
               syncDirectory(state);
               syncDirectory(dirname(args[3])); // Persist CURRENT rename, possibly on another disk.
-              durableWrite(join(transition, "success-record"), "Activation and health completed.\n");
+              const record = `${JSON.stringify({ version: 1, owner: ownerIdentity, action, transition, target: activationTarget })}\n`;
+              durableWrite(join(transition, "success-record"), record);
+              committed = record; // Set ONLY after file + rename + parent fsync all return.
             }
             // Clearing a forward fence is unavailable until exact-job startup
             // can be proven. Never weaken the guard for a nominal success ACK.
             settled = true;
+            successStarted = false; // Transport failure after commit is not persistence failure.
             break;
           case "settled": if (armed) throw new Error("Forward-only owner cannot restore old writers"); settled = true; break;
           default: throw new Error("Unknown managed request");
@@ -231,7 +270,8 @@ async function supervise(script, args) {
       } catch (error) {
         // Success is a commit boundary. A failed fsync or lost persistence proof
         // cannot fall through to the owner's pre-migration restoration branch.
-        if (message?.token === token && message.action === "success") {
+        if (successStarted) {
+          settled = false;
           try { arm(transition, "success persistence failed"); }
           catch { console.error("UNCONFIRMED: success failure refence persistence failed"); }
         }
@@ -270,7 +310,12 @@ async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
   if (mode === "request") {
-    const reply = await request(script); process.exitCode = reply.ok ? 0 : 1;
+    const reply = await request(script);
+    if (script === "query-success") {
+      const state = ["committed", "fenced", "unknown"].includes(reply.state) ? reply.state : "unknown";
+      console.log(state);
+      process.exitCode = state === "committed" ? 0 : state === "fenced" ? 3 : 4;
+    } else process.exitCode = reply.ok ? 0 : 1;
   } else if (mode === "run") {
     validateArguments(args);
     const state = args[4];
