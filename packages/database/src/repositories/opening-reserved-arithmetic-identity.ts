@@ -7,8 +7,13 @@ export function reservedArithmeticIdentity(text: string) {
   // Only balanced outer math delimiters are aliases; partial delimiters stay unsupported.
   expression = expression.replace(/^\$\$([^$]*)\$\$$/, "$1").replace(/^\$([^$]*)\$$/, "$1")
     .replace(/^\\\(([\s\S]*)\\\)$/, "$1").replace(/^\\\[([\s\S]*)\\\]$/, "$1")
+    // A question suffix can be inside the balanced math delimiter as well.
+    .replace(/\s*(?:=\s*[?？]?|[?？。])\s*$/, "")
     .replace(/\\(?:dfrac|tfrac|frac)\{(-?\d{1,18})\}\{(-?\d{1,18})\}/g, "($1/$2)")
     .replace(/\\times|×|·/g, "*").replace(/\\div|÷/g, "/").replace(/−/g, "-");
+  // Do not let the evaluator silently strip any further prefix/suffix: the
+  // stored identity must be the exact complete grammar that it validates.
+  if (!/^[\d.()+*/\s-]+$/.test(expression)) return null;
   // Validate before removing spaces: mixed fractions must not become different numbers.
   const value = evaluateArithmeticQuestion(expression);
   if (!value || text.length > 400) return null;

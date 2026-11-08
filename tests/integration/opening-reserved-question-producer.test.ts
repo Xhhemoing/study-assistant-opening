@@ -54,6 +54,7 @@ const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, a
 it.each([
   ["137*19", "Example: 137 · 19"], ["$137*19$", "137*19"], ["137*19", "$137*19$"],
   ["\\(137 \\times 19\\)", "137*19"],
+  ["$137*19 = ?$", "137*19"], ["137*19", "$137*19 = ?$"],
 ])("real consumer never reserves exposed alias %s from %s", async (text, history) => {
   const x = await setup();
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify({ ...candidate, text }), admitAndPersist: x.admit });
