@@ -20,6 +20,9 @@ export type OpeningSourcePurposePin = {
   }>;
 };
 
+export type OpeningMaterialPurposePin = Omit<OpeningSourcePurposePin, "activityId">;
+type MaterialPurposeSelection = { courseId: string | null; sourceIds: readonly string[]; materialUse: CourseSourceUse };
+
 export type OpeningCourseReadySourcesRepository = {
   listReadySourceIdsForCourse(scope: OpeningScope, courseId: string, use?: CourseSourceUse): Promise<string[]>;
   /** Uncapped live admission for explicit sourceIds; never treats selection as authorization. */
@@ -27,6 +30,8 @@ export type OpeningCourseReadySourcesRepository = {
   readSourcePurposePin(scope: OpeningScope, input: { activityId: string; sourceIds?: readonly string[]; materialUse?: CourseSourceUse }): Promise<OpeningSourcePurposePin>;
   /** Pass the publication transaction; locks remain held until that transaction commits. */
   assertSourcePurposePin(scope: OpeningScope, pin: OpeningSourcePurposePin, tx?: Sql | TransactionSql): Promise<void>;
+  readMaterialPurposePin(scope: OpeningScope, input: MaterialPurposeSelection): Promise<OpeningMaterialPurposePin>;
+  assertMaterialPurposePin(scope: OpeningScope, pin: OpeningMaterialPurposePin, tx?: Sql | TransactionSql): Promise<void>;
 };
 
 async function assertOwnedCourse(sql: Sql | TransactionSql, scope: OpeningScope, courseId: string): Promise<void> {
@@ -91,12 +96,27 @@ async function readSourcePurposePinInTx(
   const courseId = activity.course_id as string | null;
   const materialUse = input.materialUse ?? "teaching";
   const ids = [...new Set(input.sourceIds ?? activity.source_ids as string[])].sort();
+  if (!courseId && ids.some(id => !(activity.source_ids as string[]).includes(id))) {
+    throw new OpeningKnowledgeError("CONFLICT", "source selection changed outside the activity");
+  }
+  return { activityId: input.activityId, ...await readMaterialPurposePinInTx(tx, scope, { courseId, sourceIds: ids, materialUse }) };
+}
+
+async function readMaterialPurposePinInTx(
+  tx: Sql | TransactionSql, scope: OpeningScope, input: MaterialPurposeSelection,
+): Promise<OpeningMaterialPurposePin> {
+  const { courseId, materialUse } = input;
+  if ((courseId !== null && (typeof courseId !== "string" || !courseId))
+    || !["teaching", "practice", "citation"].includes(materialUse)) {
+    throw new OpeningKnowledgeError("CONFLICT", "trusted course and material use are required");
+  }
+  const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+  if (!owner.length) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
+  const ids = [...new Set(input.sourceIds)].sort();
   if (courseId) {
     const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
       AND archived_at IS NULL FOR SHARE`;
     if (!course.length) throw new OpeningKnowledgeError("CONFLICT", "course is no longer available");
-  } else if (ids.some(id => !(activity.source_ids as string[]).includes(id))) {
-    throw new OpeningKnowledgeError("CONFLICT", "source selection changed outside the activity");
   }
   const sources: OpeningSourcePurposePin["sources"] = [];
   if (ids.length) {
@@ -106,6 +126,13 @@ async function readSourcePurposePinInTx(
         AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
       ORDER BY s.id FOR SHARE OF s`;
     if (rows.length !== ids.length) throw new OpeningKnowledgeError("CONFLICT", "source material unavailable or excluded");
+    // No course is an explicit standalone context, not permission to ignore a
+    // classified course binding. Require a course whenever classification exists.
+    if (courseId === null) {
+      const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+        AND asset_type='source' AND asset_id=ANY(${ids}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
+      if (classified.length) throw new OpeningKnowledgeError("CONFLICT", "select a course to use classified materials");
+    }
     const memberships = courseId ? await tx`SELECT id,asset_id,purpose,
         to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS purpose_revision
       FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
@@ -122,7 +149,17 @@ async function readSourcePurposePinInTx(
         purpose: (membership?.purpose ?? null) as CourseSourcePurpose | null });
     }
   }
-  return { activityId: input.activityId, courseId, materialUse, sources };
+  return { courseId, materialUse, sources };
+}
+
+function assertSamePurposePin(current: OpeningMaterialPurposePin, pin: OpeningMaterialPurposePin): void {
+  if (current.courseId !== pin.courseId || current.sources.length !== pin.sources.length
+    || current.sources.some((source, index) => {
+      const expected = pin.sources[index]!;
+      return source.sourceId !== expected.sourceId || source.sourceVersion !== expected.sourceVersion
+        || source.membershipId !== expected.membershipId || source.purposeRevision !== expected.purposeRevision
+        || source.purpose !== expected.purpose;
+    })) throw new OpeningKnowledgeError("CONFLICT", "source purpose/version changed during generation; regenerate from current materials");
 }
 
 export function createOpeningCourseReadySourcesRepository(
@@ -131,19 +168,22 @@ export function createOpeningCourseReadySourcesRepository(
   return {
     listReadySourceIdsForCourse: (scope, courseId, use) =>
       listReadySourceIdsForCourse(sql, scope, courseId, use),
+    readMaterialPurposePin: (scope, input) => sql.begin(tx => readMaterialPurposePinInTx(tx, scope, input)) as Promise<OpeningMaterialPurposePin>,
+    async assertMaterialPurposePin(scope, pin, tx) {
+      const check = async (db: Sql | TransactionSql) => {
+        const current = await readMaterialPurposePinInTx(db, scope, { ...pin, sourceIds: pin.sources.map(source => source.sourceId) });
+        assertSamePurposePin(current, pin);
+      };
+      if (tx) await check(tx);
+      else await sql.begin(check);
+    },
     readSourcePurposePin: (scope, input) => sql.begin(tx => readSourcePurposePinInTx(tx, scope, input)) as Promise<OpeningSourcePurposePin>,
     async assertSourcePurposePin(scope, pin, tx) {
       const check = async (db: Sql | TransactionSql) => {
         const current = await readSourcePurposePinInTx(db, scope, {
           activityId: pin.activityId, sourceIds: pin.sources.map(source => source.sourceId), materialUse: pin.materialUse,
         });
-        if (current.courseId !== pin.courseId || current.sources.length !== pin.sources.length
-          || current.sources.some((source, index) => {
-            const expected = pin.sources[index]!;
-            return source.sourceId !== expected.sourceId || source.sourceVersion !== expected.sourceVersion
-              || source.membershipId !== expected.membershipId || source.purposeRevision !== expected.purposeRevision
-              || source.purpose !== expected.purpose;
-          })) throw new OpeningKnowledgeError("CONFLICT", "source purpose/version changed during generation; regenerate from current materials");
+        assertSamePurposePin(current, pin);
       };
       if (tx) await check(tx);
       else await sql.begin(check);
