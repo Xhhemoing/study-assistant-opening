@@ -9,6 +9,7 @@ import { filterSources, SourceTracker } from "./source-tracker";
 import { hasSprintAttemptHelp, practiceModeForDueAt } from "./labels";
 import { LessonButton } from "./lesson-button";
 import { SkillsAndLessons } from "./learning-plan";
+import { prepareSprintLesson } from "./lesson-navigation";
 
 const attempt: ExamAttemptView = {
   id: "attempt-1", runId: "run-1", questionId: "q-1", presentedAt: "2026-10-17T10:00:00Z", answeredAt: "2026-10-17T10:01:00Z",
@@ -98,13 +99,18 @@ describe("exam sprint UI boundaries", () => {
     overview.pack.lessons = [metadata];
     const html = renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send: () => undefined, onOpenLesson: async () => undefined }));
     expect(html).toContain('id="sprint-attempt-attempt-1"');
-    expect(html).toContain("查看对应串讲");
+    expect(html.match(/<button[^>]*>查看对应串讲<\/button>/)?.[0]).not.toMatch(/\sdisabled(?:=|[ >])/);
+    expect(html).not.toContain("结束本次计分模拟并转教学");
     expect(html).toContain("你的答案：A");
     expect(html).toContain(attempt.feedback!.explanation);
     overview.activeRun = fixture().activeRun;
     const activeHtml = renderToStaticMarkup(createElement(CompletedRun, { overview, disabled: false, send: () => undefined, onOpenLesson: () => undefined }));
-    expect(activeHtml).toContain("短模拟交卷后才能阅读串讲");
-    expect(activeHtml.match(/<button[^>]*>查看对应串讲<\/button>/)?.[0]).toMatch(/\sdisabled(?:=|[ >])/);
+    expect(activeHtml).toContain("仅当前未提交题可转教学；其他串讲请交卷后阅读。");
+    const conversionButton = activeHtml.match(/<button[^>]*>结束本次计分模拟并转教学<\/button>/)?.[0];
+    expect(conversionButton).toBeDefined();
+    expect(conversionButton).toMatch(/\sdisabled(?:=|[ >])/);
+    expect(activeHtml).not.toContain("查看对应串讲");
+    expect(activeHtml).not.toContain('href="#lesson-lesson-1"');
   });
 
   it("keeps lesson actions keyboard-operable and disables missing or ambiguous mappings", () => {
@@ -145,7 +151,54 @@ describe("exam sprint UI boundaries", () => {
     const sealed = renderToStaticMarkup(createElement(SkillsAndLessons, { ...props, lessonContent: overview.lessonContents[0] }));
     expect(sealed).not.toContain('href="#lesson-lesson-1"');
     expect(sealed).not.toContain(lesson.workedExample);
-    expect(sealed).toContain("短模拟交卷后才能阅读串讲");
+    expect(sealed).toContain("仅当前未提交题可转教学；其他串讲请交卷后阅读。");
+    expect(sealed.match(/<button[^>]*>结束本次计分模拟并转教学<\/button>/)?.[0]).toMatch(/\sdisabled(?:=|[ >])/);
+    expect(sealed).toContain('id="sprint-manual-lesson-1" aria-disabled="true"');
+    expect(sealed).not.toContain(attempt.feedback!.explanation);
+    expect(sealed).not.toContain("查看对应串讲");
+    const onOpenLesson = vi.fn(), preventDefault = vi.fn();
+    const summary = clickTarget(SkillsAndLessons({ ...props, onOpenLesson, lessonContent: overview.lessonContents[0] }), "sprint-manual-lesson-1");
+    expect(summary?.onClick).toBeDefined();
+    summary!.onClick!({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(onOpenLesson).not.toHaveBeenCalled();
+  });
+
+  it("offers only explicit conversion for the current pending mock question with a trusted mapping, without exposing cached content", () => {
+    const overview = fixture();
+    overview.pack.lessons = [metadata];
+    overview.currentAttempt = { ...attempt, answeredAt: null, answer: null, correct: null, confidence: null, durationSeconds: null, independent: false };
+    overview.attempts = [overview.currentAttempt];
+    overview.lessonContents = [{ exposureId: "cached-before-mock", lesson }];
+    const onOpenLesson = vi.fn(), send = vi.fn();
+    const html = renderToStaticMarkup(createElement(ActiveRun, { overview, disabled: false, send, onOpenLesson }));
+    const button = html.match(/<button[^>]*>结束本次计分模拟并转教学<\/button>/)?.[0];
+    expect(button).toBeDefined();
+    expect(button).not.toMatch(/\sdisabled(?:=|[ >])/);
+    expect(html).not.toContain("查看对应串讲");
+    expect(html).not.toContain('href="#lesson-lesson-1"');
+    expect(html).not.toContain(lesson.workedExample);
+    expect(html).not.toContain(attempt.feedback!.explanation);
+    expect(html).not.toContain(attempt.hint);
+    expect(onOpenLesson).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(prepareSprintLesson(overview, lesson.id)).toBeNull();
+    expect(prepareSprintLesson(overview, lesson.id, true)).toEqual({ action: "switch_to_teaching", confirmedEndScoredMock: true,
+      lessonId: lesson.id, expectedRunId: overview.activeRun!.id, expectedAttemptId: overview.currentAttempt.id, ...metadata.exposureIdentity });
+    for (const blocked of [
+      { ...overview, currentAttempt: attempt },
+      { ...overview, currentAttempt: null },
+      { ...overview, currentAttempt: { ...overview.currentAttempt, question: { ...attempt.question, lessonId: "other-lesson" } } },
+      { ...overview, pack: { ...overview.pack, lessons: [{ ...metadata, exposureIdentity: null }] } },
+      { ...overview, pack: { ...overview.pack, lessons: [{ ...metadata, exposureIdentity: { ...metadata.exposureIdentity, packVersion: "stale" } }] } },
+    ]) {
+      const blockedHtml = renderToStaticMarkup(createElement(LessonButton, { overview: blocked, lessonId: lesson.id, onOpenLesson,
+        returnTarget: { id: "sprint-attempt-attempt-1", label: "返回原题" } }));
+      expect(blockedHtml.match(/<button[^>]*>结束本次计分模拟并转教学<\/button>/)?.[0]).toMatch(/\sdisabled(?:=|[ >])/);
+      expect(blockedHtml).not.toContain("查看对应串讲");
+      expect(blockedHtml).not.toContain(lesson.workedExample);
+      expect(prepareSprintLesson(blocked, lesson.id, true)).toBeNull();
+    }
   });
 
   it("keeps newly scheduled skills in practice until the retest actually becomes due", () => {

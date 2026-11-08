@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { createHash } from "node:crypto";
+import { platform, tree } from "../../infra/deploy/verify-release-artifact.mjs";
 
 const deploymentDirectory = fileURLToPath(new URL("../../infra/deploy/", import.meta.url));
 const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
@@ -67,7 +69,7 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {
@@ -78,10 +80,11 @@ function fixture(t, overrides = {}) {
   git("init", "-b", "feat/opening-release");
   git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "add", ".");
   git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "commit", "-m", "fixture");
-  git("remote", "add", "origin", "https://github.com/test-owner/test-repo.git");
+  const repository = overrides.MOCK_PREBUILT ? "Xhhemoing/study-assistant-opening" : "test-owner/test-repo";
+  git("remote", "add", "origin", `https://github.com/${repository}.git`);
   const sha = git("rev-parse", "HEAD");
   const ciFile = join(root, "ci.json");
-  const ciRun = (extra = {}) => ({ id: 12, head_sha: sha, head_branch: "feat/opening-release", event: "push", status: "completed", conclusion: "success", html_url: "https://github.com/test-owner/test-repo/actions/runs/12", ...extra });
+  const ciRun = (extra = {}) => ({ id: 12, head_sha: sha, head_branch: "feat/opening-release", event: "push", status: "completed", conclusion: "success", html_url: `https://github.com/${repository}/actions/runs/12`, ...extra });
   writeFileSync(ciFile, JSON.stringify({ workflow_runs: [ciRun()] }));
 
   const commands = {
@@ -126,12 +129,28 @@ exec /bin/mv "$@"`,
 if [[ "\${MOCK_FAIL:-}" == rollback-copy && "\${!#}" == "$SYSTEMD_DIR/aistudy-web.service.d/50-aistudy-release.conf" ]]; then exit 33; fi
 if [[ "\${MOCK_FAIL:-}" == restore-web-copy && -f "$DEPLOY_STATE/legacy-health-failed" && "\${!#}" == "$SYSTEMD_DIR/aistudy-web.service.d/50-aistudy-release.conf" ]]; then exit 33; fi
 exec /bin/cp "$@"`,
-    git: `if [[ "$1" == ls-remote ]]; then printf '%s\\trefs/heads/feat/opening-release\\n' "$MOCK_RELEASE_SHA"; else exec "$REAL_GIT" "$@"; fi`,
-    gh: `printf 'gh %s\\n' "$*" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != ci-unavailable ]] || exit 2; cat "$MOCK_CI_FILE"`,
+    git: `if [[ "$1" == ls-remote ]]; then
+ sha=$MOCK_RELEASE_SHA
+ if [[ "\${MOCK_FAIL:-}" == tip-change ]]; then
+  count=0; [[ ! -f "$MOCK_LOG.tip" ]] || count=$(cat "$MOCK_LOG.tip"); count=$((count+1)); printf '%s' "$count" > "$MOCK_LOG.tip"
+  [[ "$count" -le 1 ]] || sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ fi
+ printf '%s\\trefs/heads/feat/opening-release\\n' "$sha"; else exec "$REAL_GIT" "$@"; fi`,
+    gh: `printf 'gh %s\\n' "$*" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != ci-unavailable ]] || exit 2
+if [[ -z "\${MOCK_PREBUILT:-}" ]]; then cat "$MOCK_CI_FILE"; exit; fi
+if [[ "$1 $2" == 'run download' ]]; then cp "$MOCK_PREBUILT" "\${!#}/release.tar.gz"; exit; fi
+if [[ "$1 $2" == 'attestation verify' ]]; then [[ "\${MOCK_FAIL:-}" != attestation ]] || exit 1; cat "$MOCK_ATTESTATION"; exit; fi
+case "$2" in
+ */attempts/*/jobs*) cat "$MOCK_JOBS";;
+ */artifacts*) cat "$MOCK_ARTIFACTS";;
+ */actions/runs/12) cat "$MOCK_RUN";;
+ *) cat "$MOCK_CI_FILE";;
+esac`,
     ssh: `printf 'ssh %s\\n' "$*" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != ssh ]] || exit 255; bash -c "\${!#}"`,
     scp: `printf 'scp\\n' >> "$MOCK_LOG"; arguments=("$@"); source=\${arguments[\${#arguments[@]}-2]}; destination=\${arguments[\${#arguments[@]}-1]}; cp "$source" "\${destination#*:}"`,
     npm: `
 printf 'npm %s\\n' "$*" >> "$MOCK_LOG"
+if [[ "$1" == --version ]]; then printf '%s\\n' "$MOCK_NPM_VERSION"; exit; fi
 if [[ "$1" == ci && "\${MOCK_FAIL:-}" == install ]]; then exit 17; fi
 if [[ "$1 $2" == 'run build' ]]; then
  printf 'build-commit=%s verified=%s\\n' "\${AISTUDY_COMMIT:-missing}" "\${AISTUDY_RELEASE_VERIFIED_SHA:-0}" >> "$MOCK_LOG"
@@ -145,8 +164,10 @@ printf 'migrate current=%s\\n' "$(readlink -f "$CURRENT_LINK")" >> "$MOCK_LOG"
 if [[ "$MOCK_WORKER" == auto-restart && ! -f "$MOCK_STOPPED" ]]; then printf 'pending old worker restarted during migration\\n' >> "$MOCK_LOG"; exit 35; fi
 if systemctl is-active --quiet aistudy-worker.service; then printf 'refused migration with active worker\\n' >> "$MOCK_LOG"; exit 35; fi
 [[ "\${MOCK_FAIL:-}" != migrate ]] || exit 19`,
-    pg_dump: `printf 'pg_dump\\n' >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup ]] || exit 25; printf dump > "\${!#}"`,
-    pg_restore: `printf 'pg_restore %s\\n' "$1" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup-list ]] || exit 26`,
+    pg_dump: `if [[ "$1" == --version ]]; then if [[ "\${MOCK_FAIL:-}" == pg-version ]]; then printf 'pg_dump (PostgreSQL) 17.1\\n'; else printf 'pg_dump (PostgreSQL) 16.6\\n'; fi; exit; fi
+printf 'pg_dump\\n' >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup ]] || exit 25; printf dump > "\${!#}"`,
+    pg_restore: `if [[ "$1" == --version ]]; then printf 'pg_restore (PostgreSQL) 16.6\\n'; exit; fi
+printf 'pg_restore %s\\n' "$1" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup-list ]] || exit 26`,
     df: `if [[ "\${MOCK_FAIL:-}" == disk ]]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nmock 100 99 1 99%% /\\n'; else exec /bin/df "$@"; fi`,
     systemctl: `
 printf 'systemctl %s\\n' "$*" >> "$MOCK_LOG"
@@ -207,6 +228,7 @@ printf '{"status":"ok"}'`,
     ...process.env, PATH: `${bin}:${process.env.PATH}`, HOST: "mock-hermes", DIR: server,
     RELEASES_DIR: releases, CURRENT_LINK: current, DEPLOY_STATE: state, BACKUP_DIR: backups,
     SYSTEMD_DIR: systemd, WORKER_CONFIG_DIR: workerConfig, MIN_FREE_KB: "10", DEPLOY_REMOTE: "",
+    MOCK_NPM_VERSION: platform().npm,
     REAL_GIT: realGit, REAL_NODE: process.execPath, MOCK_RELEASE_SHA: sha, MOCK_LOG: log, MOCK_CI_FILE: ciFile,
     MOCK_MV_FAILED: join(root, "mv-failed"), MOCK_WORKER: "active", MOCK_CRASHED: join(root, "worker-crashed"), MOCK_STOPPED: join(root, "worker-stopped"), MOCK_RESTARTED: join(root, "worker-restarted"), ...overrides,
   };
@@ -229,6 +251,117 @@ printf '{"status":"ok"}'`,
       return { ...result, log: allLog, deltaLog: allLog.slice(logStart) };
     },
   };
+}
+
+function prebuiltFixture(t) {
+  const f = fixture(t, { MOCK_PREBUILT: "pending" });
+  const source = join(f.root, "artifact-source");
+  mkdirSync(source);
+  const files = {
+    "package-lock.json": '{}',
+    "apps/web/.next/standalone/apps/web/server.js": "server",
+    "apps/web/.next/standalone/apps/web/.next/static/asset.js": "asset",
+    "apps/web/.next/standalone/node_modules/next/package.json": '{"name":"next","version":"15.3.3"}',
+    "apps/worker/src/index.ts": "worker",
+    "node_modules/tsx/dist/cli.mjs": "tsx",
+    "node_modules/tsx/package.json": '{"name":"tsx","version":"4.20.6"}',
+    "scripts/db-migrate.ts": "migration",
+    "services/parser/opening_parser/__main__.py": "# parser",
+    ".worker-protocol": "delivery-leases-v1\n",
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), content, { mode: 0o644 });
+  }
+  // Privileged controls must match the separately transported trusted Git tree.
+  mkdirSync(join(source, "infra/deploy"), { recursive: true });
+  for (const name of readdirSync(join(f.repo, 'infra/deploy'))) copyFileSync(join(f.repo, 'infra/deploy', name), join(source, 'infra/deploy', name));
+  const inventory = tree(source);
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  const manifest = { version: 1, sha: f.sha, branch: 'feat/opening-release', mainlineTip: f.sha, platform: platform(),
+    lockfileSha256: hash(readFileSync(join(source, 'package-lock.json'))), files: inventory, treeSha256: hash(JSON.stringify(inventory)),
+    dependencies: { worker: [{ path: 'node_modules/tsx/package.json', name: 'tsx', version: '4.20.6' }],
+      standalone: [{ path: 'apps/web/.next/standalone/node_modules/next/package.json', name: 'next', version: '15.3.3' }] } };
+  writeFileSync(join(source, 'release-manifest.json'), JSON.stringify(manifest));
+  const archive = join(f.root, 'prebuilt.tar.gz');
+  assert.equal(spawnSync('tar', ['--format=posix', '-czf', archive, '-C', source, ...readdirSync(source)]).status, 0);
+  const writeJson = (name, value) => { const path = join(f.root, name); writeFileSync(path, JSON.stringify(value)); return path; };
+  Object.assign(f.env, {
+    MOCK_PREBUILT: archive, ARTIFACT_RUN_ID: '12', TARGET_SHA: f.sha, MIN_FREE_KB: '6291456',
+    MOCK_RUN: writeJson('run.json', { ...f.ciRun(), run_attempt: 1, path: '.github/workflows/ci.yml', head_repository: { full_name: 'Xhhemoing/study-assistant-opening' } }),
+    MOCK_JOBS: writeJson('jobs.json', { total_count: 7, jobs: ['lint-typecheck-test-build', 'real-worker-pdf-browser-flow', 'production-build', 'static-unit-contract-spikes', 'integration-parser', 'handler-browser-spikes', 'isolated-worker-pdf-browser'].map(name => ({ name, status: 'completed', conclusion: 'success' })) }),
+    MOCK_ARTIFACTS: writeJson('artifacts.json', { total_count: 1, artifacts: [{ id: 22, name: `release-${f.sha}`, expired: false, workflow_run: { id: 12, head_sha: f.sha } }] }),
+    MOCK_ATTESTATION: writeJson('attestation.json', [{ verificationResult: { signature: { certificate: { extensions: { runInvocationURI: 'https://github.com/Xhhemoing/study-assistant-opening/actions/runs/12/attempts/1' } } } } }]),
+  });
+  return f;
+}
+
+for (const failure of ['', 'backup', 'backup-list', 'migrate', 'health', 'attestation', 'tip-change', 'pg-version']) {
+  test(`prebuilt ${failure || 'success'} retains managed safety and never rebuilds`, t => {
+    const f = prebuiltFixture(t);
+    const result = f.run('deploy', { MOCK_FAIL: failure });
+    assert.equal(result.status === 0, failure === '', result.stderr);
+    // npm --version is a platform comparison, not an install/build.
+    assert.doesNotMatch(result.deltaLog, /npm (ci|run build)/);
+    assertLegacyIntact(f);
+    if (['attestation', 'tip-change'].includes(failure)) {
+      assert.doesNotMatch(result.deltaLog, /ssh|scp|migrate|systemctl/);
+      return;
+    }
+    if (failure) {
+      assert.equal(readlinkSync(f.current), f.server);
+      assert.equal(readFileSync(join(f.systemd, 'aistudy-worker.service'), 'utf8'), f.oldUnit);
+      if (failure === 'pg-version') { assert.match(result.stderr, /PostgreSQL 16/); assert.doesNotMatch(result.log, /migrate current=/); }
+      if (failure === 'backup') assert.match(result.log, /pg_dump/);
+      if (failure === 'backup-list') assert.match(result.log, /pg_restore --list/);
+      if (failure === 'migrate') { assert.match(result.log, /migrate current=/); assert.match(result.stderr, /Previous release restored/); }
+      if (failure === 'health') assert.match(result.stderr, /DEGRADED: web restored/);
+    } else {
+      assert.notEqual(readlinkSync(f.current), f.server);
+      assert.match(result.log, /worker provision/);
+      assert(result.log.indexOf('pg_restore --list') < result.log.indexOf('migrate current='));
+    }
+  });
+}
+
+test('prebuilt restores the actual managed OLD_TARGET, not the legacy directory', t => {
+  const f = prebuiltFixture(t);
+  assert.equal(f.run().status, 0);
+  const old = readlinkSync(f.current);
+  const failed = f.run('deploy', { MOCK_FAIL: 'health', MOCK_HEALTHY_TARGET: old });
+  assert.notEqual(failed.status, 0);
+  assert.equal(readlinkSync(f.current), old);
+  assert.match(failed.stderr, /Previous release restored/);
+  assert.doesNotMatch(failed.deltaLog, /npm (ci|run build)/);
+});
+
+for (const scenario of ['wrong-attestation-run', 'missing-target', 'dirty', 'red-required-check', 'wrong-source-repo', 'disk-floor', 'wrong-architecture', 'tampered-blob', 'untrusted-control']) {
+  test(`prebuilt ${scenario} fails closed without build or service changes`, t => {
+    const f = prebuiltFixture(t);
+    if (scenario === 'wrong-attestation-run') writeFileSync(f.env.MOCK_ATTESTATION, JSON.stringify([{ verificationResult: { signature: { certificate: { extensions: { runInvocationURI: 'https://github.com/Xhhemoing/study-assistant-opening/actions/runs/11/attempts/1' } } }, statement: { predicate: { runDetails: { metadata: { invocationId: 'https://github.com/Xhhemoing/study-assistant-opening/actions/runs/12/attempts/1' } } } } } }]));
+    if (scenario === 'missing-target') f.env.TARGET_SHA = '';
+    if (scenario === 'dirty') writeFileSync(join(f.repo, 'untracked'), 'dirty');
+    if (scenario === 'red-required-check') { const jobs = JSON.parse(readFileSync(f.env.MOCK_JOBS)); jobs.jobs[0].conclusion = 'failure'; writeFileSync(f.env.MOCK_JOBS, JSON.stringify(jobs)); }
+    if (scenario === 'wrong-source-repo') { const run = JSON.parse(readFileSync(f.env.MOCK_RUN)); run.head_repository.full_name = 'attacker/fork'; writeFileSync(f.env.MOCK_RUN, JSON.stringify(run)); }
+    if (scenario === 'disk-floor') f.env.MIN_FREE_KB = '10';
+    if (scenario === 'wrong-architecture' || scenario === 'untrusted-control') {
+      const manifestFile = join(f.root, 'artifact-source/release-manifest.json');
+      const manifest = JSON.parse(readFileSync(manifestFile));
+      if (scenario === 'wrong-architecture') manifest.platform.arch = 'other';
+      else {
+        writeFileSync(join(f.root, 'artifact-source/infra/deploy/provision-worker.sh'), 'exit 99\n');
+        manifest.files = tree(join(f.root, 'artifact-source'));
+        manifest.treeSha256 = createHash('sha256').update(JSON.stringify(manifest.files)).digest('hex');
+      }
+      writeFileSync(manifestFile, JSON.stringify(manifest));
+      assert.equal(spawnSync('tar', ['-czf', f.env.MOCK_PREBUILT, '-C', join(f.root, 'artifact-source'), ...readdirSync(join(f.root, 'artifact-source'))]).status, 0);
+    }
+    if (scenario === 'tampered-blob') writeFileSync(f.env.MOCK_PREBUILT, 'not an archive');
+    const result = f.run();
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.deltaLog, /npm (ci|run build)|migrate current=|systemctl (stop|restart)/);
+    assertLegacyIntact(f);
+  });
 }
 
 function assertLegacyIntact(f) {

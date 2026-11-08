@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { readOpeningLearningAgenda } from "./opening-learning-agenda";
+import { readOpeningCurrentLearningRecovery } from "./opening-current-learning-activity";
 import { learningManagementCommandSchema, learningManagementOverviewSchema, learningManagementSettingsSchema,
   learningRecoveryCommandSchema, learningLifecycleCommandSchema, type Scope, type TaskItem } from "@aistudy/contracts";
 import { allocateLearningCapacity, deriveDayBlocks, learningRecoveryChoice, localDateKeyInZone, resolveLocalDayBounds } from "@aistudy/domain";
@@ -50,13 +51,12 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
   const plans = createOpeningPlansRepository(db), accepted = await plans.getToday(scope, state.localDate);
   const [tasks, sessions, active, goals, maintenance] = await Promise.all([
     plans.listTasks(scope), readLearningCardSessions(db, scope),
-    db`SELECT a.* FROM opening_teaching_activities a JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
-      WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.status IN ('active','paused')
-        AND a.create_intent->>'protocol' IS DISTINCT FROM 'card-review-session-v1' AND COALESCE(a.create_intent->>'legacy','false')<>'true'
-      ORDER BY a.updated_at DESC,a.id LIMIT 1`, readLearningGoals(db, scope),
+    readOpeningCurrentLearningRecovery(db, scope), readLearningGoals(db, scope),
     db`SELECT id,version,client_key FROM opening_tasks WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending' AND client_key LIKE 'planner:%:maintenance:%'`,
   ]);
-  const activity = active[0], task = selectLearningRecoveryTask(tasks, activity);
+  const [activity] = active ? await db`SELECT * FROM opening_teaching_activities WHERE id=${active.activityId}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${active.courseId}` : [];
+  const task = selectLearningRecoveryTask(tasks, activity);
   const agenda = activity ? await readOpeningLearningAgenda(db as unknown as TransactionSql, scope, String(activity.course_id), String(activity.id)) : null;
   const recovery = learningRecoveryChoice({ activityId: activity ? String(activity.id) : null, taskId: task?.id ?? null, pending: Boolean(task) });
   const warnings = ["共同预算包含已接受任务、复测与本次活动。缺席不代表能力下降；已接受安排保持原样。"];

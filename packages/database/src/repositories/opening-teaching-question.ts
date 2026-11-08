@@ -1,10 +1,40 @@
-import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
-import { courseRouteActivityContextSchema, teachingMisconceptionsSchema, teachingQuestionInteractionSchema, teachingSourceRefSchema } from "@aistudy/contracts";
+import { z } from "zod";
+import { uuidSchema, type Scope, type TeachingBlockRef, type TeachingSourceRef } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, questionIdentitySchema, teachingMisconceptionsSchema, teachingQuestionInteractionSchema, teachingSourceRefSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
-import { checkArithmeticAnswer } from "@aistudy/domain";
+import { checkArithmeticAnswer, type ResolvedCourseQuestion } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
+import { readOpeningReservedKey } from "./opening-course-reserved-selection";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
+
+// Persisted compiler metadata is not rendered question content or evidence of a
+// correct answer. Parse this closed representation before excluding it from
+// identity conditions; never open the stem to arbitrary extra/visual payloads.
+const citationMetadataSchema = z.object({
+  citedChunkIds: z.array(uuidSchema).optional(),
+  rejectedCitationCount: z.number().int().nonnegative().safe().optional(),
+  citationBinding: z.object({
+    blockId: uuidSchema,
+    role: z.enum(["teach", "prompt", "example", "answer_key", "meta"]),
+    status: z.enum(["bound", "missing", "mismatch"]),
+    refs: z.array(z.object({
+      sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative().safe(),
+      chunkId: uuidSchema, page: z.number().int().positive().safe().nullable(),
+    }).strict()),
+    factualSupport: z.literal("unverified"),
+  }).strict().optional(),
+}).strict();
+const citationMetadataFields = ["citedChunkIds", "rejectedCitationCount", "citationBinding"];
+function hasValidCitationMetadata(block: Block, role: "prompt" | "answer_key"): boolean {
+  const metadata = citationMetadataSchema.safeParse(Object.fromEntries(
+    Object.entries(block.content).filter(([field]) => citationMetadataFields.includes(field)),
+  ));
+  if (!metadata.success) return false;
+  const binding = metadata.data.citationBinding;
+  return !binding || binding.blockId === block.id && binding.role === role;
+}
+
 export type TeachingQuestionSpec = {
   kind: "teaching_question"; specVersion: "teaching-question-v1";
   activityId: string; teachingUnitId: string; contentVersion: number;
@@ -80,6 +110,62 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
   return { spec, stem };
 }
 
+/** Resolve private identity from the owner's CURRENT publication, never an item/client claim.
+ * Text-only blocks have a closed representation. Any unresolved visual/extra payload is
+ * unknown, rather than interpreting missing figure extraction as confirmed absence.
+ */
+export async function readResolvedTeachingQuestion(tx: TransactionSql, scope: Scope, spec: TeachingQuestionSpec, lock = false): Promise<ResolvedCourseQuestion | null> {
+  const [row] = await tx`SELECT r.blocks,s.block_order,s.source_refs
+    FROM opening_teaching_activity_specs s
+    JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+    JOIN opening_teaching_units u ON u.id=s.teaching_unit_id AND u.workspace_id=s.workspace_id AND u.owner_user_id=s.owner_user_id AND u.document_id=s.document_id
+    JOIN library_revisions r ON r.document_id=s.document_id AND r.workspace_id=s.workspace_id AND r.revision_number=s.revision_number
+    WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} AND s.activity_id=${spec.activityId}
+      AND s.teaching_unit_id=${spec.teachingUnitId} AND s.document_id=${spec.documentId} AND r.id=${spec.revisionId}
+      AND s.revision_number=${spec.revisionNumber} AND s.version=${spec.contentVersion} AND a.content_version=s.version
+      ${lock ? tx`FOR SHARE OF a,s,r` : tx``}`;
+  if (!row || !Array.isArray(row.blocks) || !Array.isArray(row.block_order)) return null;
+  const blocks = row.blocks as Block[], order = [...row.block_order as TeachingBlockRef[]].sort((a, b) => a.position - b.position);
+  const index = order.findIndex(ref => ref.blockId === spec.blockId && ref.role === "prompt");
+  const following = order[index + 1];
+  if (index < 0 || !following || following.role !== "answer_key" || following.blockId !== spec.answerBlockId) return null;
+  const prompt = blocks.find(block => block.id === spec.blockId && ["prompt", "question"].includes(block.type));
+  const key = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
+  if (!prompt || !key || typeof prompt.content.text !== "string" || !prompt.content.text.trim()) return null;
+  const interaction = teachingQuestionInteractionSchema.safeParse(prompt.content.interaction);
+  const answer = teachingQuestionText(key.content);
+  if (!interaction.success || !answer) return null;
+  const sources = teachingSourceRefSchema.array().min(1).max(32).safeParse(row.source_refs);
+  if (!sources.success || sources.data.some(ref => ref.version == null)) return null;
+  // Permission/version and unresolved source figures are checked on actual source rows.
+  for (const ref of sources.data) {
+    const [source] = await tx`SELECT s.version,s.mime,EXISTS(SELECT 1 FROM opening_source_chunks c
+        WHERE c.source_id=s.id AND c.source_version=s.version AND c.image_object_key IS NOT NULL) AS has_figures
+      FROM opening_sources s WHERE s.workspace_id=${scope.workspaceId} AND s.id=${ref.sourceId} AND s.upload_state='uploaded'
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+        AND (s.mime IN ('image/jpeg','image/png','image/webp') OR EXISTS(SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=s.version))
+        AND (${ref.chunkId ?? null}::text IS NULL OR EXISTS(SELECT 1 FROM opening_source_chunks c
+          WHERE c.source_id=s.id AND c.source_version=s.version AND c.id::text=${ref.chunkId ?? null}))
+        AND (${ref.page ?? null}::int IS NULL OR EXISTS(SELECT 1 FROM opening_source_chunks c
+          WHERE c.source_id=s.id AND c.source_version=s.version AND c.page=${ref.page ?? null}))
+        ${lock ? tx`FOR SHARE OF s` : tx``}`;
+    if (!source || Number(source.version) !== Number(ref.version) || source.has_figures || String(source.mime).startsWith("image/")) return null;
+  }
+  if (!hasValidCitationMetadata(prompt, "prompt") || !hasValidCitationMetadata(key, "answer_key")) return null;
+  if (Object.keys(prompt.content).some(field => !["text", "markdown", "prompt", "question", "answer", "solution", "interaction", ...citationMetadataFields].includes(field))
+    || /(?:图|figure|diagram|image|!\[|<img|\\includegraphics)/i.test(prompt.content.text)) return null;
+  const identity = questionIdentitySchema.safeParse({ protocolVersion: "question-identity-1", identityRefId: spec.blockId,
+    questionRef: { kind: "teaching_question", activityId: spec.activityId, documentId: spec.documentId,
+      revisionNumber: spec.revisionNumber, contentVersion: spec.contentVersion, questionBlockId: spec.blockId, answerBlockId: spec.answerBlockId },
+    sourceRefs: sources.data, conditionRefs: [{ kind: "block", documentId: spec.documentId, revisionNumber: spec.revisionNumber, blockId: spec.blockId }],
+    figureRefs: [], answerRole: following.role });
+  // `text` is required above and is the body consumed by both the learner and
+  // exact evaluator. Compare only that body and parsed interaction (including
+  // options/unit), not shadowed markdown/question/etc. Visual/unknown payloads
+  // were rejected above; dropping shadow fields must not hide consumed figures.
+  return identity.success ? { identity: identity.data, conditions: prompt.content.text, interaction: interaction.data, answer } : null;
+}
+
 /** Used by both live eligibility and batch qualification. The pinned revision is append-only. */
 export function teachingQuestionIdentityMatches(db: LearningSql) {
   return db`(v.teaching_revision_id IS NULL AND v.teaching_block_id IS NULL
@@ -137,17 +223,38 @@ function cardVariantLineageOnly(spec: TeachingQuestionSpec, refs: TeachingSource
 /** Read the immutable question and its hidden answer only for server-side grading. */
 export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: Scope, item: Record<string, unknown>) {
   if (item.teaching_revision_id == null) return null;
-  const [row] = await tx`SELECT r.blocks,v.activity_id,v.teaching_revision_id,v.teaching_block_id,a.create_intent FROM opening_learning_item_versions v
+  const [row] = await tx`SELECT r.blocks,v.evaluation_spec,v.activity_id,v.teaching_revision_id,v.teaching_block_id,a.create_intent,s.block_order AS current_block_order FROM opening_learning_item_versions v
     JOIN library_revisions r ON r.id=v.teaching_revision_id AND r.workspace_id=v.workspace_id
     JOIN opening_teaching_activities a ON a.id=v.activity_id AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
+    LEFT JOIN opening_teaching_activity_specs s ON s.activity_id=v.activity_id AND s.workspace_id=v.workspace_id AND s.owner_user_id=v.owner_user_id
+      AND s.document_id=r.document_id AND s.revision_number=r.revision_number AND s.version::text=v.evaluation_spec->>'contentVersion'
     WHERE v.id=${String(item.id)} AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND ${teachingQuestionIdentityMatches(tx)}`;
   if (!row) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
-  const spec = item.evaluation_spec as TeachingQuestionSpec, blocks = row.blocks as Block[];
+  const spec = (row.evaluation_spec ?? item.evaluation_spec) as TeachingQuestionSpec, blocks = row.blocks as Block[];
+  // Ordinary AI grading remains compatible with legacy/visual questions, without
+  // upgrading their authority. When exact resolution is available, use the
+  // owner's saved pair, never a separate answer/identity supplied by a caller.
+  const resolved = await readResolvedTeachingQuestion(tx, scope, spec);
+  if (Array.isArray(row.current_block_order)) {
+    const order = [...row.current_block_order as TeachingBlockRef[]].sort((a, b) => a.position - b.position);
+    const index = order.findIndex(ref => ref.blockId === spec.blockId);
+    const paired = order[index + 1];
+    if (index < 0 || spec.answerBlockId && (!paired || paired.role !== "answer_key" || paired.blockId !== spec.answerBlockId)) {
+      throw learningError("CONFLICT", "保存的课堂答案与题目绑定不一致，请重新打开课程");
+    }
+  }
   const stem = teachingQuestionText(blocks.find(block => block.id === spec.blockId)?.content);
   if (!stem) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
+  const reserved = await readOpeningReservedKey(tx, scope, String(item.id));
+  if (reserved) {
+    if (reserved.text !== stem) throw learningError("CONFLICT", "已发保留题身份不一致。");
+    // Deliberately omit key text: this helper also serves ordinary verification responses.
+    // The private deterministic key is not public reference material.
+    return { stem, misconceptions: [], sourceRefs: reserved.sourceRefs, referenceText: "" };
+  }
   const answer = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
-  const text = teachingQuestionText(answer?.content);
+  const text = resolved?.answer ?? teachingQuestionText(answer?.content);
   if (text && checkArithmeticAnswer(stem, text) === "incorrect") {
     throw learningError("CONFLICT", "原题参考解答与程序验算不一致，原答案已保留，请先核对题目");
   }

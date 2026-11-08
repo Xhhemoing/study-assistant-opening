@@ -357,6 +357,10 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env: *quality-env
     steps:
       - uses: actions/checkout@v4
@@ -367,7 +371,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build
+        env:
+          AISTUDY_COMMIT: ${{ github.sha }}
         run: npm run build
+      # Pack existing build, never bypass lint/typecheck or rebuild on the host.
+      # Only mainline push artifacts are trusted by the deployment verifier.
+      - name: Pack release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        run: |
+          mkdir -m 700 release-artifact
+          node infra/deploy/verify-release-artifact.mjs pack . release-artifact/release.tar.gz "$GITHUB_SHA"
+      - name: Attest release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-artifact/release.tar.gz
+      - name: Upload release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: release-artifact/release.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   opening-worker-flow:
     name: isolated-worker-pdf-browser

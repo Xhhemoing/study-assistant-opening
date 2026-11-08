@@ -12,6 +12,7 @@ import {
   compileCurrentActivity,
   createCompilerBuildPublishInput,
   createCompilerProviderInput,
+  createCompilerReservedQuestionProducer,
   parseCompileModelOutput,
   TeachingCompileOutputError,
   projectClientSafeLibraryBlocks,
@@ -47,6 +48,30 @@ it("keeps unsupported references unverified rather than inferring a numeric answ
     ] }), new Set());
     expect(output.blocks).toHaveLength(3);
   }
+});
+
+describe("private compiler generation lane", () => {
+  const context = { scope: { workspaceId: "w", ownerUserId: "u" }, courseId: "course", requirementId: "requirement",
+    requirementRevision: 1, sourceVersions: { [SRC_A]: 1 }, requirementText: "arithmetic" };
+  const payload = { activityId: ACTIVITY, expectedContentVersion: 0, sourceIds: [SRC_A] };
+  it("uses authorized compiler evidence without writing any generated private content to library blocks", async () => {
+    const selected = chunk("private-evidence", "Arithmetic lesson");
+    const writeLibraryBlocks = vi.fn(), admitAndPersist = vi.fn().mockResolvedValue({ privateRefId: "opaque" });
+    const generate = vi.fn().mockResolvedValue(JSON.stringify({ text: "291+2", answer: "293", interaction: { kind: "numeric" } }));
+    const result = await createCompilerReservedQuestionProducer({ loadChunks: async () => [selected], writeLibraryBlocks })(context, payload,
+      { generate, admitAndPersist });
+    expect(result).toEqual({ kind: "persisted", privateRefId: "opaque" });
+    expect(generate.mock.calls[0]![0].chunks).toEqual([selected]);
+    expect(writeLibraryBlocks).not.toHaveBeenCalled();
+    expect(admitAndPersist).toHaveBeenCalledWith(expect.objectContaining({ text: "291+2", answer: "293", requirementRevision: 1 }));
+  });
+  it.each([{ chunks: [] }, { chunks: [chunk("stale", "Arithmetic", { sourceVersion: 2 })] },
+    { chunks: [chunk("image", "OCR", { imageObjectKey: "owned/page1" })] }])("rejects absent, stale or unverified visual evidence before the private provider call %#", async ({ chunks }) => {
+    const generate = vi.fn(), admitAndPersist = vi.fn();
+    await expect(createCompilerReservedQuestionProducer({ loadChunks: async () => chunks })(context, payload,
+      { generate, admitAndPersist })).rejects.toThrow("current text-only evidence");
+    expect(generate).not.toHaveBeenCalled(); expect(admitAndPersist).not.toHaveBeenCalled();
+  });
 });
 
 describe("goal-driven teaching provider context", () => {
@@ -214,6 +239,92 @@ function stableBlockId(): string {
   blockSeq += 1;
   return `00000000-0000-4000-8000-${String(blockSeq).padStart(12, "0")}`;
 }
+
+describe("per-block citation bindings", () => {
+  function compile(blocks: Parameters<typeof compileCurrentActivity>[0]["modelOutput"], chunks = [chunk("c1", "authorized", { sourceVersion: 0, page: 7 })]) {
+    const outline = mapFixtureOutline();
+    return compileCurrentActivity({ outline, focusItemId: outline.focusItemId,
+      pack: assembleTeachingEvidencePack({ chunks, query: "authorized", maxCharacters: 4000 }),
+      teachingUnitId: UNIT, expectedContentVersion: 0, revisionNumber: 1, newBlockId: stableBlockId, modelOutput: blocks });
+  }
+
+  it("binds each role separately and retains all missing blocks, not a three-question sample", () => {
+    const blocks = [
+      { type: "text", text: "authorized", citedChunkIds: ["c1"] },
+      { type: "formula", text: "x=1", citedChunkIds: [] },
+      { type: "example", text: "example", citedChunkIds: ["c1"] },
+      ...Array.from({ length: 5 }, (_, index) => [
+        { type: "prompt", text: `question-${index}`, citedChunkIds: index === 0 ? ["c1"] : [] },
+        { type: "answer_key", text: `key-${index}`, hints, ...rankPedagogy, citedChunkIds: index === 0 ? ["c1"] : [] },
+      ]).flat(),
+    ];
+    const compiled = compile(parseCompileModelOutput(JSON.stringify({ blocks }), new Set(["c1"])));
+    const bindings = compiled.libraryBlocks.map(block => block.content.citationBinding);
+    expect(bindings).toHaveLength(13);
+    expect(bindings.filter(value => (value as { status: string }).status === "bound")).toHaveLength(4);
+    expect(bindings.filter(value => (value as { status: string }).status === "missing")).toHaveLength(9);
+    for (const block of compiled.libraryBlocks) expect(block.content.citationBinding).toEqual({
+      blockId: block.id, role: block.role,
+      status: (block.content.citedChunkIds as string[] | undefined)?.length ? "bound" : "missing",
+      refs: (block.content.citedChunkIds as string[] | undefined)?.length
+        ? [{ sourceId: SRC_A, sourceVersion: 0, chunkId: "c1", page: 7 }] : [],
+      factualSupport: "unverified",
+    });
+    expect(compiled.publishInput.verificationStatus).toBe("needs_check");
+    expect(JSON.stringify(projectClientSafeLibraryBlocks(compiled.libraryBlocks))).not.toContain("key-0");
+  });
+
+  it("retains unknown/mixed model citation failures without copying forged source metadata", () => {
+    const output = parseCompileModelOutput(JSON.stringify({ blocks: [
+      { type: "text", text: "claim", citedChunkIds: ["outside"], citationBinding: { status: "bound", sourceId: SRC_B } },
+      { type: "example", text: "mixed", citedChunkIds: ["c1", "outside", 42] },
+      { type: "formula", text: "x=1", citedChunkIds: ["c1", "c1"] },
+    ] }), new Set(["c1"]));
+    expect(output.blocks[0]).toMatchObject({ citedChunkIds: [], rejectedCitationCount: 1 });
+    const compiled = compile(output);
+    expect(compiled.libraryBlocks.map(block => block.content.citationBinding)).toEqual([
+      { blockId: compiled.libraryBlocks[0]!.id, role: "teach", status: "mismatch", refs: [], factualSupport: "unverified" },
+      { blockId: compiled.libraryBlocks[1]!.id, role: "example", status: "mismatch",
+        refs: [{ sourceId: SRC_A, sourceVersion: 0, chunkId: "c1", page: 7 }], factualSupport: "unverified" },
+      { blockId: compiled.libraryBlocks[2]!.id, role: "teach", status: "bound",
+        refs: [{ sourceId: SRC_A, sourceVersion: 0, chunkId: "c1", page: 7 }], factualSupport: "unverified" },
+    ]);
+    expect(JSON.stringify(compiled.libraryBlocks)).not.toContain(SRC_B);
+  });
+
+  it("cannot bind direct compiler candidates outside the pack or inherit a teaching citation for a prompt", () => {
+    const compiled = compile({ itemTitles: [], blocks: [
+      { type: "text", text: "claim", citedChunkIds: ["c1"] },
+      { type: "prompt", text: "question", citedChunkIds: ["outside"] },
+      { type: "answer_key", text: "answer", citedChunkIds: [] },
+    ] });
+    expect(compiled.libraryBlocks.map(block => (block.content.citationBinding as { status: string }).status))
+      .toEqual(["bound", "mismatch", "missing"]);
+  });
+
+  it.each(["missing", "version", "page", "source"])("rejects %s evidence drift before writing a revision", async kind => {
+    const evidence = chunk("c1", "authorized");
+    const current = { ...evidence, ...(kind === "version" ? { sourceVersion: 2 }
+      : kind === "page" ? { page: 2 } : kind === "source" ? { sourceId: SRC_B } : {}) };
+    const writeLibraryBlocks = vi.fn();
+    const publish = createCompilerBuildPublishInput({ evidenceChunks: [evidence],
+      loadChunks: async () => kind === "missing" ? [] : [current], writeLibraryBlocks });
+    await expect(publish({}, { activityId: ACTIVITY, teachingUnitId: UNIT,
+      expectedContentVersion: 0, sourceIds: [SRC_A, SRC_B] }, null)).rejects.toThrow("source version/location changed");
+    expect(writeLibraryBlocks).not.toHaveBeenCalled();
+  });
+
+  it("uses the exact sent excerpt while resolving its current identity, including version zero and no page", async () => {
+    const current = chunk("c1", "authorized long full text", { page: null, sourceVersion: 0 });
+    let written: Parameters<typeof projectClientSafeLibraryBlocks>[0] = [];
+    const publish = createCompilerBuildPublishInput({ evidenceChunks: [{ ...current, text: "authorized" }],
+      loadChunks: async () => [current], writeLibraryBlocks: async blocks => { written = blocks; } });
+    await publish({}, { activityId: ACTIVITY, teachingUnitId: UNIT, expectedContentVersion: 0, sourceIds: [SRC_A] }, null);
+    expect(JSON.stringify(written)).not.toContain("long full text");
+    expect(written[0]!.content.citationBinding).toMatchObject({ status: "bound",
+      refs: [{ sourceId: SRC_A, sourceVersion: 0, chunkId: "c1", page: null }], factualSupport: "unverified" });
+  });
+});
 
 describe("teaching-compiler", () => {
   it("C1: edited outline is used for compile — no silent overwrite", () => {
@@ -459,7 +570,7 @@ describe("teaching-compiler", () => {
     }), new Set(["c1"]));
     expect(parsed.itemTitles).toEqual(["秩", "零空间"]);
     expect(parsed.blocks).toEqual([
-      { type: "text", text: "rank", citedChunkIds: ["c1"] },
+      { type: "text", text: "rank", citedChunkIds: ["c1"], rejectedCitationCount: 1 },
       { type: "answer_key", hints, ...rankPedagogy, text: "3", citedChunkIds: [] },
     ]);
     expect(() => parseCompileModelOutput("not json", new Set())).toThrow(TeachingCompileOutputError);
@@ -490,7 +601,9 @@ describe("teaching-compiler", () => {
       ] }),
     });
     expect(written.map((b) => b.type)).toEqual(["text", "steps", "prompt", "answer_key", "text", "prompt", "answer_key"]);
-    expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"] });
+    expect(written[1]!.content).toEqual({ steps: ["写出方程", "化简"], citationBinding: {
+      blockId: written[1]!.id, role: "teach", status: "missing", refs: [], factualSupport: "unverified",
+    } });
     expect(written[3]).toMatchObject({ role: "answer_key", content: { answer: "n − rank", hints, hidden: true, citedChunkIds: ["c1"] } });
     expect(JSON.stringify(projectClientSafeLibraryBlocks(written as Parameters<typeof projectClientSafeLibraryBlocks>[0]))).not.toContain(hints.firstStep);
     expect(publishInput.generationConfig?.extras).toMatchObject({ contentSource: "model" });
@@ -531,9 +644,15 @@ describe("teaching-compiler", () => {
       ] }), new Set(["c1"])),
     });
     expect(compiled.libraryBlocks.find((block) => block.type === "formula")?.content)
-      .toEqual({ latex: "A x = 0", citedChunkIds: ["c1"] });
+      .toEqual({ latex: "A x = 0", citedChunkIds: ["c1"], citationBinding: {
+        blockId: compiled.libraryBlocks.find(block => block.type === "formula")!.id, role: "teach", status: "bound",
+        refs: [{ sourceId: SRC_A, sourceVersion: 1, chunkId: "c1", page: 1 }], factualSupport: "unverified",
+      } });
     expect(compiled.libraryBlocks.find((block) => block.type === "answer_key")?.content)
-      .toEqual({ answer: "A x = 0", hints, ...rankPedagogy, hidden: true, citedChunkIds: ["c1"] });
+      .toEqual({ answer: "A x = 0", hints, ...rankPedagogy, hidden: true, citedChunkIds: ["c1"], citationBinding: {
+        blockId: compiled.libraryBlocks.find(block => block.type === "answer_key")!.id, role: "answer_key", status: "bound",
+        refs: [{ sourceId: SRC_A, sourceVersion: 1, chunkId: "c1", page: 1 }], factualSupport: "unverified",
+      } });
 
     const input = {
       activityId: ACTIVITY,

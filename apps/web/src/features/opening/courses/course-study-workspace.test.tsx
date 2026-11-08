@@ -12,8 +12,9 @@ const data = vi.hoisted(() => ({
     workspaceId: "33333333-3333-4333-8333-333333333333", ownerUserId: "44444444-4444-4444-8444-444444444444",
     status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, intentKind: "goal", intentSummary: "矩阵",
     sourceIds: [], clientKey: "test:course-study", createdAt: "2026-10-23T00:00:00.000Z", updatedAt: "2026-10-23T00:00:00.000Z" } satisfies TeachingActivity,
-  teachingMount: vi.fn(), practiceMount: vi.fn(),
+  teachingMount: vi.fn(), practiceMount: vi.fn(), router: { replace: vi.fn() },
 }));
+vi.mock("next/navigation", () => ({ useRouter: () => data.router, usePathname: () => `/opening/courses/${data.course.id}/study` }));
 vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.course, loading: false, error: null, reload: vi.fn() }) }));
 vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ kind: "activity", activity: data.activity })) }));
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
@@ -50,6 +51,34 @@ async function click(label: string) {
   await act(async () => button.click());
 }
 
+it.each([undefined, "55555555-5555-4555-8555-555555555555"])("mounts static lesson navigation with persisted retest %s without ordinary resume/create", async retestId => {
+  const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
+  vi.mocked(openCourseStudy).mockImplementationOnce(real.openCourseStudy);
+  const lesson: TeachingActivity = { ...data.activity, intentKind: "course_continue", contentVersion: 0,
+    staticLesson: { protocol: "span-lesson-v1", sessionId: "66666666-6666-4666-8666-666666666666", ...(retestId ? { retestId } : {}) } };
+  const api = { listTeachingActivities: vi.fn(async () => [lesson]), getTeachingActivity: vi.fn(),
+    getTeachingResume: vi.fn(), createTeachingActivity: vi.fn() } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(data.router.replace).toHaveBeenCalledExactlyOnceWith(`/opening/courses/${data.course.id}/study/span?lesson=${lesson.id}${retestId ? `&retest=${retestId}` : ""}`);
+  expect(api.getTeachingResume).not.toHaveBeenCalled(); expect(api.createTeachingActivity).not.toHaveBeenCalled();
+  expect(data.teachingMount).not.toHaveBeenCalled(); expect(data.practiceMount).not.toHaveBeenCalled();
+});
+it("does not create on mount for a completed chain and explicitly confirms once before restoring teaching", async () => {
+  const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
+  vi.mocked(openCourseStudy).mockImplementation(real.openCourseStudy);
+  const taskId = "77777777-7777-4777-8777-777777777777";
+  const api = { listTasks: vi.fn(async () => ({ tasks: [{ id: taskId, courseId: data.course.id, title: "继续任务", minutes: 20, priority: 1, dueAt: null, status: "pending", teachingContinuation: { activityId: data.activity.id, courseId: data.course.id } }] })),
+    createTeachingActivity: vi.fn(async () => data.activity), getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  // Route admission is the existing unmanaged task path, not a new route start.
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ managed: false }), { status: 200 })));
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} taskId={taskId} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(api.getTeachingResume).not.toHaveBeenCalled();
+  await click("开始新一节");
+  expect(api.createTeachingActivity).toHaveBeenCalledOnce();
+  expect(api.createTeachingActivity).toHaveBeenCalledWith(expect.objectContaining({ continueAfterCompleted: true, createIntent: expect.objectContaining({ expectedTail: data.activity.id, taskId }) }));
+  expect(api.getTeachingResume).toHaveBeenCalledExactlyOnceWith(data.activity.id);
+  vi.mocked(openCourseStudy).mockImplementation(async () => ({ kind: "activity", activity: data.activity }));
+});
 it("keeps fallback practice and teaching surfaces mounted while the lesson is not ready", async () => {
   const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
   await act(async () => root.render(createElement(CourseStudyWorkspace, { courseId: data.course.id, teachingEnabled: true,

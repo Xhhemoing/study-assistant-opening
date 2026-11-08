@@ -1,11 +1,55 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { courses } from "./courses";
 import { courseRequirements } from "./goals";
 import { users } from "./identity";
 import { workspaces } from "./library";
 import { openingLearningItemVersions } from "./opening-learning-attempts";
 import { openingTeachingActivities } from "./opening-teaching-activities";
+
+/** Server-only exposure ledger. Nullable exact content is unknown, never unseen.
+ * Historical versions remain pinned; SQL scope/immutability triggers own write invariants.
+ */
+export const openingCourseQuestionExposures = pgTable("opening_course_question_exposures", {
+  id: uuid("id").primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  surfaceKey: text("surface_key").notNull(),
+  kind: text("kind").notNull(),
+  identityRefId: uuid("identity_ref_id"),
+  exactContent: jsonb("exact_content"),
+  familyId: text("family_id"),
+  sourceVersions: jsonb("source_versions").notNull(),
+  itemVersionId: uuid("item_version_id").references(() => openingLearningItemVersions.id),
+  historyRevision: bigint("history_revision", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [
+  unique().on(t.workspaceId, t.ownerUserId, t.surfaceKey),
+  index("opening_course_question_exposures_history_idx").on(t.workspaceId, t.ownerUserId, t.historyRevision),
+  check("opening_course_question_exposures_surface", sql`char_length(${t.surfaceKey}) BETWEEN 1 AND 240`),
+  check("opening_course_question_exposures_kind", sql`${t.kind} IN ('teaching','example','hint','presented')`),
+  check("opening_course_question_exposures_exact", sql`${t.exactContent} IS NULL OR jsonb_typeof(${t.exactContent}) = 'object'`),
+  check("opening_course_question_exposures_sources", sql`jsonb_typeof(${t.sourceVersions}) = 'object'`),
+  check("opening_course_question_exposures_history", sql`${t.historyRevision} >= 0`),
+]);
+
+/** A persistence slot, NOT authority supplied by a caller. Only new workspaces get an incomplete genesis.
+ * Phase 2 must establish completeness and compare the live workspace history watermark.
+ */
+export const openingCourseQuestionExposureCoverage = pgTable("opening_course_question_exposure_coverage", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  protocol: text("protocol").notNull(),
+  historyRevision: bigint("history_revision", { mode: "number" }).notNull(),
+  complete: boolean("complete").notNull().default(false),
+  invalidated: boolean("invalidated").notNull().default(false),
+  coveredSurfaceCount: bigint("covered_surface_count", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.workspaceId, t.ownerUserId] }),
+  check("opening_course_question_exposure_coverage_protocol", sql`${t.protocol} = 'course-question-exposure-1'`),
+  check("opening_course_question_exposure_coverage_history", sql`${t.historyRevision} >= 0`),
+  check("opening_course_question_exposure_coverage_count", sql`${t.coveredSurfaceCount} >= 0`),
+]);
 
 /** Private supply only. Never project these JSON bodies into public blocks or backup responses.
  * Immutable bodies are owned exclusively by opening-course-reserved-selection.

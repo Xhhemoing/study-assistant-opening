@@ -51,7 +51,15 @@ export type ExamAttempt = {
   /** A real legacy source can expose the whole pack without tracked lesson receipts. */
   exposureCoverage?: ExamExposureCoverage;
 };
-export type ExamRun = { id: string; mode: ExamMode; questionIds: string[]; startedAt: string; deadlineAt: string | null; completedAt: string | null };
+const conversionId = z.string().min(1).max(100);
+/** Shared strict boundary for both persisted runs and HTTP responses; absent on legacy runs. */
+export const examRunConversionSchema = z.object({
+  runId: conversionId, packId: conversionId, packVersion: conversionId, attemptId: conversionId, lessonId: conversionId,
+  exposureId: conversionId, clientKey: z.string().min(8).max(200), convertedAt: z.string().datetime({ offset: true }),
+  contentFingerprint: z.string().min(1).max(200), mappingVersion: conversionId,
+}).strict();
+export type ExamRunConversion = z.infer<typeof examRunConversionSchema>;
+export type ExamRun = { id: string; mode: ExamMode; questionIds: string[]; startedAt: string; deadlineAt: string | null; completedAt: string | null; conversion?: ExamRunConversion };
 export type ExamSourceRecord = {
   id: string; sourceId: string; phase: "first" | "blind" | "delayed" | "variant";
   outcome: "correct" | "partial" | "incorrect" | "read";
@@ -86,6 +94,8 @@ const id = z.string().min(1).max(100);
 export const examSprintCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("configure"), clientKey: key, examDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => { const date = new Date(`${value}T00:00:00Z`); return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value; }).nullable(), dailyMinutes: z.number().int().min(15).max(720) }).strict(),
   z.object({ action: z.literal("open_lesson"), clientKey: key, lessonId: id, expectedRunId: id.nullable(), expectedAttemptId: id.nullable(), packVersion: id, contentFingerprint: z.string().min(1).max(200), mappingVersion: id }).strict(),
+  z.object({ action: z.literal("switch_to_teaching"), clientKey: key, lessonId: id, expectedRunId: id, expectedAttemptId: id,
+    packVersion: id, contentFingerprint: z.string().min(1).max(200), mappingVersion: id, confirmedEndScoredMock: z.literal(true) }).strict(),
   z.object({ action: z.literal("start"), clientKey: key, mode: z.enum(["diagnostic", "practice", "retest", "mock-a", "mock-b"]) }).strict(),
   z.object({ action: z.literal("answer"), clientKey: key, attemptId: id, answer: z.string().min(1).max(20), confidence: z.number().int().min(1).max(5) }).strict(),
   z.object({ action: z.literal("help"), clientKey: key, attemptId: id, kind: z.enum(["hint", "solution", "external"]) }).strict(),
