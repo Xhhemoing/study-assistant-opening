@@ -229,6 +229,39 @@ it("binds optional issued item to the same scope and does not rewrite old exposu
   expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE id=${id}`).toHaveLength(1);
 });
 
+it("allows workspace cascade with live historical surfaces, rolls it back atomically and retains live scope guards",async()=>{
+  const rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
+  const conversationId=await rows.conversation(),turnId=await rows.turn(conversationId),cardId=randomUUID();
+  const exposureId=await insertExposure({exact:{question:'presented question',interaction:{kind:'text'},figures:[]}});
+  await f.sql`INSERT INTO cards(id,workspace_id,owner_user_id,front,back)
+    VALUES(${cardId},${f.scope.workspaceId},${f.scope.ownerUserId},'presented question','saved answer')`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  await expect(f.sql.begin(async tx=>{
+    await tx`DELETE FROM workspaces WHERE id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    expect(await tx`SELECT workspace_id FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await tx`SELECT id FROM opening_sources WHERE id=${sourceId}`).toHaveLength(0);
+    expect(await tx`SELECT id FROM opening_course_question_exposures WHERE id=${exposureId}`).toHaveLength(0);
+    throw new Error('workspace cascade rollback');
+  })).rejects.toThrow('workspace cascade rollback');
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  for(const [table,id] of [['opening_sources',sourceId],['opening_source_chunks',chunkId],['opening_turns',turnId],['cards',cardId],['opening_course_question_exposures',exposureId]])
+    expect(await f.sql`SELECT id FROM ${f.sql(table!)} WHERE id=${id!}`).toHaveLength(1);
+  await expect(insertExposure({ownerUserId:f.otherScope.ownerUserId})).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`UPDATE opening_course_question_exposure_coverage SET owner_user_id=${f.otherScope.ownerUserId}
+    WHERE workspace_id=${f.scope.workspaceId}`).rejects.toMatchObject({code:'23514'});
+  // A live workspace still records ordinary historical loss before the parent is deleted.
+  await f.sql`DELETE FROM opening_course_question_exposures WHERE id=${exposureId} AND workspace_id=${f.scope.workspaceId}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  await f.sql`DELETE FROM workspaces WHERE id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  expect(await f.sql`SELECT id FROM workspaces WHERE id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT workspace_id FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM opening_sources WHERE id=${sourceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM opening_source_chunks WHERE id=${chunkId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM opening_turns WHERE id=${turnId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM cards WHERE id=${cardId}`).toHaveLength(0);
+  expect((await f.sql`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.otherScope.workspaceId}`)[0]!.invalidated).toBe(false);
+});
+
 async function coverageInvalidated() {
   const [row]=await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage
     WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
