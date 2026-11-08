@@ -69,6 +69,78 @@ BEGIN
 END $$;
 CREATE TRIGGER opening_reserved_question_immutable BEFORE UPDATE ON opening_course_reserved_questions FOR EACH ROW EXECUTE FUNCTION opening_reserved_question_immutable();
 
+-- Private exposure facts retain old source versions and UUID-independent exact
+-- conditions. NULL/partial exact_content never establishes unseen eligibility.
+CREATE TABLE opening_course_question_exposures (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  surface_key text NOT NULL CHECK (char_length(surface_key) BETWEEN 1 AND 240),
+  kind text NOT NULL CHECK (kind IN ('teaching','example','hint','presented')),
+  identity_ref_id uuid,
+  exact_content jsonb CHECK (exact_content IS NULL OR jsonb_typeof(exact_content) = 'object'),
+  family_id text,
+  source_versions jsonb NOT NULL CHECK (jsonb_typeof(source_versions) = 'object'),
+  item_version_id uuid REFERENCES opening_learning_item_versions(id),
+  history_revision bigint NOT NULL CHECK (history_revision >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (workspace_id, owner_user_id, surface_key)
+);
+CREATE TABLE opening_course_question_exposure_coverage (
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  protocol text NOT NULL CHECK (protocol = 'course-question-exposure-1'),
+  history_revision bigint NOT NULL CHECK (history_revision >= 0),
+  complete boolean NOT NULL DEFAULT false,
+  covered_surface_count bigint NOT NULL CHECK (covered_surface_count >= 0),
+  PRIMARY KEY (workspace_id, owner_user_id)
+);
+CREATE INDEX opening_course_question_exposures_history_idx
+  ON opening_course_question_exposures (workspace_id, owner_user_id, history_revision);
+
+-- Scope is a storage invariant, not merely a property of parsed server input.
+-- Historical source versions need not be current; do not erase them on replacement.
+CREATE FUNCTION opening_course_question_exposure_scope() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id=NEW.workspace_id AND owner_user_id=NEW.owner_user_id) THEN
+    RAISE EXCEPTION 'question exposure scope mismatch' USING ERRCODE='23514';
+  END IF;
+  IF TG_TABLE_NAME='opening_course_question_exposures' THEN
+    IF NEW.item_version_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM opening_learning_item_versions WHERE id=NEW.item_version_id
+        AND workspace_id=NEW.workspace_id AND owner_user_id=NEW.owner_user_id
+    ) THEN
+      RAISE EXCEPTION 'question exposure item scope mismatch' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS (SELECT 1 FROM jsonb_each(NEW.source_versions) ref WHERE
+      jsonb_typeof(ref.value)<>'number' OR ref.value::text !~ '^(0|[1-9][0-9]*)$'
+      OR ref.key !~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') THEN
+      RAISE EXCEPTION 'question exposure source version invalid' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_course_question_exposures_scope BEFORE INSERT OR UPDATE ON opening_course_question_exposures
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_exposure_scope();
+CREATE TRIGGER opening_course_question_exposure_coverage_scope BEFORE INSERT OR UPDATE ON opening_course_question_exposure_coverage
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_exposure_scope();
+CREATE FUNCTION opening_course_question_exposure_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW IS DISTINCT FROM OLD THEN
+    RAISE EXCEPTION 'question exposure history is immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_course_question_exposure_immutable BEFORE UPDATE ON opening_course_question_exposures
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_exposure_immutable();
+
+-- No backfill and no complete=true seed. Only the server's full-history scanner
+-- plus all presentation/help writers may establish coverage under the history lock.
+-- Readers require protocol/owner/workspace and the CURRENT workspace watermark;
+-- this storage row alone (even complete=true) is not a coverage proof. These tables
+-- are not ordinary backup inventory. Privacy deletion remains with the existing
+-- owner-authorized delete path; source replacement never deletes exposure history.
+
 -- Rollback boundary: retain private rows/table on application rollback; do not
 -- drop supply/reservations or modify schema_migrations to make an old runner pass.
 -- The inherited 0108 recovery restrictions still apply. Production execution,

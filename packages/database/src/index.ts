@@ -140,7 +140,7 @@ export {
 
 export * from "./schema/opening-teaching-activities";
 export * from "./schema/opening-teaching-content";
-export { openingCourseReservedQuestions } from "./schema/opening-course-reserved-questions";
+export { openingCourseReservedQuestions, openingCourseQuestionExposures, openingCourseQuestionExposureCoverage } from "./schema/opening-course-reserved-questions";
 export {
   createOpeningTeachingContentRepository,
   redactBlocksForClientInit,
