@@ -65,6 +65,13 @@ export async function recordCourseQuestionExposure(tx: TransactionSql, scope: Sc
  * No caller may provide complete=true or a watermark.
  */
 export async function refreshCourseQuestionExposure(tx: TransactionSql, scope: Scope): Promise<boolean> {
+  // Preserve workspace ownership errors before probing coverage. Unknown history
+  // needs neither the history write lock nor the legacy surface fences.
+  const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owners.length) throw learningError("NOT_FOUND", "workspace not found");
+  const [candidate] = await tx`SELECT invalidated FROM opening_course_question_exposure_coverage
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND protocol=${protocol}`;
+  if (!candidate || candidate.invalidated !== false) return false;
   await lockWorkspaceLearningHistory(tx, scope);
   // Narrow rollout: the legacy surface writers do not all share the history
   // lock. Fail-fast table locks fence their INSERT/UPDATE/DELETE until selection
