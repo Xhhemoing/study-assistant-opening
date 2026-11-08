@@ -35,6 +35,65 @@ describe("tutor next action orchestration", () => {
     expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: resume, resumed: true, decision: { activityKind: "transfer_check" } });
     expect(executions).toEqual([]);
   });
+  const historicalContext = (operationId = request.operationId): TutorNextActionContext => {
+    const base = context({ resume: { activityId: "saved-v3", sessionId: "session", href: "/saved-v3" },
+      agenda: assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", status: "active", resumable: true,
+        decisionCurrent: false, invalidationReasons: ["policy_changed"] }),
+      historicalDecision: { activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null } as never });
+    return { ...base, spanContext: { courseId: base.courseId, grantRevision: 1, privacyEpoch: base.privacyEpoch,
+      sourceRefs: base.sourceRefs, sourceIds: ["source"], sourceVersions: { source: 2 }, decisionInput: base.decisionInput,
+      intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" },
+      resumeSession: null, dueRetestId: null, historicalOperationId: operationId } };
+  };
+  it("replays the exact historical operation decision without marking its policy current", async () => {
+    const saved = historicalContext(), { deps, executions } = service(saved);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: saved.resume, resumed: true,
+      decision: saved.historicalDecision, context: { agenda: { decisionCurrent: false, invalidationReasons: ["policy_changed"] } } });
+    expect(deps.assertCurrent).toHaveBeenCalledWith(scope, saved);
+    expect(executions).toEqual([]);
+  });
+  it("recomputes a current suggestion for a different operation even with a saved v3 result", async () => {
+    const { deps, executions } = service(historicalContext("tutor-next:other"));
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ resumed: true,
+      decision: { activityKind: "transfer_check", reasonCode: "independent" } });
+    expect(executions).toEqual([]);
+  });
+  it.each(["cancelled", "deferred", "completed"] as const)("does not replay an exact historical operation with a %s agenda", async status => {
+    const saved = historicalContext();
+    saved.agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", status, resumable: false });
+    const { deps, executions } = service(saved);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, resumed: false });
+    expect(executions).toEqual([]);
+  });
+  it.each(["permission:disabled", "source_unavailable", "source_changed", "goal_changed"])("does not replay an exact historical operation with %s", reason => {
+    const saved = historicalContext();
+    saved.agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", status: "active", resumable: false,
+      decisionCurrent: false, invalidationReasons: [reason] });
+    const { deps, executions } = service(saved);
+    return prepareTutorNextAction(deps, scope, request).then(result => {
+      expect(result).toMatchObject({ action: null, resumed: false });
+      expect(executions).toEqual([]);
+    });
+  });
+  it("checks the privacy epoch before returning a historical operation", async () => {
+    const { deps, executions } = service(historicalContext());
+    await expect(prepareTutorNextAction(deps, scope, { ...request, expectedPrivacyEpoch: 0 })).rejects.toThrow();
+    expect(deps.assertCurrent).not.toHaveBeenCalled();
+    expect(executions).toEqual([]);
+  });
+  it("checks the effective origin before returning a historical operation", async () => {
+    const { deps, executions } = service(historicalContext());
+    vi.mocked(deps.assertCurrent).mockRejectedValueOnce(new Error("origin invalidated"));
+    await expect(prepareTutorNextAction(deps, scope, request)).rejects.toThrow("origin invalidated");
+    expect(executions).toEqual([]);
+  });
+  it("preserves an origin/material choice rather than replaying the historical operation", async () => {
+    const saved = historicalContext();
+    saved.unavailableAction = { message: "原材料已变化", label: "核对原记录", href: "/records" };
+    const { deps, executions } = service(saved);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, resumed: false, choice: saved.unavailableAction });
+    expect(executions).toEqual([]);
+  });
   it.each(["cancelled", "deferred", "completed"] as const)("never executes or claims a resume for a %s agenda", async status => {
     const agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", status, resumable: false });
     const { deps, executions } = service(context({ agenda, resume: { activityId: "old", sessionId: "session", href: "/old" } }));

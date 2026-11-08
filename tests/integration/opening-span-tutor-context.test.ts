@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
-import { captureNextLearningStep, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { captureNextLearningStep, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, solveSpanProblem } from "@aistudy/domain";
+import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tutor-next-action";
+import { prepareTutorNextAction } from "../../apps/worker/src/jobs/tutor-next-action";
+import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptRepository } from "@aistudy/database";
+import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
+import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
+import { reserveSpanTutorActivityBudget } from "../../packages/database/src/repositories/opening-span-tutor-budget";
 import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -88,6 +94,107 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   expect(changedDecision).not.toEqual(savedDecision);
   expect((await f.repo.execute(fixture.scope, { ...input, context: { ...replay, decisionInput: changedInput }, decision: changedDecision })).activityId).toBe(session.activityId);
   expect(await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId })).toEqual(receipts);
+});
+it("replays a real D5 assisted-success input/execution through the worker adapter without v2 reselection", async () => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const learning = createOpeningLearningRepository(sql), attempts = createOpeningLearningAttemptRepository(sql);
+  const answer = async (hinted: boolean) => {
+    const lesson = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+      intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: randomUUID() });
+    const attempt = hinted ? await attempts.create(scope, { sessionId: lesson.sessionId, clientKey: randomUUID(),
+      spanExercise: { sourceId: f.sourceId, problemId: "span-example-2d", version: 1 } })
+      : await createSpanReservedService(sql).issue(scope, { sessionId: lesson.sessionId, sourceId: f.sourceId,
+        clientKey: randomUUID(), mode: "self_study" });
+    const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("fixture requires a unique canonical solution");
+    if (hinted) await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 });
+    const observed = await learning.insertObservation(scope, { sessionId: lesson.sessionId, courseId: f.courseId,
+      skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "in_span", coefficients: solution.coefficients,
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }),
+      assistance: "independent", outcome: "unverified", verdictSource: "self_report" });
+    expect(observed.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: hinted ? "no" : "yes", usableForCurrentVersion: "yes" });
+    await lessons.save(scope, lesson.activityId, { expectedRevision: lesson.revision, intent: lesson.intent,
+      moveId: lesson.moveId, status: "completed" });
+    return observed;
+  };
+  const older = await answer(false), latest = await answer(true);
+  const context = (await f.repo.read(scope, f.request))!;
+  expect(context.decisionInput.observations).toEqual([
+    expect.objectContaining({ id: latest.id, assistance: "hinted", verifiedCorrect: "yes", independentAttempt: "no" }),
+    expect.objectContaining({ id: older.id, assistance: "independent", verifiedCorrect: "yes", independentAttempt: "yes" }),
+  ]);
+  expect(nextLearningStep(context.decisionInput)).toMatchObject({ activityKind: "diagnose", reasonCode: "needs_check" });
+  // Persist the actual D5 branch for this real, qualified input. No v3 writer
+  // is installed: D5 inserts its assisted_success branch after unverified_only.
+  const v2 = captureNextLearningStep(context.decisionInput);
+  const decision = { ...v2.decision, activityKind: "reduced_help_practice", reasonCode: "assisted_success" };
+  const state = await sql.begin(tx => readOpeningLearnerState(tx, scope, { courseId: f.courseId }));
+  const operationId = `tutor-next:${randomUUID()}`;
+  let successor = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+    intent: context.intent, clientKey: operationId });
+  successor = await lessons.save(scope, successor.activityId, { expectedRevision: successor.revision,
+    intent: successor.intent, moveId: "self-faded", status: "active" });
+  await sql.begin(tx => reserveSpanTutorActivityBudget(tx, scope, { courseId: f.courseId,
+    activityId: successor.activityId, minutes: context.intent.timeBudgetMinutes, expectedGrantRevision: context.grantRevision }));
+  const selectedAction = "create:self-faded";
+  const execution = { kind: "create", moveId: "self-faded", retestId: null, problemId: null, problemVersion: null };
+  const evidenceRefs = context.sourceRefs.map(ref => `source:${ref.sourceId}:v${ref.sourceVersion}`);
+  const reasonCodes = ["entry:worker", "execution:create", "assisted_success"];
+  const sourceVersions = structuredClone(state.sourceVersions);
+  for (const ref of context.sourceRefs) sourceVersions[ref.sourceId] = [...new Set([...(sourceVersions[ref.sourceId] ?? []), ref.sourceVersion])].sort((a, b) => a - b);
+  const ruleCandidates = [...v2.candidates.slice(0, 5), { action: "reduced_help_practice", eligible: true,
+    reasonCodes: ["assisted_success"], evidenceRefs: [`observation:${latest.id}`] }];
+  const receipt = { stateVersion: state.stateVersion, dataAsOf: state.dataAsOf,
+    goalVersion: JSON.stringify({ courseId: f.courseId, requirementKey: SPAN_REQUIREMENT_KEY, grantRevision: context.grantRevision }),
+    intentVersion: JSON.stringify({ ...context, entry: "worker", ruleDecision: decision, execution }),
+    policyVersion: "next-learning-step-3/span-tutor-execution-2", sourceVersions, selectedAction, reasonCodes, evidenceRefs,
+    invalidationConditions: ["state_changed", "goal_changed", "intent_changed", "policy_changed", "source_changed"] as const,
+    candidates: [...ruleCandidates.map(candidate => ({ ...candidate, action: `rule:${candidate.action}`, eligible: false,
+      reasonCodes: [...candidate.reasonCodes, candidate.eligible ? "rule_recommendation_mapped_to_execution" : "rule_branch_not_selected"] })),
+      { action: selectedAction, eligible: true, reasonCodes, evidenceRefs }] };
+  const decisions = createOpeningLearningDecisionsRepository(sql);
+  const parent = await decisions.record(scope, { ...receipt, invalidationConditions: [...receipt.invalidationConditions],
+    layer: "session", targetId: successor.sessionId }, `span-tutor-decision:${operationId}:session`);
+  await decisions.record(scope, { ...receipt, invalidationConditions: [...receipt.invalidationConditions], layer: "activity",
+    targetId: successor.activityId, parentDecisionId: parent.id }, `span-tutor-decision:${operationId}`);
+  await sql`UPDATE opening_teaching_activities SET goal_json=goal_json || ${sql.json({ tutorNextAction: {
+    operationId, decision, observationIds: context.decisionInput.observations.map(row => row.id),
+    sourceRefs: context.sourceRefs, grantRevision: context.grantRevision,
+  } })}::jsonb WHERE id=${successor.activityId}`;
+  const adapter = createSpanTutorNextAction(sql);
+  const execute = vi.spyOn(adapter, "execute");
+  const request = { ...f.request, userTurnId: operationId.slice("tutor-next:".length), operationId, expectedPrivacyEpoch: context.privacyEpoch };
+  const before = async () => ({
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`,
+    receipts: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    observations: await sql`SELECT * FROM opening_learning_observations WHERE course_id=${f.courseId} ORDER BY id`,
+  });
+  const saved = await before();
+  const prepared = await prepareTutorNextAction(adapter, scope, request);
+  expect(prepared).toMatchObject({ resumed: true, action: { activityId: successor.activityId, sessionId: successor.sessionId },
+    decision, context: { agenda: { resumable: true, decisionCurrent: false, invalidationReasons: expect.arrayContaining(["policy_changed"]) } } });
+  expect(await before()).toEqual(saved);
+  // A different operation still recomputes v2's current suggestion, rather than
+  // treating all historical policy versions as current.
+  const fresh = await prepareTutorNextAction(adapter, scope, { ...request, operationId: `tutor-next:${randomUUID()}` });
+  expect(fresh).toMatchObject({ resumed: true, decision: { activityKind: "diagnose", reasonCode: "needs_check" } });
+  expect(await before()).toEqual(saved);
+  expect(execute).not.toHaveBeenCalled();
+  await expect(prepareTutorNextAction(adapter, scope, { ...request, expectedPrivacyEpoch: context.privacyEpoch + 1 })).rejects.toThrow();
+  await expect(prepareTutorNextAction(adapter, fixture.otherScope, request)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  expect(await prepareTutorNextAction(adapter, scope, request)).toMatchObject({ resumed: false, action: null,
+    context: { agenda: { resumable: false, invalidationReasons: expect.arrayContaining([expect.stringMatching(/^permission:/)]) } } });
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
+  expect(await before()).toEqual(saved);
+  // Immutable origin heads are still revalidated before exact-key replay.
+  await learning.reviseObservation(scope, { rootObservationId: latest.id, revisesObservationId: latest.id, expectedHead: latest.id,
+    revisionKind: "retract", reason: "withdraw consumed origin", clientKey: randomUUID() });
+  await expect(prepareTutorNextAction(adapter, scope, request)).rejects.toMatchObject({ code: "CONFLICT" });
 });
 it("keeps source version zero and does not invent decisions for a legacy resume", async () => {
   const f = await seed();
