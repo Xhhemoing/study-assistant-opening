@@ -120,7 +120,7 @@ async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: A
   const originalContexts = await readOpeningLearningEvidenceContexts(db, scope, roots);
   const original = spanTutorExactProjection(toSnapshotEvidence({ observations: roots, evidenceContexts: originalContexts }, new Date()).observations,
     roots.map(row => ({ id: row.id, evaluatorVersion: row.serverEvaluation?.evaluatorVersion ?? null })));
-  const help = chain.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.level,h.delivered_at FROM opening_help_exposures h
+  const help = chain.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.kind,h.level,h.delivered_at FROM opening_help_exposures h
     JOIN opening_learning_attempts a ON a.id=h.attempt_id AND a.workspace_id=h.workspace_id AND a.owner_user_id=h.owner_user_id
       AND a.session_id=h.session_id AND a.course_id=h.course_id
     WHERE h.workspace_id=${scope.workspaceId} AND h.owner_user_id=${scope.ownerUserId} AND h.course_id=${courseId}
@@ -141,17 +141,22 @@ async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: A
         return all.observations.find(item => (item.rootObservationId ?? item.id) === rootId)?.id ?? null;
       })() : null,
       identity: matching.length === heads.length && heads.length ? expectedIdentity : `unqualified:${row.id}`,
-      observations: matching.flatMap(item => {
-        const head = current.find(candidate => candidate.id === item.id), rootId = item.rootObservationId ?? item.id;
+      observations: heads.map(item => {
+        const rootId = item.rootObservationId ?? item.id;
         const root = original.find(candidate => candidate.id === rootId);
-        if (!head) return [];
-        return [{ id: head.id, rootId, verifiedCorrect: head.verifiedCorrect,
-          independentFailure: head.verifiedCorrect === 'no' && head.independentAttempt === 'yes'
-            && root?.verifiedCorrect === 'no' && root.independentAttempt === 'yes' && root.usableForCurrentVersion === 'yes',
-          deliveredAssistance: help.some(receipt => receipt.attempt_id === item.attemptId
-            && new Date(receipt.delivered_at as string | Date).getTime() < Date.parse(head.attemptedAt)
-            && new Date(receipt.delivered_at as string | Date).getTime() >= Date.parse(item.startedAt ?? head.attemptedAt)),
-          answerAt: Date.parse(head.attemptedAt), verifiedErrorLabels: (head.errors ?? []).filter(error => error.source === 'verified_steps').map(error => error.label) }];
+        const capturedRoot = roots.find(candidate => candidate.id === rootId);
+        const head = matching.includes(item) ? current.find(candidate => candidate.id === item.id) : undefined;
+        // Revisions replace qualification, never append a later submission. Use
+        // the original server-recorded event time even if a revision is newer.
+        const answerAt = Date.parse(capturedRoot?.recordedAt ?? capturedRoot?.submittedAt ?? item.occurredAt);
+        const rootVersionMatches = capturedRoot?.sourceVersions && identity(capturedRoot.sourceVersions) === expectedIdentity;
+        return { id: item.id, rootId, verifiedCorrect: head?.verifiedCorrect ?? "unknown" as const,
+          independentFailure: Boolean(rootVersionMatches && head?.verifiedCorrect === "no" && head.independentAttempt === "yes"
+            && root?.verifiedCorrect === "no" && root.independentAttempt === "yes" && root.usableForCurrentVersion === "yes"),
+          deliveredAssistance: Boolean(head && help.some(receipt => receipt.attempt_id === item.attemptId && receipt.kind !== "instruction"
+            && new Date(receipt.delivered_at as string | Date).getTime() < answerAt
+            && new Date(receipt.delivered_at as string | Date).getTime() >= Date.parse(capturedRoot?.startedAt ?? item.startedAt ?? item.occurredAt))),
+          answerAt, verifiedErrorLabels: (head?.errors ?? []).filter(error => error.source === "verified_steps").map(error => error.label) };
       }).sort((a, b) => a.answerAt - b.answerAt || a.id.localeCompare(b.id)),
       help: help.filter(item => item.session_id === row.session_id).map(item => ({ id: String(item.id),
         deliveredAt: new Date(item.delivered_at as string | Date).getTime(), level: item.level as 'hinted' | 'revealed' })) };

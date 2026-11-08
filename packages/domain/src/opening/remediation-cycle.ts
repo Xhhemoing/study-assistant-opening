@@ -28,47 +28,57 @@ export type RemediationCycleSummary = {
   completedCycles: readonly CompletedRemediationCycle[];
 };
 
-/** The chain ends at the selected origin, not at the newest activity in the course. */
+/** Effective heads retain their original submission order; an activity is not a round. */
 export function summarizeRemediationCycles(chain: readonly RemediationCycleActivity[]): RemediationCycleSummary {
   const completed: CompletedRemediationCycle[] = [];
   const roots = new Set<string>();
   const repeatedLabels = new Map<string, readonly string[]>();
-  for (let index = 1; index < chain.length; index++) {
-    const parent = chain[index - 1]!, activity = chain[index]!;
-    if (activity.parentActivityId !== parent.id || activity.identity !== parent.identity) {
-      completed.length = 0;
-      roots.clear();
-      continue;
+  let failure: RemediationCycleObservation | undefined;
+  const interrupt = () => {
+    completed.length = 0;
+    roots.clear();
+    repeatedLabels.clear();
+    failure = undefined;
+  };
+  for (let index = 0; index < chain.length; index++) {
+    const activity = chain[index]!, parent = chain[index - 1];
+    if (parent) {
+      const origin = parent.observations.find(row => row.id === activity.originObservationId);
+      if (activity.parentActivityId !== parent.id || activity.identity !== parent.identity
+        || !origin || origin.verifiedCorrect === "unknown") interrupt();
+      // Only the explicitly selected parent result may seed a child correction.
+      failure = activity.parentActivityId === parent.id && activity.identity === parent.identity
+        && origin?.verifiedCorrect === "no" && origin.independentFailure ? origin : undefined;
     }
-    const failure = parent.observations.find(row => row.id === activity.originObservationId
-      && row.verifiedCorrect === "no" && row.independentFailure);
-    const followup = failure ? activity.observations.find(row => row.rootId !== failure.rootId
-      && row.answerAt > failure.answerAt && activity.help.some(help => help.deliveredAt > failure.answerAt && help.deliveredAt < row.answerAt)
-      && (row.verifiedCorrect === "yes" && row.deliveredAssistance || row.verifiedCorrect === "no"
-        && row.verifiedErrorLabels.some(label => failure.verifiedErrorLabels.includes(label)))) : undefined;
-    const latest = activity.observations.at(-1);
-    if (!latest || latest.verifiedCorrect === "unknown" || latest.verifiedCorrect === "yes" && !latest.deliveredAssistance) {
-      completed.length = 0;
-      roots.clear();
-      continue;
-    }
-    // Only help delivered in this correction activity, after the failure and
-    // before a different trusted answer, completes a cycle. Regrading is not a round.
-    const help = failure && followup ? activity.help.filter(row => row.deliveredAt > failure.answerAt && row.deliveredAt < followup.answerAt) : [];
-    const repeatedVerifiedError = !!failure && !!followup && followup.verifiedCorrect === "no"
-      && followup.verifiedErrorLabels.some(label => failure.verifiedErrorLabels.includes(label));
-    if (failure && followup && !roots.has(failure.rootId) && followup.rootId !== failure.rootId && help.length
-      && (followup.verifiedCorrect === "yes" || repeatedVerifiedError)) {
-      roots.add(failure.rootId);
-      repeatedLabels.set(failure.rootId, followup.verifiedErrorLabels.filter(label => failure.verifiedErrorLabels.includes(label)));
-      completed.push({ failureRootId: failure.rootId, repeatedVerifiedError,
-        persistentDeliveredAssistance: followup.deliveredAssistance,
-        evidenceRefs: [`observation:${failure.id}`, ...help.map(row => `help_exposure:${row.id}`), `observation:${followup.id}`, `activity:${activity.id}`] });
-    } else {
-      // Missing/unsupported correction interrupts consecutive rounds. A later
-      // independent failure may start a new chain, not bridge the gap.
-      completed.length = 0;
-      roots.clear();
+    const observations = [...activity.observations].sort((a, b) => a.answerAt - b.answerAt || a.id.localeCompare(b.id));
+    const seen = new Set<string>();
+    for (const followup of observations) {
+      // Repository supplies one effective head per root. Never count a duplicate
+      // or a regrade of that root as a new independent submission.
+      if (seen.has(followup.rootId)) continue;
+      seen.add(followup.rootId);
+      if (followup.verifiedCorrect === "unknown" || followup.verifiedCorrect === "yes" && !followup.deliveredAssistance) {
+        interrupt();
+        continue;
+      }
+      const help = failure && followup.rootId !== failure.rootId ? activity.help.filter(row =>
+        row.deliveredAt > failure!.answerAt && row.deliveredAt < followup.answerAt) : [];
+      const labels = failure && followup.verifiedCorrect === "no"
+        ? followup.verifiedErrorLabels.filter(label => failure!.verifiedErrorLabels.includes(label)) : [];
+      // A trusted helped incorrect answer is a complete high-assistance round
+      // even without error labels. Unknown is never a trusted failure/followup.
+      if (failure && !roots.has(failure.rootId) && help.length
+        && (followup.deliveredAssistance || labels.length)) {
+        roots.add(failure.rootId);
+        repeatedLabels.set(failure.rootId, labels);
+        completed.push({ failureRootId: failure.rootId, repeatedVerifiedError: labels.length > 0,
+          persistentDeliveredAssistance: followup.deliveredAssistance,
+          evidenceRefs: [`observation:${failure.id}`, ...help.map(row => `help_exposure:${row.id}`), `observation:${followup.id}`, `activity:${activity.id}`] });
+        failure = undefined;
+      } else if (!followup.independentFailure) {
+        interrupt();
+      }
+      if (followup.verifiedCorrect === "no" && followup.independentFailure && !roots.has(followup.rootId)) failure = followup;
     }
   }
   const recent = completed.slice(-2);

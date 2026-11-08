@@ -12,7 +12,49 @@ const chain = (): RemediationCycleActivity[] => [
     observations: [{ ...error("helped-c", 60), independentFailure: false, deliveredAssistance: true }],
     help: [{ id: "help-c", deliveredAt: 50, level: "revealed" }] },
 ];
+const sameActivity = (): RemediationCycleActivity => {
+  const rows = chain();
+  return { ...rows[0]!, observations: rows.flatMap(row => [...row.observations]), help: rows.flatMap(row => [...row.help]) };
+};
 describe("server remediation cycles", () => {
+  it.each([false, true])("counts two real temporal rounds inside one activity (unlabelled incorrect=%s)", unlabelled => {
+    const activity = sameActivity();
+    if (unlabelled) activity.observations = activity.observations.map(row => ({ ...row, verifiedErrorLabels: [] }));
+    const before = structuredClone(activity);
+    const summary = summarizeRemediationCycles([activity]);
+    expect(summary.completedCycles.map(row => row.failureRootId)).toEqual(["failure-a", "failure-b"]);
+    expect(remediationLimitEvidence(summary)).toEqual(expect.arrayContaining(["help_exposure:help-b", "help_exposure:help-c", "activity:a"]));
+    expect(summary.completedCycles.every(row => row.persistentDeliveredAssistance)).toBe(true);
+    if (unlabelled) expect(summary.completedCycles.every(row => !row.repeatedVerifiedError)).toBe(true);
+    expect(activity).toEqual(before);
+  });
+  it.each([0, 1, 2])("projects %i same-activity rounds in original submission order", count => {
+    const activity = sameActivity();
+    activity.observations = [...activity.observations.slice(0, count === 0 ? 1 : count === 1 ? 2 : 4)].reverse();
+    expect(summarizeRemediationCycles([activity]).completedCycles).toHaveLength(count);
+  });
+  it("counts no-label trusted helped incorrect answers across a precise origin chain", () => {
+    const rows = chain().map(row => ({ ...row, observations: row.observations.map(observation => ({ ...observation, verifiedErrorLabels: [] })) }));
+    expect(remediationLimitEvidence(summarizeRemediationCycles(rows))).not.toBeNull();
+    rows[2]!.observations = rows[2]!.observations.map(row => ({ ...row, verifiedCorrect: "unknown" as const }));
+    expect(remediationLimitEvidence(summarizeRemediationCycles(rows))).toBeNull();
+  });
+  it("reprojects a same-activity withdrawn followup without inventing a replacement cycle", () => {
+    const activity = sameActivity();
+    activity.observations = activity.observations.filter(row => row.id !== "helped-c");
+    expect(summarizeRemediationCycles([activity]).completedCycles).toHaveLength(1);
+    activity.observations = activity.observations.filter(row => row.id !== "failure-a");
+    expect(summarizeRemediationCycles([activity]).completedCycles).toHaveLength(0);
+  });
+  it("does not let a corrected head or reused help manufacture a second same-activity round", () => {
+    const activity = sameActivity();
+    activity.observations = activity.observations.map(row => row.id === "failure-b" ? { ...row, rootId: "failure-a" } : row);
+    expect(remediationLimitEvidence(summarizeRemediationCycles([activity]))).toBeNull();
+    const missingHelp = sameActivity();
+    missingHelp.help = missingHelp.help.slice(0, 1);
+    // The first help precedes the second failure, so it cannot complete round 2.
+    expect(remediationLimitEvidence(summarizeRemediationCycles([missingHelp]))).toBeNull();
+  });
   it.each([0, 1, 2])("counts %i completed independent-failure/help/trusted-answer rounds", count => {
     const summary = summarizeRemediationCycles(chain().slice(0, count + 1));
     expect(summary.completedCycles).toHaveLength(count);
