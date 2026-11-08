@@ -14,6 +14,8 @@ export function selectedOpeningModelId(settings: OpeningAiSettings, mode: TutorM
  * The manual lock wins so "use this one model everywhere" stays one switch.
  */
 export function selectedModelIdForTask(settings: OpeningAiSettings, task: ModelTaskKey, serverDefaultId: string | null, models?: readonly OpeningModelSummary[]): string | null {
+  // Blind solving is opt-in; workspace/manual/default compile routes cannot enable it.
+  if (task === "teaching.solve") return settings.taskRoutes?.[task]?.primary ?? null;
   if (settings.mode === "manual") return settings.manualModelId;
   const taskPrimary = settings.taskRoutes?.[task]?.primary;
   if (taskPrimary) return taskPrimary;
@@ -32,7 +34,7 @@ export function selectedModelIdForTask(settings: OpeningAiSettings, task: ModelT
 }
 /** The user's explicit fallback for a task; never inferred. */
 export function selectedFallbackModelIdForTask(settings: OpeningAiSettings, task: ModelTaskKey): string | null {
-  return settings.taskRoutes?.[task]?.fallback ?? null;
+  return task === "teaching.solve" ? null : settings.taskRoutes?.[task]?.fallback ?? null;
 }
 export function resolveOpeningModel<T extends OpeningModelSummary>(models: T[], settings: OpeningAiSettings, mode: TutorMode, serverDefaultId: string | null): T {
   return pickAvailableModel(models, selectedOpeningModelId(settings, mode, serverDefaultId));

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readStoredTeachingOutline } from "./teaching-outline";
 import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
-import type { Scope } from "@aistudy/contracts";
+import { teachingQuestionInteractionSchema, type Scope, type ProviderOutput, type OpeningModelSnapshot } from "@aistudy/contracts";
 import {
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
@@ -14,8 +14,8 @@ import {
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
 } from "@aistudy/database";
-import { createCompilerProviderInput } from "@aistudy/ai";
-import { createDbModelGateway, scopeBudget } from "./model-gateway";
+import { createCompilerProviderInput, solveTeachingBlind, type TeachingBlindSolveReceipt } from "@aistudy/ai";
+import { createDbModelGateway, scopeBudget, teachingBlindSolveConfig } from "./model-gateway";
 import { createOpeningMaterialRetriever } from "./material-retrieval";
 import { createSourcePageImages, openingPageStorage } from "./source-page-images";
 import {
@@ -49,14 +49,20 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingCompilerOn = isTeachingCompilerEnabled();
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
+  const generatorSnapshots = new WeakMap<ProviderOutput, OpeningModelSnapshot>();
   const retrieveContext = createOpeningMaterialRetriever(sql, budget);
   const pageImages = shared.pageImages ?? createSourcePageImages(sql, openingPageStorage());
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
   const modelPath: Pick<CompileTeachingUnitDeps, "callModel" | "buildProviderInput"> = teachingCompilerOn
     ? {
-        callModel: (scope, input, options) =>
-          models.call(scope, input.imageParts.length ? "teaching.compile-visual" : "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options,
-            beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } }),
+        callModel: async (scope, input, options) => {
+          let snapshot: OpeningModelSnapshot | undefined;
+          const output = await models.call(scope, input.imageParts.length ? "teaching.compile-visual" : "teaching.compile", { budget: scopeBudget(budget, scope), input, ...options,
+            onModel: model => { snapshot = model.modelSnapshot; },
+            beforeSend: async () => { await assertOpeningCourseRouteReady(sql,scope,options.resultRef.replace(/^teaching_activity:/,""));await options.beforeSend?.(); } });
+          if (snapshot) generatorSnapshots.set(output, snapshot);
+          return output;
+        },
         buildProviderInput: async (scope, payload, options) => {
           const routeEvidence = await readOpeningCourseRouteEvidenceRefs(sql, scope, payload.activityId);
           const scopedLoadChunks = async (ownedScope: unknown, sourceIds: string[]) => {
@@ -162,6 +168,73 @@ export function createCompileTeachingUnitWorkerDeps(
           return result;
         }
       : undefined,
+    blindSolveBeforePublish: async (scope, { job, publishInput, providerOutput, beforeSend }) => {
+      // Legacy/unconfigured runs remain unknown without a provider or extra persistence I/O.
+      if (!teachingBlindSolveConfig()) return [];
+      const unit = await teachingContent.getUnit(scope, publishInput.teachingUnitId);
+      if (!unit) throw new Error("blind solve teaching unit missing");
+      const revision = await teachingContent.readRevision(scope, unit.documentId, publishInput.revisionNumber);
+      const snapshot = providerOutput ? generatorSnapshots.get(providerOutput) : undefined;
+      const configured = teachingBlindSolveConfig();
+      const config = configured && snapshot?.providerId === configured.generator.providerId
+        && snapshot.modelName === configured.generator.modelName ? configured : null;
+      const sourceVersions: Record<string, number> = {};
+      let versionsKnown = true;
+      for (const ref of publishInput.sourceRefs ?? []) {
+        const version = ref.version == null ? NaN : Number(ref.version);
+        if (!Number.isSafeInteger(version) || version < 0 || (ref.sourceId in sourceVersions && sourceVersions[ref.sourceId] !== version)) versionsKnown = false;
+        else sourceVersions[ref.sourceId] = version;
+      }
+      const assertCurrent = async () => {
+        await beforeSend();
+        await assertOpeningCourseRouteReady(sql, scope, publishInput.activityId);
+        for (const [sourceId, version] of Object.entries(sourceVersions)) {
+          const rows = await sql`SELECT id FROM opening_sources WHERE id=${sourceId} AND workspace_id=${scope.workspaceId}
+            AND version=${version} AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+              WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${sourceId})`;
+          if (!rows.length) throw new Error("blind solve source version changed");
+        }
+      };
+      const receipts: TeachingBlindSolveReceipt[] = [];
+      const order = [...publishInput.blockOrder].sort((a, b) => a.position - b.position);
+      for (let i = 0; i < order.length; i++) {
+        const ref = order[i]!;
+        if (ref.role === "answer_key" || !["prompt", "question"].includes(ref.blockType)) continue;
+        const prompt = revision.blocks.find(block => block.id === ref.blockId);
+        const next = order[i + 1];
+        const key = next && (next.role === "answer_key" || ["answer_key", "solution"].includes(next.blockType))
+          ? revision.blocks.find(block => block.id === next.blockId) : undefined;
+        const body = prompt?.content.text;
+        const interaction = teachingQuestionInteractionSchema.safeParse(prompt?.content.interaction).data;
+        const question = typeof body === "string" ? body : "";
+        const pinnedKey = key && [key.content.text, key.content.answer, key.content.solution].find((value): value is string => typeof value === "string");
+        const operationId = `teaching-solve:${job.id}:${ref.blockId}`;
+        const receipt = await solveTeachingBlind({
+          scope, config: versionsKnown && revision.id && question ? config : null,
+          identity: { activityId: publishInput.activityId, teachingRevisionId: revision.id,
+            blockId: ref.blockId, contentVersion: publishInput.expectedVersion + 1, sourceVersions,
+            generatorModelIdentity: config?.generator ?? null },
+          question, interaction, pinnedKey: pinnedKey ?? null, gateway: models,
+          options: { budget: scopeBudget(budget, scope), operationId, resultRef: `job:${job.id}:blind-solve:${ref.blockId}`,
+            parentBudget: { id: `study-activity:${publishInput.activityId}` }, beforeSend: assertCurrent },
+          persist: async value => {
+            // Existing private job/result JSON, not generationConfig (which client-init projects).
+            // Keep the claim and cancellation fence; a late solver cannot publish its receipt.
+            await assertCurrent();
+            const rows = await sql`UPDATE opening_jobs SET result=jsonb_set(COALESCE(result,'{}'::jsonb),
+              ARRAY['teachingBlindSolveReceipts'], COALESCE(result->'teachingBlindSolveReceipts','{}'::jsonb)
+                || ${sql.json({ [ref.blockId]: value } as never)})
+              WHERE id=${job.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+                AND state='running' AND privacy_epoch=${job.privacyEpoch}
+                AND claim_token IS NOT DISTINCT FROM ${job.claimToken ?? null}::uuid RETURNING id`;
+            if (!rows.length) throw new Error("blind solve job claim changed");
+          },
+        });
+        receipts.push(receipt);
+      }
+      await assertCurrent();
+      return receipts;
+    },
     verifyAfterPublish: teachingValidationOn
       ? (scope, input) => {
           // Check against the chunks the compiler pinned, not a fresh budget-filled

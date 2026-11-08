@@ -1,11 +1,36 @@
-import { repairDecodedLatexInJson } from "@aistudy/ai";
+import { repairDecodedLatexInJson, teachingBlindSolveMatchesCurrent } from "@aistudy/ai";
 import type { Scope } from "@aistudy/contracts";
-import { teachingQuestionInteractionSchema } from "@aistudy/contracts";
+import { teachingQuestionInteractionSchema, teachingBlindSolveReceiptSchema, type TeachingBlindSolveIdentity } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
+
+/** Read-only key metadata for a future non-deterministic evaluator. Never a learner verdict. */
+export async function readOpeningTeachingBlindSolveKeyMetadata(tx: TransactionSql, scope: Scope, identity: TeachingBlindSolveIdentity) {
+  const rows = await tx`SELECT j.result->'teachingBlindSolveReceipts'->${identity.blockId} AS receipt
+    FROM opening_jobs j
+    JOIN opening_teaching_activity_specs s ON s.workspace_id=j.workspace_id AND s.owner_user_id=j.owner_user_id
+      AND s.activity_id::text=j.payload->>'activityId'
+    JOIN library_revisions r ON r.document_id=s.document_id AND r.workspace_id=s.workspace_id AND r.revision_number=s.revision_number
+    JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+    WHERE j.workspace_id=${scope.workspaceId} AND j.owner_user_id=${scope.ownerUserId}
+      AND j.kind='compile-teaching-unit' AND j.state='succeeded' AND s.activity_id=${identity.activityId}
+      AND r.id=${identity.teachingRevisionId} AND s.version=${identity.contentVersion} AND a.content_version=s.version
+      AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(${tx.json(identity.sourceVersions as never)}) v
+        WHERE NOT EXISTS (SELECT 1 FROM opening_sources source WHERE source.workspace_id=s.workspace_id
+          AND source.id::text=v.key AND source.version::text=v.value
+          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=source.id)))
+    ORDER BY j.created_at DESC`;
+  for (const row of rows) {
+    const receipt = teachingBlindSolveReceiptSchema.safeParse(row.receipt);
+    if (receipt.success && teachingBlindSolveMatchesCurrent(receipt.data, identity)) {
+      return { eligibility: "matched_current" as const, receipt: receipt.data };
+    }
+  }
+  return { eligibility: "unknown" as const, receipt: null };
+}
 
 /** Only immutable server-side content can authorize a deterministic verdict. */
 export async function evaluateOpeningTeachingKeyAttempt(tx: TransactionSql, scope: Scope,

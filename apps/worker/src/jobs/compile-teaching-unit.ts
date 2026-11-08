@@ -13,6 +13,7 @@ import {
   isTeachingValidationEnabled,
   type BuildCompilerPublishInputOptions,
   type ParentInteractionBudget,
+  type TeachingBlindSolveReceipt,
 } from "@aistudy/ai";
 import type { NextVerificationStatus, ValidationReport } from "@aistudy/domain";
 import {
@@ -104,6 +105,11 @@ export type CompileTeachingUnitDeps = {
     providerOutput: ProviderOutput | null,
     providerInput?: ProviderInput,
   ): Promise<ActivitySpecPublishInput>;
+  /** Server-only receipt in job/result JSON; never part of teaching provider input or client spec. */
+  blindSolveBeforePublish?(scope: Scope, input: {
+    job: OpeningJobRecord; publishInput: ActivitySpecPublishInput; providerOutput: ProviderOutput | null;
+    beforeSend: () => Promise<void>;
+  }): Promise<TeachingBlindSolveReceipt[]>;
   /** Create-or-bind unit when generate omits teachingUnitId. */
   ensureTeachingUnitId?(
     scope: Scope,
@@ -305,7 +311,8 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
               persisted && persisted.activityId === body.activityId
               && (persisted.generateStatus === "needs_check" || persisted.generateStatus === "ready")
             ) {
-              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus };
+              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus,
+                teachingBlindSolveReceipts: (job.result as { teachingBlindSolveReceipts?: unknown } | null)?.teachingBlindSolveReceipts ?? {} };
             }
             await deps.setGenerateStatus(scope, body.activityId, "unknown", {
               from: ["queued", "generating"],
@@ -354,12 +361,22 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       await deps.validateSourceRefs?.(scope, publishInput);
 
+      const assertPublishCurrent = async () => {
+        if (await deps.getJobState(job.id) === "cancelled") throw new Error("teaching blind solve cancelled");
+        if (deps.privacy) assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+        await deps.validateSourceRefs?.(scope, publishInput);
+      };
+      const blindSolveReceipts = !skipProvider && deps.blindSolveBeforePublish
+        ? await deps.blindSolveBeforePublish(scope, { job, publishInput, providerOutput, beforeSend: assertPublishCurrent })
+        : [];
+
       // Re-check cancel immediately before publish (late-result fence).
       const stateBeforePublish = await deps.getJobState(job.id);
       if (stateBeforePublish === "cancelled") {
         return { discarded: true, reason: "cancelled" };
       }
 
+      if (deps.privacy) assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
       await deps.publishActivitySpec(scope, publishInput);
 
       let nextStatus: TeachingGenerateStatus = skipProvider ? "ready" : "needs_check";
@@ -396,7 +413,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
           providerOutput,
         });
 
-        if (promotion) {
+        if (promotion && !blindSolveReceipts.some(receipt => receipt.decision !== "match")) {
           const stateBeforePromote = await deps.getJobState(job.id);
           if (stateBeforePromote === "cancelled") {
             return { discarded: true, reason: "cancelled" };
@@ -437,6 +454,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         usedProvider: !skipProvider,
         verificationStatus,
         validationReport,
+        teachingBlindSolveReceipts: Object.fromEntries(blindSolveReceipts.map(receipt => [receipt.identity.blockId, receipt])),
       };
     } catch (error) {
       const status = await mapFailureStatus(error);

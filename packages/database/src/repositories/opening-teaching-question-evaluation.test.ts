@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TransactionSql } from "postgres";
-import { evaluateOpeningTeachingKeyAttempt } from "./opening-teaching-question-evaluation";
+import { evaluateOpeningTeachingKeyAttempt, readOpeningTeachingBlindSolveKeyMetadata } from "./opening-teaching-question-evaluation";
 import { teachingQuestionBody, teachingQuestionText } from "./opening-teaching-question";
 
 const exposure = vi.hoisted(() => ({ reveal: vi.fn(), insert: vi.fn(), generate: vi.fn(), release: vi.fn() }));
@@ -44,6 +44,25 @@ function setup(options: FixtureOptions = {}) {
 afterEach(() => {
   for (const fn of Object.values(exposure)) expect(fn).not.toHaveBeenCalled();
   vi.clearAllMocks();
+});
+
+describe("private blind-solve key metadata", () => {
+  it("requires a matched receipt bound to the current revision/source/item identity and reads only", async () => {
+    const identity = { activityId: "11111111-1111-4111-8111-111111111111", teachingRevisionId: "22222222-2222-4222-8222-222222222222",
+      blockId: "33333333-3333-4333-8333-333333333333", contentVersion: 1, sourceVersions: {},
+      generatorModelIdentity: { providerId: "g", modelName: "g", family: "a" } };
+    const receipt = { protocol: "teaching-blind-solve-1", identity, operationId: "solve:job:block",
+      modelSnapshot: { id: "s", providerId: "s", modelName: "s", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+      family: "b", decision: "match", solverAnswer: "4", reasonCodes: ["pinned_key_match"], costLedgerRef: "ledger" };
+    const query = vi.fn(async (..._args: unknown[]): Promise<Array<{ receipt: unknown }>> => [{ receipt }]);
+    const tx = Object.assign(query, { json: (value: unknown) => value }) as unknown as TransactionSql;
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toMatchObject({ eligibility: "matched_current", receipt });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, contentVersion: 2 })).toEqual({ eligibility: "unknown", receipt: null });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, itemVersionId: identity.blockId })).toEqual({ eligibility: "unknown", receipt: null });
+    query.mockResolvedValue([{ receipt: undefined }]);
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toEqual({ eligibility: "unknown", receipt: null });
+    expect(JSON.stringify(query.mock.calls)).not.toMatch(/INSERT|UPDATE|DELETE/);
+  });
 });
 
 describe("teaching key evaluation", () => {

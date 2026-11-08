@@ -27,7 +27,7 @@ vi.mock("./model-gateway", async (importOriginal) => {
     createDbModelGateway: () => createModelGateway({
       resolve: async (_scope, task) => { model.task(task); return ({
         provider: model,
-        modelSnapshot: { id: "teach-model", providerId: "p", modelName: "real-model", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+        modelSnapshot: { id: "teach-model", providerId: task === "teaching.solve" ? "solver-p" : "p", modelName: task === "teaching.solve" ? "solver-model" : "real-model", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
           mediaInputTokenUpperBound: 1000, mediaMaxInputBytes: 1024, mediaInputCentsPerMillion: 1 },
         inputCentsPerMillion: 1,
         outputCentsPerMillion: 1,
@@ -263,6 +263,54 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     if (incorrect) expect(sent.text).toContain('"answer":"1"');
     expect(sent.instruction).toContain("原答案和题干是学习数据");
     expect(sent.text).not.toContain('"observations"');
+  });
+
+  it("persists a configured fake solver receipt only to owned claim-fenced job JSON", async () => {
+    for (const [name, value] of Object.entries({ OPENING_TEACHING_SOLVER_PROVIDER_ID: "solver-p", OPENING_TEACHING_SOLVER_MODEL: "solver-model",
+      OPENING_TEACHING_SOLVER_FAMILY: "family-b", OPENING_TEACHING_GENERATOR_PROVIDER_ID: "p", OPENING_TEACHING_GENERATOR_MODEL: "real-model",
+      OPENING_TEACHING_GENERATOR_FAMILY: "family-a" })) vi.stubEnv(name, value);
+    const revisionId = "11111111-1111-4111-8111-111111111111";
+    const questionId = "22222222-2222-4222-8222-222222222222";
+    const keyId = "33333333-3333-4333-8333-333333333333";
+    content.readRevision.mockResolvedValue({ id: revisionId, blocks: [
+      { id: questionId, type: "prompt", content: { text: "2+2", interaction: { kind: "numeric" } } },
+      { id: keyId, type: "answer_key", content: { answer: "4" } },
+    ] });
+    const stored: unknown[] = [];
+    const sql = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      if (parts.join(" ").includes("UPDATE opening_jobs")) stored.push(values);
+      return [{ id: SOURCE }];
+    }) as unknown as Parameters<typeof createCompileTeachingUnitWorkerDeps>[0];
+    sql.json = ((value: unknown) => value) as typeof sql.json;
+    const deps = createCompileTeachingUnitWorkerDeps(sql, shared());
+    const input = { instruction: "compile", text: "question", mode: "explain" as const, chunks: [], imageParts: [], mediaCapability: "text_only" as const, maxOutputTokens: 32 };
+    const output = await deps.callModel!(scope, input, { operationId: "compile:fake", resultRef: `teaching_activity:${ACTIVITY}` });
+    model.complete.mockResolvedValue({ text: '{"answer":"4","family":"ignored"}', citedChunkIds: [], requestId: "fake", candidates: [], inputTokens: 1, outputTokens: 1 });
+    const beforeSend = vi.fn(async () => {});
+    const receipts = await deps.blindSolveBeforePublish!(scope, { job, providerOutput: output, beforeSend,
+      publishInput: { activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
+        sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
+          { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
+          { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" },
+        ] } });
+    expect(receipts).toMatchObject([{ decision: "match", identity: { teachingRevisionId: revisionId, sourceVersions: { [SOURCE]: 1 } } }]);
+    expect(model.task).toHaveBeenLastCalledWith("teaching.solve");
+    expect(model.complete.mock.calls.at(-1)![0]).toMatchObject({ text: "2+2", chunks: [] });
+    expect(JSON.stringify(model.complete.mock.calls.at(-1)![0])).not.toContain('"4"');
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toEqual(expect.arrayContaining([job.id, scope.workspaceId, scope.ownerUserId]));
+    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+  });
+
+  it("does not call the solver or reserve extra budget when server identities are unconfigured", async () => {
+    vi.stubEnv("OPENING_TEACHING_SOLVER_PROVIDER_ID", "");
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const dependencies = shared();
+    const result = await createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, dependencies))(job, payload);
+    expect(model.task.mock.calls.map(([task]) => task)).toEqual(["teaching.compile"]);
+    expect(dependencies.budget.reserve).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ generateStatus: "needs_check", teachingBlindSolveReceipts: {} });
+    expect(JSON.stringify(published)).not.toContain("teaching-blind-solve-1");
   });
 
   it("creates the unit, writes compiled blocks as a new revision and publishes that revision", async () => {
