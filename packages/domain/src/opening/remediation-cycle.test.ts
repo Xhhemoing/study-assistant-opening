@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { remediationLimitEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type RemediationCycleObservation } from "./remediation-cycle";
 const error = (id: string, answerAt: number): RemediationCycleObservation => ({ id, rootId: id, answerAt,
-  verifiedCorrect: "no", independentFailure: true, deliveredAssistance: false, verifiedErrorLabels: ["coefficients"] });
+  verifiedCorrect: "no", independentFailure: true, deliveredAssistance: false, deliveredHelpIds: [], verifiedErrorLabels: ["coefficients"] });
 const chain = (): RemediationCycleActivity[] => [
   { id: "a", parentActivityId: null, identity: "scope/course/span/source-v1", originObservationId: null,
     observations: [error("failure-a", 10)], help: [] },
   { id: "b", parentActivityId: "a", identity: "scope/course/span/source-v1", originObservationId: "failure-a",
-    observations: [{ ...error("helped-b", 30), independentFailure: false, deliveredAssistance: true }, error("failure-b", 40)],
+    observations: [{ ...error("helped-b", 30), independentFailure: false, deliveredAssistance: true, deliveredHelpIds: ["help-b"] }, error("failure-b", 40)],
     help: [{ id: "help-b", deliveredAt: 20, level: "hinted" }] },
   { id: "c", parentActivityId: "b", identity: "scope/course/span/source-v1", originObservationId: "failure-b",
-    observations: [{ ...error("helped-c", 60), independentFailure: false, deliveredAssistance: true }],
+    observations: [{ ...error("helped-c", 60), independentFailure: false, deliveredAssistance: true, deliveredHelpIds: ["help-c"] }],
     help: [{ id: "help-c", deliveredAt: 50, level: "revealed" }] },
 ];
 const sameActivity = (): RemediationCycleActivity => {
@@ -27,6 +27,16 @@ describe("server remediation cycles", () => {
     expect(summary.completedCycles.every(row => row.persistentDeliveredAssistance)).toBe(true);
     if (unlabelled) expect(summary.completedCycles.every(row => !row.repeatedVerifiedError)).toBe(true);
     expect(activity).toEqual(before);
+  });
+  it("requires matched redo help between the failed submission and the new root, not arbitrary session help", () => {
+    const activity = sameActivity();
+    expect(remediationLimitEvidence(summarizeRemediationCycles([activity]))).not.toBeNull();
+    activity.observations = activity.observations.map(row => row.id === "helped-c"
+      ? { ...row, deliveredHelpIds: ["different-question-help"] } : row);
+    activity.help = [...activity.help, { id: "different-question-help", deliveredAt: 5, level: "revealed" }];
+    expect(remediationLimitEvidence(summarizeRemediationCycles([activity]))).toBeNull();
+    activity.observations = activity.observations.map(row => row.id === "helped-c" ? { ...row, deliveredHelpIds: [] } : row);
+    expect(remediationLimitEvidence(summarizeRemediationCycles([activity]))).toBeNull();
   });
   it.each([0, 1, 2])("projects %i same-activity rounds in original submission order", count => {
     const activity = sameActivity();

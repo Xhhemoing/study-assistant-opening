@@ -120,7 +120,7 @@ async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: A
   const originalContexts = await readOpeningLearningEvidenceContexts(db, scope, roots);
   const original = spanTutorExactProjection(toSnapshotEvidence({ observations: roots, evidenceContexts: originalContexts }, new Date()).observations,
     roots.map(row => ({ id: row.id, evaluatorVersion: row.serverEvaluation?.evaluatorVersion ?? null })));
-  const help = chain.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.kind,h.level,h.delivered_at FROM opening_help_exposures h
+  const help = chain.length ? await db`SELECT h.id,h.session_id,h.attempt_id,a.problem_id,a.item_version_id,h.kind,h.level,h.delivered_at FROM opening_help_exposures h
     JOIN opening_learning_attempts a ON a.id=h.attempt_id AND a.workspace_id=h.workspace_id AND a.owner_user_id=h.owner_user_id
       AND a.session_id=h.session_id AND a.course_id=h.course_id
     WHERE h.workspace_id=${scope.workspaceId} AND h.owner_user_id=${scope.ownerUserId} AND h.course_id=${courseId}
@@ -150,12 +150,17 @@ async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: A
         // the original server-recorded event time even if a revision is newer.
         const answerAt = Date.parse(capturedRoot?.recordedAt ?? capturedRoot?.submittedAt ?? item.occurredAt);
         const rootVersionMatches = capturedRoot?.sourceVersions && identity(capturedRoot.sourceVersions) === expectedIdentity;
+        // A redo creates a new attempt for the same persisted question. Help
+        // delivered on the original attempt remains real evidence; never infer
+        // that relation from a learner's assistance declaration or session alone.
+        const deliveredHelpIds = head ? help.filter(receipt => receipt.session_id === item.sessionId
+          && receipt.problem_id === item.problemId && receipt.item_version_id === item.itemVersionId
+          && receipt.kind !== "instruction" && new Date(receipt.delivered_at as string | Date).getTime() < answerAt)
+          .map(receipt => String(receipt.id)) : [];
         return { id: item.id, rootId, verifiedCorrect: head?.verifiedCorrect ?? "unknown" as const,
           independentFailure: Boolean(rootVersionMatches && head?.verifiedCorrect === "no" && head.independentAttempt === "yes"
             && root?.verifiedCorrect === "no" && root.independentAttempt === "yes" && root.usableForCurrentVersion === "yes"),
-          deliveredAssistance: Boolean(head && help.some(receipt => receipt.attempt_id === item.attemptId && receipt.kind !== "instruction"
-            && new Date(receipt.delivered_at as string | Date).getTime() < answerAt
-            && new Date(receipt.delivered_at as string | Date).getTime() >= Date.parse(capturedRoot?.startedAt ?? item.startedAt ?? item.occurredAt))),
+          deliveredAssistance: deliveredHelpIds.length > 0, deliveredHelpIds,
           answerAt, verifiedErrorLabels: (head?.errors ?? []).filter(error => error.source === "verified_steps").map(error => error.label) };
       }).sort((a, b) => a.answerAt - b.answerAt || a.id.localeCompare(b.id)),
       help: help.filter(item => item.session_id === row.session_id).map(item => ({ id: String(item.id),

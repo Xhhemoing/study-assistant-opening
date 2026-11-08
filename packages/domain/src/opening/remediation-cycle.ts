@@ -5,6 +5,8 @@ export type RemediationCycleObservation = {
   verifiedCorrect: "yes" | "no" | "unknown";
   independentFailure: boolean;
   deliveredAssistance: boolean;
+  /** Server-matched same-question/item/source help, including an original attempt before redo. */
+  deliveredHelpIds: readonly string[];
   answerAt: number;
   verifiedErrorLabels: readonly string[];
 };
@@ -62,7 +64,8 @@ export function summarizeRemediationCycles(chain: readonly RemediationCycleActiv
         continue;
       }
       const help = failure && followup.rootId !== failure.rootId ? activity.help.filter(row =>
-        row.deliveredAt > failure!.answerAt && row.deliveredAt < followup.answerAt) : [];
+        row.deliveredAt > failure!.answerAt && row.deliveredAt < followup.answerAt
+        && followup.deliveredHelpIds.includes(row.id)) : [];
       const labels = failure && followup.verifiedCorrect === "no"
         ? followup.verifiedErrorLabels.filter(label => failure!.verifiedErrorLabels.includes(label)) : [];
       // A trusted helped incorrect answer is a complete high-assistance round

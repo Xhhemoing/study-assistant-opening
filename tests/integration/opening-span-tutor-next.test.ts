@@ -577,6 +577,69 @@ it.each(["correct", "unlabelled_error"] as const)("stops a same-activity two-rou
   expect(afterRevision.decisionInput.remediationCycles).toBeUndefined();
   expect(nextLearningStep(afterRevision.decisionInput).reasonCode).not.toBe("remediation_limit");
 });
+it.each([1, 4] as const)("counts original-attempt help level %i through two real redo roots without delivering new help", async level => {
+  const f = await seed(), { sql, scope } = fixture, origin = await f.create();
+  const learning = createOpeningLearningRepository(sql), attempts = createOpeningLearningAttemptRepository(sql);
+  const round = async (problemId: string) => {
+    const failed = await recordCycleAnswer(f, origin.sessionId, problemId, false, "labelled_error");
+    expect(failed.attemptId).toBeTruthy();
+    const help = await createSpanHintService(sql).read(scope, { attemptId: failed.attemptId!, level });
+    expect(help.exposureReceipt).toBeTruthy();
+    const redo = await attempts.create(scope, { sessionId: origin.sessionId, clientKey: `span-redo:${randomUUID()}`,
+      spanExercise: { sourceId: f.sourceId, problemId, version: 1 } });
+    expect(redo.id).not.toBe(failed.attemptId);
+    expect(redo.itemVersionId).toBe(failed.itemVersionId);
+    const problem = redo.spanExercise!, solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("redo fixture must have a unique solution");
+    const observed = await learning.insertObservation(scope, { sessionId: origin.sessionId, courseId: f.courseId,
+      skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: redo.id, problemId: redo.problemId,
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "in_span", coefficients: solution.coefficients,
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }),
+      outcome: "unverified", assistance: level === 4 ? "revealed" : "hinted", verdictSource: "self_report" });
+    expect(observed.outcome).toBe("correct");
+    expect(observed.rootObservationId ?? observed.id).not.toBe(failed.rootObservationId ?? failed.id);
+    expect(await sql`SELECT id FROM opening_help_exposures WHERE attempt_id=${redo.id}`).toHaveLength(0);
+    return { failed, observed };
+  };
+  const first = await round("span-reserved-20261021-q01"), second = await round("span-reserved-20261021-q02");
+  const reference = { activityId: origin.activityId, expectedRevision: origin.revision, observationId: second.observed.id };
+  const repository = createOpeningSpanTutorContextRepository(sql);
+  const context = (await repository.read(scope, { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 },
+    question: "继续学习", originReference: reference }))!;
+  expect(context.decisionInput.remediationCycles?.completedCycles.map(row => row.failureRootId)).toEqual([first.failed.id, second.failed.id]);
+  expect(context.decisionInput.remediationCycles?.completedCycles.every(row => row.persistentDeliveredAssistance)).toBe(true);
+  expect(nextLearningStep(context.decisionInput)).toMatchObject({ reasonCode: "remediation_limit" });
+  const before = await cyclePersisted(f);
+  expect(before.help).toHaveLength(2);
+  expect(await f.next.next(scope, { ...reference, clientKey: "real-redo-two-rounds" })).toMatchObject({ kind: "choice", reason: "remediation_limit" });
+  await expect(repository.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() }))
+    .rejects.toMatchObject({ code: "SPAN_REMEDIATION_LIMIT" });
+  expect(await cyclePersisted(f)).toEqual(before);
+});
+it.each(["different_question", "different_source_version"] as const)("does not attribute unrelated original-attempt help to a redo (%s)", async boundary => {
+  const f = await seed(), { sql, scope } = fixture, origin = await f.create();
+  await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q01", false, "labelled_error");
+  const helpOrigin = await recordCycleAnswer(f, origin.sessionId,
+    boundary === "different_question" ? "span-reserved-20261021-q03" : "span-reserved-20261021-q02", false, "labelled_error");
+  await createSpanHintService(sql).read(scope, { attemptId: helpOrigin.attemptId!, level: 4 });
+  if (boundary === "different_source_version") {
+    await sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
+    await backupRows(sql, scope).chunk(f.sourceId, 2);
+  }
+  // Self-declared assistance must not convert wrong-question/wrong-version help
+  // into a real matching receipt. No help is delivered on this new attempt.
+  const redo = await createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: origin.sessionId,
+    clientKey: `span-redo:${randomUUID()}`, spanExercise: { sourceId: f.sourceId, problemId: "span-reserved-20261021-q02", version: 1 } });
+  const observed = await createOpeningLearningRepository(sql).insertObservation(scope, { sessionId: origin.sessionId, courseId: f.courseId,
+    skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: redo.id, problemId: redo.problemId, clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "not_in_span" }), outcome: "unverified", assistance: "revealed", verdictSource: "self_report" });
+  expect(observed.outcome).toBe("incorrect");
+  const context = (await createOpeningSpanTutorContextRepository(sql).read(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+    sourceVersions: { [f.sourceId]: boundary === "different_source_version" ? 2 : 1 }, question: "继续学习",
+    originReference: { activityId: origin.activityId, expectedRevision: origin.revision, observationId: observed.id } }))!;
+  expect(context.decisionInput.remediationCycles).toBeUndefined();
+  expect(nextLearningStep(context.decisionInput).reasonCode).not.toBe("remediation_limit");
+});
 it.each(["mixed_origin", "unknown", "source_version", "missing_help"] as const)("does not combine invalid same-activity cycles (%s)", async boundary => {
   const f = await seed(), { sql, scope } = fixture, origin = await f.create();
   await recordCycleAnswer(f, origin.sessionId, "span-reserved-20261021-q01", false, "labelled_error");
