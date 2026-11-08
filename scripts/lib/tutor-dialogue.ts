@@ -15,6 +15,7 @@ import { DEFAULT_STUDY_SESSION_INTENT, SPAN_SKILL_LABEL, SPAN_REQUIREMENT_KEY } 
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tutor-next-action";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { evaluateDialogueOutput, type DialogueCase } from "../../packages/domain/src/opening/tutor-dialogue-evaluation";
 
 export type DialogueRequest = {
@@ -150,6 +151,7 @@ export async function collectTutorRuntimeSafety(options: {
         } });
         const next = createSpanTutorNextAction(sql);
         const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, privacy,
+          retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
           provider: caseId === "provider_unknown" ? { complete: async () => { record.sentAttempts = Number(record.sentAttempts ?? 0) + 1; throw new Error("CONTROLLED_SENT_RESPONSE_LOST"); } } : provider,
           systemQuery: { ...query, async reply(...args) {
             const reply = await query.reply(...args); record.readReceipt = reply.receipt;
@@ -289,6 +291,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
           activities: Array.from(await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
         });
         const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, stream: writer,
+          retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
           streamExposures: createOpeningStudyExposureRepository(sql), privacy: createOpeningPrivacyRepository(sql),
           onStreamUnavailable: error => { throw error; },
           provider: { complete: async (value, _signal, onDelta) => {
@@ -437,6 +440,7 @@ export async function collectTutorDialogue(options: {
         const conversation = await conversations.create(scope, { title: `Synthetic ${item.caseId}`, courseId: null });
         record.conversationId = conversation.id;
         const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, provider,
+          retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
           config: { maxContextCharacters: 12000, reservedCents: 100, maxOutputTokens: 1200, ...pricing } });
         let question = item.firstUser;
         for (let round = 0; round < (item.studentFollowup ? 2 : 1); round++) {

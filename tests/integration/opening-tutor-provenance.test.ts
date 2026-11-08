@@ -7,6 +7,7 @@ import {
 } from "@aistudy/database";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -42,10 +43,12 @@ function handler(text: string, memoryText?: string) {
     return { text, citedChunkIds: [], requestId: null, inputTokens: 20, outputTokens: 10,
       candidates: memoryText ? [{ kind: "memory", text: memoryText, temporary: false }] : [] };
   }) };
+  const budget = createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 });
   const run = createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(f.sql),
     chunks: createOpeningSourceChunksRepository(f.sql),
-    budget: createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 }),
+    budget,
+    retrieveContext: createOpeningMaterialRetriever(f.sql, budget, null),
     privacy: createOpeningPrivacyRepository(f.sql), provider,
     memories: { listContext: (scope, now) => createOpeningMemoryRepository(f.sql).listContext(scope, now) },
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 256,
