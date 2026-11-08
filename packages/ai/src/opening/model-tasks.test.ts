@@ -3,6 +3,9 @@ import { DEFAULT_OPENING_AI_SETTINGS, modelTaskKeySchema, openingAiSettingsRespo
 import { MODEL_TASKS } from "./model-tasks";
 
 describe("registered model task contracts", () => {
+  it("records blind solving under its own teaching ledger purpose", () => {
+    expect(MODEL_TASKS["teaching.solve"]).toMatchObject({ group: "teaching", purpose: "teaching-solve" });
+  });
   it.each(Object.keys(MODEL_TASKS))("accepts registered key %s", key => {
     expect(modelTaskKeySchema.parse(key)).toBe(key);
   });

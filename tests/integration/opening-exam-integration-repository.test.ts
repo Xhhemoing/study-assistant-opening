@@ -16,6 +16,10 @@ import { createOpeningSkillEvidenceRepository, linkOpeningSkillEvidenceInTx } fr
 import { createBuildCourseKnowledgeHandler } from "../../apps/worker/src/jobs/build-course-knowledge";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
+import { EXAM_LESSONS } from "../../packages/domain/src/opening/exam-sprint/lessons";
+import { prepareSprintLesson, confirmedSprintLesson, confirmedSprintLessonRequest, sprintLessonFetcher } from "../../apps/web/src/features/opening/exam-sprint/lesson-navigation";
+import { createExamSprintClient } from "../../apps/web/src/features/opening/exam-sprint/client";
+import { examSprintCommandSchema } from "@aistudy/contracts";
 
 const pack: ExamPack = {
   id: "canonical-exam-fixture", version: "1", title: "Limits sprint", description: "Public review",
@@ -105,7 +109,139 @@ async function source(options: { image?: boolean; version?: number; history?: bo
   return { sourceTitle: "Worksheet.pdf", sourceId: id, sourceVersion: version };
 }
 
+describe("atomic course-bound mock conversion", () => {
+  function teachingPack() {
+    const revised = structuredClone(pack), lesson = structuredClone(EXAM_LESSONS[0]!);
+    revised.lessons = [lesson]; revised.topics = [{ id: lesson.topicId, title: "Limits" }];
+    revised.questions.forEach(q => { q.topicId = lesson.topicId; q.lessonId = lesson.id; });
+    revised.sourceItems.forEach(s => { s.topicId = lesson.topicId; });
+    revised.questions.push({ ...revised.questions.find(q => q.pool === "mock-a")!, id: "mock-a-2", familyId: "other-mock-family" });
+    return revised;
+  }
+  async function setup() {
+    const revised = teachingPack(), repo = createOpeningExamSprintRepository(f.sql, revised);
+    const integration = createOpeningExamIntegrationRepository(f.sql, revised);
+    const bound = await integration.bind(f.scope, bindInput());
+    let view = await repo.act(f.scope, { action: "start", mode: "mock-a", clientKey: key() });
+    const firstId = view.currentAttempt!.id;
+    view = await repo.act(f.scope, { action: "answer", attemptId: firstId, answer: "a", confidence: 4, clientKey: key() });
+    view = await repo.act(f.scope, { action: "next", runId: view.activeRun!.id, clientKey: key() });
+    const intent = prepareSprintLesson(view, view.currentAttempt!.question.lessonId, true)!;
+    return { repo, integration, bound, view, firstId, input: { ...intent, clientKey: key() } };
+  }
+  it("publishes earlier sealed answers unchanged as timed independent evidence, while persisting real help/exposure once", async () => {
+    const { repo, integration, view, firstId, input } = await setup();
+    const earlier = view.attempts[0]!, pending = view.currentAttempt!, before = await linkFor(firstId);
+    expect(before.publication).toBe("pending_mock"); expect(before.observation_id).toBeNull();
+    const [converted, replay] = await Promise.all([repo.act(f.scope, input), repo.act(f.scope, input)]);
+    expect(converted.state).toEqual(replay.state);
+    expect(converted.state.runs[0]).toMatchObject({ ...view.activeRun, completedAt: expect.any(String) });
+    const conversion = converted.state.runs[0]!.conversion!;
+    expect(conversion.convertedAt).toBe(converted.state.runs[0]!.completedAt);
+    expect(confirmedSprintLesson(converted, input)?.exposureId).toBe(conversion.exposureId);
+    expect(converted.attempts[0]).toMatchObject({ id: earlier.id, answer: earlier.answer, answeredAt: earlier.answeredAt,
+      durationSeconds: earlier.durationSeconds, help: [], independent: true, correct: true });
+    expect(converted.attempts[1]).toMatchObject({ id: pending.id, answer: null, answeredAt: null, correct: null, independent: false,
+      help: [{ kind: "solution", at: conversion.convertedAt }], lessonExposureIds: [conversion.exposureId] });
+    const published = await linkFor(firstId), record = await observation(String(published.observation_id));
+    expect(record).toMatchObject({ outcome: "correct", assistance: "independent" });
+    expect(await f.sql`SELECT dimension FROM opening_skill_evidence WHERE observation_id=${String(record.id)}`).toEqual([{ dimension: "timed" }]);
+    expect(await eligibility(String(record.id))).toMatchObject({ independentAttempt: "yes" });
+    const pendingLink = await linkFor(pending.id);
+    const receipts = await f.sql`SELECT * FROM opening_exam_help_receipts WHERE attempt_link_id=${String(pendingLink.id)}`;
+    expect(receipts).toHaveLength(1); expect(iso(receipts[0]!.delivered_at)).toBe(conversion.convertedAt);
+    expect(await f.sql`SELECT id FROM opening_exam_help_receipts WHERE attempt_link_id=${String(published.id)}`).toHaveLength(0);
+    expect((await repo.export(f.scope)).commands.filter(c => c.intent.action === "switch_to_teaching")).toHaveLength(1);
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(1);
+    const read = await repo.read(f.scope); expect(read.state).toEqual(converted.state);
+    await expect(repo.act(f.scope, { ...input, lessonId: "other" })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.act(f.scope, { action: "start", mode: "mock-a", clientKey: key() })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+  it("delivers the real owner repository HTTP response through the existing client parser and navigates only after same-key recovery", async () => {
+    const { repo, input } = await setup();
+    const methods: string[] = [], bodies: string[] = [];
+    let loseFirstResponse = true;
+    const transport: typeof fetch = async (_url, init) => {
+      methods.push(init?.method ?? "GET");
+      if (init?.method !== "POST") return Response.json(await repo.read(f.scope));
+      bodies.push(String(init.body));
+      const command = examSprintCommandSchema.parse(JSON.parse(String(init.body)));
+      const response = Response.json(await repo.act(f.scope, command));
+      if (loseFirstResponse) { loseFirstResponse = false; throw new Error("Committed response lost"); }
+      return response;
+    };
+    const client = createExamSprintClient({ fetcher: sprintLessonFetcher(transport), keyFactory: () => input.clientKey });
+    expect(methods).toEqual([]);
+    await client.load();
+    const before = client.getSnapshot().overview!, intent = prepareSprintLesson(before, before.currentAttempt!.question.lessonId, true)!;
+    const request = { intent };
+    expect(await client.send(intent)).toBeNull();
+    expect(client.getSnapshot().uncertain).toBe(true);
+    expect(client.getSnapshot().overview?.activeRun?.id).toBe(before.activeRun!.id);
+    expect(confirmedSprintLessonRequest(request, request, before, client.getSnapshot().overview)).toBeNull();
+    const recovered = await client.recover();
+    expect(methods).toEqual(["GET", "POST", "GET", "POST"]); expect(bodies[1]).toBe(bodies[0]);
+    expect(confirmedSprintLessonRequest(request, request, recovered!, client.getSnapshot().overview)?.exposureId)
+      .toBe(recovered!.state.runs[0]!.conversion!.exposureId);
+    expect((await repo.export(f.scope)).commands.filter(c => c.intent.action === "switch_to_teaching")).toHaveLength(1);
+    expect(recovered!.state.runs[0]!.mode).toBe("mock-a");
+    expect(recovered!.attempts[0]!.correct).toBe(true);
+    expect(JSON.stringify(recovered)).not.toMatch(/partSnapshot|resultMetadata|correctOptionIds/);
+  });
+
+  it("serializes submit versus convert: exactly one wins, the loser cannot help or overwrite a submitted answer", async () => {
+    const { repo, view, input } = await setup();
+    const results = await Promise.allSettled([
+      repo.act(f.scope, input), repo.act(f.scope, { action: "answer", attemptId: view.currentAttempt!.id, answer: "a", confidence: 4, clientKey: key() }),
+    ]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(r => r.status === "rejected")).toHaveLength(1);
+    const read = await repo.read(f.scope), converted = !!read.state.runs[0]!.conversion;
+    expect(read.attempts[1]!.answeredAt === null).toBe(converted);
+    expect(read.state.lessonExposures!.length).toBe(converted ? 1 : 0);
+    const exported = await repo.export(f.scope);
+    expect(exported.commands).toHaveLength(4);
+  });
+  it.each(["version", "unavailable", "unverifiable", "source binding", "owner"] as const)("rolls back state, exposure, help and publication when %s cannot be trusted", async reason => {
+    const { repo, bound, input } = await setup();
+    const sourceId = bound.binding!.packSourceId;
+    if (reason === "version") await f.sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+    if (reason === "unavailable") await f.sql`UPDATE opening_source_versions SET availability='unavailable' WHERE source_id=${sourceId}`;
+    if (reason === "unverifiable") await f.sql`UPDATE opening_source_chunks SET text='untrusted original' WHERE source_id=${sourceId}`;
+    if (reason === "source binding") {
+      const [capture] = await f.sql`SELECT l.learning_attempt_id FROM opening_exam_attempt_links l WHERE l.exam_attempt_id=${input.expectedAttemptId}`;
+      const other = await source();
+      await f.sql`UPDATE opening_learning_attempts SET source_ids=${[other.sourceId]},source_versions=${f.sql.json({ [other.sourceId]: other.sourceVersion })}
+        WHERE id=${String(capture!.learning_attempt_id)}`;
+    }
+    const before = await repo.export(f.scope), facts = await factsCount();
+    const scope = reason === "owner" ? { ...f.scope, ownerUserId: f.otherScope.ownerUserId } : f.scope;
+    await expect(repo.act(scope, input)).rejects.toMatchObject({ code: reason === "owner" ? "NOT_FOUND" : "CONFLICT" });
+    const after = await repo.export(f.scope);
+    expect(after.state).toEqual(before.state); expect(after.commands).toEqual(before.commands); expect(await factsCount()).toEqual(facts);
+    const link = await linkFor(before.attempts.at(-1)!.id);
+    expect(await f.sql`SELECT id FROM opening_exam_help_receipts WHERE attempt_link_id=${String(link.id)}`).toHaveLength(0);
+    expect(after.state.runs[0]!.completedAt).toBeNull();
+  });
+});
+
 describe("course-bound exam sprint canonical bridge", () => {
+  it("keeps legacy single-skill snapshots and exact command replay free of invented part metadata", async () => {
+    await bind();
+    const view = await start(), clientKey = key();
+    await answer(view, clientKey);
+    const [before] = await f.sql`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    expect((before!.pack_snapshot as ExamPack).questions.every(q => !("partSnapshot" in q))).toBe(true);
+    expect((before!.state as { attempts: object[] }).attempts.every(a => !("resultMetadata" in a))).toBe(true);
+    await answer(view, clientKey);
+    const [after] = await f.sql`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    expect(after).toEqual(before);
+    const link = await linkFor(view.currentAttempt!.id);
+    const [attempt] = await f.sql`SELECT create_intent FROM opening_learning_attempts WHERE id=${String(link.learning_attempt_id)}`;
+    expect(attempt!.create_intent.examSprint).not.toHaveProperty("partRequirements");
+    expect(attempt!.create_intent.examSprint).not.toHaveProperty("partSnapshot");
+  });
+
   it("serializes concurrent bind replay into one source and graph, and rejects conflicting same-key intent", async () => {
     const originals: Array<{ sourceId: string; body: Uint8Array }> = [];
     const withStorage = createOpeningExamIntegrationRepository(f.sql, pack, {

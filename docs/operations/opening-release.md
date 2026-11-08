@@ -73,6 +73,49 @@ Opus review is required before deployment (and existing repository PR gates
 still apply). Browser acceptance belongs to the user. Stub tests and isolated
 build/package checks are not evidence of production deployment or optimization.
 
+## 0108 release / rollback boundary (2026-11-08, not executed)
+
+[#230](https://github.com/Xhhemoing/study-assistant-opening/pull/230), frozen at
+`8ab660eefb3c7c5edcc32cf8df7847a5086cd21d`, adds
+`0108_opening_knowledge_confirmations.sql`. The approved sequence is to complete
+the first migration-free safe release of this round **before merging #230**.
+Merge is not migration approval: each migration execution and migration-bearing
+deployment still needs explicit user approval for its exact SHA, target and
+operation. Only the PM arranges merge/deploy; the existing 2A ownership boundaries
+are unchanged. This page grants no production or real-data operation authority.
+
+Before requesting approval, follow
+[database-migrations.md §8](database-migrations.md#8-0108-跨版本兼容与回退操作方案尚未执行):
+read-only inventory of migration IDs and historical checksums against the upgrade
+and rollback artifacts; a backup tied to exact versions and recovery time point;
+integrity checks and an authorized restore rehearsal into a fresh empty isolated
+database; named backup/recovery owners and original authorization. Keep real
+connection details and evidence in private operations records. A backup timestamp
+or CI result alone does not establish recoverability, and restoring an earlier
+backup can lose subsequent learning records.
+
+The canonical runner is not a read-only probe. At mainline
+`be641ce61c15c3a85a4e5ce7ea613c53321bc79f`, it bootstraps the registry before
+validation and rejects an already registered, unknown 0108 with
+`MIGRATION_UNKNOWN_HISTORY`. Retaining the table does not make that old deployment
+pre-step pass. Conversely, #230's normal knowledge `replace()` and confirmation
+paths require the new table even when no confirmations exist yet.
+
+Old snapshot readers can parse the existing `supported` / `needs_check` fields,
+but old writers do not maintain #230's confirmation preservation/revocation rules.
+An application rollback is **not** a database rollback or proof of semantic
+compatibility. See §8.3 for the table/confirmation/reader matrix and §8.4 for the
+failure branches. Cross-0108 rollback remains **blocked pending an independent H
+compatibility fix** that preserves registry/checksum validation and confirmation
+semantics (or prevents unsafe writers), its exact-head review/CI, and separate
+deployment approval. Do not skip the migration pre-step, DROP the confirmation
+table, edit `schema_migrations`/checksums, or overwrite real learning data with
+`pg_restore` to force a rollback.
+
+This is an unexecuted runbook, not evidence that 0108, a backup, rehearsal,
+rollback or recovery has run. Browser acceptance remains with the user; this
+change does not claim it passed.
+
 ## System query default (2026-10-21)
 
 `OPENING_SYSTEM_QUERY` now defaults to `1` when unset, including on existing

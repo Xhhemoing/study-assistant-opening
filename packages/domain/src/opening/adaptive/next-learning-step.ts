@@ -1,4 +1,5 @@
 import type { LearningDecisionCandidate } from "../learning-decision";
+import { remediationLimitEvidence } from "../remediation-cycle";
 import type { LearningPhase, NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
 
 export type LegacyAdaptiveTutorInput = {
@@ -25,8 +26,8 @@ export type LegacyThinTutorAction = {
   problemRef: string | null; reason: string; evidenceIds: string[];
 };
 
-// Reader-first bridge: retain v3 receipt types, but write the v2 policy only.
-export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-2";
+// Bridge v2 activity policy plus evidenced D4 cycles; D5 writers remain paused.
+export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-5";
 
 /** Four-stage selection is metadata around the existing activity policy. */
 export function learningPhaseForInput(input: Pick<NextLearningStepInput, "observations" | "dueRetest" | "learningPhase" | "phaseSource">): { phase: LearningPhase; source: "automatic" | "explicit" } {
@@ -66,6 +67,15 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   if (input.dueRetest && phase.phase === "maintain") {
     check("transfer_check", true, "due_retest", "due_retest");
     return result("transfer_check", "due_retest");
+  }
+  const remediationRefs = remediationLimitEvidence(input.remediationCycles);
+  if (input.wantsFullExplanation && remediationRefs) {
+    check("full_explain", true, "requested_full", "not_requested_full");
+    return result("full_explain", "requested_full");
+  }
+  if (remediationRefs) {
+    check("diagnose", true, "remediation_limit", "remediation_limit", remediationRefs);
+    return result("diagnose", "remediation_limit", input.observations[0]?.id ?? null);
   }
   if (input.learningPhase === "consolidate") {
     check("reduced_help_practice", true, "explicit_consolidate", "explicit_consolidate");

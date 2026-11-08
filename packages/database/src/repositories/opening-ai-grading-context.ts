@@ -61,12 +61,17 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!options.readOnly) await lockLearningOwner(tx, scope);
   const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL ${options.readOnly ? tx`` : tx`FOR SHARE`}`;
   if (!owner) throw learningError("NOT_FOUND", "workspace owner unavailable");
-  const [row] = await tx`SELECT o.*,previous.answer AS previous_answer,COALESCE(root.effective_head_id,root.id) AS current_head_id
+  // Head and replay must share a statement snapshot: a concurrent grade can
+  // commit between separate SELECTs under READ COMMITTED without any correction.
+  const [row] = await tx`SELECT o.*,previous.answer AS previous_answer,COALESCE(root.effective_head_id,root.id) AS current_head_id,
+      to_jsonb(graded) AS existing_grade
     FROM opening_learning_observations o
     JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
       AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
     LEFT JOIN opening_learning_observations previous ON previous.id=o.revises_observation_id
       AND previous.workspace_id=o.workspace_id AND previous.owner_user_id=o.owner_user_id
+    LEFT JOIN opening_learning_observations graded ON graded.workspace_id=o.workspace_id AND graded.owner_user_id=o.owner_user_id
+      AND graded.client_key=${aiGradingClientKey(input)}
     JOIN courses c ON c.id=o.course_id AND c.workspace_id=o.workspace_id AND c.archived_at IS NULL
     WHERE o.id=${input.observationId} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}`;
   if (!row) throw learningError("NOT_FOUND", "找不到这次作答");
@@ -81,8 +86,7 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     throw learningError("VALIDATION", "请先关联题目并保存作答，再进行批改");
   }
-  const [existingRow] = await tx`SELECT * FROM opening_learning_observations
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${aiGradingClientKey(input)}`;
+  const existingRow = row.existing_grade as Record<string, unknown> | null;
   if (existingRow && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, raw)
     && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, input)) {
     throw learningError("CONFLICT", "这次作答已使用其他照片批改，请先查看当前结果");

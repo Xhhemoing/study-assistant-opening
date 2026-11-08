@@ -73,6 +73,13 @@ export const teachingLearnerFocusSchema = z
     reasonCode: z.string().min(1).max(40),
     /** The verified-incorrect attempt to explain against; null when there is none. */
     focusObservationId: uuidSchema.nullable(),
+    /** Private server-selected part; re-resolved against the current route binding before compilation. */
+    examPartFocus: z.object({
+      questionIdentityRefId: uuidSchema,
+      partId: z.string().trim().min(1).max(100),
+      identityRefId: uuidSchema,
+      requirementKey: z.string().min(1).max(200),
+    }).strict().optional(),
     /** Assistance on the latest observations, newest first. */
     recentAssistance: z.array(assistanceLevelSchema).max(3),
     /** Historical feedback, not a diagnosis or proof of mastery. */
@@ -89,6 +96,10 @@ export const teachingActivitySchema = z
   .object({
     id: uuidSchema,
     routeManaged: z.boolean().optional(),
+    /** Response-only qualification from the owned persisted activity/session JOIN. */
+    staticLesson: z.object({ protocol: z.literal("span-lesson-v1"), sessionId: uuidSchema, retestId: uuidSchema.optional() }).strict().optional(),
+    /** Response-only unavailable association; preserves course identity without a fabricated session. */
+    staticLessonUnavailable: z.literal("retest_unavailable").optional(),
     workspaceId: uuidSchema,
     ownerUserId: uuidSchema,
     courseId: uuidSchema.nullable(),
@@ -106,7 +117,11 @@ export const teachingActivitySchema = z
     createdAt: isoDateTimeSchema,
     updatedAt: isoDateTimeSchema,
   })
-  .strict();
+  .strict().superRefine((value, ctx) => {
+    if (value.staticLesson !== undefined && value.staticLessonUnavailable !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["staticLessonUnavailable"], message: "An unavailable static lesson cannot also expose a resumable session" });
+    }
+  });
 
 export const teachingActivityAssociateCourseInputSchema = z.union([z
   .object({

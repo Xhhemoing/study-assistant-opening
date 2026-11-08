@@ -8,6 +8,8 @@ import { insertOpeningLearningObservationInTx } from "./opening-learning-observa
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { examSkillLabel, readCurrentExamNodeIds, readExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { projectExamSourceRecord } from "./opening-exam-integration-sources";
+import { captureExamPartRequirements, publishExamPartResult } from "./opening-exam-integration-evaluation";
+import { readExamSourceExposure } from "./opening-exam-source-exposure";
 
 
 async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack: ExamPack, binding: ExamCourseBinding,
@@ -35,11 +37,12 @@ async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack:
   const revision = await nextLearningHistoryRevision(tx, scope, binding.courseId);
   await nextWorkspaceLearningHistoryRevision(tx, scope);
   const learningAttemptId = randomUUID(), linkId = randomUUID();
+  const partRequirements = question.partSnapshot ? await captureExamPartRequirements(tx, scope, binding.courseId, question) : undefined;
   await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,requirement_key,
     problem_id,item_version_id,source_ids,source_versions,client_key,create_intent,history_revision,started_at)
     VALUES(${learningAttemptId},${scope.workspaceId},${scope.ownerUserId},${sessionId},${binding.courseId},${activityId},${skillLabel},${skill.requirementKey},
       ${problemId},${itemVersionId},${sourceIds},${tx.json(sourceVersions)},${`exam-attempt:${linkId}`},
-      ${tx.json({ examSprint: { sprintId, examAttemptId: attempt.id, spec }, nodeId: skill.nodeId })},${revision},${attempt.presentedAt})`;
+      ${tx.json({ examSprint: { sprintId, examAttemptId: attempt.id, spec, ...(partRequirements ? { partRequirements, partSnapshot: question.partSnapshot } : {}) }, nodeId: skill.nodeId })},${revision},${attempt.presentedAt})`;
   const firstFamily = examAttemptExposureQualification(attempt, state, pack).firstFamilyExposure === true;
   const run = state.runs.find(item => item.id === attempt.runId)!;
   const delayedEarliest = run.mode === "retest" ? examSprintOverview(before, pack, now,
@@ -113,6 +116,7 @@ async function publish(tx: TransactionSql, scope: Scope, sprintId: string, pack:
     outcome: "unverified", assistance, clientKey: `exam-publication:${String(row.link_id)}`, nodeId: String(row.node_id),
     dimension: run.mode === "mock-a" || run.mode === "mock-b" ? "timed" : "procedure",
   }, { examSprintPublication: true });
+  await publishExamPartResult(tx, scope, sprintId, pack, state, attempt, row, observation.id, assistance);
   await tx`UPDATE opening_exam_attempt_links SET observation_id=${observation.id},publication='published' WHERE id=${String(row.link_id)}`;
   await tx`UPDATE opening_teaching_activities SET status='completed',updated_at=clock_timestamp()
     WHERE id=${String(row.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -132,9 +136,25 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
   for (const attempt of state.attempts.filter(item => !previousAttemptIds.has(item.id))) {
     await present(tx, scope, sprintId, pack, binding, before, state, attempt, now);
   }
+  if (command.action === "switch_to_teaching") {
+    const attempt = state.attempts.find(item => item.id === command.expectedAttemptId)!;
+    const [capture] = await tx`SELECT a.* FROM opening_exam_attempt_links l
+      JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
+      WHERE l.sprint_id=${sprintId} AND l.exam_attempt_id=${attempt.id}
+        AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${binding.courseId}`;
+    const source = await readExamSourceExposure(tx, scope, sprintId, pack, attempt.id);
+    const capturedSourceIds = capture?.source_ids as string[] | undefined;
+    const capturedVersions = capture?.source_versions as Record<string, number> | undefined;
+    if (!capture || capturedSourceIds?.length !== 1 || capturedSourceIds[0] !== binding.packSourceId
+      || capturedVersions?.[binding.packSourceId] !== source?.sourceVersion || source?.packSourceId !== binding.packSourceId
+      || !await mockSourcesAvailable(tx, scope, capture) || source?.kind !== "metadata_only") {
+      throw learningError("CONFLICT", "模拟材料版本或曝光来源无法校验，未结束模拟，也未打开串讲");
+    }
+    await help(tx, scope, sprintId, pack, binding, attempt);
+  }
   // A lesson opened while an attempt is pending changes its captured qualification.
   // Answered captures retain their original references and published evidence.
-  if (command.action === "open_lesson" || command.action === "answer") {
+  if (command.action === "open_lesson" || command.action === "answer" || command.action === "switch_to_teaching") {
     for (const attempt of state.attempts.filter(item => before.attempts.some(previous => previous.id === item.id && previous.answeredAt === null))) {
       await tx`UPDATE opening_exam_attempt_links SET first_family_exposure=${examAttemptExposureQualification(attempt, state, pack).firstFamilyExposure === true}
         WHERE sprint_id=${sprintId} AND exam_attempt_id=${attempt.id} AND publication<>'published'`;

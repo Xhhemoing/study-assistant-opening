@@ -92,6 +92,19 @@ it("keeps recovery activity and pending task references paired and deduplicates 
   expect(overview.recovery).toMatchObject({ activityId: second, taskId: linked.id });
   await expect(repo().recover(f.scope, { action: "continue", activityId: second, taskId: otherTask.id, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
 });
+it("shares the stable course selector for recovery and ignores newer placeholder shells", async () => {
+  const c = await course(); await budget();
+  const ids = [randomUUID(), randomUUID()].sort();
+  for (const id of ids) await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,content_version,client_key,create_intent,updated_at)
+    VALUES(${id},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},'active','goal','Recovery',1,${randomUUID()},'{}'::jsonb,'2026-11-01T00:00:00Z')`;
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,client_key,create_intent,updated_at)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},'active','course_continue','Empty shell',${randomUUID()},'{}'::jsonb,'2026-11-02T00:00:00Z')`;
+  const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
+  const overview = await repo().read(f.scope, date);
+  expect(overview.recovery.activityId).toBe(ids[1]);
+  expect(overview.recovery.href).toBe(`/opening/courses/${c.id}/study?activity=${ids[1]}`);
+  expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
+});
 it("does not let one archived linked course block the active course or receive new candidate blocks", async () => {
   const a = await course(), b = await course(); await budget();
   await f.sql`INSERT INTO course_goal_links(workspace_id,goal_id,course_id) VALUES(${f.scope.workspaceId},${a.goal.id},${b.id})`;

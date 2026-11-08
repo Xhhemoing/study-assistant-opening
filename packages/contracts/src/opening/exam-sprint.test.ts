@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { examSprintCommandSchema } from "./exam-sprint";
+import { examRunConversionSchema, examSprintCommandSchema } from "./exam-sprint";
 
 const clientKey = "valid-client-key";
 
@@ -28,6 +28,7 @@ describe("exam sprint HTTP commands", () => {
   it("rejects answer injection, unknown properties, invalid confidence, ids and unbounded inputs", () => {
     const valid = { action: "answer", clientKey, attemptId: "attempt-1", answer: "A", confidence: 3 };
     for (const invalid of [
+      { ...valid, parts: [] }, { ...valid, resultMetadata: {} }, { ...valid, questionEvaluation: {} }, { ...valid, partSnapshot: {} },
       { ...valid, correct: true }, { ...valid, confidence: 0 }, { ...valid, confidence: 6 }, { ...valid, confidence: 2.5 },
       { ...valid, clientKey: "short" }, { ...valid, clientKey: "x".repeat(201) }, { ...valid, attemptId: "x".repeat(101) },
       { ...valid, answer: "" }, { ...valid, answer: "x".repeat(21) }, { ...valid, action: "reset" },
@@ -44,6 +45,31 @@ describe("exam sprint HTTP commands", () => {
     }
     expect(examSprintCommandSchema.safeParse({ ...command, displayedFamilyIds: [] }).success).toBe(false);
     expect(examSprintCommandSchema.safeParse({ ...command, contentFingerprint: "" }).success).toBe(false);
+  });
+
+  it("parses only complete strict conversion receipts shared by storage and HTTP", () => {
+    const conversion = { runId: "run", packId: "pack", packVersion: "1", attemptId: "attempt", lessonId: "lesson", exposureId: "exposure",
+      clientKey, convertedAt: "2026-11-08T08:00:00.000Z", contentFingerprint: "fingerprint", mappingVersion: "mapping" };
+    expect(examRunConversionSchema.parse(conversion)).toEqual(conversion);
+    for (const field of Object.keys(conversion)) {
+      const invalid = { ...conversion }; Reflect.deleteProperty(invalid, field);
+      expect(examRunConversionSchema.safeParse(invalid).success).toBe(false);
+    }
+    expect(examRunConversionSchema.safeParse({ ...conversion, convertedAt: "not-a-date" }).success).toBe(false);
+    expect(examRunConversionSchema.safeParse({ ...conversion, answer: "A" }).success).toBe(false);
+  });
+
+  it("requires explicit scored-mock termination and exact server-resolved lesson identity", () => {
+    const command = { action: "switch_to_teaching", clientKey, lessonId: "lesson", expectedRunId: "run", expectedAttemptId: "attempt",
+      packVersion: "v1", contentFingerprint: "fingerprint", mappingVersion: "review-v1", confirmedEndScoredMock: true };
+    expect(examSprintCommandSchema.safeParse(command).success).toBe(true);
+    for (const field of Object.keys(command)) {
+      const invalid = { ...command }; Reflect.deleteProperty(invalid, field);
+      expect(examSprintCommandSchema.safeParse(invalid).success).toBe(false);
+    }
+    for (const invalid of [{ ...command, confirmedEndScoredMock: false }, { ...command, expectedRunId: null },
+      { ...command, expectedAttemptId: null }, { ...command, displayedFamilyIds: [] }, { ...command, answer: "A" },
+      { ...command, identityRefId: "forged" }]) expect(examSprintCommandSchema.safeParse(invalid).success).toBe(false);
   });
 
   it("rejects invalid time budgets and source inputs", () => {

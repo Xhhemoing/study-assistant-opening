@@ -9,7 +9,7 @@ import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptR
 import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { reserveSpanTutorActivityBudget } from "../../packages/database/src/repositories/opening-span-tutor-budget";
-import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
+import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision, spanTutorQuestionInScope } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
@@ -53,7 +53,14 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+it("does not widen historical receipt compatibility to unknown policy/execution pairs", () => {
+  const intentVersion = JSON.stringify({ ruleDecision: { activityKind: "diagnose", focusObservationId: null, reasonCode: "needs_check" } });
+  for (const policyVersion of ["next-learning-step-6/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-1",
+    "next-learning-step-1/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-3"]) {
+    expect(spanTutorReceiptDecision({ policyVersion, intentVersion })).toBeNull();
+  }
+});
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-2"])(
   "restores and replays %s by the original key without recomputing or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
@@ -63,9 +70,10 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   const session = await f.repo.execute(fixture.scope, input);
   const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
-  // New receipts are v2; archived labels and a v3-only result are seeded separately.
+  // New receipts are v5 (bridge v2 + D4); archived labels and a v3-only
+  // historical result remain separate fixtures, never new writer authority.
   const written = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
-  expect(written[0]!.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
+  expect(written[0]!.policyVersion).toBe("next-learning-step-5/span-tutor-execution-2");
   const savedDecision = policyVersion.startsWith("next-learning-step-3/")
     ? { ...input.decision, activityKind: "reduced_help_practice", reasonCode: "assisted_success" } : input.decision;
   const captured = { ...JSON.parse(written[0]!.intentVersion), ruleDecision: savedDecision };
@@ -336,6 +344,106 @@ it("applies explicit phases to an existing ordinary lesson without charging agai
     await f.repo.assertCurrent(fixture.scope, context);
   }
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
+it("updates an ordinary lesson to explicit overview without issuing a question or charging, and preserves admission checks", async () => {
+  expect(spanTutorQuestionInScope("串讲")).toBe(true);
+  for (const question of ["为什么串讲", "例如串讲", "不要串讲", "请解释特征值"]) expect(spanTutorQuestionInScope(question)).toBe(false);
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question: "串讲" }))!;
+  const decision = nextLearningStep(context.decisionInput), operationId = randomUUID();
+  expect(context).toMatchObject({ needsIntentUpdate: true, intent: { purpose: "overview" } });
+  const before = await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`;
+  await expect(f.repo.execute({ ...scope, ownerUserId: randomUUID() }, { context, decision, operationId: randomUUID() })).rejects.toThrow();
+  const updated = await f.repo.execute(scope, { context, decision, operationId });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, moveId: "overview-links", intent: { purpose: "overview" } });
+  expect(await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  const replay = (await f.repo.read(scope, { ...f.request, question: "串讲", operationId }))!;
+  expect((await f.repo.execute(scope, { context: replay, decision, operationId })).activityId).toBe(updated.activityId);
+  const fresh = (await f.repo.read(scope, { ...f.request, question: "span 自学" }))!;
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(f.repo.execute(scope, { context: fresh, decision: nextLearningStep(fresh.decisionInput), operationId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await lessons.get(scope, session.activityId)).toEqual(updated);
+});
+it.each([
+  ["self_study", "span 串讲", "overview-links"],
+  ["self_study", "span 拔高", "challenge-predict"],
+  ["overview", "span 拔高", "challenge-predict"],
+  ["challenge", "span 串讲", "overview-links"],
+  ["overview", "span 自学", "self-example"],
+  ["challenge", "span 自学", "self-example"],
+] as const)("normalizes an explicit %s mode change (%s) to a catalog move", async (purpose, question, moveId) => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+    intent: { ...DEFAULT_STUDY_SESSION_INTENT, purpose }, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question }))!;
+  const updated = await f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, revision: session.revision + 1, moveId });
+  expect(await sql`SELECT id FROM opening_learning_attempts WHERE course_id=${f.courseId}`).toHaveLength(0);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
+async function preferenceState(courseId: string) {
+  const { sql, scope } = fixture;
+  return {
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${courseId} ORDER BY id`,
+    receipts: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    reservations: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    history: await sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`,
+  };
+}
+it.each(["paused", "reserved", "due_retest", "source", "privacy", "authorization", "expired", "cancelled", "revision"] as const)(
+  "keeps %s admission authoritative for an overview preference update with no execution writes", async branch => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "overview" as const, explanationStyle: "full" as const };
+  let session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  if (branch === "paused" || branch === "reserved") session = await lessons.save(scope, session.activityId,
+    { expectedRevision: session.revision, intent, moveId: branch === "reserved" ? "overview-reserved" : session.moveId,
+      status: branch === "paused" ? "paused" : "active" });
+  if (branch === "due_retest") {
+    const attempt = await createSpanReservedService(sql).issue(scope,
+      { sessionId: session.sessionId, sourceId: f.sourceId, mode: "overview", clientKey: randomUUID() });
+    const observed = await createOpeningLearningRepository(sql).insertObservation(scope, { sessionId: session.sessionId,
+      courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), assistance: "independent",
+      outcome: "unverified", verdictSource: "self_report" });
+    const due = await createSpanDelayedRetestService(sql).schedule(scope, { observationId: observed.id, clientKey: randomUUID() });
+    await sql`UPDATE opening_retest_activities SET recommended_at=now()-interval '1 minute',not_before_at=now()-interval '1 minute',
+      scheduled_start_at=now()-interval '1 minute' WHERE id=${due.activityId}`;
+    await lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent, moveId: session.moveId, status: "completed" });
+    session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID(), retestId: due.activityId });
+  }
+  const context = (await f.repo.read(scope, { ...f.request, question: "span 慢一点" }))!;
+  expect(context.needsIntentUpdate).toBe(true);
+  if (branch === "due_retest") expect(context).toMatchObject({ dueRetestId: session.retestId, intentChangeRequiresChoice: true });
+  if (branch === "source") await sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+  if (branch === "privacy") await sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
+  if (branch === "authorization") await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  if (branch === "expired") await sql`UPDATE workspace_preferences SET adaptive_planning=jsonb_set(adaptive_planning,
+    ARRAY['spanTutorGrants',${f.courseId},'expiresOn'], '"2000-01-01"'::jsonb) WHERE workspace_id=${scope.workspaceId}`;
+  if (branch === "revision") await lessons.save(scope, session.activityId,
+    { expectedRevision: session.revision, intent: { ...intent, language: "en" }, moveId: session.moveId, status: "active" });
+  const before = await preferenceState(f.courseId);
+  await expect(f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID(),
+    ...(branch === "cancelled" ? { jobLease: { jobId: randomUUID(), claimToken: randomUUID() } } : {}) }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await preferenceState(f.courseId)).toEqual(before);
+});
+it.each(["span 不要串讲", "span 不要加快", "span 为什么串讲", "span 如何拔高"])(
+  "does not turn %s into a method or preference change", async question => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "challenge" as const, explanationStyle: "full" as const };
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question }))!;
+  expect(context).toMatchObject({ needsIntentUpdate: false, intent });
+  const before = await preferenceState(f.courseId);
+  expect(await f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() })).toEqual(session);
+  expect(await preferenceState(f.courseId)).toEqual(before);
 });
 it("does not start or resume after the account is disabled between reading and executing", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TransactionSql } from "postgres";
-import { evaluateOpeningTeachingKeyAttempt } from "./opening-teaching-question-evaluation";
-import { teachingQuestionBody, teachingQuestionText } from "./opening-teaching-question";
+import { evaluateOpeningTeachingKeyAttempt, readOpeningTeachingBlindSolveKeyMetadata, resolveOpeningTeachingBlindSolveQuestion } from "./opening-teaching-question-evaluation";
+import { readResolvedTeachingQuestion, teachingQuestionBody, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
+import { compareCourseQuestionIdentity } from "@aistudy/domain";
 
 const exposure = vi.hoisted(() => ({ reveal: vi.fn(), insert: vi.fn(), generate: vi.fn(), release: vi.fn() }));
 vi.mock("./opening-teaching-hints", () => ({ readOpeningTeachingAnswerKey: exposure.reveal }));
@@ -12,7 +13,11 @@ vi.mock("./opening-study-exposure", () => ({
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const attempt = { id: "attempt", course_id: "course", problem_id: "problem", item_version_id: "item", create_intent: { teachingBlock: {} } };
-const spec = { kind: "teaching_question", specVersion: "teaching-question-v1", blockId: "q", answerBlockId: "a", revisionId: "r" };
+const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const spec = { kind: "teaching_question", specVersion: "teaching-question-v1", blockId: id(1), answerBlockId: id(2), revisionId: id(3),
+  activityId: id(4), teachingUnitId: id(5), documentId: id(6), contentVersion: 1, revisionNumber: 1 };
+const order = [{ blockId: id(1), position: 0, role: "prompt", blockType: "prompt" },
+  { blockId: id(2), position: 1, role: "answer_key", blockType: "answer_key" }];
 const numeric = { kind: "numeric" };
 const choice = { kind: "choice", options: [{ id: "A", label: "1" }, { id: "B", label: "2" }] };
 const block = (content: unknown, type = "prompt", id = "q") => ({ id, type, content });
@@ -24,15 +29,29 @@ function watchedKey(answer: string) {
 }
 const numericBlocks = [block({ text: "1+1", interaction: numeric }), key("2")];
 
-type FixtureOptions = { evaluationSpec?: unknown; blocks?: unknown; missingRow?: boolean; priorFeedback?: boolean };
+type FixtureOptions = { evaluationSpec?: unknown; blocks?: unknown; missingRow?: boolean; priorFeedback?: boolean;
+  blockOrder?: unknown; sourceVersion?: number; missingIdentity?: boolean; priorSpec?: unknown; priorSameBinding?: boolean };
 function setup(options: FixtureOptions = {}) {
+  const savedBlocks = () => {
+    const input = "blocks" in options ? options.blocks : numericBlocks;
+    return Array.isArray(input) ? input.map(entry => Object.defineProperties({}, {
+      ...Object.getOwnPropertyDescriptors(entry),
+      id: { value: entry.id === "q" ? id(1) : entry.id === "a" ? id(2) : entry.id, enumerable: true },
+    })) : input;
+  };
   const tx = vi.fn((parts: TemplateStringsArray, ..._values: unknown[]) => {
     const sql = parts.join("?");
+    if (sql === "" || sql.startsWith("FOR SHARE")) return "lock clause";
     if (sql.includes("SELECT v.evaluation_spec,r.blocks")) return Promise.resolve(options.missingRow ? [] : [{
       evaluation_spec: "evaluationSpec" in options ? options.evaluationSpec : spec,
-      blocks: "blocks" in options ? options.blocks : numericBlocks,
+      blocks: savedBlocks(),
     }]);
-    if (sql.includes("SELECT o.id")) return Promise.resolve(options.priorFeedback ? [{ id: "previous" }] : []);
+    if (sql.includes("SELECT r.blocks,s.block_order,s.source_refs")) return Promise.resolve(options.missingIdentity ? [] : [{
+      blocks: savedBlocks(), block_order: options.blockOrder ?? order, source_refs: [{ sourceId: id(7), version: 1 }],
+    }]);
+    if (sql.includes("SELECT s.version,s.mime")) return Promise.resolve([{ version: options.sourceVersion ?? 1, mime: "text/plain", has_figures: false }]);
+    if (sql.includes("SELECT o.id")) return Promise.resolve(options.priorFeedback ? [{ id: "previous", evaluation_spec: options.priorSpec ?? spec,
+      activity_id: options.priorSameBinding ? spec.activityId : id(20), teaching_block_id: options.priorSameBinding ? spec.blockId : id(21) }] : []);
     if (sql.startsWith("(v.teaching_revision_id IS NULL")) return "identity predicate";
     throw new Error(`Unexpected SQL during grading: ${sql}`);
   });
@@ -44,6 +63,54 @@ function setup(options: FixtureOptions = {}) {
 afterEach(() => {
   for (const fn of Object.values(exposure)) expect(fn).not.toHaveBeenCalled();
   vi.clearAllMocks();
+});
+
+describe("private blind-solve key metadata", () => {
+  it("requires a matched receipt bound to the current revision/source/item identity and reads only", async () => {
+    const identity = { activityId: "11111111-1111-4111-8111-111111111111", teachingRevisionId: "22222222-2222-4222-8222-222222222222",
+      blockId: "33333333-3333-4333-8333-333333333333", answerBlockId: "44444444-4444-4444-8444-444444444444", questionText: "2+2", keyText: "4", contentVersion: 1, sourceVersions: {},
+      generatorModelIdentity: { providerId: "g", modelName: "g", family: "a" } };
+    const receipt = { protocol: "teaching-blind-solve-1", identity, operationId: "solve:job:block",
+      modelSnapshot: { id: "s", providerId: "s", modelName: "s", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+      family: "b", decision: "match", solverAnswer: "4", reasonCodes: ["pinned_key_match"], costLedgerRef: "ledger" };
+    const blocks = [block({ text: "2+2", interaction: numeric }, "prompt", identity.blockId), block({ text: "", markdown: "4" }, "answer_key", identity.answerBlockId)];
+    const block_order = [{ blockId: identity.blockId, position: 0, role: "prompt", blockType: "prompt" },
+      { blockId: identity.answerBlockId, position: 1, role: "answer_key", blockType: "answer_key" }];
+    const row = { receipt, blocks, block_order, source_refs: [] };
+    const query = vi.fn(async (..._args: unknown[]): Promise<Record<string, unknown>[]> => [row]);
+    const tx = Object.assign(query, { json: (value: unknown) => value }) as unknown as TransactionSql;
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toMatchObject({ eligibility: "matched_current", receipt });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, contentVersion: 2 })).toEqual({ eligibility: "unknown", receipt: null });
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, { ...identity, itemVersionId: identity.blockId })).toEqual({ eligibility: "unknown", receipt: null });
+    for (const mismatch of [{ ...row, blocks: [blocks[0], { ...blocks[1], type: "text" }] },
+      { ...row, blocks: [blocks[0], block({ answer: "5" }, "answer_key", identity.answerBlockId)] },
+      { ...row, block_order: [block_order[0], { ...block_order[1], blockId: identity.blockId }] },
+      { ...row, receipt: { ...receipt, identity: { ...identity, answerBlockId: undefined } } }]) {
+      query.mockResolvedValue([mismatch]);
+      expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toEqual({ eligibility: "unknown", receipt: null });
+    }
+    query.mockResolvedValue([{ receipt: undefined }]);
+    expect(await readOpeningTeachingBlindSolveKeyMetadata(tx, scope, identity)).toEqual({ eligibility: "unknown", receipt: null });
+    expect(JSON.stringify(query.mock.calls)).not.toMatch(/INSERT|UPDATE|DELETE/);
+  });
+});
+
+describe("blind solver canonical saved pair", () => {
+  const order = [{ blockId: "q", position: 0, role: "prompt" as const, blockType: "prompt" },
+    { blockId: "a", position: 1, role: "answer_key" as const, blockType: "answer_key" }];
+  it("uses the first NONEMPTY key field including markdown and preserves numeric units", () => {
+    const result = resolveOpeningTeachingBlindSolveQuestion([block({ text: "2+2", interaction: { kind: "numeric", unit: "m" } }),
+      block({ text: "", markdown: "4", answer: "wrong" }, "solution", "a")], order, "q");
+    expect(result).toMatchObject({ reliable: true, answerBlockId: "a", questionText: "2+2\n单位：m", keyText: "4" });
+  });
+  it.each([
+    [block({ text: "2+2", interaction: numeric }), block({ answer: "4" }, "text", "a")],
+    [block({ text: "2\times2", interaction: numeric }), key("4")],
+    [block({ question: "2+2", interaction: numeric }), key("4")],
+    [block({ text: "2+2", interaction: numeric }), block({ answer: "4\times1" }, "answer_key", "a")],
+  ])("does not authorize unreliable prompt/key rendering or a non-key block", (prompt, answer) => {
+    expect(resolveOpeningTeachingBlindSolveQuestion([prompt, answer], order, "q").reliable).toBe(false);
+  });
 });
 
 describe("teaching key evaluation", () => {
@@ -58,7 +125,8 @@ describe("teaching key evaluation", () => {
       reasonCodes: [decision === "correct" ? "teaching_key_match" : "teaching_key_mismatch"], priorFeedback,
     });
     const priorQuery = f.tx.mock.calls.find(([parts]) => parts.join(" ").includes("SELECT o.id"));
-    expect(priorQuery?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, attempt.course_id, spec.revisionId, spec.blockId, attempt.id]);
+    expect(priorQuery?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, attempt.course_id,
+      spec.activityId, spec.blockId, "1+1", attempt.id]);
   });
 
   it.each([["B. 2", "correct"], ["A. 1", "incorrect"]] as const)(
@@ -170,6 +238,30 @@ describe("teaching key evaluation", () => {
   it("accepts question and solution blocks from the pinned revision", async () => {
     const f = setup({ blocks: [block({ text: "1+1", interaction: numeric }, "question"), block({ solution: "2" }, "solution", "a")] });
     expect(await f.run("2")).toMatchObject({ decision: "correct" });
+  });
+});
+
+describe("private identity consumer", () => {
+  it.each(["question", "markdown"])("uses the consumed body rather than shadowed %s in exact identity", async field => {
+    const a = setup({ blocks: [block({ text: "1+1", interaction: numeric, [field]: "original shadow" }), key("2")] });
+    const b = setup({ blocks: [block({ text: "1+1", interaction: numeric, [field]: "changed shadow" }), key("2")] });
+    const left = await readResolvedTeachingQuestion(a.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec);
+    const right = await readResolvedTeachingQuestion(b.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec);
+    expect(left).toMatchObject({ conditions: "1+1", interaction: numeric });
+    expect(compareCourseQuestionIdentity(left, right)).toBe("same");
+  });
+  it("keeps an unrelated unresolved history from invalidating the pinned key without claiming unseen", async () => {
+    expect(await setup({ priorFeedback: true, priorSpec: { kind: "unresolved" } }).run("2"))
+      .toMatchObject({ decision: "correct", priorFeedback: true });
+    expect(await setup({ priorFeedback: true, priorSpec: { kind: "unresolved" } }).run("3"))
+      .toMatchObject({ decision: "incorrect", priorFeedback: true });
+  });
+  it.each([
+    { missingIdentity: true }, { sourceVersion: 2 }, { blockOrder: [...order].reverse().map((ref, position) => ({ ...ref, position })) },
+    { blockOrder: [order[0], { ...order[1], role: "teach" }] },
+    { priorFeedback: true, priorSpec: { kind: "unresolved" }, priorSameBinding: true },
+  ])("withholds evaluation for unavailable/current-version/wrong-key/unknown-history bindings %j", async options => {
+    expect(await setup(options).run("2")).toBeNull();
   });
 });
 

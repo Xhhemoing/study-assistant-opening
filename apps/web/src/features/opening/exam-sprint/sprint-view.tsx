@@ -20,7 +20,7 @@ import { SourceTracker } from "./source-tracker";
 import { sprintCourseScope } from "./sprint-course-route";
 
 import { LessonButton } from "./lesson-button";
-import { confirmedSprintLesson, confirmedSprintLessonRequest, focusSprintTarget, prepareSprintLesson, revealSprintLesson, type LessonReturnTarget, type OpenLessonIntent, type OpenSprintLesson } from "./lesson-navigation";
+import { sprintLessonFetcher, confirmedSprintLesson, confirmedSprintLessonRequest, focusSprintTarget, prepareSprintLesson, revealSprintLesson, type LessonReturnTarget, type OpenLessonIntent, type OpenSprintLesson } from "./lesson-navigation";
 
 const tabs = [{ id: "practice", label: "当前训练" }, { id: "plan", label: "七天计划" }, { id: "sources", label: "原题登记" }, { id: "lessons", label: "技能与串讲" }, { id: "integration", label: "课程与证据" }, { id: "estimates", label: "表现估计" }, { id: "forecast", label: "考点分析" }] as const;
 type Tab = typeof tabs[number]["id"];
@@ -42,7 +42,7 @@ function StartTraining({ overview, disabled, send }: { overview: ExamSprintOverv
 export function ExamSprintView({ courseId, embedded = false }: { courseId?: string; embedded?: boolean }) {
   const diagnostics = useDiagnosticsEnabled();
   const objectHref = useConversationObjectHref();
-  const [client] = useState(() => createExamSprintClient());
+  const [client] = useState(() => createExamSprintClient({ fetcher: sprintLessonFetcher() }));
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   const [tab, setTab] = useState<Tab>(courseId ? "integration" : "practice");
   useEffect(() => { if (!diagnostics && tab === "estimates") setTab("practice"); }, [diagnostics, tab]);
@@ -87,9 +87,9 @@ export function ExamSprintView({ courseId, embedded = false }: { courseId?: stri
     setLessonNavigation({ ...request, exposureId: content.exposureId, open: true });
     setTab("lessons");
   };
-  const openLesson: OpenSprintLesson = async (lessonId, returnTarget) => {
+  const openLesson: OpenSprintLesson = async (lessonId, returnTarget, confirmedEndScoredMock) => {
     if ((courseId && scope !== "match") || !overview || busy || uncertain || client.getSnapshot().busy || client.getSnapshot().uncertain || pendingLesson.current) return;
-    const intent = prepareSprintLesson(overview, lessonId);
+    const intent = prepareSprintLesson(overview, lessonId, confirmedEndScoredMock);
     if (!intent) { setLessonError("对应串讲暂不可用，请核对题包与训练状态。"); return; }
     const request: LessonRequest = { intent, returnTarget: tab === "lessons" && lessonNavigation ? lessonNavigation.returnTarget : returnTarget, returnTab: tab === "lessons" && lessonNavigation ? lessonNavigation.returnTab : tab };
     pendingLesson.current = request;
