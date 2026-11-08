@@ -44,13 +44,26 @@ describe("tutor next action orchestration", () => {
   it.each([
     { name: "independent pass", row: observation(), kind: "transfer_check", reason: "independent" },
     { name: "verified error", row: observation({ verifiedCorrect: "no" }), kind: "targeted_explain", reason: "verified_incorrect" },
-    { name: "assisted pass", row: observation({ assistance: "revealed", independentAttempt: "no" }), kind: "reduced_help_practice", reason: "assistance_dependent" },
+    { name: "assisted pass", row: observation({ assistance: "revealed", independentAttempt: "no" }), kind: "reduced_help_practice", reason: "assisted_success" },
   ])("executes the actual next activity after $name", async ({ row, kind, reason }) => {
     const { deps, executions } = service(context({ decisionInput: { status: "observed_independent", observations: [row], wantsFullExplanation: false } }));
     const result = await prepareTutorNextAction(deps, scope, request);
     expect(executions).toEqual([expect.objectContaining({ operationId: "tutor-next:job", userTurnId: "turn",
       decision: { activityKind: kind, reasonCode: reason, focusObservationId: kind === "targeted_explain" ? "observation" : null } })]);
     expect(result).toMatchObject({ action: { activityId: "activity", sessionId: "session" }, decision: { activityKind: kind }, resumed: false });
+  });
+
+  it.each([0, 1, 2])("shares the assisted-success decision with agenda after %i earlier independent successes", async priorChecks => {
+    for (const assistance of ["hinted", "revealed"] as const) {
+      const observations = [observation({ assistance, independentAttempt: "no" }),
+        ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}`, attemptedAt: `2026-10-${24 + i}T00:00:00Z` }))];
+      const decision = { activityKind: "reduced_help_practice" as const, reasonCode: "assisted_success" as const, focusObservationId: null };
+      const agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", suggestion: decision });
+      const { deps, executions } = service(context({ decisionInput: { status: "needs_check", observations, wantsFullExplanation: false } }));
+      const prepared = await prepareTutorNextAction(deps, scope, request);
+      expect(prepared?.decision).toEqual(agenda.suggestion);
+      expect(executions).toEqual([expect.objectContaining({ decision })]);
+    }
   });
 
   it("resumes an unfinished activity without replacing it after an earlier error", async () => {

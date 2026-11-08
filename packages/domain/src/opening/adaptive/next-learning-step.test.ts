@@ -140,7 +140,7 @@ describe("nextLearningStep", () => {
   it("fades help after a verified correct answer following two assisted errors", () => {
     expect(nextLearningStep(input({ observations: [observation({ id: "correct-after", assistance: "hinted", independentAttempt: "no" }),
       exactError("latest"), exactError("older")] })))
-      .toEqual({ activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assistance_dependent" });
+      .toEqual({ activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success" });
   });
 
   it("restores transfer checks after three independent correct answers following assisted errors", () => {
@@ -177,8 +177,39 @@ describe("nextLearningStep", () => {
       status: "observed_independent",
       observations: [observation({ assistance: "hinted", independentAttempt: "no" })],
     }))).toEqual({
-      activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assistance_dependent",
+      activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success",
     });
+  });
+
+  it.each([0, 1, 2])("fades the latest hinted/revealed success despite %i earlier independent successes", priorChecks => {
+    for (const assistance of ["hinted", "revealed"] as const) {
+      const request = input({ status: "observed_independent", observations: [
+        observation({ assistance, independentAttempt: "no" }),
+        ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}` })),
+      ] });
+      const captured = captureNextLearningStep(request);
+      expect(captured.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
+      expect(captured.candidates.at(-1)).toEqual({ action: "reduced_help_practice", eligible: true,
+        reasonCodes: ["assisted_success"], evidenceRefs: ["observation:latest-observation"] });
+      expect(captured.candidates.some(candidate => candidate.reasonCodes.includes("no_assisted_majority"))).toBe(false);
+      for (const [controls, reason] of [
+        [{ learningPhase: "new_learning", dueRetest: true }, "requested_full"],
+        [{ dueRetest: true }, "due_retest"],
+        [{ learningPhase: "consolidate" }, "requested_consolidate"],
+        [{ wantsFullExplanation: true }, "requested_full"],
+      ] as const) expect(nextLearningStep({ ...request, ...controls }).reasonCode).toBe(reason);
+    }
+  });
+
+  it("does not promote unknown, incorrect, stale or older helped success to the new reason", () => {
+    for (const latest of [observation({ assistance: "hinted", verifiedCorrect: "unknown" }),
+      observation({ assistance: "revealed", verifiedCorrect: "no" }),
+      ...["no", "unknown", undefined].map(usableForCurrentVersion => observation({ assistance: "hinted", usableForCurrentVersion: usableForCurrentVersion as SnapshotObservation["usableForCurrentVersion"] })),
+      observation({ assistance: "unknown" }), observation()]) {
+      expect(nextLearningStep(input({ observations: [latest] })).reasonCode).not.toBe("assisted_success");
+    }
+    expect(nextLearningStep(input({ observations: [observation({ verifiedCorrect: "unknown" }), observation({ id: "older", assistance: "hinted" })] })).reasonCode)
+      .not.toBe("assisted_success");
   });
 
   it("combines hinted and revealed attempts when checking the recent majority", () => {
@@ -213,7 +244,7 @@ describe("nextLearningStep", () => {
     for (const assistance of ["independent", "unknown"] as const) {
       expect(nextLearningStep(input({
         status: "observed_independent",
-        observations: [observation({ assistance: "hinted" }), observation({ id: "older", assistance })],
+        observations: [observation({ assistance }), observation({ id: "older", assistance: "hinted" })],
       }))).toEqual({ activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" });
     }
   });

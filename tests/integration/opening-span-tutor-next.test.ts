@@ -331,7 +331,7 @@ it("keeps one learner's real help, evaluation, retest, saved query and cancellat
     expect(restored.observations.map(row => row.id)).toContain(observed.id);
     const nextInput = { activityId: origin.activityId, expectedRevision: origin.revision, observationId: observed.id, clientKey: "chain-next" };
     const next = await f.next.next(scope, nextInput);
-    expect(next).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent" } });
+    expect(next).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "reduced_help_practice", reasonCode: "assisted_success" } });
     if (next.kind !== "ready") throw new Error("expected a real reduced-help successor");
 
     const oldHelp = await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
