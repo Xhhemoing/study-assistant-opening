@@ -61,6 +61,7 @@ export function spanTutorReceiptDecision(receipt: { intentVersion: string; polic
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
     || studyIntentForMessage(null, question)?.intent.learningPhase !== undefined
+    || studyIntentForMessage(null, question)?.intent.purpose === "overview"
     || learningContinuationIntent(question) !== null;
 }
 export function spanTutorExactProjection(rows: SnapshotObservation[], evaluations: Array<{ id: string; evaluatorVersion: string | null }>) {
@@ -372,9 +373,16 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await assertContext(tx, scope, context);
           } else if (position.dueRetestId !== context.dueRetestId && context.intent.learningPhase !== "new_learning" && context.intent.learningPhase !== "consolidate") throw conflict("当前到期复测已变化，请重新读取后继续。");
         }
-        if (input.decision.reasonCode === "remediation_limit") throw Object.assign(conflict("已完成两轮有据纠偏，请明确换讲法、重新诊断或暂缓；没有新增题目或活动。"),
+        const intentOnlyOverview = context.needsIntentUpdate && context.intent.purpose === "overview"
+          && context.resumeSession?.status === "active" && context.resumeSession.intent.purpose !== "overview"
+          && !context.resumeSession.retestId && !context.resumeSession.moveId.endsWith("-reserved")
+          && !context.dueRetestId && !context.needsReservedIssue && !context.intentChangeRequiresChoice;
+        if (input.decision.reasonCode === "remediation_limit" && !intentOnlyOverview) throw Object.assign(conflict("已完成两轮有据纠偏，请明确换讲法、重新诊断或暂缓；没有新增题目或活动。"),
           { code: "SPAN_REMEDIATION_LIMIT" });
-        const availability = await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
+        // A confirmed method change can save only the existing lesson state.
+        // Never select/reserve a question or budget as part of this exception.
+        const availability = intentOnlyOverview ? null
+          : await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
         if (availability?.kind === "unavailable") throw Object.assign(conflict("未见题暂不可发放，请保留原进度并核对课程记录；没有新增活动。"),
           { reason: availability.reason, code: "SPAN_UNSEEN_UNAVAILABLE" });
         // Capture before origin completion, session/attempt creation and budget reservation.
@@ -416,7 +424,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await saveDecision(context.resumeSession, "resume_issue");
           }
           if (context.needsIntentUpdate) {
-            const moveId = input.decision.activityKind === "full_explain" ? "self-example"
+            const moveId = intentOnlyOverview ? "overview-links" : input.decision.activityKind === "full_explain" ? "self-example"
               : input.decision.activityKind === "reduced_help_practice" ? "self-faded" : context.resumeSession.moveId;
             context.resumeSession = await sessions.save(scope, context.resumeSession.activityId, { expectedRevision: context.resumeSession.revision,
               intent: context.intent, moveId, status: context.resumeSession.status });
