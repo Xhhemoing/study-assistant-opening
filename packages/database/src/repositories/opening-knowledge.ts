@@ -195,8 +195,26 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       await assertOwnedCourse(sql, scope, courseId);
       const [row] = await sql`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
-      if (!row || !await hasTeachingPurposes(sql, scope, courseId, parseSourceVersions(row.source_versions))) return null;
-      return { ...mapRecord(row), nodeDefinitions: row.node_definitions as Record<string, string> };
+      if (!row) return null;
+      const current = mapRecord(row);
+      if (await hasTeachingPurposes(sql, scope, courseId, current.sourceVersions)) {
+        return { ...current, nodeDefinitions: row.node_definitions as Record<string, string> };
+      }
+      // A restricted graph still exists: keep its real CAS version, but never
+      // return its restricted labels/definitions to reconciliation or the model.
+      // Retain only complete, currently authorized evidence so legal identities
+      // survive the rebuild instead of being recreated under a false version 0.
+      const chunks = await this.listAuthorizedChunks(scope, courseId);
+      const allowed = new Set(chunks.map(chunk => chunk.id));
+      const nodes = current.snapshot.nodes.filter(node => node.evidenceChunkIds.length > 0
+        && node.evidenceChunkIds.every(id => allowed.has(id)));
+      const ids = new Set(nodes.map(node => node.id));
+      const edges = current.snapshot.edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)
+        && edge.evidenceChunkIds.every(id => allowed.has(id)));
+      const definitions = row.node_definitions as Record<string, string>;
+      return { version: current.version, snapshot: { ...current.snapshot, nodes, edges },
+        sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])),
+        nodeDefinitions: Object.fromEntries(Object.entries(definitions).filter(([id]) => ids.has(id))) };
     },
     async assertExtractionBatch(scope: Scope, courseId: string, chunks: readonly SourceChunk[]): Promise<void> {
       await sql.begin(async tx => {
@@ -219,7 +237,14 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         WHERE workspace_id = ${scope.workspaceId}
           AND owner_user_id = ${scope.ownerUserId}
           AND course_id = ${courseId}`;
-      if (!rows.length || !await hasTeachingPurposes(sql, scope, courseId, parseSourceVersions(rows[0]!.source_versions))) return null;
+      if (!rows.length) return null;
+      const sourceIds = Object.keys(parseSourceVersions(rows[0]!.source_versions));
+      // Preserve the existing historical read after unlink; only explicit purpose
+      // restrictions hide this graph here. Rebuild admission above stays strict.
+      const restricted = sourceIds.length ? await sql`SELECT id FROM course_asset_memberships
+        WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
+          AND asset_id=ANY(${sourceIds}::uuid[]) AND purpose IN ('practice','reference','mock_exam')` : [];
+      if (restricted.length) return null;
       return mapRecord(rows[0] as Record<string, unknown>);
     },
 
