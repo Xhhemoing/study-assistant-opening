@@ -66,7 +66,13 @@ it("imports an image through the paid gateway, persists page cache/chunks/index 
   expect(chunks[0]!.text).toContain(recognized.transcription);
   expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND kind='index-source' AND payload->>'sourceId'=${x.sourceId}`).toHaveLength(1);
   const retrieve = createOpeningMaterialRetriever(f.sql, x.budget, null);
-  const found = await retrieve(f.scope, { chunks, sourceIds: [x.sourceId], query: "x^2+y^2=1", maxCharacters: 6000, operationId: "controlled-lexical" });
+  const courseId = randomUUID();
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug)
+    VALUES(${courseId},${f.scope.workspaceId},'Visual teaching',${courseId})`;
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES(${f.scope.workspaceId},${courseId},'source',${x.sourceId},'core','course',NULL)`;
+  const found = await retrieve(f.scope, { courseContext: { courseId, materialUse: "teaching" },
+    chunks, sourceIds: [x.sourceId], query: "x^2+y^2=1", maxCharacters: 6000, operationId: "controlled-lexical" });
   expect(found.mode).toBe("lexical"); expect(found.chunks[0]!.text).toContain(recognized.transcription);
   const images = createSourcePageImages(f.sql, storage as never);
   const compiled = await createCompilerProviderInput({ loadChunks: () => Promise.resolve(chunks), loadPageImages: (scope, input) => images(scope as typeof f.scope, input), intentSummary: "圆的方程" })(
