@@ -49,7 +49,7 @@ const callerConfig = { maxContextCharacters: 5000, maxOutputTokens: 256, reserve
 type CallerBarrier = "pre-send" | "stream" | "final" | "privacy-send" | "privacy-stream" | "delivery-stream" | "learner-send";
 const callerOutput: ProviderOutput = { requestId: "purpose-test-provider", text: "Synthetic material answer", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 };
 
-async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | "reference" | "practice" | "mock_exam") {
+async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | "reference" | "practice" | "mock_exam", mutatePurpose = true) {
   const seeded = await setup();
   await ready(seeded.source.id);
   const membership = await seeded.courses.updateAssetMembership({ ...seeded.input, purpose,
@@ -59,9 +59,9 @@ async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | 
   const retrieveContext = createOpeningMaterialRetriever(f.sql, budget, null);
   const provider = { complete: vi.fn(async (_input: ProviderInput, _signal?: AbortSignal,
     _delta?: (text: string) => void | Promise<void>): Promise<ProviderOutput> => callerOutput) };
-  const changePurpose = async () => {
-    await seeded.courses.updateAssetMembership({ ...seeded.input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString() });
-  };
+  const changePurpose = vi.fn(async () => {
+    if (mutatePurpose) await seeded.courses.updateAssetMembership({ ...seeded.input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString() });
+  });
   const released = vi.fn(async (_text: string) => {});
   const learnerContext = {
     read: async () => ({ courseId: seeded.course.id, title: "Purpose learner", asOf: new Date().toISOString(),
@@ -146,6 +146,36 @@ describe("course source purpose storage and concurrency", () => {
     await practice.run();
     expect(practice.provider.complete).toHaveBeenCalledOnce();
     expect(practice.provider.complete.mock.calls[0]![0].chunks.map(chunk => chunk.sourceId)).toEqual([practice.source.id]);
+  });
+
+  it.each([
+    { kind: "saved", stage: "privacy-send" },
+    { kind: "saved", stage: "learner-send" },
+    { kind: "ephemeral", stage: "privacy-send" },
+    { kind: "ephemeral", stage: "learner-send" },
+    { kind: "ephemeral", stage: "privacy-stream" },
+    { kind: "ephemeral", stage: "delivery-stream" },
+  ] as const)("allows unchanged membership through the real $kind/$stage await boundary", async ({ kind, stage }) => {
+    const caller = await callerFixture(kind, "teaching", false);
+    const result = await caller.run(stage);
+    // The same barrier hooks as the race cases ran, but admission did not change.
+    expect(caller.changePurpose).toHaveBeenCalledOnce();
+    expect(caller.provider.complete).toHaveBeenCalledOnce();
+    expect(caller.provider.complete.mock.calls[0]![0].chunks.map(chunk => chunk.sourceId)).toEqual([caller.source.id]);
+    if (kind === "saved") expect(result.stored[0]).toMatchObject({ status: "complete", text: callerOutput.text });
+    if (stage === "privacy-stream" || stage === "delivery-stream") expect(caller.released).toHaveBeenCalledOnce();
+    if (stage === "delivery-stream") expect(await f.sql`SELECT id FROM opening_help_exposures
+      WHERE workspace_id=${f.scope.workspaceId} AND context_anchor->>'sourceId'=${caller.source.id}
+        AND released_at IS NOT NULL`).toHaveLength(1);
+  });
+
+  it.each(["saved", "ephemeral"] as const)("rejects the %s caller after membership removal despite its saved source selection", async kind => {
+    const caller = await callerFixture(kind, "teaching");
+    await caller.courses.removeAssetMembership(caller.input);
+    await expect(caller.run()).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(caller.provider.complete).not.toHaveBeenCalled();
+    expect(caller.released).not.toHaveBeenCalled();
+    expect((await caller.getStored())[0]?.status).not.toBe("complete");
   });
 
   it.each((["saved", "ephemeral"] as const).flatMap(kind => (["pre-send", "stream", "final"] as const).map(stage => ({ kind, stage }))))("blocks %s caller output after the original purpose pin changes: $kind/$stage", async ({ kind, stage }) => {
