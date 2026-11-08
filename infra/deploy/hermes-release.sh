@@ -2,9 +2,12 @@
 # Runs on Hermes via deploy-hermes.sh. No in-place source deletion and no DB rollback.
 set -euo pipefail
 umask 077
-[[ $# == 11 ]] || { echo 'Invalid release arguments.' >&2; exit 2; }
+[[ $# == 11 || $# == 13 ]] || { echo 'Invalid release arguments.' >&2; exit 2; }
 ACTION=$1 DIR=$2 RELEASES_DIR=$3 CURRENT=$4 STATE=$5 BACKUPS=$6 SYSTEMD=$7 WORKER_CONFIG=$8 MIN_FREE_KB=$9
 COMMIT=${10} ARCHIVE=${11}
+ARTIFACT_DIGEST=${12:-} CONTROL_ARCHIVE=${13:-}
+CONTROL_ROOT=''
+CONTROL_DIR=''
 fail() { echo "[!] $*" >&2; exit 1; }
 for path in "$DIR" "$RELEASES_DIR" "$CURRENT" "$STATE" "$BACKUPS" "$SYSTEMD" "$WORKER_CONFIG"; do
   [[ "$path" =~ ^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$ && "$path" != *'/..'* && "$path" != *'/.' ]] \
@@ -251,6 +254,8 @@ finish() {
     else echo 'Automatic application rollback failed; inspect the retained deployment state immediately.' >&2; fi
   fi
   if [[ -n "$ARCHIVE" && "$ARCHIVE" =~ ^/tmp/aistudy-source\.[A-Za-z0-9]+\.tar\.gz$ ]]; then rm -f -- "$ARCHIVE"; fi
+  if [[ -n "$CONTROL_ARCHIVE" && "$CONTROL_ARCHIVE" =~ ^/tmp/aistudy-control\.[A-Za-z0-9]+\.tar\.gz$ ]]; then rm -f -- "$CONTROL_ARCHIVE"; fi
+  [[ -z "$CONTROL_ROOT" ]] || rm -rf -- "$CONTROL_ROOT"
   exit "$result"
 }
 trap 'finish $?' EXIT
@@ -346,8 +351,23 @@ else
     [[ "$available" =~ ^[0-9]+$ && "$available" -ge "$MIN_FREE_KB" ]] || fail 'Insufficient free disk space; live files and backups were retained.'
   done
   RELEASE="$RELEASES_DIR/$COMMIT-$(date -u +%Y%m%dT%H%M%S)-$$"
-  mkdir -m 755 -- "$RELEASE"
-  tar -xzf "$ARCHIVE" -C "$RELEASE"
+  if [[ -n "$ARTIFACT_DIGEST" || -n "$CONTROL_ARCHIVE" ]]; then
+    [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ && "$CONTROL_ARCHIVE" =~ ^/tmp/aistudy-control\.[A-Za-z0-9]+\.tar\.gz$ && -f "$CONTROL_ARCHIVE" ]] || fail 'Trusted artifact controls are missing.'
+    [[ "$MIN_FREE_KB" -ge 6291456 ]] || fail 'Artifact free-space floor is 6 GiB.'
+    # Separately git-produced controls arrive over strict SSH, not from artifact.
+    CONTROL_ROOT=$(mktemp -d "$STATE/control.XXXXXXXX")
+    tar -xzf "$CONTROL_ARCHIVE" -C "$CONTROL_ROOT"
+    CONTROL_DIR="$CONTROL_ROOT/infra/deploy"
+    node "$CONTROL_DIR/verify-release-artifact.mjs" extract "$ARCHIVE" "$RELEASE" "$COMMIT" "$ARTIFACT_DIGEST"
+    chmod 755 -- "$RELEASE"
+    # Match privileged controls to independently transported reviewed Git bytes;
+    # do not silently change the verified artifact tree or run blob-supplied code.
+    diff -qr -- "$CONTROL_DIR" "$RELEASE/infra/deploy" >/dev/null || fail 'Artifact privileged controls differ from trusted Git.'
+  else
+    mkdir -m 755 -- "$RELEASE"
+    tar -xzf "$ARCHIVE" -C "$RELEASE"
+    CONTROL_DIR="$RELEASE/infra/deploy"
+  fi
   # The version travels with the reviewed source. Unmarked historical archives
   # retain their original delivery-leases protocol, never acquire Study support.
   release_protocol=$WORKER_PROTOCOL
@@ -361,23 +381,31 @@ else
   fi
   chmod -R a+rX -- "$RELEASE"
   ln -s -- "$CONFIG" "$RELEASE/.env.production"
-  node "$RELEASE/infra/deploy/hermes-health.mjs" capture "$CONFIG" "$OLD_TARGET" "$WORKER_REQUIRED" "$TRANSITION/worker-identity.json"
+  node "$CONTROL_DIR/hermes-health.mjs" capture "$CONFIG" "$OLD_TARGET" "$WORKER_REQUIRED" "$TRANSITION/worker-identity.json"
   cd -- "$RELEASE"
-  npm ci --no-audit --no-fund > "$TRANSITION/install.log" 2>&1
-  # The caller verified this exact SHA's push CI (lint + typecheck) before deploy.
-  AISTUDY_COMMIT="$COMMIT" AISTUDY_RELEASE_VERIFIED_SHA=1 npm run build > "$TRANSITION/build.log" 2>&1
-  mkdir -p apps/web/.next/standalone/apps/web/.next/static apps/web/.next/standalone/apps/web/public
-  cp -a apps/web/.next/static/. apps/web/.next/standalone/apps/web/.next/static/
-  if [[ -d apps/web/public ]]; then cp -a apps/web/public/. apps/web/.next/standalone/apps/web/public/; fi
+  if [[ -z "$ARTIFACT_DIGEST" ]]; then
+    npm ci --no-audit --no-fund > "$TRANSITION/install.log" 2>&1
+    # Legacy source mode only; artifact rejection never enters this branch.
+    AISTUDY_COMMIT="$COMMIT" AISTUDY_RELEASE_VERIFIED_SHA=1 npm run build > "$TRANSITION/build.log" 2>&1
+    mkdir -p apps/web/.next/standalone/apps/web/.next/static apps/web/.next/standalone/apps/web/public
+    cp -a apps/web/.next/static/. apps/web/.next/standalone/apps/web/.next/static/
+    if [[ -d apps/web/public ]]; then cp -a apps/web/public/. apps/web/.next/standalone/apps/web/public/; fi
+  fi
   validate_target "$RELEASE"
   [[ -n "$(find apps/web/.next/standalone/apps/web/.next/static -type f -print -quit)" ]] || fail 'Standalone static assets are missing.'
-  cp -- "$RELEASE/infra/deploy/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
+  cp -- "$CONTROL_DIR/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
-  node "$RELEASE/infra/deploy/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   BACKUP="$BACKUPS/$(basename -- "$RELEASE").dump"
-  node "$RELEASE/infra/deploy/hermes-db.mjs" backup "$CONFIG" "$BACKUP"
+  if [[ -n "$ARTIFACT_DIGEST" ]]; then
+    for tool in pg_dump pg_restore; do
+      version=$("$tool" --version)
+      [[ "$version" =~ ^$tool\ \(PostgreSQL\)\ 16\. ]] || fail 'Artifact deployment requires PostgreSQL 16 backup tools.'
+    done
+  fi
+  node "$CONTROL_DIR/hermes-db.mjs" backup "$CONFIG" "$BACKUP"
   printf '%s\n' "$BACKUP" > "$TRANSITION/database-backup"
-  WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
+  WORKER_HELPER="$CONTROL_DIR/provision-worker.sh"
   [[ -f "$WORKER_HELPER" ]] || fail 'Release worker provisioning helper is missing.'
   snapshot_configuration "$TRANSITION"
   RECOVERY_REQUIRED=1
@@ -385,7 +413,7 @@ else
   # Claim-token fencing changes the worker write protocol. Drain/stop the old
   # process before migrating so unfenced code cannot write across the transition.
   stop_worker
-  node "$RELEASE/infra/deploy/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
+  node "$CONTROL_DIR/hermes-db.mjs" migrate "$CONFIG" "$RELEASE"
   touch "$TRANSITION/migration-succeeded"
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   printf '%s\n' "$release_protocol" > "$RELEASE/.worker-protocol"
