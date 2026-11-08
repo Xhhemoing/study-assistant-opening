@@ -295,6 +295,17 @@ it("retains completed retest review despite a now unavailable teaching binding",
   expect(await openCourseStudy(client, { ...options, taskId })).toMatchObject({ kind: "retest-review", task: selected });
   expect(client.createTeachingActivity).not.toHaveBeenCalled();
 });
+it("returns the precise static lesson navigation without ordinary creation or teaching resume", async () => {
+  const lesson = activity({ intentKind: "course_continue", contentVersion: 0, staticLesson: { protocol: "span-lesson-v1", sessionId: taskId } });
+  const client = api([lesson]);
+  const entry = { kind: "static-lesson", activity: lesson, href: `/opening/courses/${courseId}/study/span?lesson=${activityId}` };
+  expect(await openCourseStudy(client, options)).toEqual(entry);
+  client.listTeachingActivities.mockClear();
+  client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: { activityId, courseId, requirementKey: null } })] });
+  expect(await openCourseStudy(client, { ...options, taskId, activityId })).toEqual(entry);
+  expect(client.listTeachingActivities).not.toHaveBeenCalled();
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
 it("uses an older server task target instead of a newer course activity", async () => {
   const old = activity({ updatedAt: "2026-10-01T00:00:00Z" });
   const client = api([old, activity({ id: otherCourseId, updatedAt: "2026-11-01T00:00:00Z" })]);

@@ -5,7 +5,13 @@ import { buildStartLearningCreateInput } from "../teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
-export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+export type CourseStudyEntry = { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+
+function activityEntry(activity: TeachingActivity): CourseStudyEntry {
+  return activity.staticLesson && activity.courseId
+    ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?lesson=${encodeURIComponent(activity.id)}` }
+    : { kind: "activity", activity };
+}
 
 const TASK_UNAVAILABLE = "这项任务不属于本课程、尚未到开始时间或已结束，请返回课程重新选择。";
 const TARGET_CHANGED = "任务的学习目标已变化或链接不匹配，请返回课程重新选择；原活动仍保留。";
@@ -62,7 +68,7 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
             taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
             clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
           if (result.kind === "choice") return { kind: "route-choice", choice: result };
-          return { kind: "activity", activity: assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)) };
+          return activityEntry(assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)));
         }
       }
     }
@@ -74,7 +80,7 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
         const activity = assertCourseStudyActivity(await api.getTeachingActivity(target.activityId), options.courseId);
         if (!currentCourseActivity([activity], options.courseId, [target.activityId, ...(options.activityId ? [options.activityId] : [])])) throw new Error(TARGET_CHANGED);
         if ((activity.learnerFocus?.requirementKey ?? null) !== target.requirementKey) throw new Error(REQUIREMENT_CHANGED);
-        return { kind: "activity", activity: assertTaskRequirement(task, activity) };
+        return activityEntry(assertTaskRequirement(task, activity));
       }
     }
     if (task.suggestionKind === "review_cards") return { kind: "cards", task };
@@ -84,17 +90,17 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     if (!enabled || !options.compilerEnabled) return { kind: "practice", task };
     const input = buildStartLearningCreateInput({ localDate: "", courseId: options.courseId, taskId: task.id, courseTitle: task.title });
     const created = assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId);
-    return { kind: "activity", activity: assertTaskRequirement(task, created) };
+    return activityEntry(assertTaskRequirement(task, created));
   }
   // Standalone history links retain their existing behavior, but never take precedence over a task.
   if (options.activityId && enabled) {
     const activity = assertCourseStudyActivity(await api.getTeachingActivity(options.activityId), options.courseId);
-    return { kind: "activity", activity };
+    return activityEntry(activity);
   }
   const activities = enabled ? await api.listTeachingActivities() : [];
   const current = currentCourseActivity(activities, options.courseId);
-  if (current) return { kind: "activity", activity: current };
+  if (current) return activityEntry(current);
   if (!enabled || !options.compilerEnabled) return { kind: "practice" };
   const input = buildCourseStudyInput(options.courseId, options.courseTitle, activities, options.sourceIds);
-  return { kind: "activity", activity: assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId) };
+  return activityEntry(assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId));
 }

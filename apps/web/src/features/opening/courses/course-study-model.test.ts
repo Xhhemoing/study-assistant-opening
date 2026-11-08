@@ -7,6 +7,14 @@ it("shares descending tie order for course history and current selection", () =>
   expect(currentCourseActivity(rows, "course")?.id).toBe("z");
   expect(courseStudyActivities(rows, "course").map(row => row.id)).toEqual(["z", "a"]);
 });
+it("retains qualified static lessons in current and history but not checkpoint-shaped shells", () => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const lesson = activity("lesson", { intentKind: "course_continue", contentVersion: 0, staticLesson: { protocol: "span-lesson-v1", sessionId } });
+  const shell = activity("shell", { intentKind: "course_continue", contentVersion: 0, checkpointJson: { spanLesson: { sessionId } } });
+  expect(currentCourseActivity([lesson, shell], "course")).toEqual(lesson);
+  expect(courseStudyActivities([lesson, shell], "course")).toEqual([lesson]);
+  expect(currentCourseActivity([lesson], "other-course")).toBeNull();
+});
 it("keeps the legacy two-argument call and rejects invalid explicit references without fallback", () => {
   const rows = [activity("old"), activity("new", { updatedAt: "2026-11-02T00:00:00Z" }), activity("done", { status: "completed" }), activity("shell", { intentKind: "course_continue", contentVersion: 0 })];
   expect(currentCourseActivity(rows, "course")?.id).toBe("new");

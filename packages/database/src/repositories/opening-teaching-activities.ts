@@ -34,6 +34,8 @@ export function mapTeachingActivity(row: Record<string, unknown>): TeachingActiv
     checkpointJson: (row.checkpoint_json ?? undefined) as TeachingActivity["checkpointJson"],
     ...(focus.success ? { learnerFocus: focus.data } : {}),
     ...(goal?.courseRoute ? { routeManaged: true } : {}),
+    ...(typeof row.static_lesson_session_id === "string"
+      ? { staticLesson: { protocol: "span-lesson-v1" as const, sessionId: row.static_lesson_session_id } } : {}),
     clientKey: String(row.client_key),
     createdAt: learningIso(row.created_at)!,
     updatedAt: learningIso(row.updated_at)!,
@@ -46,8 +48,11 @@ export async function assertOwnedActivity(
   activityId: string,
 ): Promise<TeachingActivity> {
   const rows = await sql`
-    SELECT a.* FROM opening_teaching_activities a
+    SELECT a.*,s.id AS static_lesson_session_id FROM opening_teaching_activities a
     JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+    LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
+      AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
+      AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
     WHERE a.id = ${activityId}
       AND a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}`;
@@ -271,8 +276,11 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
 
     async listByOwner(scope: Scope): Promise<TeachingActivity[]> {
       const rows = await sql`
-        SELECT a.* FROM opening_teaching_activities a
+        SELECT a.*,s.id AS static_lesson_session_id FROM opening_teaching_activities a
         JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+        LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
+          AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
+          AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
         WHERE a.workspace_id = ${scope.workspaceId}
           AND a.owner_user_id = ${scope.ownerUserId}
         ORDER BY a.updated_at DESC, a.id`;

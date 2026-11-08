@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningPlansRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
-import { taskItemSchema, type TeachingActivity } from "@aistudy/contracts";
+import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
+import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
+import { DEFAULT_STUDY_SESSION_INTENT } from "@aistudy/domain";
 import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
+import { currentCourseActivity, courseStudyActivities } from "../../apps/web/src/features/opening/courses/course-study-model";
+import { navigateCourseStaticLesson } from "../../apps/web/src/features/opening/courses/course-study-workspace";
 let f: OpeningFixture;
 let courseId: string;
 beforeEach(async () => {
@@ -20,6 +24,82 @@ async function activity(options: { id?: string; course?: string; status?: string
       ${f.sql.json(options.taskId ? { source: "task", taskId: options.taskId } : {})},${options.at ?? "2026-11-01T00:00:00Z"})`;
   return id;
 }
+async function staticLesson() {
+  const seeds = backupRows(f.sql, f.scope), sourceId = await seeds.source();
+  await seeds.chunk(sourceId);
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
+  return createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT });
+}
+async function readFootprint() {
+  return {
+    activities: await f.sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    sessions: await f.sql`SELECT * FROM opening_learning_sessions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    jobs: await f.sql`SELECT * FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    outbox: await f.sql`SELECT * FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
+  };
+}
+it("recovers real owned static span through DB DTO, course selector, entry and workspace navigation without writes", async () => {
+  const lesson = await staticLesson(), teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  await activity({ at: "2000-01-01T00:00:00Z" }); // An older compiled activity must not win.
+  const before = await readFootprint();
+  const dto = teachingActivitySchema.parse(await teaching.assertOwnedActivity(f.scope, lesson.activityId));
+  expect(dto.staticLesson).toEqual({ protocol: "span-lesson-v1", sessionId: lesson.sessionId });
+  const rows = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(currentCourseActivity(rows, courseId)).toEqual(dto);
+  expect(courseStudyActivities(rows, courseId)[0]).toEqual(dto);
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({ activityId: lesson.activityId, sessionId: lesson.sessionId, courseId });
+  const api = { listTasks: vi.fn(async () => ({ tasks: [] })), listTeachingActivities: vi.fn(async () => rows),
+    getTeachingActivity: vi.fn((id: string) => teaching.assertOwnedActivity(f.scope, id)), createTeachingActivity: vi.fn() };
+  const options = { courseId, courseTitle: "Static span", compilerEnabled: true, archived: false, sourceIds: [] };
+  const entry = await openCourseStudy(api, options);
+  const href = `/opening/courses/${courseId}/study/span?lesson=${lesson.activityId}`;
+  expect(entry).toEqual({ kind: "static-lesson", activity: dto, href });
+  const navigate = vi.fn();
+  expect(navigateCourseStaticLesson(entry, navigate)).toBe(true);
+  expect(navigate).toHaveBeenCalledExactlyOnceWith(href);
+  api.listTeachingActivities.mockClear();
+  expect(await openCourseStudy(api, { ...options, activityId: lesson.activityId })).toEqual(entry);
+  expect(api.listTeachingActivities).not.toHaveBeenCalled();
+  expect(api.createTeachingActivity).not.toHaveBeenCalled();
+  expect(await readFootprint()).toEqual(before);
+  expect(teachingActivityCreateInputSchema.safeParse({ clientKey: randomUUID(), intentKind: "topic", intentSummary: "No qualification input", sourceIds: [], staticLesson: dto.staticLesson }).success).toBe(false);
+});
+it.each(["activity", "course", "workspace", "owner", "missing", "protocol"] as const)("does not project or restore static span with a %s mismatch", async mismatch => {
+  const lesson = await staticLesson(), teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  if (mismatch === "missing") await f.sql`UPDATE opening_teaching_activities SET checkpoint_json=${f.sql.json({ spanLesson: { sessionId: randomUUID() } })} WHERE id=${lesson.activityId}`;
+  else if (mismatch === "protocol") await f.sql`UPDATE opening_teaching_activities SET create_intent='{}'::jsonb WHERE id=${lesson.activityId}`;
+  else if (mismatch === "activity") {
+    const other = await activity();
+    await f.sql`UPDATE opening_learning_sessions SET activity_id=${other} WHERE id=${lesson.sessionId}`;
+  } else if (mismatch === "course") {
+    const other = randomUUID();
+    await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${other},${f.scope.workspaceId},'Other',${other})`;
+    await f.sql`UPDATE opening_learning_sessions SET course_id=${other} WHERE id=${lesson.sessionId}`;
+  } else if (mismatch === "workspace") await f.sql`UPDATE opening_learning_sessions SET workspace_id=${f.otherScope.workspaceId} WHERE id=${lesson.sessionId}`;
+  else await f.sql`UPDATE opening_learning_sessions SET owner_user_id=${f.otherScope.ownerUserId} WHERE id=${lesson.sessionId}`;
+  const before = await readFootprint();
+  const dto = teachingActivitySchema.parse(await teaching.assertOwnedActivity(f.scope, lesson.activityId));
+  expect(dto).not.toHaveProperty("staticLesson");
+  const rows = await teaching.listByOwner(f.scope);
+  expect(rows.find(row => row.id === lesson.activityId)).not.toHaveProperty("staticLesson");
+  expect(currentCourseActivity(rows.filter(row => row.id === lesson.activityId), courseId)).toBeNull();
+  expect(courseStudyActivities([dto], courseId)).toEqual([]);
+  const navigate = vi.fn();
+  expect(navigateCourseStaticLesson({ kind: "activity", activity: dto }, navigate)).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  await expect(teaching.assertOwnedActivity(f.otherScope, lesson.activityId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await readFootprint()).toEqual(before);
+});
+it("does not promote checkpoint-shaped legacy shells into static lesson qualification", async () => {
+  const shell = await activity({ placeholder: true });
+  await f.sql`UPDATE opening_teaching_activities SET checkpoint_json=${f.sql.json({ spanLesson: { sessionId: randomUUID() }, staticLesson: { protocol: "span-lesson-v1", sessionId: randomUUID() } })} WHERE id=${shell}`;
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  const dto = await teaching.assertOwnedActivity(f.scope, shell);
+  expect(dto).not.toHaveProperty("staticLesson");
+  expect(currentCourseActivity(await teaching.listByOwner(f.scope), courseId)).toBeNull();
+});
 it("uses stable DESC id ties inside the course and never crosses scope or course", async () => {
   const [lowId, highId] = [randomUUID(), randomUUID()].sort();
   const low = await activity({ id: lowId });
