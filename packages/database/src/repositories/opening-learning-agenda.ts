@@ -7,6 +7,8 @@ import { readOpeningLearnerState } from "./opening-learner-state-read";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import { readCourseRequirements, readCourseRouteObservations } from "./opening-course-route-read";
+import { courseRouteDecisionInput } from "./opening-course-route-decision-input";
 import { readLearningGoal } from "./opening-learning-goals";
 import { SPAN_TUTOR_EXECUTION_POLICY_VERSION } from "./opening-span-tutor-context";
 
@@ -97,7 +99,15 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
   }
   const invalidationReasons = [...new Set(reasons)];
   let observations: NextLearningStepInput["observations"] = [];
-  if (invalidationReasons.length && state) {
+  if (invalidationReasons.length && state && Object.keys(route).length) {
+    // Resolve current identity server-side in this scope, not from the old receipt
+    // or the key alone. Keep this consumer's evidence within the same course.
+    const requirement = (await readCourseRequirements(tx, scope, courseId)).find(row => row.id === route.requirementId);
+    if (requirement) {
+      const evidence = await readCourseRouteObservations(tx, scope, courseId, false);
+      observations = courseRouteDecisionInput(requirement, evidence.projected).observations;
+    }
+  } else if (invalidationReasons.length && state) {
     // Reuse the effective-head/privacy/context owner in this same read-only snapshot.
     // Its transaction boundary becomes a savepoint, never a second connection.
     const db = new Proxy(tx, { get(target, key, receiver) {
