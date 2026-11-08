@@ -61,6 +61,8 @@ export type CompileModelBlock = {
   type: (typeof COMPILE_MODEL_BLOCK_TYPES)[number];
   text: string;
   citedChunkIds: string[];
+  /** Invalid model claims remain observable after unknown ids are removed. */
+  rejectedCitationCount?: number;
   hints?: TeachingPartialHints;
   misconceptions?: TeachingMisconception[];
   startChoice?: TeachingStartChoice;
@@ -118,6 +120,8 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
       type: block.type as CompileModelBlock["type"],
       text: block.text.trim().slice(0, MODEL_TEXT_LIMIT),
       citedChunkIds: [...new Set(cited)].slice(0, 16),
+      ...(Array.isArray(block.citedChunkIds) && block.citedChunkIds.length !== cited.length
+        ? { rejectedCitationCount: block.citedChunkIds.length - cited.length } : {}),
       ...(hints?.success ? { hints: hints.data } : {}),
       ...(misconceptions?.success ? { misconceptions: misconceptions.data } : {}),
       ...(startChoice?.success ? { startChoice: startChoice.data } : {}),
@@ -146,7 +150,10 @@ export function parseCompileModelOutput(text: string, allowedChunkIds: ReadonlyS
 function blocksFromModel(blocks: CompileModelBlock[], newBlockId: () => string): CompileLibraryBlock[] {
   return blocks.map((block) => {
     const id = newBlockId();
-    const cite = block.citedChunkIds.length ? { citedChunkIds: block.citedChunkIds } : {};
+    const cite = {
+      ...(block.citedChunkIds.length ? { citedChunkIds: block.citedChunkIds } : {}),
+      ...(block.rejectedCitationCount ? { rejectedCitationCount: block.rejectedCitationCount } : {}),
+    };
     switch (block.type) {
       case "prompt":
         return { id, type: "prompt", role: "prompt", content: { text: block.text, ...(block.interaction ? { interaction: block.interaction } : {}), ...cite } };
@@ -468,6 +475,30 @@ function buildBlocksForItem(
 }
 
 /**
+ * Bind candidate citations to the server's exact evidence, for EVERY content
+ * block, including prompts and hidden keys. This proves location/identity only,
+ * never entailment, mathematical correctness or suitability as scored evidence.
+ * No model-supplied source/version/page or coverage verdict is accepted here.
+ */
+function bindBlockCitations(blocks: CompileLibraryBlock[], pack: TeachingEvidencePack): CompileLibraryBlock[] {
+  const chunks = new Map(pack.chunks.map(chunk => [chunk.id, chunk]));
+  return blocks.map(block => {
+    const candidates = Array.isArray(block.content.citedChunkIds) ? block.content.citedChunkIds : [];
+    const refs: Array<{ sourceId: string; sourceVersion: number; chunkId: string; page: number | null }> = [];
+    let mismatch = Number(block.content.rejectedCitationCount ?? 0) > 0;
+    for (const id of new Set(candidates)) {
+      const chunk = typeof id === "string" ? chunks.get(id) : undefined;
+      if (!chunk) { mismatch = true; continue; }
+      refs.push({ sourceId: chunk.sourceId, sourceVersion: chunk.sourceVersion, chunkId: chunk.id, page: chunk.page });
+    }
+    return { ...block, content: { ...block.content, citationBinding: {
+      blockId: block.id, role: block.role, status: mismatch ? "mismatch" : refs.length ? "bound" : "missing",
+      refs, factualSupport: "unverified",
+    } } };
+  });
+}
+
+/**
  * Compile the current (focus) outline item into publish graph + library drafts.
  * Prefetch at most one next skeleton when enabled. Does not wait for whole course.
  */
@@ -489,9 +520,9 @@ export function compileCurrentActivity(input: CompileCurrentInput): CompileCurre
   });
 
   const newBlockId = input.newBlockId ?? (() => newId());
-  const libraryBlocks = input.modelOutput
+  const libraryBlocks = bindBlockCitations(input.modelOutput
     ? blocksFromModel(input.modelOutput.blocks, newBlockId)
-    : buildBlocksForItem(focus, input.pack, newBlockId);
+    : buildBlocksForItem(focus, input.pack, newBlockId), input.pack);
   const blockOrder: TeachingBlockRef[] = libraryBlocks.map((b, position) => ({
     blockId: b.id,
     position,
@@ -638,7 +669,7 @@ export type BuildCompilerPublishInputOptions = {
   newBlockId?: () => string;
   /** Production with a real model: fail instead of publishing template blocks. */
   requireModelOutput?: boolean;
-  /** Course routes require a generated teaching/example block citing this evidence pack. */
+  /** Minimum generation condition only, NOT full citation coverage or factual verification. */
   requireMaterialCitations?: boolean;
 };
 
@@ -713,6 +744,18 @@ async function prepareCompile(
         operationId: `teaching:${payload.activityId}:${payload.expectedContentVersion}`,
         parentBudget: options.parentBudget,
       })).chunks : scopedChunks);
+  // The provider's pinned excerpts cannot reintroduce a revoked/private source
+  // or an old location/version removed by the current authorized chunk loader.
+  // Keep excerpt text as sent (retrieval may truncate it), not a fresh retrieval.
+  if (options.evidenceChunks && options.loadChunks) {
+    const current = new Map(scopedChunks.map(chunk => [chunk.id, chunk]));
+    for (const evidence of options.evidenceChunks) {
+      const chunk = current.get(evidence.id);
+      if (!chunk || chunk.sourceId !== evidence.sourceId || chunk.sourceVersion !== evidence.sourceVersion || chunk.page !== evidence.page) {
+        throw new TeachingCompileOutputError("teaching evidence is unavailable or its source version/location changed");
+      }
+    }
+  }
   let pack = assembleTeachingEvidencePack({
     chunks: evidenceChunks.filter(chunk => focusSources.has(chunk.sourceId) && sourceIds.includes(chunk.sourceId)),
     ranked: Boolean(options.retrieveContext || options.evidenceChunks),
@@ -860,8 +903,9 @@ export function createCompilerBuildPublishInput(
       ...(modelOutput ? { modelOutput } : {}),
     });
 
-    // The parser has already removed citations outside this exact evidence pack.
-    // Only model-written, learner-visible teaching counts, never a question or hidden key.
+    // Minimum material-based generation condition, not a coverage calculation.
+    // Per-block bindings retain missing/mismatched prompts, examples and hidden
+    // answers independently; one cited teaching block never means 100% coverage.
     if (options.requireMaterialCitations && !modelOutput?.blocks.some(block =>
       block.type !== "prompt" && block.type !== "answer_key" && block.citedChunkIds.length > 0)) {
       throw new TeachingCompileOutputError("course teaching requires a teaching block citing the material evidence pack");
