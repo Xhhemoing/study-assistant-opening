@@ -5,6 +5,74 @@ Scope: the Opening release slice (43-task plan in
 must run, what is verified, and what stays blocked. Release acceptance evidence is always bound to
 an exact commit SHA; a claim without a SHA is not evidence.
 
+## Prebuilt managed releases (opt-in; not a deployment record)
+
+The existing `.github/workflows/ci.yml` workflow (`CI`) retains all required
+checks. Its `build` / `production-build` job runs `npm ci` and the worker/web
+build, then on mainline pushes uploads `release-<full SHA>` containing only
+`release.tar.gz`, with GitHub build-provenance attestation. No checks are skipped
+or weakened for this path. A successful build job alone is not deploy approval:
+the latest exact-SHA push run and every required job, including the real worker
+browser gate, must have succeeded.
+
+For an isolated local build, use
+`bash infra/deploy/build-release-artifact.sh <new-output-directory>` from a clean
+checkout of the formal repository's current `feat/opening-release` tip. It builds
+from a disposable Git archive without loading local environment files. This
+local output is test material, **not** independently trusted deployment input;
+the managed download path currently accepts GitHub-hosted, attested CI output
+only. No arbitrary local archive or self-reported provenance option is provided.
+
+After the user approves the precise production use, the opt-in deployment
+interface is `HOST=<explicit-approved-target> TARGET_SHA=<full-SHA>
+ARTIFACT_RUN_ID=<successful-CI-run-ID> bash infra/deploy/deploy-hermes.sh deploy`
+(as one shell command). This documentation does not approve any target/version.
+The caller needs authenticated `gh` with Actions/attestation read access and a
+version supporting `attestation verify`, source-ref/source-digest restrictions,
+JSON output, and denial of self-hosted runners. It verifies the formal repo,
+workflow path, run/attempt, head SHA, latest successful push CI and required jobs,
+then verifies GitHub's signed attestation over the actual complete archive.
+The attestation's OIDC certificate `runInvocationURI` must match that precise
+run attempt; user-controlled predicate metadata is not accepted for this binding. A manifest or
+hash supplied by the archive never grants executable trust. Missing credentials,
+attestation support, expired artifacts, ambiguous responses or failed checks stop
+before activation, with no source-build fallback.
+
+The manifest records exact SHA/branch/mainline tip, lockfile SHA-256, builder
+Node/npm/OS/architecture/glibc, full file tree SHA-256 and individual file hashes,
+and complete installed standalone/worker dependency package versions. Worker
+build currently typechecks: its runtime still needs `tsx`, source and workspace
+packages. Those dependencies ship with the artifact, not a host-side install.
+The host must match the recorded platform **exactly**, including Node/npm/glibc;
+a runner/host mismatch is a refusal, not permission to change production config.
+The builder materializes in-checkout links; the extractor rejects all symlinks,
+hardlinks, absolute/traversal paths, special files, duplicate members and unsafe
+permissions before writes. It validates in private staging and renames only after
+full verification. Committed source and build/runtime roots are allowlisted;
+local `.env`, secrets, database dumps and private runtime caches do not ship.
+
+The deployment caller rechecks mainline tip/CI after download and transfer.
+Separately Git-archived control scripts travel over the existing strict SSH
+channel; the host uses that trusted verifier and requires artifact privileged
+helpers to match those Git bytes. The host does not run artifact install hooks,
+`npm ci`, or builds. Installed dependency code executes only after provenance,
+archive and tree checks, as part of the existing migration/application protocol.
+Minimum free disk remains mandatory on both release and backup destinations,
+with an enforced 6 GiB floor in artifact mode. PostgreSQL 16 dump/restore tools,
+readable backup, the existing unknown-history/checksum-drift migration checks,
+single transition lock, actual previous target/configuration/worker identity,
+protocol and persistent pause guards, health verification and managed failure
+rollback remain in place. Application rollback retains migrations; database
+restore is never automatic. No migration SQL, ledger, service configuration,
+SSH settings or production secrets are changed by introducing this interface.
+
+Without `ARTIFACT_RUN_ID`, the legacy managed source-build path remains
+available. An artifact-path error never selects it automatically. Before merge:
+independent GPT review and exact-head required CI remain mandatory; designated
+Opus review is required before deployment (and existing repository PR gates
+still apply). Browser acceptance belongs to the user. Stub tests and isolated
+build/package checks are not evidence of production deployment or optimization.
+
 ## 0108 release / rollback boundary (2026-11-08, not executed)
 
 [#230](https://github.com/Xhhemoing/study-assistant-opening/pull/230), frozen at
