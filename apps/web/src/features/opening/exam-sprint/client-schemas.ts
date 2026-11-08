@@ -63,7 +63,7 @@ export const overviewSchema: z.ZodType<ExamSprintOverview> = z.object({
       || receipt.clientKey !== c.clientKey || receipt.contentFingerprint !== c.contentFingerprint || receipt.mappingVersion !== c.mappingVersion
       || lessons.length !== 1 || !identity || identity.packVersion !== c.packVersion
       || identity.contentFingerprint !== c.contentFingerprint || identity.mappingVersion !== c.mappingVersion) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "转教学记录与原模拟、题目或曝光回执不一致", path: ["state", "runs"] });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "转教学记录与原模拟、题目或帮助记录不一致", path: ["state", "runs"] });
     }
   }
 });
