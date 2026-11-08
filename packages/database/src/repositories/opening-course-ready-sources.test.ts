@@ -39,6 +39,26 @@ function makeSql(opts: {
   return sql;
 }
 
+describe("explicit course source admission", () => {
+  it.each([
+    { use: "teaching" as const, expected: [S1, S2] },
+    { use: "practice" as const, expected: [S1, S2, "practice"] },
+    { use: "citation" as const, expected: [S1, S2, "practice", "reference"] },
+  ])("admits the live $use subset, not the explicit selection itself", async ({ use, expected }) => {
+    const sql = makeSql({ rows: [
+      { id: S1, purpose: null }, { id: S2, purpose: "teaching" },
+      { id: "practice", purpose: "practice" }, { id: "reference", purpose: "reference" }, { id: "exam", purpose: "mock_exam" },
+    ] });
+    const repo = createOpeningCourseReadySourcesRepository(sql);
+    await expect(repo.admitSourceIds(scope, COURSE, [S1, S2, "practice", "reference", "exam", "unlinked", S1], use))
+      .resolves.toEqual(expected);
+  });
+  it("does not admit a foreign/archived course even for explicit ids", async () => {
+    const repo = createOpeningCourseReadySourcesRepository(makeSql({ courseFound: false }));
+    await expect(repo.admitSourceIds(scope, COURSE, [S1], "citation")).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
 describe("listReadySourceIdsForCourse", () => {
   it("returns [] when course has no ready membership sources", async () => {
     const sql = makeSql({ rows: [] });

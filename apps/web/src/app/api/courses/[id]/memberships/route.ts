@@ -1,12 +1,13 @@
 import {
   addMembershipForPrincipal,
   removeMembershipForPrincipal,
+  updateMembershipPurposeForPrincipal,
   jsonError,
   mapDomainError,
   requirePrincipal,
 } from "../../../../../features/auth/service";
 import { getAuthRuntime } from "../../../../../server/runtime";
-import { addMembershipBodySchema, courseIdParamSchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema } from "../../../../../features/opening/courses/server/course-request-schemas";
+import { addMembershipBodySchema, courseIdParamSchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema, updateMembershipPurposeBodySchema } from "../../../../../features/opening/courses/server/course-request-schemas";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -26,6 +27,19 @@ export async function POST(
       body,
     );
     return Response.json({ membership }, { status: 201 });
+  } catch (error) {
+    return jsonError(mapDomainError(error));
+  }
+}
+
+export async function PATCH(request: Request, context: Params): Promise<Response> {
+  const runtime = getAuthRuntime();
+  try {
+    const principal = await requirePrincipal(runtime, request);
+    const id = parseCourseRequest(courseIdParamSchema, (await context.params).id);
+    const body = parseCourseRequest(updateMembershipPurposeBodySchema, await readCourseJson(request));
+    const membership = await updateMembershipPurposeForPrincipal(runtime, principal, id, body);
+    return Response.json({ membership });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }
