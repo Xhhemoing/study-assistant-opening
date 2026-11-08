@@ -8,7 +8,7 @@ import { backupRows } from "./opening-backup-records-fixture";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 
-// Storage-boundary tests only. Raw rows are deliberately NOT trusted candidate
+// Raw storage fixtures are deliberately NOT trusted candidate
 // admission, exposure-coverage evidence, ready eligibility or issuance evidence.
 let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
@@ -166,4 +166,60 @@ it("serializes racing reservations and rolls back a failed issue without half pu
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${x.scope.workspaceId}`).toHaveLength(0);
   expect(await f.sql`SELECT id FROM library_revisions WHERE workspace_id=${x.scope.workspaceId}`).toHaveLength(0);
   expect((await f.sql`SELECT state FROM opening_course_reserved_questions WHERE workspace_id=${x.scope.workspaceId}`)[0]!.state).toBe('reserved');
+});
+
+// Ledger storage boundaries only: no scanner/coverage authority is simulated here.
+async function insertExposure(overrides: { ownerUserId?: string; itemVersionId?: string; versions?: unknown; surfaceKey?: string; kind?: string; exact?: unknown; revision?: number } = {}) {
+  const id=randomUUID(), surfaceKey=overrides.surfaceKey ?? `presented:${id}`;
+  await f.sql`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,item_version_id,history_revision)
+    VALUES(${id},${f.scope.workspaceId},${overrides.ownerUserId ?? f.scope.ownerUserId},${surfaceKey},${overrides.kind ?? 'presented'},
+      ${overrides.exact === undefined ? null : f.sql.json(overrides.exact as never)},${f.sql.json((overrides.versions ?? {}) as never)},
+      ${overrides.itemVersionId ?? null},${overrides.revision ?? 0})`;
+  return id;
+}
+it("creates empty private exposure slots, defaults incomplete and preserves historical source snapshots",async()=>{
+  expect(await f.sql`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  await f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,0)`;
+  expect((await f.sql`SELECT complete FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`)[0]!.complete).toBe(false);
+  const sourceId=randomUUID(), versions={ [sourceId]: 1 }, id=await insertExposure({versions});
+  const [stored]=await f.sql`SELECT exact_content,source_versions FROM opening_course_question_exposures WHERE id=${id}`;
+  expect(stored).toMatchObject({exact_content:null,source_versions:versions});
+  // A historical/deleted source ref remains a negative-exposure fact, not a live-source FK.
+  const [index]=await f.sql`SELECT indexname FROM pg_indexes WHERE tablename='opening_course_question_exposures' AND indexname='opening_course_question_exposures_history_idx'`;
+  expect(index?.indexname).toBe('opening_course_question_exposures_history_idx');
+  const serialized=JSON.stringify(await readOpeningBackupRecords(f.sql,f.scope));
+  expect(serialized).not.toContain('opening_course_question_exposures');
+  expect(serialized).not.toContain('opening_course_question_exposure_coverage');
+});
+it("rejects cross-owner exposures and coverage, malformed facts and duplicate surfaces",async()=>{
+  await expect(insertExposure({ownerUserId:f.otherScope.ownerUserId})).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+    VALUES(${f.scope.workspaceId},${f.otherScope.ownerUserId},'course-question-exposure-1',0,0)`).rejects.toMatchObject({code:'23514'});
+  for(const patch of [{kind:'answer_key'},{surfaceKey:''},{exact:[]},{revision:-1},{versions:{bad:1}},{versions:{[randomUUID()]:-1}},{versions:{[randomUUID()]:'1'}}])
+    await expect(insertExposure(patch)).rejects.toMatchObject({code:'23514'});
+  const surfaceKey=randomUUID(); await insertExposure({surfaceKey});
+  await expect(insertExposure({surfaceKey})).rejects.toMatchObject({code:'23505'});
+  await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'unknown-protocol',0,0)`).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,covered_surface_count)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,-1)`).rejects.toMatchObject({code:'23514'});
+});
+it("binds optional issued item to the same scope and does not rewrite old exposure history",async()=>{
+  const x=await setup(), itemId=randomUUID(), otherActivity=await insertTestTeachingActivity(f.sql,f.otherScope);
+  await f.sql`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,source_id,source_version,stem_snapshot,artifact_kind)
+    VALUES(${itemId},${f.otherScope.workspaceId},${f.otherScope.ownerUserId},NULL,${otherActivity},${randomUUID()},NULL,NULL,'historical question','unknown')`;
+  await expect(insertExposure({itemVersionId:itemId})).rejects.toMatchObject({code:'23514'});
+  const ownedItem=randomUUID();
+  await f.sql`INSERT INTO opening_learning_item_versions(id,workspace_id,owner_user_id,course_id,activity_id,problem_id,source_id,source_version,stem_snapshot,artifact_kind)
+    VALUES(${ownedItem},${f.scope.workspaceId},${f.scope.ownerUserId},${x.courseId},${x.activityId},${randomUUID()},NULL,NULL,'historical question','unknown')`;
+  const id=await insertExposure({itemVersionId:ownedItem,exact:{question:'historical question',interaction:{kind:'text'},figures:[]}});
+  await expect(f.sql`UPDATE opening_course_question_exposures SET exact_content=NULL WHERE id=${id}`).rejects.toMatchObject({code:'23514'});
+  await expect(f.sql`UPDATE opening_course_question_exposures SET source_versions=${f.sql.json({[randomUUID()]:2})} WHERE id=${id}`).rejects.toMatchObject({code:'23514'});
+  await f.sql`UPDATE opening_course_question_exposures SET surface_key=surface_key WHERE id=${id}`;
+  await expect(f.sql.begin(async tx=>{
+    await tx`DELETE FROM opening_course_question_exposures WHERE id=${id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+    throw new Error('privacy transaction rollback');
+  })).rejects.toThrow('privacy transaction rollback');
+  expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE id=${id}`).toHaveLength(1);
 });
