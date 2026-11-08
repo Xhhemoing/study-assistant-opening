@@ -48,9 +48,6 @@ async function compile(x: Awaited<ReturnType<typeof seed>>) {
   const chunks = createOpeningSourceChunksRepository(f.sql);
   const deps = createCompileTeachingUnitWorkerDeps(f.sql, { budget: createOpeningBudgetRepository(f.sql), chunks,
     privacy: createOpeningPrivacyRepository(f.sql) });
-  const evidence = await chunks.listForSources(f.scope, [x.sourceId]);
-  deps.buildProviderInput = async () => ({ instruction: "controlled compiler fixture", text: "no real model", chunks: evidence,
-    mode: "explain", maxOutputTokens: 5500, mediaCapability: "text_only", imageParts: [], outputFormat: "json" });
   deps.callModel = async (_scope, _input, options) => {
     await options.beforeSend?.();
     return { text: JSON.stringify({ blocks: [
