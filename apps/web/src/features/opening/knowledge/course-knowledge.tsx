@@ -7,6 +7,7 @@ import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { ConfirmKnowledgeNode } from "./confirm-knowledge-node";
 
 const KIND_ORDER: Record<KnowledgeNode["kind"], number> = {
   chapter: 0, concept: 1, procedure: 2, problem_type: 3,
@@ -41,6 +42,21 @@ export function nextStepCta(
   return { href: `?${params.toString()}#course-practice`, label, reason: action.reason };
 }
 
+type KnowledgeRecord = Awaited<ReturnType<OpeningApi["getCourseKnowledge"]>>;
+
+/**
+ * State after a server-confirmed node: the returned record replaces local graph state (so sibling
+ * confirmations pin the new version), and an open evidence panel follows the same node id.
+ */
+export function confirmedKnowledgeState(next: KnowledgeRecord) {
+  return {
+    record: next,
+    snapshot: next.snapshot,
+    selected: (previous: KnowledgeNode | null) =>
+      previous ? next.snapshot.nodes.find(item => item.id === previous.id) ?? null : null,
+  };
+}
+
 export function CourseKnowledge({
   courseId,
   api: supplied,
@@ -50,6 +66,7 @@ export function CourseKnowledge({
 }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const [snapshot, setSnapshot] = useState<KnowledgeSnapshot | null>(null);
+  const [record, setRecord] = useState<KnowledgeRecord | null>(null);
   const [actions, setActions] = useState<ThinTutorActionView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -57,22 +74,28 @@ export function CourseKnowledge({
   const [selected, setSelected] = useState<KnowledgeNode | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
+  const loadActions = useCallback(async (knowledge: KnowledgeSnapshot) => {
+    try {
+      const tutor = await api.listTutorActions({
+        courseId,
+        skillLabel: knowledge.nodes.find((n) => n.kind === "chapter")?.label
+          ?? knowledge.nodes[0]?.label
+          ?? "课程",
+      });
+      setActions(tutor.slice(0, 3));
+    } catch {
+      setActions([]);
+    }
+  }, [api, courseId]);
+
   const load = useCallback(async () => {
     setLoading(true); setError(""); setUnavailable(false);
     try {
       const knowledge = await api.getCourseKnowledge(courseId);
       setSnapshot(knowledge.snapshot);
-      try {
-        const tutor = await api.listTutorActions({
-          courseId,
-          skillLabel: knowledge.snapshot.nodes.find((n) => n.kind === "chapter")?.label
-            ?? knowledge.snapshot.nodes[0]?.label
-            ?? "课程",
-        });
-        setActions(tutor.slice(0, 3));
-      } catch {
-        setActions([]);
-      }
+      setRecord(knowledge);
+      setSelected(null);
+      await loadActions(knowledge.snapshot);
     } catch (reason) {
       const message = userFacingMessage(reason, "课程知识暂时无法读取");
       if (/503|不可用|not configured|CONFIGURATION/i.test(message)) {
@@ -85,7 +108,7 @@ export function CourseKnowledge({
     } finally {
       setLoading(false);
     }
-  }, [api, courseId]);
+  }, [api, courseId, loadActions]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -168,6 +191,12 @@ export function CourseKnowledge({
                   {node.label}
                   <span className="ml-2 font-normal text-text-2">{knowledgeKindLabel[node.kind]} · {knowledgeStatusLabel[node.status]}</span>
                 </button>
+                {record ? <ConfirmKnowledgeNode node={node} record={record} api={api} onReload={() => void load()}
+                  onConfirmed={next => {
+                    const state = confirmedKnowledgeState(next);
+                    setRecord(state.record); setSnapshot(state.snapshot); setSelected(state.selected);
+                    void loadActions(next.snapshot);
+                  }} /> : null}
               </li>
             ))}
           </ul>

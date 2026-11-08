@@ -529,6 +529,19 @@ export function createOpeningApi(transport: FetchLike = fetch) {
         }), body);
     },
 
+    async confirmKnowledgeNode(courseId: string, input: {
+      nodeId: string; expectedVersion: number; sourceVersions: Record<string, number>;
+    }) {
+      const body = await request(`/api/opening/courses/${courseId}/knowledge/confirm`, {
+        method: "POST", body: JSON.stringify(input),
+      }, fetchImpl);
+      return parseOpeningResponse(z.object({
+        version: z.number().int().nonnegative(),
+        snapshot: knowledgeSnapshotSchema,
+        sourceVersions: z.record(z.string(), z.number().int().nonnegative()),
+      }), body);
+    },
+
     async getLearning(courseId: string) {
       const body = await request(`/api/opening/courses/${courseId}/learning`, { method: "GET" }, fetchImpl);
       return parseOpeningResponse(z.array(learningSummarySchema), body);
