@@ -47,6 +47,15 @@ function sameGraph(left: KnowledgeSnapshot, right: KnowledgeSnapshot): boolean {
   return strip(left) === strip(right);
 }
 
+/** Status-only worker classification is not a new graph; every semantic edit is. */
+function sameConfirmationGraph(left: KnowledgeSnapshot, right: KnowledgeSnapshot): boolean {
+  const content = (snapshot: KnowledgeSnapshot) => JSON.stringify({
+    nodes: snapshot.nodes.map(({ status: _status, ...node }) => node),
+    edges: snapshot.edges.map(({ status: _status, ...edge }) => edge),
+  });
+  return content(left) === content(right);
+}
+
 function parseSourceVersions(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out: Record<string, number> = {};
@@ -228,7 +237,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
         if (!node.evidenceChunkIds.length) throw new OpeningKnowledgeError("CONFLICT", "尚无材料依据，请先补充材料。");
         const evidenceIds = evidenceSet(node.evidenceChunkIds);
-        // Live source rows are locked until commit. markNeedsCheck does not bump graph versions.
+        // Live source rows are locked until commit; maintenance also advances the graph CAS fence.
         // Validate the complete observed source set as well as the selected node's evidence.
         const sourceIds = Object.keys(input.sourceVersions).sort();
         const sources = sourceIds.length ? await tx`SELECT s.id,s.version FROM opening_sources s
@@ -355,7 +364,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
 
         if (current && currentVersion === newVersion) {
           const existing = mapRecord(current);
-          if (sameGraph(existing.snapshot, draft)) return existing;
+          if (sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
         }
         if (currentVersion !== input.expectedVersion) {
           throw new OpeningKnowledgeError("CONFLICT", "stale knowledge version");
@@ -382,6 +391,11 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           }
         }
 
+        // A confirmation belongs to the whole observed graph/source set. Once either changes,
+        // delete the receipt in this transaction: changing back must not resurrect approval.
+        const confirmationContextUnchanged = previous !== null
+          && sameConfirmationGraph(previous.snapshot, draft)
+          && sameVersions(previous.sourceVersions, sourceVersions);
         // Restore only this exact confirmed evidence/version set, after normal worker classification.
         // UUID/definition guards above still apply. A changed source is never a permanent exemption.
         const confirmations = await tx`SELECT DISTINCT ON (node_id) node_id,node_label,node_kind,source_versions,evidence_chunk_ids
@@ -391,10 +405,13 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         const nodes = draft.nodes.map(node => {
           const existing = previous?.snapshot.nodes.find(item => item.id === node.id);
           const confirmation = confirmations.find(item => item.node_id === node.id);
-          const confirmed = existing && confirmation && node.label === confirmation.node_label && node.kind === confirmation.node_kind
+          const confirmed = confirmationContextUnchanged && existing && confirmation
+            && definitions[node.id] === previousDefinitions[node.id]
+            && node.label === confirmation.node_label && node.kind === confirmation.node_kind
             && node.evidenceChunkIds.length > 0
             && JSON.stringify(evidenceSet(node.evidenceChunkIds)) === JSON.stringify(confirmation.evidence_chunk_ids)
             && sameVersions(nodeSourceVersions(node.evidenceChunkIds, evidence), parseSourceVersions(confirmation.source_versions));
+          if (confirmation && !confirmed) return { ...node, status: "needs_check" as const };
           if (input.expectedReferencedNodeIds && confirmed && (node.status === "needs_check" || node.status === "supported")) {
             return { ...node, status: "supported" as const };
           }
@@ -422,14 +439,12 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           WHERE opening_course_knowledge.version = ${input.expectedVersion}
           RETURNING version, snapshot, source_versions`;
         if (!rows.length) throw new OpeningKnowledgeError("CONFLICT", "knowledge replace raced");
-        // Withdrawn confirmations never come back: a node removed from the graph, or manually moved off
-        // supported, must be re-checked by the learner even if the same UUID/evidence reappears later.
-        // markNeedsCheckForSources does not pass through here and keeps confirmations; the restore
-        // condition above already requires the exact confirmed source versions.
+        // All invalidated receipts are removed, including receipts for nodes no longer present.
         const nextStatus = new Map(nodes.map(node => [node.id, node.status]));
-        const revoked = (previous?.snapshot.nodes ?? []).filter(node => !nextStatus.has(node.id)
-          || (!input.expectedReferencedNodeIds && node.status === "supported" && nextStatus.get(node.id) !== "supported"))
-          .map(node => node.id).sort();
+        const revoked = confirmations.filter(confirmation => !confirmationContextUnchanged
+          || !nextStatus.has(String(confirmation.node_id))
+          || nextStatus.get(String(confirmation.node_id)) !== "supported")
+          .map(confirmation => String(confirmation.node_id)).sort();
         if (revoked.length) {
           await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
             AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND node_id IN ${tx(revoked)}`;
@@ -498,6 +513,10 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       const ids = [...new Set(sourceIds)].sort();
       if (!ids.length) return { updated: 0, courseIds: [] };
       return sql.begin(async (tx) => {
+        // Same workspace -> graph order as confirm/replace; maintenance cannot race a receipt insert.
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner.length) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
         const rows = await tx`
           SELECT workspace_id, course_id, version, snapshot, source_versions
           FROM opening_course_knowledge
@@ -511,6 +530,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           if (!ids.some((id) => id in sourceVersions)) continue;
           const courseId = String(row.course_id);
           courseIds.push(courseId);
+          // Revoke even if the graph was already needs_check; the CAS fence advances below.
+          await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
           const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
           let dirty = false;
           const nodes = snapshot.nodes.map((node) => {
@@ -523,15 +545,17 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             dirty = true;
             return { ...edge, status: "needs_check" as const };
           });
-          if (!dirty) continue;
-          const next: KnowledgeSnapshot = { ...snapshot, nodes, edges };
+          // Even an already-pending graph needs a new CAS fence: a confirmation submitted before
+          // this maintenance must conflict after it, rather than approve the invalidated view.
+          const version = Number(row.version) + 1;
+          const next: KnowledgeSnapshot = { ...snapshot, version, nodes, edges };
           await tx`
             UPDATE opening_course_knowledge
-            SET snapshot = ${tx.json(next as never)}, updated_at = now()
+            SET version = ${version}, snapshot = ${tx.json(next as never)}, updated_at = now()
             WHERE workspace_id = ${row.workspace_id as string}
               AND course_id = ${row.course_id as string}
               AND version = ${Number(row.version)}`;
-          updated += 1;
+          if (dirty) updated += 1;
         }
         return { updated, courseIds };
       });

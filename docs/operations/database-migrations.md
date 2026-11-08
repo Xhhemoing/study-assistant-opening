@@ -142,7 +142,51 @@ ORDER BY tgname;
 
 两行的 `tgenabled` 都必须为 `O`。对升级前记录的 workspace、document、block、revision、relation、property、course 和 membership 行数逐项比较，任何减少都阻断发布。
 
-## 7. 失败恢复
+## 7. 0108 确认协议的兼容恢复边界（执行仍需另批）
+
+0108 是增量建表，但这**不意味着任意旧应用可以安全回退**。旧 runner 不认识
+`0108_opening_knowledge_confirmations.sql`，仍必须报 `MIGRATION_UNKNOWN_HISTORY`；旧 writer
+不会完整撤回确认，不能恢复写入。禁止 `allowUnknown`、down DDL、删表、删除或伪造
+ledger/checksum/attestation，也不通过修改 `OLD_TARGET` 或 transition 绕过受管流程。
+
+本次新增的是 **reader/writer 兼容锚点和只读资格报告**，不是历史制品的通用豁免：
+
+- canonical owner 仍是 `packages/database/src/migrate.ts`，不存在独立 migration-registry。
+- 仅认识真实、连续的 0001..0108：逐行要求原始 `verified` checksum；107 尚未升级、
+  unknown 0109、legacy-unverified、checksum 漂移、缺失确认表/约束/索引都拒绝。
+  preflight 不 bootstrap registry、不补写 checksum、不自动执行 0108。
+- 候选须带完整相同 migration inventory；其 runner、knowledge repository、受管 DB helper
+  的实际内容必须等于执行 preflight 的可信锚点，且匹配独立审查发布清单里的内容摘要。
+  这不是任意输入字符串的能力声明，也不接受候选自行上报“兼容”。此 profile 仅针对
+  未修改的 source release；编译包、其它依赖和整个制品的供应链真实性仍由精确 SHA 的
+  发布清单、审查和 CI 保证，报告不替代这些门禁。当前没有自动批准的历史恢复目标。
+- 新 writer 在图的节点/边内容或完整 source version 集合变化后撤回确认；相同内容的
+  worker status 重分类才可保留。手动撤销、删除节点和 source maintenance 都删除 receipt，
+  即使节点已是 needs_check 也删除；变回旧图/旧源不能复活旧确认。
+  confirm/replace/maintenance 按 workspace → graph 顺序串行；maintenance 即使 status 未变也
+  推进 graph version 的 CAS 栅栏，使维护前提交的确认冲突，失败事务不得留下半次确认。
+
+在已获得单独的操作授权、独立核准兼容锚点和候选精确 SHA 后，可由受管操作人员运行：
+
+```bash
+node <trusted-anchor>/infra/deploy/hermes-db.mjs confirmation-recovery-preflight \
+  <private-config-file> <candidate-source-release> <reviewed-content-digest>
+```
+
+内容摘要的算法是 SHA-256，按以下顺序串联每个相对路径、NUL、原始文件字节、NUL：
+`packages/database/src/migrate.ts`、`packages/database/src/repositories/opening-knowledge.ts`、
+`infra/deploy/hermes-db.mjs`。摘要须从独立审查过的版本生成和保存，不从不可信候选取值。
+JSON 报告只含 profile、ledgerThrough、migrationChecksum、artifactContentDigest、writerProtocol、
+readOnly 和 automaticRecovery，不含数据库地址、账号或学习资料。helper 用可信锚点的
+runner 执行，只读 repeatable-read 事务核对数据库，不执行候选代码。
+
+**报告是时点观测，不是恢复许可证或数据库 attestation。** 写入应保持停止；任何目标、
+ledger、schema 或制品变化后报告失效，必须重新核对。现有 deploy/release 脚本没有接入
+这一动作；它不会迁移、切指针、改 transition、恢复服务或恢复 writer。若受管流程只能回到
+能力不足的旧目标，结论就是不可恢复，保持停写并提交 forward-fix/新兼容 reader-writer
+锚点方案，不能偷偷更换恢复目标。迁移执行、含迁移部署、真正恢复演练及新发布顺序均另批。
+
+## 8. 失败恢复
 
 - preflight、attestation 或 `0004` 失败：保持服务停止，保存错误与数据库状态；修正受控映射或 attestation 后重试，或恢复到已验证备份。
 - 已记录旧版 `0003` 且数据已被删除：`0004_identity_repair.sql` 无法恢复数据。必须从已验证备份恢复到隔离环境，确认完整性后执行正式恢复；无备份时阻断发布并进入人工数据重建流程。

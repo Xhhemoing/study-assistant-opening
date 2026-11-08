@@ -5,6 +5,28 @@ Scope: the Opening release slice (43-task plan in
 must run, what is verified, and what stays blocked. Release acceptance evidence is always bound to
 an exact commit SHA; a claim without a SHA is not evidence.
 
+## 0108 compatibility recovery boundary (execution not authorized)
+
+The manual-confirmation stack includes migration 0108. Do not describe the full stack as
+migration-free, even when the follow-up compatibility change does not add another migration.
+Migration execution, a migration-bearing deployment and any revised deployment/recovery order
+require separate explicit authorization. Browser acceptance remains with the user.
+
+The only new recovery object is the reviewed **compatibility reader/writer anchor** described in
+[database migrations §7](database-migrations.md#7-0108-确认协议的兼容恢复边界执行仍需另批).
+The additive table alone does not make an older writer safe: historical runners still reject
+unknown 0108, and writers lacking graph/source/revocation maintenance are not eligible. Keep
+writers stopped if the managed old target lacks these capabilities; propose a forward fix, do
+not change OLD_TARGET, transition state, ledger or table contents to simulate recoverability.
+
+`hermes-db.mjs confirmation-recovery-preflight` is a separate read-only observation using the
+trusted anchor, exact 0001..0108 verified checksums, confirmation-table catalog checks and a
+reviewed source-content digest. It emits a JSON report only, never migrations, pointer changes
+or writer resume. Existing deploy/release scripts are unchanged and do **not** consume that
+report automatically. A successful report is neither a completed restore drill nor permission
+to deploy; exact artifact SHA, required CI, designated reviews, backup/restore evidence and
+operator authorization remain required. No historical artifact is automatically allowlisted.
+
 ## System query default (2026-10-21)
 
 `OPENING_SYSTEM_QUERY` now defaults to `1` when unset, including on existing

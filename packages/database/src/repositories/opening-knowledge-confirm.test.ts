@@ -63,6 +63,7 @@ function replaceFixture(old: KnowledgeSnapshot, options: { chunks?: ReturnType<t
     chunks.map(row => ({ id: row.id, sourceId, sourceVersion: row.source_version, text: row.text, page: 1,
       slideLabel: null, startMs: null, endMs: null, imageObjectKey: null })))]));
   const deletes: Array<{ query: string; values: unknown[] }> = [];
+  const updates: unknown[][] = [];
   const sql = ((strings: TemplateStringsArray | unknown[], ...values: unknown[]) => {
     if (!Object.hasOwn(strings, "raw")) return strings;
     const query = strings.join("?");
@@ -71,6 +72,9 @@ function replaceFixture(old: KnowledgeSnapshot, options: { chunks?: ReturnType<t
       source_versions: sourceVersions, node_definitions: definitions }]);
     if (query.includes("SELECT c.*")) return Promise.resolve(chunks);
     if (query.includes("FROM opening_skill_evidence")) return Promise.resolve([]);
+    if (query.includes("SELECT workspace_id, course_id")) return Promise.resolve([{ workspace_id: scope.workspaceId,
+      course_id: courseId, version: 2, snapshot: old, source_versions: sourceVersions }]);
+    if (query.includes("UPDATE opening_course_knowledge")) { updates.push(values); return Promise.resolve([]); }
     if (query.includes("SELECT DISTINCT ON (node_id)")) return Promise.resolve([options.confirmation ?? { node_id: nodeId,
       source_versions: sourceVersions, evidence_chunk_ids: [chunkId], node_label: "函数", node_kind: "concept" }]);
     if (query.includes("INSERT INTO opening_course_knowledge")) return Promise.resolve([{ version: values[3], snapshot: values[4], source_versions: values[5] }]);
@@ -79,7 +83,7 @@ function replaceFixture(old: KnowledgeSnapshot, options: { chunks?: ReturnType<t
   }) as unknown as Sql;
   sql.json = (value => value) as Sql["json"];
   sql.begin = ((callback: (tx: Sql) => unknown) => callback(sql)) as Sql["begin"];
-  return { repo: createOpeningKnowledgeRepository(sql), deletes };
+  return { repo: createOpeningKnowledgeRepository(sql), deletes, updates };
 }
 const graph = (nodes: Node[]): KnowledgeSnapshot => ({ courseId, version: 2, nodes, edges: [] });
 const node = (overrides: Partial<Node> = {}): Node => ({ id: nodeId, courseId, label: "函数", kind: "concept",
@@ -157,8 +161,8 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     expect(result.snapshot.nodes[0]!.id).toBe(draft.nodes[0]!.id);
     expect(result.snapshot.nodes[0]!.evidenceChunkIds).toEqual(draft.nodes[0]!.evidenceChunkIds);
     expect(result.sourceVersions).toEqual(versions);
-    // Only a node that left the graph loses its confirmation; worker reclassification keeps it.
-    expect(deletes).toEqual(change === "different-node" ? [[scope.workspaceId, scope.ownerUserId, courseId, [nodeId]]] : []);
+    // A changed graph/source/identity invalidates the receipt permanently, not just this rebuild.
+    expect(deletes).toEqual(change !== "same" ? [[scope.workspaceId, scope.ownerUserId, courseId, [nodeId]]] : []);
   });
   it.each([
     ["manual supported -> needs_check", undefined, "needs_check", [nodeId]],
@@ -180,11 +184,33 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     expect(f.deletes[0]!.query).toMatch(/workspace_id=\?\s+AND owner_user_id=\? AND course_id=\? AND node_id IN \?/);
     expect(f.deletes[0]!.values).toEqual([scope.workspaceId, scope.ownerUserId, courseId, [nodeId]]);
   });
-  it("leaves needs_check -> needs_check manual edits (e.g. after markNeedsCheckForSources) without deleting", async () => {
+  it("revokes a residual receipt even when the manual graph is already needs_check", async () => {
     const f = replaceFixture(graph([node({ status: "needs_check" })]));
     const result = await f.repo.replace(scope, courseId, { expectedVersion: 2, snapshot: graph([node({ status: "needs_check" })]), sourceVersions });
     expect(result.snapshot.nodes[0]!.status).toBe("needs_check");
-    expect(f.deletes).toEqual([]);
+    expect(f.deletes.map(item => item.values)).toEqual([[scope.workspaceId, scope.ownerUserId, courseId, [nodeId]]]);
+  });
+  it.each(["other-node", "edge", "source-set"] as const)("revokes confirmation on whole graph/context change: %s", async change => {
+    const old = graph([node(), node({ id: id(9), label: "映射", status: "needs_check" })]);
+    const f = replaceFixture(old);
+    const draft = structuredClone(old);
+    if (change === "other-node") draft.nodes.pop();
+    if (change === "edge") draft.edges.push({ from: nodeId, to: id(9), kind: "prerequisite", status: "supported", evidenceChunkIds: [chunkId] });
+    const versions = change === "source-set" ? { [sourceId]: 2 } : sourceVersions;
+    const replacement = change === "source-set" ? replaceFixture(old, { chunks: [chunkRow(chunkId, 2)] }) : f;
+    const result = await replacement.repo.replace(scope, courseId, { expectedVersion: 2, expectedReferencedNodeIds: [],
+      snapshot: draft, sourceVersions: versions });
+    expect(result.snapshot.nodes[0]!.status).toBe("needs_check");
+    expect(replacement.deletes.map(item => item.values)).toEqual([[scope.workspaceId, scope.ownerUserId, courseId, [nodeId]]]);
+  });
+  it.each(["supported", "needs_check"] as const)("source maintenance revokes receipts even from %s graphs", async status => {
+    const f = replaceFixture(graph([node({ status })]));
+    const result = await f.repo.markNeedsCheckForSources(scope, [sourceId]);
+    expect(result).toEqual({ updated: status === "supported" ? 1 : 0, courseIds: [courseId] });
+    expect(f.deletes.map(item => item.values)).toEqual([[scope.workspaceId, scope.ownerUserId, courseId]]);
+    expect(f.updates).toHaveLength(1);
+    expect(f.updates[0]![0]).toBe(3);
+    expect(f.updates[0]![1]).toMatchObject({ version: 3, nodes: [{ status: "needs_check" }] });
   });
   it("does not delete on a stale-version conflict", async () => {
     const f = replaceFixture(graph([node()]));
