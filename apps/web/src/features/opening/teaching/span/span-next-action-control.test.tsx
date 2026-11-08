@@ -4,11 +4,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { LearningObservation } from "@aistudy/contracts";
 vi.mock("../../v3/motion/view-transition", () => ({ TransitionLink: "a" }));
-import { SpanNextActionControl, currentSpanObservationId } from "./span-next-action-control";
+import { SpanNextActionControl, currentSpanObservationId, readSpanNextResult } from "./span-next-action-control";
 beforeAll(async () => { await import("./span-lesson"); }, 30_000);
 const id = "11111111-1111-4111-8111-111111111111", nextId = "22222222-2222-4222-8222-222222222222", courseId = "33333333-3333-4333-8333-333333333333";
 const session = { activityId: id, sessionId: id, courseId, revision: 3 };
 const href = `/opening/courses/${courseId}/study/span?lesson=${nextId}`;
+const limitChoice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、重新诊断或暂缓。原答案保留。",
+  primary: { label: "回原活动选择串讲", href: `/opening/courses/${courseId}/study/span?lesson=${id}` },
+  secondary: { label: "到学习入口明确选择", href: `/opening/courses/${courseId}/study` } };
 const ready = { kind: "ready", href, activityId: nextId, sessionId: nextId, courseId, label: "开始下一道新题", resumed: false };
 let host: HTMLDivElement, root: Root;
 beforeEach(() => { vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true); vi.stubGlobal("fetch", vi.fn(async () => Response.json(ready))); host = document.createElement("div"); document.body.append(host); root = createRoot(host); });
@@ -61,6 +64,57 @@ it("requires rereading after a definite stale-origin rejection instead of silent
   expect(reload).toHaveBeenCalledOnce();
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+it("parses remediation_limit and keeps safe server links when progress callbacks are absent", async () => {
+  expect(readSpanNextResult(limitChoice, courseId)).toEqual(limitChoice);
+  vi.mocked(fetch).mockResolvedValue(Response.json(limitChoice));
+  const { navigate } = await render();
+  expect(fetch).not.toHaveBeenCalled();
+  await act(async () => button("安排下一步学习").click());
+  expect(host.textContent).toContain(limitChoice.message);
+  expect(host.querySelectorAll("a")).toHaveLength(2);
+  expect(host.querySelector("a")?.getAttribute("href")).toBe(limitChoice.primary.href);
+  expect(host.querySelectorAll("button")).toHaveLength(0);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each(["primary", "secondary"] as const)("rejects cross-course and external remediation %s links", key => {
+  for (const href of ["https://evil.test", `/opening/courses/${id}/study`, `//opening.local/opening/courses/${courseId}/study`]) {
+    expect(() => readSpanNextResult({ ...limitChoice, [key]: { label: "x", href } }, courseId)).toThrow();
+  }
+});
+
+it("only changes explanation on click, blocks duplicate actions, and preserves the choice for a failed save retry", async () => {
+  let finish!: (saved: boolean) => void;
+  const change = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; })), pause = vi.fn(async () => true);
+  const navigate = vi.fn();
+  let respond!: (response: Response) => void;
+  vi.mocked(fetch).mockImplementation(() => new Promise(resolve => { respond = resolve; }));
+  await act(async () => root.render(<SpanNextActionControl session={session} observationId={id} onNavigate={navigate} onChangeExplanation={change} onPause={pause} />));
+  expect(change).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  await act(async () => button("安排下一步学习").click());
+  expect(change).not.toHaveBeenCalled();
+  await act(async () => respond(Response.json(limitChoice)));
+  expect(change).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled(); expect(navigate).not.toHaveBeenCalled();
+  await act(async () => { button("换个讲法").click(); button("换个讲法").click(); button("暂缓并保存").click(); });
+  expect(change).toHaveBeenCalledTimes(1); expect(pause).not.toHaveBeenCalled();
+  const diagnostic = host.querySelector("a")!;
+  expect(diagnostic.getAttribute("href")).toBe(limitChoice.secondary.href);
+  expect(diagnostic.getAttribute("aria-disabled")).toBe("true");
+  await act(async () => finish(false));
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("保存未确认");
+  expect(host.textContent).toContain(limitChoice.message);
+  await act(async () => button("换个讲法").click());
+  await act(async () => finish(true));
+  expect(change).toHaveBeenCalledTimes(2);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  await act(async () => button("暂缓并保存").click());
+  expect(pause).toHaveBeenCalledTimes(1); expect(fetch).toHaveBeenCalledTimes(1); expect(navigate).not.toHaveBeenCalled();
+  diagnostic.addEventListener("click", event => event.preventDefault());
+  await act(async () => diagnostic.click());
+  expect(change).toHaveBeenCalledTimes(2); expect(pause).toHaveBeenCalledTimes(1); expect(fetch).toHaveBeenCalledTimes(1);
+});
+
 it("uses the newest submitted effective row in this origin instead of a later correction of an older answer", () => {
   const row = { id, courseId, sessionId: id, occurredAt: "2026-10-27T10:00:00Z", submittedAt: "2026-10-27T10:00:00Z", recordedAt: "2026-10-27T13:00:00Z" } as LearningObservation;
   const current = { ...row, id: nextId, submittedAt: "2026-10-27T11:00:00Z", recordedAt: "2026-10-27T11:01:00Z" };
@@ -111,6 +165,17 @@ it("opens the real ordinary-practice fallback while keeping it separate from uns
   expect(host.querySelector<HTMLAnchorElement>('a[href*="mode=practice"]')?.getAttribute("href")).toBe(practiceHref);
   expect(host.textContent).toContain("不作为未见题验证");
   expect(navigate).not.toHaveBeenCalled();
+});
+
+it("keeps cancelled choices on safe navigation and never invokes remediation callbacks", async () => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ ...limitChoice, reason: "cancelled", message: "原复测已取消，原记录保留。" }));
+  const change = vi.fn(async () => true), pause = vi.fn(async () => true);
+  await act(async () => root.render(<SpanNextActionControl session={session} observationId={id} onChangeExplanation={change} onPause={pause} />));
+  await act(async () => button("安排下一步学习").click());
+  expect(host.textContent).toContain("原复测已取消");
+  expect(host.querySelectorAll("a")).toHaveLength(2);
+  expect(host.querySelectorAll("button")).toHaveLength(0);
+  expect(change).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled(); expect(fetch).toHaveBeenCalledTimes(1);
 });
 
 it("shows a changed-evidence choice without reviving the superseded lesson", async () => {

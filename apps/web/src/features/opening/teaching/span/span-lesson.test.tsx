@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 
 const { probe, passthrough } = vi.hoisted(() => ({
-  probe: { intent: null as unknown },
+  probe: { intent: null as unknown, next: null as unknown },
   passthrough: ({ children }: { children?: ReactNode }) => createElement("div", null, children),
 }));
 vi.mock("../../v3/motion/view-transition", () => ({ TransitionLink: passthrough }));
@@ -32,7 +32,7 @@ vi.mock("../lesson-companion-workspace", () => ({ LessonCompanionWorkspace: pass
 vi.mock("../lesson-shortcuts", () => ({ useLessonArrowKeys: vi.fn() }));
 vi.mock("../../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("./span-tutor-control", () => ({ SpanTutorControl: passthrough }));
-vi.mock("./span-next-action-control", () => ({ SpanNextActionControl: passthrough, currentSpanObservationId: () => undefined }));
+vi.mock("./span-next-action-control", () => ({ SpanNextActionControl: (props: unknown) => { probe.next = props; return null; }, currentSpanObservationId: () => undefined }));
 vi.mock("./span-answer", () => ({ isSpanReservedProblemId: () => false }));
 
 import { SpanLesson } from "./span-lesson";
@@ -79,6 +79,27 @@ it("restores matching intent once, then sends pause and renders the paused sessi
     expect(host.querySelector("h1")?.textContent).toBe("本次学习已暂停");
     expect(fetch).toHaveBeenCalledTimes(1);
   } finally { await act(async () => root.unmount()); host.remove(); fetch.mockRestore(); request.mockReset(); }
+});
+
+it("routes explanation and pause through the original lesson progress owner without changing state on failure", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const intent = { purpose: "self_study" as const, timeBudgetMinutes: 17, language: "zh" as const, pace: "slow" as const, continuous: false, selfReportedFatigue: "high" as const };
+  const save = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ event: null }));
+  const host = document.createElement("div"), root = createRoot(host);
+  type Callbacks = { onChangeExplanation: () => Promise<boolean>; onPause: () => Promise<boolean> };
+  try {
+    await act(async () => root.render(<SpanLesson courseId="course" sourceIds={[]} sourceLoadError initialIntent={intent} initialMoveId="self-independent" session={{ sessionId: "session", intent } as never} onProgress={save} />));
+    expect(save).not.toHaveBeenCalled();
+    const actions = probe.next as Callbacks;
+    await act(async () => expect(await actions.onChangeExplanation()).toBe(false));
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe("self_study");
+    await act(async () => expect(await actions.onChangeExplanation()).toBe(true));
+    expect(save.mock.calls.slice(0, 2)).toEqual(Array(2).fill([{ ...intent, purpose: "overview" }, "overview-links", "active"]));
+    expect((host.querySelector('select') as HTMLSelectElement).value).toBe("overview");
+    await act(async () => actions.onPause());
+    expect(save).toHaveBeenLastCalledWith(intent, "self-independent", "paused");
+  } finally { await act(async () => root.unmount()); fetch.mockRestore(); }
 });
 
 it("passes the persisted session intent to the study intent controls", async () => {

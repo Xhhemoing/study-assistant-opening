@@ -14,6 +14,7 @@ type Handlers = {
   onEdit: Parameters<typeof StepRenderer>[0]["onEdit"]; onChoosePhoto: (file: File) => void; onRemovePhoto: () => void;
   onSelectGrade?: Parameters<typeof StepRenderer>[0]["onSelectGrade"];
   onRedo?: () => void;
+  onChangeExplanation?: () => void;
   onContinue?: () => void;
   onConfidence?: (value: PreAnswerConfidence | null) => void;
 };
@@ -29,7 +30,8 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
   const [moreOpen, setMoreOpen] = useState(false);
   const helpId = useId(), moreId = useId();
   const helpButton = useRef<HTMLButtonElement>(null);
-  const primary = primaryAction(view, pending);
+  const remediation = view.next?.choiceReason === "remediation_limit";
+  const primary = remediation ? { kind: "next" as const, label: on.onChangeExplanation ? "换个讲法" : view.next!.label, disabled: pending } : primaryAction(view, pending);
   const locked = pending || view.sealed || Boolean(view.result);
   const questionStep = view.step.kind === "question" ? view.step : null;
   const helpAllowed = questionStep !== null && !(questionStep.purpose === "retest" && !view.result);
@@ -46,13 +48,18 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [helpOpen, moreOpen]);
-  const primaryButton = <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onPrimary}>
+  const primaryButton = remediation && !on.onChangeExplanation ? <a data-primary-action className={ui.primary} href={view.next!.href} aria-disabled={pending || undefined} onClick={event => { if (pending) event.preventDefault(); }}>{view.next!.label}</a> : <button type="button" data-primary-action className={ui.primary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={remediation ? on.onChangeExplanation : on.onPrimary}>
     {pending ? "正在保存…" : primary.label}
   </button>;
   const continueButton = primary.kind === "redo" && on.onContinue
     ? <button type="button" className={ui.secondary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onContinue}>看下一步安排</button> : null;
   const successorCard = Boolean(conversation && (view.next || primary.kind === "next"));
   const primaryInThread = successorCard && primary.kind === "next";
+  const remediationActions = remediation ? <div className="flex flex-wrap gap-2">
+    {primaryButton}
+    {view.next!.alternatives.map(link => <a key={link.href} className={ui.quiet} href={link.href} aria-disabled={pending || undefined} onClick={event => { if (pending) event.preventDefault(); }}>重新诊断：到学习入口明确选择</a>)}
+    <button type="button" className={ui.secondary} disabled={pending} onClick={on.onPause}>暂缓并保存</button>
+  </div> : null;
 
   return <section className="mx-auto flex min-h-full max-w-(--layout-prose) flex-col text-text" aria-label="学习会话">
     <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/95 px-4 py-2 backdrop-blur">
@@ -74,14 +81,14 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
     </header>
 
     {conversation ? <main className="flex-1 space-y-6 px-4 py-6">
-      <ConversationThread history={conversation.history} scrollCursor={conversation.scrollCursor} view={view}
+      <ConversationThread history={conversation.history} scrollCursor={conversation.scrollCursor} view={remediation ? { ...view, next: { ...view.next!, alternatives: [] } } : view}
         step={<StepRenderer step={view.step} answer={view.answer} locked={locked} photo={view.photo}
           onEdit={on.onEdit} onSelectGrade={on.onSelectGrade} onChoosePhoto={on.onChoosePhoto} onRemovePhoto={on.onRemovePhoto} content={content} />}
         feedbackActions={<>
-          {view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
+          {!remediation && view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
           {successorCard ? null : continueButton}
         </>}
-        successor={successorCard ? { action: primaryInThread ? primaryButton : continueButton } : null} />
+        successor={successorCard ? { action: remediationActions ?? (primaryInThread ? primaryButton : continueButton) } : null} />
       {view.blocked ? <p role="alert" className="text-sm text-warn">{view.blocked}</p> : null}
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
     </main> : <main key={view.step.id} className="flex-1 space-y-6 px-4 py-6 motion-safe:animate-text-in">
@@ -100,10 +107,10 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
             {view.next?.reason ? <p>{view.next.reason}</p> : null}
           </div>
         </details> : null}
-        {view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
+        {!remediation && view.canRedo && on.onRedo && primary.kind !== "redo" ? <button type="button" className={ui.secondary} disabled={pending} onClick={on.onRedo}>改这道题</button> : null}
         {primary.kind === "redo" && on.onContinue ? <button type="button" className={ui.secondary} disabled={primary.disabled} aria-busy={pending || undefined} onClick={on.onContinue}>看下一步安排</button> : null}
       </section> : null}
-      {view.next?.alternatives.length ? <div className="flex flex-wrap gap-2">{view.next.alternatives.map(link =>
+      {!remediation && view.next?.alternatives.length ? <div className="flex flex-wrap gap-2">{view.next.alternatives.map(link =>
         <a key={link.href} className={ui.quiet} href={link.href}>{link.label}</a>)}</div> : null}
       {view.blocked ? <p role="alert" className="text-sm text-warn">{view.blocked}</p> : null}
       {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
@@ -114,7 +121,7 @@ export function StudySessionShell({ view, pending = false, error = "", content, 
         onClick={() => setHelpOpen(value => !value)}>{view.help.hints.length ? `提示 · 已看 ${view.help.hints.length}` : "提示"}</button> : <span />}
       {view.confidence && on.onConfidence ? <ConfidenceChoice value={view.confidence.value} disabled={pending || view.confidence.locked} onChange={on.onConfidence}
         className="order-first w-full sm:order-none sm:ml-auto sm:w-auto" /> : null}
-      {primaryInThread ? null : primaryButton}
+      {primaryInThread ? null : remediationActions ?? primaryButton}
     </footer> : null}
 
     {helpAllowed && helpOpen ? <aside id={helpId} aria-label="提示" className="fixed inset-x-0 bottom-0 z-30 max-h-[70dvh] space-y-3 overflow-auto rounded-t-(--radius-sheet) border border-line bg-popover p-4 shadow-overlay motion-safe:animate-sheet-in lg:inset-y-0 lg:left-auto lg:w-(--layout-companion) lg:max-h-none lg:rounded-none lg:motion-safe:animate-panel-in">
@@ -174,15 +181,17 @@ export function StudySession({ port }: { port: StudySessionPort }) {
   const go = (href: string) => { if (router) router.push(href); else window.location.assign(href); };
   const continueSession = () => {
     if (pending || view.blocked) return;
-    if (view.next) go(view.next.href);
+    if (view.next?.choiceReason === "remediation_limit" && port.changeExplanation) void run(port.changeExplanation);
+    else if (view.next) go(view.next.href);
     else void run(port.primary);
   };
   return <StudySessionShell view={view} pending={pending} error={error} conversation={{ history, scrollCursor }}
     onPrimary={() => {
-      if (primaryAction(view, pending).kind === "redo" && port.redo) void run(port.redo);
+      if (view.next?.choiceReason !== "remediation_limit" && primaryAction(view, pending).kind === "redo" && port.redo) void run(port.redo);
       else continueSession();
     }}
     onContinue={continueSession}
+    onChangeExplanation={port.changeExplanation ? () => void run(port.changeExplanation!) : undefined}
     onHelp={() => void run(port.help)} onPause={() => void run(port.pause)} onReload={() => void run(port.load)}
     onRedo={port.redo ? () => void run(port.redo!) : undefined}
     onEdit={change => sync(() => port.edit(change))} onChoosePhoto={file => void run(() => port.choosePhoto(file))} onRemovePhoto={() => sync(port.removePhoto)}

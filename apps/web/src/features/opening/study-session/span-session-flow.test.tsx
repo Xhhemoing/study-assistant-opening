@@ -23,7 +23,8 @@ vi.mock("../learning/practice-draft", async original => ({ ...await original<typ
 vi.mock("../teaching/span/span-session-client", async original => ({ ...await original<typeof import("../teaching/span/span-session-client")>(), spanLessonRequest: mocks.request }));
 vi.mock("../teaching/span/span-hint-client", async original => ({ ...await original<typeof import("../teaching/span/span-hint-client")>(), requestSpanHint: mocks.hint }));
 vi.mock("../assistant/study-exposure-ack", () => ({ acknowledgeStudyExposure: mocks.ack }));
-vi.mock("../v3/motion/view-transition", () => ({ useTransitionRouter: () => ({ push: mocks.push, replace: vi.fn(), back: vi.fn() }) }));
+vi.mock("../teaching/span/span-tutor-control", () => ({ SpanTutorControl: () => null }));
+vi.mock("../v3/motion/view-transition", () => ({ TransitionLink: "a", useTransitionRouter: () => ({ push: mocks.push, replace: vi.fn(), back: vi.fn() }) }));
 
 const problem = getSpanProblem("span-faded-3d")!;
 const solution = solveSpanProblem(problem);
@@ -369,6 +370,90 @@ it.each(["last move", "retest", "overview"])("%s keeps the authorized adaptive n
   expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), expect.objectContaining({ method: "POST" }));
   expect(JSON.parse(mocks.request.mock.calls[0]![2].body)).toEqual({ activityId, expectedRevision: 1, observationId: record.id, clientKey: `span-next:${activityId}:1:${record.id}` });
   expect(view.next).toMatchObject({ notice: "请先授权导师安排。", href: `/opening/courses/${courseId}` });
+});
+
+it.each(["explanation", "diagnostic", "pause"])("remediation_limit exposes three choices and only the explicit %s action runs", async action => {
+  const { attempt, details, courseId } = fixture("self_study-reserved", "span-independent-3d");
+  attempt.spanExercise = { ...attempt.spanExercise!, id: "span-reserved-fraction" };
+  details.attempts = [attempt];
+  const record = { id: uuid(), assistance: "hinted", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "none" });
+  let respond!: (value: unknown) => void;
+  mocks.request.mockImplementation(() => new Promise(resolve => { respond = resolve; }));
+  let finish!: (saved: boolean) => void;
+  const save = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+  const port = createSpanStudySession(details, save), ui = await mount(port);
+  try {
+    expect(save).not.toHaveBeenCalled(); expect(mocks.request).not.toHaveBeenCalled(); expect(mocks.createAttempt).not.toHaveBeenCalled();
+    await ui.click("看下一步安排");
+    expect(save).not.toHaveBeenCalled();
+    const choice = { kind: "choice", reason: "remediation_limit", message: "两轮纠偏后，请换讲法、重新诊断或暂缓。原记录保留。",
+      primary: { label: "回原活动选择串讲", href: `/opening/courses/${courseId}/study/span?lesson=${details.session!.activityId}` },
+      secondary: { label: "到学习入口明确选择", href: `/opening/courses/${courseId}/study` } };
+    await act(async () => respond(choice));
+    const card = ui.host.querySelector("section[aria-label='下一步']")!;
+    expect(card.textContent).toContain(choice.message);
+    expect(ui.button("换个讲法")).toBeDefined(); expect(ui.button("暂缓并保存")).toBeDefined();
+    expect(ui.host.querySelectorAll("[data-primary-action]")).toHaveLength(1);
+    expect(ui.button("改这道题")).toBeUndefined();
+    const diagnostic = card.querySelector("a")!;
+    expect(diagnostic.getAttribute("href")).toBe(choice.secondary.href);
+    expect(diagnostic.textContent).toContain("重新诊断");
+    expect(save).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
+    if (action === "diagnostic") {
+      diagnostic.addEventListener("click", event => event.preventDefault());
+      await act(async () => diagnostic.click());
+      expect(save).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
+    } else {
+      const label = action === "pause" ? "暂缓并保存" : "换个讲法";
+      await act(async () => { ui.button(label)!.click(); ui.button(label)!.click(); });
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenLastCalledWith(action === "pause" ? details.session!.intent : { ...details.session!.intent, purpose: "overview" },
+        action === "pause" ? details.session!.moveId : "overview-links", action === "pause" ? "paused" : "active");
+      expect(ui.button("暂缓并保存")!.disabled).toBe(true);
+      expect(diagnostic.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => finish(false));
+      expect(ui.host.querySelector("[role='alert']")?.textContent).toContain(action === "pause" ? "暂停还没保存" : "讲法还没切换");
+      expect(ui.host.textContent).toContain(choice.message);
+      await ui.click(label);
+      await act(async () => finish(true));
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(ui.host.querySelector("[role='alert']")).toBeNull();
+    }
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
+  } finally { await ui.unmount(); }
+});
+
+it("the v2 progress owner supplies the revision when switching to overview after remediation_limit", async () => {
+  const { attempt, details, courseId, activityId } = fixture("self_study-reserved", "span-independent-3d");
+  attempt.spanExercise = { ...attempt.spanExercise!, id: "span-reserved-fraction" }; details.attempts = [attempt];
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), assistance: "hinted", serverEvaluation: { decision: "incorrect", reasonCodes: [] } }, deliveredAssistance: "none" });
+  mocks.request.mockImplementation(async (path: string, _schema: unknown, init?: RequestInit) => {
+    if (!init) return details;
+    if (init.method === "PATCH") return { ...details.session, ...JSON.parse(String(init.body)), revision: 9 };
+    if (path.endsWith("/next")) return { kind: "choice", reason: "remediation_limit", message: "请选择换讲法、诊断或暂缓。", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, label: "回原活动" }, secondary: { href: `/opening/courses/${courseId}/study`, label: "重新诊断" } };
+    if (path.endsWith("/presentation")) return { problem, solution, exposureReceipt: { id: uuid() } };
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const host = document.createElement("div"), root = createRoot(host); document.body.append(host);
+  const click = async (label: string) => act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === label)!.click());
+  try {
+    await act(async () => root.render(<SpanLessonSession courseId={courseId} sourceIds={attempt.sourceIds} sourceLoadError={false} initialActivityId={activityId} />));
+    expect(mocks.request.mock.calls.some(call => call[2]?.method === "PATCH")).toBe(false);
+    await click("看下一步安排");
+    expect(mocks.request.mock.calls.some(call => call[2]?.method === "PATCH")).toBe(false);
+    await click("换个讲法");
+    expect(host.querySelector("ol[aria-label='第 1 步，共 4 步']")).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="更多"]')!.click());
+    await click("暂停并保存");
+    const patches = mocks.request.mock.calls.filter(call => call[2]?.method === "PATCH");
+    expect(patches.map(call => JSON.parse(call[2].body))).toEqual([
+      { expectedRevision: 1, intent: { ...details.session!.intent, purpose: "overview" }, moveId: "overview-links", status: "active" },
+      { expectedRevision: 9, intent: { ...details.session!.intent, purpose: "overview" }, moveId: "overview-links", status: "paused" },
+    ]);
+    expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); host.remove(); }
 });
 
 it("a failed lesson save preserves the result for retry without requesting adaptive next", async () => {

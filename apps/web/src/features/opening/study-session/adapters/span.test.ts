@@ -103,6 +103,16 @@ it("validates successor links with the legacy rule and keeps choices", () => {
   expect(() => adaptSpanNext({ kind: "ready", href: `/opening/courses/${id}/study/span?lesson=${id}`, activityId: id, sessionId: id, courseId: "22222222-2222-4222-8222-222222222222", label: "x", resumed: false }, id)).toThrow();
 });
 
+it("propagates the validated remediation choice reason and message without inventing an action or href", () => {
+  const choice = { kind: "choice", reason: "remediation_limit", message: "请换讲法、重新诊断或暂缓。原记录保留。",
+    primary: { label: "回原活动选择串讲", href: `/opening/courses/${id}/study/span?lesson=${id}` },
+    secondary: { label: "到学习入口明确选择", href: `/opening/courses/${id}/study` } };
+  expect(adaptSpanNext(choice, id)).toEqual({ href: choice.primary.href, label: choice.primary.label, choiceReason: "remediation_limit", notice: choice.message, alternatives: [choice.secondary] });
+  for (const href of ["https://evil.test", "/opening/courses/22222222-2222-4222-8222-222222222222/study"]) {
+    for (const key of ["primary", "secondary"] as const) expect(() => adaptSpanNext({ ...choice, [key]: { href, label: "x" } }, id)).toThrow();
+  }
+});
+
 it("summarizes the sealed answer by membership and key fields within 200 characters", () => {
   expect(spanAnswerSummary({})).toBeUndefined();
   expect(spanAnswerSummary({ membership: "in_span", coefficients: ["2", "-1"] })).toBe("属于 span；α = 2，β = -1");
