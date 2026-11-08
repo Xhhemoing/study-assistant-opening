@@ -58,6 +58,7 @@ class WorkerProvisionTests(unittest.TestCase):
         self.unsafe_effective_user = False
         self.stack = []
         for target, value in (("os.geteuid", lambda: 0), ("os.chown", lambda *args, **kwargs: None),
+                              ("os.fchown", lambda *args, **kwargs: None),
                               ("ensure_identity", lambda: (os.getuid(), os.getgid())),
                               ("run", self.record_run),
                               ("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1))):
@@ -92,6 +93,32 @@ class WorkerProvisionTests(unittest.TestCase):
                 "--legacy-app-dir", str(self.legacy), "--config-file", str(self.env),
                 "--state-dir", str(self.state), "--config-dir", str(self.config),
                 "--systemd-dir", str(self.units), "--cache-dir", str(self.cache), *extra]
+
+    def test_atomic_write_persists_content_and_metadata_before_rename_then_parent(self):
+        events = []
+        fsync, replace = os.fsync, os.replace
+        def sync(fd):
+            path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            events.append(("sync", path))
+            if path != self.runtime.parent:
+                self.assertEqual(path.read_text(), "DURABLE=1\n")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(self.runtime.read_text(), "OLD_RUNTIME=1\n")
+            fsync(fd)
+        def rename(source, target):
+            events.append(("rename", Path(target)))
+            replace(source, target)
+        with patch.object(worker.os, "fsync", sync), patch.object(worker.os, "replace", rename):
+            worker.atomic_write(self.runtime, "DURABLE=1\n", 0o600)
+        self.assertEqual([event[0] for event in events], ["sync", "rename", "sync"])
+        self.assertEqual(events[-1][1], self.runtime.parent)
+
+    def test_atomic_write_failed_file_fsync_keeps_original(self):
+        with patch.object(worker.os, "fsync", side_effect=OSError("file sync failed")):
+            with self.assertRaises(OSError):
+                worker.atomic_write(self.runtime, "CHANGED=1", 0o600)
+        self.assertEqual(self.runtime.read_text(), "OLD_RUNTIME=1\n")
+        self.assertEqual(list(self.runtime.parent.glob(".worker-runtime.env.*")), [])
 
     def test_provisions_read_only_release_and_checks_real_service_identity_before_reload(self):
         worker.main(self.args())

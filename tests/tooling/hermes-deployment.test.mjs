@@ -62,6 +62,7 @@ function fixture(t, overrides = {}) {
   writeFileSync(python, `#!/usr/bin/env bash\nfixture_root="$(cd -- "$(dirname -- "$0")/../../../.." && pwd)"\nprintf 'parser %s\\n' "$*" >> "$fixture_root/commands.log"\n[[ ! -f "$fixture_root/parser-failure" ]]\n`, { mode: 0o755 });
   mkdirSync(join(systemd, "aistudy-web.service.d"));
   writeFileSync(join(systemd, "aistudy-web.service.d/50-aistudy-release.conf"), "old-web-override\n");
+  writeFileSync(join(systemd, "aistudy-web.service"), "[Service]\nExecStart=/usr/bin/node server.js\n");
   const oldUnit = `old-worker-unit\n[Service]\nExecStart=/usr/bin/node ${server}/apps/worker/src/index.ts\n`;
   writeFileSync(join(systemd, "aistudy-worker.service"), oldUnit);
   writeFileSync(join(workerConfig, "worker-runtime.env"), "old-runtime-env\n");
@@ -69,7 +70,7 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {
@@ -184,7 +185,17 @@ printf 'pg_restore %s\\n' "$1" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != backup-li
 printf 'systemctl %s\\n' "$*" >> "$MOCK_LOG"
 case "$1" in
  show)
-  unit=\${!#}; load=loaded; [[ "$MOCK_WORKER" != missing || "$unit" != aistudy-worker.service ]] || load=not-found
+  unit=\${!#}
+  if [[ "$*" == *FragmentPath* ]]; then
+   printf 'FragmentPath=%s/%s\\nNeedDaemonReload=no\\n' "$SYSTEMD_DIR" "$unit"
+   if [[ "$unit" == aistudy-web.service ]]; then
+    printf 'DropInPaths=%s/aistudy-web.service.d/50-aistudy-release.conf\\nEnvironmentFiles=%s/.env.production (ignore_errors=no)\\n' "$SYSTEMD_DIR" "$DIR"
+   else
+    printf 'DropInPaths=%s/aistudy-worker.service.d/90-aistudy-protocol-guard.conf\\nEnvironmentFiles=%s/.env.production (ignore_errors=no) %s/worker-runtime.env (ignore_errors=no)\\n' "$SYSTEMD_DIR" "$DIR" "$WORKER_CONFIG_DIR"
+   fi
+   exit
+  fi
+  load=loaded; [[ "$MOCK_WORKER" != missing || "$unit" != aistudy-worker.service ]] || load=not-found
   printf 'LoadState=%s\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nControlPID=0\\nJob=\\nControlGroup=\\n' "$load"
   [[ "\${MOCK_FAIL:-}" != residual-job ]] || printf 'Job=91\\n'
   [[ "\${MOCK_FAIL:-}" != residual-cgroup ]] || printf 'ControlGroup=/unreadable-test-cgroup\\nMainPID=922\\n'
@@ -212,6 +223,11 @@ case "$1" in
   fi
   touch "$MOCK_STOPPED";;
  start|restart)
+  fence="$SYSTEMD_DIR/$2.d/95-aistudy-migration-fence.conf"
+  if [[ -f "$fence" ]]; then
+   marker=$(sed -n 's/^ConditionPathExists=!//p' "$fence")
+   if [[ -n "$marker" && -f "$marker" ]]; then printf 'writer skipped by migration fence\\n' >> "$MOCK_LOG"; exit 0; fi
+  fi
   target=$(readlink -f "$CURRENT_LINK")
   if [[ "$2" == aistudy-web.service && "\${MOCK_FAIL:-}" == web-start && "$target" != "$DIR" ]]; then exit 21; fi
   if [[ "$2" == aistudy-worker.service ]]; then
@@ -990,6 +1006,10 @@ for (const failure of ['migrate', 'provision', 'switch', 'web-start', 'worker-pa
     const pointer = readlinkSync(f.current);
     if (['migrate', 'provision', 'switch', 'owner-term', 'owner-kill', 'migration-timeout', 'lost-commit-receipt'].includes(failure)) assert.equal(pointer, f.server);
     else assert.notEqual(pointer, f.server, 'retain the failed activation pointer, not an old writer');
+    if (['web-start', 'worker-partial-start', 'health'].includes(failure)) {
+      assert.match(result.stderr, /Exact-job creation provenance unavailable/);
+      assert.doesNotMatch(result.log, /systemctl restart/);
+    }
     if (failure === 'lost-commit-receipt') assert.equal(readFileSync(join(f.state, 'simulated-ledger'), 'utf8'), '109 committed\n');
     const transition = readdirSync(join(f.state, 'releases'))[0];
     assert(existsSync(join(f.state, 'releases', transition, 'forward-armed')));
@@ -1014,25 +1034,35 @@ for (const failure of ['residual-job', 'residual-cgroup', 'residual-control', 'u
     assert.doesNotMatch(result.log, /migrate current=|systemctl restart/);
   });
 }
-test('successful pending migration persists history and success before clearing active guard, and refuses old-schema rollback', t => {
+test('pending migration activation refuses an unproven exact-job bypass and keeps both durable guards', t => {
   const f = fixture(t, { MOCK_PENDING: '1', MOCK_WORKER: 'disabled' });
   const result = f.run();
-  assert.equal(result.status, 0, result.stderr);
-  assert(!existsSync(join(f.state, 'migration-forward-only')));
-  assert(!existsSync(join(f.state, 'writers-fenced')));
-  const transition = readlinkSync(join(f.state, 'last-transition'));
+  assert.notEqual(result.status, 0, result.stderr);
+  assert(existsSync(join(f.state, 'migration-forward-only')));
+  assert(existsSync(join(f.state, 'writers-fenced')));
+  const transition = join(f.state, 'releases', readdirSync(join(f.state, 'releases'))[0]);
   assert(existsSync(join(transition, 'forward-armed')));
-  assert(existsSync(join(transition, 'success-record')));
-  assert.doesNotMatch(result.log, /systemctl restart aistudy-worker.service/);
+  assert(!existsSync(join(transition, 'success-record')));
+  assert.match(result.stderr, /Exact-job creation provenance unavailable/);
+  assert.doesNotMatch(result.log, /systemctl restart/);
   const rejected = f.run('rollback');
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /Refusing rollback across a migration boundary/);
+  assert.equal(rejected.status, 3);
+  assert.match(rejected.stderr, /FORWARD FIX REQUIRED/);
   assert.doesNotMatch(rejected.deltaLog, /systemctl restart|worker --restore/);
+  // New processes model retained boot/direct/dependency conditions, not a real
+  // host reboot or real systemd. No permit is offered by this checkpoint.
+  for (const source of ['direct', 'dependency', 'boot']) {
+    for (const unit of ['aistudy-web.service', 'aistudy-worker.service']) {
+      const started = spawnSync(join(f.root, 'bin/systemctl'), ['start', unit], { env: { ...f.env, MOCK_START_SOURCE: source }, encoding: 'utf8' });
+      assert.equal(started.status, 0);
+      assert(existsSync(f.env.MOCK_STOPPED));
+    }
+  }
 });
 
 for (const point of ['guard-file', 'guard-directory', 'success-record']) {
 test(`${point} fsync failure reaches real supervisor and cannot publish durable success`, t => {
-  const f = fixture(t, { MOCK_PENDING: '1' });
+  const f = fixture(t, { MOCK_PENDING: point === 'success-record' ? '0' : '1' });
   const preload = join(f.root, 'fail-fsync.mjs');
   writeFileSync(preload, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
     const original=fs.fsyncSync; fs.fsyncSync=fd=>{ const name=fs.readlinkSync('/proc/self/fd/'+fd);
@@ -1044,10 +1074,50 @@ test(`${point} fsync failure reaches real supervisor and cannot publish durable 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Guard\/fence persistence|guard persistence|injected fsync failure/);
   if (point !== 'success-record') assert.doesNotMatch(result.log, /migrate current=|systemctl restart/);
-  else assert.match(result.log, /migrate current=/);
+  else assert.doesNotMatch(result.log, /migrate current=/);
   assert(existsSync(join(f.state, 'writers-fenced')));
   assert.equal(f.run('restart').status, 3);
 });
+}
+
+test('failed fence persistence still attempts both service stops before quiescence', t => {
+  const f = fixture(t, { MOCK_PENDING: '1', MOCK_FAIL: 'migrate' });
+  const preload = join(f.root, 'fence-fault.mjs');
+  writeFileSync(preload, `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+    const original=fs.fsyncSync; fs.fsyncSync=fd=>{if(fs.readlinkSync('/proc/self/fd/'+fd).includes('writers-fenced.next-')) throw new Error('fence fsync fault');return original(fd);};syncBuiltinESMExports();`);
+  const result = f.run('deploy', { NODE_OPTIONS: `--import=${preload}` });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /UNCONFIRMED/);
+  const stops = [...result.log.matchAll(/systemctl stop (aistudy-(?:web|worker).service)/g)];
+  assert(stops.length >= 4, result.log);
+  assert.deepEqual(stops.slice(-2).map(match => match[1]), ['aistudy-web.service', 'aistudy-worker.service']);
+  assert(result.log.lastIndexOf('db quiescence') > stops.at(-1).index);
+  assert.doesNotMatch(result.log, /migrate current=|worker --restore/);
+  assert(existsSync(join(f.state, 'migration-forward-only')));
+});
+
+for (const input of ['web-unit', 'web-override', 'worker-unit', 'runtime-env', 'protocol-guard', 'runtime-helper', 'release-sha', 'worker-protocol']) {
+  test(`actual ${input} file fsync fault cannot publish success or restore old writers`, t => {
+    const f = fixture(t);
+    const endings = {
+      'web-unit': '/systemd/aistudy-web.service', 'web-override': '/50-aistudy-release.conf',
+      'worker-unit': '/systemd/aistudy-worker.service', 'runtime-env': '/worker-runtime.env',
+      'protocol-guard': '/90-aistudy-protocol-guard.conf', 'runtime-helper': '/runtime-identity.mjs',
+      'release-sha': '/.release-sha', 'worker-protocol': '/.worker-protocol',
+    };
+    const preload = join(f.root, 'actual-fsync.mjs');
+    writeFileSync(preload, `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+      const original=fs.fsyncSync; fs.fsyncSync=fd=>{if(fs.readlinkSync('/proc/self/fd/'+fd).endsWith(${JSON.stringify(endings[input])})) throw new Error('actual config fsync fault'); return original(fd);}; syncBuiltinESMExports();`);
+    const result = f.run('deploy', { NODE_OPTIONS: `--import=${preload}` });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /actual config fsync fault/);
+    assert(existsSync(join(f.state, 'writers-fenced')));
+    assert(existsSync(join(f.state, 'migration-forward-only')));
+    assert.doesNotMatch(result.deltaLog, /worker --restore/);
+    assert.notEqual(readlinkSync(f.current), f.server);
+    const transition = join(f.state, 'releases', readdirSync(join(f.state, 'releases'))[0]);
+    assert(!existsSync(join(transition, 'success-record')));
+  });
 }
 
 test('restart command failure cannot become success through a healthy endpoint', t => {

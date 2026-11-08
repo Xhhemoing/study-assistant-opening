@@ -7,6 +7,25 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
+
+// A disconnected SSH pipe is not permission to abandon independent cleanup.
+export function protectCleanupStreams(streams = [process.stdout, process.stderr]) {
+  for (const stream of streams) stream.on("error", () => { /* Diagnostics unavailable; continue safety work. */ });
+}
+export function processStarttime(pid) {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const started = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  if (!/^\d+$/.test(started ?? "")) throw new Error("Owner starttime unavailable");
+  return started;
+}
+export function signalVerifiedGroup(pid, expectedStart, signal, identity = processStarttime, kill = process.kill) {
+  try {
+    if (!expectedStart || identity(pid) !== expectedStart) return false;
+    kill(-pid, signal);
+    return true;
+  } catch { return false; }
+}
 
 const units = ["aistudy-web.service", "aistudy-worker.service"];
 const filename = fileURLToPath(import.meta.url);
@@ -28,14 +47,22 @@ export function durableWrite(file, contents, mode = 0o600) {
   renameSync(temporary, file);
   syncDirectory(dirname(file));
 }
-function durableRemove(file) { unlinkSync(file); syncDirectory(dirname(file)); }
+export function boundedQuiescence(helper, config, release) {
+  // GNU timeout owns a process group and kills the whole probe tree, including
+  // the nested tsx client. No inherited pipe can hold cleanup open afterwards.
+  const result = spawnSync("timeout", ["--signal=KILL", "15s", "node", helper, "quiescence", config, release],
+    { stdio: "ignore", timeout: 20_000, killSignal: "SIGKILL" });
+  return !result.error && result.status === 0;
+}
 function command(args) {
   const result = spawnSync("systemctl", args, { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
   return { ok: !result.error && result.status === 0, stdout: result.stdout ?? "" };
 }
 export function cgroupEmpty(group, root = "/sys/fs/cgroup") {
+  // Only unified v2 is understood. Missing paths on v1/unknown layouts are
+  // not evidence of an empty group, even if a unit reports inactive.
+  if (!existsSync(join(root, "cgroup.controllers"))) return false;
   if (!group) return true;
-  if (!existsSync(root)) return false;
   if (!/^\/[A-Za-z0-9_.@:/-]+$/.test(group) || group.includes("..")) return false;
   const directory = resolve(root, `.${group}`);
   if (!directory.startsWith(`${resolve(root)}/`)) return false;
@@ -43,18 +70,21 @@ export function cgroupEmpty(group, root = "/sys/fs/cgroup") {
     const walk = directory => {
       if (lstatSync(directory).isSymbolicLink()) return false;
       if (readFileSync(join(directory, "cgroup.procs"), "utf8").trim()) return false;
-      return readdirSync(directory, { withFileTypes: true }).filter(entry => entry.isDirectory())
+      const entries = readdirSync(directory, { withFileTypes: true });
+      return !entries.some(entry => entry.isSymbolicLink()) && entries.filter(entry => entry.isDirectory())
         .every(entry => walk(join(directory, entry.name)));
     };
     return walk(directory);
-  } catch (error) { return error.code === "ENOENT" && !existsSync(directory); }
+  } catch { return false; }
 }
 /** Each stop and each observation are independent; is-active exit codes prove nothing. */
-export function stopWriters(run = command, empty = cgroupEmpty) {
+export function stopWriters(run = command, empty = cgroupEmpty, report = line => console.error(line)) {
   let confirmed = true;
+  const attempt = args => { try { return run(args); } catch { return { ok: false, stdout: "" }; } };
+  const observedEmpty = group => { try { return empty(group); } catch { return false; } };
   for (const unit of units) {
-    const stopped = run(["stop", unit]);
-    const observed = run(["show", "--all", "--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job,ControlGroup", unit]);
+    const stopped = attempt(["stop", unit]);
+    const observed = attempt(["show", "--all", "--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job,ControlGroup", unit]);
     const properties = Object.fromEntries(observed.stdout.trim().split("\n").map(line => {
       const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)];
     }));
@@ -64,9 +94,11 @@ export function stopWriters(run = command, empty = cgroupEmpty) {
       && ["inactive", "failed"].includes(properties.ActiveState)
       && ["dead", "failed"].includes(properties.SubState)
       && properties.MainPID === "0" && properties.ControlPID === "0"
-      && ["", "0"].includes(properties.Job) && empty(properties.ControlGroup);
+      && ["", "0"].includes(properties.Job) && observedEmpty(properties.ControlGroup);
     const ok = absent && (stopped.ok || properties.LoadState === "not-found");
-    console.error(`${unit}: stop ${ok ? "confirmed" : "UNCONFIRMED"}; MainPID=${/^\d+$/.test(properties.MainPID) ? properties.MainPID : "unknown"} ControlPID=${/^\d+$/.test(properties.ControlPID) ? properties.ControlPID : "unknown"} job=${properties.Job ? "present" : "empty-or-unavailable"} cgroup=${absent ? "empty" : "unconfirmed"}`);
+    try {
+      report(`${unit}: stop ${ok ? "confirmed" : "UNCONFIRMED"}; MainPID=${/^\d+$/.test(properties.MainPID) ? properties.MainPID : "unknown"} ControlPID=${/^\d+$/.test(properties.ControlPID) ? properties.ControlPID : "unknown"} job=${properties.Job ? "present" : "empty-or-unavailable"} cgroup=${absent ? "empty" : "unconfirmed"}`);
+    } catch { /* A broken diagnostic pipe must not skip the other writer. */ }
     confirmed = ok && confirmed;
   }
   return confirmed;
@@ -88,28 +120,25 @@ async function supervise(script, args) {
   const fence = join(state, "writers-fenced");
   const socketPath = join(state, `owner-${process.pid}.sock`);
   const token = randomBytes(32).toString("hex");
-  let armed = existsSync(guard) || existsSync(fence), settled = false, owner, transition, ownerStart, ownerPid, release;
-  function ownerIdentity() {
-    // Linux /proc starttime prevents a reused numeric process-group ID from
-    // authorizing signals to an unrelated group after the direct child exits.
-    const stat = readFileSync(`/proc/${owner.pid}/stat`, "utf8");
-    const started = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-    if (!/^\d+$/.test(started ?? '')) throw new Error("Owner starttime unavailable");
-    return started;
-  }
+  let armed = existsSync(guard) || existsSync(fence), settled = false, owner, transition, ownerStart, ownerPid, release, configuration;
   function signalOwnerGroup(signal) {
-    try { if (ownerStart && ownerIdentity() === ownerStart) process.kill(-owner.pid, signal); }
-    catch { console.error("Owner identity no longer observable; descendant termination UNCONFIRMED (no unrelated PID signalled)."); }
+    if (!signalVerifiedGroup(owner?.pid, ownerStart, signal)) {
+      console.error("Owner identity no longer observable; descendant termination UNCONFIRMED (no unrelated PID signalled); backend outcome unknown.");
+    }
   }
   function installFence() {
-    durableWrite(fence, "Writers fenced; managed forward repair required.\n");
+    let failed = false;
+    try { durableWrite(fence, "Writers fenced; managed forward repair required.\n"); } catch { failed = true; }
     for (const unit of units) {
-      const directory = join(systemd, `${unit}.d`);
-      mkdirSync(directory, { recursive: true, mode: 0o755 });
-      syncDirectory(systemd);
-      durableWrite(join(directory, "95-aistudy-migration-fence.conf"), `[Unit]\nConditionPathExists=!${fence}\n`, 0o644);
+      try {
+        const directory = join(systemd, `${unit}.d`);
+        mkdirSync(directory, { recursive: true, mode: 0o755 });
+        syncDirectory(systemd);
+        durableWrite(join(directory, "95-aistudy-migration-fence.conf"), `[Unit]\nConditionPathExists=!${fence}\n`, 0o644);
+      } catch { failed = true; } // Still attempt the other persistent condition.
     }
-    if (!command(["daemon-reload"]).ok) throw new Error("Fence daemon reload unconfirmed");
+    if (!command(["daemon-reload"]).ok) failed = true;
+    if (failed) throw new Error("Fence persistence/reload unconfirmed");
   }
   function arm(at, reason) {
     armed = true; // Memory first: failure in ANY persistence step cannot permit recovery.
@@ -129,9 +158,8 @@ async function supervise(script, args) {
     const stopped = stopWriters();
     console.error(`FORWARD FIX REQUIRED: writers ${stopped ? "stopped" : "UNCONFIRMED"}; fence ${persisted ? "persisted" : "UNCONFIRMED"}; database backend completion is not inferred from process exit.`);
     if (release) {
-      const probe = spawnSync("node", [join(dirname(filename), "hermes-db.mjs"), "quiescence", join(args[1], ".env.production"), release],
-        { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
-      if (probe.error || probe.status !== 0) console.error("UNCONFIRMED: independent database activity/backend probe failed; writers remain fenced.");
+      const observed = boundedQuiescence(join(dirname(filename), "hermes-db.mjs"), join(args[1], ".env.production"), release);
+      if (!observed) console.error("UNCONFIRMED: independent database activity/backend probe failed; writers remain fenced.");
       else console.error("Independent read-only database quiescence observed (point-in-time only); writers remain fenced.");
     } else console.error("UNCONFIRMED: no trusted migration session target available for backend probe; writers remain fenced.");
   }
@@ -146,8 +174,9 @@ async function supervise(script, args) {
       body += data;
       if (body.length > 4096) { socket.destroy(); return; }
       if (!body.includes("\n")) return;
+      let message;
       try {
-        const message = JSON.parse(body);
+        message = JSON.parse(body);
         if (message.token !== token) throw new Error("Owner identity mismatch");
         if (message.transition) {
           if (!resolve(message.transition).startsWith(`${resolve(state)}/releases/`)) throw new Error("Invalid transition");
@@ -160,13 +189,24 @@ async function supervise(script, args) {
         switch (message.action) {
           case "ping": break;
           case "arm": arm(transition, "migration runner may execute"); break;
+          case "refence": arm(transition, "activation failed; writer permission revoked"); break;
           case "stop": if (!stopWriters()) throw new Error("Writer stop UNCONFIRMED"); break;
           case "activate":
             if (armed && (!transition || !existsSync(join(transition, "migration-succeeded")))) throw new Error("Migration success is unconfirmed");
-            if (existsSync(fence)) durableRemove(fence);
+            // No temporary path-wide bypass: StartUnit(mode=fail) may merge a
+            // pre-existing start job. Until creation provenance is established,
+            // candidate startup behind this fence is deliberately unavailable.
+            if (armed) throw new Error("Exact-job creation provenance unavailable; writers remain fenced");
+            configuration = captureConfiguration(args, command);
             break;
           case "success":
             if (!transition && action !== "restart") throw new Error("Missing success transition");
+            if (armed) throw new Error("Fenced activation has no verified candidate startup");
+            if (action === "deploy") {
+              if (!configuration) throw new Error("Missing activation configuration identity");
+              const identity = persistConfiguration(configuration, args, command);
+              durableWrite(join(transition, "configuration-identity"), `${JSON.stringify(identity)}\n`);
+            }
             if (transition) {
               for (const entry of readdirSync(transition, { withFileTypes: true })) {
                 if (entry.isFile()) {
@@ -180,15 +220,23 @@ async function supervise(script, args) {
               syncDirectory(dirname(args[3])); // Persist CURRENT rename, possibly on another disk.
               durableWrite(join(transition, "success-record"), "Activation and health completed.\n");
             }
-            // Guard is removed LAST, after all transition metadata and health.
-            if (armed) durableRemove(guard);
+            // Clearing a forward fence is unavailable until exact-job startup
+            // can be proven. Never weaken the guard for a nominal success ACK.
             settled = true;
             break;
           case "settled": if (armed) throw new Error("Forward-only owner cannot restore old writers"); settled = true; break;
           default: throw new Error("Unknown managed request");
         }
         socket.end('{"ok":true}\n');
-      } catch (error) { console.error(error.message); socket.end('{"ok":false}\n'); }
+      } catch (error) {
+        // Success is a commit boundary. A failed fsync or lost persistence proof
+        // cannot fall through to the owner's pre-migration restoration branch.
+        if (message?.token === token && message.action === "success") {
+          try { arm(transition, "success persistence failed"); }
+          catch { console.error("UNCONFIRMED: success failure refence persistence failed"); }
+        }
+        console.error(error.message); socket.end('{"ok":false}\n');
+      }
     });
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
@@ -197,7 +245,7 @@ async function supervise(script, args) {
     // still authorizes killing ONLY this owned group, including orphan children.
     owner = spawn(process.execPath, [...process.execArgv, filename, "anchor", script, ...args], { stdio: ["inherit", "inherit", "inherit", "ipc"], detached: true,
       env: { ...process.env, HERMES_SUPERVISOR_SOCKET: socketPath, HERMES_SUPERVISOR_TOKEN: token, HERMES_SUPERVISOR_HELPER: filename } });
-    try { ownerStart = ownerIdentity(); } catch { /* spawn failure is handled below */ }
+    try { ownerStart = processStarttime(owner.pid); } catch { /* spawn failure is handled below */ }
     // Direct child identity, no PID-file lookup, no signalling unrelated PIDs.
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => signalOwnerGroup(signal));
     owner.on("message", message => {
@@ -219,6 +267,7 @@ async function supervise(script, args) {
   return settled ? result : result || 1;
 }
 async function main() {
+  protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
   if (mode === "request") {
     const reply = await request(script); process.exitCode = reply.ok ? 0 : 1;

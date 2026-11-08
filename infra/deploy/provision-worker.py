@@ -49,9 +49,16 @@ def atomic_write(path, value, mode):
     try:
         with os.fdopen(descriptor, "w") as output:
             output.write(value)
-        os.chmod(temporary, mode)
-        os.chown(temporary, 0, 0)
+            output.flush()
+            os.fchmod(output.fileno(), mode)
+            os.fchown(output.fileno(), 0, 0)
+            os.fsync(output.fileno())
         os.replace(temporary, path)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

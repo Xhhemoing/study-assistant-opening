@@ -112,5 +112,5 @@ else
   for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive" "$artifact_digest" "$remote_control"; do
     remote_command+=" $(quote "$value")"
   done
-  tar -czf - -C "$SCRIPT_DIR" hermes-release.sh hermes-supervisor.mjs hermes-db.mjs | ssh_run "$remote_command"
+  tar -czf - -C "$SCRIPT_DIR" hermes-release.sh hermes-supervisor.mjs hermes-config-durability.mjs hermes-db.mjs | ssh_run "$remote_command"
 fi

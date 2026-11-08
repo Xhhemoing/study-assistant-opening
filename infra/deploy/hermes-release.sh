@@ -191,6 +191,7 @@ restart_services() {
   local required=$1 target=$2
   [[ "$required" == 0 || "$required" == 1 ]] || return 1
   install_worker_guard "$target" || return 1
+  if [[ "${3:-}" == activate ]]; then managed activate || return 1; fi
   # Web can persist Study answer conditions even when the worker is disabled.
   if study_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-app-start-attempted" || return 1; fi
   # 0091 pasted questions and 0092 recognition jobs are unreadable by Study v1.
@@ -229,10 +230,11 @@ finish() {
   trap - EXIT INT TERM
   if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" ) ]]; then
     echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
+    managed refence || echo 'UNCONFIRMED: refence persistence failed; old writers must not be restored.' >&2
     managed stop || echo 'UNCONFIRMED: one or both writers may still exist.' >&2
     # A dead owner/runner is not a dead PostgreSQL session. This independent
     # read-only observation may itself fail, and never authorizes writer resume.
-    node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/failure-quiescence.json" \
+    timeout --signal=KILL 15s node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/failure-quiescence.json" \
       && echo 'Database quiescence observed after failure (point-in-time only; guard retained).' >&2 \
       || echo 'UNCONFIRMED: database activity/backend completion; guard retained.' >&2
     RECOVERY_REQUIRED=0
@@ -463,8 +465,7 @@ UNIT
   chmod 644 -- "$WEB_OVERRIDE"
   systemctl daemon-reload
   atomic_link "$RELEASE" "$CURRENT"
-  managed activate
-  restart_services "$WORKER_REQUIRED" "$RELEASE"
+  restart_services "$WORKER_REQUIRED" "$RELEASE" activate
   health "$WORKER_REQUIRED" "$RELEASE"
 fi
 printf '%s\n' "$RELEASE" > "$TRANSITION/to-target"

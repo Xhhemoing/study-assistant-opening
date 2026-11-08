@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { postgresBackupEnvironment } from "../../infra/deploy/hermes-db.mjs";
-import { cgroupEmpty, stopWriters } from "../../infra/deploy/hermes-supervisor.mjs";
+import { boundedQuiescence, cgroupEmpty, protectCleanupStreams, signalVerifiedGroup, stopWriters } from "../../infra/deploy/hermes-supervisor.mjs";
+import { Writable } from "node:stream";
 import { VISIBLE_FLAGS, verifyProcessSnapshot } from "../../infra/deploy/hermes-health.mjs";
 
 const release = "/opt/aistudy-releases/new-sha";
@@ -29,6 +30,7 @@ const worker = {
 test('cgroup proof visits nested groups and rejects unreadable or populated groups', t => {
   const root = mkdtempSync(join(tmpdir(), 'hermes-cgroup-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'cgroup.controllers'), 'cpu memory\n');
   mkdirSync(join(root, 'service/child'), { recursive: true });
   writeFileSync(join(root, 'service/cgroup.procs'), '');
   writeFileSync(join(root, 'service/child/cgroup.procs'), '12345\n');
@@ -38,7 +40,11 @@ test('cgroup proof visits nested groups and rejects unreadable or populated grou
   rmSync(join(root, 'service/child/cgroup.procs'));
   assert.equal(cgroupEmpty('/service', root), false);
   assert.equal(cgroupEmpty('/../escape', root), false);
-  assert.equal(cgroupEmpty('/absent-service', root), true);
+  assert.equal(cgroupEmpty('/absent-service', root), false);
+  assert.equal(cgroupEmpty('/service', join(root, 'unknown-layout')), false);
+  assert.equal(cgroupEmpty('', join(root, 'unknown-layout')), false);
+  rmSync(join(root, 'cgroup.controllers'));
+  assert.equal(cgroupEmpty('/service', root), false, 'v1-like layout cannot be declared empty');
 });
 test('failed web stop cannot prevent the independent worker stop and full observations', () => {
   const calls = [];
@@ -50,6 +56,42 @@ test('failed web stop cannot prevent the independent worker stop and full observ
   assert.equal(result, false);
   assert.deepEqual(calls.filter(call => call[0] === 'stop').map(call => call[1]), ['aistudy-web.service', 'aistudy-worker.service']);
   assert.equal(calls.filter(call => call[0] === 'show').length, 2);
+});
+
+test('broken stdout/stderr between stops cannot abort the second independent service attempt', async () => {
+  const broken = new Writable({ write(_chunk, _encoding, callback) { callback(Object.assign(new Error('broken pipe'), { code: 'EPIPE' })); } });
+  protectCleanupStreams([broken]);
+  const calls = [];
+  const result = stopWriters(args => {
+    calls.push(args);
+    if (args[0] === 'stop') return { ok: true, stdout: '' };
+    return { ok: true, stdout: 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n' };
+  }, () => true, line => broken.write(line));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(result, true);
+  assert.deepEqual(calls.filter(call => call[0] === 'stop').map(call => call[1]), ['aistudy-web.service', 'aistudy-worker.service']);
+  assert.equal(stopWriters(() => { throw new Error('command failed'); }, () => false, () => { throw new Error('EPIPE'); }), false);
+});
+test('quiescence errors and hung probe descendants are bounded without inherited pipes', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'hermes-probe-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const helper = join(directory, 'probe.mjs');
+  writeFileSync(helper, `import {spawn} from 'node:child_process'; spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'inherit'}); setInterval(()=>{},1000);`);
+  const began = Date.now();
+  assert.equal(boundedQuiescence(helper, 'unused', 'unused'), false);
+  assert(Date.now() - began < 20000, '15s group deadline must release the probe tree');
+  writeFileSync(helper, `throw new Error('probe failed');`);
+  assert.equal(boundedQuiescence(helper, 'unused', 'unused'), false);
+});
+
+test('missing, reused or OOM-killed anchor never authorizes a group signal', () => {
+  const killed = [];
+  for (const identity of [() => { throw new Error('ENOENT'); }, () => 'different']) {
+    assert.equal(signalVerifiedGroup(1234, 'original', 'SIGKILL', identity, (...args) => killed.push(args)), false);
+  }
+  assert.deepEqual(killed, []);
+  assert.equal(signalVerifiedGroup(1234, 'original', 'SIGKILL', () => 'original', (...args) => killed.push(args)), true);
+  assert.deepEqual(killed, [[-1234, 'SIGKILL']]);
 });
 
 test("runtime identity checks the actual cwd and command paths and returns only allowlisted flags", () => {
