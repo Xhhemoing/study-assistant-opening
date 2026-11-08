@@ -425,7 +425,5 @@ if (entry.endsWith("index.ts") || entry.endsWith("index.js")) {
   });
 }
 
-export { createRetestCloseHandler } from "./jobs/retest-close";
-
 export { createExtractStudyActionsHandler } from "./jobs/extract-study-actions";
 export { createCompileTeachingUnitHandler } from "./jobs/compile-teaching-unit";

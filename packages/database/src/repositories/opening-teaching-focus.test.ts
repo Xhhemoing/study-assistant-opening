@@ -218,6 +218,22 @@ describe("compiler focus for a course-route correction of an exam answer bound b
     expect(sql.mock.calls[1]).toEqual(expect.arrayContaining([itemVersionId, learningObservation.problemId, scope.workspaceId, scope.ownerUserId]));
   });
 
+  it("attaches a route-owned answer with the stored key but a different skill label through the scoped identity projection", async () => {
+    const facts = examEvidence(), captured = facts.evidenceContexts[oldId]!;
+    captured.observation = { ...captured.observation, requirementKey: route.requirementKey };
+    facts.observations = facts.observations.map(row => row.id === oldId
+      ? { ...row, requirementKey: route.requirementKey, answer: "3/8" } : row);
+    const current = facts.observations.find(row => row.id === oldId)!;
+    expect(current).toMatchObject({ requirementKey: stored.requirementKey, itemVersionId, outcome: "incorrect" });
+    expect(current.skillLabel).not.toBe(stored.skillLabel);
+    vi.mocked(readOpeningCourseEvidence).mockResolvedValue(facts);
+    projectionWith(binding);
+    const sql = routeSql(stored);
+    expect(await read(sql)).toEqual({ learnerFocus: stored, focusAttempt: { question: stem, answer: "3/8" } });
+    expect(readCourseRouteObservations).toHaveBeenCalledExactlyOnceWith(sql, scope, learningObservation.courseId, false);
+    expect(sql.mock.calls[1]).toEqual(expect.arrayContaining([itemVersionId, current.problemId, scope.workspaceId, scope.ownerUserId]));
+  });
+
   it.each([
     ["the current binding was removed", undefined],
     ["the requirement has a new revision", { ...binding, revision: 3 }],
