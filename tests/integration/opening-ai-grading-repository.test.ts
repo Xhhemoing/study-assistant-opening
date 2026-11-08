@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { systemQueryRequestSchema, type AiGradingInput, type AiGradingProposal, type LearningObservation } from "@aistudy/contracts";
 import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, createScopedOpeningSystemQueryReader, readOpeningBackupRecords, readOpeningCourseEvidence, readOpeningCourseLearningSummary } from "@aistudy/database";
@@ -102,18 +103,75 @@ it("keeps hinted work assisted, and earlier AI feedback stays exposure after a u
   expect(repeatedAnswer.eligibility.reasonCodes).toContain("prior_evaluation_feedback");
 });
 
+// Pause only the first context head SELECT after PostgreSQL has returned its
+// snapshot. Other clients can commit; no production hook or timing delay.
+function afterGradingHeadRead(sql: Sql) {
+  let release = () => undefined as void;
+  let entered = (_rows: Record<string, unknown>[]) => undefined as void;
+  const opened = new Promise<Record<string, unknown>[]>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  let paused = false;
+  const gated = new Proxy(sql, { get(target, property) {
+    if (property !== "begin") return Reflect.get(target, property);
+    return (work: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => work(new Proxy(tx, {
+      apply(query, receiver, args) {
+        const pending = Reflect.apply(query, receiver, args);
+        if (paused || !Array.isArray(args[0]) || !args[0].join("").includes("AS current_head_id")) return pending;
+        paused = true;
+        return Promise.resolve(pending).then(async rows => {
+          entered(rows);
+          await barrier;
+          return rows;
+        });
+      },
+    })));
+  } });
+  return { sql: gated, opened, release };
+}
+
 it("replays the same grade once, while concurrent user corrections cannot be overwritten", async () => {
   const f = await learningAttemptFixture(fixture), original = await f.submit(await f.start());
-  const [a, b] = await Promise.all([grade(original), grade(original)]);
-  expect(a.id).toBe(b.id);
-  expect((await repository().context(fixture.scope, { observationId: original.id })).existing?.id).toBe(a.id);
-  const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
-  expect(history.revisions).toHaveLength(2);
+  const duplicate = afterGradingHeadRead(fixture.sql);
+  const pending = createOpeningAiGradingRepository(duplicate.sql).apply(fixture.scope, { observationId: original.id }, proposal(), "test-grader");
+  try {
+    const rows = await Promise.race([duplicate.opened, pending.then(() => { throw new Error("head read barrier bypassed"); })]);
+    expect(rows[0]?.current_head_id).toBe(original.id);
+    const a = await grade(original); // B read O; A commits G before B resumes.
+    duplicate.release();
+    const b = await pending;
+    expect(a.id).toBe(b.id);
+    expect((await repository().context(fixture.scope, { observationId: original.id })).existing?.id).toBe(a.id);
+    const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id);
+    expect(history.revisions).toHaveLength(2);
+    expect(history.headObservationId).toBe(a.id);
+    // An actual correction after a saved grade must still reject its replay.
+    const corrected = await correct(original, a);
+    await expect(grade(original)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await readOpeningObservationHistory(fixture.sql, fixture.scope, original.id)).headObservationId).toBe(corrected.headObservationId);
+  } finally {
+    duplicate.release();
+    await Promise.allSettled([pending]);
+  }
+
   const another = await f.submit(await f.start());
-  await repository().context(fixture.scope, { observationId: another.id });
-  const userRevision = await correct(another, another, "重新检查后的答案");
-  await expect(grade(another)).rejects.toMatchObject({ code: "CONFLICT" });
-  expect((await readOpeningObservationHistory(fixture.sql, fixture.scope, another.id)).headObservationId).toBe(userRevision.headObservationId);
+  const publication = afterGradingHeadRead(fixture.sql);
+  const staleGrade = createOpeningAiGradingRepository(publication.sql).apply(fixture.scope, { observationId: another.id }, proposal(), "test-grader");
+  try {
+    await Promise.race([publication.opened, staleGrade.then(() => { throw new Error("head read barrier bypassed"); })]);
+    const userRevision = await correct(another, another, "重新检查后的答案");
+    const rejected = expect(staleGrade).rejects.toMatchObject({ code: "CONFLICT" });
+    publication.release();
+    await rejected; // The preflight saw O, but publication must recheck the corrected head.
+    await expect(grade(another)).rejects.toMatchObject({ code: "CONFLICT" });
+    const history = await readOpeningObservationHistory(fixture.sql, fixture.scope, another.id);
+    expect(history.headObservationId).toBe(userRevision.headObservationId);
+    expect(history.revisions).toHaveLength(2);
+    expect(history.revisions.at(-1)).toMatchObject({ answer: "重新检查后的答案", verdictSource: "self_report" });
+    expect(history.revisions.every(row => !row.aiEvaluation)).toBe(true);
+  } finally {
+    publication.release();
+    await Promise.allSettled([staleGrade]);
+  }
 });
 
 it.each([
