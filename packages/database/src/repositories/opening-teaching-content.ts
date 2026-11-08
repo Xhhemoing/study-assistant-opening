@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { issueOpeningReservedQuestion, type OpeningReservedPorts } from "./opening-course-reserved-selection";
-import { recordCourseQuestionExposure } from "./opening-course-question-exposure";
 import { assertReferenceTextRevision } from "./opening-teaching-reference-revision";
 
 type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
@@ -625,21 +624,10 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
       });
 
       const blocks = redactBlocksForClientInit(spec.blockOrder, revision.blocks);
-      // Persist exposure BEFORE returning content. A failed write cannot disclose
-      // a surface while leaving a false unseen claim. Replays use immutable keys.
-      await sql.begin(async tx => {
-        await lockWorkspaceLearningHistory(tx, scope);
-        const sourceVersions = Object.fromEntries(spec.sourceRefs.flatMap(ref =>
-          ref.version == null ? [] : [[ref.sourceId, Number(ref.version)]]));
-        for (const block of blocks) {
-          if (block.role === "answer_key" || !block.content) continue;
-          await recordCourseQuestionExposure(tx, scope, {
-            surfaceKey: `client-init:${revision.id}:${block.blockId}`,
-            kind: block.role === "example" ? "example" : block.role === "prompt" ? "presented" : "teaching",
-            body: block.content, sourceVersions,
-          });
-        }
-      });
+      // Ordinary saved handouts remain read-only. The exposure scanner already
+      // conservatively counts every persisted library revision/block as exposed,
+      // including examples and unanswered prompts before any client reads them.
+      // Reserved issuance records its first presentation in the transaction above.
       const checkpointJson = sanitizeCheckpointForRestore(
         activity.checkpointJson as Record<string, unknown> | undefined,
       );

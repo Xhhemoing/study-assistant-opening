@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { reservedArithmeticIdentity } from "./opening-course-reserved-selection";
+import { reservedArithmeticIdentity, readOpeningReservedSupply } from "./opening-course-reserved-selection";
+import type { CourseRequirement } from "@aistudy/contracts";
+import type { Sql } from "postgres";
+
+describe("private inventory is not exposure qualification", () => {
+  it.each([
+    { requirementKey: "rank", verification: { kind: "rubric" } },
+    { requirementKey: "arithmetic", verification: { kind: "rubric" } },
+  ])("does not query or certify unsupported inventory %#", async requirement => {
+    const db = (() => { throw new Error("unsupported producer must not resolve or authorize a question"); }) as unknown as Sql;
+    expect(await readOpeningReservedSupply(db, { workspaceId: "workspace", ownerUserId: "owner" }, requirement as CourseRequirement))
+      .toEqual({ status: "missing", available: 0, reason: "本要求的私有生成与身份校验题型尚不支持" });
+  });
+});
 
 describe("private arithmetic identity", () => {
   it("recognizes exact rendering aliases without treating a new UUID as a new condition", () => {

@@ -142,6 +142,8 @@ export async function readOpeningReservedSupply(db: Db, scope: Scope, requiremen
   return supply;
 }
 async function eligibleRows(db: Db, scope: Scope, requirement: CourseRequirement, demand: OpeningReservedDemand, reservationActivityId?: string, ports?: OpeningReservedPorts) {
+  // Unsupported production means missing private inventory, not a statement
+  // about historical exposure or the learner's verified performance.
   if (requirement.requirementKey !== "arithmetic" || requirement.verification.kind !== "exact") return { rows: [],
     supply: { status: "missing", available: 0, reason: "本要求的私有生成与身份校验题型尚不支持" } as OpeningReservedSupply };
   const exposure = ports ?? { readExposure: readCourseQuestionExposure };

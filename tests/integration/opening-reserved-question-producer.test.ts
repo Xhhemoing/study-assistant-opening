@@ -242,6 +242,17 @@ it("runs fake-provider generation through the production worker, real budget led
     expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
+it("keeps unsupported private inventory missing while saved-question exposure and mastery remain unknown", async () => {
+  const x = await setup();
+  await f.sql`UPDATE course_requirements SET requirement_key='rank',verification=${f.sql.json({ kind: "rubric", status: "ready",
+    exerciseKeys: ["rank"], rubric: "Explain rank", missingReasons: [] })} WHERE id=${x.requirement.id}`;
+  const route = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
+  const snapshot = await route.read(f.scope, x.courseId), item = snapshot.requirements[0]!;
+  expect(item.reservedSupply).toMatchObject({ status: "missing", available: 0 });
+  expect(item.questionCoverage).toEqual({ savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" });
+  expect(snapshot.summary.verified).toBe(0);
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
 it("revalidates pinned source/requirement versions after generation and leaves no half write", async () => {
   const x = await setup();
   await expect(produceReservedQuestion(x.input, { generate: async () => {
