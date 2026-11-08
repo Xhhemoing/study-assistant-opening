@@ -192,9 +192,6 @@ describe("learner snapshot read", () => {
 
   it("reads materials, supported knowledge prerequisites and course goals without promoting candidate graph entries", async () => {
     const f = await matrixAttemptFixture(fixture);
-    await fixture.sql`INSERT INTO course_asset_memberships
-      (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-      VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${f.courseId}, 'source', ${f.sourceId}, 'core', 0, 'course')`;
     const bare = await insertCourse(fixture.scope.workspaceId, "No materials");
     const [chapter, first, second, independent, suggested, unchecked] = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
     type GraphStatus = KnowledgeSnapshot["nodes"][number]["status"];

@@ -178,8 +178,6 @@ describe("opening adaptive loop (K02 Data)", () => {
 
   it("marks checked independent only from a real current server-scored attempt", async () => {
     const matrix = await matrixAttemptFixture(f);
-    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-      VALUES(${f.scope.workspaceId},${matrix.courseId},'source',${matrix.sourceId},'core','private')`;
     await createOpeningKnowledgeRepository(f.sql).replace(f.scope, matrix.courseId, { expectedVersion: 0,
       sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: matrix.courseId, version: 1, edges: [],
         nodes: [{ id: nodeA, courseId: matrix.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
@@ -205,8 +203,6 @@ describe("opening adaptive loop (K02 Data)", () => {
 
   it("keeps node evidence within the requested course for the same owner", async () => {
     const matrix = await matrixAttemptFixture(f);
-    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-      VALUES(${f.scope.workspaceId},${matrix.courseId},'source',${matrix.sourceId},'core','private')`;
     await createOpeningKnowledgeRepository(f.sql).replace(f.scope, matrix.courseId, { expectedVersion: 0,
       sourceVersions: { [matrix.sourceId]: 1 }, snapshot: { courseId: matrix.courseId, version: 1, edges: [],
         nodes: [{ id: nodeA, courseId: matrix.courseId, label: "矩阵维数", kind: "concept", status: "supported", evidenceChunkIds: [matrix.chunkId] }] } });
