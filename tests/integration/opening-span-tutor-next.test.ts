@@ -451,6 +451,64 @@ it("keeps one learner's real help, evaluation, retest, saved query and cancellat
 // The full persistent lifecycle spans several real transactions; keep its timeout local to this new case.
 }, 45_000);
 
+it("limits a real same-origin two-cycle chain before writes, preserves replay, and reprojects withdrawal", async () => {
+  const f = await seed(), { sql, scope } = fixture, learning = createOpeningLearningRepository(sql);
+  const attempts = createOpeningLearningAttemptRepository(sql);
+  const submit = async (sessionId: string, problemId: string, helped: boolean, correct: boolean) => {
+    const attempt = await attempts.create(scope, { sessionId, clientKey: randomUUID(),
+      spanExercise: { sourceId: f.sourceId, problemId, version: 1 } });
+    if (helped) expect((await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 })).exposureReceipt).toBeTruthy();
+    const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+    const answer = correct && solution.kind === "unique" ? { membership: "in_span", coefficients: solution.coefficients,
+      equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }
+      : { membership: "in_span", coefficients: ["999", "999"] };
+    const observed = await learning.insertObservation(scope, { sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL,
+      sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId, clientKey: randomUUID(),
+      answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+    expect(observed.outcome).toBe(correct ? "correct" : "incorrect");
+    return observed;
+  };
+  const a = await f.create(), failureA = await submit(a.sessionId, "span-reserved-20261021-q01", false, false);
+  const firstInput = { activityId: a.activityId, expectedRevision: a.revision, observationId: failureA.id, clientKey: "cycle-first" };
+  const first = await f.next.next(scope, firstInput);
+  if (first.kind !== "ready") throw new Error("expected first correction");
+  await submit(first.session.sessionId, "span-reserved-20261021-q02", true, true);
+  const failureB = await submit(first.session.sessionId, "span-reserved-20261021-q03", false, false);
+  const second = await f.next.next(scope, { activityId: first.session.activityId, expectedRevision: first.session.revision,
+    observationId: failureB.id, clientKey: "cycle-second" });
+  if (second.kind !== "ready") throw new Error("expected second correction");
+  const followup = await submit(second.session.sessionId, "span-reserved-20261021-q05", true, true);
+  const reference = { activityId: second.session.activityId, expectedRevision: second.session.revision, observationId: followup.id };
+  const repository = createOpeningSpanTutorContextRepository(sql);
+  const request = { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 }, question: "继续学习", originReference: reference };
+  const context = (await repository.read(scope, request))!;
+  expect(context.decisionInput.observations.map(row => row.id)).toEqual([followup.id]);
+  expect(context.decisionInput.remediationCycles?.completedCycles.map(row => row.failureRootId)).toEqual([failureA.id, failureB.id]);
+  expect(nextLearningStep(context.decisionInput)).toMatchObject({ reasonCode: "remediation_limit", activityKind: "diagnose" });
+  const persisted = async () => ({
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`,
+    observations: await sql`SELECT * FROM opening_learning_observations WHERE course_id=${f.courseId} ORDER BY id`,
+    help: await sql`SELECT * FROM opening_help_exposures WHERE course_id=${f.courseId} ORDER BY id`,
+    receipts: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    capacity: await readOpeningLearningCapacity(sql, scope),
+  });
+  const before = await persisted();
+  const results = await Promise.all(["third-one", "third-two"].map(clientKey => f.next.next(scope, { ...reference, clientKey })));
+  expect(results).toMatchObject([{ kind: "choice", reason: "remediation_limit" }, { kind: "choice", reason: "remediation_limit" }]);
+  await expect(repository.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() }))
+    .rejects.toMatchObject({ code: "SPAN_REMEDIATION_LIMIT" });
+  expect(await f.next.next(scope, firstInput)).toMatchObject({ kind: "ready", replayed: true, session: { activityId: first.session.activityId } });
+  expect(await persisted()).toEqual(before);
+  const full = (await repository.read(scope, { ...request, question: "先学" }))!;
+  expect(nextLearningStep(full.decisionInput)).toMatchObject({ reasonCode: "requested_full" });
+  await learning.reviseObservation(scope, { rootObservationId: followup.rootObservationId ?? followup.id,
+    revisesObservationId: followup.id, expectedHead: followup.id, revisionKind: "retract", reason: "撤回本次作答", clientKey: randomUUID() });
+  const afterWithdrawal = (await repository.read(scope, { ...request, originReference: { ...reference, observationId: null } }))!;
+  expect(afterWithdrawal.decisionInput.remediationCycles).toBeUndefined();
+  expect(nextLearningStep(afterWithdrawal.decisionInput).reasonCode).not.toBe("remediation_limit");
+});
+
 it("invalidates a stored no-evidence origin only when A itself gains a head", async () => {
   const f = await seed(), a = await f.create(), b = await f.create();
   const reference = { activityId: a.activityId, expectedRevision: a.revision, observationId: null };

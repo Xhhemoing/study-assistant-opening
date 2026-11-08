@@ -29,6 +29,9 @@ const result = (step: unknown) => ({
 // The read-only query passes current evidence but no phase or due-retest controls.
 // Exercise real policy outputs, not a second hand-written list of allowed codes.
 const cases = [
+  { reason: "remediation_limit", activity: "diagnose", request: input({ remediationCycles: { completedCycles: [id, olderId].map(failureRootId => ({
+    failureRootId, evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`, `observation:followup-${failureRootId}`],
+    repeatedVerifiedError: true, persistentDeliveredAssistance: false })) } }) },
   { reason: "no_evidence", activity: "diagnose", request: input() },
   { reason: "unverified_only", activity: "diagnose", request: input({ observations: [observation({ verifiedCorrect: "unknown" })] }) },
   { reason: "verified_incorrect", activity: "targeted_explain", request: input({ observations: [observation({ verifiedCorrect: "no" })] }) },

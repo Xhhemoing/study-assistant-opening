@@ -47,7 +47,7 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2"])(
   "restores and replays %s by the original key without recomputing or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
@@ -59,7 +59,7 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
   // Seed an archived policy label to exercise the reader's explicit compatibility list.
   // The recorded input, rule result and execution remain the originally saved facts.
-  if (policyVersion !== "next-learning-step-3/span-tutor-execution-2") await fixture.sql`
+  if (policyVersion !== "next-learning-step-4/span-tutor-execution-2") await fixture.sql`
     UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',${fixture.sql.json(policyVersion)}::jsonb)
     WHERE target_id=${session.activityId} AND workspace_id=${fixture.scope.workspaceId}`;
   const receipts = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
