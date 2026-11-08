@@ -58,6 +58,17 @@ CREATE TABLE opening_course_reserved_questions (
 CREATE INDEX opening_course_reserved_questions_supply_idx
   ON opening_course_reserved_questions (workspace_id, owner_user_id, course_id, requirement_id, requirement_revision, state);
 
+-- The repository binds immutable content and identity before any reservation.
+CREATE FUNCTION opening_reserved_question_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF (to_jsonb(NEW) - ARRAY['state','reservation_key','reserved_activity_id','reserved_at','issued_item_version_id','issued_at','revoked_at'])
+    IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['state','reservation_key','reserved_activity_id','reserved_at','issued_item_version_id','issued_at','revoked_at']) THEN
+    RAISE EXCEPTION 'reserved question content is immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_reserved_question_immutable BEFORE UPDATE ON opening_course_reserved_questions FOR EACH ROW EXECUTE FUNCTION opening_reserved_question_immutable();
+
 -- Rollback boundary: retain private rows/table on application rollback; do not
 -- drop supply/reservations or modify schema_migrations to make an old runner pass.
 -- The inherited 0108 recovery restrictions still apply. Production execution,

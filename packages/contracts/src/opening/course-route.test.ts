@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { courseRouteConfirmSchema, courseRouteNextSchema, courseRequirementSchema } from "./course-route";
+import { courseRouteConfirmSchema, courseRouteNextSchema, courseRequirementSchema, courseRequirementProgressSchema } from "./course-route";
 const id = "00000000-0000-4000-8000-000000000001";
 describe("course route boundary", () => {
+  it("projects only public supply counts and gaps, never private candidate bodies", () => {
+    const schema = courseRequirementProgressSchema.shape.reservedSupply.unwrap();
+    for (const status of ["ready", "missing", "unknown"] as const) expect(schema.parse({status,available:0,reason:null})).toEqual({status,available:0,reason:null});
+    expect(schema.safeParse({status:"ready",available:1,reason:null,answer:"private"}).success).toBe(false);
+    expect(schema.safeParse({status:"ready",available:-1,reason:null}).success).toBe(false);
+  });
   it("keeps stable skill and requirement identities separate and permits explicit material gaps", () => {
     expect(courseRequirementSchema.parse({ id, courseId:id, stableSkillId:id, knowledgeNodeId:null,
       requirementKey:"algebra.eigenvectors", title:"特征向量", position:0, mandatory:true, goalIds:[], prerequisiteIds:[],

@@ -3,6 +3,7 @@ import { courseRouteActivityContextSchema, teachingMisconceptionsSchema, teachin
 import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
+import { readOpeningReservedKey } from "./opening-course-reserved-selection";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 export type TeachingQuestionSpec = {
@@ -146,6 +147,13 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
   const spec = item.evaluation_spec as TeachingQuestionSpec, blocks = row.blocks as Block[];
   const stem = teachingQuestionText(blocks.find(block => block.id === spec.blockId)?.content);
   if (!stem) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
+  const reserved = await readOpeningReservedKey(tx, scope, String(item.id));
+  if (reserved) {
+    if (reserved.text !== stem) throw learningError("CONFLICT", "已发保留题身份不一致。");
+    // Deliberately omit key text: this helper also serves ordinary verification responses.
+    // The private deterministic key is not public reference material.
+    return { stem, misconceptions: [], sourceRefs: reserved.sourceRefs, referenceText: "" };
+  }
   const answer = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
   const text = teachingQuestionText(answer?.content);
   if (text && checkArithmeticAnswer(stem, text) === "incorrect") {
