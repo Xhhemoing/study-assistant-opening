@@ -176,7 +176,13 @@ BEGIN
   IF TG_TABLE_NAME='opening_source_chunks' THEN
     SELECT workspace_id INTO old_workspace FROM opening_sources WHERE id=OLD.source_id;
   END IF;
-  UPDATE opening_course_question_exposure_coverage SET invalidated=true,complete=false WHERE workspace_id=old_workspace;
+  -- During a legitimate workspace cascade the parent may already be gone while
+  -- coverage awaits its own cascade. Do not update that doomed row; retain the
+  -- scope guard for every live-workspace mutation.
+  UPDATE opening_course_question_exposure_coverage AS coverage SET invalidated=true,complete=false
+    WHERE coverage.workspace_id=old_workspace AND EXISTS (
+      SELECT 1 FROM workspaces w WHERE w.id=coverage.workspace_id AND w.owner_user_id=coverage.owner_user_id
+    );
   IF TG_OP='DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
 END $$;
