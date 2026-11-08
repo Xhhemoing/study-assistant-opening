@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { NEXT_LEARNING_STEP_VERSION } from "@aistudy/domain";
 import { applyMigrations, createSqlClient, createOpeningKnowledgeRepository,
   createOpeningLearningRepository, createOpeningSkillEvidenceRepository, readOpeningCourseEvidence } from "@aistudy/database";
 import { buildDecisionInput, toSnapshotEvidence } from "@aistudy/domain";
@@ -23,6 +24,18 @@ let workspaceId = "";
 let courseId = "";
 let sessionId = "";
 let otherCookie = "";
+
+// Fixed version protocol: the separate D5 restoration must pass all three real
+// evaluator/HTTP cases against v3 gold, especially the 1/2-prior-success cases.
+function assistedSuccessGold(policyVersion: string) {
+  const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
+  const clarify = { kind: "clarify", problemRef: null } as const;
+  switch (policyVersion) {
+    case "next-learning-step-2": return [variant, clarify, clarify] as const;
+    case "next-learning-step-3": return [variant, variant, variant] as const;
+    default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
+  }
+}
 
 type RegisterResult = {
   cookie: string;
@@ -241,15 +254,18 @@ describe("K02a tutor-actions route", () => {
     expect(response.status).toBe(404);
   });
 
-  it.each([0, 1, 2])("uses the latest assisted server-correct head after %i independent successes", async count => {
+  it.each([0, 1, 2])("uses explicit policy gold for latest assisted server-correct head after %i independent successes", async count => {
     const fixture = await scoredCourse();
     for (let index = 0; index < count; index++) await fixture.answer(index);
     const { observation, link } = await fixture.answer(count, true);
+    expect(observation.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForCurrentVersion: "yes" });
+    expect(observation.serverEvaluation).toMatchObject({ evaluatorVersion: "matrix-exact-v1", decision: "correct" });
     expect(link.id).not.toBe(observation.id);
     const response = await get(fixture.id, { skillLabel: matrixSkill, nodeId: fixture.nodeId });
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.actions[0]).toMatchObject({ kind: "independent_variant", nodeId: fixture.nodeId });
+    expect(body.actions).toHaveLength(1);
+    expect(body.actions[0]).toMatchObject({ ...assistedSuccessGold(NEXT_LEARNING_STEP_VERSION)[count]!, nodeId: fixture.nodeId });
     expect(body.actions[0].evidenceIds).toContain(link.id);
     expect(body.actions[0].evidenceIds).not.toContain(observation.id);
   });

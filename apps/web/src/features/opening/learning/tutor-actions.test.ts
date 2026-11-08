@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
+import { NEXT_LEARNING_STEP_VERSION, toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
 import type { LearningObservation } from "@aistudy/contracts";
 import { createOpeningApi } from "../client/api";
 import {
@@ -18,6 +18,18 @@ const OBS = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const LINK = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
 const scope = { workspaceId: "workspace-1", ownerUserId: "user-1" };
 const emptyEvidence = (): CourseEvidence => ({ observations: [], evidenceContexts: {} });
+
+// Fixed policy gold, not derived from the action under test. The separate D5
+// restoration must pass the v3 column with these same assisted-success inputs.
+function assistedSuccessGold(policyVersion: string) {
+  const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
+  const clarify = { kind: "clarify", problemRef: null } as const;
+  switch (policyVersion) {
+    case "next-learning-step-2": return [variant, clarify, clarify] as const;
+    case "next-learning-step-3": return [variant, variant, variant] as const;
+    default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
+  }
+}
 
 type EvidenceOptions = {
   id?: string; at?: number; assistance?: "independent" | "hinted" | "revealed";
@@ -93,6 +105,9 @@ describe("tutor-actions query boundary", () => {
 });
 
 describe("canonical tutor action mapping (pure seam)", () => {
+  it("refuses an unspecified policy instead of falling back to another gold column", () => {
+    expect(() => assistedSuccessGold("next-learning-step-unknown")).toThrow("Unsupported assisted-success policy");
+  });
   it("maps no evidence and unknown-only evidence to clarify, even with a selected page", () => {
     expect(recommend(emptyEvidence())).toMatchObject({ kind: "clarify", currentPage: 2, evidenceIds: [] });
     expect(recommend(evidenceRow({ unknown: true, assistance: "hinted" })).kind).toBe("clarify");
@@ -108,10 +123,13 @@ describe("canonical tutor action mapping (pure seam)", () => {
     }));
     expect(buildTutorActions({ skillLabel: "chain rule", observations, retestDue: false })[0]!.kind).toBe("worked_example");
   });
-  it.each([0, 1, 2])("D5: latest verified assisted success after %i independent successes stays reduced-help", count => {
+  it.each([0, 1, 2])("uses explicit policy gold for latest verified assisted success after %i independent successes", count => {
     const earlier = Array.from({ length: count }, (_, index) => evidenceRow({ id: `independent-${index}`, at: 100_000 + index * 1000 }));
-    const action = recommend(combine(...earlier, evidenceRow({ at: 200_000, assistance: "hinted" })));
-    expect(action).toMatchObject({ kind: "independent_variant", problemRef: "variant:1" });
+    const evidence = combine(...earlier, evidenceRow({ at: 200_000, assistance: "hinted" }));
+    expect(toSnapshotEvidence(evidence, new Date()).observations.find(row => row.id === OBS))
+      .toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForCurrentVersion: "yes" });
+    const action = recommend(evidence);
+    expect(action).toMatchObject(assistedSuccessGold(NEXT_LEARNING_STEP_VERSION)[count]!);
     expect(action).not.toHaveProperty("masteryPercent");
   });
   it.each([false, true])("bounds only response references with node=%s, preserving full canonical decisions", async node => {
