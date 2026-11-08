@@ -223,6 +223,10 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
       const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
       const retrievalInput = {
+        // The repository validates ownership for this selected course; materialUse
+        // is chosen here, never read from the client request or model output.
+        courseContext: { courseId: contextAnchor?.courseId ?? input.courseId ?? null,
+          materialUse: contextAnchor?.attemptId || contextAnchor?.itemVersionId ? "practice" as const : "citation" as const },
         chunks,
         sourceIds: allowedSourceIds,
         query: input.text,
@@ -233,7 +237,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         parentBudget,
         signal,
       };
-      const context = deps.retrieveContext ? (await deps.retrieveContext(scope, retrievalInput)).chunks : selectContext(retrievalInput);
+      if (allowedSourceIds.length && !deps.retrieveContext) throw new EphemeralServiceError("CONFLICT", "资料用途校验暂不可用，请稍后重试。", 409);
+      const retrieved = deps.retrieveContext ? await withLearnerContextError(() => deps.retrieveContext!(scope, retrievalInput)) : null;
+      if (allowedSourceIds.length && !retrieved?.assertCurrent) throw new EphemeralServiceError("CONFLICT", "资料用途凭据不可用，请重新发送问题。", 409);
+      const assertMaterialsCurrent = () => withLearnerContextError(async () => { await retrieved?.assertCurrent?.(); });
+      const context = retrieved?.chunks ?? selectContext(retrievalInput);
       const historyToResolve = epochChanged ? [] : input.history;
       const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
       const historyDiscarded = epochChanged || historyRefs === null;
@@ -258,6 +266,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const emitText = onTextDelta ? async (delta: string) => {
         if (!delta) return;
         if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
+        await assertMaterialsCurrent();
         if (await deps.privacy.currentEpoch(scope) !== privacy.epoch) {
           throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次回答已停止。", 409);
         }
@@ -328,6 +337,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           signal,
           ...(emitText ? { onTextDelta: emitText } : {}),
           beforeSend: async () => {
+            await assertMaterialsCurrent();
             if (learnerContext) await withLearnerContextError(() => deps.learnerContext!.assertCurrent(scope, learnerContext));
             const epoch = await deps.privacy.currentEpoch(scope);
             if (epoch !== privacy.epoch) {
@@ -371,6 +381,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         if (error instanceof OpeningProviderError) throw error;
         throw error;
       }
+      await assertMaterialsCurrent();
       const validated = providerOutputSchema.parse(output);
       const streamedCitations = onTextDelta ? tutorCitationsFromMarkdown(validated.text, context) : null;
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
@@ -391,6 +402,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const selectionChanged =
         clientSourceIds.length === 0 && allowedSourceIds.length > 0;
       const exposureReceipt = await deliverHelp();
+      await assertMaterialsCurrent();
       return {
         ...(contextAnchor ? { contextAnchor } : {}),
         ...(exposureReceipt ? { exposureReceipt } : {}),

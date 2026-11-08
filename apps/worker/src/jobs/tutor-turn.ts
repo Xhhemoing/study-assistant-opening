@@ -296,6 +296,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
       const retrievalInput = {
+        courseContext: { courseId: turn.courseId ?? turn.contextAnchor?.courseId ?? null,
+          materialUse: turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" as const : "citation" as const },
         chunks,
         sourceIds: allowedSourceIds,
         query: turn.text,
@@ -305,9 +307,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         operationId: claimed.id,
         parentBudget,
       };
-      const context = (deps.retrieveContext
-        ? (await deps.retrieveContext(scope, retrievalInput)).chunks
-        : selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
+      if (allowedSourceIds.length && !deps.retrieveContext) throw Object.assign(new Error("material admission service unavailable"), { code: "CONFLICT" });
+      const retrieved = deps.retrieveContext ? await deps.retrieveContext(scope, retrievalInput) : null;
+      if (allowedSourceIds.length && !retrieved?.assertCurrent) throw Object.assign(new Error("material admission pin unavailable"), { code: "CONFLICT" });
+      const assertMaterialsCurrent = async () => { await retrieved?.assertCurrent?.(); };
+      const context = (retrieved?.chunks ?? selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
       const { history, sourceRefs: historySourceRefs } = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
@@ -383,6 +387,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       let firstTextAt: number | null = null;
       const onTextDelta = deps.stream ? async (delta: string) => {
         if (!delta) return;
+        await assertMaterialsCurrent();
         if (firstTextAt === null) {
           const observedAt = new Date();
           firstTextAt = performance.now();
@@ -427,6 +432,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           actualCents: terms.actualCents,
           ...(terms.requestCapPerDay ? { requestCapPerDay: terms.requestCapPerDay } : {}),
           beforeSend: async () => {
+            await assertMaterialsCurrent();
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
           },
@@ -464,6 +470,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
         throw error;
       }
+      await assertMaterialsCurrent();
       let validated: ProviderOutput = providerOutputSchema.parse(output);
       if (deps.stream) {
         const referenced = tutorCitationsFromMarkdown(validated.text, context);
@@ -515,6 +522,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         level: mode === "explain" ? "revealed" as const : "hinted" as const,
       } : undefined);
       await flushTiming();
+      await assertMaterialsCurrent();
       await deps.tutorJobs.completeTurn({
         scope,
         jobId: claimed.id,

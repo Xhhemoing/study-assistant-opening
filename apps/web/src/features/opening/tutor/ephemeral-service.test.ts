@@ -2,7 +2,7 @@ import { format } from "node:util";
 import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderInput, ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
-import { OpeningProviderError } from "@aistudy/ai";
+import { OpeningProviderError, selectContext } from "@aistudy/ai";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
@@ -43,6 +43,7 @@ function deps(overrides?: {
   studyContext?: EphemeralTutorDeps["studyContext"];
   exposures?: EphemeralTutorDeps["exposures"];
   learnerContext?: EphemeralTutorDeps["learnerContext"];
+  retrieveContext?: EphemeralTutorDeps["retrieveContext"];
 }) {
   const writes: string[] = [];
   const budget = {
@@ -72,6 +73,8 @@ function deps(overrides?: {
     provenance: overrides?.provenance,
     studyContext: overrides?.studyContext,
     learnerContext: overrides?.learnerContext,
+    // Unit adapter; actual owned-course/membership admission is exercised in PG.
+    retrieveContext: overrides?.retrieveContext ?? (async (_scope, input) => ({ chunks: selectContext(input), mode: "lexical", assertCurrent: async () => {} })),
     exposures: overrides?.exposures,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
@@ -90,6 +93,22 @@ function deps(overrides?: {
 }
 
 describe("ephemeral tutor service", () => {
+  it("passes course as a selector with server-chosen citation use and reuses the captured pin", async () => {
+    const assertCurrent = vi.fn(async () => {});
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const, assertCurrent }));
+    const f = deps({ retrieveContext });
+    await f.service.replyEphemeral(scope, { text: "read source", courseId: chunkId, sourceIds: [sourceId], history: [] });
+    expect(retrieveContext).toHaveBeenCalledWith(scope, expect.objectContaining({ courseContext: { courseId: chunkId, materialUse: "citation" } }));
+    expect(assertCurrent).toHaveBeenCalledTimes(3);
+  });
+  it("does not send after a purpose change between retrieval and provider pre-send", async () => {
+    const assertCurrent = vi.fn(async () => { throw Object.assign(new Error("purpose changed"), { code: "CONFLICT" }); });
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const, assertCurrent }));
+    const f = deps({ retrieveContext });
+    await expect(f.service.replyEphemeral(scope, { text: "read source", sourceIds: [sourceId], history: [] })).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+    expect(retrieveContext).toHaveBeenCalledOnce();
+    expect(f.complete).not.toHaveBeenCalled();
+  });
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("keeps %s in temporary question answering", async text => {
     const f = deps();
     await f.service.replyEphemeral(scope, { text, sourceIds: [], history: [] });
@@ -125,7 +144,7 @@ describe("ephemeral tutor service", () => {
   it("does not silently ignore images on the temporary route", async () => {
     const complete = vi.fn(async () => output);
     const images = [{ mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId, physicalPage: 2 }];
-    const service = createEphemeralTutorService({ sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
+    const service = createEphemeralTutorService({ retrieveContext: async (_scope, input) => ({ chunks: selectContext(input), mode: "lexical", assertCurrent: async () => {} }), sources: { listOwnedIds: async () => [sourceId] }, chunks: { listForSources: async () => [chunk] },
       privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
       budget: { reserve: async () => ({ id: "r" }), settle: async () => {}, release: async () => {}, claimExecution: async () => true, markUnknown: async () => {} },
       provider: { complete }, resolveModel: async () => ({ provider: { complete }, supportsVision: true, modelSnapshot: { id: "v", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576, mediaInputCentsPerMillion: 100, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),

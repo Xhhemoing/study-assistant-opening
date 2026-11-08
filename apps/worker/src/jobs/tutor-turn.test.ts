@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError, OpeningModelRoutingError } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
 import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
@@ -58,7 +58,9 @@ describe("tutor turn handler", () => {
       claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
-    const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
+    // Unit adapter only; real admission and pin persistence are covered by purpose PG.
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: selectContext(input), mode: "lexical" as const, assertCurrent: async () => {} }));
+    const deps = { tutorJobs, chunks, budget, provider, retrieveContext, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     const freezeHelpInputSnapshot = vi.fn(async (): Promise<HelpInputSnapshot> => {
       const selected = jobs.getUserTurn.mock.results.at(-1)?.value;
       const saved = await selected as typeof turn & { studyIntent?: StudyIntentEvent };
@@ -69,6 +71,34 @@ describe("tutor turn handler", () => {
     const jobs = { ...tutorJobs, freezeHelpInputSnapshot };
     return { deps: { ...deps, tutorJobs: jobs }, tutorJobs: jobs, chunks, budget, provider };
   }
+
+  it("passes the persisted course and server-selected use, retaining the original pre-send assertion", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const assertCurrent = vi.fn(async () => {});
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const, assertCurrent }));
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId: claimedJob.conversationId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    await createTutorTurnHandler({ ...deps, retrieveContext })(claimedJob.id);
+    expect(retrieveContext).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      expect.objectContaining({ courseContext: { courseId: claimedJob.conversationId, materialUse: "citation" }, sourceIds: [chunkA.sourceId] }));
+    expect(assertCurrent).toHaveBeenCalledTimes(3);
+    expect(provider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("blocks the real provider send after the captured admission changes without retrying retrieval", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const assertCurrent = vi.fn(async () => { throw Object.assign(new Error("purpose changed"), { code: "CONFLICT" }); });
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const, assertCurrent }));
+    await expect(createTutorTurnHandler({ ...deps, retrieveContext })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(retrieveContext).toHaveBeenCalledOnce();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed rather than using the old lexical path when material admission is absent", async () => {
+    const { deps, provider } = setup();
+    await expect(createTutorTurnHandler({ ...deps, retrieveContext: undefined })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
 
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("opens a real course-scoped span action for %s before the proposal/model path", async text => {
     const { deps, tutorJobs, provider, budget } = setup();
