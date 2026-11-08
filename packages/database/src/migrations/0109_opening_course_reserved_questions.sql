@@ -92,6 +92,7 @@ CREATE TABLE opening_course_question_exposure_coverage (
   protocol text NOT NULL CHECK (protocol = 'course-question-exposure-1'),
   history_revision bigint NOT NULL CHECK (history_revision >= 0),
   complete boolean NOT NULL DEFAULT false,
+  invalidated boolean NOT NULL DEFAULT false,
   covered_surface_count bigint NOT NULL CHECK (covered_surface_count >= 0),
   PRIMARY KEY (workspace_id, owner_user_id)
 );
@@ -134,7 +135,71 @@ END $$;
 CREATE TRIGGER opening_course_question_exposure_immutable BEFORE UPDATE ON opening_course_question_exposures
   FOR EACH ROW EXECUTE FUNCTION opening_course_question_exposure_immutable();
 
--- No backfill and no complete=true seed. Only the server's full-history scanner
+-- Only workspace creation seeds provenance. An ordinary caller/scanner cannot
+-- insert a coverage row to retrofit a pre-migration workspace. No backfill.
+CREATE FUNCTION opening_course_question_coverage_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    IF pg_trigger_depth()<>2 OR NEW.protocol<>'course-question-exposure-1'
+      OR NEW.history_revision<>0 OR NEW.complete OR NEW.invalidated OR NEW.covered_surface_count<>0 THEN
+      RAISE EXCEPTION 'coverage genesis requires workspace creation' USING ERRCODE='23514';
+    END IF;
+  ELSE
+    IF (NEW.workspace_id,NEW.owner_user_id,NEW.protocol) IS DISTINCT FROM (OLD.workspace_id,OLD.owner_user_id,OLD.protocol) THEN
+      RAISE EXCEPTION 'coverage scope is immutable' USING ERRCODE='23514';
+    END IF;
+    -- Never let a scanner clear a deletion gap or promote invalidated history.
+    NEW.invalidated := OLD.invalidated OR NEW.invalidated;
+    IF NEW.invalidated THEN NEW.complete := false; END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_course_question_coverage_guard BEFORE INSERT OR UPDATE ON opening_course_question_exposure_coverage
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_coverage_guard();
+CREATE FUNCTION opening_course_question_coverage_genesis() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,complete,invalidated,covered_surface_count)
+    VALUES(NEW.id,NEW.owner_user_id,'course-question-exposure-1',0,false,false,0);
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_course_question_coverage_genesis AFTER INSERT ON workspaces
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_coverage_genesis();
+
+-- No dynamic SQL or extra privileges: only these explicit historical surfaces.
+-- The source BEFORE DELETE trigger marks its workspace before cascade removes
+-- chunks, whose parent lookup may no longer resolve during the cascade.
+CREATE FUNCTION opening_course_question_history_invalidate() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE old_workspace uuid;
+BEGIN
+  IF TG_OP='UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+  old_workspace := (to_jsonb(OLD)->>'workspace_id')::uuid;
+  IF TG_TABLE_NAME='opening_source_chunks' THEN
+    SELECT workspace_id INTO old_workspace FROM opening_sources WHERE id=OLD.source_id;
+  END IF;
+  UPDATE opening_course_question_exposure_coverage SET invalidated=true,complete=false WHERE workspace_id=old_workspace;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF blocks ON library_revisions
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF text,image_object_key ON opening_source_chunks
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON opening_sources
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF text,help_input_snapshot ON opening_turns
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE ON cards
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON opening_help_exposures
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON opening_learning_item_versions
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+
+-- These row triggers preserve deletion gaps; they do NOT serialize every
+-- surface INSERT against scan/reserve. Do not claim concurrency-safe unseen
+-- until each writer acquires history -> coverage -> business locks at entry.
+-- Taking history from a row UPDATE trigger would invert that lock order.
+-- Genesis is NOT completeness. Only the server's full-history scanner
 -- plus all presentation/help writers may establish coverage under the history lock.
 -- Readers require protocol/owner/workspace and the CURRENT workspace watermark;
 -- this storage row alone (even complete=true) is not a coverage proof. These tables

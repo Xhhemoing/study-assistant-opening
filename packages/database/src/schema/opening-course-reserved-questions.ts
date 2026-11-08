@@ -33,7 +33,7 @@ export const openingCourseQuestionExposures = pgTable("opening_course_question_e
   check("opening_course_question_exposures_history", sql`${t.historyRevision} >= 0`),
 ]);
 
-/** A persistence slot, NOT authority supplied by a caller. No initial coverage is seeded.
+/** A persistence slot, NOT authority supplied by a caller. Only new workspaces get an incomplete genesis.
  * Phase 2 must establish completeness and compare the live workspace history watermark.
  */
 export const openingCourseQuestionExposureCoverage = pgTable("opening_course_question_exposure_coverage", {
@@ -42,6 +42,7 @@ export const openingCourseQuestionExposureCoverage = pgTable("opening_course_que
   protocol: text("protocol").notNull(),
   historyRevision: bigint("history_revision", { mode: "number" }).notNull(),
   complete: boolean("complete").notNull().default(false),
+  invalidated: boolean("invalidated").notNull().default(false),
   coveredSurfaceCount: bigint("covered_surface_count", { mode: "number" }).notNull(),
 }, t => [
   primaryKey({ columns: [t.workspaceId, t.ownerUserId] }),
