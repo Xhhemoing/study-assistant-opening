@@ -79,6 +79,17 @@ it("passes explicit overview-only updates to the repository for authoritative re
   expect(repository.execute).toHaveBeenCalledWith(scope, expect.objectContaining({ context: stored }));
   expect(repository.assertCurrent).toHaveBeenCalledWith(scope, stored);
 });
+it.each(["overview", "challenge"] as const)("does not relabel an existing %s pace change as the remediation method-change exception", async purpose => {
+  const stored = { ...context(), decisionInput: limitedInput(), needsIntentUpdate: true,
+    intent: { ...DEFAULT_STUDY_SESSION_INTENT, purpose, pace: "slow" },
+    resumeSession: { ...session, intent: { ...DEFAULT_STUDY_SESSION_INTENT, purpose },
+      moveId: purpose === "overview" ? "overview-contrast" : "challenge-transfer" } };
+  repository.read.mockResolvedValue(stored);
+  expect(await prepareTutorNextAction(createSpanTutorNextAction({} as Sql), scope, { ...request, question: "span 慢一点" }))
+    .toMatchObject({ action: null, decision: { reasonCode: "remediation_limit" }, choice: { href: expect.stringContaining("lesson=activity") } });
+  expect(repository.execute).not.toHaveBeenCalled();
+  expect(repository.assertCurrent).toHaveBeenCalledWith(scope, stored);
+});
 it("propagates repository admission failures for an explicit intent-only update instead of hiding a conflict", async () => {
   repository.read.mockResolvedValue({ ...context(), decisionInput: limitedInput(), resumeSession: session,
     intent: { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "overview" }, needsIntentUpdate: true });
