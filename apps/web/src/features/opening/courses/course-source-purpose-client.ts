@@ -18,7 +18,7 @@ export function sourcePurposeLabel(purpose: CourseSourcePurpose): string {
   return purpose === null ? "未分类" : sourcePurposeLabels[purpose];
 }
 export const SOURCE_PURPOSE_HELP = "教学材料用于教学；练习材料用于练习，不自动当作教材；模考材料不参与教学；引用材料仅作引用，不生成练习。未分类表示尚未指定用途，不等于教学材料。";
-export const SOURCE_PURPOSE_SCOPE = "用途仅影响本课程，不改变其他课程中的同一材料；不删除资料、成绩、历史作答或曝光记录。保存不会开始课程或生成内容；实际使用由服务端按用途校验，页面提示不能替代后端隔离。";
+export const SOURCE_PURPOSE_SCOPE = "用途仅影响本课程，不改变其他课程中的同一材料；不删除资料、成绩、历史作答或曝光记录。保存不会开始课程或生成内容；实际使用时仍需按用途限制材料使用范围，仅有页面提示并不能保证材料不会被误用。";
 
 export class CourseSourcePurposeError extends Error {
   constructor(public readonly status: number, public readonly code: string) {
@@ -60,7 +60,7 @@ export function createCourseSourcePurposeClient(transport: typeof fetch = (input
         assetType: "source", assetId: sourceId, role, visibility: "private", sortOrder: 0, purpose,
       }));
       const row = membership(body.membership, courseId, sourceId);
-      if (row.purpose !== purpose) throw new Error("服务端尚未确认所选用途，请刷新核对，不会自动重试。");
+      if (row.purpose !== purpose) throw new Error("尚未确认所选用途已保存，请刷新核对，不会自动重试。");
       return row;
     },
     async update(courseId: string, current: CourseSourceMembership, purpose: CourseSourcePurpose) {
@@ -70,7 +70,7 @@ export function createCourseSourcePurposeClient(transport: typeof fetch = (input
       }));
       const row = membership(body.membership, courseId, current.assetId);
       if (row.purpose !== purpose || new Date(row.updatedAt).getTime() <= new Date(current.updatedAt).getTime()) {
-        throw new Error("服务端尚未确认用途更新，请刷新核对，不会自动重试。");
+        throw new Error("尚未确认用途修改已保存，请刷新核对，不会自动重试。");
       }
       return row;
     },
