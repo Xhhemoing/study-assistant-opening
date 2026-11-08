@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
+import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, createOpeningLearningRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
 import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
-import { DEFAULT_STUDY_SESSION_INTENT } from "@aistudy/domain";
+import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -24,12 +25,12 @@ async function activity(options: { id?: string; course?: string; status?: string
       ${f.sql.json(options.taskId ? { source: "task", taskId: options.taskId } : {})},${options.at ?? "2026-11-01T00:00:00Z"})`;
   return id;
 }
-async function staticLesson() {
+async function staticLesson(retestId?: string) {
   const seeds = backupRows(f.sql, f.scope), sourceId = await seeds.source();
   await seeds.chunk(sourceId);
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
     VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
-  return createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT });
+  return createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT, ...(retestId ? { retestId } : {}) });
 }
 async function readFootprint() {
   return {
@@ -40,6 +41,44 @@ async function readFootprint() {
     preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
   };
 }
+it.each(["active", "paused"] as const)("restores a real %s delayed retest via DTO href and the actual lesson target reader", async status => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const lesson = await staticLesson(retestId), sessions = createOpeningSpanSessionRepository(f.sql);
+  const answer = await createOpeningLearningRepository(f.sql).insertObservation(f.scope, { sessionId: lesson.sessionId, courseId, skillLabel: SPAN_SKILL_LABEL,
+    sourceIds: lesson.sourceIds, clientKey: randomUUID(), answer: "保留原复测作答", outcome: "unverified", assistance: "independent", verdictSource: "self_report", retestId });
+  const saved = await sessions.save(f.scope, lesson.activityId, { expectedRevision: lesson.revision, intent: lesson.intent, moveId: lesson.moveId, status });
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql), dto = teachingActivitySchema.parse(await teaching.assertOwnedActivity(f.scope, lesson.activityId));
+  expect(dto.staticLesson).toEqual({ protocol: "span-lesson-v1", sessionId: lesson.sessionId, retestId });
+  const before = await readFootprint();
+  const api = { listTasks: vi.fn(async () => ({ tasks: [] })), listTeachingActivities: () => teaching.listByOwner(f.scope), getTeachingActivity: vi.fn(), createTeachingActivity: vi.fn() };
+  const entry = await openCourseStudy(api, { courseId, courseTitle: "Delayed", compilerEnabled: true, archived: false, sourceIds: [] });
+  const href = `/opening/courses/${courseId}/study/span?lesson=${lesson.activityId}&retest=${retestId}`;
+  expect(entry).toEqual({ kind: "static-lesson", activity: dto, href });
+  const navigate = vi.fn(); expect(navigateCourseStaticLesson(entry, navigate)).toBe(true); expect(navigate).toHaveBeenCalledExactlyOnceWith(href);
+  const params = new URL(href, "https://opening.test").searchParams;
+  const details = await createSpanLessonSessionService(f.sql).read(f.scope, courseId, params.get("lesson"), params.get("retest"));
+  expect(details.session).toEqual(saved); expect(details.observations.map(row => row.id)).toContain(answer.id);
+  expect(details.observations.find(row => row.id === answer.id)?.answer).toBe("保留原复测作答");
+  expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(await readFootprint()).toEqual(before);
+  await f.sql`UPDATE opening_retest_activities SET status='cancelled' WHERE id=${retestId}`;
+  const cancelled = await readFootprint();
+  await expect(teaching.assertOwnedActivity(f.scope, lesson.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(openCourseStudy(api, { courseId, courseTitle: "Delayed", compilerEnabled: true, archived: false, sourceIds: [] })).rejects.toThrow("原延迟复测");
+  expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(await readFootprint()).toEqual(cancelled);
+});
+it("rejects a persisted retest reference after its course identity no longer matches", async () => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const lesson = await staticLesson(retestId);
+  const other = randomUUID(); await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${other},${f.scope.workspaceId},'Other',${other})`;
+  await f.sql`UPDATE opening_retest_activities SET course_id=${other} WHERE id=${retestId}`;
+  const before = await readFootprint();
+  await expect(createOpeningTeachingActivitiesRepository(f.sql).assertOwnedActivity(f.scope, lesson.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await readFootprint()).toEqual(before);
+});
 it("recovers real owned static span through DB DTO, course selector, entry and workspace navigation without writes", async () => {
   const lesson = await staticLesson(), teaching = createOpeningTeachingActivitiesRepository(f.sql);
   await activity({ at: "2000-01-01T00:00:00Z" }); // An older compiled activity must not win.

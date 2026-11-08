@@ -9,7 +9,8 @@ export type CourseStudyEntry = { kind: "static-lesson"; activity: TeachingActivi
 
 function activityEntry(activity: TeachingActivity): CourseStudyEntry {
   return activity.staticLesson && activity.courseId
-    ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?lesson=${encodeURIComponent(activity.id)}` }
+    ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?${new URLSearchParams({ lesson: activity.id,
+      ...(activity.staticLesson.retestId ? { retest: activity.staticLesson.retestId } : {}) })}` }
     : { kind: "activity", activity };
 }
 

@@ -17,6 +17,7 @@ import {
 } from "./opening-learning-facts";
 
 export function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
+  if (row.static_lesson_retest_unavailable === true) throw learningError("CONFLICT", "原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
   const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
   const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
   return {
@@ -35,7 +36,8 @@ export function mapTeachingActivity(row: Record<string, unknown>): TeachingActiv
     ...(focus.success ? { learnerFocus: focus.data } : {}),
     ...(goal?.courseRoute ? { routeManaged: true } : {}),
     ...(typeof row.static_lesson_session_id === "string"
-      ? { staticLesson: { protocol: "span-lesson-v1" as const, sessionId: row.static_lesson_session_id } } : {}),
+      ? { staticLesson: { protocol: "span-lesson-v1" as const, sessionId: row.static_lesson_session_id,
+        ...(typeof row.static_lesson_retest_id === "string" ? { retestId: row.static_lesson_retest_id } : {}) } } : {}),
     clientKey: String(row.client_key),
     createdAt: learningIso(row.created_at)!,
     updatedAt: learningIso(row.updated_at)!,
@@ -48,11 +50,18 @@ export async function assertOwnedActivity(
   activityId: string,
 ): Promise<TeachingActivity> {
   const rows = await sql`
-    SELECT a.*,s.id AS static_lesson_session_id FROM opening_teaching_activities a
+    SELECT a.*,CASE WHEN a.checkpoint_json->'spanLesson'->>'retestId' IS NULL OR r.id IS NOT NULL THEN s.id END AS static_lesson_session_id,
+      r.id AS static_lesson_retest_id,
+      (a.status IN ('active','paused') AND s.id IS NOT NULL AND a.checkpoint_json->'spanLesson'->>'retestId' IS NOT NULL AND r.id IS NULL) AS static_lesson_retest_unavailable
+    FROM opening_teaching_activities a
     JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
     LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
       AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
       AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+    LEFT JOIN opening_retest_activities r ON s.id IS NOT NULL AND r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+      AND r.course_id=a.course_id AND (r.id::text=a.checkpoint_json->'spanLesson'->>'retestId'
+        OR r.candidate_id::text=a.checkpoint_json->'spanLesson'->>'retestId' OR r.candidate_reference_id::text=a.checkpoint_json->'spanLesson'->>'retestId')
+      AND r.status IN ('accepted','in_progress')
     WHERE a.id = ${activityId}
       AND a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}`;
@@ -276,11 +285,18 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
 
     async listByOwner(scope: Scope): Promise<TeachingActivity[]> {
       const rows = await sql`
-        SELECT a.*,s.id AS static_lesson_session_id FROM opening_teaching_activities a
+        SELECT a.*,CASE WHEN a.checkpoint_json->'spanLesson'->>'retestId' IS NULL OR r.id IS NOT NULL THEN s.id END AS static_lesson_session_id,
+          r.id AS static_lesson_retest_id,
+          (a.status IN ('active','paused') AND s.id IS NOT NULL AND a.checkpoint_json->'spanLesson'->>'retestId' IS NOT NULL AND r.id IS NULL) AS static_lesson_retest_unavailable
+        FROM opening_teaching_activities a
         JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
         LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
           AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
           AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+        LEFT JOIN opening_retest_activities r ON s.id IS NOT NULL AND r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+          AND r.course_id=a.course_id AND (r.id::text=a.checkpoint_json->'spanLesson'->>'retestId'
+            OR r.candidate_id::text=a.checkpoint_json->'spanLesson'->>'retestId' OR r.candidate_reference_id::text=a.checkpoint_json->'spanLesson'->>'retestId')
+          AND r.status IN ('accepted','in_progress')
         WHERE a.workspace_id = ${scope.workspaceId}
           AND a.owner_user_id = ${scope.ownerUserId}
         ORDER BY a.updated_at DESC, a.id`;

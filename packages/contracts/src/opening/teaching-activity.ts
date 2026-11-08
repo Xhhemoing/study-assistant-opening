@@ -90,7 +90,7 @@ export const teachingActivitySchema = z
     id: uuidSchema,
     routeManaged: z.boolean().optional(),
     /** Response-only qualification from the owned persisted activity/session JOIN. */
-    staticLesson: z.object({ protocol: z.literal("span-lesson-v1"), sessionId: uuidSchema }).strict().optional(),
+    staticLesson: z.object({ protocol: z.literal("span-lesson-v1"), sessionId: uuidSchema, retestId: uuidSchema.optional() }).strict().optional(),
     workspaceId: uuidSchema,
     ownerUserId: uuidSchema,
     courseId: uuidSchema.nullable(),
