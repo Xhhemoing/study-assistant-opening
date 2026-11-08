@@ -60,7 +60,7 @@ function recheckDerivedFocus(learnerFocus: TeachingLearnerFocus, evidence: Cours
 /** A goal is the activity's policy snapshot; expired answer evidence must not erase it. */
 function withoutCurrentEvidence(focus: TeachingLearnerFocus): TeachingCompilerFocus {
   if (!focus.goalContext) return {};
-  const { prerequisiteRepair: _repair, recentErrors: _errors, ...base } = focus;
+  const { prerequisiteRepair: _repair, recentErrors: _errors, examPartFocus: _part, ...base } = focus;
   return { learnerFocus: { ...base, activityKind: "diagnose", reasonCode: "no_evidence",
     focusObservationId: null, recentAssistance: [] } };
 }
@@ -109,10 +109,23 @@ async function routeProjectionBindsFocus(sql: Sql, scope: Scope, courseId: strin
   learnerFocus: TeachingLearnerFocus): Promise<boolean> {
   const context = courseRouteActivityContextSchema.safeParse((goalJson as { courseRoute?: unknown } | null)?.courseRoute);
   if (!context.success || learnerFocus.requirementKey !== context.data.requirementKey) return false;
-  const { projected } = await readCourseRouteObservations(sql, scope, courseId, false);
-  const bound = projected.find(row => row.id === learnerFocus.focusObservationId)?.courseRequirement;
-  return bound !== undefined && bound.id === context.data.requirementId && bound.revision === context.data.requirementRevision
-    && bound.stableSkillId === context.data.stableSkillId && bound.requirementKey === context.data.requirementKey;
+  const { raw, projected } = await readCourseRouteObservations(sql, scope, courseId, false);
+  const original = raw.find(row => row.id === learnerFocus.focusObservationId);
+  if (learnerFocus.examPartFocus && (!original || original.rootObservationId && original.rootObservationId !== original.id)) return false;
+  const matches = projected.filter(row => row.id === learnerFocus.focusObservationId
+    && (!learnerFocus.examPartFocus || row.requirementKey === context.data.requirementKey)
+    && row.courseRequirement?.id === context.data.requirementId && row.courseRequirement.revision === context.data.requirementRevision
+    && row.courseRequirement.stableSkillId === context.data.stableSkillId && row.courseRequirement.requirementKey === context.data.requirementKey);
+  if (matches.length !== 1) return false;
+  const current = matches[0]!;
+  if (learnerFocus.examPartFocus) {
+    const part = current.examPartFocus, pinned = learnerFocus.examPartFocus;
+    return part !== undefined && part.questionIdentityRefId === pinned.questionIdentityRefId && part.partId === pinned.partId
+      && part.identityRefId === pinned.identityRefId && part.requirementKey === pinned.requirementKey
+      && pinned.requirementKey === context.data.requirementKey && current.verifiedCorrect === "no" && current.usableForCurrentVersion === "yes";
+  }
+  // A missing private part ref must never upgrade a whole-question verdict.
+  return current.examPartFocus === undefined;
 }
 
 /** Only the chosen effective observation's question and answer may enter the prompt. */
@@ -142,6 +155,13 @@ export async function readOpeningTeachingCompilerFocus(sql: Sql, scope: Scope, a
   const eligibility = observation && evidence.evidenceContexts[observation.id];
   // Historical correctness alone cannot qualify an answer for the current material.
   if (!observation || !eligibility) return withoutCurrentEvidence(learnerFocus);
+  if (learnerFocus.examPartFocus) {
+    if (!routeSnapshot || !courseId || !await routeProjectionBindsFocus(sql, scope, courseId, activity?.goal_json, learnerFocus))
+      return withoutCurrentEvidence(learnerFocus);
+    // Trusted current part verdict authorizes this focus; the immutable raw whole
+    // question may be correct. Its original stem/answer are still the prompt input.
+    return withFocusAttempt(sql, scope, learnerFocus, evidence);
+  }
   if (learnerFocus.requirementKey !== undefined && (
     learnerFocus.requirementKey !== (observation.requirementKey ?? null) ||
     normalizeSkillLabelKey(learnerFocus.skillLabel) !== normalizeSkillLabelKey(observation.skillLabel)

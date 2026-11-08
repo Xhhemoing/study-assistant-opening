@@ -7,10 +7,11 @@ import { mapTeachingActivity } from "./opening-teaching-activities";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { courseRouteDelayedProtocolSchema,readOpeningCourseRouteRetestOutcome } from "./opening-course-route-retest-state";
-import type { CourseRouteObservation,CourseRouteSourceChunk } from "@aistudy/domain";
+import type { CourseRouteSourceChunk } from "@aistudy/domain";
 import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
 import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
+import type { ExamCourseRouteObservation } from "./opening-course-exam-evidence-projection";
 const bindingSchema=z.object({id:z.string().uuid(),revision:z.number().int().positive(),stableSkillId:z.string().uuid(),requirementKey:z.string()}).strict();
 export type CourseRouteDb=Sql|TransactionSql;
 export async function assertCourseRouteCourse(db:CourseRouteDb,scope:Scope,courseId:string){
@@ -45,7 +46,7 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
     ORDER BY a.started_at,a.id`;
   const identity=(stem:unknown)=>typeof stem==="string"&&stem.trim()?stem.normalize("NFKC").replace(/\s+/gu," ").trim():null;
   const first=new Map<string,string>();for(const row of history){const key=identity(row.stem_snapshot);if(key&&!first.has(key))first.set(key,String(row.id));}
-  const projected:CourseRouteObservation[]=toSnapshotEvidence({observations,evidenceContexts},new Date()).observations.map(observation=>{
+  const projected:ExamCourseRouteObservation[]=toSnapshotEvidence({observations,evidenceContexts},new Date()).observations.map(observation=>{
     const row=rows.find(row=>String(row.id)===observation.id)!,binding=bindingSchema.safeParse((row.evaluation_spec as {courseRequirement?:unknown}|null)?.courseRequirement);
     const actual=history.find(item=>String(item.id)===row.attempt_id),questionIdentity=identity(actual?.stem_snapshot);
     const block=(actual?.blocks as {id:string;content?:{interaction?:{kind?:string}}}[]|undefined)?.find(block=>block.id===actual?.teaching_block_id);

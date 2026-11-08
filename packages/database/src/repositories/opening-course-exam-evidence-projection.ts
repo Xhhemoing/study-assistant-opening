@@ -13,25 +13,37 @@ const partRequirementSchema = z.object({ partId: z.string(), identityRefId: z.st
 export type ExamCoursePartEvidence = z.infer<typeof questionPartEvaluationSchema> & z.infer<typeof partRequirementSchema> & { identityCurrent: boolean };
 export type ExamCourseEvidenceLink = { observationId: string; nodeId: string; requirementKey: string; capturedAt: string | null; identityCurrent: boolean;
   /** Present (even empty) suppresses whole-question projection. Absent means legacy. */
-  parts?: ExamCoursePartEvidence[] };
+  parts?: ExamCoursePartEvidence[]; questionIdentityRefId?: string };
+export type ExamPartFocus = { questionIdentityRefId: string; partId: string; identityRefId: string; requirementKey: string };
+export type ExamCourseRouteObservation = CourseRouteObservation & { examPartFocus?: ExamPartFocus };
 
-export function projectExamCourseEvidence(observations: readonly CourseRouteObservation[], roots: ReadonlyMap<string, string>, requirements: readonly CourseRequirement[], links: readonly ExamCourseEvidenceLink[]): CourseRouteObservation[] {
+export function projectExamCourseEvidence(observations: readonly CourseRouteObservation[], roots: ReadonlyMap<string, string>, requirements: readonly CourseRequirement[], links: readonly ExamCourseEvidenceLink[]): ExamCourseRouteObservation[] {
   const byRoot = new Map(links.map(link => [link.observationId, link]));
   return observations.flatMap(observation => {
     const link = byRoot.get(roots.get(observation.id) ?? observation.id);
     if (link?.parts !== undefined) {
-      if (!link.identityCurrent || !link.capturedAt || observation.usableForCurrentVersion !== "yes") return [];
-      return link.parts.flatMap(part => {
-        const matches = requirements.filter(row => row.lifecycle === "active" && row.id === part.id
-          && row.revision === part.revision && row.stableSkillId === part.stableSkillId
-          && row.requirementKey === part.requirementKey && row.knowledgeNodeId === part.nodeId);
-        const requirement = matches.length === 1 ? matches[0] : undefined;
-        if (!part.identityCurrent || !requirement?.approvedAt || !(Date.parse(link.capturedAt!) > Date.parse(requirement.approvedAt))) return [];
-        return [{ ...observation, requirementKey: part.requirementKey,
-          verifiedCorrect: part.outcome === "correct" ? "yes" as const : part.outcome === "incorrect" ? "no" as const : "unknown" as const,
-          assistance: part.assistance,
-          independentAttempt: part.assistance === "independent" && observation.independentAttempt === "yes" ? "yes" as const : "no" as const,
-          questionIdentity: part.identityRefId,
+      if (!link.identityCurrent || !link.capturedAt || !link.questionIdentityRefId || observation.usableForCurrentVersion !== "yes") return [];
+      // One immutable question supplies at most ONE check for a requirement, even if
+      // several declared parts address it. Never let order or a successful sibling
+      // hide a failure/unknown. Private stored part facts remain unchanged.
+      return requirements.flatMap(requirement => {
+        const parts = link.parts!.filter(part => part.id === requirement.id);
+        if (!parts.length || requirement.lifecycle !== "active" || !requirement.approvedAt
+          || !(Date.parse(link.capturedAt!) > Date.parse(requirement.approvedAt))
+          || parts.some(part => !part.identityCurrent || part.revision !== requirement.revision
+            || part.stableSkillId !== requirement.stableSkillId || part.requirementKey !== requirement.requirementKey
+            || part.nodeId !== requirement.knowledgeNodeId)) return [];
+        const incorrect = parts.filter(part => part.outcome === "incorrect").sort((a, b) => a.partId.localeCompare(b.partId));
+        const verifiedCorrect = incorrect.length ? "no" as const : parts.some(part => part.outcome === "unknown") ? "unknown" as const : "yes" as const;
+        const assistance = parts.some(part => part.assistance === "revealed") ? "revealed" as const
+          : parts.some(part => part.assistance === "hinted") ? "hinted" as const
+            : parts.some(part => part.assistance === "unknown") ? "unknown" as const : "independent" as const;
+        const focus = incorrect[0];
+        return [{ ...observation, requirementKey: requirement.requirementKey, verifiedCorrect, assistance,
+          independentAttempt: assistance === "independent" && verifiedCorrect !== "unknown" && observation.independentAttempt === "yes" ? "yes" as const : "no" as const,
+          questionIdentity: link.questionIdentityRefId,
+          ...(focus ? { examPartFocus: { questionIdentityRefId: link.questionIdentityRefId, partId: focus.partId,
+            identityRefId: focus.identityRefId, requirementKey: focus.requirementKey } } : {}),
           courseRequirement: { id: requirement.id, revision: requirement.revision, stableSkillId: requirement.stableSkillId, requirementKey: requirement.requirementKey } }];
       });
     }
@@ -74,6 +86,7 @@ export async function readExamCourseEvidenceLinks(db: Sql | TransactionSql, scop
     const question = pack.questions.find(item => item.id === attempt?.questionId);
     if (!question?.partSnapshot) return link;
     link.parts = [];
+    link.questionIdentityRefId = question.partSnapshot.questionIdentityRefId;
     if (!attempt?.answeredAt || !attempt.answer || row.head_id !== row.observation_id || row.revision_kind === "retract"
       || row.sources_current !== true || !link.identityCurrent) return link;
     const qualification = examAttemptExposureQualification(attempt, state, pack);

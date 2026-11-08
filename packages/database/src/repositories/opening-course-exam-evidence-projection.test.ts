@@ -19,13 +19,30 @@ describe("private per-part projection and snapshot boundary", () => {
     id: r.id, revision: r.revision, stableSkillId: r.stableSkillId, nodeId: r.knowledgeNodeId,
     outcome: i === 0 ? "incorrect" as const : "correct" as const, assistance: "independent" as const, identityCurrent: true }));
   const projectParts = (overrides: Partial<ExamCourseEvidenceLink> = {}, reqs = [requirement, second]) =>
-    projectExamCourseEvidence([observation], roots, reqs, [{ ...link, parts, ...overrides }]);
+    projectExamCourseEvidence([observation], roots, reqs, [{ ...link, parts, questionIdentityRefId: uuid(10), ...overrides }]);
   it("replaces rather than double counts whole-question evidence, preserving original facts", () => {
     const projected = projectParts();
     expect(projected.map(p => [p.courseRequirement?.id, p.verifiedCorrect])).toEqual([["r", "no"], ["r2", "yes"]]);
     expect(projected.every(p => p.id === observation.id)).toBe(true);
     expect(observation.verifiedCorrect).toBe("yes");
-    expect(projectParts({ parts: [...parts].reverse() }).map(p => p.courseRequirement?.id)).toEqual(["r2", "r"]);
+    expect(projectParts({ parts: [...parts].reverse() }).map(p => p.courseRequirement?.id)).toEqual(["r", "r2"]);
+  });
+  it.each(["correct", "incorrect", "unknown"] as const)("counts one question for same-requirement parts with %s sibling regardless of order", outcome => {
+    const same = [{ ...parts[0]!, outcome: "correct" as const }, { ...parts[0]!, partId: "second", identityRefId: uuid(9), outcome }];
+    const withSources = { ...requirement, sourceRefs: [{ sourceId: "source", sourceVersion: 1 }] };
+    const forward = projectParts({ parts: same }, [withSources]);
+    expect(projectParts({ parts: [...same].reverse() }, [withSources])).toEqual(forward);
+    expect(forward).toHaveLength(1);
+    expect(forward[0]!.questionIdentity).toBe(uuid(10));
+    expect(forward[0]!.verifiedCorrect).toBe(outcome === "incorrect" ? "no" : outcome === "unknown" ? "unknown" : "yes");
+    const progress = courseRequirementProgress([withSources], forward.map(row => ({ ...row, firstQuestionExposure: true })), new Map([["source", 1]]));
+    expect(progress[0]!.status).toBe(outcome === "incorrect" ? "needs_correction" : "needs_verification");
+    if (outcome === "unknown") expect(forward[0]!.independentAttempt).toBe("no");
+  });
+  it("keeps assisted same-requirement success out of independent counts", () => {
+    const same = parts.map((part, i) => ({ ...parts[0]!, partId: part.partId, identityRefId: part.identityRefId, outcome: "correct" as const,
+      assistance: i ? "revealed" as const : "independent" as const }));
+    expect(projectParts({ parts: same })[0]).toMatchObject({ verifiedCorrect: "yes", assistance: "revealed", independentAttempt: "no" });
   });
   it("keeps missing/assisted results orthogonal to sibling correctness", () => {
     const projected = projectParts({ parts: [{ ...parts[0]!, outcome: "unknown", assistance: "unknown" }, { ...parts[1]!, assistance: "revealed" }] });
