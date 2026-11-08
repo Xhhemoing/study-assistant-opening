@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, jsonError } from "../../../auth/service";
-import { addMembershipBodySchema, createCourseBodySchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema } from "./course-request-schemas";
+import { addMembershipBodySchema, createCourseBodySchema, parseCourseRequest, readCourseJson, removeMembershipBodySchema, updateMembershipPurposeBodySchema } from "./course-request-schemas";
 
 const assetId = "11111111-1111-4111-8111-111111111111";
 const reject = (run: () => unknown) => {
@@ -14,6 +14,23 @@ describe("course request validation", () => {
     expect(parseCourseRequest(addMembershipBodySchema, { assetType: "document", assetId, role: "reference", visibility: "private" })).toMatchObject({ assetType: "document" });
     expect(parseCourseRequest(addMembershipBodySchema, { assetType: "source", assetId, role: "core", sortOrder: 0, visibility: "private" })).toMatchObject({ sortOrder: 0 });
     expect(parseCourseRequest(removeMembershipBodySchema, { assetType: "source", assetId })).toEqual({ assetType: "source", assetId });
+  });
+  it.each([null, "teaching", "practice", "mock_exam", "reference"])("preserves POST purpose %s and accepts purpose-only PATCH", purpose => {
+    expect(parseCourseRequest(addMembershipBodySchema, { assetType: "source", assetId, role: "core", visibility: "private", purpose })).toHaveProperty("purpose", purpose);
+    const patch = { assetType: "source", assetId, purpose, expectedUpdatedAt: "2026-11-08T13:00:00.123Z" };
+    expect(parseCourseRequest(updateMembershipPurposeBodySchema, patch)).toEqual(patch);
+  });
+  it.each([
+    { assetType: "document", assetId, purpose: "teaching", expectedUpdatedAt: "2026-11-08T13:00:00.123Z" },
+    { assetType: "source", assetId, purpose: "unknown", expectedUpdatedAt: "2026-11-08T13:00:00.123Z" },
+    { assetType: "source", assetId, purpose: "teaching" },
+    { assetType: "source", assetId, purpose: null, expectedUpdatedAt: "2026-11-08" },
+    { assetType: "source", assetId, purpose: null, expectedUpdatedAt: "2026-11-08T13:00:00.123Z", role: "archive" },
+  ])("rejects invalid or metadata-mutating PATCH %#", body => {
+    expect(reject(() => parseCourseRequest(updateMembershipPurposeBodySchema, body))).toMatchObject({ code: "VALIDATION", status: 400 });
+  });
+  it("rejects classification on non-source POST without reusing role", () => {
+    expect(reject(() => parseCourseRequest(addMembershipBodySchema, { assetType: "document", assetId, role: "reference", visibility: "private", purpose: "teaching" }))).toMatchObject({ code: "VALIDATION" });
   });
   it("rejects bad bodies with a Chinese message in the VALIDATION envelope", async () => {
     const missingTitle = reject(() => parseCourseRequest(createCourseBodySchema, { slug: "a" }));

@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Sql, TransactionSql } from "postgres";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { readOpeningBackupRecords, createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
+import { createOpeningCourseReadySourcesRepository, readOpeningBackupRecords, createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { saveOpeningReservedCandidates, admitOpeningReservedCandidate, readOpeningReservedSupply, reserveOpeningCourseQuestion, issueOpeningReservedQuestion, type OpeningReservedPorts } from "../../packages/database/src/repositories/opening-course-reserved-selection";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
+import { recordCourseQuestionExposure } from "../../packages/database/src/repositories/opening-course-question-exposure";
 import { backupRows } from "./opening-backup-records-fixture";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
@@ -103,11 +104,14 @@ async function supplyFixture() {
   const start=await route.start(scope,courseId,{goalId:goal.id,expectedGoalRevision:1,requirementId:requirement.id,expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
   if(start.kind!=='ready')throw new Error('start failed');
   const candidate={text:'137*19',interaction:{kind:'numeric' as const},answer:'2603'};
-  await saveOpeningReservedCandidates(f.sql,scope,start.activity.id,[candidate]);
-  return {scope,courseId,sourceId:freshSource,goal,requirement,activity:start.activity,candidate,route};
+  const purposes=createOpeningCourseReadySourcesRepository(f.sql);
+  const pin=await purposes.readSourcePurposePin(scope,{activityId:start.activity.id,sourceIds:[freshSource],materialUse:'teaching'});
+  const admission={assertPinnedContext:(tx:TransactionSql)=>purposes.assertSourcePurposePin(scope,pin,tx)};
+  await saveOpeningReservedCandidates(f.sql,scope,start.activity.id,[candidate],admission);
+  return {scope,courseId,sourceId:freshSource,goal,requirement,activity:start.activity,candidate,route,admission};
 }
-// Explicit SQL-consumer test port, NOT production coverage evidence. Phase 2 owns
-// the real ledger and presentation writers. Default production must remain unknown.
+// Explicit SQL-consumer test port, NOT production coverage evidence.
+// Real scanner genesis, missing-history and sticky-gap regressions below use no port.
 const isolatedExposure: OpeningReservedPorts = { readExposure: async () => ({coverage:"complete",exactExposed:false,familyExposed:false,reason:null}) };
 it("under an explicit test exposure port, reserves and issues a real item/attempt with no public key",async()=>{
   const x=await supplyFixture();
@@ -142,19 +146,32 @@ it("honors authoritative exposure without conflating same family and same questi
 it("pins admission to the real current requirement/source snapshot and returns a private row identity",async()=>{
   const x=await supplyFixture(), pinned={courseId:x.courseId,requirementId:x.requirement.id,requirementRevision:1,sourceVersions:{[x.sourceId]:1}};
   const candidate={text:'139*23',interaction:{kind:'numeric' as const},answer:'3197'};
-  await expect(admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,{...pinned,requirementRevision:2},candidate)).rejects.toMatchObject({code:'CONFLICT'});
-  await expect(admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,{...pinned,sourceVersions:{[x.sourceId]:2}},candidate)).rejects.toMatchObject({code:'CONFLICT'});
-  const receipt=await admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,pinned,candidate);
+  await expect(admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,{...pinned,requirementRevision:2},candidate,x.admission)).rejects.toMatchObject({code:'CONFLICT'});
+  await expect(admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,{...pinned,sourceVersions:{[x.sourceId]:2}},candidate,x.admission)).rejects.toMatchObject({code:'CONFLICT'});
+  const receipt=await admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,pinned,candidate,x.admission);
   expect(receipt).not.toBeNull();
   const [row]=await f.sql`SELECT id,identity_json,key_json FROM opening_course_reserved_questions WHERE id=${receipt!.privateRefId}`;
   expect(row!.identity_json).toMatchObject({reservedQuestionId:row!.id,requirementId:x.requirement.id,requirementRevision:1,familyId:'arithmetic:*'});
-  expect(await admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,pinned,{...candidate,answer:'1'})).toBeNull();
+  expect(await admitOpeningReservedCandidate(f.sql,x.scope,x.activity.id,pinned,{...candidate,answer:'1'},x.admission)).toBeNull();
+});
+it("uses the real scanner to qualify a fresh genesis with fully enumerable history",async()=>{
+  const x=await supplyFixture();
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  expect(await readOpeningReservedSupply(f.sql,x.scope,x.requirement)).toMatchObject({status:'ready',available:1});
+  expect(await coverageInvalidated()).toEqual({complete:true,invalidated:false});
 });
 it("keeps missing history unknown and rejects forged or unsupported keys",async()=>{
   const x=await supplyFixture();
-  expect(await saveOpeningReservedCandidates(f.sql,x.scope,x.activity.id,[{...x.candidate,text:'44+7',answer:'99'}])).toBe(0);
-  await expect(saveOpeningReservedCandidates(f.sql,x.scope,x.activity.id,[{...x.candidate,trusted:true}])).rejects.toThrow();
+  expect(await saveOpeningReservedCandidates(f.sql,x.scope,x.activity.id,[{...x.candidate,text:'44+7',answer:'99'}],x.admission)).toBe(0);
+  await expect(saveOpeningReservedCandidates(f.sql,x.scope,x.activity.id,[{...x.candidate,trusted:true}],x.admission)).rejects.toThrow();
+  // Explicitly remove the trusted origin, as for pre-0109 workspaces. Empty
+  // current history alone is not unknown when DB genesis and all surfaces exist.
+  await f.sql`DELETE FROM opening_course_question_exposure_coverage WHERE workspace_id=${x.scope.workspaceId}`;
   expect(await readOpeningReservedSupply(f.sql,x.scope,x.requirement)).toMatchObject({status:'unknown',available:0});
+  await expect(f.sql.begin(tx=>reserveOpeningCourseQuestion(tx,x.scope,x.requirement,x.activity.id,{kind:'new_question'})))
+    .rejects.toMatchObject({code:'CONFLICT'});
+  expect((await f.sql`SELECT state FROM opening_course_reserved_questions WHERE workspace_id=${x.scope.workspaceId}`)[0]!.state).toBe('available');
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${x.scope.workspaceId}`).toHaveLength(0);
 });
 it("serializes racing reservations and rolls back a failed issue without half publication",async()=>{
   const x=await supplyFixture(),other=await insertTestTeachingActivity(f.sql,x.scope,x.courseId);
@@ -333,21 +350,25 @@ it("preserves library append-only rejection and rolls back the attempted invalid
 type HistoryGapSurface = 'block' | 'problem' | 'checkpoint' | 'observation' | 'exposure';
 async function seedHistoryGapSurface(surface: HistoryGapSurface, x: Awaited<ReturnType<typeof supplyFixture>>) {
   // A real server-persisted presentation precedes each destructive mutation.
-  const exposureId=await insertExposure({exact:{question:x.candidate.text,interaction:x.candidate.interaction,figures:[]}});
+  const surfaceKey=`presented:${randomUUID()}`;
+  await f.sql.begin(tx=>recordCourseQuestionExposure(tx,f.scope,{surfaceKey,kind:'presented',text:'2+3',sourceVersions:{}}));
+  const [exposure]=await f.sql`SELECT id FROM opening_course_question_exposures
+    WHERE workspace_id=${f.scope.workspaceId} AND surface_key=${surfaceKey}`;
+  const exposureId=String(exposure!.id);
   if(surface==='exposure') return {table:'opening_course_question_exposures',idColumn:'id',id:exposureId,column:'surface_key',json:false};
   if(surface==='checkpoint') return {table:'opening_teaching_activities',idColumn:'id',id:x.activity.id,column:'checkpoint_json',json:true};
   if(surface==='block'){
     const documentId=randomUUID(),id=randomUUID();
     await f.sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES(${documentId},${f.scope.workspaceId},'Presented content','candidate')`;
     await f.sql`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
-      VALUES(${id},${f.scope.workspaceId},${documentId},'prompt',0,${f.sql.json({text:x.candidate.text})})`;
+      VALUES(${id},${f.scope.workspaceId},${documentId},'prompt',0,${f.sql.json({text:'2+3'})})`;
     return {table:'library_blocks',idColumn:'id',id,column:'content',json:true};
   }
   const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:x.activity.id,courseId:x.courseId,skillLabel:'Arithmetic',sourceIds:[x.sourceId]});
   const id=randomUUID();
   if(surface==='problem'){
     await f.sql`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,stem_snapshot,artifact_kind)
-      VALUES(${id},${f.scope.workspaceId},${session.id},${x.sourceId},1,${x.candidate.text},'reference_item')`;
+      VALUES(${id},${f.scope.workspaceId},${session.id},${x.sourceId},1,'2+3','reference_item')`;
     return {table:'opening_problem_refs',idColumn:'problem_id',id,column:'stem_snapshot',json:false};
   }
   await f.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
@@ -363,6 +384,8 @@ it.each([
   ['checkpoint','update'],['checkpoint','delete'],['observation','update'],['observation','delete'],['exposure','delete'],
 ] as const)("keeps %s %s history gaps sticky, scoped and transactional without granting unseen",async(surface,mutation)=>{
   const x=await supplyFixture(),target=await seedHistoryGapSurface(surface,x);
+  // Start from real scanner-qualified history, not a hand-written complete flag.
+  expect(await readOpeningReservedSupply(f.sql,f.scope,x.requirement)).toMatchObject({status:'ready',available:1});
   const mutate=async(db:Sql|TransactionSql)=>{
     if(mutation==='delete') await db`DELETE FROM ${db(target.table)} WHERE ${db(target.idColumn)}=${target.id} AND workspace_id=${f.scope.workspaceId}`;
     else await db`UPDATE ${db(target.table)} SET ${db(target.column)}=${target.json?db.json({text:'changed historical content'}):'changed historical content'}
@@ -371,20 +394,20 @@ it.each([
   // Even an UPDATE OF a guarded column must not invalidate when bytes are unchanged.
   await f.sql`UPDATE ${f.sql(target.table)} SET ${f.sql(target.column)}=${f.sql(target.column)}
     WHERE ${f.sql(target.idColumn)}=${target.id} AND workspace_id=${f.scope.workspaceId}`;
-  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  expect(await coverageInvalidated()).toEqual({complete:true,invalidated:false});
   await expect(f.sql.begin(async tx=>{
     await mutate(tx);
     expect((await tx`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`)[0]!.invalidated).toBe(true);
     throw new Error('history gap rollback');
   })).rejects.toThrow('history gap rollback');
-  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  expect(await coverageInvalidated()).toEqual({complete:true,invalidated:false});
   await mutate(f.sql);
   expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
   await f.sql`UPDATE opening_course_question_exposure_coverage SET invalidated=false,complete=true WHERE workspace_id=${f.scope.workspaceId}`;
   expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
   expect((await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.otherScope.workspaceId}`)[0])
     .toEqual({complete:false,invalidated:false});
-  // No scanner/complete positive fixture: default consumer refuses unknown history.
+  // The same production scanner must not recover deleted/changed history.
   expect(await readOpeningReservedSupply(f.sql,f.scope,x.requirement)).toMatchObject({status:'unknown',available:0});
   await expect(f.sql.begin(tx=>reserveOpeningCourseQuestion(tx,f.scope,x.requirement,x.activity.id,{kind:'new_question'})))
     .rejects.toMatchObject({code:'CONFLICT'});

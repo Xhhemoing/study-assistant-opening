@@ -216,7 +216,7 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     // Positive control: the same intent and sources without route scope pass
     // all four chunks through the real production provider builder/retriever.
     const unscoped = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
-      clientKey: randomUUID(), intentKind: activity.intentKind, intentSummary: activity.intentSummary, createIntent: { control: true },
+      clientKey: randomUUID(), intentKind: activity.intentKind, intentSummary: activity.intentSummary, sourceIds: [sourceA, sourceB], createIntent: { control: true },
     });
     const control = await deps.buildProviderInput!(f.scope, { ...payload, activityId: unscoped.id });
     expect(control.chunks.map(chunk => chunk.id).sort()).toEqual([chunkA, chunkANext, chunkB, chunkBNext].sort());
@@ -266,7 +266,17 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     for (const block of citedBlocks) expect(block.content.citedChunkIds).toEqual([chunkA, chunkB]);
     expect(citedBlocks).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "text", content: expect.objectContaining({ text: "矩阵的秩与零空间维数之和等于列数。" }) }),
-      expect.objectContaining({ type: "formula", content: { latex: "rank(A) + dim N(A) = 5", citedChunkIds: [chunkA, chunkB] } }),
+      expect.objectContaining({ type: "formula", content: {
+        latex: "rank(A) + dim N(A) = 5", citedChunkIds: [chunkA, chunkB],
+        citationBinding: {
+          blockId: citedBlocks.find(block => block.type === "formula")!.id, role: "teach", status: "bound",
+          refs: [
+            { sourceId: sourceA, sourceVersion: 1, chunkId: chunkA, page: 1 },
+            { sourceId: sourceB, sourceVersion: 1, chunkId: chunkB, page: 1 },
+          ],
+          factualSupport: "unverified",
+        },
+      } }),
       expect.objectContaining({ type: "answer_key", content: expect.objectContaining({ answer: "5 − 2 = 3", hidden: true }) }),
       expect.objectContaining({ type: "answer_key", content: expect.objectContaining({ answer: "4 − 2 = 2", hidden: true }) }),
     ]));

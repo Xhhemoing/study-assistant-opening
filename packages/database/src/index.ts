@@ -282,6 +282,7 @@ export * from "./repositories/opening-learner-state-read";
 
 export * from "./repositories/opening-learning-decisions";
 export * from "./repositories/opening-learning-agenda";
+export * from "./repositories/opening-current-learning-activity";
 
 export * from "./schema/opening-learning-decisions";
 

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { EXAM_SPRINT_PACK } from "./catalog";
+import { validExamLessonExposure } from "./lesson-exposure-mapping";
 import type { ExamAttempt, ExamPack, ExamQuestion, ExamSprintCommand, ExamSprintState } from "@aistudy/contracts";
 import { evaluateExamQuestionParts, applyExamSprintCommand, createExamSprintState, examSprintOverview, type ExamSelectionContext } from "./engine";
 
@@ -73,6 +75,58 @@ describe("private immutable per-part grading", () => {
     const view = examSprintOverview(answered, selectedPack, NOW);
     expect(view.attempts[0]!.correct).toBeNull();
     expect(JSON.stringify(view)).not.toMatch(/partSnapshot|resultMetadata|questionIdentityRefId|correctOptionIds/);
+  });
+});
+
+describe("atomic mock to teaching", () => {
+  const selectedPack = EXAM_SPRINT_PACK;
+  function pending() {
+    let state = start(createExamSprintState(NOW), "mock-a", NOW, selectedPack);
+    state = answer(state, selectedPack.questions.find(q => q.id === state.attempts[0]!.questionId)!.answer, NOW, selectedPack);
+    return applyExamSprintCommand(state, { action: "next", runId: state.runs[0]!.id, clientKey: "next-request-key" }, selectedPack, NOW);
+  }
+  function command(state: ExamSprintState): Extract<ExamSprintCommand, { action: "switch_to_teaching" }> {
+    const attempt = state.attempts.at(-1)!, lessonId = selectedPack.questions.find(q => q.id === attempt.questionId)!.lessonId;
+    const mapping = validExamLessonExposure(selectedPack.lessons.find(l => l.id === lessonId)!)!;
+    return { action: "switch_to_teaching", clientKey: "conversion-request-key", expectedRunId: state.runs[0]!.id,
+      expectedAttemptId: attempt.id, lessonId, packVersion: selectedPack.version, contentFingerprint: mapping.contentFingerprint,
+      mappingVersion: mapping.mappingVersion, confirmedEndScoredMock: true };
+  }
+  it("ends only the original run, records real-time assistance and preserves sealed independent answers and whole scores", () => {
+    const state = pending(), input = command(state), now = "2026-10-17T08:01:00.000Z";
+    const converted = applyExamSprintCommand(state, input, selectedPack, now);
+    expect(converted.attempts[0]).toEqual(state.attempts[0]);
+    expect(converted.runs[0]).toMatchObject({ ...state.runs[0], completedAt: now, conversion: {
+      runId: input.expectedRunId, attemptId: input.expectedAttemptId, convertedAt: now, packId: selectedPack.id, packVersion: selectedPack.version } });
+    expect(converted.attempts.at(-1)).toMatchObject({ answer: null, answeredAt: null, correct: null,
+      help: [{ kind: "solution", at: now }], lessonExposureIds: [converted.runs[0]!.conversion!.exposureId] });
+    const view = examSprintOverview(converted, selectedPack, now);
+    expect(view.activeRun).toBeNull(); expect(view.lessonContents.some(c => c.exposureId === converted.runs[0]!.conversion!.exposureId)).toBe(true);
+    expect(view.attempts[0]).toMatchObject({ correct: true, independent: true });
+    expect(view.attempts.at(-1)!.independent).toBe(false);
+    expect(() => start(converted, "mock-a", now, selectedPack)).toThrow("不能重复");
+    expect(() => applyExamSprintCommand(converted, { action: "next", runId: input.expectedRunId, clientKey: key }, selectedPack, now)).toThrow("没有进行");
+    expect(state.runs[0]!.completedAt).toBeNull(); expect(state.lessonExposures).toEqual([]);
+  });
+  it("returns the conversion receipt even when the same lesson was previously opened in practice", () => {
+    const state = pending(), input = command(state), mapping = validExamLessonExposure(selectedPack.lessons.find(l => l.id === input.lessonId)!)!;
+    state.lessonExposures!.push({ id: "old-lesson-receipt", clientKey: "previous-lesson-key", openedAt: NOW, runId: null,
+      lessonId: input.lessonId, packId: selectedPack.id, packVersion: selectedPack.version, ...mapping });
+    const converted = applyExamSprintCommand(state, input, selectedPack, "2026-10-17T08:01:00.000Z");
+    const view = examSprintOverview(converted, selectedPack, NOW);
+    expect(view.lessonContents.find(c => c.lesson.id === input.lessonId)?.exposureId).toBe(converted.runs[0]!.conversion!.exposureId);
+  });
+  it("rejects stale attempts, answered captures, practice, other lessons and untrusted mappings without partial mutation", () => {
+    const state = pending(), input = command(state), before = structuredClone(state);
+    for (const invalid of [{ ...input, expectedAttemptId: state.attempts[0]!.id }, { ...input, expectedRunId: "stale" },
+      { ...input, packVersion: "other" }, { ...input, contentFingerprint: "forged" }, { ...input, mappingVersion: "other" },
+      { ...input, lessonId: "other" }]) expect(() => applyExamSprintCommand(state, invalid, selectedPack, NOW)).toThrow();
+    expect(() => applyExamSprintCommand(answer(state, "A", NOW, selectedPack), input, selectedPack, NOW)).toThrow("已改变");
+    const legacy = structuredClone(selectedPack); legacy.lessons.forEach(l => { l.workedExample = "unreviewed"; });
+    expect(() => applyExamSprintCommand(state, input, legacy, NOW)).toThrow("曝光映射");
+    const practice = structuredClone(state); practice.runs[0]!.mode = "practice";
+    expect(() => applyExamSprintCommand(practice, input, selectedPack, NOW)).toThrow("已改变");
+    expect(state).toEqual(before);
   });
 });
 

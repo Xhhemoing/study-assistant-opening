@@ -88,7 +88,10 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
         referenceChecks: { matched: 0, mismatched: 0, unsupported: 0 } };
     const supply = await readOpeningReservedSupply(db, scope, item.requirement);
     item.reservedSupply = supply;
-    item.questionCoverage = { ...facts.coverage, unexposedEligibility: supply.status };
+    // Inventory is not exposure evidence for the saved/public questions above.
+    // In particular an unsupported private producer or an empty pool cannot turn
+    // their unknown historical qualification into either unseen or exhausted.
+    item.questionCoverage = facts.coverage;
     item.referenceChecks = facts.referenceChecks;
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({
       activityId: row ? String(row.id) : null, generateStatus: row?.generate_status ?? null,

@@ -1,0 +1,469 @@
+{
+  "repository": "Xhhemoing/study-assistant-opening",
+  "commit": "996fc1d8623ae106c8dd0f5379fe533b9bb4efee",
+  "controls": [
+    {
+      "path": "packages/database/src/migrate.ts",
+      "sha256": "dac78d4303d5a410d4480e0536daeafb99d0350b42ade6f4f2c9d3a1031c2348",
+      "fixture": "108/packages/database/src/migrate.ts.bin"
+    },
+    {
+      "path": "packages/database/src/repositories/opening-knowledge.ts",
+      "sha256": "eaa2c6408df29882fcdb0b525d64eb0a686b66e7f6f9cc328e9708b74a102385",
+      "fixture": "108/packages/database/src/repositories/opening-knowledge.ts.bin"
+    },
+    {
+      "path": "infra/deploy/hermes-db.mjs",
+      "sha256": "26a927a28a7476deb9cc8a8735df1ceaf98732560df721e206e55407bac83605",
+      "fixture": "108/infra/deploy/hermes-db.mjs.bin"
+    }
+  ],
+  "runtimeFiles": [
+    {
+      "path": "packages/database/src/migration-preflight.ts",
+      "sha256": "6cfbe60cb3797c7bcaec1f84f34ce5171a97934c609129e4491d856fef2315d2"
+    },
+    {
+      "path": "package.json",
+      "sha256": "b4881ae0185d7a83bb0b380961d358c6299fb596aabec674ccbadb3452ef12f8"
+    },
+    {
+      "path": "packages/database/package.json",
+      "sha256": "4371bcac50a3c3e256755e4bcf17ce6555d11e749d5358f0c175268dab2b5d18"
+    }
+  ],
+  "migrations": [
+    {
+      "filename": "0001_library.sql",
+      "sha256": "4e37b1a8d938ecd0d1573f224b77dea9c2e9c7a4e2433e66b0cffc09af4024a4"
+    },
+    {
+      "filename": "0002_courses.sql",
+      "sha256": "b88aa3e001e4132166b7c47b2d46fe69bc29675d6bf3ecda6db2f52a457e1708"
+    },
+    {
+      "filename": "0003_identity.sql",
+      "sha256": "940368b38eb4e3c7d266c3a808b07c403aa931a0d54d495694106e6d98423c9e"
+    },
+    {
+      "filename": "0004_identity_repair.sql",
+      "sha256": "898874072817cc1cdcdee15829b6e78245b987e17459eafd8007a051b8b535c6"
+    },
+    {
+      "filename": "0005_workspace_preferences.sql",
+      "sha256": "f6eefe828c2401a4964eb23278b77a28f526286013d1407f15eebe8ac45a91bd"
+    },
+    {
+      "filename": "0006_wiki_link_relation_source.sql",
+      "sha256": "287d2e49c0347549411596f6c790505dce966bb218919aa5b322a4af37a758b0"
+    },
+    {
+      "filename": "0007_search_indexes.sql",
+      "sha256": "1a01443dc6236dbc1ed65c848d88fda8db1a5954869ad65430269b2c75b71b5e"
+    },
+    {
+      "filename": "0008_explorations.sql",
+      "sha256": "4ea638922fd21d44a500bd7c51ad9c8739e22db544e1f67a67420290a9c264fb"
+    },
+    {
+      "filename": "0009_promotions.sql",
+      "sha256": "89b723584b4cb5cefac18fad30507eb381188a3e296dd69cbf3ad1bdfd410638"
+    },
+    {
+      "filename": "0010_revision_proposals.sql",
+      "sha256": "f7ec98065f467da252f6578a6df05f669ab729825bc7f2bd5d6041d90f1e130a"
+    },
+    {
+      "filename": "0011_goals.sql",
+      "sha256": "adfeefaaa3503f41f50e100e6a212cc436ab5c39f0647b849abc89aa5135cb56"
+    },
+    {
+      "filename": "0012_learning_events.sql",
+      "sha256": "a1bccd7e5c4ce502e75e021feb4d2e0dffdc127b1d999a7fb451e3f5c47ae123"
+    },
+    {
+      "filename": "0013_cards.sql",
+      "sha256": "8a8c62ea1100dd2ff4dba65cf6ec399ec15e6c083544f2d0690bcc76d94698b7"
+    },
+    {
+      "filename": "0014_learning_event_delete_guard.sql",
+      "sha256": "6ff1869b9089b0fb6fda24077bd20990b98b46334744fda570f2b6203fa6c02f"
+    },
+    {
+      "filename": "0015_practice_content.sql",
+      "sha256": "877ecd4eea52a39a29b125c454f175fad3f757cdd6c04b02659dee4fad0a2cc5"
+    },
+    {
+      "filename": "0016_opening_sources.sql",
+      "sha256": "6cb5af2d270757da963263f4d2264cca2be7b7d45bf1762846f68e4582b97668"
+    },
+    {
+      "filename": "0017_opening_conversations.sql",
+      "sha256": "f0b8f4e4e142e8dc5351124e278c11926538f775dcf15995674299dcd1ef8d41"
+    },
+    {
+      "filename": "0018_opening_jobs_outbox_budget.sql",
+      "sha256": "9d628341511b5cc6b54a38921e99a7201c714bbfbbb13d8e05eab6e858e0e158"
+    },
+    {
+      "filename": "0019_opening_learning.sql",
+      "sha256": "7d41f40c8f59a866a321e81ad9d11e7346fe5fd767fa6969fb16df3e4d09c5cb"
+    },
+    {
+      "filename": "0020_opening_source_chunks.sql",
+      "sha256": "857eba3eff46de7918e98d2381815cb9d3a6c407467c5cf9fc30cf682516623c"
+    },
+    {
+      "filename": "0021_opening_assistant_candidates.sql",
+      "sha256": "4216d36034588c47e9f34867b0d007f0262bf12a031cbbd8efe8258716b7d31d"
+    },
+    {
+      "filename": "0022_opening_memory_privacy.sql",
+      "sha256": "3707d594017edd97d4065492e9956ad5f58994d583b0f6a21b272057635e96fa"
+    },
+    {
+      "filename": "0023_opening_memory_privacy_epoch.sql",
+      "sha256": "49f075c52a67d3a207413addf591a3660ba8412fdc6e7b7ab6a7a092d5a33fdb"
+    },
+    {
+      "filename": "0024_opening_planning.sql",
+      "sha256": "629207b6320c7a1856caaa2f328119616dd5d8ef4ac421767bda879831b69c6a"
+    },
+    {
+      "filename": "0025_opening_turn_intent_snapshot.sql",
+      "sha256": "4ea5cb0eab1d814cf42fc4c4798f99bd28d983cea4223087d5e2367886fca4d2"
+    },
+    {
+      "filename": "0026_opening_turn_outcome_unknown.sql",
+      "sha256": "fc6c7069388f8dd5bdc6a72ba8f8c1d0086594a054436c9109bc60d2ef28dd1a"
+    },
+    {
+      "filename": "0027_opening_assistant_task_acceptance.sql",
+      "sha256": "e3c19fc08e793c798343b8ebca23155090f9eb66752afe4804ea1b296b0d7b5a"
+    },
+    {
+      "filename": "0028_opening_learning_attempts.sql",
+      "sha256": "a723fadc69ed68f1c85ea74163ec48795a6ef05b120aad053ce7229bdd7ec697"
+    },
+    {
+      "filename": "0029_opening_observation_revisions.sql",
+      "sha256": "efda7117fb41a0a376bda284ca6715e741258c6398ff8635f7cc7c4db1189dda"
+    },
+    {
+      "filename": "0030_opening_retest_activities.sql",
+      "sha256": "6c5e95befeb3e57db2c61088ed683dab5f6c4a71990ad897ad5e0c4f7863a4ac"
+    },
+    {
+      "filename": "0031_opening_learning_preferences.sql",
+      "sha256": "68a9a60f2386f67e2b3e41ad4f4e7079ef19b1047e1aa3273495cb190876107a"
+    },
+    {
+      "filename": "0032_opening_learning_activation.sql",
+      "sha256": "60aabf4d733b690b00a92939c60fe39e54bb745d0923a93a199341dc9ae45fa4"
+    },
+    {
+      "filename": "0033_opening_context_provenance.sql",
+      "sha256": "ffdec40eea4d107ae9f0c884552f85eae465a371ac3aa1405c5fbf2d212c1e2c"
+    },
+    {
+      "filename": "0034_opening_source_actions.sql",
+      "sha256": "85f0640f9619342155179a2130ec0540a184e5288e2fee12255e653d7b1c5155"
+    },
+    {
+      "filename": "0035_opening_note_provenance.sql",
+      "sha256": "aebef26c45ebb3268e08a0720dd52d6dc08412a0355c7253d4cf5fd62e0a720f"
+    },
+    {
+      "filename": "0036_opening_ai_settings.sql",
+      "sha256": "bbd39e711ec7813d97f1114c4da1cd1eaea05a58b617186d3687364093e6a8b9"
+    },
+    {
+      "filename": "0037_opening_learning_history_snapshot.sql",
+      "sha256": "3a3a84df4a2c89841817073bdd58cbd810350e0cc0ae9db90f37ec8579727563"
+    },
+    {
+      "filename": "0038_opening_learning_eligibility.sql",
+      "sha256": "5c00de8dfd6a00ecca10db22435d841495021188190abd6b07d11b19de6b2dd5"
+    },
+    {
+      "filename": "0039_opening_memory_revisions.sql",
+      "sha256": "98d923d87cd79d2234adc9ef5bc69b07267ea0d7aa6b767016419cbad8b24b8f"
+    },
+    {
+      "filename": "0040_opening_timetable_weekday.sql",
+      "sha256": "2812236ff0e7c30df58447577f205f79cf63aade0c2f69d8fc387511ad369191"
+    },
+    {
+      "filename": "0041_opening_connections.sql",
+      "sha256": "9f45c4d7adcdfbf44f53d4c509711120ad8e585dfc9564a8db5865e9d70547fa"
+    },
+    {
+      "filename": "0042_opening_connection_lifecycle.sql",
+      "sha256": "cec3b0e1bd394c183f7d1f0f821b3660628611d698c04ae7ed27f5a8dafdb079"
+    },
+    {
+      "filename": "0043_opening_model_providers.sql",
+      "sha256": "90699d852d4f951d678234f455d42211c17f7ffffb106f5acbe12ee525dc9e16"
+    },
+    {
+      "filename": "0044_opening_turn_strategy.sql",
+      "sha256": "c592fe9b862160ec2f4a32155d8679c1056eea8f689e8bd066363634b4296140"
+    },
+    {
+      "filename": "0045_opening_imports.sql",
+      "sha256": "fc7153e913adda14e238731174d9f5a1fa0933db57725b498613dc76ffcc4299"
+    },
+    {
+      "filename": "0046_opening_task_client_key.sql",
+      "sha256": "a96522169c747ce0a7e0194c84e5d6e328edfd27ac2e0eeea250d202bdfbffc3"
+    },
+    {
+      "filename": "0047_opening_planning_settings.sql",
+      "sha256": "80a83fc0e0659305ab9ab303f7becd3fcd3d99994b7aa5d52b881d3da1bd50e7"
+    },
+    {
+      "filename": "0048_opening_knowledge.sql",
+      "sha256": "a50755a903e36072a45314966af2b2839961595efb7adeb569bb31f6d83ab458"
+    },
+    {
+      "filename": "0049_opening_skill_evidence.sql",
+      "sha256": "478c609d319bf59a945aef8e2413805c36937fdc08a6f5f65c3c083b1b71e690"
+    },
+    {
+      "filename": "0050_opening_parse_media_job.sql",
+      "sha256": "d0755e89a6cb873cc7ffc8028a0f3929ff91321ab09ca067a58771a0ec7220db"
+    },
+    {
+      "filename": "0051_opening_extract_study_actions_job.sql",
+      "sha256": "e589db1a43c70dff798008b5cd416a36eb8de4476e35c4fbd8bccb4995136def"
+    },
+    {
+      "filename": "0052_opening_action_digest_decisions.sql",
+      "sha256": "e3f2264ec72a644669f48b3a6c0e1945db3f154e6fe6c394c896f2ea8e9ad658"
+    },
+    {
+      "filename": "0053_opening_teaching_activities.sql",
+      "sha256": "b61d7d9c3ab7c5a728d8ddc43bda1499490e7b94935ef428eac588a6659656e2"
+    },
+    {
+      "filename": "0054_opening_teaching_content.sql",
+      "sha256": "d57361d243e0fab4ae00157dbbe727cd232e4f9e77ae7a96a03f4dcc3d5450ef"
+    },
+    {
+      "filename": "0055_opening_compile_teaching_unit_job.sql",
+      "sha256": "22a8653dcbd050e580b6b59c40971683072c3eaf144d555cb0a0f831708902b3"
+    },
+    {
+      "filename": "0056_opening_intervention_settings.sql",
+      "sha256": "181b8c25f9f4eef42c57026f684d01a0f2268ada92dc31104d6a0495279295c0"
+    },
+    {
+      "filename": "0057_opening_help_exposure_kind.sql",
+      "sha256": "7e5eff185eb3415d282dfb6495bf26632650930bab473e94a464bfb063ba8e09"
+    },
+    {
+      "filename": "0058_opening_turn_clarify.sql",
+      "sha256": "f681c19c0dec339cda30dd528b6af846966f1b93e6c54779c213127d487fee51"
+    },
+    {
+      "filename": "0059_opening_budget_reconcile.sql",
+      "sha256": "a02306b72c901664c1b2b7c8e30975d828b4cb425018837f4c73797faea30864"
+    },
+    {
+      "filename": "0060_opening_retest_accept_key.sql",
+      "sha256": "535948fa7afa8d3782f971775ec61d6e9408f962bda982682b9219b48777cca6"
+    },
+    {
+      "filename": "0061_opening_adaptive_planning.sql",
+      "sha256": "14bdc21a7c1b218cc0e6afd60d76bbcaae914fb1fd355bccd3873444ef996c42"
+    },
+    {
+      "filename": "0062_opening_model_routing_and_card_evidence.sql",
+      "sha256": "21072188546646491bd85e432f869f3cb7e8148139c797f86a621b4f24229ad7"
+    },
+    {
+      "filename": "0063_opening_model_quick_setup.sql",
+      "sha256": "030448b180251b7da758258a2f26723d4498ba745c22989ceb433d50c99a9b88"
+    },
+    {
+      "filename": "0064_card_source_lineage.sql",
+      "sha256": "233d8b791f7577ba9be044a952daa6252f9d8ff2147123631936fd8c4dbbe5f8"
+    },
+    {
+      "filename": "0065_opening_task_requirement.sql",
+      "sha256": "d562620d1014728052303fb78a3a11abf9e8e973a01e2f6580cf145676c604b8"
+    },
+    {
+      "filename": "0066_opening_measurement.sql",
+      "sha256": "4faad545073e996a468cf792eb917b331619934dc822417fdd71a2782afbe09c"
+    },
+    {
+      "filename": "0067_opening_plan_feedback.sql",
+      "sha256": "50fd7b126d66dbd98f6f5a34df41bf63ff022dec800843658968e0ca67bd9050"
+    },
+    {
+      "filename": "0068_opening_plan_control.sql",
+      "sha256": "6629a697293303845b3afe3064c4c013b4f22302bb7b0afcbfb2bd255267c89c"
+    },
+    {
+      "filename": "0069_opening_matrix_evaluation.sql",
+      "sha256": "d96994d097633eece6b70ba8aaa970c0a0cadb37a2fdcb06eef84e08045a5349"
+    },
+    {
+      "filename": "0070_opening_exam_sprint.sql",
+      "sha256": "f1c3db01dd11fbaee1cb93bd74591bdfed0ae1080c266cf5a427b427e9d249e1"
+    },
+    {
+      "filename": "0071_opening_exam_integration.sql",
+      "sha256": "b8cf2cb178a0d672dc39b326f1011b3e53134d19c3956f34548d8de4c6793791"
+    },
+    {
+      "filename": "0072_opening_exam_forecast_reviews.sql",
+      "sha256": "75cb885283dcb940c8b1e54037f5f81e632da310312c11a08273ed82ce9f1fe5"
+    },
+    {
+      "filename": "0073_opening_job_delivery_leases.sql",
+      "sha256": "c726eca968a5dfd18d62befb1c40e000d29fbe8e6f3e3d5c212f1f7ecf0be708"
+    },
+    {
+      "filename": "0074_opening_system_query_receipts.sql",
+      "sha256": "afe80cbda4538576ac94e54ae7ec75aa75ea0c78553bf04480a2be39a6ebdce7"
+    },
+    {
+      "filename": "0075_opening_study_context_exposure.sql",
+      "sha256": "c7398fc1f293ef58eac3a2bb37ebce432c6f96e39d02261e1fd2e8c56e848472"
+    },
+    {
+      "filename": "0076_opening_parent_interaction_budget.sql",
+      "sha256": "2aff3d8cf15cf306c538229c464f50fb92bb31e63f7819904c3dc6dac51e60b6"
+    },
+    {
+      "filename": "0077_opening_learning_decisions.sql",
+      "sha256": "02cfe56b1c32d2ac2023a263652a6a7e92c1b2919939a98db97544b1bee53db7"
+    },
+    {
+      "filename": "0078_opening_learning_shadow_predictions.sql",
+      "sha256": "b60b17bc3fdb68791d7720d55260fbdcf35f88e5536384dd006aff8bb750609e"
+    },
+    {
+      "filename": "0079_opening_assistant_proposals.sql",
+      "sha256": "996470e24acb7a1bf310b0938b4b876c0e5f69eac83a8e799d4f28c5c4dcbe67"
+    },
+    {
+      "filename": "0080_opening_workspace_media_budget.sql",
+      "sha256": "4312dfc3bd1eac70ca6b7eade81d73519497f298b253c611e6dd6290675d1d9c"
+    },
+    {
+      "filename": "0081_opening_study_intent_events.sql",
+      "sha256": "702f88f815fe71cd6300f58614c6626af1a1c9c09948acb2431b93c87375fc1b"
+    },
+    {
+      "filename": "0082_opening_retest_learning_protocol.sql",
+      "sha256": "5296dca1e71115e70478ce4e8bdef1ce0a74b79f3fe1d32669c26ef32a5b8e84"
+    },
+    {
+      "filename": "0083_opening_ai_grading.sql",
+      "sha256": "a0661a997ea8237a3116e2d9023bad3f7a116f78429ec7abf4b62c271b80b4d1"
+    },
+    {
+      "filename": "0084_opening_source_embeddings.sql",
+      "sha256": "886681de2e9aa8aedf824519d5eaf9ac890fa7fb667c71f7b75341a255a5b1ea"
+    },
+    {
+      "filename": "0085_cards_fsrs.sql",
+      "sha256": "08c6b3888d7b41a4b364384040e5ba761da5c9513b2ffd5e8013610abdf78908"
+    },
+    {
+      "filename": "0086_opening_course_exam_sprints.sql",
+      "sha256": "7656bff7029e7779988548d1a7d2cab79ca60b2be9955da4b6a061e88b04f925"
+    },
+    {
+      "filename": "0087_opening_teaching_question_identity.sql",
+      "sha256": "b24c29eae5fde2ba011239a38917fb0bd35694b522ab9348fd64c8eafd231c2b"
+    },
+    {
+      "filename": "0088_opening_tutor_metadata_job.sql",
+      "sha256": "d5619f0fa6549f61462d5c6a75a2d0eed39660158f4eb7de8bda182b7d06eab4"
+    },
+    {
+      "filename": "0089_opening_knowledge_definitions.sql",
+      "sha256": "4098dbfdf00ec22631c8eaf49469ba7067736da628ead5aef214c353481b16b6"
+    },
+    {
+      "filename": "0090_learning_experience_metrics.sql",
+      "sha256": "f1e3a9f1b0f8afb93fd4267c98f97f245693333aecc42eab233af23d3a4ca406"
+    },
+    {
+      "filename": "0091_opening_text_question_identity.sql",
+      "sha256": "cab8e0ad5cfd6c94315998de615014557aaf28a95d18606af484503c12f0cf9d"
+    },
+    {
+      "filename": "0092_opening_photo_recognition_job.sql",
+      "sha256": "edbbd26bf5f8902c15013498a6b9cf21856b9eb1ffdb48e6d07d3af77882822e"
+    },
+    {
+      "filename": "0093_opening_background_grading.sql",
+      "sha256": "fc4ca987b664947e3127e086cefaabc3286d59a23740b506502e436ea0cb88dc"
+    },
+    {
+      "filename": "0094_opening_parser_health_segments.sql",
+      "sha256": "a235c0758e43e4362e23088040eb064490f880a03961833c85e69e922de4dab0"
+    },
+    {
+      "filename": "0095_opening_pdf_segment_zero_version.sql",
+      "sha256": "94d4ffa3c4068a0dcc2952bbbe6ca83d925893f50f42935770241ff9a198e0ed"
+    },
+    {
+      "filename": "0096_opening_material_manifest.sql",
+      "sha256": "49b3c4162b5c43f999b529e2cafd3c18e683b38cd6199c6dcb5fd11cecf1cb68"
+    },
+    {
+      "filename": "0097_opening_material_reviewer_retention.sql",
+      "sha256": "d5852aff862b165f1808cfad544732d95de5e4c1c0fd4c572bf1c927d4d6fc4d"
+    },
+    {
+      "filename": "0098_opening_auto_grade_policy.sql",
+      "sha256": "f9526147301dc8380460fae1c916a87ec83d6e54a94dd51ab7c343539ec8b013"
+    },
+    {
+      "filename": "0099_opening_teaching_unit_titles.sql",
+      "sha256": "d8980e1de8e5ba3847aa386721a3a8d55b4d5321396c62ed7f0a80f3e97ffbd4"
+    },
+    {
+      "filename": "0100_tutor_timing.sql",
+      "sha256": "3e57147c1caf62af8426e20b3a5229bc649acbaeb2026e86cd79f2f91ea1ea74"
+    },
+    {
+      "filename": "0101_full_learning_goals.sql",
+      "sha256": "c6ea2d56408b10c3a5b6e2fab2a31811df51c95c6c0ed26abf2c98d1c2f22617"
+    },
+    {
+      "filename": "0102_learning_evidence_and_asset_links.sql",
+      "sha256": "b8043f56277a7b9aa3fb9027b9c60178c352a3393c52447de68657569d242dde"
+    },
+    {
+      "filename": "0103_source_visual_recognitions.sql",
+      "sha256": "40f0c9460253c2aacc3690e07b5230453094a0f8b6864e69896bbc9b2b53c7dd"
+    },
+    {
+      "filename": "0104_opening_attempt_confidence.sql",
+      "sha256": "3528119aa887c489be4bcd7aad711a4c66c2a0fc90c50fcadfb9cda2e5c6aef6"
+    },
+    {
+      "filename": "0105_opening_help_metadata.sql",
+      "sha256": "f9a088c79525cb2c6d6cbca2af5704240cb8e3c60a88f232a5476f7e7b4b6b79"
+    },
+    {
+      "filename": "0106_opening_help_input_snapshot.sql",
+      "sha256": "b9e2022743651afc4aadbcef0b6ef5f3f1699c3d89bb93963d1f0c4bc442d2d2"
+    },
+    {
+      "filename": "0107_opening_dataset_consent.sql",
+      "sha256": "8936ff347202fe2a36ed282e7487f6f2edbca54d8277d86522fe55d059eca5b8"
+    },
+    {
+      "filename": "0108_opening_knowledge_confirmations.sql",
+      "sha256": "c0cbf85e3d4036f0c7dcecf1a69df5941cd31aa84a520d7bf62e6e6f3b240110"
+    }
+  ]
+}

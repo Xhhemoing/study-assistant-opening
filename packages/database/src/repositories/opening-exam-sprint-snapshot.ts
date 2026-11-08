@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { examErrorCauseSchema, examQuestionPartsSchema, examPartResultSchema, type ExamPack, type ExamSprintState } from "@aistudy/contracts";
+import { examRunConversionSchema, examErrorCauseSchema, examQuestionPartsSchema, examPartResultSchema, type ExamPack, type ExamSprintState } from "@aistudy/contracts";
 import { validExamLessonExposure } from "@aistudy/domain";
 
 const id = z.string().min(1);
@@ -36,7 +36,8 @@ const packSchema: z.ZodType<ExamPack> = z.object({
 const stateSchema: z.ZodType<ExamSprintState> = z.object({
   version: z.literal(1), startedAt: timestamp, examDate: date.nullable(), dailyMinutes: z.number().int().min(15).max(720),
   runs: z.array(z.object({ id, mode, questionIds: z.array(id), startedAt: timestamp,
-    deadlineAt: timestamp.nullable(), completedAt: timestamp.nullable() }).strict()),
+    deadlineAt: timestamp.nullable(), completedAt: timestamp.nullable(),
+    conversion: examRunConversionSchema.optional() }).strict()),
   attempts: z.array(z.object({ id, questionId: id, runId: id, presentedAt: timestamp,
     answeredAt: timestamp.nullable(), answer: z.string().nullable(), correct: z.boolean().nullable(),
     confidence: z.number().int().min(1).max(5).nullable(), durationSeconds: z.number().nonnegative().nullable(),
@@ -113,7 +114,27 @@ export function parseExamSprintSnapshot(rawPack: unknown, rawState: unknown): { 
         || (exposure.partialFamilyIds ?? []).some(familyId => !mapping.partialFamilyIds?.includes(familyId))
         || exposure.runId !== null && (!run || Date.parse(exposure.openedAt) < Date.parse(run.startedAt)
           || run.completedAt !== null && Date.parse(exposure.openedAt) > Date.parse(run.completedAt)
-          || (run.mode === "mock-a" || run.mode === "mock-b") && (run.completedAt === null || Date.parse(exposure.openedAt) < Date.parse(run.completedAt)));
+          || (run.mode === "mock-a" || run.mode === "mock-b") && (run.completedAt === null
+            || Date.parse(exposure.openedAt) < Date.parse(run.completedAt) || run.conversion?.exposureId !== exposure.id));
+    })
+    || state.runs.some(run => {
+      const conversion = run.conversion;
+      if (!conversion) return false;
+      const attempt = state.attempts.find(item => item.id === conversion.attemptId);
+      const exposure = exposures.get(conversion.exposureId);
+      const question = attempt ? questions.get(attempt.questionId) : null;
+      return (run.mode !== "mock-a" && run.mode !== "mock-b") || conversion.runId !== run.id
+        || conversion.packId !== pack.id || conversion.packVersion !== pack.version
+        || conversion.convertedAt !== run.completedAt || Date.parse(conversion.convertedAt) < Date.parse(run.startedAt)
+        || !attempt || attempt.runId !== run.id || attempt.answeredAt !== null
+        || state.attempts.filter(item => item.runId === run.id).at(-1)?.id !== attempt.id
+        || question?.lessonId !== conversion.lessonId || !exposure || exposure.runId !== run.id
+        || exposure.lessonId !== conversion.lessonId || exposure.packId !== conversion.packId || exposure.packVersion !== conversion.packVersion
+        || exposure.clientKey !== conversion.clientKey || exposure.openedAt !== conversion.convertedAt
+        || exposure.contentFingerprint !== conversion.contentFingerprint || exposure.mappingVersion !== conversion.mappingVersion
+        || !attempt.help.some(help => help.kind === "solution" && help.at === conversion.convertedAt)
+        || !attempt.lessonExposureIds?.includes(exposure.id)
+        || Date.parse(attempt.presentedAt) > Date.parse(conversion.convertedAt);
     })
     || state.runs.some(run => new Set(run.questionIds).size !== run.questionIds.length
       || run.questionIds.some(questionId => !questions.has(questionId))

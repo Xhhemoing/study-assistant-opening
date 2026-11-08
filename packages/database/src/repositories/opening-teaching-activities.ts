@@ -9,12 +9,25 @@ import type {
   TeachingActivityCreateInput,
 } from "@aistudy/contracts";
 import { teachingLearnerFocusSchema } from "@aistudy/contracts";
+import { readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
 import {
   admitLearningSources,
   learningError,
   learningIso,
   lockLearningOwner,
 } from "./opening-learning-facts";
+
+/** Teaching admission is course-local even when callers provide explicit sourceIds. */
+export async function assertOpeningTeachingSourcePurposes(
+  tx: Sql | TransactionSql, scope: Scope, courseId: string | null | undefined, sourceIds: readonly string[],
+): Promise<void> {
+  if (!courseId || !sourceIds.length) return;
+  const ids = [...new Set(sourceIds)];
+  const memberships = await tx`SELECT asset_id FROM course_asset_memberships
+    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
+      AND asset_id=ANY(${ids}::uuid[]) AND (purpose IS NULL OR purpose='teaching') FOR SHARE`;
+  if (memberships.length !== ids.length) throw learningError("CONFLICT", "课程资料用途已变化，不能作为本次教材；请重新选择材料。");
+}
 
 export function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
   const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
@@ -34,6 +47,10 @@ export function mapTeachingActivity(row: Record<string, unknown>): TeachingActiv
     checkpointJson: (row.checkpoint_json ?? undefined) as TeachingActivity["checkpointJson"],
     ...(focus.success ? { learnerFocus: focus.data } : {}),
     ...(goal?.courseRoute ? { routeManaged: true } : {}),
+    ...(row.static_lesson_retest_unavailable === true ? { staticLessonUnavailable: "retest_unavailable" as const } : {}),
+    ...(row.static_lesson_retest_unavailable !== true && typeof row.static_lesson_session_id === "string"
+      ? { staticLesson: { protocol: "span-lesson-v1" as const, sessionId: row.static_lesson_session_id,
+        ...(typeof row.static_lesson_retest_id === "string" ? { retestId: row.static_lesson_retest_id } : {}) } } : {}),
     clientKey: String(row.client_key),
     createdAt: learningIso(row.created_at)!,
     updatedAt: learningIso(row.updated_at)!,
@@ -46,12 +63,23 @@ export async function assertOwnedActivity(
   activityId: string,
 ): Promise<TeachingActivity> {
   const rows = await sql`
-    SELECT a.* FROM opening_teaching_activities a
+    SELECT a.*,CASE WHEN a.checkpoint_json->'spanLesson'->>'retestId' IS NULL OR r.id IS NOT NULL THEN s.id END AS static_lesson_session_id,
+      r.id AS static_lesson_retest_id,
+      (a.status IN ('active','paused') AND s.id IS NOT NULL AND a.checkpoint_json->'spanLesson'->>'retestId' IS NOT NULL AND r.id IS NULL) AS static_lesson_retest_unavailable
+    FROM opening_teaching_activities a
     JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+    LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
+      AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
+      AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+    LEFT JOIN opening_retest_activities r ON s.id IS NOT NULL AND r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+      AND r.course_id=a.course_id AND (r.id::text=a.checkpoint_json->'spanLesson'->>'retestId'
+        OR r.candidate_id::text=a.checkpoint_json->'spanLesson'->>'retestId' OR r.candidate_reference_id::text=a.checkpoint_json->'spanLesson'->>'retestId')
+      AND r.status IN ('accepted','in_progress')
     WHERE a.id = ${activityId}
       AND a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}`;
   if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+  if (rows[0]!.static_lesson_retest_unavailable === true) throw learningError("CONFLICT", "原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
   return mapTeachingActivity(rows[0] as Record<string, unknown>);
 }
 
@@ -177,6 +205,7 @@ export async function createOpeningTeachingActivityInTransaction(
   }
   const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
   if (sourceIds.length) await admitLearningSources(tx, scope, sourceIds);
+  await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, sourceIds);
   if (input.courseId) {
     const course = await tx`
       SELECT id FROM courses
@@ -201,7 +230,29 @@ export async function createOpeningTeachingActivityInTransaction(
       FOR SHARE OF t, c`;
     if (!source.length) throw learningError("NOT_FOUND", "source user turn not found in this course");
   }
-  const initialCreateIntent = { ...input.createIntent, ...(input.sourceTurnId ? { sourceTurnId: input.sourceTurnId } : {}) };
+  const trustedCreateIntent = { ...input.createIntent }; delete trustedCreateIntent.expectedTail;
+  const initialCreateIntent = { ...trustedCreateIntent, ...(input.sourceTurnId ? { sourceTurnId: input.sourceTurnId } : {}) };
+  const expectedTail = input.createIntent.expectedTail;
+  if (expectedTail !== undefined) {
+    if (typeof expectedTail !== "string" || input.createIntent.source !== "task" || typeof input.createIntent.taskId !== "string" || !input.courseId || !input.continueAfterCompleted) throw learningError("CONFLICT", "续学确认身份不完整。");
+    if (input.clientKey !== `task:${input.createIntent.taskId}`) throw learningError("CONFLICT", "续学请求必须沿原任务创建键。");
+    const [task] = await tx`SELECT t.*,r.id AS retest_id FROM opening_tasks t LEFT JOIN opening_retest_activities r
+      ON r.task_id=t.id AND r.workspace_id=t.workspace_id AND r.owner_user_id=t.owner_user_id
+      WHERE t.id::text=${input.createIntent.taskId} AND t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId} FOR UPDATE OF t`;
+    if (!task || task.status !== "pending" || task.course_id !== input.courseId || task.retest_id
+      || task.not_before && new Date(task.not_before).getTime() > Date.now()) throw learningError("CONFLICT", "任务已结束或尚不可续学。");
+    const [tail] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id::text=${expectedTail} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId}`;
+    const focus = teachingLearnerFocusSchema.safeParse(tail?.goal_json?.learnerFocus);
+    if (task.requirement_key != null && (!focus.success || focus.data.requirementKey !== task.requirement_key)) throw learningError("CONFLICT", "任务学习要求已变化。");
+    const binding = await readOpeningTaskTeachingBinding(tx, scope, input.courseId, input.createIntent.taskId);
+    if (binding.kind === "current") {
+      const [live] = await tx`SELECT * FROM opening_teaching_activities WHERE id=${binding.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      if (live?.create_intent?.continuesActivityId === expectedTail
+        && isDeepStrictEqual(live.create_intent, { ...initialCreateIntent, continuesActivityId: expectedTail })) return mapTeachingActivity(live);
+      throw learningError("CONFLICT", "续学链尾已变化，请重新确认。");
+    }
+    if (binding.kind !== "continuation" || binding.activityId !== expectedTail) throw learningError("CONFLICT", "续学链尾已变化，请重新确认。");
+  }
   // A completed activity is final; with continueAfterCompleted the same request
   // walks to the next key in its chain, so repeats still land on one activity.
   let clientKey = input.clientKey;
@@ -271,8 +322,18 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
 
     async listByOwner(scope: Scope): Promise<TeachingActivity[]> {
       const rows = await sql`
-        SELECT a.* FROM opening_teaching_activities a
+        SELECT a.*,CASE WHEN a.checkpoint_json->'spanLesson'->>'retestId' IS NULL OR r.id IS NOT NULL THEN s.id END AS static_lesson_session_id,
+          r.id AS static_lesson_retest_id,
+          (a.status IN ('active','paused') AND s.id IS NOT NULL AND a.checkpoint_json->'spanLesson'->>'retestId' IS NOT NULL AND r.id IS NULL) AS static_lesson_retest_unavailable
+        FROM opening_teaching_activities a
         JOIN workspaces w ON w.id = a.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+        LEFT JOIN opening_learning_sessions s ON a.create_intent->>'protocol'='span-lesson-v1'
+          AND s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
+          AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+        LEFT JOIN opening_retest_activities r ON s.id IS NOT NULL AND r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+          AND r.course_id=a.course_id AND (r.id::text=a.checkpoint_json->'spanLesson'->>'retestId'
+            OR r.candidate_id::text=a.checkpoint_json->'spanLesson'->>'retestId' OR r.candidate_reference_id::text=a.checkpoint_json->'spanLesson'->>'retestId')
+          AND r.status IN ('accepted','in_progress')
         WHERE a.workspace_id = ${scope.workspaceId}
           AND a.owner_user_id = ${scope.ownerUserId}
         ORDER BY a.updated_at DESC, a.id`;
@@ -321,7 +382,8 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           const candidates = sourceIds.length ? await tx`SELECT DISTINCT c.id FROM courses c
             JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=c.workspace_id
             WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
-              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[]) LIMIT 2` : [];
+              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[])
+              AND (m.purpose IS NULL OR m.purpose='teaching') LIMIT 2` : [];
           const courseId = candidates.length === 1 ? String(candidates[0]!.id) : randomUUID();
           if (candidates.length !== 1) {
             const title = String(current.intent_summary).split("\n")[0]!.trim().slice(0, 120) || "自主学习";
@@ -330,6 +392,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             for (const [index, sourceId] of sourceIds.entries()) await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
               VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
           }
+          await assertOpeningTeachingSourcePurposes(tx, scope, courseId, sourceIds);
           const [updated] = await tx`UPDATE opening_teaching_activities SET course_id=${courseId},updated_at=now()
             WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
           return mapTeachingActivity(updated!);
@@ -350,6 +413,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           if (!course.length) throw learningError("NOT_FOUND", "course not found");
           if ((current.source_ids as string[]).length) {
             await admitLearningSources(tx, scope, current.source_ids as string[]);
+            await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, current.source_ids as string[]);
           }
         }
         const updated = await tx`
@@ -506,6 +570,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           throw learningError("CONFLICT", "teaching content already exists");
         }
         if (current.sourceIds.length) await admitLearningSources(tx, scope, current.sourceIds);
+        await assertOpeningTeachingSourcePurposes(tx, scope, current.courseId, current.sourceIds);
         const jobId = await insertCompileJob(tx, scope, {
           activityId,
           mode: "generate",
@@ -562,6 +627,9 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           if (existing[0] && isDeepStrictEqual(existing[0].payload, payload)) return { jobId: String(existing[0].id), kind: "compile-teaching-unit" as const, created: false };
           throw learningError("CONFLICT", "completed teaching activity cannot generate new content");
         }
+        const current = await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
+        await assertOpeningTeachingSourcePurposes(tx, scope, current.courseId,
+          [...new Set([...current.sourceIds, ...(input.sourceIds ?? [])])]);
         const jobId = await insertCompileJob(tx, scope, input);
         if (jobId) {
           await tx`

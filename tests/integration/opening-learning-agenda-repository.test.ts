@@ -117,6 +117,19 @@ async function routeAgenda() {
   });
   return { ...f, activityId, binding, observe, read };
 }
+it("selects the same stable course activity by default, while exact old and missing identities never become latest", async () => {
+  const f = await seed(), { sql, scope } = fixture;
+  const later = await createOpeningSpanSessionRepository(sql).create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], clientKey: randomUUID(), intent: f.lesson.intent });
+  await sql`UPDATE opening_teaching_activities SET updated_at='2026-11-01T00:00:00Z' WHERE id IN (${f.lesson.activityId},${later.activityId})`;
+  const expected = [f.lesson.activityId, later.activityId].sort().at(-1);
+  const repo = createOpeningLearningAgendaRepository(sql);
+  expect((await repo.get(scope, f.courseId))?.activityId).toBe(expected);
+  expect((await repo.get(scope, f.courseId, f.lesson.activityId))?.activityId).toBe(f.lesson.activityId);
+  expect(await repo.get(scope, f.courseId, randomUUID())).toBeNull();
+  const before = await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`;
+  await repo.get(scope, f.courseId);
+  expect(await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+});
 it.each(["id", "revision", "stableSkillId", "requirementKey", "unbound"] as const)("route agenda excludes %s mismatches despite the same observation key and preserves receipts", async field => {
   const f = await routeAgenda(), { sql, scope } = fixture;
   const identity = field === "unbound" ? null : { ...f.binding,

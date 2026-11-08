@@ -21,7 +21,7 @@ function ready(value: CourseRouteActionResult) {
   return value;
 }
 
-type Question = { prompt: string; key: string; interaction: TeachingQuestionInteraction };
+type Question = { prompt: string; key: string; interaction: TeachingQuestionInteraction; shadow?: Record<string, unknown> };
 const numeric: Question = { prompt: "计算 1/3 + 1/4", key: "7/12", interaction: { kind: "numeric" } };
 const choice: Question = { prompt: "计算 2/3 + 1/6", key: "B", interaction: { kind: "choice", options: [
   { id: "A", label: "1/2" }, { id: "B", label: "5/6" },
@@ -32,8 +32,6 @@ const choice: Question = { prompt: "计算 2/3 + 1/6", key: "B", interaction: { 
 // compatibility and new bridge submissions are covered in the companion suite.
 async function seed(questions: Question[] = [numeric, choice]) {
   const base = await learningAttemptFixture(f);
-  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${f.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
   const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, {
     clientKey: randomUUID(), courseIds: [base.courseId], title: "分数运算", kind: "custom", targetDate: null,
     examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "独立完成分数加法",
@@ -55,7 +53,7 @@ async function seed(questions: Question[] = [numeric, choice]) {
   const content = createOpeningTeachingContentRepository(f.sql);
   const blocks = questions.map(question => ({ ...question, blockId: randomUUID(), answerId: randomUUID() }));
   const unit = await content.createUnit(f.scope, { title: "分数加法练习", blocks: blocks.flatMap(question => [
-    { id: question.blockId, type: "prompt", content: { text: question.prompt, interaction: question.interaction } },
+    { id: question.blockId, type: "prompt", content: { ...question.shadow, text: question.prompt, interaction: question.interaction } },
     { id: question.answerId, type: "answer_key", content: { answer: question.key, hidden: true,
       hints: { direction: "先比较分母。", concept: "通分后相加。", firstStep: "找公分母。" } } },
   ]) });
@@ -127,6 +125,35 @@ it("reads evaluator-era verification after two different first-seen arithmetic q
   expect(await gradingJobs(first.observation.id)).toHaveLength(0);
   expect(await gradingJobs(second.observation.id)).toHaveLength(0);
   expect(await createCardRepository(f.sql).listCards(f.scope)).toEqual([]);
+});
+
+it("does not double-count independent evidence when identical published questions receive different UUIDs", async () => {
+  const x = await seed([numeric, numeric]);
+  const first = await x.submit(0, "7/12"), renamed = await x.submit(1, "7/12");
+  expect(renamed.attempt.problemId).not.toBe(first.attempt.problemId);
+  expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", allowsIndependent: true });
+  expect(renamed.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted", allowsIndependent: false });
+  expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+
+it.each(["question", "markdown"])("does not grant duplicate independent evidence for a shadowed %s change under new UUIDs", async field => {
+  const x = await seed([{ ...numeric, shadow: { [field]: "unused original" } },
+    { ...numeric, shadow: { [field]: "unused changed" } }]);
+  const first = await x.submit(0, "7/12"), second = await x.submit(1, "7/12");
+  expect(second.attempt.problemId).not.toBe(first.attempt.problemId);
+  expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", allowsIndependent: true });
+  expect(second.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted", allowsIndependent: false });
+  expect(second.observation.eligibility?.independentAttempt).not.toBe("yes");
+  expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+
+it("keeps unrelated unknown history from blocking a different question's incorrect verdict and error card", async () => {
+  const x = await seed(), first = await x.submit(0, "7/12");
+  await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=${f.sql.json({ kind: "unresolved" })}
+    WHERE id=${first.attempt.itemVersionId!}`;
+  const wrong = await x.submit(1, "A. 1/2");
+  expect(wrong.observation).toMatchObject({ verdictSource: "deterministic", outcome: "incorrect" });
+  expect((await createCardRepository(f.sql).listCards(f.scope)).some(card => card.originObservationRootId === wrong.observation.id)).toBe(true);
 });
 
 it("records a controlled incorrect answer and enters the existing route correction flow", async () => {
