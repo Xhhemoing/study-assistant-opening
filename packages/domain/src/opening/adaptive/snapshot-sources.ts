@@ -1,6 +1,7 @@
 import type { CourseGoal, LearningActivityKind, TaskItem, TeachingLearnerFocus } from "@aistudy/contracts";
 import type { EvidenceEligibilityValue } from "../evidence-eligibility";
 import type { Assistance, SkillStatus } from "./types";
+import type { RemediationCycleSummary } from "../remediation-cycle";
 
 /** Outcome of reading one data source. "unavailable" is a failure and never means "empty". */
 export type SnapshotDataStatus = "available" | "not_configured" | "unavailable";
@@ -86,12 +87,14 @@ export type LearnerSnapshotSources = {
 
 export type NextStepReasonCode =
   | "due_retest"
+  | "remediation_limit"
   | "requested_consolidate"
   | "requested_full"
   | "no_evidence"
   | "unverified_only"
   | "verified_incorrect"
   | "repeated_assisted_error"
+  | "assisted_success"
   | "assistance_dependent"
   | "independent"
   | "correct_needs_independent_check"
@@ -111,6 +114,8 @@ export type NextLearningStepInput = {
   learningPhase?: LearningPhase;
   phaseSource?: LearningPhaseSource;
   dueRetest?: boolean;
+  /** Trusted repository projection, never client/model supplied. */
+  remediationCycles?: RemediationCycleSummary;
 };
 
 export type NextLearningStep = {

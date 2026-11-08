@@ -16,6 +16,10 @@ import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { createOpeningLearningGoalRepository } from "@aistudy/database";
+import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
+import { readCourseRequirements, readCourseRouteObservations } from "../../packages/database/src/repositories/opening-course-route-read";
+import { courseRouteDecisionInput } from "../../packages/database/src/repositories/opening-course-route-decision-input";
 function sessionAgenda(result: Awaited<ReturnType<ReturnType<typeof createSpanLessonSessionService>["read"]>>) {
   return "agenda" in result ? result.agenda : undefined;
 }
@@ -73,6 +77,89 @@ async function agendaAttempt(f: Awaited<ReturnType<typeof seed>>, options: { cor
   expect(observation).toMatchObject({ outcome: options.correct ? "correct" : "incorrect", serverEvaluation: { evaluatorVersion: "span-exact-v1" } });
   return observation;
 }
+async function routeAgenda() {
+  const f = await seed(), { sql, scope } = fixture;
+  const goal = await createOpeningLearningGoalRepository(sql).create(scope, { clientKey: randomUUID(), courseIds: [f.courseId],
+    title: "Agenda route", kind: "custom", targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1,
+    learningMode: "understand", successCriteria: "独立验证当前要求" });
+  const binding = { id: randomUUID(), revision: 1, stableSkillId: randomUUID(), requirementKey: SPAN_REQUIREMENT_KEY };
+  const route = createOpeningCourseRouteRepository(sql, { compilerEnabled: true });
+  await route.confirm(scope, f.courseId, { expectedRevisions: [], confirmScope: true, requirements: [{ id: binding.id,
+    stableSkillId: binding.stableSkillId, knowledgeNodeId: null, requirementKey: binding.requirementKey, title: SPAN_SKILL_LABEL,
+    position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [], sourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }],
+    verification: { kind: "exact", status: "ready", exerciseKeys: ["span-reserved-fraction"], rubric: null, missingReasons: [] }, origin: "confirmed" }] });
+  // Verification readiness is a server fixture fact, not trusted request input.
+  await sql`UPDATE course_requirements SET verification=${sql.json({ kind: "exact", status: "ready", exerciseKeys: ["span-reserved-fraction"], rubric: null, missingReasons: [] })}
+    WHERE id=${binding.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const result = await route.start(scope, f.courseId, { goalId: goal.id, expectedGoalRevision: 1, requirementId: binding.id,
+    expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
+  if (result.kind !== "ready") throw new Error(`route fixture: ${result.kind}`);
+  const learning = createOpeningLearningRepository(sql), activityId = result.activity.id;
+  const session = await learning.createSession(scope, { activityId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId] });
+  const observe = async (identity: typeof binding | null = binding, correct = true) => {
+    const attempt = await createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: session.id, clientKey: randomUUID(),
+      spanExercise: { sourceId: f.sourceId, problemId: "span-reserved-fraction", version: 1 } });
+    if (identity) await sql`UPDATE opening_learning_item_versions SET evaluation_spec=evaluation_spec || ${sql.json({ courseRequirement: identity })}::jsonb
+      WHERE id=${attempt.itemVersionId!} AND workspace_id=${scope.workspaceId}`;
+    const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("fixture requires unique span problem");
+    return learning.insertObservation(scope, { sessionId: session.id, attemptId: attempt.id, courseId: f.courseId,
+      skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], problemId: attempt.problemId, clientKey: randomUUID(),
+      answer: JSON.stringify({ membership: "in_span", coefficients: correct ? solution.coefficients : ["999", "999"],
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }),
+      outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+  };
+  const read = () => sql.begin("isolation level repeatable read read only", async tx => {
+    const agenda = await readOpeningLearningAgenda(tx, scope, f.courseId, activityId);
+    const requirement = (await readCourseRequirements(tx, scope, f.courseId)).find(row => row.id === binding.id);
+    const evidence = await readCourseRouteObservations(tx, scope, f.courseId, false);
+    return { agenda, projected: evidence.projected, canonical: requirement ? nextLearningStep(courseRouteDecisionInput(requirement, evidence.projected)) : null };
+  });
+  return { ...f, activityId, binding, observe, read };
+}
+it.each(["id", "revision", "stableSkillId", "requirementKey", "unbound"] as const)("route agenda excludes %s mismatches despite the same observation key and preserves receipts", async field => {
+  const f = await routeAgenda(), { sql, scope } = fixture;
+  const identity = field === "unbound" ? null : { ...f.binding,
+    ...(field === "revision" ? { revision: 2 } : { [field]: field === "requirementKey" ? "another-key" : randomUUID() }) };
+  const observation = await f.observe(identity);
+  expect(observation.eligibility?.verifiedCorrect).toBe("yes");
+  const receipts = await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.activityId}`;
+  const activities = await sql`SELECT * FROM opening_teaching_activities WHERE id=${f.activityId}`;
+  const result = await f.read();
+  expect(result.projected.find(row => row.id === observation.id)?.requirementKey).toBe(SPAN_REQUIREMENT_KEY);
+  expect(result.agenda).toMatchObject({ decisionCurrent: false, invalidationReasons: expect.arrayContaining(["state_changed"]),
+    suggestion: { activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null } });
+  expect(result.agenda?.suggestion).toEqual(result.canonical);
+  expect(await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.activityId}`).toEqual(receipts);
+  expect(await sql`SELECT * FROM opening_teaching_activities WHERE id=${f.activityId}`).toEqual(activities);
+  expect(await createOpeningLearningAgendaRepository(sql).get(fixture.otherScope, f.courseId, f.activityId)).toBeNull();
+  expect(await createOpeningLearningAgendaRepository(sql).get(scope, randomUUID(), f.activityId)).toBeNull();
+});
+it.each(["revision", "archived"] as const)("route agenda uses current requirement state (%s), not the persisted activity binding", async change => {
+  const f = await routeAgenda(), { sql, scope } = fixture;
+  await f.observe();
+  expect((await f.read()).agenda?.suggestion).toMatchObject({ activityKind: "transfer_check", reasonCode: "independent" });
+  const receipts = await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.activityId}`;
+  if (change === "revision") await sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${f.binding.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  else await sql`UPDATE course_requirements SET lifecycle='archived' WHERE id=${f.binding.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const result = await f.read();
+  expect(result.agenda).toMatchObject({ resumable: false, invalidationReasons: expect.arrayContaining(["goal_requirement_or_source_changed"]),
+    suggestion: { activityKind: "diagnose", reasonCode: "no_evidence", focusObservationId: null } });
+  if (change === "revision") expect(result.agenda?.suggestion).toEqual(result.canonical);
+  else expect(result.canonical).toBeNull();
+  expect(await sql`SELECT * FROM opening_learning_decisions WHERE target_id=${f.activityId}`).toEqual(receipts);
+});
+it("route agenda keeps the matching local error and excludes newer foreign-course and unbound success", async () => {
+  const f = await routeAgenda();
+  const error = await f.observe(f.binding, false);
+  await f.observe(null);
+  const other = await routeAgenda();
+  const foreign = await other.observe(f.binding);
+  const result = await f.read();
+  expect(result.agenda?.suggestion).toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: error.id });
+  expect(result.agenda?.suggestion).toEqual(result.canonical);
+  expect(result.projected.some(row => row.id === foreign.id)).toBe(false);
+});
 it("projects repeated real hinted errors into the recovered agenda and resolves them after independent success", async () => {
   const f = await seed();
   await agendaAttempt(f, { help: true });

@@ -5,6 +5,7 @@ import { createOpeningSpanTutorNextRepository, type OpeningSpanNextChoiceReason 
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 const inputSchema = controlledLearningTools.next_question.input;
 const choiceMessages: Record<OpeningSpanNextChoiceReason, string> = {
+  remediation_limit: "同一活动链已完成两轮有作答和真实帮助记录的纠偏，仍有同类已核验错误或持续依赖帮助。请换讲法（在原活动选择串讲例题）、到学习入口明确选择重新诊断，或暂缓。原答案、成绩和历史保留；没有自动发第三轮题、执行换方式或联系他人。",
   unknown_evidence: "这份答案还不能确定判分；先核对答案或评价，不把它算作不会。原答案和学习位置保留。",
   source_unavailable: "原题或课程材料目前不可用或版本已变化；先恢复或核对材料，原答案保留。",
   authorization_required: "本课程导师授权尚未启用或已停止；请明确确认授权后再选择下一步。",
@@ -27,12 +28,14 @@ export function createSpanNextActionService(sql: Sql) {
       const origin = result.originSession ? sessionHref(result.originSession) : records;
       const practice = `/opening/courses/${result.courseId}/study?${new URLSearchParams({ mode: "practice", skillLabel: SPAN_SKILL_LABEL, requirementKey: SPAN_REQUIREMENT_KEY })}`;
       return { kind: "choice" as const, reason: result.reason, message: choiceMessages[result.reason],
-        primary: result.reason === "evidence_changed" ? { label: result.originSession ? "查看原活动的最新记录，重新选择下一步" : "回看课程记录", href: origin }
+        primary: result.reason === "remediation_limit" ? { label: "换讲法：回原活动选择串讲例题", href: origin }
+          : result.reason === "evidence_changed" ? { label: result.originSession ? "查看原活动的最新记录，重新选择下一步" : "回看课程记录", href: origin }
           : result.reason === "unseen_unavailable" ? { label: "继续普通练习（不作为未见题验证）", href: practice }
           : result.reason === "authorization_required" ? { label: "保留原位置，核对导师授权", href: origin }
           : result.reason === "source_unavailable" ? { label: "恢复或核对课程材料", href: `/opening/courses/${result.courseId}` }
             : { label: "回看答案与课程记录", href: records },
-        secondary: result.historicalSession ? { label: "查看派生活动的已有记录", href: sessionHref(result.historicalSession) }
+        secondary: result.reason === "remediation_limit" ? { label: "重新诊断：到学习入口明确选择（也可暂缓）", href: `/opening/courses/${result.courseId}/study` }
+          : result.historicalSession ? { label: "查看派生活动的已有记录", href: sessionHref(result.historicalSession) }
           : { label: "返回原学习位置", href: origin } };
     }
     const params = new URLSearchParams({ lesson: result.session.activityId });

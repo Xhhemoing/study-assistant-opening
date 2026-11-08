@@ -214,7 +214,6 @@ export {
 } from "./opening/tutor-policy";
 export { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, TUTOR_MODEL_SETUP_MESSAGE, TUTOR_STALE_MESSAGE } from "./opening/tutor-failure";
 export {
-  nextTutorKindAfterRetestClose,
   nodeIdForSkillLabel,
   prepareRetestSkillLink,
   shouldAppendRetestEvidence,
@@ -480,6 +479,7 @@ export {
 
 export * from "./opening/adaptive";
 export { buildDecisionInput } from "./opening/adaptive/decision-input";
+export { summarizeRemediationCycles, remediationLimitEvidence, type RemediationCycleSummary, type RemediationCycleActivity } from "./opening/remediation-cycle";
 
 export {
   createRulesSkillStateEstimator,

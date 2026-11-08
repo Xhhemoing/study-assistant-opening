@@ -25,7 +25,7 @@ const observation = z.object({
 const recommendation = z.union([
   z.object({ identity: z.object({ courseId: uuidSchema, skillLabel: z.string().max(200), requirementKey: z.string().max(200).nullable() }).strict(),
     step: z.object({ activityKind: z.enum(["diagnose", "targeted_explain", "full_explain", "reduced_help_practice", "transfer_check"]),
-      focusObservationId: uuidSchema.nullable(), reasonCode: z.enum(["requested_full", "no_evidence", "unverified_only", "verified_incorrect", "repeated_assisted_error", "assistance_dependent", "independent", "needs_check", "correct_needs_independent_check"]) }).strict(),
+      focusObservationId: uuidSchema.nullable(), reasonCode: z.enum(["remediation_limit", "requested_full", "no_evidence", "unverified_only", "verified_incorrect", "repeated_assisted_error", "assisted_success", "assistance_dependent", "independent", "needs_check", "correct_needs_independent_check"]) }).strict(),
     evidenceIds: z.array(uuidSchema).max(10), basis: z.literal("nextLearningStep/current-evidence"), limitations: z.array(z.string().max(200)).max(2), summary }).strict(),
   z.object({ summary, recommendationStatus: z.literal("unknown") }).strict(),
 ]);
