@@ -43,6 +43,9 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     if (!task) throw new Error(TASK_UNAVAILABLE);
   }
   if (task) {
+    if (task.teachingTargetUnavailable) throw new Error(task.teachingTargetUnavailable === "conflicting_binding"
+      ? "任务关联了多个学习活动，暂不可继续；请返回课程核对，原任务与记录保留。"
+      : "任务原先关联的学习活动暂不可用；请返回课程核对，未创建替代活动，原任务与记录保留。");
     // Only the freshly read server projection can bind an explicit activity to this task.
     // Client-key prefixes alone are not binding evidence (onboarding also uses a different key).
     const target = task.teachingTarget;
@@ -76,10 +79,9 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     }
     if (task.suggestionKind === "review_cards") return { kind: "cards", task };
     if (task.retest) return { kind: "practice", task };
-    if (!enabled) return { kind: "practice", task };
-    const current = currentCourseActivity(await api.listTeachingActivities(), options.courseId);
-    if (current) return { kind: "activity", activity: assertTaskRequirement(task, current) };
-    if (!options.compilerEnabled) return { kind: "practice", task };
+    // A genuinely unbound task retains its explicit task-key creation boundary;
+    // unrelated course progress must not be substituted for this task.
+    if (!enabled || !options.compilerEnabled) return { kind: "practice", task };
     const input = buildStartLearningCreateInput({ localDate: "", courseId: options.courseId, taskId: task.id, courseTitle: task.title });
     const created = assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId);
     return { kind: "activity", activity: assertTaskRequirement(task, created) };

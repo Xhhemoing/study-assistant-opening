@@ -22,6 +22,7 @@ import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { withTaskPlanningFields } from "./opening-task-fields";
 import { recordOpeningPlanFeedback } from "./opening-plan-feedback";
+import { readOpeningCurrentLearningActivity } from "./opening-current-learning-activity";
 
 import { recordOpeningPlanDraftDecision } from "./opening-plan-decision";
 
@@ -148,9 +149,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       const rows = await sql`
         SELECT
           t.*,
-          target.id AS teaching_activity_id,
-          target.course_id AS teaching_course_id,
-          target.goal_json AS teaching_goal_json,
+          target.binding_ids AS teaching_binding_ids,
+          target.onboarding_binding_exists,
           a.id AS retest_activity_id,
           a.candidate_id AS retest_candidate_id,
           a.course_id AS retest_course_id,
@@ -161,19 +161,15 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         FROM opening_tasks t
         JOIN workspaces w ON w.id = t.workspace_id AND w.owner_user_id = t.owner_user_id
         LEFT JOIN LATERAL (
-          SELECT teaching.id, teaching.course_id, teaching.goal_json
+          -- Preserve the complete owned binding set, including closed or wrong-course
+          -- bindings. Never expose those rows as targets or silently choose latest.
+          SELECT array_agg(teaching.id ORDER BY teaching.id) AS binding_ids,
+            bool_or(t.client_key = 'first-learning-activity:' || teaching.id::text) AS onboarding_binding_exists
           FROM opening_teaching_activities teaching
-          JOIN courses c ON c.id = teaching.course_id AND c.workspace_id = t.workspace_id AND c.archived_at IS NULL
           WHERE teaching.workspace_id = t.workspace_id AND teaching.owner_user_id = t.owner_user_id
-            AND teaching.course_id = t.course_id AND teaching.status IN ('active', 'paused')
-            AND (
-              -- Use the stored task intent, never an accidental task-looking client key.
-              (teaching.create_intent->>'source' = 'task' AND lower(teaching.create_intent->>'taskId') = t.id::text)
+            AND ((teaching.create_intent->>'source' = 'task' AND lower(teaching.create_intent->>'taskId') = t.id::text)
               OR (t.origin IN ('manual', 'course_seed') AND t.client_key = 'first-learning-activity:' || teaching.id::text
-                AND teaching.create_intent->>'source' = 'onboarding' AND teaching.client_key LIKE 'first-learning:%')
-            )
-          ORDER BY teaching.updated_at DESC, teaching.id ASC
-          LIMIT 1
+                AND teaching.create_intent->>'source' = 'onboarding' AND teaching.client_key LIKE 'first-learning:%'))
         ) target ON true
         LEFT JOIN opening_retest_activities a
           ON a.task_id = t.id
@@ -184,7 +180,30 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           AND j.workspace_id = t.workspace_id
         WHERE t.workspace_id = ${scope.workspaceId} AND t.owner_user_id = ${scope.ownerUserId}
         ORDER BY t.created_at ASC`;
-      return rows.map((r) => mapTask(r as Record<string, unknown>));
+      const tasks: TaskItem[] = [];
+      for (const row of rows) {
+        const task = mapTask(row as Record<string, unknown>);
+        // Card review and completed retest review retain their original execution paths.
+        if (task.suggestionKind === "review_cards" || task.status === "done" && task.retest) { tasks.push(task); continue; }
+        const ids = (row.teaching_binding_ids ?? []) as string[];
+        const onboardingReference = ["manual", "course_seed"].includes(String(row.origin))
+          && typeof row.client_key === "string" && row.client_key.startsWith("first-learning-activity:");
+        const references = [...new Set([...ids, ...(onboardingReference ? [String(row.client_key).slice("first-learning-activity:".length)] : [])])];
+        if (!references.length) { tasks.push(task); continue; } // True absence keeps legacy creation.
+        if (references.length > 1) { tasks.push({ ...task, teachingTargetUnavailable: "conflicting_binding" }); continue; }
+        if (!task.courseId || onboardingReference && !row.onboarding_binding_exists) {
+          tasks.push({ ...task, teachingTargetUnavailable: "unavailable_binding" }); continue;
+        }
+        const current = await readOpeningCurrentLearningActivity(sql, scope, task.courseId, { taskId: task.id });
+        if (!current || current.activityId !== references[0]) {
+          tasks.push({ ...task, teachingTargetUnavailable: "unavailable_binding" }); continue;
+        }
+        const [target] = await sql`SELECT id AS teaching_activity_id,course_id AS teaching_course_id,goal_json AS teaching_goal_json
+          FROM opening_teaching_activities WHERE id=${current.activityId} AND workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND course_id=${task.courseId} AND status IN ('active','paused')`;
+        tasks.push(target ? withTaskPlanningFields(task, target) : { ...task, teachingTargetUnavailable: "unavailable_binding" });
+      }
+      return tasks;
     },
 
     async createTask(

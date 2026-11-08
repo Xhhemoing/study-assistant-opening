@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach, expect, it } from "vitest";
-import { readOpeningCurrentLearningActivity } from "@aistudy/database";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createOpeningPlansRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
+import { taskItemSchema, type TeachingActivity } from "@aistudy/contracts";
+import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 let f: OpeningFixture;
 let courseId: string;
@@ -41,6 +43,43 @@ it("does not substitute latest for missing, closed, placeholder or conflicting e
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { sessionId })).toMatchObject({ activityId: old, sessionId });
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: latest, sessionId })).toBeNull();
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { sessionId: randomUUID() })).toBeNull();
+});
+it("projects actual task bindings into entry without falling back after conflict or closure", async () => {
+  const plans = createOpeningPlansRepository(f.sql);
+  const created = await plans.createTask(f.scope, { courseId, title: "Bound entry", minutes: 20, dueAt: null, priority: 1, candidateId: null });
+  const bound = await activity({ taskId: created.id });
+  await activity({ at: "2026-11-02T00:00:00Z" });
+  const projection = async () => taskItemSchema.parse((await plans.listTasks(f.scope)).find(row => row.id === created.id));
+  expect((await projection()).teachingTarget?.activityId).toBe(bound);
+  const api = { listTasks: async () => ({ tasks: await plans.listTasks(f.scope) }), getTeachingActivity: vi.fn(async () => ({ id: bound, courseId, status: "active", intentKind: "topic", contentVersion: 1 }) as TeachingActivity),
+    listTeachingActivities: vi.fn(async () => []), createTeachingActivity: vi.fn() };
+  const options = { courseId, courseTitle: "Course", taskId: created.id, compilerEnabled: true, archived: false, sourceIds: [] };
+  expect(await openCourseStudy(api, options)).toMatchObject({ kind: "activity", activity: { id: bound } });
+  api.getTeachingActivity.mockClear();
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${bound}`;
+  expect(await projection()).toMatchObject({ teachingTargetUnavailable: "unavailable_binding" });
+  expect((await projection()).teachingTarget).toBeUndefined();
+  const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  await expect(openCourseStudy(api, options)).rejects.toThrow("原任务与记录保留");
+  await activity({ taskId: created.id });
+  expect(await projection()).toMatchObject({ teachingTargetUnavailable: "conflicting_binding" });
+  await expect(openCourseStudy(api, options)).rejects.toThrow("多个学习活动");
+  expect(api.getTeachingActivity).not.toHaveBeenCalled(); expect(api.listTeachingActivities).not.toHaveBeenCalled(); expect(api.createTeachingActivity).not.toHaveBeenCalled();
+  const after = await f.sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  expect(after.filter(row => before.some(prior => prior.id === row.id))).toEqual(before);
+});
+it("omits both target fields for truly unbound tasks and ignores unauthorized bindings", async () => {
+  const plans = createOpeningPlansRepository(f.sql);
+  const task = await plans.createTask(f.scope, { courseId, title: "Unbound", minutes: 20, dueAt: null, priority: 1, candidateId: null });
+  const foreign = randomUUID();
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,status,intent_kind,intent_summary,client_key,create_intent)
+    VALUES(${foreign},${f.otherScope.workspaceId},${f.otherScope.ownerUserId},'active','topic','Foreign',${randomUUID()},${f.sql.json({ source: "task", taskId: task.id })})`;
+  const projected = (await plans.listTasks(f.scope)).find(row => row.id === task.id)!;
+  expect(projected).not.toHaveProperty("teachingTarget"); expect(projected).not.toHaveProperty("teachingTargetUnavailable");
+  const api = { listTasks: async () => ({ tasks: [projected] }), getTeachingActivity: vi.fn(), listTeachingActivities: vi.fn(async () => []),
+    createTeachingActivity: vi.fn(async () => ({ id: randomUUID(), courseId }) as TeachingActivity) };
+  await openCourseStudy(api, { courseId, courseTitle: "Course", taskId: task.id, compilerEnabled: true, archived: false, sourceIds: [] });
+  expect(api.createTeachingActivity).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ clientKey: `task:${task.id}` }));
 });
 it("resolves a persisted older task target, blocks ambiguous/closed targets and performs no writes", async () => {
   const taskId = randomUUID();
