@@ -3,6 +3,7 @@
  * Workspace smoke symbol used by monorepo quality gates.
  */
 export const PLATFORM_NAME = "AIstudy" as const;
+export * from "./opening/current-learning-activity";
 
 export type SummaryBand = "stable" | "usable" | "weak" | "untested";
 

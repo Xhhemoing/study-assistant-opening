@@ -9,6 +9,7 @@ import { contextSourceRefsIncluded, mergeContextSourceRefs, type ContextSourceRe
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
+import { readOpeningCurrentLearningActivity } from "./opening-current-learning-activity";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
 import { readSpanTutorAuthorization, lockSpanTutorAuthorization } from "./opening-span-tutor-grant";
 import { reserveSpanTutorActivityBudget } from "./opening-span-tutor-budget";
@@ -124,11 +125,14 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   return { sourceRefs, decisionInput };
 }
 async function nextSession(db: Sql, scope: Scope, courseId: string) {
-  const sessions = createOpeningSpanSessionRepository(db), unfinished = await sessions.latest(scope, courseId);
+  const sessions = createOpeningSpanSessionRepository(db);
+  const current = await readOpeningCurrentLearningActivity(db, scope, courseId, {}, { spanOnly: true });
+  const unfinished = current ? await sessions.get(scope, current.activityId) : null;
   if (unfinished) return { resumeSession: unfinished, dueRetestId: null };
   const due = (await createOpeningRetestActivityRepository(db).listDue(scope, courseId, new Date().toISOString()))
     .find(row => row.requirementKey === SPAN_REQUIREMENT_KEY && row.skillLabel === SPAN_SKILL_LABEL);
-  return { resumeSession: due ? await sessions.latest(scope, courseId, due.activityId) : null, dueRetestId: due?.activityId ?? null };
+  const retest = due ? await readOpeningCurrentLearningActivity(db, scope, courseId, {}, { spanOnly: true, retestId: due.activityId }) : null;
+  return { resumeSession: retest ? await sessions.get(scope, retest.activityId) : null, dueRetestId: due?.activityId ?? null };
 }
 async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot | null, intent: StudySessionIntent, decision: NextLearningStep, dueRetestId: string | null) {
   if (session) {

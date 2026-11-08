@@ -206,6 +206,7 @@ describe("task-bound direct activity entry", () => {
 
   it.each([
     { id: otherCourseId }, { courseId: otherCourseId }, { status: "completed" as const }, { status: "skipped" as const },
+    { intentKind: "course_continue" as const, contentVersion: 0 },
     { learnerFocus: { skillLabel: "矩阵", requirementKey: "old", activityKind: "diagnose" as const,
       reasonCode: "first", focusObservationId: null, recentAssistance: [], strategyVersion: "test" } },
   ])("rechecks the fetched activity rather than trusting the projection snapshot: %j", async change => {
@@ -271,9 +272,31 @@ it.each(["复测已取消，原记录保留。", "复测已过期，请选择新
   const client = api(); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => ({ managed: true as const, courseId, taskId, expectedTaskVersion: 2, goalId: courseId, expectedGoalRevision: 3, requirementId: courseId, expectedRequirementRevision: 4, minutes: 15, notBeforeAt: null, available: false, reason })), start: vi.fn() };
   await expect(openCourseStudy(client, { ...options, taskId }, route)).rejects.toThrow(reason); expect(route.start).not.toHaveBeenCalled(); expect(client.createTeachingActivity).not.toHaveBeenCalled();
 });
-it("preserves old unmanaged task behavior and does not query routes for an explicit ordinary activity", async () => {
+it("resumes course fallback for an unmanaged task and does not query routes for an explicit ordinary activity", async () => {
   const client = api([activity()]); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => ({ managed: false as const })), start: vi.fn() };
-  await openCourseStudy(client, { ...options, taskId }, route); expect(client.createTeachingActivity).toHaveBeenCalledOnce();
+  await openCourseStudy(client, { ...options, taskId }, route); expect(client.createTeachingActivity).not.toHaveBeenCalled();
   route.task.mockClear(); await openCourseStudy(client, { ...options, activityId }, route); expect(route.task).not.toHaveBeenCalled();
+});
+it("uses an older server task target instead of a newer course activity", async () => {
+  const old = activity({ updatedAt: "2026-10-01T00:00:00Z" });
+  const client = api([old, activity({ id: otherCourseId, updatedAt: "2026-11-01T00:00:00Z" })]);
+  client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: { activityId, courseId, requirementKey: null } })] });
+  expect(await openCourseStudy(client, { ...options, taskId })).toEqual({ kind: "activity", activity: old });
+  expect(client.listTeachingActivities).not.toHaveBeenCalled();
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
+it("keeps route admission before a bound resume but does not start another route activity", async () => {
+  const client = api([activity()]);
+  client.listTasks.mockResolvedValue({ tasks: [task({ teachingTarget: { activityId, courseId, requirementKey: null } })] });
+  const route = { task: vi.fn(async () => ({ managed: true as const, courseId, taskId, expectedTaskVersion: 1, goalId: courseId, expectedGoalRevision: 1, requirementId: courseId, expectedRequirementRevision: 1, minutes: 15, notBeforeAt: null, available: true, reason: null })), start: vi.fn() };
+  expect((await openCourseStudy(client, { ...options, taskId, compilerEnabled: false }, route)).kind).toBe("activity");
+  expect(route.task).toHaveBeenCalledOnce(); expect(route.start).not.toHaveBeenCalled();
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
+});
+it("uses the course fallback for an unbound task before considering compilation", async () => {
+  const selected = activity({ id: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
+  const client = api([activity(), selected]); client.listTasks.mockResolvedValue({ tasks: [task()] });
+  expect(await openCourseStudy(client, { ...options, taskId, compilerEnabled: false })).toEqual({ kind: "activity", activity: selected });
+  expect(client.createTeachingActivity).not.toHaveBeenCalled();
 });
 it("does not create a replacement when the route task lookup fails", async () => { const client = api(); client.listTasks.mockResolvedValue({ tasks: [task()] }); const route = { task: vi.fn(async () => { throw new Error("任务上下文无法读取"); }), start: vi.fn() }; await expect(openCourseStudy(client, { ...options, taskId }, route)).rejects.toThrow("任务上下文无法读取"); expect(client.createTeachingActivity).not.toHaveBeenCalled(); });

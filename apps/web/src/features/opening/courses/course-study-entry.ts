@@ -52,13 +52,15 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       if (context.managed) {
         if (context.courseId !== options.courseId || context.taskId !== task.id) throw new Error(TARGET_CHANGED);
         if (!context.available) throw new Error(context.reason ?? "这项路线任务暂不可开始，原任务与记录保留。");
-        if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
-        const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
-          requirementId: context.requirementId, expectedRequirementRevision: context.expectedRequirementRevision,
-          taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
-          clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
-        if (result.kind === "choice") return { kind: "route-choice", choice: result };
-        return { kind: "activity", activity: assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)) };
+        if (!target) {
+          if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
+          const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
+            requirementId: context.requirementId, expectedRequirementRevision: context.expectedRequirementRevision,
+            taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
+            clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
+          if (result.kind === "choice") return { kind: "route-choice", choice: result };
+          return { kind: "activity", activity: assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)) };
+        }
       }
     }
     if (target) {
@@ -67,14 +69,17 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       if (expectedRequirement !== undefined && target.requirementKey !== expectedRequirement) throw new Error(REQUIREMENT_CHANGED);
       if (enabled && task.suggestionKind !== "review_cards") {
         const activity = assertCourseStudyActivity(await api.getTeachingActivity(target.activityId), options.courseId);
-        if (activity.id !== target.activityId || (activity.status !== "active" && activity.status !== "paused")) throw new Error(TARGET_CHANGED);
+        if (!currentCourseActivity([activity], options.courseId, [target.activityId, ...(options.activityId ? [options.activityId] : [])])) throw new Error(TARGET_CHANGED);
         if ((activity.learnerFocus?.requirementKey ?? null) !== target.requirementKey) throw new Error(REQUIREMENT_CHANGED);
         return { kind: "activity", activity: assertTaskRequirement(task, activity) };
       }
     }
     if (task.suggestionKind === "review_cards") return { kind: "cards", task };
     if (task.retest) return { kind: "practice", task };
-    if (!enabled || !options.compilerEnabled) return { kind: "practice", task };
+    if (!enabled) return { kind: "practice", task };
+    const current = currentCourseActivity(await api.listTeachingActivities(), options.courseId);
+    if (current) return { kind: "activity", activity: assertTaskRequirement(task, current) };
+    if (!options.compilerEnabled) return { kind: "practice", task };
     const input = buildStartLearningCreateInput({ localDate: "", courseId: options.courseId, taskId: task.id, courseTitle: task.title });
     const created = assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId);
     return { kind: "activity", activity: assertTaskRequirement(task, created) };
