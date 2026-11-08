@@ -61,6 +61,7 @@ export function spanTutorReceiptDecision(receipt: { intentVersion: string; polic
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
     || studyIntentForMessage(null, question)?.intent.learningPhase !== undefined
+    || studyIntentForMessage(null, question)?.intent.purpose === "overview"
     || learningContinuationIntent(question) !== null;
 }
 export function spanTutorExactProjection(rows: SnapshotObservation[], evaluations: Array<{ id: string; evaluatorVersion: string | null }>) {

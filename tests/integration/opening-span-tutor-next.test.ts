@@ -613,7 +613,16 @@ it("delivers a worker remediation choice and an admitted overview-only change af
   const after = await cyclePersisted(f);
   expect(after.activities).toHaveLength(before.activities.length);
   expect(after.attempts).toEqual(before.attempts); expect(after.observations).toEqual(before.observations);
-  expect(after.help).toEqual(before.help); expect(after.capacity).toEqual(before.capacity); expect(after.money).toEqual(before.money);
+  expect(after.help).toEqual(before.help); expect(after.money).toEqual(before.money);
+  // Capacity includes raw intent/checkpoint rows, which this operation is
+  // explicitly meant to update. Compare every budget field and reservation,
+  // not those allowed presentation-state changes.
+  const { activities: beforeCapacityActivities, ...beforeBudget } = before.capacity;
+  const { activities: afterCapacityActivities, ...afterBudget } = after.capacity;
+  expect(afterBudget).toEqual(beforeBudget);
+  const reservations = (rows: typeof beforeCapacityActivities) => rows.map(row => ({ id: row.id,
+    tutorBudget: row.goal_json?.tutorBudget, learningBudget: row.goal_json?.learningBudget, sessionMinutes: row.goal_json?.sessionMinutes }));
+  expect(reservations(afterCapacityActivities)).toEqual(reservations(beforeCapacityActivities));
   expect(await prepareTutorNextAction(adapter, scope, overviewRequest)).toMatchObject({ resumed: true, action: { activityId: origin.activityId } });
   expect(await cyclePersisted(f)).toEqual(after);
   await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
