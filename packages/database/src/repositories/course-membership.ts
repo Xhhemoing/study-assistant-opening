@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
   assetTypeSchema,
+  courseSourcePurposeSchema,
   isoDateTimeSchema,
+  type CourseSourcePurpose,
   type AssetType,
   type SourceRecord,
   type CourseLearningPreferencesUpdate,
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import type { courseAssetMemberships } from "../schema/courses";
 import {
   createLibraryRepository,
   LibraryError,
@@ -38,8 +39,6 @@ export class CourseMembershipError extends Error {
 
 export type CourseRole = "core" | "optional" | "reference" | "archive";
 export type CourseVisibility = "private" | "course" | "public";
-/** Source-only, course-local; null remains explicitly unknown. */
-export type CourseSourcePurpose = NonNullable<typeof courseAssetMemberships.$inferSelect.purpose>;
 
 export type CourseRecord = {
   id: string;
@@ -180,7 +179,7 @@ function assertVisibility(value: string): asserts value is CourseVisibility {
 
 function assertPurpose(assetType: AssetType, purpose: unknown): void {
   if (purpose === undefined || purpose === null) return;
-  if (assetType !== "source" || !["teaching", "practice", "mock_exam", "reference"].includes(purpose as string)) {
+  if (assetType !== "source" || !courseSourcePurposeSchema.safeParse(purpose).success) {
     throw new CourseMembershipError("VALIDATION", "purpose must be a source-only course purpose");
   }
 }

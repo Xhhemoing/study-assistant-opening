@@ -140,6 +140,7 @@ async function assertAuthorizedChunks(
       AND m.asset_type = 'source'
       AND m.asset_id = s.id
       AND m.course_id = ${courseId}
+      AND (m.purpose IS NULL OR m.purpose = 'teaching')
     WHERE s.workspace_id = ${scope.workspaceId}
       AND s.upload_state = 'uploaded'
       AND s.parse_state = 'ready'
@@ -177,6 +178,16 @@ async function assertAuthorizedChunks(
   return rows.map(row => mapChunk(row));
 }
 
+/** Purpose changes hide stale source-derived context without mutating confirmations/history. */
+async function hasTeachingPurposes(sql: Sql, scope: Scope, courseId: string, versions: Record<string, number>): Promise<boolean> {
+  const ids = Object.keys(versions);
+  if (!ids.length) return true;
+  const admitted = await sql`SELECT m.asset_id FROM course_asset_memberships m
+    WHERE m.workspace_id=${scope.workspaceId} AND m.course_id=${courseId} AND m.asset_type='source'
+      AND m.asset_id IN ${sql(ids)} AND (m.purpose IS NULL OR m.purpose='teaching')`;
+  return admitted.length === ids.length;
+}
+
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
     /** Definitions contain source text and are only available to the rebuild worker. */
@@ -184,7 +195,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       await assertOwnedCourse(sql, scope, courseId);
       const [row] = await sql`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
-      return row ? { ...mapRecord(row), nodeDefinitions: row.node_definitions as Record<string, string> } : null;
+      if (!row || !await hasTeachingPurposes(sql, scope, courseId, parseSourceVersions(row.source_versions))) return null;
+      return { ...mapRecord(row), nodeDefinitions: row.node_definitions as Record<string, string> };
     },
     async assertExtractionBatch(scope: Scope, courseId: string, chunks: readonly SourceChunk[]): Promise<void> {
       await sql.begin(async tx => {
@@ -207,7 +219,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         WHERE workspace_id = ${scope.workspaceId}
           AND owner_user_id = ${scope.ownerUserId}
           AND course_id = ${courseId}`;
-      if (!rows.length) return null;
+      if (!rows.length || !await hasTeachingPurposes(sql, scope, courseId, parseSourceVersions(rows[0]!.source_versions))) return null;
       return mapRecord(rows[0] as Record<string, unknown>);
     },
 
@@ -244,6 +256,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=s.version
           JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.asset_type='source'
             AND m.asset_id=s.id AND m.course_id=${courseId}
+            AND (m.purpose IS NULL OR m.purpose='teaching')
           WHERE s.workspace_id=${scope.workspaceId} AND s.id IN ${tx(sourceIds)}
             AND s.upload_state='uploaded' AND s.parse_state='ready' AND v.availability='available'
             AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
@@ -302,6 +315,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           AND m.asset_type = 'source'
           AND m.asset_id = s.id
           AND m.course_id = ${courseId}
+          AND (m.purpose IS NULL OR m.purpose = 'teaching')
         WHERE s.workspace_id = ${scope.workspaceId}
           AND s.upload_state = 'uploaded'
           AND s.parse_state = 'ready'

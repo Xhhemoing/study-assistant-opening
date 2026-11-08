@@ -2,7 +2,7 @@ import { readOpeningStudyIntentInTx } from "./opening-study-intent-events";
 import { matrixExerciseStem, parseCanonicalMatrixExercise, spanProblemStem } from "@aistudy/domain";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import type { Sql, TransactionSql } from "postgres";
-import { studyContextAnchorSchema, type Scope, type StudyContextAnchor } from "@aistudy/contracts";
+import { courseSourcePurposeAllows, studyContextAnchorSchema, type CourseSourcePurpose, type CourseSourceUse, type Scope, type StudyContextAnchor } from "@aistudy/contracts";
 import { learningError } from "./opening-learning-facts";
 import { teachingQuestionIdentityMatches, type TeachingQuestionSpec } from "./opening-teaching-question";
 
@@ -27,6 +27,7 @@ export async function resolveOpeningStudyContext(
     if (anchor[field] != null && anchor[field] !== value) throw conflict(`study context ${String(field)} mismatch; reopen the selected version`);
     anchor[field] = value;
   }
+  const contextSourceIds = new Set(expected.sourceIds ?? []);
   if (expected.attemptId && input.attemptId && expected.attemptId !== input.attemptId) throw conflict("study context attempt mismatch");
   if (expected.courseId !== undefined && expected.courseId !== null) bind("courseId", expected.courseId);
   let session: Row | undefined;
@@ -75,6 +76,7 @@ export async function resolveOpeningStudyContext(
     if (anchor.blockId && !blocks.some(block => block.blockId === anchor.blockId)) throw conflict("block does not belong to the teaching content version");
     const allRefs = spec.source_refs as Array<{ sourceId: string; version?: string | number | null }>;
     for (const reference of allRefs) {
+      contextSourceIds.add(reference.sourceId);
       if (reference.version == null || !Number.isInteger(Number(reference.version))) continue;
       const [available] = await tx`SELECT s.id FROM opening_sources s WHERE s.id=${reference.sourceId} AND s.workspace_id=${scope.workspaceId}
         AND s.upload_state='uploaded'
@@ -170,6 +172,21 @@ export async function resolveOpeningStudyContext(
   if (anchor.courseId) {
     const [resolvedCourse] = await tx`SELECT id FROM courses WHERE id=${anchor.courseId} AND workspace_id=${scope.workspaceId} AND (${expected.associationOnly === true} OR archived_at IS NULL) FOR SHARE`;
     if (!resolvedCourse) throw learningError("NOT_FOUND", "study course not found");
+  }
+  // Saved session/activity/item membership shortcuts never waive current AI purpose.
+  // Human reading and association-only history are intentionally not reclassified.
+  if (!expected.associationOnly && expected.sourceAccess !== "human_read" && anchor.courseId) {
+    if (anchor.sourceId) contextSourceIds.add(anchor.sourceId);
+    const use: CourseSourceUse = anchor.purpose === "material_read" ? "citation"
+      : anchor.attemptId || anchor.itemVersionId ? "practice" : "teaching";
+    if (contextSourceIds.size) {
+      const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
+        WHERE workspace_id=${scope.workspaceId} AND course_id=${anchor.courseId} AND asset_type='source'
+          AND asset_id=ANY(${[...contextSourceIds]}::uuid[]) FOR SHARE`;
+      const allowed = new Set(memberships.filter(row => courseSourcePurposeAllows(row.purpose as CourseSourcePurpose | null, use))
+        .map(row => String(row.asset_id)));
+      if ([...contextSourceIds].some(id => !allowed.has(id))) throw conflict("study material purpose changed; reload the course materials");
+    }
   }
   return studyContextAnchorSchema.parse(anchor);
 }

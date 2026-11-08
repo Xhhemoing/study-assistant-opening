@@ -11,6 +11,10 @@ export {
 } from "./foundation";
 
 export {
+  courseSourcePurposeSchema,
+  courseSourcePurposeAllows,
+  type CourseSourcePurpose,
+  type CourseSourceUse,
   sourceMimeSchema,
   uploadInputSchema,
   sourceRecordSchema,
