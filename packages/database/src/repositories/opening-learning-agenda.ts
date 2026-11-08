@@ -11,11 +11,17 @@ import { readCourseRequirements, readCourseRouteObservations } from "./opening-c
 import { courseRouteDecisionInput } from "./opening-course-route-decision-input";
 import { readLearningGoal } from "./opening-learning-goals";
 import { SPAN_TUTOR_EXECUTION_POLICY_VERSION } from "./opening-span-tutor-context";
+import { readOpeningCurrentLearningActivity } from "./opening-current-learning-activity";
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown) => typeof value === "string" ? value : null;
 /** Same transaction, exact persisted session, no activity/job/budget writes. */
 export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope, courseId: string, activityId?: string | null): Promise<LearningAgenda | null> {
+  // An exact historical request still reads its original receipt/status. Only
+  // the unbound current lookup applies active/paused candidate selection.
+  const current = activityId == null ? await readOpeningCurrentLearningActivity(tx, scope, courseId) : null;
+  const selectedId = activityId ?? current?.activityId;
+  if (selectedId == null) return null;
   const [activity] = await tx`SELECT a.*,s.id AS session_id,s.skill_label,c.archived_at
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -24,8 +30,7 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
       AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
       AND (a.create_intent->>'protocol'='span-lesson-v1' OR a.goal_json ? 'courseRoute')
-      AND ${activityId ? tx`a.id=${activityId}` : tx`a.status IN ('active','paused')`}
-    ORDER BY a.updated_at DESC,a.id DESC LIMIT 1`;
+      AND a.id::text=${selectedId}`;
   if (!activity) return null;
   const aid = String(activity.id), sessionId = text(activity.session_id), goal = object(activity.goal_json);
   const route = object(goal.courseRoute), checkpoint = object(object(activity.checkpoint_json).spanLesson);

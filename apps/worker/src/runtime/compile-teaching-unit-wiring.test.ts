@@ -502,8 +502,12 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     const formula = writtenBlocks.find((b) => b.type === "formula")!;
     expect(formula.content).toEqual({
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
-      citationBinding: { blockId: formula.id, role: "teach", status: "bound", factualSupport: "unverified",
-        refs: [{ sourceId: SOURCE, sourceVersion: 1, chunkId: CHUNK, page: 1 }] },
+      citationBinding: {
+        blockId: formula.id,
+        role: "teach", status: "bound",
+        refs: [{ sourceId: SOURCE, sourceVersion: 1, chunkId: CHUNK, page: 1 }],
+        factualSupport: "unverified",
+      },
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hints: rankHints, hidden: true });

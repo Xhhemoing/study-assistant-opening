@@ -1,5 +1,5 @@
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
-import { buildDecisionInput, captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
+import { buildDecisionInput, captureNextLearningStep, createSpanTeachingSequence, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
@@ -12,6 +12,7 @@ import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence
 import { mapLearningObservation } from "./opening-learning-facts";
 import { z } from "zod";
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
+import { readOpeningCurrentLearningActivity } from "./opening-current-learning-activity";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
 import { readSpanTutorAuthorization, lockSpanTutorAuthorization } from "./opening-span-tutor-grant";
 import { reserveSpanTutorActivityBudget } from "./opening-span-tutor-budget";
@@ -209,11 +210,14 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   return { sourceRefs, decisionInput };
 }
 async function nextSession(db: Sql, scope: Scope, courseId: string) {
-  const sessions = createOpeningSpanSessionRepository(db), unfinished = await sessions.latest(scope, courseId);
+  const sessions = createOpeningSpanSessionRepository(db);
+  const current = await readOpeningCurrentLearningActivity(db, scope, courseId, {}, { spanOnly: true });
+  const unfinished = current ? await sessions.get(scope, current.activityId) : null;
   if (unfinished) return { resumeSession: unfinished, dueRetestId: null };
   const due = (await createOpeningRetestActivityRepository(db).listDue(scope, courseId, new Date().toISOString()))
     .find(row => row.requirementKey === SPAN_REQUIREMENT_KEY && row.skillLabel === SPAN_SKILL_LABEL);
-  return { resumeSession: due ? await sessions.latest(scope, courseId, due.activityId) : null, dueRetestId: due?.activityId ?? null };
+  const retest = due ? await readOpeningCurrentLearningActivity(db, scope, courseId, {}, { spanOnly: true, retestId: due.activityId }) : null;
+  return { resumeSession: retest ? await sessions.get(scope, retest.activityId) : null, dueRetestId: due?.activityId ?? null };
 }
 async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot | null, intent: StudySessionIntent, decision: NextLearningStep, dueRetestId: string | null) {
   if (session) {
@@ -424,8 +428,15 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await saveDecision(context.resumeSession, "resume_issue");
           }
           if (context.needsIntentUpdate) {
-            const moveId = intentOnlyOverview ? "overview-links" : input.decision.activityKind === "full_explain" ? "self-example"
-              : input.decision.activityKind === "reduced_help_practice" ? "self-faded" : context.resumeSession.moveId;
+            if (context.resumeSession.status !== "active") throw conflict("当前学习已暂停或结束，请回原学习进度明确调整。");
+            const mode = spanModeForIntent(context.intent), moves = createSpanTeachingSequence(mode);
+            const firstMove = mode === "overview" ? "overview-links" : mode === "challenge" ? "challenge-predict" : "self-example";
+            // Presentation preferences do not restart an existing overview or
+            // challenge as a new method. Only self-study has full/faded moves.
+            const moveId = intentOnlyOverview ? firstMove
+              : mode === "self_study" && input.decision.activityKind === "full_explain" ? "self-example"
+                : mode === "self_study" && input.decision.activityKind === "reduced_help_practice" ? "self-faded"
+                  : moves.some(move => move.id === context.resumeSession!.moveId) ? context.resumeSession.moveId : firstMove;
             context.resumeSession = await sessions.save(scope, context.resumeSession.activityId, { expectedRevision: context.resumeSession.revision,
               intent: context.intent, moveId, status: context.resumeSession.status });
             await saveDecision(context.resumeSession, "resume_issue");
