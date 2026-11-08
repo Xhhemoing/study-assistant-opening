@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NEXT_LEARNING_STEP_VERSION } from "@aistudy/domain";
 import { applyMigrations, createSqlClient, createOpeningKnowledgeRepository,
-  createOpeningLearningRepository, createOpeningSkillEvidenceRepository } from "@aistudy/database";
+  createOpeningLearningRepository, createOpeningSkillEvidenceRepository, readOpeningCourseEvidence } from "@aistudy/database";
+import { buildDecisionInput, toSnapshotEvidence } from "@aistudy/domain";
+import { createOpeningApi } from "../../../apps/web/src/features/opening/client/api";
 import { createOpeningAttemptService } from "../../../apps/web/src/features/opening/learning/attempt-service";
 import { backupRows } from "../opening-backup-records-fixture";
 import { matrixSkill } from "../opening-matrix-attempt-fixture";
@@ -267,6 +269,34 @@ describe("K02a tutor-actions route", () => {
     expect(body.actions[0].evidenceIds).toContain(link.id);
     expect(body.actions[0].evidenceIds).not.toContain(observation.id);
   });
+
+  it("keeps large node/non-node responses client-parseable without clipping canonical evidence", async () => {
+    const fixture = await scoredCourse();
+    for (let index = 0; index < 200; index++) await fixture.answer(index % 9);
+    const latest = await fixture.answer(0, false, "[3,2]");
+    const evidence = await readOpeningCourseEvidence(sql, fixture.scope, fixture.id);
+    const snapshot = toSnapshotEvidence(evidence, new Date());
+    const decision = buildDecisionInput({ observations: snapshot.observations });
+    expect(decision.observations).toHaveLength(201);
+    expect(decision.observations.every(row => row.usableForCurrentVersion === "yes")).toBe(true);
+    expect(decision.observations[0]!.id).toBe(latest.observation.id);
+    const flags = await createOpeningSkillEvidenceRepository(sql).flagsForNode(fixture.scope, fixture.id, fixture.nodeId);
+    expect(flags.evidenceIds).toHaveLength(201);
+    for (const node of [false, true]) {
+      const query = { skillLabel: matrixSkill, ...(node ? { nodeId: fixture.nodeId } : {}) };
+      const response = await get(fixture.id, query);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const api = createOpeningApi(async () => Response.json(body));
+      const actions = await api.listTutorActions({ courseId: fixture.id, ...query });
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({ kind: "guided", nodeId: node ? fixture.nodeId : null });
+      const allIds = node ? flags.evidenceIds : decision.observations.map(row => row.id);
+      expect(actions[0]!.evidenceIds).toEqual([...new Set(allIds)].slice(0, 200));
+      expect(new Set(actions[0]!.evidenceIds).size).toBe(200);
+      expect(actions[0]!.evidenceIds).not.toContain(node ? latest.observation.id : latest.link.id);
+    }
+  }, 60_000);
 
   it("uses canonical revised heads behind old links and excludes withdrawn or stale evidence", async () => {
     const fixture = await scoredCourse(), { observation, link } = await fixture.answer(0);

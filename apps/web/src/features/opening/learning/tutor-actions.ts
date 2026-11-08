@@ -137,6 +137,9 @@ const actionKind: Record<Exclude<NextLearningStep["activityKind"], "transfer_che
   reduced_help_practice: "independent_variant",
 };
 
+/** Matches the client thinTutorActionSchema limit; only response references are bounded. */
+const MAX_TUTOR_ACTION_EVIDENCE_IDS = 200;
+
 /** Pure seam over server-scoped, canonical snapshot evidence; material/exposure is not a score. */
 export function buildTutorActions(input: {
   skillLabel: string;
@@ -163,8 +166,9 @@ export function buildTutorActions(input: {
     nodeId: input.nodeId ?? null,
     problemRef: kind === "independent_variant" ? "variant:1" : null,
     reason: adaptiveReason[kind],
-    evidenceIds: input.evidenceIds ?? decisionInput.observations
-      .filter(row => row.usableForCurrentVersion === "yes").map(row => row.id),
+    evidenceIds: [...new Set(input.evidenceIds ?? decisionInput.observations
+      .filter(row => row.usableForCurrentVersion === "yes").map(row => row.id))]
+      .slice(0, MAX_TUTOR_ACTION_EVIDENCE_IDS),
   };
   assertNoMasteryPercentage({ ...action } as Record<string, unknown>);
   return [action];
