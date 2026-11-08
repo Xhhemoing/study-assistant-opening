@@ -24,7 +24,7 @@ export function courseRouteDecisionInput(requirement: CourseRequirement, observa
   return buildDecisionInput({ observations: matching, wantsFullExplanation: false, ...(options.dueRetest ? { dueRetest: true } : {}) });
 }
 
-/** Historical route-only reason, retained for interpreting stored overrides. */
+/** Route-only bridge override; historical shared v3 reasons remain readable. */
 export const COURSE_ROUTE_ASSISTED_CORRECTION = "route_assisted_correction";
 export type CourseRouteTeachingOverride = {
   rule: typeof COURSE_ROUTE_ASSISTED_CORRECTION;
@@ -35,16 +35,24 @@ export type CourseRouteTeachingOverride = {
 export type CourseRouteTeachingStep = {
   /** Exactly what the shared policy returns for the canonical input. */
   canonical: ReturnType<typeof captureNextLearningStep>;
-  /** New route decisions use the shared policy without a route-only override. */
+  /** The route keeps its accepted correction behavior over the v2 canonical policy. */
   decision: { activityKind: NextLearningStep["activityKind"]; reasonCode: string; focusObservationId: string | null };
   override: CourseRouteTeachingOverride | null;
 };
 
-/** Assisted success is owned by the shared policy. Historical overrides remain
- * readable in stored receipts; selecting a new step never recreates them.
+/** During the v2 bridge, preserve the accepted route-only correction override.
+ * Qualification and canonical ordering above remain unchanged; agenda/span use
+ * the canonical result, and route receipts record both decisions.
  */
 export function courseRouteTeachingStep(input: NextLearningStepInput): CourseRouteTeachingStep {
   const canonical = captureNextLearningStep(input);
   const { activityKind, reasonCode, focusObservationId } = canonical.decision;
-  return { canonical, decision: { activityKind, reasonCode, focusObservationId }, override: null };
+  const latest = input.observations.find(row => row.usableForCurrentVersion === "yes");
+  if (input.dueRetest || input.learningPhase || input.wantsFullExplanation || !latest
+    || activityKind !== "diagnose" || reasonCode !== "needs_check"
+    || latest.verifiedCorrect !== "yes" || (latest.assistance !== "hinted" && latest.assistance !== "revealed")) {
+    return { canonical, decision: { activityKind, reasonCode, focusObservationId }, override: null };
+  }
+  const to = { activityKind: "reduced_help_practice", reasonCode: COURSE_ROUTE_ASSISTED_CORRECTION, focusObservationId: null } as const;
+  return { canonical, decision: to, override: { rule: COURSE_ROUTE_ASSISTED_CORRECTION, observationId: latest.id, from: { activityKind, reasonCode, focusObservationId }, to } };
 }

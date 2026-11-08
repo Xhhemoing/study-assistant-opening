@@ -13,6 +13,9 @@ import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { controlledCourseGrading } from "./opening-controlled-grade-fixture";
+import { evaluateOpeningTeachingKeyAttempt } from "../../packages/database/src/repositories/opening-teaching-question-evaluation";
+import { refreshOpeningLearningEligibility } from "../../packages/database/src/repositories/opening-learning-eligibility";
+import { readOpeningCourseObservationHeads } from "../../packages/database/src/repositories/opening-learning-read";
 let f: OpeningFixture;
 let gradingFixture: ReturnType<typeof controlledCourseGrading>;
 beforeEach(async () => { f=await createOpeningFixture(); gradingFixture=controlledCourseGrading(); vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1"); vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0"); });
@@ -139,8 +142,30 @@ it("keeps a confirmed exact requirement ready through route start and next when 
   const next=await enabled.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20});
   expect(next).toMatchObject({kind:"ready",requirementId:exact.id,action:"transfer_check"});
 });
-it("combines server-confirmed exact readiness with the real teaching evaluator and an unseen transfer question", async () => {
-  // The older rank-nullity tests deliberately control AI qualification; this test must not.
+it("retains the evaluator-enabled arithmetic expectation as an independent real compiler/evaluator leaf", async () => {
+  gradingFixture.restore();
+  const x=await setup();
+  await f.sql`UPDATE opening_source_chunks SET text='加法按位计算，相同数位相加。',image_object_key=NULL WHERE id=${x.chunkId}`;
+  await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[x.requirement],confirmScope:true});
+  const start=await x.route.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirement.id,
+    expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
+  if(start.kind!=="ready")throw new Error(JSON.stringify(start));
+  const spec=await compile(start.activity,0,true);
+  const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:start.activity.id,courseId:x.courseId,
+    skillLabel:start.activity.learnerFocus!.skillLabel,sourceIds:start.activity.sourceIds});
+  const attempt=await createOpeningAttemptService(f.sql).create(f.scope,{sessionId:session.id,clientKey:randomUUID(),
+    teachingBlock:{blockId:spec.blockOrder.find(block=>block.role==="prompt")!.blockId,contentVersion:1}});
+  await f.sql.begin(async tx=>{
+    const [saved]=await tx`SELECT * FROM opening_learning_attempts WHERE id=${attempt.id}`;
+    expect(await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,"19",[])).toMatchObject({
+      evaluatorVersion:"teaching-key-exact-v1",specVersion:"teaching-key-v1",decision:"correct",outcome:"correct",priorFeedback:false});
+    expect(await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,"-99",[])).toMatchObject({decision:"incorrect",outcome:"incorrect"});
+  });
+});
+it("bridges new compiler submissions and reads evaluator-era exact readiness with an unseen transfer question", async () => {
+  // The bridge must not claim complete evaluator integration. New submissions
+  // remain unknown; the retained real evaluator is a separate leaf, and its
+  // persisted-era facts exercise route qualification without fake AI approval.
   gradingFixture.restore();
   const x=await setup(), exact={...x.requirement,requirementKey:"arithmetic",title:"加法运算",
     verification:{kind:"exact" as const,status:"missing" as const,exerciseKeys:[],rubric:"独立计算加法的数值结果。",missingReasons:[]}};
@@ -166,8 +191,25 @@ it("combines server-confirmed exact readiness with the real teaching evaluator a
       teachingBlock:{blockId:prompts[0]!.blockId,contentVersion:1}});
     expect(attempt.stemSnapshot).toBe(stem);
     expect(attempt.courseRequirement).toMatchObject({id:exact.id,revision:1});
-    const observation=await service.submit(f.scope,attempt.id,{clientKey:randomUUID(),answer:value,outcome:"unverified",
+    const submitted=await service.submit(f.scope,attempt.id,{clientKey:randomUUID(),answer:value,outcome:"unverified",
       assistance:"independent",verdictSource:"self_report"});
+    expect(submitted).toMatchObject({outcome:"unverified",verdictSource:"self_report",allowsIndependent:false});
+    expect(submitted.serverEvaluation).toBeUndefined();
+    expect((await route.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
+    // Explicit historical fixture, not production submit wiring.
+    await f.sql.begin(async tx=>{
+      const [saved]=await tx`SELECT * FROM opening_learning_attempts WHERE id=${attempt.id}`;
+      const evaluation=await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,value,[]);
+      expect(evaluation).toMatchObject({evaluatorVersion:"teaching-key-exact-v1",decision:"correct",priorFeedback:false});
+      const {priorFeedback:_prior,...facts}=evaluation!;
+      const receipt={...facts,observationId:submitted.id,attemptId:attempt.id,problemId:attempt.problemId!,
+        itemVersionId:attempt.itemVersionId!,requirementKey:attempt.requirementKey!,evaluatedAt:submitted.recordedAt!};
+      await tx`UPDATE opening_learning_observations SET outcome='correct',verdict_source='deterministic',
+        server_evaluation=${tx.json(receipt)} WHERE id=${submitted.id}`;
+      await refreshOpeningLearningEligibility(tx,f.scope,[submitted.id]);
+    });
+    const head=(await readOpeningCourseObservationHeads(f.sql,f.scope,x.courseId)).find(row=>row.id===submitted.id)!;
+    const observation={...head,allowsIndependent:head.eligibility?.verifiedCorrect==="yes"&&head.eligibility.independentAttempt==="yes"};
     expect(observation).toMatchObject({attemptId:attempt.id,outcome:"correct",assistance:"independent",verdictSource:"deterministic",
       serverEvaluation:{evaluatorVersion:"teaching-key-exact-v1",decision:"correct"},
       eligibility:{verifiedCorrect:"yes",usableForCurrentVersion:"yes",independentAttempt:"yes"}});

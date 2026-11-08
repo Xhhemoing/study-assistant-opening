@@ -46,7 +46,7 @@ describe("course route action canonical teaching decisions", () => {
     expect(mocks.record).toHaveBeenCalledTimes(1);
   });
 
-  it.each([0, 1, 2])("真实复测受助结果在%d次先前独立检查后经共享策略进入减少帮助练习", async priorChecks => {
+  it.each([0, 1, 2])("真实复测受助结果在%d次先前独立检查后保持v2路线减少帮助练习", async priorChecks => {
     const activityId = randomUUID(), observationId = randomUUID(), goalId = randomUUID();
     const currentRequirement = { ...requirement, id: randomUUID(), stableSkillId: randomUUID() };
     const context = { goalId, goalRevision: 1, requirementId: currentRequirement.id, requirementRevision: 1,
@@ -69,13 +69,13 @@ describe("course route action canonical teaching decisions", () => {
       goalId, expectedGoalRevision: 1, activityId, expectedPathVersion: 1, observationId, clientKey: "next", minutes: 20,
     });
     expect(result).toMatchObject({ kind: "ready", action: "reduced_help_practice", activity: { learnerFocus: {
-      activityKind: "reduced_help_practice", reasonCode: "assisted_success", recentAssistance: ["hinted", ...previous.map(() => "independent")],
+      activityKind: "reduced_help_practice", reasonCode: priorChecks === 0 ? "assistance_dependent" : "route_assisted_correction", recentAssistance: ["hinted", ...previous.map(() => "independent")],
     } } });
     expect(mocks.retestOutcome).toHaveBeenCalledWith(sql, scope, context.retestId, current);
     expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ context: { action: "reduced_help_practice" }, decisionInput: {
       status: "needs_check", observations: [{ id: observationId, assistance: "hinted", independentAttempt: "no" }, ...previous.map(previous => ({ id: previous.id })).reverse()],
     } });
-    // The canonical input carries no phase control; assisted success is shared policy.
+    // The canonical v2 input carries no phase control; the route override stays local.
     expect(mocks.capture.mock.calls[0]![2].decisionInput).not.toHaveProperty("learningPhase");
     expect(mocks.capture.mock.calls[0]![2].decisionInput).not.toHaveProperty("phaseSource");
     expect(mocks.reserve).toHaveBeenCalledTimes(1);
@@ -192,11 +192,11 @@ describe("course route next: return and comprehensive paths", () => {
     expect(mocks.capture.mock.calls[0]![2].context).toMatchObject({ action: "comprehensive", coveredRequirementIds: [reqA.id, reqB.id] });
   });
 
-  it("综合检查当前观察判对（受助，仍需本项检查）时，经共享策略进入减少帮助练习，焦点为null", async () => {
+  it("综合检查当前观察判对（受助，仍需本项检查）时，保持路线覆盖减少帮助练习，焦点为null", async () => {
     const { f, reqA } = comprehensive({ verifiedCorrect: "yes", independentAttempt: "no", assistance: "hinted" });
     // A's two earlier independent checks do not cancel the latest assisted success.
     expect(await next(f)).toMatchObject({ kind: "ready", action: "comprehensive", requirementId: reqA.id, activity: { learnerFocus: {
-      activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null,
+      activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null,
       recentAssistance: ["hinted", "independent", "independent"] } } });
     expect(mocks.capture.mock.calls[0]![2]).toMatchObject({ requestedId: reqA.id, context: { action: "comprehensive" }, decisionInput: {
       status: "needs_check", observations: [{ id: f.observationId }, { id: "a-verified-2" }, { id: "a-verified-1" }] } });
