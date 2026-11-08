@@ -1,7 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
-import type { ProviderInput, ProviderOutput, SourceChunk } from "@aistudy/contracts";
+import type { OpeningMaterialPurposePin, ProviderInput, ProviderOutput, SourceChunk } from "@aistudy/contracts";
+import { createOpeningMaterialRetriever } from "../../../../../worker/src/runtime/material-retrieval";
 import { createEphemeralTutorService } from "./ephemeral-service";
+
+const repositories = vi.hoisted(() => ({
+  readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn(), authorizeChunks: vi.fn(),
+}));
+vi.mock("@aistudy/database", async importOriginal => ({
+  ...await importOriginal<typeof import("@aistudy/database")>(),
+  createOpeningCourseReadySourcesRepository: () => ({
+    readMaterialPurposePin: repositories.readMaterialPurposePin,
+    assertMaterialPurposePin: repositories.assertMaterialPurposePin,
+  }),
+  createOpeningSourceEmbeddingsRepository: () => ({ authorizeChunks: repositories.authorizeChunks }),
+}));
 
 const scope = { workspaceId: "10000000-0000-4000-8000-000000000001", ownerUserId: "10000000-0000-4000-8000-000000000002" };
 const privateId = "10000000-0000-4000-8000-000000000003";
@@ -10,7 +23,34 @@ const output: ProviderOutput = { text: "answer", candidates: [], citedChunkIds: 
 const input = { text: "allowed question", sourceIds: [], mode: "listen" as const, history: [] };
 const oldHistory = [{ role: "assistant" as const, text: "OLD-PRIVATE-HISTORY", provenanceId: "20000000-0000-4000-8000-000000000009" }];
 function fixture() {
-  const state = { epoch: 2, excluded: [privateId] };
+  const state = { epoch: 2, excluded: [privateId], versions: new Map([[privateId, 1], [publicId, 1]]) };
+  const captures: OpeningMaterialPurposePin[] = [];
+  const conflict = () => Object.assign(new Error("material version/privacy changed"), { code: "CONFLICT" });
+  const assertScope = (actual: typeof scope) => expect(actual).toEqual(scope);
+  const sourcePin = (sourceId: string): OpeningMaterialPurposePin["sources"][number] => {
+    const sourceVersion = state.versions.get(sourceId);
+    if (sourceVersion === undefined || state.excluded.includes(sourceId)) throw conflict();
+    return { sourceId, sourceVersion, membershipId: null, purposeRevision: null, purpose: null };
+  };
+  repositories.readMaterialPurposePin.mockReset().mockImplementation(async (actualScope, selection) => {
+    assertScope(actualScope);
+    expect(selection).toMatchObject({ courseId: null, materialUse: "citation" });
+    const capture: OpeningMaterialPurposePin = { courseId: selection.courseId, materialUse: selection.materialUse,
+      sources: [...new Set<string>(selection.sourceIds)].sort().map(sourcePin) };
+    captures.push(capture);
+    return capture;
+  });
+  repositories.assertMaterialPurposePin.mockReset().mockImplementation(async (actualScope, capture: OpeningMaterialPurposePin) => {
+    assertScope(actualScope);
+    expect(captures).toContain(capture);
+    expect(capture).toMatchObject({ courseId: null, materialUse: "citation" });
+    if (capture.sources.some(source => source.sourceVersion !== sourcePin(source.sourceId).sourceVersion)) throw conflict();
+  });
+  repositories.authorizeChunks.mockReset().mockImplementation(async (actualScope, chunks: SourceChunk[]) => {
+    assertScope(actualScope);
+    return { privacyEpoch: state.epoch, chunks: chunks.filter(chunk =>
+      state.versions.get(chunk.sourceId) === chunk.sourceVersion && !state.excluded.includes(chunk.sourceId)) };
+  });
   const sourceChunks = [privateId, publicId].map((sourceId, index): SourceChunk => ({
     id: sourceId, sourceId, sourceVersion: 1, page: 1, slideLabel: null, startMs: null, endMs: null,
     text: index === 0 ? "EXCLUDED-PRIVATE-SOURCE" : "allowed source", imageObjectKey: null,
@@ -28,13 +68,19 @@ function fixture() {
     resolveHistory: vi.fn(async () => []),
     record: vi.fn(async () => "30000000-0000-4000-8000-000000000001"),
   };
+  // Real retriever orchestration; only its database factories are replaced. No PG claim.
+  const retrieveContext = createOpeningMaterialRetriever(
+    {} as Parameters<typeof createOpeningMaterialRetriever>[0],
+    budget as unknown as Parameters<typeof createOpeningMaterialRetriever>[1], null,
+  );
   const service = createEphemeralTutorService({
+    retrieveContext,
     sources: { listOwnedIds: async (_scope, ids) => ids.filter(id => [privateId, publicId].includes(id.toLowerCase())) },
     chunks: { listForSources: async (_scope, ids) => sourceChunks.filter(chunk => ids.map(id => id.toLowerCase()).includes(chunk.sourceId)) },
     privacy, budget, provider: { complete }, requestKey: () => "ephemeral-request", provenance,
     config: { maxContextCharacters: 12_000, reservedCents: 10, maxOutputTokens: 128, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
-  return { state, complete, budget, service, privacy, provenance };
+  return { state, captures, complete, budget, service, privacy, provenance };
 }
 
 describe("ephemeral privacy admission", () => {
@@ -45,6 +91,49 @@ describe("ephemeral privacy admission", () => {
     expect(sent.chunks.map(chunk => chunk.sourceId)).toEqual([publicId]);
     expect(JSON.stringify(sent)).not.toContain("EXCLUDED-PRIVATE-SOURCE");
     expect(f.privacy.snapshot).toHaveBeenCalledWith(scope);
+    expect(repositories.readMaterialPurposePin).toHaveBeenCalledExactlyOnceWith(scope, {
+      courseId: null, materialUse: "citation", sourceIds: [publicId],
+    });
+    expect(f.captures).toEqual([{ courseId: null, materialUse: "citation", sources: [
+      { sourceId: publicId, sourceVersion: 1, membershipId: null, purposeRevision: null, purpose: null },
+    ] }]);
+    for (const [, capture] of repositories.assertMaterialPurposePin.mock.calls) expect(capture).toBe(f.captures[0]);
+  });
+  it("rejects a version change during the privacy await before sending and releases the reservation", async () => {
+    const f = fixture();
+    f.privacy.currentEpoch.mockImplementation(async () => {
+      await Promise.resolve();
+      f.state.versions.set(publicId, 2);
+      return f.state.epoch;
+    });
+    await expect(f.service.replyEphemeral(scope, { ...input, sourceIds: [publicId] }))
+      .rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.budget.release).toHaveBeenCalledWith("ephemeral-request", "not_sent");
+    expect(f.budget.markUnknown).not.toHaveBeenCalled();
+    expect(repositories.readMaterialPurposePin).toHaveBeenCalledTimes(1);
+    expect(f.captures[0]?.sources[0]?.sourceVersion).toBe(1);
+    for (const [, capture] of repositories.assertMaterialPurposePin.mock.calls) expect(capture).toBe(f.captures[0]);
+  });
+  it("refuses the final answer when a version changes during provenance recording", async () => {
+    const f = fixture();
+    f.provenance.record.mockImplementation(async () => {
+      await Promise.resolve();
+      f.state.versions.set(publicId, 2);
+      return "30000000-0000-4000-8000-000000000001";
+    });
+    await expect(f.service.replyEphemeral(scope, { ...input, sourceIds: [publicId] }))
+      .rejects.toMatchObject({ code: "CONFLICT", status: 409 });
+    expect(f.complete).toHaveBeenCalledTimes(1);
+    expect(f.budget.settle).toHaveBeenCalledTimes(1);
+    expect(f.budget.release).not.toHaveBeenCalled();
+    expect(f.budget.markUnknown).not.toHaveBeenCalled();
+    expect(f.provenance.record).toHaveBeenCalledWith(scope, {
+      requestId: "ephemeral-request", privacyEpoch: 2, contextSourceRefs: [{ sourceId: publicId, sourceVersion: 1 }],
+    });
+    expect(repositories.readMaterialPurposePin).toHaveBeenCalledTimes(1);
+    expect(f.captures[0]?.sources[0]?.sourceVersion).toBe(1);
+    for (const [, capture] of repositories.assertMaterialPurposePin.mock.calls) expect(capture).toBe(f.captures[0]);
   });
   it("treats uppercase UUIDs as the same excluded source", async () => {
     const f = fixture();

@@ -44,9 +44,6 @@ afterEach(async () => { await fixture?.close(); });
 
 async function seedLearnerReferenceChecks() {
   const course = await learningAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships
-    (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   const reference = {
     verdictSource: "reference_checked",
     referenceSourceId: course.sourceId,
@@ -66,9 +63,6 @@ async function seedLearnerReferenceChecks() {
 
 async function seedRequirementEvidence() {
   const course = await matrixAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships
-    (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   const session = await course.learning.createSession(fixture.scope, {
     courseId: course.courseId, sourceIds: [course.sourceId], skillLabel: incorrectSkill,
   });
