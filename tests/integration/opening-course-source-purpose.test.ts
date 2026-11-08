@@ -11,7 +11,8 @@ import { readOpeningLearnerSnapshotCourses } from "../../packages/database/src/r
 import { assertOpeningTeachingSourcePurposes } from "../../packages/database/src/repositories/opening-teaching-activities";
 import { readCourseRouteMaterials, readCourseRouteSourceChunks } from "../../packages/database/src/repositories/opening-course-route-read";
 import { resolveOpeningStudyContext } from "../../packages/database/src/repositories/opening-study-context";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
+import { openRaceSession, closeRace, track, waitUntilBlocked } from "./opening-race-helpers";
 
 // Uses the real contiguous migration chain via createOpeningFixture. Do not
 // inject a placeholder 0109, apply 0110 in isolation, or weaken migration guards.
@@ -127,6 +128,75 @@ describe("course source purpose storage and concurrency", () => {
     await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
     expect((await knowledge.get(f.scope, course.id))?.snapshot.nodes[0]?.status).toBe("supported");
     expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(confirmations);
+  });
+
+  it("pins exact membership timestamps and rejects changed-back purposes and source versions", async () => {
+    const { courses, source, course, input, membership } = await setup();
+    await ready(source.id);
+    const activityId = await insertTestTeachingActivity(f.sql, f.scope, course.id);
+    await f.sql`UPDATE opening_teaching_activities SET source_ids=${[source.id]} WHERE id=${activityId}`;
+    await f.sql`UPDATE course_asset_memberships SET updated_at='2026-01-01T00:00:00.123456Z' WHERE id=${membership.id}`;
+    const pool = createOpeningCourseReadySourcesRepository(f.sql);
+    const pin = await pool.readSourcePurposePin(f.scope, { activityId });
+    expect(pin).toMatchObject({ activityId, courseId: course.id, materialUse: "teaching", sources: [{
+      sourceId: source.id, sourceVersion: 0, membershipId: membership.id, purpose: null,
+      purposeRevision: "2026-01-01T00:00:00.123456Z",
+    }] });
+    await expect(f.sql.begin(tx => pool.assertSourcePurposePin(f.scope, pin, tx))).resolves.toBeUndefined();
+    const current = await courses.getMembership(input);
+    const changed = await courses.updateAssetMembership({ ...input, purpose: "mock_exam", expectedUpdatedAt: current.updatedAt.toISOString() });
+    await expect(pool.assertSourcePurposePin(f.scope, pin)).rejects.toMatchObject({ code: "CONFLICT" });
+    await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
+    await expect(pool.assertSourcePurposePin(f.scope, pin)).rejects.toMatchObject({ code: "CONFLICT" });
+    const fresh = await pool.readSourcePurposePin(f.scope, { activityId });
+    await f.sql`UPDATE opening_sources SET version=1 WHERE id=${source.id}`;
+    await expect(pool.assertSourcePurposePin(f.scope, fresh)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(pool.readSourcePurposePin(f.otherScope, { activityId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("holds a final pin assertion through commit against concurrent purpose updates", async () => {
+    const { source, course, input, membership } = await setup();
+    await ready(source.id);
+    const activityId = await insertTestTeachingActivity(f.sql, f.scope, course.id);
+    const pin = await createOpeningCourseReadySourcesRepository(f.sql).readSourcePurposePin(f.scope, { activityId, sourceIds: [source.id] });
+    const publisher = await openRaceSession().ready;
+    const writer = await openRaceSession().ready;
+    let signal = () => {}, release = () => {};
+    const entered = new Promise<void>(resolve => { signal = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const publication = track(publisher.sql.begin(async tx => {
+      await createOpeningCourseReadySourcesRepository(publisher.sql).assertSourcePurposePin(f.scope, pin, tx);
+      signal();
+      await gate;
+    }));
+    let update: Promise<unknown> | undefined;
+    try {
+      await entered;
+      update = track(createCourseMembershipRepository(writer.sql).updateAssetMembership({
+        ...input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString(),
+      }));
+      await waitUntilBlocked(f.sql, writer.pid, publisher.pid, "purpose writer behind final publication pin");
+      release();
+      await publication;
+      await update;
+      await expect(createOpeningCourseReadySourcesRepository(f.sql).assertSourcePurposePin(f.scope, pin)).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      release();
+      await Promise.allSettled([publication, ...(update ? [update] : [])]);
+      await closeRace(publisher.sql); await closeRace(writer.sql);
+    }
+  });
+
+  it("rejects a pin after unlink/relink even when purpose and timestamp are copied", async () => {
+    const { courses, source, course, input } = await setup();
+    await ready(source.id);
+    const activityId = await insertTestTeachingActivity(f.sql, f.scope, course.id);
+    const pool = createOpeningCourseReadySourcesRepository(f.sql);
+    const pin = await pool.readSourcePurposePin(f.scope, { activityId, sourceIds: [source.id] });
+    await courses.removeAssetMembership(input);
+    const replacement = await courses.addAssetMembership({ ...input, role: "core", visibility: "private" });
+    await f.sql`UPDATE course_asset_memberships SET updated_at=${pin.sources[0]!.purposeRevision!}::timestamptz WHERE id=${replacement.id}`;
+    await expect(pool.assertSourcePurposePin(f.scope, pin)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("invalidates material revision on purpose changes even when both states admit teaching", async () => {
