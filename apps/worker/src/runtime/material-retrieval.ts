@@ -58,7 +58,7 @@ export function createOpeningMaterialRetriever(
     }
     await purposes.assertMaterialPurposePin(scope, purposePin);
     const after = await repository.authorizeChunks(scope, before.chunks);
-    return { chunks: rankMaterialContext({ ...input, chunks: after.chunks, dense }), mode,
+    return { chunks: rankMaterialContext({ ...input, chunks: after.chunks, dense }), mode, purposePin,
       // Caller must keep this exact pin through the actual model send/release.
       assertCurrent: () => purposes.assertMaterialPurposePin(scope, purposePin) };
   };

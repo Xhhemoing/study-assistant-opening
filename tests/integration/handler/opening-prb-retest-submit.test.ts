@@ -33,8 +33,6 @@ const answer = (extra: Record<string, unknown> = {}) => ({ clientKey: randomUUID
 
 async function setup(recommendedAt: Date) {
   const f = await learningAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${f.courseId}, 'source', ${f.sourceId}, 'core', 0, 'course')`;
   const snapshot: KnowledgeSnapshot = { courseId: f.courseId, version: 1,
     nodes: [{ id: nodeId, courseId: f.courseId, label: "fractions", kind: "concept", evidenceChunkIds: [f.chunkId], status: "supported" }], edges: [] };
   await createOpeningKnowledgeRepository(fixture.sql).replace(fixture.scope, f.courseId, { expectedVersion: 0, snapshot, sourceVersions: { [f.sourceId]: 1 } });

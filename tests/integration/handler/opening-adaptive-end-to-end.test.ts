@@ -60,9 +60,6 @@ const context = (id: string) => ({ params: Promise.resolve({ id }) });
 
 async function recordVerifiedError() {
   const course = await matrixAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships
-    (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   const started = await createAttempt(request("/attempts", {
     sessionId: course.sessionId, clientKey: randomUUID(),
     matrixExercise: { sourceId: course.sourceId, exerciseKey: "dimensions", variant: 0 },
@@ -146,6 +143,10 @@ it("carries a verified error through Today selection into a server-derived targe
   expect(await activityReplay.json()).toMatchObject({ id: activity.id });
   expect(await fixture.sql`SELECT id FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId}
     AND kind='compile-teaching-unit' AND payload->>'activityId'=${activity.id}`).toHaveLength(0);
+  // This positive reassociation reuses the material in the target course.
+  await fixture.sql`INSERT INTO course_asset_memberships
+    (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility, purpose)
+    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${unchosen.courseId}, 'source', ${chosen.sourceId}, 'core', 0, 'course', NULL)`;
   const reassociated = await createOpeningTeachingActivitiesRepository(fixture.sql).associateCourse(fixture.scope, activity.id, { courseId: unchosen.courseId });
   expect(reassociated).not.toHaveProperty("learnerFocus");
 });

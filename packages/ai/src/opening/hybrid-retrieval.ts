@@ -1,4 +1,4 @@
-import type { SourceChunk } from "@aistudy/contracts";
+import type { CourseSourceUse, OpeningMaterialPurposePin, SourceChunk } from "@aistudy/contracts";
 import { keywordOverlapScore, renderContext } from "./context";
 import type { ParentInteractionBudget } from "./parent-interaction-budget";
 
@@ -6,6 +6,8 @@ export type MaterialSegment = { chunk: SourceChunk; segmentIndex: number };
 export type MaterialRetrievalInput = {
   chunks: SourceChunk[];
   sourceIds: string[];
+  /** Server-resolved context. null explicitly means standalone; omission is not authorization. */
+  courseContext?: { courseId: string | null; materialUse: CourseSourceUse };
   query: string;
   maxCharacters: number;
   preferChunkId?: string;
@@ -14,7 +16,14 @@ export type MaterialRetrievalInput = {
   parentBudget?: ParentInteractionBudget;
   signal?: AbortSignal;
 };
-export type MaterialRetrievalResult = { chunks: SourceChunk[]; mode: "hybrid" | "lexical" };
+export type MaterialRetrievalResult = {
+  chunks: SourceChunk[];
+  mode: "hybrid" | "lexical";
+  /** Recheck the captured admission, never recapture, before model send or output release. */
+  assertCurrent?: () => Promise<void>;
+  /** Original server capture, passed only to the transactional completion owner. */
+  readonly purposePin?: OpeningMaterialPurposePin;
+};
 export type MaterialRetriever = (
   scope: { workspaceId: string; ownerUserId: string },
   input: MaterialRetrievalInput,

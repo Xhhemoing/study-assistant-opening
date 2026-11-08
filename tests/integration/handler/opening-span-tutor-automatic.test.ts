@@ -40,6 +40,9 @@ async function baseline(scope = fixture.scope, dailyMinutes = 30) {
   await createOpeningAdaptivePrefsRepository(fixture.sql).patch(scope, {
     spanTutorGrant: { courseId, enabled: true, dailyMinutes, expiresOn: null, expectedRevision: 0 },
   });
+  await fixture.sql`INSERT INTO course_asset_memberships
+    (id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility,purpose)
+    VALUES (${randomUUID()},${scope.workspaceId},${courseId},'source',${sourceId},'core',0,'course',NULL)`;
   const learning = createOpeningLearningRepository(fixture.sql);
   const session = await learning.createSession(scope, { courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [sourceId] });
   const problem = getSpanProblem("span-example-2d")!;
