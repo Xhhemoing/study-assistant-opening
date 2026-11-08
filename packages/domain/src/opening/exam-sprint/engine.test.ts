@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExamAttempt, ExamPack, ExamQuestion, ExamSprintCommand, ExamSprintState } from "@aistudy/contracts";
-import { applyExamSprintCommand, createExamSprintState, examSprintOverview, type ExamSelectionContext } from "./engine";
+import { evaluateExamQuestionParts, applyExamSprintCommand, createExamSprintState, examSprintOverview, type ExamSelectionContext } from "./engine";
 
 const NOW = "2026-10-17T08:00:00.000Z";
 const LATER = "2026-10-18T08:00:00.000Z";
@@ -45,6 +45,36 @@ function addEvidence(state: ExamSprintState, questionId: string, answeredAt: str
 }
 const source = (state: ExamSprintState, overrides: Partial<Extract<ExamSprintCommand, { action: "source" }>> = {}, now = NOW) =>
   applyExamSprintCommand(state, { action: "source", clientKey: key, sourceId: "source-a", phase: "first", outcome: "correct", assistance: "none", durationMinutes: 5, errorCause: null, note: "", ...overrides }, pack, now);
+
+describe("private immutable per-part grading", () => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const q = question("parts", "s1", { partSnapshot: { questionIdentityRefId: uuid(1), packId: pack.id, packVersion: pack.version,
+    questionId: "parts", familyId: "family-parts", parts: [
+      { partId: "left", identityRefId: uuid(2), requirementKey: "left", evaluator: { kind: "choice-options-v1", correctOptionIds: ["B"] } },
+      { partId: "right", identityRefId: uuid(3), requirementKey: "right", evaluator: { kind: "choice-options-v1", correctOptionIds: ["A"] } },
+    ] } });
+  it("grades each trusted part, not the whole-question answer, independent of order", () => {
+    const graded = evaluateExamQuestionParts(q, pack, "A", uuid(4), "revealed")!;
+    expect(graded.parts.map(p => [p.partId, p.outcome, p.assistance])).toEqual([["left", "incorrect", "revealed"], ["right", "correct", "revealed"]]);
+    const reversed = { ...q, partSnapshot: { ...q.partSnapshot!, parts: [...q.partSnapshot!.parts].reverse() } };
+    expect(evaluateExamQuestionParts(reversed, pack, "A", uuid(4), "revealed")!.parts).toEqual([...graded.parts].reverse());
+  });
+  it("keeps missing or unverifiable part rules unknown and rejects a foreign revision", () => {
+    const missing = structuredClone(q); delete missing.partSnapshot!.parts[1]!.evaluator;
+    expect(evaluateExamQuestionParts(missing, pack, "A", uuid(4), "independent")!.parts[1]).toMatchObject({ outcome: "unknown", assistance: "unknown" });
+    expect(() => evaluateExamQuestionParts(q, { ...pack, version: "other" }, "A", uuid(4), "independent")).toThrow("revision");
+    expect(evaluateExamQuestionParts(question("legacy"), pack, "A", uuid(4), "independent")).toBeNull();
+  });
+  it("never leaks private refs/rules/results and keeps the whole-question timed score sealed", () => {
+    const selectedPack = { ...pack, questions: [{ ...q, pool: "mock-a" as const }] };
+    const answered = answer(start(createExamSprintState(NOW), "mock-a", NOW, selectedPack), "A", NOW, selectedPack);
+    answered.attempts[0]!.resultMetadata = { questionEvaluation: evaluateExamQuestionParts(q, pack, "A", uuid(4), "independent")! };
+    expect(answered.attempts[0]!.correct).toBe(true);
+    const view = examSprintOverview(answered, selectedPack, NOW);
+    expect(view.attempts[0]!.correct).toBeNull();
+    expect(JSON.stringify(view)).not.toMatch(/partSnapshot|resultMetadata|questionIdentityRefId|correctOptionIds/);
+  });
+});
 
 describe("exam sprint sessions and selection", () => {
   it("creates deterministic immutable diagnostics with one or two questions per topic and no reserved questions", () => {

@@ -30,12 +30,15 @@ sha256sum /secure/backups/aistudy-pre-identity.dump \
 
 ```bash
 createdb aistudy_restore_rehearsal
-pg_restore --exit-on-error --clean --if-exists \
+pg_restore --exit-on-error \
   --dbname=aistudy_restore_rehearsal \
   /secure/backups/aistudy-pre-identity.dump
 ```
 
-4. 记录备份位置、SHA-256、操作者、时间、目标数据库 host/database、数据库 fingerprint 以及恢复演练结果。`identity_owner_mappings.database_fingerprint` 和 legacy `0003` attestation 都必须等于 canonical runner 为目标数据库和当前 schema 生成的值。不要在仓库中保存凭据、attestation 或备份文件。
+4. 在私有运维记录中保存备份位置、SHA-256、操作者、备份开始/完成时间（含时区）、目标数据库身份、数据库 fingerprint 以及恢复演练结果。将备份绑定到精确应用/runner SHA、已登记迁移 ID/checksum 和预期恢复时间点；核对备份文件完整性，并在新建空隔离数据库恢复后核对 registry、关键行数、约束/trigger 和只读应用结果。`identity_owner_mappings.database_fingerprint` 和 legacy `0003` attestation 都必须等于 canonical runner 为目标数据库和当前 schema 生成的值。
+5. 由 PM 明确备份执行者、恢复执行者和完整性验收责任人，记录原授权、恢复可接受的数据损失窗口及停机窗口。迁移后的新增学习记录不在迁移前备份内，恢复旧备份不能被描述成无损回退。备份、恢复演练、真实恢复与切换分别按其操作边界取得授权；本文不授予执行权。
+
+以上是待执行流程，不是备份或演练已完成的证据。恢复目标必须是新建空隔离数据库；不要将示例改为对真实学习数据库执行覆盖式 `pg_restore`。真实恢复需另行评估并获用户明确批准，包含迁移后新增数据的保全/核对方案和验收后切换方案。不要在公开仓库保存真实数据库身份、凭据、attestation、备份文件或原始恢复日志。
 
 ## 3. 运行 Preflight 与 Canonical Runner
 
@@ -159,7 +162,8 @@ ledger/checksum/attestation，也不通过修改 `OLD_TARGET` 或 transition 绕
   的实际内容必须等于执行 preflight 的可信锚点，且匹配独立审查发布清单里的内容摘要。
   这不是任意输入字符串的能力声明，也不接受候选自行上报“兼容”。此 profile 仅针对
   未修改的 source release；编译包、其它依赖和整个制品的供应链真实性仍由精确 SHA 的
-  发布清单、审查和 CI 保证，报告不替代这些门禁。当前没有自动批准的历史恢复目标。
+  发布清单、审查和 CI 保证。source digest 不是签名、部署授权或可恢复性证明，报告不替代
+  这些门禁；实际恢复对象必须是精确已审兼容制品。当前没有自动批准的历史恢复目标。
 - 新 writer 在图的节点/边内容或完整 source version 集合变化后撤回确认；相同内容的
   worker status 重分类才可保留。手动撤销、删除节点和 source maintenance 都删除 receipt，
   即使节点已是 needs_check 也删除；变回旧图/旧源不能复活旧确认。
@@ -188,8 +192,95 @@ ledger、schema 或制品变化后报告失效，必须重新核对。现有 dep
 能力不足的旧目标，结论就是不可恢复，保持停写并提交 forward-fix/新兼容 reader-writer
 锚点方案，不能偷偷更换恢复目标。迁移执行、含迁移部署、真正恢复演练及新发布顺序均另批。
 
-## 8. 失败恢复
+## 通用失败恢复（身份与保护触发器）
 
-- preflight、attestation 或 `0004` 失败：保持服务停止，保存错误与数据库状态；修正受控映射或 attestation 后重试，或恢复到已验证备份。
+- preflight、attestation 或 `0004` 失败：保持服务停止，保存错误与数据库状态；修正经审批的受控映射或 attestation 后重试。若需恢复，先按第 2 节在新建空隔离数据库验证已授权备份，再另行批准真实恢复与切换，不直接覆盖当前学习数据。
 - 已记录旧版 `0003` 且数据已被删除：`0004_identity_repair.sql` 无法恢复数据。必须从已验证备份恢复到隔离环境，确认完整性后执行正式恢复；无备份时阻断发布并进入人工数据重建流程。
-- trigger 验证失败：立即停止写入，从备份恢复或在受控事务中修复 trigger 后重新验证；不要在保护关闭时开放应用流量。
+- trigger 验证失败：立即停止写入；按第 2 节另行批准恢复，或经审批在受控事务中修复 trigger 后重新验证；不要在保护关闭时开放应用流量。
+
+## 8. 0108 跨版本兼容与回退（操作方案，尚未执行）
+
+### 8.1 源码依据与授权顺序
+
+本节只读核对主线 `be641ce61c15c3a85a4e5ce7ea613c53321bc79f` 的
+`packages/database/src/migrate.ts`、`scripts/db-migrate.ts`、
+`packages/database/src/repositories/opening-knowledge.ts`，以及
+[#230](https://github.com/Xhhemoing/study-assistant-opening/pull/230) 冻结提交
+`8ab660eefb3c7c5edcc32cf8df7847a5086cd21d` 同路径源码和
+`packages/database/src/migrations/0108_opening_knowledge_confirmations.sql`。
+这是两个精确版本的源码结论，不是当前数据库状态或恢复成功的证明；后续候选改变时必须重新核对。
+第 7 节新增的 H 兼容锚点进一步收紧 source/graph/维护失效，不把本节冻结 #230 的历史
+行为描述推广到新制品。它目前仅输出只读前置报告，现受管脚本不消费该报告；尚未验成
+可恢复、没有解除本节的实际恢复阻塞，仍需精确已审制品、CI 和另行执行授权。
+
+发布顺序保持：**先完成本轮首个无迁移安全发布，再合 #230**。合入不等于批准执行
+0108；含迁移部署和迁移执行仍需用户对每次操作、精确 SHA 和目标分别明确批准，由唯一 PM
+安排。首个无迁移桥接发布真实健康前，#230 与含它的 H 兼容栈均不可合入。
+既有 2A 分工不变；本说明不授权 worker 合并、部署、迁移或操作真实数据。
+
+### 8.2 升级前只读核对
+
+由获准操作者使用只读连接，在迁移/部署前保存以下结果到私有记录；本次文档工作未连接数据库：
+
+```sql
+BEGIN READ ONLY;
+SELECT id, checksum, verification_state, recorded_at
+FROM schema_migrations ORDER BY id;
+SELECT to_regclass('opening_knowledge_confirmations') IS NOT NULL
+  AS confirmation_table_exists;
+COMMIT;
+```
+
+- 对照精确候选制品中 `packages/database/src/migrations/` 的全部文件：ID 格式合法、编号从
+  0001 连续且唯一、数据库历史 ID 均被候选识别；对每条 `verified` 历史比较原文件的
+  SHA-256（例如在获准的候选副本上用 `sha256sum`）。不得重写历史 SQL、换行、checksum
+  或 verification state 来消除差异；`legacy-unverified` 也不能冒充已验证。
+- 比较升级源、升级目标、拟回退目标的完整迁移集合和历史 checksum；只看最大编号或确认表是否存在不够。
+  0108 未登记而表已存在，或 0108 已登记而表不存在，均停止，交人工核查，不手工补账/删表。
+- canonical runner **不是只读 preflight，也没有仅执行 0108 的开关**：取得锁后先调用
+  `bootstrapRegistry`（含 DDL/UPDATE），再 `verifyRegistry`，通过后执行所有待执行文件。
+  不用 `npm run db:migrate` 试探旧版兼容性；有未知历史或 checksum 漂移立即阻断。
+- 按第 2 节完成获准备份和空隔离库恢复验证，将精确版本、时间点、完整性结果、恢复责任人与原授权关联；
+  未完成不能放行，不能用历史备份或其他版本 CI 代替本次证据。
+
+### 8.3 表、确认语义与 reader 兼容矩阵
+
+0108 只创建 `opening_knowledge_confirmations` 及索引，不回填或改写已有知识图谱。
+记录包含 workspace/owner/course/node、节点 label/kind、确认前后图版本（后者等于前者加一）、
+该节点材料版本映射及非空证据 chunk 集合。它是**当前有效确认**，不是永久不可变审计表：
+#230 的 `confirmNode()` 在同一事务内将 `needs_check` 节点改为 `supported`、图版本加一并写确认；
+要求课程所有权、观测图/材料版本一致且当前证据仍获授权。重复或过期提交冲突，不是幂等重放。
+`replace()` 自动重建只在节点身份/label/kind、证据集合、材料版本均符合确认且节点仍存在时保留支持状态；
+节点移除或手工从 supported 撤回会删除该节点确认。材料变更标记 needs_check 不删除确认，但旧材料版本不能恢复支持。
+
+下表“旧应用”仅指上述主线精确 SHA，不外推至任意历史版本：
+
+| 数据库状态 | 旧应用 reader / writer | #230 应用 reader / writer | canonical runner |
+| --- | --- | --- | --- |
+| 历史到 0107、无确认表 | 原知识快照 reader 可读；无新确认能力 | 单纯 `get()` 仍读原快照；`confirmNode()` 和正常 `replace()` 路径需确认表，不能放行完整应用 | 旧 runner 认识到 0107；#230 runner 会尝试所有待执行迁移，必须先获批准 |
+| 已登记 0108 且确认表完整、尚无确认 | 旧 reader 不查询新表，快照字段/状态仍可解析；旧 writer 不维护确认规则，不能视作安全回退 | 认识表与确认协议；仍需实际验证 | 旧 runner 报 `MIGRATION_UNKNOWN_HISTORY`；#230 runner 可识别 ID，但仍须校验 checksum/全部历史 |
+| 已登记 0108、已有人工确认 | 旧 reader 可读 supported/needs_check，但不理解其确认来源；旧 replace/重建不读取或撤销确认，后续前向升级可能错误恢复已撤回的确认 | 按版本和证据匹配保留/撤销确认；不得绕过冲突 | 同上；应用可解析快照不等于部署前置 runner 可通过 |
+| 已登记 0108、确认表缺失 | 即便部分旧读取可用，也属损坏状态 | 确认和 replace 会失败；前向 runner 已登记而跳过 0108，不会自动补表 | 阻断，不能 DROP 后寄望重跑修复 |
+
+结论：**旧版 runner 遇到未知已登记 0108，绝不是“安全旧版”**。SQL 注释中的增量兼容不构成跨版本回退许可。
+保留确认表不等于保留应用确认语义，应用回滚也不等于数据库回滚。
+
+### 8.4 故障分支与最小 H 后继（当前阻塞）
+
+1. 若 0108 执行失败，停止本次发布，保存错误与只读 registry/表状态。runner 为每个文件将 SQL
+   与 registry INSERT 放在同一事务内，0108 失败应一起回滚；此前已提交文件不会因此撤销。
+   不假定整个批次都回滚，先核实，不自行重跑或伪造已登记行。
+2. 若 0108 已成功、应用异常，先由获准操作者停住相关知识图谱写入/重建/确认入口并保全现态，
+   交 PM 选择前向修复或兼容应用回退；不能绕过部署迁移前置步骤直接换旧包开放 writer。
+   即使临时只读，也须单独获准并核对精确 reader，不能宣称完整回退完成。
+3. 当前两个源码版本均无可批准的跨 0108 旧 runner 流程，**跨版本应用回退阻塞**。
+   最小后继是独立 H PR 提供精确回退候选：保留原样 0108 迁移文件并由 canonical runner
+   识别/校验已登记 checksum，不忽略其他未知历史、不重放已登记迁移；同时保留或受控禁止
+   会破坏确认保留/撤销语义的旧 writer。需测试“0108 已登记且有确认”的前向→回退→再前向，
+   包括删除节点、撤销确认、材料版本变化、未知 ID 和 checksum 漂移的失败路径，并通过精确 head
+   审查/CI 后另行申请部署批准。本 L 文档不实现或宣布该 H 修复已完成。
+4. **禁止** DROP 确认表、删除/改写 `schema_migrations` 或 checksum、修改已发布 0108、另造 down migration
+   绕过未知历史。需要数据库恢复时遵循第 2 节的独立授权及空隔离库验证流程；不建议以
+   `pg_restore` 覆盖真实学习数据来“撤销 0108”。无备份/演练/兼容候选证据时保持阻塞，交用户决定。
+
+本节未执行升级、备份、恢复演练、应用回退或数据库恢复；没有相应执行证据，不得记为通过。

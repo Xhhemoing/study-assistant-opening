@@ -13,6 +13,7 @@ import {
   isTeachingValidationEnabled,
   type BuildCompilerPublishInputOptions,
   type ParentInteractionBudget,
+  type TeachingBlindSolveReceipt,
 } from "@aistudy/ai";
 import type { NextVerificationStatus, ValidationReport } from "@aistudy/domain";
 import {
@@ -104,6 +105,12 @@ export type CompileTeachingUnitDeps = {
     providerOutput: ProviderOutput | null,
     providerInput?: ProviderInput,
   ): Promise<ActivitySpecPublishInput>;
+  /** Server-only receipt in job/result JSON; never part of teaching provider input or client spec. */
+  blindSolveBeforePublish?(scope: Scope, input: {
+    job: OpeningJobRecord; publishInput: ActivitySpecPublishInput; providerOutput: ProviderOutput | null;
+    parentBudget: ParentInteractionBudget; beforeSend: () => Promise<void>;
+  }): Promise<TeachingBlindSolveReceipt[]>;
+  persistBlindSolveReceipts?(scope: Scope, job: OpeningJobRecord, receipts: TeachingBlindSolveReceipt[], beforePersist: () => Promise<void>): Promise<void>;
   /** Create-or-bind unit when generate omits teachingUnitId. */
   ensureTeachingUnitId?(
     scope: Scope,
@@ -246,9 +253,10 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
       const skipProvider = body.mode === "repair" && deps.skipProviderForRepair === true;
       let providerOutput: ProviderOutput | null = null;
       let sentInput: ProviderInput | undefined;
+      let parentBudget: ParentInteractionBudget = { id: `study-activity:${body.activityId}` };
 
       if (!skipProvider) {
-        const parentBudget = deps.resolveParentBudget
+        parentBudget = deps.resolveParentBudget
           ? await deps.resolveParentBudget(scope, body)
           : { id: `study-activity:${body.activityId}` };
         const input: ProviderInput = deps.buildProviderInput
@@ -305,7 +313,9 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
               persisted && persisted.activityId === body.activityId
               && (persisted.generateStatus === "needs_check" || persisted.generateStatus === "ready")
             ) {
-              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus };
+              const receipts = (job.result as { teachingBlindSolveReceipts?: Record<string, unknown> } | null)?.teachingBlindSolveReceipts;
+              return { replayed: true, activityId: persisted.activityId, generateStatus: persisted.generateStatus,
+                ...(receipts && Object.keys(receipts).length ? { teachingBlindSolveReceipts: receipts } : {}) };
             }
             await deps.setGenerateStatus(scope, body.activityId, "unknown", {
               from: ["queued", "generating"],
@@ -354,12 +364,22 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
 
       await deps.validateSourceRefs?.(scope, publishInput);
 
+      const assertPublishCurrent = async () => {
+        if (await deps.getJobState(job.id) === "cancelled") throw new Error("teaching blind solve cancelled");
+        if (deps.privacy) assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+        await deps.validateSourceRefs?.(scope, publishInput);
+      };
+      const blindSolveReceipts = !skipProvider && deps.blindSolveBeforePublish
+        ? await deps.blindSolveBeforePublish(scope, { job, publishInput, providerOutput, parentBudget, beforeSend: assertPublishCurrent })
+        : [];
+
       // Re-check cancel immediately before publish (late-result fence).
       const stateBeforePublish = await deps.getJobState(job.id);
       if (stateBeforePublish === "cancelled") {
         return { discarded: true, reason: "cancelled" };
       }
 
+      if (deps.privacy) assertCurrentEpoch(job.privacyEpoch, await deps.privacy.getWorkspaceEpoch(scope));
       await deps.publishActivitySpec(scope, publishInput);
 
       let nextStatus: TeachingGenerateStatus = skipProvider ? "ready" : "needs_check";
@@ -371,6 +391,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         return { discarded: true, reason: "generate_status_fence" };
       }
 
+      let finalContentVersion = publishInput.expectedVersion + 1;
       let verificationStatus: string | undefined = publishInput.verificationStatus;
       let validationReport: ValidationReport | undefined;
 
@@ -396,7 +417,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
           providerOutput,
         });
 
-        if (promotion) {
+        if (promotion && !blindSolveReceipts.some(receipt => receipt.decision !== "match")) {
           const stateBeforePromote = await deps.getJobState(job.id);
           if (stateBeforePromote === "cancelled") {
             return { discarded: true, reason: "cancelled" };
@@ -411,6 +432,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
             expectedVersion: publishInput.expectedVersion + 1,
             verificationStatus: promotion.nextVerificationStatus,
           });
+          finalContentVersion = publishInput.expectedVersion + 2;
           verificationStatus = promotion.nextVerificationStatus;
           validationReport = promotion.report;
 
@@ -428,6 +450,11 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         }
       }
 
+      // Only a successful metadata-only republish can rebind this exact immutable pair.
+      // Keep strict version equality on reads; never reinterpret a stale receipt there.
+      const finalReceipts = blindSolveReceipts.map(receipt => ({ ...receipt,
+        identity: { ...receipt.identity, contentVersion: finalContentVersion } }));
+      if (finalReceipts.length) await deps.persistBlindSolveReceipts?.(scope, job, finalReceipts, assertPublishCurrent);
       return {
         activityId: body.activityId,
         teachingUnitId,
@@ -437,6 +464,7 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
         usedProvider: !skipProvider,
         verificationStatus,
         validationReport,
+        teachingBlindSolveReceipts: Object.fromEntries(finalReceipts.map(receipt => [receipt.identity.blockId, receipt])),
       };
     } catch (error) {
       const status = await mapFailureStatus(error);

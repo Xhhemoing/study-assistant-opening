@@ -1,5 +1,4 @@
 import type { SkillEvidence } from "@aistudy/contracts";
-import { recommendAdaptiveTutorAction, type AdaptiveTutorActionKind } from "./tutor-policy-adaptive";
 
 export type RetestCloseAssistance = "independent" | "hinted" | "revealed" | "unknown";
 export type RetestCloseOutcome = "correct" | "incorrect" | "unverified";
@@ -65,14 +64,4 @@ export function prepareRetestSkillLink(input: {
     nodeId,
     dimension: input.dimension,
   };
-}
-
-/** Next tutor action after a successful independent retest close (due cleared). */
-export function nextTutorKindAfterRetestClose(nodeId: string): AdaptiveTutorActionKind {
-  return recommendAdaptiveTutorAction({
-    nodeId,
-    hasCheckedIndependent: true,
-    hasAssistance: false,
-    retestDue: false,
-  });
 }

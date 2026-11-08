@@ -39,6 +39,8 @@ describe("read-only query contracts", () => {
       evidenceIds: [id], basis: "nextLearningStep/current-evidence", limitations: [], summary: "获得帮助后仍多次在同一步骤出错" };
     const parse = (data: unknown) => systemQueryResultSchema.safeParse({ ...common, data: [data] });
     expect(parse(recommendation).success).toBe(true);
+    expect(parse({ ...recommendation, step: { activityKind: "diagnose", focusObservationId: id, reasonCode: "remediation_limit" } }).success).toBe(true);
+    expect(parse({ ...recommendation, step: { activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success" } }).success).toBe(true);
     expect(parse({ ...recommendation, step: { activityKind: "transfer_check", focusObservationId: id, reasonCode: "correct_needs_independent_check" } }).success).toBe(true);
     expect(parse({ ...recommendation, step: { ...recommendation.step, reasonCode: "independent" } }).success).toBe(true);
     expect(parse({ summary: "无法可靠解释下一学习活动", recommendationStatus: "unknown" }).success).toBe(true);

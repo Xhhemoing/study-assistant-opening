@@ -11,6 +11,8 @@ import {
   type ModelTaskKey,
   type ModelGatewayCallOptions,
   type ResolvedTaskModel,
+  independentTeachingSolver,
+  type TeachingBlindSolveConfig,
 } from "@aistudy/ai";
 import { loadOpeningModelCatalog, parseBooleanEnv } from "@aistudy/config";
 import {
@@ -56,13 +58,31 @@ function toResolved(model: MergedModel, task: ModelTaskKey): ResolvedTaskModel {
   };
 }
 
+/** Server-only explicit identities. Reading configuration never enables a call by itself. */
+export function teachingBlindSolveConfig(env: NodeJS.ProcessEnv = process.env): TeachingBlindSolveConfig | null {
+  const config = {
+    solver: { providerId: env.OPENING_TEACHING_SOLVER_PROVIDER_ID ?? "", modelName: env.OPENING_TEACHING_SOLVER_MODEL ?? "", family: env.OPENING_TEACHING_SOLVER_FAMILY ?? "" },
+    generator: { providerId: env.OPENING_TEACHING_GENERATOR_PROVIDER_ID ?? "", modelName: env.OPENING_TEACHING_GENERATOR_MODEL ?? "", family: env.OPENING_TEACHING_GENERATOR_FAMILY ?? "" },
+  };
+  return independentTeachingSolver(config) ? config : null;
+}
+
 export async function resolveTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel> {
+  const config = task === "teaching.solve" ? teachingBlindSolveConfig() : null;
+  if (task === "teaching.solve" && !config) throw new OpeningModelRoutingError("异家族盲解未配置；不会使用编译模型。");
   const { settings, merged } = await loadRouting(sql, scope);
+  if (task === "teaching.solve") {
+    const candidates = merged.models.filter(model => model.providerId === config!.solver.providerId && model.modelName === config!.solver.modelName);
+    if (candidates.length !== 1) throw new OpeningModelRoutingError("盲解模型身份不唯一或未配置。");
+    const explicit = { ...settings, mode: "automatic" as const, taskRoutes: { ...settings.taskRoutes, [task]: { primary: candidates[0]!.id, fallback: null } } };
+    return toResolved(resolveModelForTask(merged.models, explicit, task, null), task);
+  }
   return toResolved(resolveModelForTask(merged.models, settings, task, merged.defaultModelId), task);
 }
 
 /** The user's explicit fallback for a task, or null (unset, removed or unable to serve it). */
 export async function resolveFallbackTaskModel(sql: Sql, scope: Scope, task: ModelTaskKey): Promise<ResolvedTaskModel | null> {
+  if (task === "teaching.solve") return null;
   const { settings, merged } = await loadRouting(sql, scope);
   const model = resolveFallbackModelForTask(merged.models, settings, task);
   return model ? toResolved(model, task) : null;

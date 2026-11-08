@@ -35,6 +35,8 @@ export type NodeSkillEvidenceFlags = {
   hasCheckedIndependent: boolean;
   hasAssistance: boolean;
   evidenceIds: string[];
+  /** Unique usable effective observation heads behind the unchanged link IDs. */
+  observationIds: string[];
 };
 
 function mapRow(row: Record<string, unknown>): SkillEvidenceRecord {
@@ -249,16 +251,18 @@ export function createOpeningSkillEvidenceRepository(sql: Sql) {
         const contexts = await readOpeningLearningEvidenceContexts(tx, scope, heads);
         let hasCheckedIndependent = false, hasAssistance = false;
         const evidenceIds: string[] = [];
+        const observationIds = new Set<string>();
         for (const row of rows) {
           const facts = contexts[String(row.id)]!;
           const eligibility = evaluateEvidenceEligibility(facts.observation, facts.context);
           if (eligibility.usableForCurrentVersion !== "yes") continue;
           evidenceIds.push(String(row.evidence_id));
+          observationIds.add(String(row.id));
           const assistance = resolveEvidenceAssistance(facts.observation, facts.context);
           if (assistance === "hinted" || assistance === "revealed") hasAssistance = true;
           if (eligibility.independentAttempt === "yes" && eligibility.verifiedCorrect === "yes") hasCheckedIndependent = true;
         }
-        return { nodeId, hasCheckedIndependent, hasAssistance, evidenceIds };
+        return { nodeId, hasCheckedIndependent, hasAssistance, evidenceIds, observationIds: [...observationIds] };
       }) as Promise<NodeSkillEvidenceFlags>;
     },
   };

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
 const mocks = vi.hoisted(() => ({ catalog: vi.fn(), get: vi.fn(), provider: vi.fn(), models: vi.fn() }));
 vi.mock("@aistudy/config", async original => ({ ...await original<typeof import("@aistudy/config")>(), loadOpeningModelCatalog: mocks.catalog }));
@@ -10,7 +10,7 @@ vi.mock("@aistudy/database", async original => ({
 vi.mock("@aistudy/ai", async original => ({ ...await original<typeof import("@aistudy/ai")>(), createOpeningProvider: mocks.provider }));
 vi.mock("../../../../packages/database/src/repositories/opening-ai-settings", () => ({ createOpeningAiSettingsRepository: () => ({ get: mocks.get }) }));
 vi.mock("../../../../packages/database/src/repositories/opening-model-providers", () => ({ createOpeningModelProvidersRepository: () => ({ listResolvableModels: mocks.models }) }));
-import { probeDbModel, resolveTaskModel, resolveTutorModel } from "./model-gateway";
+import { probeDbModel, resolveTaskModel, resolveTutorModel, teachingBlindSolveConfig, resolveFallbackTaskModel } from "./model-gateway";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const model = { id: "chosen", providerId: "secondary", providerLabel: "Secondary", label: "Chosen", modelName: "actual-model", availability: "available", inputCentsPerMillion: 5, outputCentsPerMillion: 7, apiKey: "private", baseUrl: "https://provider.example/v1", supportsVision: true };
 beforeEach(() => {
@@ -19,6 +19,24 @@ beforeEach(() => {
   mocks.get.mockResolvedValue({ settings: DEFAULT_OPENING_AI_SETTINGS, saved: false, invalidStoredSettings: false });
   mocks.provider.mockReturnValue({ complete: vi.fn() });
   mocks.models.mockResolvedValue([]);
+});
+afterEach(() => vi.unstubAllEnvs());
+describe("blind solve server identity", () => {
+  it("unconfigured or same-family does not construct providers or load routing", async () => {
+    vi.stubEnv("OPENING_TEACHING_SOLVER_PROVIDER_ID", "");
+    expect(teachingBlindSolveConfig()).toBeNull();
+    await expect(resolveTaskModel({} as never, scope, "teaching.solve")).rejects.toThrow(/未配置/);
+    expect(mocks.catalog).not.toHaveBeenCalled(); expect(mocks.provider).not.toHaveBeenCalled();
+    expect(await resolveFallbackTaskModel({} as never, scope, "teaching.solve")).toBeNull();
+    expect(teachingBlindSolveConfig({ OPENING_TEACHING_SOLVER_PROVIDER_ID: "p", OPENING_TEACHING_SOLVER_MODEL: "s", OPENING_TEACHING_SOLVER_FAMILY: " A ",
+      OPENING_TEACHING_GENERATOR_PROVIDER_ID: "g", OPENING_TEACHING_GENERATOR_MODEL: "g", OPENING_TEACHING_GENERATOR_FAMILY: "a" })).toBeNull();
+  });
+  it("selects the explicit server provider/model, not a manual workspace lock", async () => {
+    for (const [name, value] of Object.entries({ OPENING_TEACHING_SOLVER_PROVIDER_ID: model.providerId, OPENING_TEACHING_SOLVER_MODEL: model.modelName,
+      OPENING_TEACHING_SOLVER_FAMILY: "family-b", OPENING_TEACHING_GENERATOR_PROVIDER_ID: "generator", OPENING_TEACHING_GENERATOR_MODEL: "g", OPENING_TEACHING_GENERATOR_FAMILY: "family-a" })) vi.stubEnv(name, value);
+    mocks.get.mockResolvedValue({ settings: { ...DEFAULT_OPENING_AI_SETTINGS, mode: "manual", manualModelId: "removed" }, saved: true, invalidStoredSettings: false });
+    expect((await resolveTaskModel({} as never, scope, "teaching.solve")).modelSnapshot.id).toBe(model.id);
+  });
 });
 describe("shared tutor model selection", () => {
   it("joins one owner-scoped choice to provider options and the exact ledger prices", async () => {

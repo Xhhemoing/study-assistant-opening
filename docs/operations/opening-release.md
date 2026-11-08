@@ -5,27 +5,69 @@ Scope: the Opening release slice (43-task plan in
 must run, what is verified, and what stays blocked. Release acceptance evidence is always bound to
 an exact commit SHA; a claim without a SHA is not evidence.
 
-## 0108 compatibility recovery boundary (execution not authorized)
+## 0108 release / rollback boundary (2026-11-08, not executed)
 
-The manual-confirmation stack includes migration 0108. Do not describe the full stack as
-migration-free, even when the follow-up compatibility change does not add another migration.
-Migration execution, a migration-bearing deployment and any revised deployment/recovery order
-require separate explicit authorization. Browser acceptance remains with the user.
+[#230](https://github.com/Xhhemoing/study-assistant-opening/pull/230), frozen at
+`8ab660eefb3c7c5edcc32cf8df7847a5086cd21d`, adds
+`0108_opening_knowledge_confirmations.sql`. The approved sequence is to complete
+the first migration-free safe release of this round **before merging #230**.
+Merge is not migration approval: each migration execution and migration-bearing
+deployment still needs explicit user approval for its exact SHA, target and
+operation. Only the PM arranges merge/deploy; the existing 2A ownership boundaries
+are unchanged. This page grants no production or real-data operation authority.
 
-The only new recovery object is the reviewed **compatibility reader/writer anchor** described in
+Before requesting approval, follow
+[database-migrations.md §8](database-migrations.md#8-0108-跨版本兼容与回退操作方案尚未执行):
+read-only inventory of migration IDs and historical checksums against the upgrade
+and rollback artifacts; a backup tied to exact versions and recovery time point;
+integrity checks and an authorized restore rehearsal into a fresh empty isolated
+database; named backup/recovery owners and original authorization. Keep real
+connection details and evidence in private operations records. A backup timestamp
+or CI result alone does not establish recoverability, and restoring an earlier
+backup can lose subsequent learning records.
+
+The canonical runner is not a read-only probe. At mainline
+`be641ce61c15c3a85a4e5ce7ea613c53321bc79f`, it bootstraps the registry before
+validation and rejects an already registered, unknown 0108 with
+`MIGRATION_UNKNOWN_HISTORY`. Retaining the table does not make that old deployment
+pre-step pass. Conversely, #230's normal knowledge `replace()` and confirmation
+paths require the new table even when no confirmations exist yet.
+
+Old snapshot readers can parse the existing `supported` / `needs_check` fields,
+but old writers do not maintain #230's confirmation preservation/revocation rules.
+An application rollback is **not** a database rollback or proof of semantic
+compatibility. See §8.3 for the table/confirmation/reader matrix and §8.4 for the
+failure branches. Cross-0108 rollback remains **blocked pending an independent H
+compatibility fix** that preserves registry/checksum validation and confirmation
+semantics (or prevents unsafe writers), its exact-head review/CI, and separate
+deployment approval. Do not skip the migration pre-step, DROP the confirmation
+table, edit `schema_migrations`/checksums, or overwrite real learning data with
+`pg_restore` to force a rollback.
+
+This is an unexecuted runbook, not evidence that 0108, a backup, rehearsal,
+rollback or recovery has run. Browser acceptance remains with the user; this
+change does not claim it passed.
+
+### Compatibility follow-up: read-only report, not an approved recovery
+
+The full manual-confirmation stack remains migration-bearing, including inherited #230;
+this follow-up adds no migration and does not alter the approved sequence above. Neither
+#230 nor this stack may merge before the first migration-free bridge release is actually healthy.
+
+The new **compatibility reader/writer anchor** is described in
 [database migrations §7](database-migrations.md#7-0108-确认协议的兼容恢复边界执行仍需另批).
-The additive table alone does not make an older writer safe: historical runners still reject
-unknown 0108, and writers lacking graph/source/revocation maintenance are not eligible. Keep
-writers stopped if the managed old target lacks these capabilities; propose a forward fix, do
-not change OLD_TARGET, transition state, ledger or table contents to simulate recoverability.
+Only an exact independently reviewed compatible artifact can be a proposed recovery object.
+Old runners still reject unknown 0108; old writers lacking graph/source/revocation maintenance
+remain ineligible. Keep writers stopped and propose a forward fix if the managed old target
+is insufficient; do not change OLD_TARGET, transition state, ledger or tables to force recovery.
 
-`hermes-db.mjs confirmation-recovery-preflight` is a separate read-only observation using the
-trusted anchor, exact 0001..0108 verified checksums, confirmation-table catalog checks and a
-reviewed source-content digest. It emits a JSON report only, never migrations, pointer changes
-or writer resume. Existing deploy/release scripts are unchanged and do **not** consume that
-report automatically. A successful report is neither a completed restore drill nor permission
-to deploy; exact artifact SHA, required CI, designated reviews, backup/restore evidence and
-operator authorization remain required. No historical artifact is automatically allowlisted.
+`hermes-db.mjs confirmation-recovery-preflight` checks the trusted anchor, exact 0001..0108
+verified checksums, confirmation-table catalog and reviewed source-content digest. That digest
+is **not a signature, deployment authorization or proof of recoverability**. The action emits
+only a read-only report. Existing managed deploy/release scripts are unchanged and do **not**
+consume it; no migration, pointer switch or writer resume occurs. Exact-head independent
+reviews/CI and separately authorized backup/rehearsal/deployment/recovery operations are still
+required. No historical artifact is automatically allowlisted and no actual recovery was verified.
 
 ## System query default (2026-10-21)
 

@@ -73,6 +73,13 @@ export const teachingLearnerFocusSchema = z
     reasonCode: z.string().min(1).max(40),
     /** The verified-incorrect attempt to explain against; null when there is none. */
     focusObservationId: uuidSchema.nullable(),
+    /** Private server-selected part; re-resolved against the current route binding before compilation. */
+    examPartFocus: z.object({
+      questionIdentityRefId: uuidSchema,
+      partId: z.string().trim().min(1).max(100),
+      identityRefId: uuidSchema,
+      requirementKey: z.string().min(1).max(200),
+    }).strict().optional(),
     /** Assistance on the latest observations, newest first. */
     recentAssistance: z.array(assistanceLevelSchema).max(3),
     /** Historical feedback, not a diagnosis or proof of mastery. */
