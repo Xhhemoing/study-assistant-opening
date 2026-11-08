@@ -36,9 +36,9 @@ export function createSpanTutorNextAction(sql: Sql): TutorNextActionService {
         && !context.dueRetestId && !context.needsReservedIssue && !context.intentChangeRequiresChoice;
       const remediationChoice = context && !exactReplay && !intentOnlyOverview
         && nextLearningStep(context.decisionInput).reasonCode === "remediation_limit" ? {
-          message: "已完成两轮有据纠偏，仍重复错误或依赖帮助。请回原活动明确换讲法（串讲例题）、到课程学习入口重新诊断，或暂缓；原答案和历史保留，没有新增题目、活动或预算。",
-          label: context.resumeSession ? "回原活动选择换讲法或暂缓" : "到课程学习入口明确换方式或暂缓",
-          href: context.resumeSession ? action(context.resumeSession).href : `/opening/courses/${context.courseId}/study`,
+          message: "已完成两轮有据纠偏，仍重复错误或依赖帮助。请回原活动明确换讲法（串讲例题）、到课程路线重新选择，或暂缓；原答案和历史保留，没有新增题目、活动或预算。",
+          label: context.resumeSession ? "回原活动选择换讲法或暂缓" : "到课程路线重新选择",
+          href: context.resumeSession ? action(context.resumeSession).href : `/opening/courses/${context.courseId}?tab=units#course-learning-route`,
         } : undefined;
       return context ? { courseId: context.courseId, privacyEpoch: context.privacyEpoch, sourceRefs: context.sourceRefs,
         decisionInput: context.decisionInput, spanContext: context, historicalDecision: context.historicalDecision,

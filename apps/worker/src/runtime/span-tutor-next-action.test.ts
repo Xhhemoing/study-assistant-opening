@@ -53,7 +53,8 @@ it.each(["new_activity", "early_resume", "reserved_resume"] as const)("returns a
   const before = structuredClone(stored), adapter = createSpanTutorNextAction({} as Sql);
   const result = await prepareTutorNextAction(adapter, scope, request);
   expect(result).toMatchObject({ action: null, resumed: false, decision: { reasonCode: "remediation_limit" },
-    choice: { href: branch === "new_activity" ? "/opening/courses/course/study" : "/opening/courses/course/study/span?lesson=activity" } });
+    choice: { href: branch === "new_activity" ? "/opening/courses/course?tab=units#course-learning-route" : "/opening/courses/course/study/span?lesson=activity",
+      label: branch === "new_activity" ? "到课程路线重新选择" : "回原活动选择换讲法或暂缓" } });
   expect(result?.choice?.message).toContain("没有新增题目、活动或预算");
   expect(repository.execute).not.toHaveBeenCalled();
   expect(repository.assertCurrent).toHaveBeenCalledWith(scope, stored);
