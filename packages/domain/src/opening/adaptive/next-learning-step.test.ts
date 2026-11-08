@@ -140,7 +140,7 @@ describe("nextLearningStep", () => {
   it("fades help after a verified correct answer following two assisted errors", () => {
     expect(nextLearningStep(input({ observations: [observation({ id: "correct-after", assistance: "hinted", independentAttempt: "no" }),
       exactError("latest"), exactError("older")] })))
-      .toEqual({ activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assistance_dependent" });
+      .toEqual({ activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success" });
   });
 
   it("restores transfer checks after three independent correct answers following assisted errors", () => {
@@ -177,22 +177,21 @@ describe("nextLearningStep", () => {
       status: "observed_independent",
       observations: [observation({ assistance: "hinted", independentAttempt: "no" })],
     }))).toEqual({
-      activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assistance_dependent",
+      activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success",
     });
   });
 
-  it.each([0, 1, 2])("keeps the v2 majority rule with %i earlier independent successes", priorChecks => {
+  it.each([0, 1, 2])("fades the latest hinted/revealed success despite %i earlier independent successes", priorChecks => {
     for (const assistance of ["hinted", "revealed"] as const) {
       const request = input({ status: "observed_independent", observations: [
         observation({ assistance, independentAttempt: "no" }),
         ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}` })),
       ] });
       const captured = captureNextLearningStep(request);
-      const majority = priorChecks === 0;
-      expect(captured.decision).toEqual({ activityKind: majority ? "reduced_help_practice" : "transfer_check",
-        reasonCode: majority ? "assistance_dependent" : "independent", focusObservationId: null });
-      expect(captured.candidates.some(candidate => candidate.reasonCodes.includes("assisted_success")
-        || candidate.reasonCodes.includes("not_assisted_success"))).toBe(false);
+      expect(captured.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
+      expect(captured.candidates.at(-1)).toEqual({ action: "reduced_help_practice", eligible: true,
+        reasonCodes: ["assisted_success"], evidenceRefs: ["observation:latest-observation"] });
+      expect(captured.candidates.some(candidate => candidate.reasonCodes.includes("no_assisted_majority"))).toBe(false);
       for (const [controls, reason] of [
         [{ learningPhase: "new_learning", dueRetest: true }, "requested_full"],
         [{ dueRetest: true }, "due_retest"],

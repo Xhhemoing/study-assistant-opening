@@ -19,8 +19,8 @@ const LINK = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
 const scope = { workspaceId: "workspace-1", ownerUserId: "user-1" };
 const emptyEvidence = (): CourseEvidence => ({ observations: [], evidenceContexts: {} });
 
-// Fixed policy gold, not derived from the action under test. The separate D5
-// restoration must pass the v3 column with these same assisted-success inputs.
+// Fixed policy gold, not derived from the action under test. Keep the bridge
+// column explicit while requiring the restored writer to pass the v3 column.
 function assistedSuccessGold(policyVersion: string) {
   const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
   const clarify = { kind: "clarify", problemRef: null } as const;
@@ -123,7 +123,8 @@ describe("canonical tutor action mapping (pure seam)", () => {
     }));
     expect(buildTutorActions({ skillLabel: "chain rule", observations, retestDue: false })[0]!.kind).toBe("worked_example");
   });
-  it.each([0, 1, 2])("uses explicit policy gold for latest verified assisted success after %i independent successes", count => {
+  it.each([0, 1, 2])("uses explicit v3 gold for latest verified assisted success after %i independent successes", count => {
+    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
     const earlier = Array.from({ length: count }, (_, index) => evidenceRow({ id: `independent-${index}`, at: 100_000 + index * 1000 }));
     const evidence = combine(...earlier, evidenceRow({ at: 200_000, assistance: "hinted" }));
     expect(toSnapshotEvidence(evidence, new Date()).observations.find(row => row.id === OBS))

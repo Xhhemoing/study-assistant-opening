@@ -80,7 +80,7 @@ it("keeps explicit next scoped to its origin despite two delivered hints and exa
   const [activity] = await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${result.session.activityId}`;
   expect(activity!.goal_json.tutorNextAction.observationIds).toEqual([latest.observed.id]);
   const [receipt] = await sql`SELECT receipt FROM opening_learning_decisions WHERE target_id=${result.session.activityId} AND layer='activity'`;
-  expect(receipt!.receipt.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
+  expect(receipt!.receipt.policyVersion).toBe("next-learning-step-3/span-tutor-execution-2");
   expect(receipt!.receipt.candidates).toContainEqual(expect.objectContaining({ reasonCodes: expect.arrayContaining(["verified_incorrect"]),
     evidenceRefs: [`observation:${latest.observed.id}`] }));
   const captured = JSON.parse(receipt!.receipt.intentVersion);
@@ -332,7 +332,7 @@ it("keeps one learner's real help, evaluation, retest, saved query and cancellat
     expect(restored.observations.map(row => row.id)).toContain(observed.id);
     const nextInput = { activityId: origin.activityId, expectedRevision: origin.revision, observationId: observed.id, clientKey: "chain-next" };
     const next = await f.next.next(scope, nextInput);
-    expect(next).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent" } });
+    expect(next).toMatchObject({ kind: "ready", replayed: false, decision: { activityKind: "reduced_help_practice", reasonCode: "assisted_success" } });
     if (next.kind !== "ready") throw new Error("expected a real reduced-help successor");
 
     const oldHelp = await sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`;
