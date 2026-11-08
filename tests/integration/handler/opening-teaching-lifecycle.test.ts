@@ -48,9 +48,10 @@ async function seedActivity() {
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${f.scope.workspaceId},'学习小结',${courseId})`;
   const sourceId = await backupRows(f.sql, f.scope).source();
   const chunkId = await backupRows(f.sql, f.scope).chunk(sourceId);
-  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
-    VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
   const taskId = randomUUID();
+  await f.sql`INSERT INTO course_asset_memberships
+    (id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility,purpose)
+    VALUES (${randomUUID()},${f.scope.workspaceId},${courseId},'source',${sourceId},'core',0,'course',NULL)`;
   const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
     clientKey: `task:${taskId}`, intentKind: "goal", intentSummary: "核对矩阵练习", courseId, sourceIds: [sourceId], createIntent: { taskId },
   });

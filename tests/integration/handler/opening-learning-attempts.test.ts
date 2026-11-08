@@ -10,6 +10,7 @@ import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/att
 import { POST as submitTurn } from "../../../apps/web/src/app/api/opening/turns/route";
 import { GET as listTurns } from "../../../apps/web/src/app/api/opening/conversations/[id]/turns/route";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { learningAttemptFixture } from "../opening-learning-attempt-fixture";
 import { useTutorModelFixture } from "./tutor-model-fixture";
@@ -29,9 +30,10 @@ const answer = () => ({ clientKey: randomUUID(), answer: "1", outcome: "correct"
 function tutorHandler(chunkId: string, provider: TutorTurnDeps["provider"] = {
   complete: async () => ({ text: "Start with the common denominator", citedChunkIds: [chunkId], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 }),
 }) {
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql), chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }), provider,
+    budget, provider, retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     config: { maxContextCharacters: 12000, reservedCents: 10, maxOutputTokens: 1000, inputCentsPerMillion: 100, outputCentsPerMillion: 100 },
   });
 }

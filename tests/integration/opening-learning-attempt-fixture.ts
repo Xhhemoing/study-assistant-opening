@@ -8,8 +8,9 @@ export async function learningAttemptFixture(fixture: OpeningFixture) {
   // This fixture is a text question; visual cases explicitly attach their original image.
   await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${chunkId}`;
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Learning attempts',${courseId})`;
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
-    VALUES(${fixture.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
+  await fixture.sql`INSERT INTO course_asset_memberships
+    (id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility,purpose)
+    VALUES (${randomUUID()},${fixture.scope.workspaceId},${courseId},'source',${sourceId},'core',0,'course',NULL)`;
   const learning = createOpeningLearningRepository(fixture.sql), attempts = createOpeningLearningAttemptRepository(fixture.sql);
   const session = await learning.createSession(fixture.scope, { courseId, skillLabel: "fractions", sourceIds: [sourceId] });
   const start = (extra = {}) => attempts.create(fixture.scope, { sessionId: session.id, clientKey: randomUUID(),
