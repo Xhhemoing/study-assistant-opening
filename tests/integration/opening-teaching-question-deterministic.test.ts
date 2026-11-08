@@ -6,10 +6,6 @@ import { createOpeningCourseRouteRepository } from "../../packages/database/src/
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
-import { evaluateOpeningTeachingKeyAttempt } from "../../packages/database/src/repositories/opening-teaching-question-evaluation";
-import { refreshOpeningLearningEligibility } from "../../packages/database/src/repositories/opening-learning-eligibility";
-import { syncOpeningAutomaticErrorCard } from "../../packages/database/src/repositories/opening-auto-error-cards";
-import { readOpeningCourseObservationHeads } from "../../packages/database/src/repositories/opening-learning-read";
 
 let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
@@ -27,9 +23,6 @@ const choice: Question = { prompt: "计算 2/3 + 1/6", key: "B", interaction: { 
   { id: "A", label: "1/2" }, { id: "B", label: "5/6" },
 ] } };
 
-// These are evaluator-era persisted-record fixtures, not a claim that the bridge
-// invokes the evaluator. Its retained implementation is exercised as a leaf;
-// compatibility and new bridge submissions are covered in the companion suite.
 async function seed(questions: Question[] = [numeric, choice]) {
   const base = await learningAttemptFixture(f);
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
@@ -72,35 +65,15 @@ async function seed(questions: Question[] = [numeric, choice]) {
     teachingBlock: { blockId: blocks[index]!.blockId, contentVersion: 1 } });
   const submit = async (index: number, answer: string) => {
     const attempt = await start(index);
-    const evaluation = await f.sql.begin(async tx => {
-      const [row] = await tx`SELECT * FROM opening_learning_attempts WHERE id=${attempt.id}`;
-      return evaluateOpeningTeachingKeyAttempt(tx, f.scope, row, answer, []);
-    });
-    // Reconstruct evaluator-era facts explicitly; the production submit stays in
-    // bridge mode. Unsupported answers still use ordinary AI admission (no call).
-    let observation = await base.learning.insertObservation(f.scope, { sessionId: session.id, activityId: started.activity.id,
+    // Metadata-only grading admission; this never invokes a model.
+    const observation = await base.learning.insertObservation(f.scope, { sessionId: session.id, activityId: started.activity.id,
       courseId: base.courseId, skillLabel: started.activity.learnerFocus!.skillLabel, sourceIds: [base.sourceId],
       attemptId: attempt.id, problemId: attempt.problemId, answer, outcome: "unverified", assistance: "independent", clientKey: randomUUID() },
-    { autoGrade: evaluation ? undefined : { enabled: true, modelAvailable: true, dailyCap: 50,
+    { autoGrade: { enabled: true, modelAvailable: true, dailyCap: 50,
       primaryModel: { modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture",
         inputCentsPerMillion: 0, outputCentsPerMillion: 0 }, inputCentsPerMillion: 0, outputCentsPerMillion: 0,
         billing: "free_tier", dailyRequestCap: 10000 },
       dayStart: new Date(Date.now() - 86400000), dayEnd: new Date(Date.now() + 86400000) } });
-    if (evaluation) {
-      await f.sql.begin(async tx => {
-        const serverEvaluation = { ...evaluation, observationId: observation.id, attemptId: attempt.id,
-          problemId: attempt.problemId!, itemVersionId: attempt.itemVersionId!, requirementKey: attempt.requirementKey!,
-          evaluatedAt: observation.recordedAt! };
-        const { priorFeedback: _prior, ...receipt } = serverEvaluation;
-        await tx`UPDATE opening_learning_observations SET outcome=${evaluation.outcome},verdict_source='deterministic',
-          assistance=${evaluation.priorFeedback ? "hinted" : "independent"},server_evaluation=${tx.json(receipt)} WHERE id=${observation.id}`;
-        await refreshOpeningLearningEligibility(tx, f.scope, [observation.id]);
-        if (evaluation.outcome === "incorrect") await syncOpeningAutomaticErrorCard(tx, f.scope, observation.id);
-      });
-      const saved = (await readOpeningCourseObservationHeads(f.sql, f.scope, base.courseId)).find(row => row.id === observation.id)!;
-      observation = { ...saved, allowsIndependent: saved.eligibility?.verifiedCorrect === "yes"
-        && saved.eligibility.independentAttempt === "yes" && saved.eligibility.usableForCurrentVersion === "yes" };
-    }
     return { attempt, observation };
   };
   return { ...base, route, goal, requirement, started, session, service, start, submit };
@@ -111,7 +84,7 @@ async function gradingJobs(observationId: string) {
     AND owner_user_id=${f.scope.ownerUserId} AND kind='grade-observation' AND payload->>'observationId'=${observationId}`;
 }
 
-it("reads evaluator-era verification after two different first-seen arithmetic questions without AI grading", async () => {
+it("verifies two different first-seen arithmetic questions through the restored writer without AI grading", async () => {
   const x = await seed();
   const first = await x.submit(0, "7/12");
   expect(first.observation).toMatchObject({ outcome: "correct", verdictSource: "deterministic",
@@ -216,7 +189,7 @@ it("keeps a correct answer after a delivered hint from becoming independent evid
   // The client still claims independence; the real submit service resolves the delivered hint.
   const observation = await x.service.submit(f.scope, attempt.id, { clientKey: randomUUID(), answer: "7/12",
     outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
-  expect(observation).toMatchObject({ verdictSource: "self_report", outcome: "unverified", assistance: "hinted",
+  expect(observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted",
     eligibility: { independentAttempt: "no" }, allowsIndependent: false });
   expect(observation.eligibility?.independentAttempt).not.toBe("yes");
   expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");

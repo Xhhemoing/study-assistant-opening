@@ -287,7 +287,7 @@
     {
       "caseId": "next-assisted-majority",
       "entry": "nextLearningStep",
-      "scenario": "v2桥接按近期受助多数减少帮助",
+      "scenario": "最新可信受助成功优先于近期受助多数",
       "initialFactRefs": [
         "synthetic:next-assisted-majority"
       ],
@@ -296,14 +296,14 @@
         "synthetic:requirement-v1"
       ],
       "goalOrMode": "独立完成合成任务",
-      "typicalError": "v2桥接按近期受助多数减少帮助",
+      "typicalError": "最新可信受助成功优先于近期受助多数",
       "gold": {
         "allowed": {
           "decision.activityKind": [
             "reduced_help_practice"
           ],
           "decision.reasonCode": [
-            "assistance_dependent"
+            "assisted_success"
           ]
         },
         "forbidden": {},
@@ -2732,7 +2732,7 @@
     {
       "caseId": "loop-helped-majority",
       "entry": "nextLearningStep",
-      "scenario": "v2受助多数：降低帮助后等待学生作答",
+      "scenario": "最新受助成功：降低帮助后等待学生作答",
       "initialFactRefs": [
         "synthetic:next-assisted-majority"
       ],
@@ -2741,14 +2741,14 @@
         "synthetic:requirement-v1"
       ],
       "goalOrMode": "独立完成合成任务",
-      "typicalError": "v2受助多数：降低帮助后等待学生作答",
+      "typicalError": "最新受助成功：降低帮助后等待学生作答",
       "gold": {
         "allowed": {
           "decision.activityKind": [
             "reduced_help_practice"
           ],
           "decision.reasonCode": [
-            "assistance_dependent"
+            "assisted_success"
           ]
         },
         "forbidden": {},

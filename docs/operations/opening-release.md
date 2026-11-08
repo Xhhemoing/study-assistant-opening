@@ -48,6 +48,36 @@ This is an unexecuted runbook, not evidence that 0108, a backup, rehearsal,
 rollback or recovery has run. Browser acceptance remains with the user; this
 change does not claim it passed.
 
+## D4 + restored D5 candidate: reader and rollback boundary (2026-11-08)
+
+This candidate combines frozen integration
+`23fba100bfa18fd1f89bd1ede107394ae36e1474` with mainline
+`1e511bc0f09d02f52d97be165597c6d3ab9bfe8d`. It writes
+`next-learning-step-6` (restored D5 assisted success plus evidenced D4 cycles).
+Span receipts explicitly support v1 with execution-1 and v2–v6 with execution-2;
+first-learning explanations explicitly recognize v1–v6. Historical operation
+replays retain their saved decision and activity, not a recomputed v6 decision.
+An unknown version is not current authority: span decision decoding returns
+unknown, and first-learning explanations remain readable but conservatively
+report `policy_version_not_revalidated`. Known older receipts may report
+`policy_changed`; none of these read paths rewrite historical receipts.
+
+After the candidate writes an exam run's new `conversion` receipt, rolling the
+application back to `1e511bc0f09d02f52d97be165597c6d3ab9bfe8d` is **not a
+lossless application rollback**. That version's strict old parser rejects the
+new field; sprint access and forecast evaluation of the affected saved state
+can fail. Preserving the stored facts does not preserve access through that old
+reader. Retain the conversion, original attempt, answer and exposure facts;
+restore access by moving forward to a compatible reader, not by deleting the
+field, rewriting history or restoring an older database.
+
+Likewise, an older application that does not recognize a v6 receipt must treat
+its policy conservatively as unknown/not current (or `policy_changed` where
+supported), without synthesizing an old-policy receipt or restoring the database.
+These are candidate compatibility limits, not evidence of a completed rollout
+or rollback. Exact-head review/CI and separate merge/deployment authorization
+remain required; this section grants neither operation.
+
 ## System query default (2026-10-21)
 
 `OPENING_SYSTEM_QUERY` now defaults to `1` when unset, including on existing
