@@ -409,6 +409,8 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
       scope: Scope,
       input: ActivitySpecPublishInput,
       referenceRevision?: ReferenceRevisionInput,
+      /** Server-only pinned authority; never serialized in the public publish input. */
+      assertPinnedContext?: (tx: TransactionSql) => Promise<void>,
     ): Promise<ActivitySpec> {
       if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
         throw learningError("VALIDATION", "expectedVersion must be a non-negative integer");
@@ -432,6 +434,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
       return sql.begin(async (tx) => {
         await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
+        await assertPinnedContext?.(tx);
         await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
 
         const unitRows = await tx`

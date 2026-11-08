@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { Scope } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
+import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { reservedArithmeticIdentity, type OpeningReservedExposureInput, type OpeningReservedExposureResult } from "./opening-course-reserved-selection";
 
 type Db = Sql | TransactionSql;
 const protocol = "course-question-exposure-1";
+const descriptorSchema = z.object({ complete: z.literal(true), expressions: z.array(z.string()), families: z.array(z.string()) }).strict();
 export type CourseQuestionExposureInput = {
   surfaceKey: string; kind: "teaching" | "example" | "hint" | "presented";
   text?: string; body?: unknown; identityRefId?: string; itemVersionId?: string; sourceVersions: Record<string, number>;
@@ -13,7 +16,7 @@ export type CourseQuestionExposureInput = {
 /** Exact arithmetic only: unsupported conditions/figures must never silently disappear. */
 export function extractCourseQuestionExposure(body: unknown) {
   const expressions = new Set<string>(), families = new Set<string>();
-  let complete = true;
+  let complete = body != null;
   function visit(value: unknown) {
     if (typeof value === "string") {
       if (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)) return;
@@ -51,6 +54,14 @@ export async function recordCourseQuestionExposure(tx: TransactionSql, scope: Sc
     VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.surfaceKey},${input.kind},${input.identityRefId ?? null},
       ${exact.complete ? tx.json(exact) : null},${tx.json(input.sourceVersions)},${input.itemVersionId ?? null},${history!.revision})
     ON CONFLICT(workspace_id,owner_user_id,surface_key) DO NOTHING`;
+  const [stored] = await tx`SELECT kind,identity_ref_id,exact_content,source_versions,item_version_id
+    FROM opening_course_question_exposures WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND surface_key=${input.surfaceKey}`;
+  if (!stored || stored.kind !== input.kind || stored.identity_ref_id !== (input.identityRefId ?? null)
+    || stored.item_version_id !== (input.itemVersionId ?? null) || !isDeepStrictEqual(stored.source_versions, input.sourceVersions)
+    || !isDeepStrictEqual(stored.exact_content, exact.complete ? exact : null)) {
+    throw learningError("CONFLICT", "曝光重放内容与原始记录不同。");
+  }
 }
 
 /**
@@ -62,16 +73,47 @@ export async function recordCourseQuestionExposure(tx: TransactionSql, scope: Sc
  */
 export async function refreshCourseQuestionExposure(tx: TransactionSql, scope: Scope): Promise<boolean> {
   await lockWorkspaceLearningHistory(tx, scope);
-  const [origin] = await tx`SELECT to_jsonb(c)->>'genesis_verified' AS genesis_verified,
-    to_jsonb(c)->>'invalidated' AS invalidated FROM opening_course_question_exposure_coverage c
+  // Narrow rollout: the legacy surface writers do not all share the history
+  // lock. Fail-fast table locks fence their INSERT/UPDATE/DELETE until selection
+  // and issuance commit. NOWAIT avoids reversing a writer's business->history
+  // lock order. Never retry here or promote a contended scan into unseen.
+  // SHARE ROW EXCLUSIVE also serializes lock upgrades when issuance writes a
+  // library revision in this same transaction.
+  await tx`LOCK TABLE library_revisions,library_blocks,opening_sources,opening_source_chunks,
+    opening_learning_item_versions,opening_problem_refs,opening_turns,opening_conversations,
+    opening_help_exposures,cards,opening_learning_observations,opening_teaching_activities,
+    opening_privacy_exclusions,opening_source_versions,opening_exam_sprints,opening_measurement_trials,
+    practice_sessions,explorations,opening_memories IN SHARE ROW EXCLUSIVE MODE NOWAIT`;
+  const [origin] = await tx`SELECT invalidated FROM opening_course_question_exposure_coverage c
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND protocol=${protocol} FOR UPDATE`;
-  // The current storage-only migration has neither proof. Absent fields/rows
-  // fail closed until the schema owner supplies the approved genesis protocol.
-  if (origin?.genesis_verified !== "true" || origin.invalidated !== "false") return false;
+  // 0109's guard only permits INSERT from the workspace genesis trigger.
+  // No row means pre-migration/unknown history, even when all current tables empty.
+  if (!origin || origin.invalidated !== false) return false;
+  // The first 0109 handoff omitted sticky protection on these mutable surfaces.
+  // Presence of a genesis row cannot recover text removed BEFORE our first scan.
+  // Inspect the actual DB triggers (not a caller/version flag) until the schema
+  // owner's follow-up lands. Each must use the sticky invalidator for DELETE and
+  // the named content UPDATE; table fences alone only protect concurrent writes.
+  const [protection] = await tx`SELECT NOT EXISTS (
+    SELECT 1 FROM (VALUES ('library_blocks','content'),('opening_problem_refs','stem_snapshot'),
+      ('opening_teaching_activities','checkpoint_json'),('opening_learning_observations','answer'),
+      ('opening_course_question_exposures',NULL)) AS required(table_name,column_name)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE n.nspname=current_schema() AND c.relname=required.table_name AND NOT t.tgisinternal AND t.tgenabled='O'
+        AND p.proname='opening_course_question_history_invalidate' AND (t.tgtype::int & 11)=11
+        AND (required.column_name IS NULL OR (t.tgtype::int & 16)=16 AND
+          (t.tgattr=''::int2vector OR EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid
+            AND a.attname=required.column_name AND a.attnum=ANY(t.tgattr)))))
+    ) AS complete`;
+  if (protection?.complete !== true) return false;
   const rows = await tx`SELECT 'revision:'||r.id::text AS surface,r.blocks AS body FROM library_revisions r WHERE r.workspace_id=${scope.workspaceId}
     UNION ALL SELECT 'block:'||b.id::text,b.content FROM library_blocks b WHERE b.workspace_id=${scope.workspaceId}
     UNION ALL SELECT 'item:'||v.id::text,jsonb_build_object('stem',v.stem_snapshot) FROM opening_learning_item_versions v
       WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+    UNION ALL SELECT 'problem:'||p.problem_id::text,jsonb_build_object('stem',p.stem_snapshot) FROM opening_problem_refs p
+      WHERE p.workspace_id=${scope.workspaceId}
     UNION ALL SELECT 'turn:'||t.id::text,jsonb_build_object('text',t.text,'status',t.status,'snapshot',t.help_input_snapshot) FROM opening_turns t
       JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
@@ -94,6 +136,9 @@ export async function refreshCourseQuestionExposure(tx: TransactionSql, scope: S
     OR EXISTS(SELECT 1 FROM practice_sessions WHERE workspace_id=${scope.workspaceId})
     OR EXISTS(SELECT 1 FROM explorations WHERE workspace_id=${scope.workspaceId})
     OR EXISTS(SELECT 1 FROM opening_memories WHERE workspace_id=${scope.workspaceId})
+    OR EXISTS(SELECT 1 FROM opening_problem_refs p WHERE p.workspace_id=${scope.workspaceId} AND p.stem_snapshot IS NULL)
+    OR EXISTS(SELECT 1 FROM opening_help_exposures h LEFT JOIN opening_turns t ON t.id=h.turn_id AND t.workspace_id=h.workspace_id
+      WHERE h.workspace_id=${scope.workspaceId} AND h.delivered=true AND h.turn_id IS NOT NULL AND t.id IS NULL)
     OR EXISTS(SELECT 1 FROM opening_learning_attempts a LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id
       WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND (v.id IS NULL OR v.stem_snapshot IS NULL))
     ) AS unknown`;
@@ -132,6 +177,8 @@ export async function readCourseQuestionExposure(db: Db, scope: Scope, input: Op
   if (!complete || !exact || !coverage?.complete || coverage.invalidated !== "false" || String(coverage.history_revision) !== String(coverage.revision))
     return { coverage: "unknown", exactExposed: false, familyExposed: false, reason: "曝光历史无可信起点、存在缺口或版本不完整" };
   const rows = await tx`SELECT exact_content FROM opening_course_question_exposures WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-  return { coverage: "complete", exactExposed: rows.some(row => (row.exact_content as { expressions: string[] }).expressions.includes(exact.expression)),
-    familyExposed: rows.some(row => (row.exact_content as { families: string[] }).families.includes(exact.familyId)), reason: null };
+  const descriptors = rows.map(row => descriptorSchema.safeParse(row.exact_content));
+  if (descriptors.some(row => !row.success)) return { coverage: "unknown", exactExposed: false, familyExposed: false, reason: "曝光记录格式未知或不完整" };
+  return { coverage: "complete", exactExposed: descriptors.some(row => row.success && row.data.expressions.includes(exact.expression)),
+    familyExposed: descriptors.some(row => row.success && row.data.families.includes(exact.familyId)), reason: null };
 }
