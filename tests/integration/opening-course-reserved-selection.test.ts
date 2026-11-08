@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import type { Sql, TransactionSql } from "postgres";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { readOpeningBackupRecords, createOpeningLearningGoalRepository, createOpeningTeachingContentRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
@@ -296,6 +297,67 @@ it("preserves library append-only rejection and rolls back the attempted invalid
   await expect(f.sql`DELETE FROM library_revisions WHERE id=${revision}`).rejects.toMatchObject({code:'23000'});
   expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
 });
+type HistoryGapSurface = 'block' | 'problem' | 'checkpoint' | 'observation' | 'exposure';
+async function seedHistoryGapSurface(surface: HistoryGapSurface, x: Awaited<ReturnType<typeof supplyFixture>>) {
+  // A real server-persisted presentation precedes each destructive mutation.
+  const exposureId=await insertExposure({exact:{question:x.candidate.text,interaction:x.candidate.interaction,figures:[]}});
+  if(surface==='exposure') return {table:'opening_course_question_exposures',idColumn:'id',id:exposureId,column:'surface_key',json:false};
+  if(surface==='checkpoint') return {table:'opening_teaching_activities',idColumn:'id',id:x.activity.id,column:'checkpoint_json',json:true};
+  if(surface==='block'){
+    const documentId=randomUUID(),id=randomUUID();
+    await f.sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES(${documentId},${f.scope.workspaceId},'Presented content','candidate')`;
+    await f.sql`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+      VALUES(${id},${f.scope.workspaceId},${documentId},'prompt',0,${f.sql.json({text:x.candidate.text})})`;
+    return {table:'library_blocks',idColumn:'id',id,column:'content',json:true};
+  }
+  const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:x.activity.id,courseId:x.courseId,skillLabel:'Arithmetic',sourceIds:[x.sourceId]});
+  const id=randomUUID();
+  if(surface==='problem'){
+    await f.sql`INSERT INTO opening_problem_refs(problem_id,workspace_id,session_id,source_id,source_version,stem_snapshot,artifact_kind)
+      VALUES(${id},${f.scope.workspaceId},${session.id},${x.sourceId},1,${x.candidate.text},'reference_item')`;
+    return {table:'opening_problem_refs',idColumn:'problem_id',id,column:'stem_snapshot',json:false};
+  }
+  await f.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},0) ON CONFLICT DO NOTHING`;
+  await f.sql`INSERT INTO opening_learning_observations(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,
+    answer,outcome,assistance,client_key,source_turn_ids,verdict_source,workspace_history_revision)
+    VALUES(${id},${f.scope.workspaceId},${f.scope.ownerUserId},${session.id},${x.courseId},${x.activity.id},'Arithmetic',${[x.sourceId]},
+      'historical answer','unverified','unknown',${id},${[]},'unknown',0)`;
+  return {table:'opening_learning_observations',idColumn:'id',id,column:'answer',json:false};
+}
+it.each([
+  ['block','update'],['block','delete'],['problem','update'],['problem','delete'],
+  ['checkpoint','update'],['checkpoint','delete'],['observation','update'],['observation','delete'],['exposure','delete'],
+] as const)("keeps %s %s history gaps sticky, scoped and transactional without granting unseen",async(surface,mutation)=>{
+  const x=await supplyFixture(),target=await seedHistoryGapSurface(surface,x);
+  const mutate=async(db:Sql|TransactionSql)=>{
+    if(mutation==='delete') await db`DELETE FROM ${db(target.table)} WHERE ${db(target.idColumn)}=${target.id} AND workspace_id=${f.scope.workspaceId}`;
+    else await db`UPDATE ${db(target.table)} SET ${db(target.column)}=${target.json?db.json({text:'changed historical content'}):'changed historical content'}
+      WHERE ${db(target.idColumn)}=${target.id} AND workspace_id=${f.scope.workspaceId}`;
+  };
+  // Even an UPDATE OF a guarded column must not invalidate when bytes are unchanged.
+  await f.sql`UPDATE ${f.sql(target.table)} SET ${f.sql(target.column)}=${f.sql(target.column)}
+    WHERE ${f.sql(target.idColumn)}=${target.id} AND workspace_id=${f.scope.workspaceId}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  await expect(f.sql.begin(async tx=>{
+    await mutate(tx);
+    expect((await tx`SELECT invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`)[0]!.invalidated).toBe(true);
+    throw new Error('history gap rollback');
+  })).rejects.toThrow('history gap rollback');
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:false});
+  await mutate(f.sql);
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  await f.sql`UPDATE opening_course_question_exposure_coverage SET invalidated=false,complete=true WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(await coverageInvalidated()).toEqual({complete:false,invalidated:true});
+  expect((await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.otherScope.workspaceId}`)[0])
+    .toEqual({complete:false,invalidated:false});
+  // No scanner/complete positive fixture: default consumer refuses unknown history.
+  expect(await readOpeningReservedSupply(f.sql,f.scope,x.requirement)).toMatchObject({status:'unknown',available:0});
+  await expect(f.sql.begin(tx=>reserveOpeningCourseQuestion(tx,f.scope,x.requirement,x.activity.id,{kind:'new_question'})))
+    .rejects.toMatchObject({code:'CONFLICT'});
+  expect((await f.sql`SELECT state FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`)[0]!.state).toBe('available');
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
 it("does not backfill pre-0109 workspaces when applying the real migration and seeds only later workspace births",async()=>{
   const schema=`reserved_genesis_${randomUUID().replaceAll('-','')}`;
   const body=await readFile(new URL('../../packages/database/src/migrations/0109_opening_course_reserved_questions.sql',import.meta.url),'utf8');
@@ -307,7 +369,10 @@ it("does not backfill pre-0109 workspaces when applying the real migration and s
       CREATE TABLE workspaces(id uuid PRIMARY KEY,owner_user_id uuid NOT NULL);
       CREATE TABLE courses(id uuid,workspace_id uuid,UNIQUE(workspace_id,id));
       CREATE TABLE course_requirements(id uuid,workspace_id uuid,UNIQUE(workspace_id,id));
-      CREATE TABLE opening_teaching_activities(id uuid PRIMARY KEY);
+      CREATE TABLE opening_teaching_activities(id uuid PRIMARY KEY,workspace_id uuid,checkpoint_json jsonb);
+      CREATE TABLE library_blocks(id uuid PRIMARY KEY,workspace_id uuid,content jsonb);
+      CREATE TABLE opening_problem_refs(problem_id uuid PRIMARY KEY,workspace_id uuid,stem_snapshot text);
+      CREATE TABLE opening_learning_observations(id uuid PRIMARY KEY,workspace_id uuid,answer text);
       CREATE TABLE opening_learning_item_versions(id uuid PRIMARY KEY,workspace_id uuid,owner_user_id uuid);
       CREATE TABLE library_revisions(id uuid PRIMARY KEY,workspace_id uuid,blocks jsonb);
       CREATE TABLE opening_sources(id uuid PRIMARY KEY,workspace_id uuid);
