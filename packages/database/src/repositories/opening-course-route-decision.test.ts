@@ -52,7 +52,7 @@ it("持久回执保留规范输入和真实候选原因，而不是误记为综�
   expect(captured).not.toHaveProperty("teachingOverride");
 });
 
-it("v2桥接受助成功：回执保留规范结果和路线覆盖，不冒充显式巩固请求", async () => {
+it("共享受助成功：回执记录规范策略而非路线覆盖，不冒充显式巩固请求", async () => {
   const requirement = { id: "r", courseId: "c", stableSkillId: "s", knowledgeNodeId: null, requirementKey: "key", title: "秩", position: 0,
     mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [{ sourceId: "source", sourceVersion: 1 }],
     verification: { kind: "exact" as const, status: "ready" as const, exerciseKeys: ["q"], rubric: null, missingReasons: [] }, revision: 1, lifecycle: "active" as const, origin: "confirmed" as const, approvedAt: null };
@@ -71,18 +71,16 @@ it("v2桥接受助成功：回执保留规范结果和路线覆盖，不冒充�
   const receipt = await captureOpeningCourseRouteDecision({} as Sql as unknown as TransactionSql, { workspaceId: "w", ownerUserId: "u" } as Scope, input);
   expect(() => validateLearningDecision({ ...receipt, targetId: "activity" })).not.toThrow();
   expect(receipt.selectedAction).toBe("reduced_help_practice");
-  expect(receipt.reasonCodes).toContain("teaching:needs_check");
-  expect(receipt.reasonCodes).toContain("teaching_override:route_assisted_correction");
+  expect(receipt.reasonCodes).toContain("teaching:assisted_success");
+  expect(receipt.reasonCodes.some(code => code.startsWith("teaching_override:"))).toBe(false);
   expect(receipt.reasonCodes.some(code => code.includes("consolidate"))).toBe(false);
-  expect(receipt.candidates).toContainEqual(expect.objectContaining({ action: "diagnose", eligible: false,
-    reasonCodes: expect.arrayContaining(["overridden_by_route_assisted_correction"]) }));
+  expect(receipt.candidates).not.toContainEqual(expect.objectContaining({ reasonCodes: expect.arrayContaining(["overridden_by_route_assisted_correction"]) }));
   // origin and decision-input references to the same observation appear once.
   expect(receipt.evidenceRefs.filter(ref => ref === "observation:helped")).toHaveLength(1);
   const captured = JSON.parse(receipt.intentVersion);
   expect(captured.decisionInput).toEqual(input.decisionInput);
-  expect(captured.teaching.decision).toEqual({ activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null });
-  expect(captured.teaching.candidates.at(-1)).toEqual({ action: "diagnose", eligible: true,
-    reasonCodes: ["needs_check"], evidenceRefs: ["observation:helped", "observation:prior"] });
-  expect(captured.teachingOverride).toMatchObject({ rule: "route_assisted_correction", observationId: "helped",
-    to: { activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction" } });
+  expect(captured.teaching.decision).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
+  expect(captured.teaching.candidates.at(-1)).toEqual({ action: "reduced_help_practice", eligible: true,
+    reasonCodes: ["assisted_success"], evidenceRefs: ["observation:helped"] });
+  expect(captured).not.toHaveProperty("teachingOverride");
 });

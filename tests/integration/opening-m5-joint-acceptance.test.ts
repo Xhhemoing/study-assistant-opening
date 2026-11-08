@@ -90,15 +90,17 @@ async function sharedPair() {
     targetRequirementId: target.input.id, expectedTargetRevision: 1, expectedLinkRevision: 0, confirmed: true as const };
   return { source, target, command, repository: createOpeningCourseSharedSkillRepository(f.sql) };
 }
-async function savedQuestions(source: Awaited<ReturnType<typeof requirement>>) {
+async function savedQuestions(source: Awaited<ReturnType<typeof requirement>>, questionKind: "arithmetic" | "word_problem" = "arithmetic") {
   const started = await routes().start(f.scope, source.id, { goalId: source.goal.id, expectedGoalRevision: 1,
     requirementId: source.input.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
   expect(started.kind).toBe("ready");
   if (started.kind !== "ready") throw new Error(JSON.stringify(started));
   const content = createOpeningTeachingContentRepository(f.sql);
   const questions = [
-    { id: randomUUID(), answerId: randomUUID(), text: "计算 1/3 + 1/4", answer: "7/12" },
-    { id: randomUUID(), answerId: randomUUID(), text: "计算 2/3 + 1/6", answer: "5/6" },
+    { id: randomUUID(), answerId: randomUUID(), text: questionKind === "word_problem"
+      ? "小明把 1/3 升和 1/4 升水倒入同一个空杯中，杯中共有多少升水？" : "计算 1/3 + 1/4", answer: "7/12" },
+    { id: randomUUID(), answerId: randomUUID(), text: questionKind === "word_problem"
+      ? "小明把 2/3 升和 1/6 升水倒入同一个空杯中，杯中共有多少升水？" : "计算 2/3 + 1/6", answer: "5/6" },
   ];
   const unit = await content.createUnit(f.scope, { title: "冻结的分数题", blocks: questions.flatMap(q => [
     { id: q.id, type: "prompt", content: { text: q.text, interaction: { kind: "numeric" } } },
@@ -259,9 +261,15 @@ it("shares persisted independent evidence without duplicating answers, maintenan
 });
 
 it("does not turn unknown self reports or an explicit shared mapping into mastery", async () => {
-  const x = await sharedPair(), saved = await savedQuestions(x.source);
-  await saved.submit(0, "7/12");
-  await saved.submit(1, "5/6");
+  // A real word problem is outside the exact arithmetic evaluator's authority.
+  // Keep the numeric interaction and correct saved keys; do not seed a verdict.
+  const x = await sharedPair(), saved = await savedQuestions(x.source, "word_problem");
+  const first = await saved.submit(0, "7/12"), second = await saved.submit(1, "5/6");
+  for (const { observation } of [first, second]) {
+    expect(observation).toMatchObject({ outcome: "unverified", verdictSource: "self_report",
+      eligibility: { independentAttempt: "yes", verifiedCorrect: "unknown", usableForCurrentVersion: "yes" } });
+    expect(observation.serverEvaluation ?? null).toBeNull();
+  }
   const before = await readOpeningLearningCapacity(f.sql, f.scope);
   const linked = await x.repository.command(f.scope, x.target.id, x.command);
   expect(linked.links[0]).toMatchObject({ active: true, effective: false, observationIds: [] });

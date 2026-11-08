@@ -267,17 +267,54 @@ it.each(["version", "membership", "privacy", "upload", "goal", "goal-archive", "
     expect(await receipts(first.activity.id)).toEqual([saved]);
   });
 
-it("revalidates the canonical policy version rather than trusting caller-supplied historical versions", async () => {
-  const first = await repository().initialize(fixture.scope, input([], 1));
-  const saved = (await receipts(first.activity.id))[0]!;
-  await fixture.sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',
-    '"first-learning-1/next-learning-step-0"'::jsonb) WHERE id=${saved.id}`;
-  const historical = (await receipts(first.activity.id))[0]!;
-  expect(await decisions().explain(fixture.scope, saved.id, { goalVersion: historical.goalVersion,
-    intentVersion: historical.intentVersion, policyVersion: historical.policyVersion }))
-    .toMatchObject({ current: false, invalidationReasons: ["policy_changed"] });
-  expect(await receipts(first.activity.id)).toEqual([historical]);
-});
+it.each(["first-learning-1/next-learning-step-1", "first-learning-1/next-learning-step-2",
+  "first-learning-1/next-learning-step-3", "first-learning-1/next-learning-step-4", "first-learning-1/next-learning-step-5"])(
+  "revalidates canonical policy rather than trusting caller-supplied historical %s", async policyVersion => {
+    const first = await repository().initialize(fixture.scope, input([], 1));
+    const saved = (await receipts(first.activity.id))[0]!;
+    await fixture.sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',
+      ${fixture.sql.json(policyVersion)}::jsonb) WHERE id=${saved.id}`;
+    const historical = { ...saved, policyVersion };
+    const rawReceipts = await fixture.sql`SELECT * FROM opening_learning_decisions WHERE id=${saved.id}`;
+    expect(await decisions().get(fixture.scope, saved.id)).toEqual(historical);
+    expect(await decisions().explain(fixture.scope, saved.id, { goalVersion: historical.goalVersion,
+      intentVersion: historical.intentVersion, policyVersion: historical.policyVersion }))
+      .toMatchObject({ decision: historical, current: false, invalidationReasons: ["policy_changed"] });
+    expect(await receipts(first.activity.id)).toEqual([historical]);
+    expect(await fixture.sql`SELECT * FROM opening_learning_decisions WHERE id=${saved.id}`).toEqual(rawReceipts);
+  });
+
+it.each(["first-learning-1/next-learning-step-0", "first-learning-1/next-learning-step-7",
+  "first-learning-1/next-learning-step-06", "first-learning-1/unknown"])(
+  "reads unknown %s conservatively without rewriting receipts or initialization facts", async policyVersion => {
+    const sourceId = await source(), request = input([sourceId], 1);
+    const first = await repository().initialize(fixture.scope, request), saved = (await receipts(first.activity.id))[0]!;
+    expect(saved.policyVersion).toBe("first-learning-1/next-learning-step-6");
+    const facts = async () => ({ counts: await counts(),
+      activities: await fixture.sql`SELECT * FROM opening_teaching_activities WHERE id=${first.activity.id}`,
+      tasks: await fixture.sql`SELECT * FROM opening_tasks WHERE course_id=${first.courseId!} ORDER BY id`,
+      sources: await listReadySourceIdsForCourse(fixture.sql, fixture.scope, first.courseId!),
+    });
+    const before = await facts();
+    expect(before.sources).toEqual([sourceId]);
+    await fixture.sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',
+      ${fixture.sql.json(policyVersion)}::jsonb) WHERE id=${saved.id}`;
+    const historical = { ...saved, policyVersion };
+    const rawReceipts = await fixture.sql`SELECT * FROM opening_learning_decisions WHERE id=${saved.id}`;
+    expect(await decisions().get(fixture.scope, saved.id)).toEqual(historical);
+    expect(await decisions().explain(fixture.otherScope, saved.id)).toBeNull();
+    for (const versions of [undefined, { goalVersion: historical.goalVersion,
+      intentVersion: historical.intentVersion, policyVersion }]) {
+      expect(await decisions().explain(fixture.scope, saved.id, versions)).toMatchObject({
+        decision: historical, current: false, invalidationReasons: ["policy_version_not_revalidated"],
+      });
+    }
+    const replay = await repository().initialize(fixture.scope, request, { replayOnly: true });
+    expect(replay).toMatchObject({ replayed: true, activity: { id: first.activity.id }, firstTaskId: first.firstTaskId });
+    expect(await facts()).toEqual(before);
+    expect(await receipts(first.activity.id)).toEqual([historical]);
+    expect(await fixture.sql`SELECT * FROM opening_learning_decisions WHERE id=${saved.id}`).toEqual(rawReceipts);
+  });
 
 it("does not treat another initialization's unobserved materials as missing from this receipt", async () => {
   const first = await repository().initialize(fixture.scope, input([await source()], 1));

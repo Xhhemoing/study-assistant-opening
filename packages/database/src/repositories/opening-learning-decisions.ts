@@ -34,7 +34,12 @@ const firstLearningVersionSchema = z.object({ protocol: z.literal("first-learnin
 
 /** Only this entry owns revalidation of its persisted initialization inputs. Never repairs old activities. */
 async function explainFirstLearning(tx: TransactionSql, scope: Scope, decision: LearningDecision, state: LearnerState) {
-  if (decision.layer !== "activity" || !/^first-learning-1\/next-learning-step-\d+$/.test(decision.policyVersion)) return null;
+  if (decision.layer !== "activity" || !decision.policyVersion.startsWith("first-learning-1/")) return null;
+  if (!["first-learning-1/next-learning-step-1", "first-learning-1/next-learning-step-2",
+    "first-learning-1/next-learning-step-3", "first-learning-1/next-learning-step-4",
+    "first-learning-1/next-learning-step-5", "first-learning-1/next-learning-step-6"].includes(decision.policyVersion)) {
+    return { decision, current: false, invalidationReasons: ["policy_version_not_revalidated"], dataAsOf: state.dataAsOf };
+  }
   let raw: unknown;
   try { raw = JSON.parse(decision.intentVersion); } catch { return null; }
   const parsed = firstLearningVersionSchema.safeParse(raw);

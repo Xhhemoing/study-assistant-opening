@@ -79,8 +79,8 @@ it.each(["independent", "unknown"] as const)("真实课程路线、恢复agenda�
   expect(continued.activity.learnerFocus).toMatchObject(expected);
 });
 
-// Manual policy gold: the separate D5 restoration must pass the shared v3
-// result at all entries, without the bridge's route-only correction override.
+// Manual policy gold: combined v6 shares v3's D5 result at all these entries,
+// without the bridge's route-only correction override or D4 summaries.
 function assistedSuccessGold(policyVersion: string) {
   const majority = { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null } as const;
   const fallback = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null } as const;
@@ -95,6 +95,7 @@ function assistedSuccessGold(policyVersion: string) {
       { canonical: fallback, route: correction, override: true },
       { canonical: fallback, route: correction, override: true },
     ] as const;
+    case "next-learning-step-6":
     case "next-learning-step-3": return [
       { canonical: shared, route: shared, override: false },
       { canonical: shared, route: shared, override: false },
@@ -105,6 +106,7 @@ function assistedSuccessGold(policyVersion: string) {
 }
 
 it.each([0, 1, 2])("最新受助判对、之前%d次独立判对：按显式版本分别断言canonical和路线最终值", async priorChecks => {
+  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-6");
   const { route, scope, courseId, request, observe, canonical, next } = await routeWithSpanEvidence();
   for (const problemId of ["span-reserved-20261021-q02", "span-reserved-20261021-q01"].slice(0, priorChecks)) await observe(problemId, "independent");
   const helped = await observe("span-reserved-fraction", "hinted");
