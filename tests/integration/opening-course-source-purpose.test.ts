@@ -5,6 +5,7 @@ import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 import { POST, PATCH } from "../../apps/web/src/app/api/courses/[id]/memberships/route";
 import { GET as GET_ASSETS } from "../../apps/web/src/app/api/courses/[id]/assets/route";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { courseSourcePurposeAllows } from "../../packages/contracts/src/opening/sources";
 import { listReadySourceIdsForCourse, createOpeningCourseReadySourcesRepository } from "../../packages/database/src/repositories/opening-course-ready-sources";
 import { readOpeningLearnerSnapshotCourses } from "../../packages/database/src/repositories/opening-learner-snapshot-read";
@@ -128,6 +129,59 @@ describe("course source purpose storage and concurrency", () => {
     await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
     expect((await knowledge.get(f.scope, course.id))?.snapshot.nodes[0]?.status).toBe("supported");
     expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(confirmations);
+  });
+
+  it.each([null, "teaching", "practice", "reference", "mock_exam"] as const)("retrieves explicit material only for admitted course/use: %s", async purpose => {
+    const { courses, source, course, input, membership } = await setup();
+    await ready(source.id);
+    if (purpose !== null) await courses.updateAssetMembership({ ...input, purpose, expectedUpdatedAt: membership.updatedAt.toISOString() });
+    const [row] = await f.sql`SELECT id FROM opening_source_chunks WHERE source_id=${source.id}`;
+    const chunk = { id: String(row!.id), sourceId: source.id, sourceVersion: 0, page: 1,
+      text: "Synthetic purpose material", startMs: null, endMs: null, imageObjectKey: null };
+    const retrieve = createOpeningMaterialRetriever(f.sql, {} as never, null);
+    for (const materialUse of ["teaching", "practice", "citation"] as const) {
+      const query = { sourceIds: [source.id], chunks: [chunk], query: "purpose", maxCharacters: 1000,
+        operationId: randomUUID(), courseContext: { courseId: course.id, materialUse } };
+      if (courseSourcePurposeAllows(purpose, materialUse)) expect((await retrieve(f.scope, query)).chunks).toHaveLength(1);
+      else await expect(retrieve(f.scope, query)).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    const other = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "Independent", slug: randomUUID() });
+    await courses.addAssetMembership({ ...input, courseId: other.id, purpose: "teaching", role: "core", visibility: "private" });
+    expect((await retrieve(f.scope, { sourceIds: [source.id], chunks: [chunk], query: "purpose", maxCharacters: 1000,
+      operationId: randomUUID(), courseContext: { courseId: other.id, materialUse: "teaching" } })).chunks).toHaveLength(1);
+    await expect(retrieve(f.scope, { sourceIds: [source.id], chunks: [chunk], query: "purpose", maxCharacters: 1000,
+      operationId: randomUUID(), courseContext: { courseId: null, materialUse: "citation" } })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("retains the original retrieval pin until provider send, including changed-back purpose", async () => {
+    const { courses, source, course, input, membership } = await setup();
+    await ready(source.id);
+    const [row] = await f.sql`SELECT id FROM opening_source_chunks WHERE source_id=${source.id}`;
+    const chunk = { id: String(row!.id), sourceId: source.id, sourceVersion: 0, page: 1,
+      text: "Synthetic purpose material", startMs: null, endMs: null, imageObjectKey: null };
+    const result = await createOpeningMaterialRetriever(f.sql, {} as never, null)(f.scope, {
+      sourceIds: [source.id], chunks: [chunk], query: "purpose", maxCharacters: 1000, operationId: randomUUID(),
+      courseContext: { courseId: course.id, materialUse: "teaching" },
+    });
+    await expect(result.assertCurrent()).resolves.toBeUndefined();
+    const changed = await courses.updateAssetMembership({ ...input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString() });
+    await expect(result.assertCurrent()).rejects.toMatchObject({ code: "CONFLICT" });
+    await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
+    await expect(result.assertCurrent()).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("admits explicit standalone unclassified material but rejects unknown context and later classification", async () => {
+    const { source } = await setup();
+    await ready(source.id);
+    const pool = createOpeningCourseReadySourcesRepository(f.sql);
+    await expect(pool.readMaterialPurposePin(f.scope, { courseId: undefined, materialUse: "teaching", sourceIds: [source.id] } as never))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const pin = await pool.readMaterialPurposePin(f.scope, { courseId: null, materialUse: "citation", sourceIds: [source.id] });
+    await expect(pool.assertMaterialPurposePin(f.scope, pin)).resolves.toBeUndefined();
+    await f.sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE asset_id=${source.id}`;
+    await expect(pool.assertMaterialPurposePin(f.scope, pin)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(pool.readMaterialPurposePin(f.otherScope, { courseId: null, materialUse: "citation", sourceIds: [source.id] }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("pins exact membership timestamps and rejects changed-back purposes and source versions", async () => {
