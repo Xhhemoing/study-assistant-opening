@@ -216,7 +216,7 @@ describe("compile-teaching-unit worker wiring: completed replay", () => {
     // Positive control: the same intent and sources without route scope pass
     // all four chunks through the real production provider builder/retriever.
     const unscoped = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
-      clientKey: randomUUID(), intentKind: activity.intentKind, intentSummary: activity.intentSummary, createIntent: { control: true },
+      clientKey: randomUUID(), intentKind: activity.intentKind, intentSummary: activity.intentSummary, sourceIds: [sourceA, sourceB], createIntent: { control: true },
     });
     const control = await deps.buildProviderInput!(f.scope, { ...payload, activityId: unscoped.id });
     expect(control.chunks.map(chunk => chunk.id).sort()).toEqual([chunkA, chunkANext, chunkB, chunkBNext].sort());

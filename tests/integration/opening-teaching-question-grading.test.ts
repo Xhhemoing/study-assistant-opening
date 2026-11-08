@@ -259,8 +259,6 @@ it("automatically assigns an unscoped lesson once and respects an existing cours
 
 it("infers a unique material course but isolates ambiguous material associations", async () => {
   const base = await learningAttemptFixture(fixture), repo = createOpeningTeachingActivitiesRepository(fixture.sql);
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
-    VALUES(${fixture.scope.workspaceId},${base.courseId},'source',${base.sourceId},'reference',0,'private')`;
   const create = () => repo.create(fixture.scope, { clientKey: randomUUID(), intentKind: "topic", intentSummary: "向量", sourceIds: [base.sourceId], createIntent: {} });
   const unique = await create();
   expect((await repo.associateCourse(fixture.scope, unique.id, { auto: true })).courseId).toBe(base.courseId);

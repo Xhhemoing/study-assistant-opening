@@ -7,7 +7,8 @@ import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type Opening
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
-import { helpInputSnapshotSchema, type HelpInputSnapshot } from "@aistudy/contracts";
+import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
+import { helpInputSnapshotSchema, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -491,13 +492,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       expectedPrivacyEpoch?: number;
       claimToken?: string;
       enqueueMetadata?: boolean;
-    }): Promise<void> {
+    }, options?: { materialPurposePin?: OpeningMaterialPurposePin }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure || input.generatedExposure) await lockWorkspaceLearningHistory(tx, input.scope);
         const workspace = await tx`
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
         if (!workspace.length) throw new Error("workspace permission changed");
+        if (options?.materialPurposePin) {
+          await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(input.scope, options.materialPurposePin, tx);
+        }
         const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
         if (receipt) {
           if (receipt.authorization.purpose !== "system_record_lookup" || receipt.authorization.workspaceId !== input.scope.workspaceId

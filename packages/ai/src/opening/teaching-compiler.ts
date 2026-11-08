@@ -41,6 +41,7 @@ import {
   type TeachingEvidencePack,
 } from "./teaching-evidence";
 import { parseModelJson } from "./latex-json";
+import { produceReservedQuestion, type ReservedQuestionProducerInput, type ReservedQuestionProducerPorts } from "./reserved-question-producer";
 
 export type ProposeOutlineInput = {
   activityId: string;
@@ -832,6 +833,26 @@ export function createCompilerProviderInput(options: BuildCompilerPublishInputOp
       imageParts,
       outputFormat: "json",
     };
+  };
+}
+
+/**
+ * Dedicated private generation lane. Reuses the authorized, pinned evidence pack,
+ * but NEVER passes this provider output through buildPublishInput/writeLibraryBlocks.
+ * The worker must supply budgeted generation and authoritative private admission.
+ */
+export function createCompilerReservedQuestionProducer(options: BuildCompilerPublishInputOptions = {}) {
+  return async (
+    input: Omit<ReservedQuestionProducerInput, "evidence">,
+    payload: CompilePayload,
+    ports: ReservedQuestionProducerPorts,
+  ) => {
+    const { pack } = await prepareCompile(options, input.scope, payload, null);
+    if (!pack.chunks.length || pack.chunks.some(chunk =>
+      input.sourceVersions[chunk.sourceId] !== chunk.sourceVersion || chunk.imageObjectKey)) {
+      throw new TeachingCompileOutputError("reserved generation requires current text-only evidence");
+    }
+    return produceReservedQuestion({ ...input, evidence: { chunks: pack.chunks } }, ports);
   };
 }
 

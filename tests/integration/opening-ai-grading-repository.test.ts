@@ -274,7 +274,12 @@ it("does not count an answer edited after AI feedback as an independent first at
 
 it("rejects an extra photo before creating an unreadable result when the answer already has 32 sources", async () => {
   const f = await learningAttemptFixture(fixture), rows = backupRows(fixture.sql, fixture.scope), sourceIds = [f.sourceId];
-  for (let i = 1; i < 32; i++) { const id = await rows.source(); await rows.chunk(id); sourceIds.push(id); }
+  for (let i = 1; i < 32; i++) {
+    const id = await rows.source(); await rows.chunk(id);
+    await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+      VALUES(${fixture.scope.workspaceId},${f.courseId},'source',${id},'core','private',NULL)`;
+    sourceIds.push(id);
+  }
   await fixture.sql`UPDATE opening_learning_sessions SET source_ids=${sourceIds} WHERE id=${f.sessionId}`;
   const original = await f.submit(await f.start(), { sourceIds });
   const photoId = await rows.source();

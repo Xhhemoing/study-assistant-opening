@@ -6,6 +6,34 @@ import {
   uuidSchema,
 } from "./foundation";
 
+/** Course-local source use, independent of membership role and visibility.
+ * null is explicitly unclassified; it retains legacy teaching admission.
+ */
+export const courseSourcePurposeSchema = z.enum(["teaching", "practice", "mock_exam", "reference"]);
+export type CourseSourcePurpose = z.infer<typeof courseSourcePurposeSchema>;
+export type CourseSourceUse = "teaching" | "practice" | "citation";
+
+/** Server-only captured admission. Never accepted from HTTP or model output. */
+export type OpeningMaterialPurposePin = {
+  readonly courseId: string | null;
+  readonly materialUse: CourseSourceUse;
+  readonly sources: readonly {
+    readonly sourceId: string;
+    readonly sourceVersion: number;
+    readonly membershipId: string | null;
+    readonly purposeRevision: string | null;
+    readonly purpose: CourseSourcePurpose | null;
+  }[];
+};
+
+/** Server owners must enforce this on current course memberships, not global sources. */
+export function courseSourcePurposeAllows(purpose: CourseSourcePurpose | null, use: CourseSourceUse): boolean {
+  if (purpose === null || purpose === "teaching") return true;
+  if (purpose === "mock_exam") return false;
+  if (use === "citation") return true;
+  return use === "practice" && purpose === "practice";
+}
+
 export const sourceMimeSchema = z.enum([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",

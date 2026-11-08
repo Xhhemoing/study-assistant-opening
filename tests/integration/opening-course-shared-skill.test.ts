@@ -29,6 +29,8 @@ afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();await f?.close();});
 const ready=(value:CourseRouteActionResult)=>{expect(value.kind).toBe("ready");if(value.kind!=="ready")throw new Error(JSON.stringify(value));return value;};
 async function seed(count=1){
   const courseId=randomUUID(),rows=backupRows(f.sql,f.scope),sourceId=await rows.source(),chunkId=await rows.chunk(sourceId);
+  // This fixture is plain text; visual evidence is covered by dedicated image cases.
+  await f.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${chunkId}`;
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug)VALUES(${courseId},${f.scope.workspaceId},'Course route',${courseId})`;
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   const goals=createOpeningLearningGoalRepository(f.sql),goal=await goals.create(f.scope,{clientKey:randomUUID(),courseIds:[courseId],title:"掌握全课",kind:"custom",targetDate:null,
@@ -46,7 +48,6 @@ async function seed(count=1){
 /** Real job/library/publish/attempt flow; only the model response is a controlled fixture. No external model is called. */
 async function compile(activity:TeachingActivity,variant=0){
   const deps=createCompileTeachingUnitWorkerDeps(f.sql,{budget:createOpeningBudgetRepository(f.sql),chunks:createOpeningSourceChunksRepository(f.sql),privacy:createOpeningPrivacyRepository(f.sql)});
-  deps.buildProviderInput=async()=>({instruction:"教学编译测试",text:activity.intentSummary,chunks:await createOpeningSourceChunksRepository(f.sql).listForSources(f.scope,activity.sourceIds),mode:"explain",maxOutputTokens:5500,mediaCapability:"text_only",imageParts:[],outputFormat:"json"});
   deps.callModel=async(_scope,input,options)=>{await options.beforeSend?.();expect(input.chunks.length).toBeGreaterThan(0);return {text:JSON.stringify({itemTitles:["秩与零空间"],blocks:[
     {type:"text",text:"秩与零空间维数之和等于列数。",citedChunkIds:input.chunks.map(chunk=>chunk.id)},
     {type:"prompt",text:`一个3×${5+variant*3}矩阵的秩为2，零空间维数是多少？`},{type:"answer_key",...rankPedagogy,text:`${5+variant*3} − 2 = ${3+variant*3}`,hints:{direction:"先找列数。",concept:"秩与零空间维数之和等于列数。",firstStep:`用${5+variant*3}减去2。`}},

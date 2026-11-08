@@ -17,6 +17,18 @@ import {
   lockLearningOwner,
 } from "./opening-learning-facts";
 
+/** Teaching admission is course-local even when callers provide explicit sourceIds. */
+export async function assertOpeningTeachingSourcePurposes(
+  tx: Sql | TransactionSql, scope: Scope, courseId: string | null | undefined, sourceIds: readonly string[],
+): Promise<void> {
+  if (!courseId || !sourceIds.length) return;
+  const ids = [...new Set(sourceIds)];
+  const memberships = await tx`SELECT asset_id FROM course_asset_memberships
+    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
+      AND asset_id=ANY(${ids}::uuid[]) AND (purpose IS NULL OR purpose='teaching') FOR SHARE`;
+  if (memberships.length !== ids.length) throw learningError("CONFLICT", "课程资料用途已变化，不能作为本次教材；请重新选择材料。");
+}
+
 export function mapTeachingActivity(row: Record<string, unknown>): TeachingActivity {
   const goal = row.goal_json && typeof row.goal_json === "object" ? row.goal_json as Record<string, unknown> : null;
   const focus = teachingLearnerFocusSchema.safeParse(goal?.learnerFocus);
@@ -193,6 +205,7 @@ export async function createOpeningTeachingActivityInTransaction(
   }
   const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
   if (sourceIds.length) await admitLearningSources(tx, scope, sourceIds);
+  await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, sourceIds);
   if (input.courseId) {
     const course = await tx`
       SELECT id FROM courses
@@ -369,7 +382,8 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           const candidates = sourceIds.length ? await tx`SELECT DISTINCT c.id FROM courses c
             JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=c.workspace_id
             WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
-              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[]) LIMIT 2` : [];
+              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[])
+              AND (m.purpose IS NULL OR m.purpose='teaching') LIMIT 2` : [];
           const courseId = candidates.length === 1 ? String(candidates[0]!.id) : randomUUID();
           if (candidates.length !== 1) {
             const title = String(current.intent_summary).split("\n")[0]!.trim().slice(0, 120) || "自主学习";
@@ -378,6 +392,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
             for (const [index, sourceId] of sourceIds.entries()) await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
               VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
           }
+          await assertOpeningTeachingSourcePurposes(tx, scope, courseId, sourceIds);
           const [updated] = await tx`UPDATE opening_teaching_activities SET course_id=${courseId},updated_at=now()
             WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
           return mapTeachingActivity(updated!);
@@ -398,6 +413,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           if (!course.length) throw learningError("NOT_FOUND", "course not found");
           if ((current.source_ids as string[]).length) {
             await admitLearningSources(tx, scope, current.source_ids as string[]);
+            await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, current.source_ids as string[]);
           }
         }
         const updated = await tx`
@@ -554,6 +570,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           throw learningError("CONFLICT", "teaching content already exists");
         }
         if (current.sourceIds.length) await admitLearningSources(tx, scope, current.sourceIds);
+        await assertOpeningTeachingSourcePurposes(tx, scope, current.courseId, current.sourceIds);
         const jobId = await insertCompileJob(tx, scope, {
           activityId,
           mode: "generate",
@@ -610,6 +627,9 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           if (existing[0] && isDeepStrictEqual(existing[0].payload, payload)) return { jobId: String(existing[0].id), kind: "compile-teaching-unit" as const, created: false };
           throw learningError("CONFLICT", "completed teaching activity cannot generate new content");
         }
+        const current = await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
+        await assertOpeningTeachingSourcePurposes(tx, scope, current.courseId,
+          [...new Set([...current.sourceIds, ...(input.sourceIds ?? [])])]);
         const jobId = await insertCompileJob(tx, scope, input);
         if (jobId) {
           await tx`

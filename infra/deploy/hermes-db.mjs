@@ -3,8 +3,8 @@
 import { chmodSync, readFileSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { parseEnv } from "node:util";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Bind pg_dump to DATABASE_URL; ambient libpq service/password/host settings cannot redirect it. */
 export function postgresBackupEnvironment(databaseUrl, inherited) {
@@ -53,6 +53,29 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     chmodSync(partial, 0o600);
     run("pg_restore", ["--list", partial]);
     renameSync(partial, target);
+  } else if (action === "confirmation-recovery-preflight") {
+    // Run this trusted compatibility anchor, NEVER code supplied by the candidate target.
+    // Fourth argument is the independently reviewed content digest, not a self-attestation.
+    if (!configured.DATABASE_URL || !/^[a-f0-9]{64}$/.test(parserPython ?? "")) {
+      fail("Recovery preflight requires configured DATABASE_URL and a reviewed artifact content digest.");
+    }
+    const anchor = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+    const moduleUrl = pathToFileURL(join(anchor, "packages/database/src/migrate.ts")).href;
+    const code = `const { createSqlClient, preflightConfirmationRecovery } = await import(${JSON.stringify(moduleUrl)});
+      const sql = createSqlClient(process.env.DATABASE_URL, { max: 1 });
+      try { console.log(JSON.stringify(await preflightConfirmationRecovery(sql, {
+        artifactRoot: ${JSON.stringify(resolve(target))}, expectedArtifactContentDigest: ${JSON.stringify(parserPython)}
+      }))); } catch (error) {
+        console.log(JSON.stringify({ eligible: false, code: /^MIGRATION_[A-Z0-9_]+$/.test(error.code ?? "")
+          ? error.code : "MIGRATION_RECOVERY_INCOMPATIBLE", automaticRecovery: false }));
+        process.exitCode = 1;
+      } finally { await sql.end({ timeout: 5 }); }`;
+    const result = spawnSync(join(anchor, "node_modules/.bin/tsx"), ["--eval", `(async () => { ${code} })()`],
+      { env, cwd: anchor, stdio: ["ignore", "pipe", "pipe"] });
+    if (result.error || !result.stdout?.length) fail("Compatibility anchor preflight failed; recovery is not permitted.");
+    process.stdout.write(result.stdout);
+    if (result.status !== 0) process.exitCode = 1;
+    // Report only. No migrate, OLD_TARGET change, transition edit, pointer switch or writer resume.
   } else if (action === "migrate") {
     run("npx", ["tsx", "./scripts/db-migrate.ts"], { cwd: target });
   } else if (action === "parser") {

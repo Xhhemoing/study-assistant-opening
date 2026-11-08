@@ -34,6 +34,8 @@ async function visualVariant() {
   { workSource: { id: photoId, version: 1, physicalPage: 1 } });
   const cards = createCardRepository(f.sql), card = await cards.createCard({ ...f.scope, courseId: base.courseId, skillLabel: "derivatives", reviewKind: "question",
     front: "What is a derivative?", back: "Historical feedback", observationId: original.id });
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES(${f.scope.workspaceId},${base.courseId},'source',${photoId},'core','private',NULL)`;
   const variants = createOpeningCardVariantRepository(f.sql), begun = await variants.begin(f.scope, card.id);
   const ready = await variants.complete(f.scope, card.id, begun.review.activity.id, proposal);
   const sources = [base.sourceId, photoId].sort();

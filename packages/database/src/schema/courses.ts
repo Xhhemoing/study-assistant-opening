@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   integer,
   jsonb,
   pgTable,
@@ -8,6 +9,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { workspaces } from "./library";
 
 export const courses = pgTable(
@@ -43,7 +45,8 @@ export const courses = pgTable(
 
 /**
  * Course-local membership metadata for a shared workspace asset.
- * Never stores document/block content — only role, order, visibility.
+ * Never stores document/block content — only course-local metadata.
+ * NULL source purpose means unclassified, not an inferred teaching classification.
  */
 export const courseAssetMemberships = pgTable(
   "course_asset_memberships",
@@ -60,6 +63,7 @@ export const courseAssetMemberships = pgTable(
     role: text("role").notNull(),
     sortOrder: integer("sort_order").notNull().default(0),
     visibility: text("visibility").notNull(),
+    purpose: text("purpose", { enum: ["teaching", "practice", "mock_exam", "reference"] }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -68,6 +72,9 @@ export const courseAssetMemberships = pgTable(
       .defaultNow(),
   },
   (table) => [
+    check("course_asset_memberships_source_purpose_check", sql`${table.purpose} IS NULL OR (
+      ${table.assetType} = 'source' AND ${table.purpose} IN ('teaching', 'practice', 'mock_exam', 'reference')
+    )`),
     uniqueIndex("course_asset_memberships_unique_uidx").on(
       table.courseId,
       table.assetType,

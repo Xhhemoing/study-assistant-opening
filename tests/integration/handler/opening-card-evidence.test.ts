@@ -39,6 +39,10 @@ async function seed(outcome: "incorrect" | "correct" = "incorrect", reference = 
   // These are text references; the backup helper's private locator is not an image.
   await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE source_id IN (${sourceId},${referenceSourceId})`;
   await fixture.sql`UPDATE opening_source_chunks SET text='A trusted reference answer' WHERE source_id=${referenceSourceId}`;
+  await fixture.sql`INSERT INTO course_asset_memberships
+    (id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility,purpose)
+    VALUES (${randomUUID()},${scope.workspaceId},${courseId},'source',${sourceId},'core',0,'course',NULL),
+      (${randomUUID()},${scope.workspaceId},${courseId},'source',${referenceSourceId},'core',1,'course',NULL)`;
   const repo = createOpeningLearningRepository(fixture.sql);
   const session = await repo.createSession(scope, { courseId, skillLabel: "derivatives", sourceIds: [sourceId, referenceSourceId] });
   const attempt = await createOpeningLearningAttemptRepository(fixture.sql).create(scope, { sessionId: session.id, clientKey: randomUUID(), problem: { sourceId, chunkId, stemSnapshot: "What is a derivative?", artifactKind: "reference_item" } });

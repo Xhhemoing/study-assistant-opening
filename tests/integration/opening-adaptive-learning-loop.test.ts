@@ -46,9 +46,6 @@ type AttemptFixture = Awaited<ReturnType<typeof matrixAttemptFixture>>;
 
 async function seedCourse() {
   const course = await matrixAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships
-    (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
-    VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${course.sourceId}, 'core', 0, 'course')`;
   return course;
 }
 
