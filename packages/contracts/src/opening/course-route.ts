@@ -31,7 +31,28 @@ export const courseRouteStartSchema=z.object({...actionBase,requirementId:uuidSc
   taskId:uuidSchema.optional(),expectedTaskVersion:z.number().int().positive().optional()}).strict()
   .refine(value=>(value.taskId===undefined)===(value.expectedTaskVersion===undefined),"Task identity and version must be supplied together");
 export const courseRouteNextSchema=z.object({...actionBase,activityId:uuidSchema,expectedPathVersion:z.number().int().positive(),observationId:uuidSchema.nullable()}).strict();
+const citationCountSchema = z.number().int().nonnegative().safe();
+const citationCountsSchema = z.object({
+  total: citationCountSchema, bound: citationCountSchema, missing: citationCountSchema,
+  mismatch: citationCountSchema, unknown: citationCountSchema,
+}).strict();
+const citationCoverageSchema = citationCountsSchema.extend({
+  byRole: z.object({ teach: citationCountsSchema, prompt: citationCountsSchema,
+    example: citationCountsSchema, answer_key: citationCountsSchema }).strict(),
+  factualSupport: z.literal("unverified"),
+}).strict().superRefine((value, ctx) => {
+  const roles = Object.values(value.byRole);
+  for (const [index, counts] of [value, ...roles].entries()) {
+    if (counts.total !== counts.bound + counts.missing + counts.mismatch + counts.unknown)
+      ctx.addIssue({ code: "custom", path: index === 0 ? ["total"] : ["byRole", Object.keys(value.byRole)[index - 1]!, "total"], message: "Citation status counts must sum to total" });
+  }
+  for (const key of ["total", "bound", "missing", "mismatch", "unknown"] as const) {
+    if (value[key] !== roles.reduce((sum, role) => sum + role[key], 0))
+      ctx.addIssue({ code: "custom", path: [key], message: "Citation role counts must sum to aggregate" });
+  }
+});
 export const courseRequirementProgressSchema=z.object({requirement:courseRequirementSchema,
+  citationCoverage: citationCoverageSchema.optional(),
   referenceChecks:z.object({matched:z.number().int().nonnegative(),mismatched:z.number().int().nonnegative(),
     unsupported:z.number().int().nonnegative()}).strict().optional(),
   questionCoverage:z.object({savedQuestions:z.number().int().nonnegative(),withReferenceAnswers:z.number().int().nonnegative(),

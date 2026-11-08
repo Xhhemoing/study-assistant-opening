@@ -122,6 +122,62 @@ it("accepts count-only reference checks and rejects private or invalid aggregate
     await expect(createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }))).read(courseId)).rejects.toThrow();
   }
 });
+it("renders count-only citation coverage without inferring correctness or issuing write commands", async () => {
+  const citationCoverage = { total: 7, bound: 2, missing: 2, mismatch: 1, unknown: 2, factualSupport: "unverified" as const,
+    byRole: {
+      teach: { total: 2, bound: 1, missing: 1, mismatch: 0, unknown: 0 },
+      prompt: { total: 1, bound: 0, missing: 0, mismatch: 1, unknown: 0 },
+      example: { total: 1, bound: 0, missing: 0, mismatch: 0, unknown: 1 },
+      answer_key: { total: 3, bound: 1, missing: 1, mismatch: 0, unknown: 1 },
+    } };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null },
+    status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage };
+  const transport = vi.fn(async () => new Response(JSON.stringify({ ...snapshot, requirements: [row] })));
+  const api = createCourseRouteClient(transport);
+  const start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  await render(api);
+  const details = [...host.querySelectorAll("details")].find(node => node.querySelector("summary")?.textContent?.startsWith("引用绑定"))!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")?.textContent).toContain("2 / 7 块已绑定");
+  expect(details.textContent).toContain("题干：应引 1 · 已绑定 0 · 缺失 0 · 不匹配 1 · 未知 0");
+  expect(details.textContent).toContain("隐藏答案：应引 3 · 已绑定 1 · 缺失 1 · 不匹配 0 · 未知 1");
+  expect(details.textContent).toContain("事实支持未验证");
+  expect(details.textContent).toContain("不表示答案正确、可作为独立新题或已经掌握");
+  expect(details.querySelector("a, button")).toBeNull();
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+it.each([undefined, "empty"] as const)("distinguishes absent citation coverage from a recorded empty population: %s", async mode => {
+  const zero = { total: 0, bound: 0, missing: 0, mismatch: 0, unknown: 0 };
+  const citationCoverage = mode ? { ...zero, factualSupport: "unverified" as const,
+    byRole: { teach: zero, prompt: zero, example: zero, answer_key: zero } } : undefined;
+  await render(client({ ...snapshot, requirements: [{ requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null },
+    status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage }] }));
+  if (mode) {
+    expect(host.textContent).toContain("引用绑定：0 / 0 块已绑定");
+    expect(host.textContent).not.toContain("未提供引用覆盖");
+  } else {
+    expect(host.textContent).toContain("未提供引用覆盖");
+    expect(host.textContent).not.toContain("0 / 0");
+  }
+  expect(host.textContent).not.toContain("100%");
+});
+it("rejects private citation details at the real HTTP client boundary", async () => {
+  const counts = { total: 1, bound: 0, missing: 0, mismatch: 0, unknown: 1 };
+  const citationCoverage = { total: 4, bound: 0, missing: 0, mismatch: 0, unknown: 4, factualSupport: "unverified",
+    byRole: { teach: counts, prompt: counts, example: counts, answer_key: counts } };
+  for (const field of ["text", "prompt", "answer", "id", "key", "refs"]) {
+    for (const invalid of [{ ...citationCoverage, [field]: "private-value" },
+      { ...citationCoverage, byRole: { ...citationCoverage.byRole, answer_key: { ...counts, [field]: "private-value" } } }]) {
+      const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...snapshot, requirements: [{
+        requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved",
+        observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage: invalid,
+      }] })));
+      await expect(api.read(courseId)).rejects.toThrow();
+    }
+  }
+  expect(host.textContent).not.toContain("private-value");
+});
 it("shows the full material inventory while keeping extracted suggestions unconfirmed", async () => { const api = client(); await render(api); expect(host.textContent).toContain("资料 33"); expect(host.textContent).toContain("尚未确认全课范围"); expect(api.confirm).not.toHaveBeenCalled(); expect(api.start).not.toHaveBeenCalled(); });
 it("confirms the explicitly reviewed full list without replacing stable identities", async () => { const api = client(); await render(api); await act(async () => button("检查与确认课程范围").click()); expect(host.textContent).toContain("概念一"); await act(async () => button("确认这份全课范围").click()); expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [requirement], confirmScope: true }); });
 it("keeps material and verification gaps visible and does not claim course mastery", async () => { const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "blocked" as const, observationId: null, sourcesAvailable: false, missingReasons: ["缺少可用题目"] }; await render(client({ ...snapshot, scopeState: "confirmed", suggestions: [], requirements: [row], summary: { total: 1, mandatory: 1, verified: 0, blocked: 1 } })); expect(host.textContent).toContain("缺少可用题目"); expect(host.textContent).toContain("资料不可用"); expect(host.textContent).not.toContain("已掌握"); });
