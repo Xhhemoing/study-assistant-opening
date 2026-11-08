@@ -12,6 +12,7 @@ import {
   compileCurrentActivity,
   createCompilerBuildPublishInput,
   createCompilerProviderInput,
+  createCompilerReservedQuestionProducer,
   parseCompileModelOutput,
   TeachingCompileOutputError,
   projectClientSafeLibraryBlocks,
@@ -47,6 +48,30 @@ it("keeps unsupported references unverified rather than inferring a numeric answ
     ] }), new Set());
     expect(output.blocks).toHaveLength(3);
   }
+});
+
+describe("private compiler generation lane", () => {
+  const context = { scope: { workspaceId: "w", ownerUserId: "u" }, courseId: "course", requirementId: "requirement",
+    requirementRevision: 1, sourceVersions: { [SRC_A]: 1 }, requirementText: "arithmetic" };
+  const payload = { activityId: ACTIVITY, expectedContentVersion: 0, sourceIds: [SRC_A] };
+  it("uses authorized compiler evidence without writing any generated private content to library blocks", async () => {
+    const selected = chunk("private-evidence", "Arithmetic lesson");
+    const writeLibraryBlocks = vi.fn(), admitAndPersist = vi.fn().mockResolvedValue({ privateRefId: "opaque" });
+    const generate = vi.fn().mockResolvedValue(JSON.stringify({ text: "291+2", answer: "293", interaction: { kind: "numeric" } }));
+    const result = await createCompilerReservedQuestionProducer({ loadChunks: async () => [selected], writeLibraryBlocks })(context, payload,
+      { generate, admitAndPersist });
+    expect(result).toEqual({ kind: "persisted", privateRefId: "opaque" });
+    expect(generate.mock.calls[0]![0].chunks).toEqual([selected]);
+    expect(writeLibraryBlocks).not.toHaveBeenCalled();
+    expect(admitAndPersist).toHaveBeenCalledWith(expect.objectContaining({ text: "291+2", answer: "293", requirementRevision: 1 }));
+  });
+  it.each([{ chunks: [] }, { chunks: [chunk("stale", "Arithmetic", { sourceVersion: 2 })] },
+    { chunks: [chunk("image", "OCR", { imageObjectKey: "owned/page1" })] }])("rejects absent, stale or unverified visual evidence before the private provider call %#", async ({ chunks }) => {
+    const generate = vi.fn(), admitAndPersist = vi.fn();
+    await expect(createCompilerReservedQuestionProducer({ loadChunks: async () => chunks })(context, payload,
+      { generate, admitAndPersist })).rejects.toThrow("current text-only evidence");
+    expect(generate).not.toHaveBeenCalled(); expect(admitAndPersist).not.toHaveBeenCalled();
+  });
 });
 
 describe("goal-driven teaching provider context", () => {
