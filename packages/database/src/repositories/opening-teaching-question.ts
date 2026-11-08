@@ -128,7 +128,11 @@ export async function readResolvedTeachingQuestion(tx: TransactionSql, scope: Sc
       revisionNumber: spec.revisionNumber, contentVersion: spec.contentVersion, questionBlockId: spec.blockId, answerBlockId: spec.answerBlockId },
     sourceRefs: sources.data, conditionRefs: [{ kind: "block", documentId: spec.documentId, revisionNumber: spec.revisionNumber, blockId: spec.blockId }],
     figureRefs: [], answerRole: following.role });
-  return identity.success ? { identity: identity.data, conditions: prompt.content.text, interaction: { interaction: interaction.data, content: prompt.content }, answer } : null;
+  // `text` is required above and is the body consumed by both the learner and
+  // exact evaluator. Compare only that body and parsed interaction (including
+  // options/unit), not shadowed markdown/question/etc. Visual/unknown payloads
+  // were rejected above; dropping shadow fields must not hide consumed figures.
+  return identity.success ? { identity: identity.data, conditions: prompt.content.text, interaction: interaction.data, answer } : null;
 }
 
 /** Used by both live eligibility and batch qualification. The pinned revision is append-only. */

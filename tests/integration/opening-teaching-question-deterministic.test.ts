@@ -21,7 +21,7 @@ function ready(value: CourseRouteActionResult) {
   return value;
 }
 
-type Question = { prompt: string; key: string; interaction: TeachingQuestionInteraction };
+type Question = { prompt: string; key: string; interaction: TeachingQuestionInteraction; shadow?: Record<string, unknown> };
 const numeric: Question = { prompt: "计算 1/3 + 1/4", key: "7/12", interaction: { kind: "numeric" } };
 const choice: Question = { prompt: "计算 2/3 + 1/6", key: "B", interaction: { kind: "choice", options: [
   { id: "A", label: "1/2" }, { id: "B", label: "5/6" },
@@ -55,7 +55,7 @@ async function seed(questions: Question[] = [numeric, choice]) {
   const content = createOpeningTeachingContentRepository(f.sql);
   const blocks = questions.map(question => ({ ...question, blockId: randomUUID(), answerId: randomUUID() }));
   const unit = await content.createUnit(f.scope, { title: "分数加法练习", blocks: blocks.flatMap(question => [
-    { id: question.blockId, type: "prompt", content: { text: question.prompt, interaction: question.interaction } },
+    { id: question.blockId, type: "prompt", content: { ...question.shadow, text: question.prompt, interaction: question.interaction } },
     { id: question.answerId, type: "answer_key", content: { answer: question.key, hidden: true,
       hints: { direction: "先比较分母。", concept: "通分后相加。", firstStep: "找公分母。" } } },
   ]) });
@@ -135,6 +135,17 @@ it("does not double-count independent evidence when identical published question
   expect(renamed.attempt.problemId).not.toBe(first.attempt.problemId);
   expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", allowsIndependent: true });
   expect(renamed.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted", allowsIndependent: false });
+  expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
+});
+
+it.each(["question", "markdown"])("does not grant duplicate independent evidence for a shadowed %s change under new UUIDs", async field => {
+  const x = await seed([{ ...numeric, shadow: { [field]: "unused original" } },
+    { ...numeric, shadow: { [field]: "unused changed" } }]);
+  const first = await x.submit(0, "7/12"), second = await x.submit(1, "7/12");
+  expect(second.attempt.problemId).not.toBe(first.attempt.problemId);
+  expect(first.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", allowsIndependent: true });
+  expect(second.observation).toMatchObject({ verdictSource: "deterministic", outcome: "correct", assistance: "hinted", allowsIndependent: false });
+  expect(second.observation.eligibility?.independentAttempt).not.toBe("yes");
   expect((await x.route.read(f.scope, x.courseId)).requirements[0]!.status).not.toBe("verified");
 });
 

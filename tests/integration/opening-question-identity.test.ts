@@ -12,7 +12,8 @@ let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
 afterEach(async () => { await f?.close(); });
 
-async function seed(secondContent: Record<string, unknown> = { text: "1+1", interaction: { kind: "numeric" } }) {
+async function seed(secondContent: Record<string, unknown> = { text: "1+1", interaction: { kind: "numeric" } },
+  firstContent: Record<string, unknown> = { text: "1+1", interaction: { kind: "numeric" } }) {
   const base = await learningAttemptFixture(f);
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
     VALUES(${f.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
@@ -29,7 +30,7 @@ async function seed(secondContent: Record<string, unknown> = { text: "1+1", inte
   const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
   const content = createOpeningTeachingContentRepository(f.sql);
   const unit = await content.createUnit(f.scope, { title: "Identical questions under different UUIDs", blocks: [
-    { id: ids[0], type: "prompt", content: { text: "1+1", interaction: { kind: "numeric" } } },
+    { id: ids[0], type: "prompt", content: firstContent },
     { id: ids[1], type: "answer_key", content: { answer: "2", hidden: true } },
     { id: ids[2], type: "prompt", content: secondContent },
     { id: ids[3], type: "answer_key", content: { answer: "2", hidden: true } },
@@ -82,9 +83,27 @@ it("uses actual published content to deduplicate different UUIDs in the real eva
   expect(grading).not.toHaveProperty("identity");
 });
 
+it("does not ignore an actually displayed option change behind identical text", async () => {
+  const content = (label: string) => ({ text: "1+1", interaction: { kind: "choice", options: [{ id: "A", label: "2" }, { id: "B", label }] } });
+  const x = await seed(content("4"), content("3"));
+  const first = await x.read(x.first.itemVersionId!), second = await x.read(x.second.itemVersionId!);
+  expect(compareCourseQuestionIdentity(first.resolved, second.resolved)).toBe("different");
+});
+
+it.each(["question", "markdown", "prompt", "answer", "solution"])("ignores shadowed %s changes when resolving an exact duplicate through the real evaluator", async field => {
+  const x = await seed({ text: "1+1", interaction: { kind: "numeric" }, [field]: "a different unused condition" });
+  const first = await x.read(x.first.itemVersionId!), second = await x.read(x.second.itemVersionId!);
+  expect(x.first.problemId).not.toBe(x.second.problemId);
+  expect(compareCourseQuestionIdentity(first.resolved, second.resolved)).toBe("equivalent_exact");
+  expect(second.resolved).toMatchObject({ conditions: "1+1", interaction: { kind: "numeric" } });
+  await x.feedback();
+  expect(await x.evaluate(x.second.id)).toMatchObject({ decision: "correct", priorFeedback: true });
+});
+
 it.each([
   { name: "conditions", content: { text: "1+1 with x>0", interaction: { kind: "numeric" } }, expected: "different" },
   { name: "unit", content: { text: "1+1", interaction: { kind: "numeric", unit: "m" } }, expected: "different" },
+  { name: "options", content: { text: "1+1", interaction: { kind: "choice", options: [{ id: "A", label: "2" }, { id: "B", label: "3" }] } }, expected: "different" },
   { name: "figure reference", content: { text: "1+1", interaction: { kind: "numeric" }, figureRefs: [{ page: 2 }] }, expected: "unknown" },
   { name: "semantic candidate", content: { text: "Calculate the sum of one and one", interaction: { kind: "numeric" } }, expected: "candidate" },
 ])("does not supply exact/unseen evidence for $name", async ({ content, expected }) => {

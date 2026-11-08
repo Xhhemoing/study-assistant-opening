@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TransactionSql } from "postgres";
 import { evaluateOpeningTeachingKeyAttempt, readOpeningTeachingBlindSolveKeyMetadata, resolveOpeningTeachingBlindSolveQuestion } from "./opening-teaching-question-evaluation";
-import { teachingQuestionBody, teachingQuestionText } from "./opening-teaching-question";
+import { readResolvedTeachingQuestion, teachingQuestionBody, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
+import { compareCourseQuestionIdentity } from "@aistudy/domain";
 
 const exposure = vi.hoisted(() => ({ reveal: vi.fn(), insert: vi.fn(), generate: vi.fn(), release: vi.fn() }));
 vi.mock("./opening-teaching-hints", () => ({ readOpeningTeachingAnswerKey: exposure.reveal }));
@@ -241,6 +242,14 @@ describe("teaching key evaluation", () => {
 });
 
 describe("private identity consumer", () => {
+  it.each(["question", "markdown"])("uses the consumed body rather than shadowed %s in exact identity", async field => {
+    const a = setup({ blocks: [block({ text: "1+1", interaction: numeric, [field]: "original shadow" }), key("2")] });
+    const b = setup({ blocks: [block({ text: "1+1", interaction: numeric, [field]: "changed shadow" }), key("2")] });
+    const left = await readResolvedTeachingQuestion(a.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec);
+    const right = await readResolvedTeachingQuestion(b.tx as unknown as TransactionSql, scope, spec as TeachingQuestionSpec);
+    expect(left).toMatchObject({ conditions: "1+1", interaction: numeric });
+    expect(compareCourseQuestionIdentity(left, right)).toBe("same");
+  });
   it("keeps an unrelated unresolved history from invalidating the pinned key without claiming unseen", async () => {
     expect(await setup({ priorFeedback: true, priorSpec: { kind: "unresolved" } }).run("2"))
       .toMatchObject({ decision: "correct", priorFeedback: true });
