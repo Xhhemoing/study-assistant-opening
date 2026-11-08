@@ -23,11 +23,12 @@ vi.mock("./opening-learning-facts", async original => ({ ...await original<typeo
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 beforeEach(() => vi.clearAllMocks());
 
-it.each(["teaching", "exam", "span", "matrix"])("pauses only teaching evaluation and retains the %s dispatch", async kind => {
+it.each(["teaching", "exam", "span", "matrix"])("restores teaching evaluation after the %s dispatch without bypassing exam/span/matrix", async kind => {
   const controlled = { evaluatorVersion: "fixture", specVersion: "fixture", decision: "correct", outcome: "correct", reasonCodes: ["match"] };
   vi.mocked(evaluateOpeningExamAttempt).mockResolvedValue(kind === "exam" ? controlled as never : null);
   vi.mocked(evaluateOpeningSpanAttempt).mockResolvedValue(kind === "span" ? controlled as never : null);
   vi.mocked(evaluateOpeningMatrixAttempt).mockResolvedValue(kind === "matrix" ? controlled as never : null);
+  vi.mocked(evaluateOpeningTeachingKeyAttempt).mockResolvedValue(kind === "teaching" ? controlled as never : null);
   const queries: string[] = [];
   const tx = vi.fn(async (parts: TemplateStringsArray) => {
     const query = parts.join("?"); queries.push(query);
@@ -41,7 +42,7 @@ it.each(["teaching", "exam", "span", "matrix"])("pauses only teaching evaluation
     sessionId: "session", courseId: "course", skillLabel: "skill", sourceIds: [], attemptId: "attempt", problemId: "problem",
     answer: "2", outcome: "unverified", assistance: "independent", clientKey: "new-key",
   })).rejects.toThrow("stop before writes");
-  expect(evaluateOpeningTeachingKeyAttempt).not.toHaveBeenCalled();
+  expect(evaluateOpeningTeachingKeyAttempt).toHaveBeenCalledTimes(kind === "teaching" ? 1 : 0);
   expect(evaluateOpeningExamAttempt).toHaveBeenCalledOnce();
   expect(evaluateOpeningSpanAttempt).toHaveBeenCalledTimes(kind === "exam" ? 0 : 1);
   expect(evaluateOpeningMatrixAttempt).toHaveBeenCalledTimes(kind === "exam" || kind === "span" ? 0 : 1);
@@ -69,9 +70,9 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
     const ruleDecision = { activityKind: "reduced_help_practice", focusObservationId: null, reasonCode: "assisted_success" };
     expect(spanTutorReceiptDecision({ policyVersion, intentVersion: JSON.stringify({ ruleDecision }) })).toEqual(ruleDecision);
   });
-it("keeps the v2 writer and rejects unknown policy combinations", () => {
-  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-2");
-  expect(SPAN_TUTOR_EXECUTION_POLICY_VERSION).toBe("next-learning-step-2/span-tutor-execution-2");
+it("restores the v3 writer and rejects unknown policy combinations", () => {
+  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
+  expect(SPAN_TUTOR_EXECUTION_POLICY_VERSION).toBe("next-learning-step-3/span-tutor-execution-2");
   const capture = captureNextLearningStep({ observations: [], wantsFullExplanation: false });
   expect(capture.decision.reasonCode).toBe("no_evidence");
   const assisted = captureNextLearningStep({ wantsFullExplanation: false, observations: [
@@ -80,8 +81,8 @@ it("keeps the v2 writer and rejects unknown policy combinations", () => {
     { id: "prior", skillLabel: "skill", attemptedAt: "2026-11-05T00:00:00Z", assistance: "independent",
       verifiedCorrect: "yes", independentAttempt: "yes", usableForCurrentVersion: "yes", problemId: null },
   ] });
-  expect(assisted.decision).toMatchObject({ activityKind: "diagnose", reasonCode: "needs_check" });
-  expect(assisted.candidates.some(candidate => candidate.reasonCodes.includes("assisted_success"))).toBe(false);
+  expect(assisted.decision).toMatchObject({ activityKind: "reduced_help_practice", reasonCode: "assisted_success" });
+  expect(assisted.candidates.at(-1)).toMatchObject({ eligible: true, reasonCodes: ["assisted_success"] });
   for (const policyVersion of ["next-learning-step-3/span-tutor-execution-1", "next-learning-step-4/span-tutor-execution-2"]) {
     expect(spanTutorReceiptDecision({ policyVersion, intentVersion: "not JSON" })).toBeNull();
   }

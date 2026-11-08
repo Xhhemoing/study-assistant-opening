@@ -52,6 +52,17 @@ describe("tutor next action orchestration", () => {
     expect(deps.assertCurrent).toHaveBeenCalledWith(scope, saved);
     expect(executions).toEqual([]);
   });
+  it("replays an exact v2 operation rather than replacing it with the restored v3 suggestion", async () => {
+    const saved = historicalContext();
+    saved.historicalDecision = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null };
+    saved.decisionInput = { observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation({ id: "prior" })], wantsFullExplanation: false };
+    const { deps, executions } = service(saved);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ resumed: true, decision: saved.historicalDecision });
+    saved.spanContext!.historicalOperationId = "tutor-next:other";
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ resumed: true,
+      decision: { activityKind: "reduced_help_practice", reasonCode: "assisted_success" } });
+    expect(executions).toEqual([]);
+  });
   it("recomputes a current suggestion for a different operation even with a saved v3 result", async () => {
     const { deps, executions } = service(historicalContext("tutor-next:other"));
     expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ resumed: true,
@@ -103,7 +114,7 @@ describe("tutor next action orchestration", () => {
   it.each([
     { name: "independent pass", row: observation(), kind: "transfer_check", reason: "independent" },
     { name: "verified error", row: observation({ verifiedCorrect: "no" }), kind: "targeted_explain", reason: "verified_incorrect" },
-    { name: "assisted pass", row: observation({ assistance: "revealed", independentAttempt: "no" }), kind: "reduced_help_practice", reason: "assistance_dependent" },
+    { name: "assisted pass", row: observation({ assistance: "revealed", independentAttempt: "no" }), kind: "reduced_help_practice", reason: "assisted_success" },
   ])("executes the actual next activity after $name", async ({ row, kind, reason }) => {
     const { deps, executions } = service(context({ decisionInput: { status: "observed_independent", observations: [row], wantsFullExplanation: false } }));
     const result = await prepareTutorNextAction(deps, scope, request);
@@ -112,13 +123,11 @@ describe("tutor next action orchestration", () => {
     expect(result).toMatchObject({ action: { activityId: "activity", sessionId: "session" }, decision: { activityKind: kind }, resumed: false });
   });
 
-  it.each([0, 1, 2])("shares the v2 decision with agenda after %i earlier independent successes", async priorChecks => {
+  it.each([0, 1, 2])("shares the restored v3 assisted-success decision with agenda after %i earlier independent successes", async priorChecks => {
     for (const assistance of ["hinted", "revealed"] as const) {
       const observations = [observation({ assistance, independentAttempt: "no" }),
         ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}`, attemptedAt: `2026-10-${24 + i}T00:00:00Z` }))];
-      const decision = priorChecks === 0
-        ? { activityKind: "reduced_help_practice" as const, reasonCode: "assistance_dependent" as const, focusObservationId: null }
-        : { activityKind: "diagnose" as const, reasonCode: "needs_check" as const, focusObservationId: null };
+      const decision = { activityKind: "reduced_help_practice" as const, reasonCode: "assisted_success" as const, focusObservationId: null };
       const agenda = assembleLearningAgenda({ courseId: "10000000-0000-4000-8000-000000000001", suggestion: decision });
       const { deps, executions } = service(context({ decisionInput: { status: "needs_check", observations, wantsFullExplanation: false } }));
       const prepared = await prepareTutorNextAction(deps, scope, request);

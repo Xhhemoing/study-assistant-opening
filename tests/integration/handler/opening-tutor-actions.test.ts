@@ -25,7 +25,7 @@ let courseId = "";
 let sessionId = "";
 let otherCookie = "";
 
-// Fixed version protocol: the separate D5 restoration must pass all three real
+// Fixed version protocol: the restored writer must pass all three real
 // evaluator/HTTP cases against v3 gold, especially the 1/2-prior-success cases.
 function assistedSuccessGold(policyVersion: string) {
   const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
@@ -254,7 +254,8 @@ describe("K02a tutor-actions route", () => {
     expect(response.status).toBe(404);
   });
 
-  it.each([0, 1, 2])("uses explicit policy gold for latest assisted server-correct head after %i independent successes", async count => {
+  it.each([0, 1, 2])("uses explicit v3 gold for latest assisted server-correct head after %i independent successes", async count => {
+    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
     const fixture = await scoredCourse();
     for (let index = 0; index < count; index++) await fixture.answer(index);
     const { observation, link } = await fixture.answer(count, true);
