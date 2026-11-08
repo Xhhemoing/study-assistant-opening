@@ -22,6 +22,8 @@ async function start(problemId: string) {
   const sourceId = await rows.source(), courseId = randomUUID();
   await rows.chunk(sourceId);
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Span flow',${courseId})`;
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES (${fixture.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
   const learning = createOpeningLearningRepository(fixture.sql), attempts = createOpeningLearningAttemptRepository(fixture.sql);
   const session = await learning.createSession(fixture.scope, { courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [sourceId] });
   const input = { sessionId: session.id, clientKey: randomUUID(), spanExercise: { sourceId, problemId, version: 1 } };
@@ -35,8 +37,6 @@ it.each(["validation", "retest"] as const)("replays a canonical generated %s att
   const f = await start("span-example-2d");
   let sessionId = f.session.id;
   if (purpose === "retest") {
-    await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-      VALUES (${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'core','course')`;
     await createWorkspacePreferencesRepository(fixture.sql).setLearningPreferences(fixture.scope, { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
     const p = f.attempt.spanExercise!;
     const baseline = await f.submit({ membership: "in_span", coefficients: ["3", "-1/2"], equation: p, coordinateChecks: p.target });
@@ -164,8 +164,6 @@ it("uses the original attempt chain for exact first-answer storage, replay and s
 });
 it("keeps the wrong first answer immutable when the same lesson question is redone on a new attempt", async () => {
   const f = await start("span-example-2d");
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES (${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'core','course')`;
   const lesson = await createOpeningSpanSessionRepository(fixture.sql).create(fixture.scope, {
     courseId: f.courseId, sourceIds: [f.sourceId], clientKey: randomUUID(),
     intent: { purpose: "self_study", timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" },
