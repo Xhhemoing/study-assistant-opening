@@ -1117,6 +1117,7 @@ export async function addMembershipForPrincipal(
     role: "core" | "optional" | "reference" | "archive";
     sortOrder?: number;
     visibility: "private" | "course" | "public";
+    purpose?: import("@aistudy/contracts").CourseSourcePurpose | null;
   },
 ) {
   assertAuthorized(principal, "membership.create", {
@@ -1132,6 +1133,28 @@ export async function addMembershipForPrincipal(
     role: body.role,
     sortOrder: body.sortOrder,
     visibility: body.visibility,
+    purpose: body.purpose,
+  });
+}
+
+export async function updateMembershipPurposeForPrincipal(
+  runtime: AuthRuntime,
+  principal: Principal,
+  courseId: string,
+  body: {
+    assetType: "source";
+    assetId: string;
+    purpose: import("@aistudy/contracts").CourseSourcePurpose | null;
+    expectedUpdatedAt: string;
+  },
+) {
+  assertAuthorized(principal, "membership.update", {
+    type: "membership", workspaceId: principal.workspaceId, courseId,
+  });
+  return runtime.courses.updateAssetMembership({
+    workspaceId: boundWorkspaceId(principal), courseId,
+    assetType: body.assetType, assetId: body.assetId,
+    purpose: body.purpose, expectedUpdatedAt: body.expectedUpdatedAt,
   });
 }
 

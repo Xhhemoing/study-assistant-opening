@@ -1,5 +1,6 @@
 import "server-only";
 import { z } from "zod";
+import { courseSourcePurposeSchema } from "@aistudy/contracts";
 import { ApiError } from "../../../auth/service";
 
 /** Request bodies for /api/courses handlers; messages are learner-facing Chinese. */
@@ -19,7 +20,20 @@ export const addMembershipBodySchema = z.object({
   role: z.enum(["core", "optional", "reference", "archive"], { error: "资料在课程中的角色不正确。" }),
   sortOrder: z.number({ error: "排序值必须是整数。" }).int({ error: "排序值必须是整数。" }).optional(),
   visibility: z.enum(["private", "course", "public"], { error: "可见范围不正确。" }),
-}, { error: "请求内容格式不正确。" });
+  purpose: courseSourcePurposeSchema.nullable().optional(),
+}, { error: "请求内容格式不正确。" }).superRefine((value, ctx) => {
+  if (value.assetType !== "source" && value.purpose != null) {
+    ctx.addIssue({ code: "custom", path: ["purpose"], message: "只有原始资料可以设置课程用途。" });
+  }
+});
+
+/** Purpose-only PATCH: unrelated membership metadata is never silently accepted. */
+export const updateMembershipPurposeBodySchema = z.object({
+  assetType: z.literal("source"),
+  assetId: assetIdSchema,
+  purpose: courseSourcePurposeSchema.nullable(),
+  expectedUpdatedAt: z.string().datetime().regex(/\.\d{3}Z$/, { error: "请使用最近读取的资料更新时间。" }),
+}).strict();
 
 export const removeMembershipBodySchema = z.object({ assetType: assetTypeSchema, assetId: assetIdSchema }, { error: "请求内容格式不正确。" });
 

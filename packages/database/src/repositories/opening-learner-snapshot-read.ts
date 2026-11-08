@@ -63,19 +63,21 @@ export function readOpeningLearnerSnapshotBase(sql: Sql, scope: Scope): Promise<
 export async function readOpeningLearnerSnapshotCourses(sql: Sql | TransactionSql, scope: Scope): Promise<LearnerSnapshotCourseRow[]> {
   const rows = await sql`
     WITH admitted AS (
-      SELECT m.course_id, s.id, s.version, jsonb_agg(chunk.id ORDER BY chunk.id) AS chunks
+      SELECT m.course_id, s.id, s.version, m.purpose, m.updated_at AS membership_updated_at,
+        jsonb_agg(chunk.id ORDER BY chunk.id) AS chunks
       FROM course_asset_memberships m
       JOIN opening_sources s ON s.id=m.asset_id AND s.workspace_id=m.workspace_id
       JOIN opening_source_chunks chunk ON chunk.source_id=s.id AND chunk.source_version=s.version
       WHERE m.workspace_id=${scope.workspaceId} AND m.asset_type='source'
+        AND (m.purpose IS NULL OR m.purpose='teaching')
         AND s.upload_state='uploaded' AND s.parse_state='ready'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
           WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-      GROUP BY m.course_id, s.id, s.version
+      GROUP BY m.course_id, s.id, s.version, m.purpose, m.updated_at
     )
     SELECT c.id, c.title,
       EXISTS (SELECT 1 FROM admitted a WHERE a.course_id=c.id) AS has_usable_materials,
-      (SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(a.id,a.version,a.chunks) ORDER BY a.id),'[]'::jsonb)::text)
+      (SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(a.id,a.version,a.chunks,a.purpose,a.membership_updated_at) ORDER BY a.id),'[]'::jsonb)::text)
         FROM admitted a WHERE a.course_id=c.id) AS material_revision,
       CASE WHEN jsonb_typeof(k.source_versions)='object' AND NOT EXISTS (
         SELECT 1 FROM jsonb_each_text(CASE WHEN jsonb_typeof(k.source_versions)='object'
