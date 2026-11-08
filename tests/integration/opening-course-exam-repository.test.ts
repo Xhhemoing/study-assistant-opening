@@ -18,8 +18,8 @@ const proposal = (chunkId: string): CourseExamProposal => ({ title: "线性代�
     evidenceChunkIds: [chunkId], estimatedMinutes: 5 })) });
 async function seed() {
   const f = await learningAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'reference','private')`;
+  await fixture.sql`UPDATE course_asset_memberships SET role='reference',visibility='private'
+    WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${f.courseId} AND asset_type='source' AND asset_id=${f.sourceId}`;
   await fixture.sql`UPDATE opening_source_chunks SET text='线性代数期末真题：求矩阵的秩；判断列向量是否线性无关。' WHERE id=${f.chunkId}`;
   const repo = createOpeningCourseExamRepository(fixture.sql), input = { clientKey: randomUUID(), sourceId: f.sourceId, questionCount: 3 };
   return { ...f, repo, input, begin: () => repo.begin(fixture.scope, f.courseId, input) };

@@ -83,6 +83,8 @@ it("cannot erase received feedback by retracting the source observation and revi
 it("recognizes the same catalogue question after changing its material association or source version", async () => {
   const f = await matrixFixture(), first = await f.start(); await f.submit(first.id);
   const rows = backupRows(fixture.sql, fixture.scope), sourceId = await rows.source(); await rows.chunk(sourceId);
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES(${fixture.scope.workspaceId},${f.courseId},'source',${sourceId},'core','private',NULL)`;
   const anotherSession = await f.learning.createSession(fixture.scope, { courseId: f.courseId, sourceIds: [sourceId], skillLabel: "矩阵乘法" });
   const otherSource = await f.start({ sessionId: anotherSession.id, matrixExercise: { ...f.input.matrixExercise, sourceId } });
   expect(otherSource.problemId).not.toBe(first.problemId);

@@ -12,6 +12,7 @@ import { decideCourseRouteVerification } from "./opening-course-route-verificati
 import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
 import type { ExamCourseRouteObservation } from "./opening-course-exam-evidence-projection";
+import { readOpeningCourseCitationCoverage } from "./opening-course-citation-coverage";
 const bindingSchema=z.object({id:z.string().uuid(),revision:z.number().int().positive(),stableSkillId:z.string().uuid(),requirementKey:z.string()}).strict();
 export type CourseRouteDb=Sql|TransactionSql;
 export async function assertCourseRouteCourse(db:CourseRouteDb,scope:Scope,courseId:string){
@@ -106,6 +107,12 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
   const observations=await readCourseRouteObservations(db,scope,courseId);
   const progress=courseRequirementProgress(requirements,observations.projected,new Map(materials.filter(row=>row.available).map(row=>[row.sourceId,row.sourceVersion])),await readCourseRouteSourceChunks(db,scope,courseId));
   await readCourseRouteCompilation(db,scope,courseId,progress);
+  const citations=await readOpeningCourseCitationCoverage(db,scope,courseId,progress);
+  for(const item of progress){
+    const citation=citations.get(item.requirement.id);
+    if(citation?.coverage)item.citationCoverage=citation.coverage;
+    if(citation?.reason)item.missingReasons.push(citation.reason);
+  }
   const retests=await db`SELECT id,task_id,learning_protocol,not_before_at FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND learning_protocol->>'protocolId'='course-route-delayed-v1' ORDER BY created_at DESC,id DESC`;
   for(const item of progress){
