@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { applyMigrations, createSqlClient } from "@aistudy/database";
+import { applyMigrations, createSqlClient, createOpeningKnowledgeRepository,
+  createOpeningLearningRepository, createOpeningSkillEvidenceRepository } from "@aistudy/database";
+import { createOpeningAttemptService } from "../../../apps/web/src/features/opening/learning/attempt-service";
+import { backupRows } from "../opening-backup-records-fixture";
+import { matrixSkill } from "../opening-matrix-attempt-fixture";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { GET as getTutorActions } from "../../../apps/web/src/app/api/opening/courses/[id]/tutor-actions/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -70,6 +74,38 @@ function get(
   );
 }
 
+async function scoredCourse() {
+  const scope = { workspaceId, ownerUserId }, rows = backupRows(sql, scope);
+  const sourceId = await rows.source(), chunkId = await rows.chunk(sourceId), id = randomUUID(), nodeId = randomUUID();
+  await sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${chunkId}`;
+  await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${id},${workspaceId},'Canonical tutor evidence',${id})`;
+  await sql`UPDATE courses SET intervention_settings='{"nodes":{"allowOnLowEvidence":true}}'::jsonb WHERE id=${id}`;
+  await sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES(${workspaceId},${id},'source',${sourceId},'core','private')`;
+  const learning = createOpeningLearningRepository(sql), evidence = createOpeningSkillEvidenceRepository(sql);
+  // Source admission records the real available version before graph evidence is validated.
+  const session = await learning.createSession(scope, { courseId: id, skillLabel: matrixSkill, sourceIds: [sourceId] });
+  await createOpeningKnowledgeRepository(sql).replace(scope, id, { expectedVersion: 0, sourceVersions: { [sourceId]: 1 },
+    snapshot: { courseId: id, version: 1, edges: [], nodes: [{ id: nodeId, courseId: id, label: matrixSkill,
+      kind: 'concept', status: 'supported', evidenceChunkIds: [chunkId] }] } });
+  const service = createOpeningAttemptService(sql);
+  const answer = async (variant: number, assisted = false, value = "[2,3]") => {
+    const attempt = await service.create(scope, { sessionId: session.id, clientKey: randomUUID(),
+      matrixExercise: { sourceId, exerciseKey: 'dimensions', variant } });
+    if (assisted) {
+      const turnId = await rows.turn(await rows.conversation(), [sourceId]);
+      await sql`UPDATE opening_turns SET learning_session_id=${session.id},attempt_id=${attempt.id} WHERE id=${turnId}`;
+      await learning.insertHelpExposure(scope, { id: randomUUID(), sessionId: session.id, attemptId: attempt.id,
+        problemId: attempt.problemId, turnId, kind: 'hint', level: 'hinted', delivered: true });
+    }
+    const observation = await service.submit(scope, attempt.id, { clientKey: randomUUID(), answer: value,
+      outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
+    const link = await evidence.link(scope, { courseId: id, nodeId, observationId: observation.id, dimension: 'transfer' });
+    return { observation, link };
+  };
+  return { id, nodeId, sourceId, learning, answer, scope };
+}
+
 beforeAll(async () => {
   await applyMigrations(sql);
   runtime = createAuthRuntime({
@@ -90,6 +126,8 @@ beforeAll(async () => {
   courseId = randomUUID();
   await sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${workspaceId}, 'K02a tutor actions', ${`k02a-${courseId}`})`;
+  // Explicit opt-in allows observing no-evidence recommendations; default low-evidence gate remains closed.
+  await sql`UPDATE courses SET intervention_settings='{"nodes":{"allowOnLowEvidence":true}}'::jsonb WHERE id=${courseId}`;
 
   sessionId = randomUUID();
   const activityId = await insertTestTeachingActivity(sql, { workspaceId, ownerUserId }, courseId);
@@ -105,9 +143,7 @@ beforeAll(async () => {
   await sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, status)
     VALUES (${taskId}, ${workspaceId}, ${ownerUserId}, 'Integration retest', 15, 'pending')`;
   const dueAt = new Date(Date.now() - 60_000).toISOString();
-  // Due activity lives on a different skill so the revealed-exposure cases below
-  // stay isolated from retestDue; the delayed_retest case then also proves the
-  // frozen K02a baseline priority (retestDue wins over revealed exposures).
+  // Due activity lives on a different skill; only the server's due/time/scope read may authorize it.
   await sql`INSERT INTO opening_retest_activities
     (id, workspace_id, owner_user_id, course_id, skill_label, purpose, evidence_cycle_id,
       task_id, status, scheduled_start_at, accepted_at)
@@ -121,7 +157,7 @@ afterAll(async () => {
 });
 
 describe("K02a tutor-actions route", () => {
-  it("returns guided from server-validated page/skillLabel", async () => {
+  it("returns clarify without performance evidence even with a selected material page", async () => {
     const response = await get(courseId, {
       skillLabel: "derivatives",
       currentPage: "5",
@@ -131,7 +167,7 @@ describe("K02a tutor-actions route", () => {
       actions: Array<{ kind: string; nodeId: string | null }>;
     };
     expect(body.actions).toHaveLength(1);
-    expect(body.actions[0]!.kind).toBe("guided");
+    expect(body.actions[0]!.kind).toBe("clarify");
     expect(body.actions[0]!.nodeId).toBeNull();
     expect(body.actions[0]!).not.toHaveProperty("masteryPercent");
     expect(body.actions[0]!).not.toHaveProperty("mastery");
@@ -146,7 +182,7 @@ describe("K02a tutor-actions route", () => {
     expect(response.status).toBe(400);
   });
 
-  it("derives independent_variant from delivered revealed exposure", async () => {
+  it("does not derive assisted success from a delivered reveal alone", async () => {
     const response = await get(courseId, {
       skillLabel: "chain rule",
       sessionId,
@@ -155,11 +191,11 @@ describe("K02a tutor-actions route", () => {
     const body = (await response.json()) as {
       actions: Array<{ kind: string; problemRef: string | null }>;
     };
-    expect(body.actions[0]!.kind).toBe("independent_variant");
-    expect(body.actions[0]!.problemRef).toBe("variant:1");
+    expect(body.actions[0]!.kind).toBe("clarify");
+    expect(body.actions[0]!.problemRef).toBeNull();
   });
 
-  it("derives worked_example from a hint without masking later reveals", async () => {
+  it("does not invent a verified result from hints and reveals", async () => {
     await sql`INSERT INTO opening_help_exposures
       (id, workspace_id, session_id, turn_id, kind, level, delivered)
       VALUES (${randomUUID()}, ${workspaceId}, ${sessionId}, ${randomUUID()}, 'hint', 'hinted', TRUE)`;
@@ -169,11 +205,11 @@ describe("K02a tutor-actions route", () => {
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as { actions: Array<{ kind: string }> };
-    expect(body.actions[0]!.kind).toBe("independent_variant");
+    expect(body.actions[0]!.kind).toBe("clarify");
   });
 
   it("derives delayed_retest from an accepted due activity", async () => {
-    // Session has revealed exposures, yet retestDue must win per K02a baseline.
+    // Session exposures are not grades; the existing accepted due activity is authoritative.
     const response = await get(courseId, {
       skillLabel: "integration by parts",
       currentPage: "2",
@@ -185,12 +221,66 @@ describe("K02a tutor-actions route", () => {
     expect(JSON.stringify(body)).not.toMatch(/masteryPercent|mastery_pct/);
   });
 
+  it.each(["hasCheckedIndependent", "hasAssistance", "retestDue", "observationIds", "evidenceIds"])("rejects client-forged %s", async key => {
+    expect((await get(courseId, { skillLabel: "derivatives", [key]: "true" })).status).toBe(400);
+  });
+
+  it("rejects a session from another course", async () => {
+    const otherCourseId = randomUUID();
+    await sql`INSERT INTO courses (id,workspace_id,title,slug) VALUES (${otherCourseId},${workspaceId},'Other',${otherCourseId})`;
+    expect((await get(otherCourseId, { skillLabel: "chain rule", sessionId })).status).toBe(404);
+  });
+
   it("rejects a course outside the caller workspace", async () => {
     const response = await get(courseId, {
       skillLabel: "derivatives",
       currentPage: "5",
     }, otherCookie);
     expect(response.status).toBe(404);
+  });
+
+  it.each([0, 1, 2])("uses the latest assisted server-correct head after %i independent successes", async count => {
+    const fixture = await scoredCourse();
+    for (let index = 0; index < count; index++) await fixture.answer(index);
+    const { observation, link } = await fixture.answer(count, true);
+    expect(link.id).not.toBe(observation.id);
+    const response = await get(fixture.id, { skillLabel: matrixSkill, nodeId: fixture.nodeId });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.actions[0]).toMatchObject({ kind: "independent_variant", nodeId: fixture.nodeId });
+    expect(body.actions[0].evidenceIds).toContain(link.id);
+    expect(body.actions[0].evidenceIds).not.toContain(observation.id);
+  });
+
+  it("uses canonical revised heads behind old links and excludes withdrawn or stale evidence", async () => {
+    const fixture = await scoredCourse(), { observation, link } = await fixture.answer(0);
+    const query = { skillLabel: matrixSkill, nodeId: fixture.nodeId };
+    const revised = await fixture.learning.reviseObservation(fixture.scope, { rootObservationId: observation.id,
+      revisesObservationId: observation.id, expectedHead: observation.id, revisionKind: "replace", reason: "Correct transcription",
+      clientKey: randomUUID(), replacement: { answer: "[2,3]", outcome: "correct", assistance: "hinted", verdictSource: "self_report" } });
+    const flags = await createOpeningSkillEvidenceRepository(sql).flagsForNode(fixture.scope, fixture.id, fixture.nodeId);
+    expect(flags.observationIds).toEqual([revised.headObservationId]);
+    expect(flags.evidenceIds).toEqual([link.id]);
+    // The learner-owned replacement is not a trusted correctness verdict.
+    expect((await (await get(fixture.id, query)).json()).actions[0].kind).toBe("clarify");
+    await fixture.learning.reviseObservation(fixture.scope, { rootObservationId: observation.id,
+      revisesObservationId: revised.headObservationId, expectedHead: revised.headObservationId,
+      revisionKind: "retract", reason: "Withdraw", clientKey: randomUUID() });
+    expect((await (await get(fixture.id, query)).json()).actions[0]).toMatchObject({ kind: "clarify", evidenceIds: [] });
+    await fixture.answer(1);
+    await sql`UPDATE opening_sources SET version=2 WHERE id=${fixture.sourceId}`;
+    expect((await (await get(fixture.id, query)).json()).actions[0]).toMatchObject({ kind: "clarify", evidenceIds: [] });
+  });
+
+  it("maps a real verified error to guided and honors the default low-evidence and quiet gates", async () => {
+    const fixture = await scoredCourse();
+    const { observation } = await fixture.answer(0, false, "[3,2]");
+    expect((await (await get(fixture.id, { skillLabel: matrixSkill })).json()).actions[0])
+      .toMatchObject({ kind: "guided", evidenceIds: [observation.id] });
+    await sql`UPDATE courses SET intervention_settings=NULL WHERE id=${fixture.id}`;
+    expect((await (await get(fixture.id, { skillLabel: "unobserved", nodeId: randomUUID() })).json()).actions).toEqual([]);
+    await sql`UPDATE courses SET intervention_settings='{"quietMode":true}'::jsonb WHERE id=${fixture.id}`;
+    expect((await (await get(fixture.id, { skillLabel: matrixSkill })).json()).actions).toEqual([]);
   });
 
   it("performs a read-only recommendation", async () => {
