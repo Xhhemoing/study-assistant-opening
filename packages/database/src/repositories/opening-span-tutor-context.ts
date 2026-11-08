@@ -50,7 +50,7 @@ export const SPAN_TUTOR_EXECUTION_POLICY_VERSION = `${NEXT_LEARNING_STEP_VERSION
 const conflict = (message: string) => learningError("CONFLICT", message);
 const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}`;
 export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
-  return receipt && ["next-learning-step-1/span-tutor-execution-1", SPAN_TUTOR_EXECUTION_POLICY_VERSION].includes(receipt.policyVersion)
+  return receipt && ["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"].includes(receipt.policyVersion)
     ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
 }
 export function spanTutorQuestionInScope(question: string): boolean {

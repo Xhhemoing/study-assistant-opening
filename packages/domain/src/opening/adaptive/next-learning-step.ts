@@ -25,6 +25,7 @@ export type LegacyThinTutorAction = {
   problemRef: string | null; reason: string; evidenceIds: string[];
 };
 
+// Reader-first bridge: retain v3 receipt types, but write the v2 policy only.
 export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-2";
 
 /** Four-stage selection is metadata around the existing activity policy. */

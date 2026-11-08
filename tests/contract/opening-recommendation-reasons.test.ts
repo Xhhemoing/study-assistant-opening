@@ -34,12 +34,19 @@ const cases = [
   { reason: "verified_incorrect", activity: "targeted_explain", request: input({ observations: [observation({ verifiedCorrect: "no" })] }) },
   { reason: "repeated_assisted_error", activity: "full_explain", request: input({ observations: [error(id), error(olderId)] }) },
   { reason: "assistance_dependent", activity: "reduced_help_practice", request: input({ observations: [observation({ assistance: "hinted", independentAttempt: "no" })] }) },
+  { reason: "assistance_dependent", activity: "reduced_help_practice", request: input({ observations: [observation(), observation({ id: olderId, assistance: "hinted" }), observation({ assistance: "revealed" })] }) },
   { reason: "independent", activity: "transfer_check", request: input({ status: "observed_independent", observations: [observation()] }) },
   { reason: "correct_needs_independent_check", activity: "transfer_check", request: input({ observations: [observation({ assistance: "unknown", independentAttempt: "unknown" })] }) },
   { reason: "needs_check", activity: "diagnose", request: input({ observations: [observation({ independentAttempt: "no" })] }) },
 ];
 
 describe("current-evidence recommendation reason compatibility", () => {
+  it("accepts the historical v3 reason while new v2 decisions do not select it", () => {
+    expect(systemQueryResultSchema.safeParse(result({ activityKind: "reduced_help_practice",
+      reasonCode: "assisted_success", focusObservationId: null })).success).toBe(true);
+    const step = nextLearningStep(input({ observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation({ id: olderId })] }));
+    expect(step.reasonCode).toBe("needs_check");
+  });
   it.each(cases)("accepts the real $reason decision without reshaping it", ({ reason, activity, request }) => {
     const step = nextLearningStep(request);
     expect(step).toMatchObject({ reasonCode: reason, activityKind: activity });

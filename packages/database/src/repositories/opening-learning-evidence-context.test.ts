@@ -52,9 +52,9 @@ function evidenceDatabase(teachingVerdicts?: Record<string, unknown>[]) {
   return { db: db as unknown as Sql, queries: () => queries, answerConditionQueries: () => answerConditionQueries };
 }
 
-function teachingVerdict(attemptId: string) {
+function teachingVerdict(attemptId: string, courseId = "course") {
   return { id: "40000000-0000-4000-8000-000000000001", attempt_id: attemptId, problem_id: "problem-0",
-    recorded_at: "2026-01-01T09:00:00Z", course_id: "course", teaching_revision_id: teachingRevisionId, teaching_block_id: teachingBlockId };
+    recorded_at: "2026-01-01T09:00:00Z", course_id: courseId, teaching_revision_id: teachingRevisionId, teaching_block_id: teachingBlockId };
 }
 
 async function eligibilityByItem(db: Sql) {
@@ -87,5 +87,13 @@ describe("course evidence batch contexts", () => {
   it("does not count the same attempt's controlled teaching verdict as prior feedback", async () => {
     const eligibility = await eligibilityByItem(evidenceDatabase([teachingVerdict("attempt-0")]).db);
     expect(eligibility.get("item-0")!.independentAttempt).toBe("yes");
+  });
+
+  it("does not import teaching feedback from another course", async () => {
+    const eligibility = await eligibilityByItem(evidenceDatabase([teachingVerdict("attempt-earlier", "another-course")]).db);
+    expect(eligibility.get("item-0")).toMatchObject({ independentAttempt: "yes" });
+    expect(eligibility.get("item-0")!.reasonCodes).not.toContain("prior_evaluation_feedback");
+    expect([...eligibility.values()]).toHaveLength(8);
+    expect([...eligibility.values()].every(row => row.independentAttempt === "yes")).toBe(true);
   });
 });

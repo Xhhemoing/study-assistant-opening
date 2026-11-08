@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS, type CourseRouteActionResult } from "@aistudy/contracts";
-import { nextLearningStep, solveSpanProblem, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { NEXT_LEARNING_STEP_VERSION, nextLearningStep, solveSpanProblem, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningLearningGoalRepository,
   createOpeningSpanTutorContextRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
@@ -79,28 +79,54 @@ it.each(["independent", "unknown"] as const)("真实课程路线、恢复agenda�
   expect(continued.activity.learnerFocus).toMatchObject(expected);
 });
 
-it("最新受助判对、之前一次独立判对：agenda/span 保持规范结果，课程路线按显式覆盖进入减少帮助练习并在回执中并列记录", async () => {
+// Manual policy gold: the separate D5 restoration must pass the shared v3
+// result at all entries, without the bridge's route-only correction override.
+function assistedSuccessGold(policyVersion: string) {
+  const majority = { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null } as const;
+  const fallback = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null } as const;
+  const correction = { activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null } as const;
+  const shared = { activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null } as const;
+  switch (policyVersion) {
+    case "next-learning-step-2": return [
+      { canonical: majority, route: majority, override: false },
+      { canonical: fallback, route: correction, override: true },
+      { canonical: fallback, route: correction, override: true },
+    ] as const;
+    case "next-learning-step-3": return [
+      { canonical: shared, route: shared, override: false },
+      { canonical: shared, route: shared, override: false },
+      { canonical: shared, route: shared, override: false },
+    ] as const;
+    default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
+  }
+}
+
+it.each([0, 1, 2])("最新受助判对、之前%d次独立判对：按显式版本分别断言canonical和路线最终值", async priorChecks => {
   const { route, scope, courseId, request, observe, canonical, next } = await routeWithSpanEvidence();
-  await observe("span-reserved-20261021-q02", "independent");
+  for (const problemId of ["span-reserved-20261021-q02", "span-reserved-20261021-q01"].slice(0, priorChecks)) await observe(problemId, "independent");
   const helped = await observe("span-reserved-fraction", "hinted");
-  const expectedCanonical = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null };
+  expect(helped.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForCurrentVersion: "yes" });
+  const expected = assistedSuccessGold(NEXT_LEARNING_STEP_VERSION)[priorChecks]!;
+  const expectedCanonical = expected.canonical;
   const shared = await canonical();
   expect(shared.agenda).toEqual(expectedCanonical);
   expect(shared.span).toMatchObject(expectedCanonical);
-  const routeFocus = { activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null };
+  const routeFocus = expected.route;
   const decisions = createOpeningLearningDecisionsRepository(f.sql);
   for (const result of [ready(await route.start(scope, courseId, { ...request, clientKey: randomUUID() })), await next(helped.id)]) {
     expect(result.action).toBe("reduced_help_practice");
     expect(result.activity.learnerFocus).toMatchObject(routeFocus);
     const [receipt, ...extra] = await decisions.list(scope, { layer: "activity", targetId: result.activity.id });
     expect(extra).toHaveLength(0);
-    expect(receipt!.reasonCodes).toEqual(expect.arrayContaining(["teaching:needs_check", "teaching_override:route_assisted_correction"]));
+    expect(receipt!.reasonCodes).toContain(`teaching:${expectedCanonical.reasonCode}`);
     expect(receipt!.reasonCodes.some(code => code.includes("consolidate"))).toBe(false);
-    expect(receipt!.candidates).toContainEqual({ action: "diagnose", eligible: false,
-      reasonCodes: ["teaching:needs_check", "overridden_by_route_assisted_correction"], evidenceRefs: [`observation:${helped.id}`] });
+    expect(receipt!.reasonCodes.filter(code => code.startsWith("teaching_override:")))
+      .toEqual(expected.override ? ["teaching_override:route_assisted_correction"] : []);
     const captured = JSON.parse(receipt!.intentVersion);
     expect(captured.decisionInput).not.toHaveProperty("learningPhase");
     expect(captured.teaching.decision).toEqual(expectedCanonical);
-    expect(captured.teachingOverride).toMatchObject({ rule: "route_assisted_correction", observationId: helped.id, from: expectedCanonical, to: routeFocus });
+    if (expected.override) expect(captured.teachingOverride).toEqual({ rule: "route_assisted_correction",
+      observationId: helped.id, from: expectedCanonical, to: routeFocus });
+    else expect(captured).not.toHaveProperty("teachingOverride");
   }
 });

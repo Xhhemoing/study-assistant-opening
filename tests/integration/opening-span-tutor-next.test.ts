@@ -80,6 +80,7 @@ it("keeps explicit next scoped to its origin despite two delivered hints and exa
   const [activity] = await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${result.session.activityId}`;
   expect(activity!.goal_json.tutorNextAction.observationIds).toEqual([latest.observed.id]);
   const [receipt] = await sql`SELECT receipt FROM opening_learning_decisions WHERE target_id=${result.session.activityId} AND layer='activity'`;
+  expect(receipt!.receipt.policyVersion).toBe("next-learning-step-2/span-tutor-execution-2");
   expect(receipt!.receipt.candidates).toContainEqual(expect.objectContaining({ reasonCodes: expect.arrayContaining(["verified_incorrect"]),
     evidenceRefs: [`observation:${latest.observed.id}`] }));
   const captured = JSON.parse(receipt!.receipt.intentVersion);
