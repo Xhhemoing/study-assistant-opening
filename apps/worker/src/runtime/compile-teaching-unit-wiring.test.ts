@@ -482,6 +482,12 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     // Preserve formula provenance without treating a citation as a correctness check.
     expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
+      citationBinding: {
+        blockId: writtenBlocks.find((b) => b.type === "formula")!.id,
+        role: "teach", status: "bound",
+        refs: [{ sourceId: SOURCE, sourceVersion: 1, chunkId: CHUNK, page: 1 }],
+        factualSupport: "unverified",
+      },
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hints: rankHints, hidden: true });
