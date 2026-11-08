@@ -30,7 +30,7 @@ async function seed(withKey = true) {
   await content.publishActivitySpec(f.scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0,
     expectedRevisionNumber: 1, revisionNumber: 1, blockOrder: [
       { blockId, blockType: "prompt", role: "prompt", position: 0 },
-      ...(withKey ? [{ blockId: keyId, blockType: "answer_key", role: "answer_key", position: 1 }] : []),
+      ...(withKey ? [{ blockId: keyId, blockType: "answer_key", role: "answer_key" as const, position: 1 }] : []),
     ], sourceRefs: [{ sourceId: base.sourceId, chunkId: base.chunkId, version: 1 }] });
   const service = createOpeningAttemptService(f.sql);
   const start = () => service.create(f.scope, { sessionId: base.sessionId, clientKey: randomUUID(),
