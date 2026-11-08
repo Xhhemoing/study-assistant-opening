@@ -84,6 +84,49 @@ it("projects a real binding into a navigable URL, restores its checkpoint and le
   expect(before).toEqual({ activities: 1, jobs: 1, outbox: 1 });
 });
 
+it("restores the real persisted continuation after completing a section without completing its task", async () => {
+  const courseId = await course(), selected = await task(courseId), request = input(selected);
+  const root = await teaching().create(f.scope, request);
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${root.id}`;
+  const next = await teaching().create(f.scope, request);
+  expect(next.id).not.toBe(root.id);
+  const [stored] = await f.sql`SELECT create_intent FROM opening_teaching_activities WHERE id=${next.id}`;
+  expect(stored!.create_intent.continuesActivityId).toBe(root.id);
+  expect((await readTask(selected.id)).teachingTarget).toEqual({ activityId: next.id, courseId, requirementKey: null });
+  const before = await counts(), api = client();
+  expect(await openCourseStudy(api, { ...options(courseId), taskId: selected.id })).toEqual({ kind: "activity", activity: next });
+  expect(api.listTeachingActivities).not.toHaveBeenCalled(); expect(api.createTeachingActivity).not.toHaveBeenCalled();
+  expect(await counts()).toEqual(before);
+});
+it("waits for explicit confirmation on a fully completed lineage and creates one idempotent successor", async () => {
+  const courseId = await course(), selected = await task(courseId), request = input(selected);
+  const root = await teaching().create(f.scope, request);
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${root.id}`;
+  const api = client(), pending = await readTask(selected.id);
+  expect(pending.teachingContinuation).toEqual({ activityId: root.id, courseId });
+  expect(await openCourseStudy(api, { ...options(courseId), taskId: selected.id })).toEqual({ kind: "continuation-choice", task: pending, tailActivityId: root.id });
+  expect(api.createTeachingActivity).not.toHaveBeenCalled();
+  const [confirmed, concurrent] = await Promise.all([
+    openCourseStudy(api, { ...options(courseId), taskId: selected.id, confirmContinuation: root.id }),
+    openCourseStudy(api, { ...options(courseId), taskId: selected.id, confirmContinuation: root.id }),
+  ]);
+  expect(confirmed.kind).toBe("activity");
+  if (confirmed.kind !== "activity" || concurrent.kind !== "activity") throw new Error("expected successor");
+  expect(concurrent.activity.id).toBe(confirmed.activity.id);
+  const confirmation = { ...request, createIntent: { ...request.createIntent, expectedTail: root.id } };
+  const [again, twice] = await Promise.all([teaching().create(f.scope, confirmation, { enqueueCompile: true }), teaching().create(f.scope, confirmation, { enqueueCompile: true })]);
+  expect(again.id).toBe(confirmed.activity.id); expect(twice.id).toBe(confirmed.activity.id);
+  expect((await readTask(selected.id)).status).toBe("pending");
+  expect((await readTask(selected.id)).teachingTarget?.activityId).toBe(confirmed.activity.id);
+  expect(await counts()).toEqual({ activities: 2, jobs: 1, outbox: 1 });
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${confirmed.activity.id}`;
+  await expect(teaching().create(f.scope, confirmation)).rejects.toMatchObject({ code: "CONFLICT" });
+  const allCompleted = await readTask(selected.id);
+  expect(allCompleted.teachingContinuation).toEqual({ activityId: confirmed.activity.id, courseId });
+  const next = await openCourseStudy(api, { ...options(courseId), taskId: selected.id, confirmContinuation: confirmed.activity.id });
+  expect(next.kind).toBe("activity");
+  expect(await counts()).toEqual({ activities: 3, jobs: 2, outbox: 2 });
+});
 it.each(["active", "completed"])("reports conflicting persisted task bindings with a %s root rather than choosing latest", async rootStatus => {
   const courseId = await course(), selected = await task(courseId), request = input(selected);
   const root = await teaching().create(f.scope, request);
@@ -219,11 +262,13 @@ it.each(["completed", "skipped", "deleted", "reassociated", "archived"])("does n
   else await f.sql`UPDATE opening_teaching_activities SET status=${change} WHERE id=${activity.id}`;
   expect(await readTask(selected.id)).not.toHaveProperty("teachingTarget");
   const projected = await readTask(selected.id);
-  if (change !== "deleted") expect(projected.teachingTargetUnavailable).toBe("unavailable_binding");
+  if (change === "completed") expect(projected.teachingContinuation).toEqual({ activityId: activity.id, courseId });
+  else if (change !== "deleted") expect(projected.teachingTargetUnavailable).toBe("unavailable_binding");
   const before = await counts(), api = client();
   await expect(openCourseStudy(api, { ...options(courseId), taskId: url.searchParams.get("task")!, activityId: url.searchParams.get("activity")! }))
-    .rejects.toThrow(change === "deleted" ? "目标已变化" : "原任务与记录保留");
-  if (change !== "deleted") await expect(openCourseStudy(api, { ...options(courseId), taskId: selected.id })).rejects.toThrow("原任务与记录保留");
+    .rejects.toThrow(change === "deleted" || change === "completed" ? "目标已变化" : "原任务与记录保留");
+  if (change === "completed") expect(await openCourseStudy(api, { ...options(courseId), taskId: selected.id })).toEqual({ kind: "continuation-choice", task: projected, tailActivityId: activity.id });
+  else if (change !== "deleted") await expect(openCourseStudy(api, { ...options(courseId), taskId: selected.id })).rejects.toThrow("原任务与记录保留");
   expect(api.getTeachingActivity).not.toHaveBeenCalled();
   expect(api.listTeachingActivities).not.toHaveBeenCalled();
   expect(api.createTeachingActivity).not.toHaveBeenCalled();

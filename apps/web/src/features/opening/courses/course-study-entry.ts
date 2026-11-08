@@ -5,7 +5,7 @@ import { buildStartLearningCreateInput } from "../teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
-export type CourseStudyEntry = { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+export type CourseStudyEntry = { kind: "continuation-choice"; task: TaskItem; tailActivityId: string } | { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
 
 function assertStaticLessonAvailable(activity: TeachingActivity): void {
   if (activity.staticLessonUnavailable) throw new Error("原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
@@ -36,7 +36,7 @@ function assertTaskRequirement(task: TaskItem, activity: TeachingActivity): Teac
 /** Course/task admission precedes every targeted resume; failed resume never creates a replacement. */
 export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity" | "listTeachingActivities" | "listTasks" | "createTeachingActivity">, options: {
   courseId: string; courseTitle: string; activityId?: string; taskId?: string; retestId?: string;
-  compilerEnabled: boolean; teachingEnabled?: boolean; archived: boolean; sourceIds: readonly string[];
+  compilerEnabled: boolean; teachingEnabled?: boolean; archived: boolean; sourceIds: readonly string[]; confirmContinuation?: string;
 }, routeApi?: Pick<CourseRouteClient, "task" | "start">): Promise<CourseStudyEntry> {
   if (options.archived) return { kind: "practice" };
   const enabled = options.teachingEnabled !== false;
@@ -59,6 +59,12 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       : "任务原先关联的学习活动暂不可用；请返回课程核对，未创建替代活动，原任务与记录保留。");
     // Only the freshly read server projection can bind an explicit activity to this task.
     // Client-key prefixes alone are not binding evidence (onboarding also uses a different key).
+    const continuation = task.teachingContinuation;
+    if (continuation) {
+      if (continuation.courseId !== options.courseId || task.retest || options.activityId) throw new Error(TARGET_CHANGED);
+      if (!options.confirmContinuation) return { kind: "continuation-choice", task, tailActivityId: continuation.activityId };
+      if (options.confirmContinuation !== continuation.activityId) throw new Error(TARGET_CHANGED);
+    } else if (options.confirmContinuation && !task.teachingTarget) throw new Error(TARGET_CHANGED);
     const target = task.teachingTarget;
     if (options.activityId && (task.suggestionKind === "review_cards" || target?.activityId !== options.activityId)) throw new Error(TARGET_CHANGED);
     if (enabled && routeApi && task.suggestionKind !== "review_cards") {
@@ -66,6 +72,7 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       if (context.managed) {
         if (context.courseId !== options.courseId || context.taskId !== task.id) throw new Error(TARGET_CHANGED);
         if (!context.available) throw new Error(context.reason ?? "这项路线任务暂不可开始，原任务与记录保留。");
+        if (continuation) throw new Error(TARGET_CHANGED);
         if (!target) {
           if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
           const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
@@ -94,6 +101,7 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     // unrelated course progress must not be substituted for this task.
     if (!enabled || !options.compilerEnabled) return { kind: "practice", task };
     const input = buildStartLearningCreateInput({ localDate: "", courseId: options.courseId, taskId: task.id, courseTitle: task.title });
+    if (continuation) input.createIntent = { ...input.createIntent, expectedTail: continuation.activityId };
     const created = assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId);
     return activityEntry(assertTaskRequirement(task, created));
   }

@@ -1,4 +1,5 @@
 import type { Scope } from "@aistudy/contracts";
+import { isDeepStrictEqual } from "node:util";
 import { compareCurrentLearningActivities, selectCurrentLearningActivity } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 
@@ -31,6 +32,65 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       placeholder: span ? !row.session_id : row.intent_kind === "course_continue" && Number(row.content_version) === 0 };
   });
 }
+export type OpeningTaskTeachingBinding = { kind: "unbound" } | { kind: "unavailable"; reason: "conflicting_binding" | "unavailable_binding" }
+  | { kind: "current" | "continuation"; activityId: string; courseId: string };
+/** Persisted edges, not timestamps or task-looking keys, define a single task lineage. */
+export async function readOpeningTaskTeachingBinding(db: Db, scope: Scope, courseId: string, taskId: string): Promise<OpeningTaskTeachingBinding> {
+  const tasks = await db`SELECT t.id,t.client_key,t.origin,a.id AS activity_id,a.course_id,a.status,a.create_intent,a.client_key AS activity_client_key
+    FROM opening_tasks t JOIN workspaces w ON w.id=t.workspace_id AND w.owner_user_id=t.owner_user_id
+    LEFT JOIN opening_teaching_activities a ON a.workspace_id=t.workspace_id AND a.owner_user_id=t.owner_user_id
+      AND ((a.create_intent->>'source'='task' AND lower(a.create_intent->>'taskId')=t.id::text)
+        OR (t.origin IN ('manual','course_seed') AND t.client_key='first-learning-activity:' || a.id::text
+          AND a.create_intent->>'source'='onboarding' AND a.client_key LIKE 'first-learning:%'))
+    WHERE t.id::text=${taskId} AND t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId}
+      AND t.course_id=${courseId} AND t.status='pending'`;
+  const unavailable = { kind: "unavailable", reason: "unavailable_binding" } as const;
+  const conflict = { kind: "unavailable", reason: "conflicting_binding" } as const;
+  if (!tasks.length) return unavailable;
+  const onboardingId = ["manual", "course_seed"].includes(String(tasks[0]!.origin)) && typeof tasks[0]!.client_key === "string"
+    && tasks[0]!.client_key.startsWith("first-learning-activity:") ? tasks[0]!.client_key.slice("first-learning-activity:".length) : null;
+  const rows = tasks.filter(row => row.activity_id);
+  if (!rows.length) return onboardingId !== null ? unavailable : { kind: "unbound" };
+  if (onboardingId !== null && !rows.some(row => row.activity_id === onboardingId)) return unavailable;
+  const byId = new Map(rows.map(row => [String(row.activity_id), row]));
+  const children = new Map<string, string>();
+  const roots: string[] = [];
+  for (const row of rows) {
+    if (row.course_id !== courseId) return unavailable;
+    const id = String(row.activity_id), parent = row.create_intent?.continuesActivityId;
+    if (parent === undefined) roots.push(id);
+    else {
+      if (typeof parent !== "string" || !byId.has(parent) || children.has(parent)) return conflict;
+      const previous = byId.get(parent)!;
+      if (previous.status !== "completed" || row.create_intent?.source !== "task"
+        || String(row.create_intent?.taskId).toLowerCase() !== taskId.toLowerCase()
+        || previous.create_intent?.source !== "task" || String(previous.create_intent?.taskId).toLowerCase() !== taskId.toLowerCase()) return conflict;
+      children.set(parent, id);
+    }
+  }
+  if (roots.length !== 1) return conflict;
+  const root = byId.get(roots[0]!)!;
+  if ((rows.length > 1 || root.status === "completed") && onboardingId === null
+    && (root.activity_client_key !== `task:${taskId}` || root.create_intent?.source !== "task"
+      || String(root.create_intent?.taskId).toLowerCase() !== taskId.toLowerCase())) return rows.length > 1 ? conflict : { kind: "unavailable", reason: "unavailable_binding" };
+  for (const row of rows) {
+    const parent = row.create_intent?.continuesActivityId;
+    if (parent !== undefined && (!isDeepStrictEqual(row.create_intent, { ...root.create_intent, continuesActivityId: parent })
+      || row.activity_client_key !== `${root.activity_client_key}:next:${parent}`)) return conflict;
+  }
+  const visited = new Set<string>();
+  let tail = roots[0]!;
+  while (children.has(tail)) {
+    if (visited.has(tail)) return conflict;
+    visited.add(tail); tail = children.get(tail)!;
+  }
+  visited.add(tail);
+  if (visited.size !== rows.length) return conflict;
+  const last = byId.get(tail)!;
+  if (["active", "paused"].includes(String(last.status))) return { kind: "current", activityId: tail, courseId };
+  if (last.status === "completed" && onboardingId === null && rows.every(row => row.status === "completed")) return { kind: "continuation", activityId: tail, courseId };
+  return unavailable;
+}
 /** Read-only identity owner. Content, authorization and receipts stay with their existing readers. */
 export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, courseId: string,
   reference: OpeningCurrentLearningReference = {}, options: { spanOnly?: boolean; retestId?: string } = {}): Promise<OpeningCurrentLearningActivity | null> {
@@ -56,24 +116,9 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
     references.push(String(session.activity_id));
   }
   if (reference.taskId != null) {
-    // Do not filter closed activities here: a closed explicit binding must block
-    // fallback. Task-looking client keys alone are not binding evidence.
-    const tasks = await db`SELECT t.id,t.client_key,t.origin,a.id AS activity_id FROM opening_tasks t
-      JOIN workspaces w ON w.id=t.workspace_id AND w.owner_user_id=t.owner_user_id
-      LEFT JOIN opening_teaching_activities a ON a.workspace_id=t.workspace_id AND a.owner_user_id=t.owner_user_id
-        AND ((a.create_intent->>'source'='task' AND lower(a.create_intent->>'taskId')=t.id::text)
-          OR (t.origin IN ('manual','course_seed') AND t.client_key='first-learning-activity:' || a.id::text
-            AND a.create_intent->>'source'='onboarding' AND a.client_key LIKE 'first-learning:%'))
-      WHERE t.id::text=${reference.taskId} AND t.workspace_id=${scope.workspaceId}
-        AND t.owner_user_id=${scope.ownerUserId} AND t.course_id=${courseId} AND t.status='pending'`;
-    if (!tasks.length) return null;
-    const ids = [...new Set(tasks.flatMap(row => {
-      const onboardingId = ["manual", "course_seed"].includes(String(row.origin)) && typeof row.client_key === "string"
-        && row.client_key.startsWith("first-learning-activity:") ? row.client_key.slice("first-learning-activity:".length) : null;
-      return [...(row.activity_id ? [String(row.activity_id)] : []), ...(onboardingId !== null ? [onboardingId] : [])];
-    }))];
-    if (ids.length > 1) return null;
-    references.push(...ids);
+    const binding = await readOpeningTaskTeachingBinding(db, scope, courseId, reference.taskId);
+    if (binding.kind === "unavailable" || binding.kind === "continuation") return null;
+    if (binding.kind === "current") references.push(binding.activityId);
   }
   const selected = selectCurrentLearningActivity(await candidates(db, scope, courseId,
     { ...options, retestReferences, references, sessionId: reference.sessionId }), courseId, references);

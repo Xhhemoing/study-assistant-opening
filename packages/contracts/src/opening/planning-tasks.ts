@@ -41,6 +41,8 @@ const taskItemObjectSchema = z.object({
   retest: taskRetestProjectionSchema.nullable().optional(),
   /** Present only for an owned, course-matched resumable teaching activity. Always re-read on entry. */
   teachingTarget: taskTeachingTargetSchema.optional(),
+  /** Response-only completed lineage tail; requires a new explicit user confirmation. */
+  teachingContinuation: z.object({ activityId: uuidSchema, courseId: uuidSchema }).strict().optional(),
   /** A persisted binding exists but must not resume, select latest or create a replacement. */
   teachingTargetUnavailable: z.enum(["conflicting_binding", "unavailable_binding"]).optional(),
   /** Adaptive planning (0061); omitted when unset. */
@@ -55,8 +57,8 @@ const taskItemObjectSchema = z.object({
   /** Planners must not place the task before this instant (deferral). */
   notBefore: isoDateTimeSchema.optional(),
 }).strict();
-function exclusiveTeachingTarget(value: { teachingTarget?: unknown; teachingTargetUnavailable?: unknown }, ctx: z.RefinementCtx) {
-  if (value.teachingTarget !== undefined && value.teachingTargetUnavailable !== undefined) {
+function exclusiveTeachingTarget(value: { teachingTarget?: unknown; teachingTargetUnavailable?: unknown; teachingContinuation?: unknown }, ctx: z.RefinementCtx) {
+  if ([value.teachingTarget, value.teachingTargetUnavailable, value.teachingContinuation].filter(item => item !== undefined).length > 1) {
     ctx.addIssue({ code: "custom", path: ["teachingTargetUnavailable"], message: "An unavailable binding cannot also expose a teaching target" });
   }
 }

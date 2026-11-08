@@ -16,6 +16,14 @@ it.each(["conflicting_binding", "unavailable_binding"])("accepts explicit %s wit
     expect(schema.safeParse({ ...input, teachingTarget }).success).toBe(false);
   }
 });
+it("accepts a completed lineage tail only as an exclusive response projection", () => {
+  const teachingContinuation = { activityId: id, courseId: id };
+  for (const schema of [taskItemSchema, taskCreateResultSchema]) {
+    expect(schema.parse({ ...task, teachingContinuation })).toEqual({ ...task, teachingContinuation });
+    expect(schema.safeParse({ ...task, teachingContinuation, teachingTarget }).success).toBe(false);
+    expect(schema.safeParse({ ...task, teachingContinuation, teachingTargetUnavailable: "unavailable_binding" }).success).toBe(false);
+  }
+});
 it("rejects null, unknown states and fabricated target identities", () => {
   for (const teachingTargetUnavailable of [null, "unknown", "", 1]) {
     expect(taskItemSchema.safeParse({ ...task, teachingTargetUnavailable }).success).toBe(false);

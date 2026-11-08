@@ -22,7 +22,7 @@ import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { withTaskPlanningFields } from "./opening-task-fields";
 import { recordOpeningPlanFeedback } from "./opening-plan-feedback";
-import { readOpeningCurrentLearningActivity } from "./opening-current-learning-activity";
+import { readOpeningCurrentLearningActivity, readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
 
 import { recordOpeningPlanDraftDecision } from "./opening-plan-decision";
 
@@ -190,12 +190,16 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           && typeof row.client_key === "string" && row.client_key.startsWith("first-learning-activity:");
         const references = [...new Set([...ids, ...(onboardingReference ? [String(row.client_key).slice("first-learning-activity:".length)] : [])])];
         if (!references.length) { tasks.push(task); continue; } // True absence keeps legacy creation.
-        if (references.length > 1) { tasks.push({ ...task, teachingTargetUnavailable: "conflicting_binding" }); continue; }
         if (!task.courseId || onboardingReference && !row.onboarding_binding_exists) {
           tasks.push({ ...task, teachingTargetUnavailable: "unavailable_binding" }); continue;
         }
-        const current = await readOpeningCurrentLearningActivity(sql, scope, task.courseId, { taskId: task.id });
-        if (!current || current.activityId !== references[0]) {
+        const binding = await readOpeningTaskTeachingBinding(sql, scope, task.courseId, task.id);
+        if (binding.kind === "continuation" && !task.retest) {
+          tasks.push({ ...task, teachingContinuation: { activityId: binding.activityId, courseId: task.courseId } }); continue;
+        }
+        if (binding.kind === "unavailable") { tasks.push({ ...task, teachingTargetUnavailable: binding.reason }); continue; }
+        const current = binding.kind === "current" ? await readOpeningCurrentLearningActivity(sql, scope, task.courseId, { activityId: binding.activityId }) : null;
+        if (!current) {
           tasks.push({ ...task, teachingTargetUnavailable: "unavailable_binding" }); continue;
         }
         const [target] = await sql`SELECT id AS teaching_activity_id,course_id AS teaching_course_id,goal_json AS teaching_goal_json
