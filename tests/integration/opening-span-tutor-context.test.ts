@@ -7,7 +7,6 @@ import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tu
 import { prepareTutorNextAction } from "../../apps/worker/src/jobs/tutor-next-action";
 import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptRepository } from "@aistudy/database";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
-import { reserveSpanTutorActivityBudget } from "../../packages/database/src/repositories/opening-span-tutor-budget";
 import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision, spanTutorQuestionInScope } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
