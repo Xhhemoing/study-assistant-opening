@@ -1,9 +1,14 @@
 import type { TaskItem, TeachingActivity, TeachingActivityCreateInput } from "@aistudy/contracts";
+import { compareCurrentLearningActivities, selectCurrentLearningActivity } from "@aistudy/domain";
+
+function courseStudyPlaceholder(row: TeachingActivity): boolean {
+  return row.intentKind === "course_continue" && row.contentVersion === 0 && !row.staticLesson;
+}
 
 /** Course membership is authoritative; a workspace's latest activity is never a fallback. */
 export function courseStudyActivities(rows: readonly TeachingActivity[], courseId: string): TeachingActivity[] {
-  return rows.filter(row => row.courseId === courseId && !(row.intentKind === "course_continue" && row.contentVersion === 0))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+  return rows.filter(row => row.courseId === courseId && !courseStudyPlaceholder(row))
+    .sort(compareCurrentLearningActivities);
 }
 
 export function assertCourseStudyActivity(activity: TeachingActivity, courseId: string): TeachingActivity {
@@ -11,8 +16,10 @@ export function assertCourseStudyActivity(activity: TeachingActivity, courseId: 
   return activity;
 }
 
-export function currentCourseActivity(rows: readonly TeachingActivity[], courseId: string): TeachingActivity | null {
-  return courseStudyActivities(rows, courseId).find(row => row.status === "active" || row.status === "paused") ?? null;
+export function currentCourseActivity(rows: readonly TeachingActivity[], courseId: string, references: readonly string[] = []): TeachingActivity | null {
+  const selected = selectCurrentLearningActivity(rows.map(row => ({ ...row,
+    placeholder: courseStudyPlaceholder(row) })), courseId, references);
+  return selected ? rows.find(row => row.id === selected.id)! : null;
 }
 
 export function courseStudyTasks(rows: readonly TaskItem[], courseId: string, now = new Date()): TaskItem[] {

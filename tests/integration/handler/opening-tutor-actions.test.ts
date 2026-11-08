@@ -25,13 +25,16 @@ let courseId = "";
 let sessionId = "";
 let otherCookie = "";
 
-// Fixed version protocol: the restored writer must pass all three real
-// evaluator/HTTP cases against v3 gold, especially the 1/2-prior-success cases.
+// Fixed version protocol: the combined v6 writer shares v3's D5 gold for all
+// three real evaluator/HTTP cases, especially the 1/2-prior-success cases.
 function assistedSuccessGold(policyVersion: string) {
   const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
   const clarify = { kind: "clarify", problemRef: null } as const;
   switch (policyVersion) {
+    // v5 adds D4 cycles but keeps bridge v2 ordinary policy; D5 stays paused.
+    case "next-learning-step-5":
     case "next-learning-step-2": return [variant, clarify, clarify] as const;
+    case "next-learning-step-6":
     case "next-learning-step-3": return [variant, variant, variant] as const;
     default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
   }
@@ -255,7 +258,7 @@ describe("K02a tutor-actions route", () => {
   });
 
   it.each([0, 1, 2])("uses explicit v3 gold for latest assisted server-correct head after %i independent successes", async count => {
-    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
+    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-6");
     const fixture = await scoredCourse();
     for (let index = 0; index < count; index++) await fixture.answer(index);
     const { observation, link } = await fixture.answer(count, true);

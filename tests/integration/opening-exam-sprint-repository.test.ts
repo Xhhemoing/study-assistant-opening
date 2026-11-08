@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ExamPack, ExamSprintCommand, ExamSprintOverview } from "@aistudy/contracts";
 import { createOpeningExamSprintRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { EXAM_SPRINT_PACK } from "../../packages/domain/src/opening/exam-sprint/catalog";
+import { prepareSprintLesson } from "../../apps/web/src/features/opening/exam-sprint/lesson-navigation";
 
 const pack: ExamPack = {
   id: "sprint-fixture", version: "1", title: "Fixture", description: "Reviewed test pack",
@@ -42,6 +44,84 @@ async function countRows() {
 }
 
 describe("isolated exam sprint repository", () => {
+  it("retains private part declarations through a real persisted snapshot without leaking sealed rules", async () => {
+    const revised = structuredClone(pack), q = revised.questions.find(q => q.pool === "mock-a")!;
+    q.partSnapshot = { packId: revised.id, packVersion: revised.version, questionId: q.id, familyId: q.familyId,
+      questionIdentityRefId: randomUUID(), parts: [
+        { partId: "left", identityRefId: randomUUID(), requirementKey: "requirement-left", evaluator: { kind: "choice-options-v1", correctOptionIds: ["b"] } },
+        { partId: "right", identityRefId: randomUUID(), requirementKey: "requirement-right" },
+      ] };
+    const repo = createOpeningExamSprintRepository(fixture.sql, revised);
+    const input = { action: "start" as const, mode: "mock-a" as const, clientKey: key() };
+    const first = await repo.act(fixture.scope, input);
+    await repo.act(fixture.scope, { action: "answer", attemptId: first.currentAttempt!.id, answer: "a", confidence: 4, clientKey: key() });
+    const [saved] = await fixture.sql`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
+    expect((saved!.pack_snapshot as ExamPack).questions.find(q => q.id === first.currentAttempt!.questionId)?.partSnapshot).toEqual(q.partSnapshot);
+    expect((saved!.state as { attempts: Array<{ correct: boolean; resultMetadata?: unknown }> }).attempts[0]).toMatchObject({ correct: true });
+    for (const view of [await repo.read(fixture.scope), await repo.export(fixture.scope), await repo.act(fixture.scope, input)]) {
+      expect(view.attempts[0]!.correct).toBeNull();
+      expect(JSON.stringify(view)).not.toMatch(/partSnapshot|correctOptionIds|questionIdentityRefId|resultMetadata/);
+    }
+  });
+
+  it("rejects duplicate or foreign question revision part declarations at configuration admission", () => {
+    const revised = structuredClone(pack), q = revised.questions[0]!;
+    const part = { partId: "left", identityRefId: randomUUID(), requirementKey: "requirement-left" };
+    q.partSnapshot = { packId: revised.id, packVersion: revised.version, questionId: q.id, familyId: q.familyId,
+      questionIdentityRefId: randomUUID(), parts: [part, part] };
+    expect(() => createOpeningExamSprintRepository(fixture.sql, revised)).toThrow("无法校验");
+    q.partSnapshot.parts = [part]; q.partSnapshot.packVersion = "another-version";
+    expect(() => createOpeningExamSprintRepository(fixture.sql, revised)).toThrow("无法校验");
+  });
+
+  it("persists one exact conversion and receipt on replay and rejects half or foreign conversion snapshots", async () => {
+    const repo = createOpeningExamSprintRepository(fixture.sql, EXAM_SPRINT_PACK);
+    const view = await repo.act(fixture.scope, { action: "start", mode: "mock-a", clientKey: key() });
+    const intent = prepareSprintLesson(view, view.currentAttempt!.question.lessonId, true)!;
+    const input = { ...intent, clientKey: key() };
+    const before = await countRows();
+    for (const invalid of [{ ...input, packVersion: "wrong" }, { ...input, contentFingerprint: "wrong" },
+      { ...input, mappingVersion: "wrong" }, { ...input, expectedRunId: "wrong" }, { ...input, expectedAttemptId: "wrong" }]) {
+      await expect(repo.act(fixture.scope, invalid)).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    expect(await countRows()).toEqual(before);
+    const converted = await repo.act(fixture.scope, input), replay = await repo.act(fixture.scope, input);
+    expect(replay.state).toEqual(converted.state);
+    expect(converted.state.runs[0]).toMatchObject({ ...view.activeRun, completedAt: expect.any(String), conversion: {
+      attemptId: view.currentAttempt!.id, lessonId: intent.lessonId, packId: EXAM_SPRINT_PACK.id, packVersion: EXAM_SPRINT_PACK.version } });
+    expect(converted.attempts[0]).toMatchObject({ answer: null, answeredAt: null, correct: null });
+    expect(converted.state.lessonExposures).toHaveLength(1);
+    expect((await repo.export(fixture.scope)).commands).toHaveLength(2);
+    const [row] = await fixture.sql`SELECT id,state FROM opening_exam_sprints WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const state = row!.state;
+    for (const broken of [
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, runId: "foreign" } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, packVersion: "foreign" } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, attemptId: "missing" } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, lessonId: "missing" } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, exposureId: "missing" } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, convertedAt: view.activeRun!.startedAt } }] },
+      { ...state, runs: [{ ...state.runs[0], conversion: { ...state.runs[0].conversion, unknown: "injected" } }] },
+      { ...state, lessonExposures: [] }, { ...state, attempts: [{ ...state.attempts[0], help: [] }] },
+    ]) {
+      await fixture.sql`UPDATE opening_exam_sprints SET state=${fixture.sql.json(broken)} WHERE id=${String(row!.id)}`;
+      await expect(repo.read(fixture.scope)).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    const { conversion: _conversion, ...halfRun } = state.runs[0];
+    await fixture.sql`UPDATE opening_exam_sprints SET state=${fixture.sql.json({ ...state, runs: [halfRun] })} WHERE id=${String(row!.id)}`;
+    await expect(repo.read(fixture.scope)).rejects.toMatchObject({ code: "CONFLICT" });
+    await fixture.sql`UPDATE opening_exam_sprints SET state=${fixture.sql.json(state)} WHERE id=${String(row!.id)}`;
+    expect((await repo.read(fixture.scope)).state).toEqual(converted.state);
+  });
+
+  it("keeps old run JSON without conversion and never backfills a conversion on normal finish", async () => {
+    const view = await start("mock-a");
+    await repository.act(fixture.scope, { action: "finish", runId: view.activeRun!.id, clientKey: key() });
+    const [row] = await fixture.sql`SELECT state FROM opening_exam_sprints WHERE workspace_id=${fixture.scope.workspaceId}`;
+    expect(row!.state.runs[0]).not.toHaveProperty("conversion");
+    expect((await repository.read(fixture.scope)).state.runs[0]).not.toHaveProperty("conversion");
+  });
+
   it("reads and exports an initial overview without creating enrollment or exposing the answer bank", async () => {
     const view = await repository.read(fixture.scope);
     const exported = await repository.export(fixture.scope);

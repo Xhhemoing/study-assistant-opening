@@ -101,10 +101,10 @@ describe("system recommendation canonical evidence input", () => {
     const out = await read([row("helped", 301)], { helped: input(301) });
     expect(out.data[0]?.step).toMatchObject({ reasonCode: "assisted_success" });
     expect(out.data[0]?.summary).toContain("最近一次在获得帮助后答对，接下来减少帮助练习");
-    expect(domain.NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
+    expect(domain.NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-6");
   });
 
-  it.each([0, 1, 2])("uses the real restored v3 rule after %i independent successes", async priorChecks => {
+  it.each([0, 1, 2])("uses the restored assisted-success rule under v6 after %i independent successes", async priorChecks => {
     for (const assistance of ["hinted", "revealed"] as const) {
       const rows = [row("helped", 301), ...Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, 300 - i))];
       const contexts = Object.fromEntries(rows.map((r, i) => [r.id, input(301 - i)]));

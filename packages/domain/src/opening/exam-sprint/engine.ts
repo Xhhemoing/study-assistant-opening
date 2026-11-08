@@ -2,7 +2,25 @@ import type {
   ExamAttempt, ExamAttemptView, ExamExposureCoverage, ExamMode, ExamPack, ExamQuestion, ExamRun,
   ExamSkillSummary, ExamSourceRecord, ExamSprintCommand, ExamSprintOverview, ExamSprintState,
 } from "@aistudy/contracts";
+import { examQuestionPartsSchema, questionEvaluationSchema, type QuestionEvaluation, type QuestionPartAssistance } from "@aistudy/contracts";
 import { validExamLessonExposure } from "./lesson-exposure-mapping";
+
+/** Only called with a server-resolved immutable question; shape alone never grants authority. */
+export function evaluateExamQuestionParts(question: ExamQuestion, pack: Pick<ExamPack, "id" | "version">,
+  answer: string, evaluationRefId: string, assistance: QuestionPartAssistance): QuestionEvaluation | null {
+  if (!question.partSnapshot) return null;
+  const snapshot = examQuestionPartsSchema.parse(question.partSnapshot);
+  if (snapshot.packId !== pack.id || snapshot.packVersion !== pack.version || snapshot.questionId !== question.id
+    || snapshot.familyId !== question.familyId) throw new Error("Part snapshot question revision mismatch");
+  const optionIds = new Set(question.options.map(option => option.id));
+  return questionEvaluationSchema.parse({ protocolVersion: "question-evaluation-1", evaluationRefId,
+    questionIdentityRefId: snapshot.questionIdentityRefId, parts: snapshot.parts.map(part => {
+      const valid = part.evaluator && part.evaluator.correctOptionIds.every(id => optionIds.has(id)) && optionIds.has(answer);
+      return { partId: part.partId, identityRefId: part.identityRefId, requirementKey: part.requirementKey,
+        outcome: valid ? part.evaluator!.correctOptionIds.includes(answer) ? "correct" : "incorrect" : "unknown",
+        assistance: valid ? assistance : "unknown" };
+    }) });
+}
 import { snapshotExamPrediction } from "./analytics";
 import { captureExamAttemptExposures, examAttemptExposureQualification } from "./exposure-qualification";
 export { examAttemptExposureQualification } from "./exposure-qualification";
@@ -266,8 +284,38 @@ function openLesson(state: ExamSprintState, command: Extract<ExamSprintCommand, 
   if (current) captureExamAttemptExposures(current, state, pack, context?.exposureCoverage);
 }
 
+function switchToTeaching(state: ExamSprintState, command: Extract<ExamSprintCommand, { action: "switch_to_teaching" }>, pack: ExamPack, now: string, context?: ExamSelectionContext): void {
+  const run = activeRun(state), attempt = run ? currentAttempt(state, run) : null;
+  if (!run || !isMock(run.mode) || run.id !== command.expectedRunId || !attempt
+    || attempt.id !== command.expectedAttemptId || attempt.answeredAt !== null) {
+    fail("CONFLICT", "模拟或当前未提交题已改变，请重新载入；已提交答案不能转为受助作答。");
+  }
+  const question = questionFor(pack, attempt.questionId);
+  if (command.lessonId !== question.lessonId || at(now) < at(attempt.presentedAt)) fail("CONFLICT", "转教学的题目或时间无法校验。");
+  const lesson = pack.lessons.find(item => item.id === command.lessonId);
+  const mapping = lesson ? validExamLessonExposure(lesson) : null;
+  if (!mapping || command.packVersion !== pack.version || command.contentFingerprint !== mapping.contentFingerprint
+    || command.mappingVersion !== mapping.mappingVersion || command.confirmedEndScoredMock !== true) {
+    fail("CONFLICT", "串讲内容版本或已审核曝光映射无法校验，请重新载入。");
+  }
+  const exposures = state.lessonExposures ??= [];
+  const exposureId = `lesson-exposure-${exposures.length + 1}-${command.clientKey.slice(0, 60)}`;
+  exposures.push({ id: exposureId, clientKey: command.clientKey, openedAt: now, runId: run.id,
+    lessonId: lesson!.id, packId: pack.id, packVersion: pack.version, ...structuredClone(mapping) });
+  if (!attempt.help.some(help => help.kind === "solution")) attempt.help.push({ kind: "solution", at: now });
+  captureExamAttemptExposures(attempt, state, pack, context?.exposureCoverage);
+  run.completedAt = now;
+  run.conversion = { runId: run.id, packId: pack.id, packVersion: pack.version, attemptId: attempt.id,
+    lessonId: lesson!.id, exposureId, clientKey: command.clientKey, convertedAt: now,
+    contentFingerprint: mapping.contentFingerprint, mappingVersion: mapping.mappingVersion };
+}
+
 export function applyExamSprintCommand(state: ExamSprintState, command: ExamSprintCommand, pack: ExamPack, now: string, context?: ExamSelectionContext): ExamSprintState {
   const result = structuredClone(state);
+  if (command.action === "switch_to_teaching") {
+    switchToTeaching(result, command, pack, now, context);
+    return result;
+  }
   if (command.action === "open_lesson") {
     openLesson(result, command, pack, now, context);
     return result;
@@ -347,11 +395,11 @@ export function applyExamSprintCommand(state: ExamSprintState, command: ExamSpri
 
 function attemptView(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): ExamAttemptView {
   const original = questionFor(pack, attempt.questionId);
-  const { answer, explanation, hint, pool: _pool, ...question } = original;
+  const { answer, explanation, hint, pool: _pool, partSnapshot: _partSnapshot, ...question } = original;
   const run = state.runs.find(item => item.id === attempt.runId);
   const sealed = Boolean(run && isMock(run.mode) && !run.completedAt);
   const reveal = !sealed && (attempt.answeredAt !== null || attempt.help.some(help => help.kind === "solution") || Boolean(run && isMock(run.mode) && run.completedAt));
-  const { prediction, ...publicAttempt } = structuredClone(attempt);
+  const { prediction, resultMetadata: _resultMetadata, ...publicAttempt } = structuredClone(attempt);
   return {
     ...publicAttempt, ...(!sealed && prediction ? { prediction } : {}), correct: sealed ? null : attempt.correct, question: structuredClone(question),
     feedback: reveal ? { answer, explanation } : null,
@@ -400,9 +448,11 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   const lessonContents: ExamSprintOverview["lessonContents"] = active && isMock(active.mode) ? [] : lessons.flatMap(lesson => {
     const mapping = validExamLessonExposure(lesson);
     if (!mapping) return [];
-    const exposure = (state.lessonExposures ?? []).find(item => item.packId === pack.id && item.packVersion === pack.version
+    const matching = (state.lessonExposures ?? []).filter(item => item.packId === pack.id && item.packVersion === pack.version
       && (!active || item.runId === active.id)
       && item.lessonId === lesson.id && item.contentFingerprint === mapping.contentFingerprint && item.mappingVersion === mapping.mappingVersion);
+    const conversion = !active ? state.runs.at(-1)?.conversion : undefined;
+    const exposure = matching.find(item => item.id === conversion?.exposureId) ?? matching[0];
     return exposure ? [{ exposureId: exposure.id, lesson: structuredClone(lesson) }] : [];
   });
   const { attempts: _attempts, ...publicState } = state;

@@ -79,19 +79,23 @@ it.each(["independent", "unknown"] as const)("真实课程路线、恢复agenda�
   expect(continued.activity.learnerFocus).toMatchObject(expected);
 });
 
-// Manual policy gold: the restored writer must pass the shared v3 result at
-// all entries, without the bridge's route-only correction override.
+// Manual policy gold: combined v6 shares v3's D5 result at all these entries,
+// without the bridge's route-only correction override or D4 summaries.
 function assistedSuccessGold(policyVersion: string) {
   const majority = { activityKind: "reduced_help_practice", reasonCode: "assistance_dependent", focusObservationId: null } as const;
   const fallback = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null } as const;
   const correction = { activityKind: "reduced_help_practice", reasonCode: "route_assisted_correction", focusObservationId: null } as const;
   const shared = { activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null } as const;
   switch (policyVersion) {
+    // D4 summaries are not supplied here: v5 retains v2 route correction,
+    // while historical v3 keeps its own explicit shared-policy gold below.
+    case "next-learning-step-5":
     case "next-learning-step-2": return [
       { canonical: majority, route: majority, override: false },
       { canonical: fallback, route: correction, override: true },
       { canonical: fallback, route: correction, override: true },
     ] as const;
+    case "next-learning-step-6":
     case "next-learning-step-3": return [
       { canonical: shared, route: shared, override: false },
       { canonical: shared, route: shared, override: false },
@@ -102,7 +106,7 @@ function assistedSuccessGold(policyVersion: string) {
 }
 
 it.each([0, 1, 2])("最新受助判对、之前%d次独立判对：按显式版本分别断言canonical和路线最终值", async priorChecks => {
-  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-3");
+  expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-6");
   const { route, scope, courseId, request, observe, canonical, next } = await routeWithSpanEvidence();
   for (const problemId of ["span-reserved-20261021-q02", "span-reserved-20261021-q01"].slice(0, priorChecks)) await observe(problemId, "independent");
   const helped = await observe("span-reserved-fraction", "hinted");

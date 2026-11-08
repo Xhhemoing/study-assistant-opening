@@ -52,7 +52,7 @@ describe("tutor next action orchestration", () => {
     expect(deps.assertCurrent).toHaveBeenCalledWith(scope, saved);
     expect(executions).toEqual([]);
   });
-  it("replays an exact v2 operation rather than replacing it with the restored v3 suggestion", async () => {
+  it("replays an exact v2 operation rather than replacing it with the combined v6 suggestion", async () => {
     const saved = historicalContext();
     saved.historicalDecision = { activityKind: "diagnose", reasonCode: "needs_check", focusObservationId: null };
     saved.decisionInput = { observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation({ id: "prior" })], wantsFullExplanation: false };
@@ -123,7 +123,7 @@ describe("tutor next action orchestration", () => {
     expect(result).toMatchObject({ action: { activityId: "activity", sessionId: "session" }, decision: { activityKind: kind }, resumed: false });
   });
 
-  it.each([0, 1, 2])("shares the restored v3 assisted-success decision with agenda after %i earlier independent successes", async priorChecks => {
+  it.each([0, 1, 2])("shares the combined v6 assisted-success decision with agenda after %i earlier independent successes", async priorChecks => {
     for (const assistance of ["hinted", "revealed"] as const) {
       const observations = [observation({ assistance, independentAttempt: "no" }),
         ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}`, attemptedAt: `2026-10-${24 + i}T00:00:00Z` }))];
@@ -159,6 +159,19 @@ describe("tutor next action orchestration", () => {
     const unavailableAction = { message: "题族已用完，普通练习不标作未见检查。", label: "继续普通练习", href: "/opening/courses/course/study/span?move=self-independent" };
     const { deps, executions } = service(context({ unavailableAction }));
     expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, choice: unavailableAction });
+    expect(executions).toEqual([]);
+  });
+  it.each(["new", "early_resume", "execute_resume"])("keeps a server remediation choice ahead of the %s branch", async branch => {
+    const unavailableAction = { message: "两轮有据纠偏后，请换讲法、重新诊断或暂缓。没有新增活动。", label: "明确换方式",
+      href: "/opening/courses/course/study" };
+    const base = context({ unavailableAction, ...(branch === "new" ? {} : { resume: { activityId: "old", sessionId: "session", href: "/existing" } }),
+      ...(branch === "execute_resume" ? { resumeRequiresExecution: true } : {}) });
+    base.decisionInput.remediationCycles = { completedCycles: ["one", "two"].map(failureRootId => ({ failureRootId,
+      persistentDeliveredAssistance: true, repeatedVerifiedError: false, evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`] })) };
+    const { deps, executions } = service(base);
+    expect(await prepareTutorNextAction(deps, scope, request)).toMatchObject({ action: null, resumed: false,
+      choice: unavailableAction, decision: { reasonCode: "remediation_limit" } });
+    expect(deps.assertCurrent).toHaveBeenCalledWith(scope, base);
     expect(executions).toEqual([]);
   });
   it("executes a reserved resume that still needs its actual attempt allocated", async () => {

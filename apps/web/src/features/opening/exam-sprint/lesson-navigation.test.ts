@@ -25,6 +25,31 @@ describe("sprint lesson navigation", () => {
     expect(sprintLessonUnavailableReason(data, lesson.id)).toContain("交卷");
   });
 
+  it("requires explicit confirmation before conversion and navigates only with the committed matching conversion receipt", () => {
+    const data = fixture();
+    data.activeRun = { id: "mock-1", mode: "mock-a", questionIds: ["q"], startedAt: data.state.startedAt, deadlineAt: null, completedAt: null };
+    data.currentAttempt = { id: "attempt", runId: "mock-1", questionId: "q", presentedAt: data.state.startedAt,
+      answeredAt: null, answer: null, correct: null, confidence: null, durationSeconds: null, help: [], errorCause: null,
+      feedback: null, hint: null, independent: false, question: { id: "q", topicId: lesson.topicId, lessonId: lesson.id,
+        skillId: "skill", familyId: "family", difficulty: "foundation", prompt: "Q", options: [], estimatedMinutes: 1 } };
+    expect(prepareSprintLesson(data, lesson.id)).toBeNull();
+    expect(sprintLessonUnavailableReason(data, lesson.id)).toBeNull();
+    const intent = prepareSprintLesson(data, lesson.id, true)!;
+    expect(intent).toMatchObject({ action: "switch_to_teaching", confirmedEndScoredMock: true, expectedRunId: "mock-1", expectedAttemptId: "attempt" });
+    expect(confirmedSprintLesson(data, intent)).toBeNull();
+    const run = data.activeRun;
+    data.activeRun = null; data.currentAttempt = null;
+    run.completedAt = "2026-10-20T00:01:00Z";
+    run.conversion = { runId: run.id, packId: data.pack.id, packVersion: data.pack.version, attemptId: "attempt", lessonId: lesson.id,
+      exposureId: "receipt", clientKey: "conversion-key", convertedAt: run.completedAt, contentFingerprint: intent.contentFingerprint, mappingVersion: intent.mappingVersion };
+    data.state.runs = [run]; data.lessonContents = [{ exposureId: "receipt", lesson }];
+    expect(confirmedSprintLesson(data, intent)?.exposureId).toBe("receipt");
+    data.lessonContents[0]!.exposureId = "unrelated";
+    expect(confirmedSprintLesson(data, intent)).toBeNull();
+    data.lessonContents[0]!.exposureId = "receipt"; run.conversion.attemptId = "other";
+    expect(confirmedSprintLesson(data, intent)).toBeNull();
+  });
+
   it("accepts only the confirmed exact content while rejecting changed identity, context or duplicate body", () => {
     const data = fixture();
     const intent = prepareSprintLesson(data, lesson.id)!;

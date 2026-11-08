@@ -71,7 +71,7 @@ export function adaptSpanHelp(level: HelpState["level"], hints: { level: SpanHin
 export function adaptSpanNext(raw: unknown, courseId: string): NextAction {
   const next = readSpanNextResult(raw, courseId);
   return next.kind === "ready" ? { href: next.href, label: next.label, alternatives: [] }
-    : { href: next.primary.href, label: next.primary.label, notice: next.message, alternatives: next.secondary ? [next.secondary] : [] };
+    : { href: next.primary.href, label: next.primary.label, notice: next.message, choiceReason: next.reason, alternatives: next.secondary ? [next.secondary] : [] };
 }
 
 /** Membership plus the key fields the learner filled, at most 200 characters. */
@@ -365,6 +365,12 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
       photo = options.photoEnabled ? { status: "none" } : null;
       return refresh();
+    },
+    async changeExplanation() {
+      if (view.next?.choiceReason !== "remediation_limit") return view;
+      if (!await save({ ...session.intent, purpose: "overview" }, spanLessonMoves("overview")[0]!.id, "active")) throw new Error("讲法还没切换，原学习位置保留，请再试一次。");
+      // The owner rebuilds this port with the saved snapshot, including its revision.
+      return view;
     },
     async pause() {
       if (!await save(session.intent, session.moveId, "paused")) throw new Error("暂停还没保存，请再试一次。");

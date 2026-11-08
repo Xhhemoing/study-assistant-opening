@@ -29,6 +29,9 @@ const result = (step: unknown) => ({
 // The read-only query passes current evidence but no phase or due-retest controls.
 // Exercise real policy outputs, not a second hand-written list of allowed codes.
 const cases = [
+  { reason: "remediation_limit", activity: "diagnose", request: input({ remediationCycles: { completedCycles: [id, olderId].map(failureRootId => ({
+    failureRootId, evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`, `observation:followup-${failureRootId}`],
+    repeatedVerifiedError: true, persistentDeliveredAssistance: false })) } }) },
   { reason: "no_evidence", activity: "diagnose", request: input() },
   { reason: "unverified_only", activity: "diagnose", request: input({ observations: [observation({ verifiedCorrect: "unknown" })] }) },
   { reason: "verified_incorrect", activity: "targeted_explain", request: input({ observations: [observation({ verifiedCorrect: "no" })] }) },
@@ -41,7 +44,7 @@ const cases = [
 ];
 
 describe("current-evidence recommendation reason compatibility", () => {
-  it("accepts the historical v3 reason and selects it again for real assisted success", () => {
+  it("accepts the historical v3 reason and selects it under v6 for real assisted success", () => {
     expect(systemQueryResultSchema.safeParse(result({ activityKind: "reduced_help_practice",
       reasonCode: "assisted_success", focusObservationId: null })).success).toBe(true);
     const step = nextLearningStep(input({ observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation({ id: olderId })] }));

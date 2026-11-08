@@ -7,7 +7,7 @@ import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tu
 import { prepareTutorNextAction } from "../../apps/worker/src/jobs/tutor-next-action";
 import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptRepository } from "@aistudy/database";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
-import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
+import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision, spanTutorQuestionInScope } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
@@ -51,7 +51,14 @@ it("prepares a real reserved question after worked teaching and preserves both i
   expect((await f.repo.read(fixture.scope, f.request))!.needsReservedIssue).not.toBe(true);
   expect(await presenter.read(fixture.scope, workedRequest)).toEqual(worked);
 });
-it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2"])(
+it("does not widen historical receipt compatibility to unknown policy/execution pairs", () => {
+  const intentVersion = JSON.stringify({ ruleDecision: { activityKind: "diagnose", focusObservationId: null, reasonCode: "needs_check" } });
+  for (const policyVersion of ["next-learning-step-7/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-1",
+    "next-learning-step-1/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-3"]) {
+    expect(spanTutorReceiptDecision({ policyVersion, intentVersion })).toBeNull();
+  }
+});
+it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2", "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2", "next-learning-step-5/span-tutor-execution-2", "next-learning-step-6/span-tutor-execution-2"])(
   "restores and replays %s by the original key without recomputing or rewriting history", async policyVersion => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;
   const originalInput = structuredClone(context.decisionInput);
@@ -61,9 +68,10 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   const session = await f.repo.execute(fixture.scope, input);
   const { createOpeningLearningDecisionsRepository } = await import("@aistudy/database");
   const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
-  // New receipts are v3; archived v1/v2 labels remain explicit compatibility fixtures.
+  // New receipts are v6 (restored D5 + D4); archived labels remain explicit
+  // compatibility fixtures, never authority to rewrite an old operation.
   const written = await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId });
-  expect(written[0]!.policyVersion).toBe("next-learning-step-3/span-tutor-execution-2");
+  expect(written[0]!.policyVersion).toBe("next-learning-step-6/span-tutor-execution-2");
   const savedDecision = policyVersion.startsWith("next-learning-step-3/")
     ? { ...input.decision, activityKind: "reduced_help_practice", reasonCode: "assisted_success" } : input.decision;
   const captured = { ...JSON.parse(written[0]!.intentVersion), ruleDecision: savedDecision };
@@ -96,7 +104,7 @@ it.each(["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/sp
   expect((await f.repo.execute(fixture.scope, { ...input, context: { ...replay, decisionInput: changedInput }, decision: changedDecision })).activityId).toBe(session.activityId);
   expect(await decisions.list(fixture.scope, { layer: "activity", targetId: session.activityId })).toEqual(receipts);
 });
-it.each(["v2", "v3"] as const)("replays the exact %s operation across the restored v3 writer without cross-operation decisions", async version => {
+it.each(["v2", "v3", "v6"] as const)("replays the exact %s operation across the combined v6 writer without cross-operation decisions", async version => {
   const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
   const learning = createOpeningLearningRepository(sql), attempts = createOpeningLearningAttemptRepository(sql);
   const answer = async (hinted: boolean) => {
@@ -136,10 +144,16 @@ it.each(["v2", "v3"] as const)("replays the exact %s operation across the restor
   expect(successor.moveId).toBe("self-faded");
   const decisions = createOpeningLearningDecisionsRepository(sql);
   const [written] = await decisions.list(scope, { layer: "activity", targetId: successor.activityId });
-  expect(written!.policyVersion).toBe("next-learning-step-3/span-tutor-execution-2");
+  expect(written!.policyVersion).toBe("next-learning-step-6/span-tutor-execution-2");
   expect(JSON.parse(written!.intentVersion)).toMatchObject({ ruleDecision: gold,
     execution: { kind: "create", moveId: "self-faded" } });
-  const decision = version === "v3" ? created!.decision! : { ...created!.decision!, activityKind: "diagnose" as const, reasonCode: "needs_check" as const };
+  const decision = version === "v2" ? { ...created!.decision!, activityKind: "diagnose" as const, reasonCode: "needs_check" as const } : created!.decision!;
+  if (version === "v3") {
+    // The historical v3 result agrees on D5 but predates the combined D4 policy.
+    await sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{policyVersion}',
+      '"next-learning-step-3/span-tutor-execution-2"'::jsonb)
+      WHERE target_id=ANY(${[successor.activityId, successor.sessionId]}::uuid[]) AND workspace_id=${scope.workspaceId}`;
+  }
   if (version === "v2") {
     // Explicit old-v2 fixture: this same assisted/independent input used to fall
     // through the majority rule to diagnose. Never install a fake current writer.
@@ -179,12 +193,12 @@ it.each(["v2", "v3"] as const)("replays the exact %s operation across the restor
   const prepared = await prepareTutorNextAction(adapter, scope, request);
   expect(prepared).toMatchObject({ resumed: true, action: { activityId: successor.activityId, sessionId: successor.sessionId },
     decision, context: { agenda: { resumable: true } } });
-  if (version === "v2") {
+  if (version !== "v6") {
     expect(prepared!.context.agenda!.decisionCurrent).toBe(false);
     expect(prepared!.context.agenda!.invalidationReasons).toContain("policy_changed");
   } else expect(prepared!.context.agenda!.invalidationReasons).not.toContain("policy_changed");
   expect(await before()).toEqual(saved);
-  // A different operation selects the restored v3 suggestion, never the old v2 decision.
+  // A different operation selects the combined v6 suggestion, never the old v2 decision.
   const fresh = await prepareTutorNextAction(adapter, scope, { ...request, operationId: `tutor-next:${randomUUID()}` });
   expect(fresh).toMatchObject({ resumed: true, decision: gold });
   expect(await before()).toEqual(saved);
@@ -340,6 +354,106 @@ it("applies explicit phases to an existing ordinary lesson without charging agai
     await f.repo.assertCurrent(fixture.scope, context);
   }
   expect(await fixture.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
+it("updates an ordinary lesson to explicit overview without issuing a question or charging, and preserves admission checks", async () => {
+  expect(spanTutorQuestionInScope("串讲")).toBe(true);
+  for (const question of ["为什么串讲", "例如串讲", "不要串讲", "请解释特征值"]) expect(spanTutorQuestionInScope(question)).toBe(false);
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent: DEFAULT_STUDY_SESSION_INTENT, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question: "串讲" }))!;
+  const decision = nextLearningStep(context.decisionInput), operationId = randomUUID();
+  expect(context).toMatchObject({ needsIntentUpdate: true, intent: { purpose: "overview" } });
+  const before = await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`;
+  await expect(f.repo.execute({ ...scope, ownerUserId: randomUUID() }, { context, decision, operationId: randomUUID() })).rejects.toThrow();
+  const updated = await f.repo.execute(scope, { context, decision, operationId });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, moveId: "overview-links", intent: { purpose: "overview" } });
+  expect(await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+  const replay = (await f.repo.read(scope, { ...f.request, question: "串讲", operationId }))!;
+  expect((await f.repo.execute(scope, { context: replay, decision, operationId })).activityId).toBe(updated.activityId);
+  const fresh = (await f.repo.read(scope, { ...f.request, question: "span 自学" }))!;
+  await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  await expect(f.repo.execute(scope, { context: fresh, decision: nextLearningStep(fresh.decisionInput), operationId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await lessons.get(scope, session.activityId)).toEqual(updated);
+});
+it.each([
+  ["self_study", "span 串讲", "overview-links"],
+  ["self_study", "span 拔高", "challenge-predict"],
+  ["overview", "span 拔高", "challenge-predict"],
+  ["challenge", "span 串讲", "overview-links"],
+  ["overview", "span 自学", "self-example"],
+  ["challenge", "span 自学", "self-example"],
+] as const)("normalizes an explicit %s mode change (%s) to a catalog move", async (purpose, question, moveId) => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId],
+    intent: { ...DEFAULT_STUDY_SESSION_INTENT, purpose }, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question }))!;
+  const updated = await f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() });
+  expect(updated).toMatchObject({ activityId: session.activityId, sessionId: session.sessionId, revision: session.revision + 1, moveId });
+  expect(await sql`SELECT id FROM opening_learning_attempts WHERE course_id=${f.courseId}`).toHaveLength(0);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId}`).toHaveLength(1);
+  expect(await sql`SELECT id FROM opening_teaching_activities WHERE course_id=${f.courseId} AND goal_json ? 'tutorBudget'`).toHaveLength(0);
+});
+async function preferenceState(courseId: string) {
+  const { sql, scope } = fixture;
+  return {
+    activities: await sql`SELECT * FROM opening_teaching_activities WHERE course_id=${courseId} ORDER BY id`,
+    attempts: await sql`SELECT * FROM opening_learning_attempts WHERE course_id=${courseId} ORDER BY id`,
+    receipts: await sql`SELECT * FROM opening_learning_decisions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    reservations: await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    history: await sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`,
+  };
+}
+it.each(["paused", "reserved", "due_retest", "source", "privacy", "authorization", "expired", "cancelled", "revision"] as const)(
+  "keeps %s admission authoritative for an overview preference update with no execution writes", async branch => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "overview" as const, explanationStyle: "full" as const };
+  let session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  if (branch === "paused" || branch === "reserved") session = await lessons.save(scope, session.activityId,
+    { expectedRevision: session.revision, intent, moveId: branch === "reserved" ? "overview-reserved" : session.moveId,
+      status: branch === "paused" ? "paused" : "active" });
+  if (branch === "due_retest") {
+    const attempt = await createSpanReservedService(sql).issue(scope,
+      { sessionId: session.sessionId, sourceId: f.sourceId, mode: "overview", clientKey: randomUUID() });
+    const observed = await createOpeningLearningRepository(sql).insertObservation(scope, { sessionId: session.sessionId,
+      courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId,
+      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), assistance: "independent",
+      outcome: "unverified", verdictSource: "self_report" });
+    const due = await createSpanDelayedRetestService(sql).schedule(scope, { observationId: observed.id, clientKey: randomUUID() });
+    await sql`UPDATE opening_retest_activities SET recommended_at=now()-interval '1 minute',not_before_at=now()-interval '1 minute',
+      scheduled_start_at=now()-interval '1 minute' WHERE id=${due.activityId}`;
+    await lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent, moveId: session.moveId, status: "completed" });
+    session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID(), retestId: due.activityId });
+  }
+  const context = (await f.repo.read(scope, { ...f.request, question: "span 慢一点" }))!;
+  expect(context.needsIntentUpdate).toBe(true);
+  if (branch === "due_retest") expect(context).toMatchObject({ dueRetestId: session.retestId, intentChangeRequiresChoice: true });
+  if (branch === "source") await sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+  if (branch === "privacy") await sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
+  if (branch === "authorization") await createWorkspacePreferencesRepository(sql).setLearningPreferences(scope,
+    { assessmentEnabled: false, retestSuggestionsEnabled: false, automaticRemindersEnabled: false });
+  if (branch === "expired") await sql`UPDATE workspace_preferences SET adaptive_planning=jsonb_set(adaptive_planning,
+    ARRAY['spanTutorGrants',${f.courseId},'expiresOn'], '"2000-01-01"'::jsonb) WHERE workspace_id=${scope.workspaceId}`;
+  if (branch === "revision") await lessons.save(scope, session.activityId,
+    { expectedRevision: session.revision, intent: { ...intent, language: "en" }, moveId: session.moveId, status: "active" });
+  const before = await preferenceState(f.courseId);
+  await expect(f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID(),
+    ...(branch === "cancelled" ? { jobLease: { jobId: randomUUID(), claimToken: randomUUID() } } : {}) }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await preferenceState(f.courseId)).toEqual(before);
+});
+it.each(["span 不要串讲", "span 不要加快", "span 为什么串讲", "span 如何拔高"])(
+  "does not turn %s into a method or preference change", async question => {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "challenge" as const, explanationStyle: "full" as const };
+  const session = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  const context = (await f.repo.read(scope, { ...f.request, question }))!;
+  expect(context).toMatchObject({ needsIntentUpdate: false, intent });
+  const before = await preferenceState(f.courseId);
+  expect(await f.repo.execute(scope, { context, decision: nextLearningStep(context.decisionInput), operationId: randomUUID() })).toEqual(session);
+  expect(await preferenceState(f.courseId)).toEqual(before);
 });
 it("does not start or resume after the account is disabled between reading and executing", async () => {
   const f = await seed(), context = (await f.repo.read(fixture.scope, f.request))!;

@@ -5,7 +5,18 @@ import { buildStartLearningCreateInput } from "../teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
-export type CourseStudyEntry = { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+export type CourseStudyEntry = { kind: "continuation-choice"; task: TaskItem; tailActivityId: string } | { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+
+function assertStaticLessonAvailable(activity: TeachingActivity): void {
+  if (activity.staticLessonUnavailable) throw new Error("原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
+}
+function activityEntry(activity: TeachingActivity): CourseStudyEntry {
+  assertStaticLessonAvailable(activity);
+  return activity.staticLesson && activity.courseId
+    ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?${new URLSearchParams({ lesson: activity.id,
+      ...(activity.staticLesson.retestId ? { retest: activity.staticLesson.retestId } : {}) })}` }
+    : { kind: "activity", activity };
+}
 
 const TASK_UNAVAILABLE = "这项任务不属于本课程、尚未到开始时间或已结束，请返回课程重新选择。";
 const TARGET_CHANGED = "任务的学习目标已变化或链接不匹配，请返回课程重新选择；原活动仍保留。";
@@ -25,7 +36,7 @@ function assertTaskRequirement(task: TaskItem, activity: TeachingActivity): Teac
 /** Course/task admission precedes every targeted resume; failed resume never creates a replacement. */
 export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity" | "listTeachingActivities" | "listTasks" | "createTeachingActivity">, options: {
   courseId: string; courseTitle: string; activityId?: string; taskId?: string; retestId?: string;
-  compilerEnabled: boolean; teachingEnabled?: boolean; archived: boolean; sourceIds: readonly string[];
+  compilerEnabled: boolean; teachingEnabled?: boolean; archived: boolean; sourceIds: readonly string[]; confirmContinuation?: string;
 }, routeApi?: Pick<CourseRouteClient, "task" | "start">): Promise<CourseStudyEntry> {
   if (options.archived) return { kind: "practice" };
   const enabled = options.teachingEnabled !== false;
@@ -43,8 +54,17 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
     if (!task) throw new Error(TASK_UNAVAILABLE);
   }
   if (task) {
+    if (task.teachingTargetUnavailable) throw new Error(task.teachingTargetUnavailable === "conflicting_binding"
+      ? "任务关联了多个学习活动，暂不可继续；请返回课程核对，原任务与记录保留。"
+      : "任务原先关联的学习活动暂不可用；请返回课程核对，未创建替代活动，原任务与记录保留。");
     // Only the freshly read server projection can bind an explicit activity to this task.
     // Client-key prefixes alone are not binding evidence (onboarding also uses a different key).
+    const continuation = task.teachingContinuation;
+    if (continuation) {
+      if (continuation.courseId !== options.courseId || task.retest || options.activityId) throw new Error(TARGET_CHANGED);
+      if (!options.confirmContinuation) return { kind: "continuation-choice", task, tailActivityId: continuation.activityId };
+      if (options.confirmContinuation !== continuation.activityId) throw new Error(TARGET_CHANGED);
+    } else if (options.confirmContinuation && !task.teachingTarget) throw new Error(TARGET_CHANGED);
     const target = task.teachingTarget;
     if (options.activityId && (task.suggestionKind === "review_cards" || target?.activityId !== options.activityId)) throw new Error(TARGET_CHANGED);
     if (enabled && routeApi && task.suggestionKind !== "review_cards") {
@@ -52,13 +72,16 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       if (context.managed) {
         if (context.courseId !== options.courseId || context.taskId !== task.id) throw new Error(TARGET_CHANGED);
         if (!context.available) throw new Error(context.reason ?? "这项路线任务暂不可开始，原任务与记录保留。");
-        if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
-        const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
-          requirementId: context.requirementId, expectedRequirementRevision: context.expectedRequirementRevision,
-          taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
-          clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
-        if (result.kind === "choice") return { kind: "route-choice", choice: result };
-        return { kind: "activity", activity: assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)) };
+        if (continuation) throw new Error(TARGET_CHANGED);
+        if (!target) {
+          if (!options.compilerEnabled) throw new Error("当前环境暂不可开始课程路线教学，请返回课程核对资料与配置；原任务保留。");
+          const result = await routeApi.start(options.courseId, { goalId: context.goalId, expectedGoalRevision: context.expectedGoalRevision,
+            requirementId: context.requirementId, expectedRequirementRevision: context.expectedRequirementRevision,
+            taskId: task.id, expectedTaskVersion: context.expectedTaskVersion, minutes: context.minutes,
+            clientKey: `course-route-task:${task.id}:${context.expectedTaskVersion}` });
+          if (result.kind === "choice") return { kind: "route-choice", choice: result };
+          return activityEntry(assertTaskRequirement(task, assertCourseStudyActivity(result.activity, options.courseId)));
+        }
       }
     }
     if (target) {
@@ -67,27 +90,35 @@ export async function openCourseStudy(api: Pick<OpeningApi, "getTeachingActivity
       if (expectedRequirement !== undefined && target.requirementKey !== expectedRequirement) throw new Error(REQUIREMENT_CHANGED);
       if (enabled && task.suggestionKind !== "review_cards") {
         const activity = assertCourseStudyActivity(await api.getTeachingActivity(target.activityId), options.courseId);
-        if (activity.id !== target.activityId || (activity.status !== "active" && activity.status !== "paused")) throw new Error(TARGET_CHANGED);
+        if (!currentCourseActivity([activity], options.courseId, [target.activityId, ...(options.activityId ? [options.activityId] : [])])) throw new Error(TARGET_CHANGED);
         if ((activity.learnerFocus?.requirementKey ?? null) !== target.requirementKey) throw new Error(REQUIREMENT_CHANGED);
-        return { kind: "activity", activity: assertTaskRequirement(task, activity) };
+        return activityEntry(assertTaskRequirement(task, activity));
       }
     }
     if (task.suggestionKind === "review_cards") return { kind: "cards", task };
     if (task.retest) return { kind: "practice", task };
+    // A genuinely unbound task retains its explicit task-key creation boundary;
+    // unrelated course progress must not be substituted for this task.
     if (!enabled || !options.compilerEnabled) return { kind: "practice", task };
     const input = buildStartLearningCreateInput({ localDate: "", courseId: options.courseId, taskId: task.id, courseTitle: task.title });
+    if (continuation) input.createIntent = { ...input.createIntent, expectedTail: continuation.activityId };
     const created = assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId);
-    return { kind: "activity", activity: assertTaskRequirement(task, created) };
+    return activityEntry(assertTaskRequirement(task, created));
   }
   // Standalone history links retain their existing behavior, but never take precedence over a task.
   if (options.activityId && enabled) {
     const activity = assertCourseStudyActivity(await api.getTeachingActivity(options.activityId), options.courseId);
-    return { kind: "activity", activity };
+    return activityEntry(activity);
   }
   const activities = enabled ? await api.listTeachingActivities() : [];
+  // A workspace list may contain another course's unavailable association. Only
+  // the selected course can block this entry; never erase its identity into create.
+  for (const activity of activities) {
+    if (activity.courseId === options.courseId && (activity.status === "active" || activity.status === "paused")) assertStaticLessonAvailable(activity);
+  }
   const current = currentCourseActivity(activities, options.courseId);
-  if (current) return { kind: "activity", activity: current };
+  if (current) return activityEntry(current);
   if (!enabled || !options.compilerEnabled) return { kind: "practice" };
   const input = buildCourseStudyInput(options.courseId, options.courseTitle, activities, options.sourceIds);
-  return { kind: "activity", activity: assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId) };
+  return activityEntry(assertCourseStudyActivity(await api.createTeachingActivity(input), options.courseId));
 }
