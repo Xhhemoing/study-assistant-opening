@@ -4,6 +4,7 @@
  */
 export const PLATFORM_NAME = "AIstudy" as const;
 export * from "./opening/current-learning-activity";
+export { compareCourseQuestionIdentity, type ResolvedCourseQuestion, type CourseQuestionComparison } from "./opening/course-question-identity";
 
 export type SummaryBand = "stable" | "usable" | "weak" | "untested";
 
