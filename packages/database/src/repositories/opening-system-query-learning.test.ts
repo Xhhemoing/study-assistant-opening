@@ -1,5 +1,6 @@
 import type { TransactionSql } from "postgres";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as domain from "@aistudy/domain";
 import { buildDecisionInput, nextLearningStep, toSnapshotEvidence, type ObservationEligibilityInput } from "@aistudy/domain";
 import { learningObservation, qualifiedInput } from "../../../domain/src/opening/learning-summary-fixtures";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
@@ -34,6 +35,7 @@ async function read(rows: ReturnType<typeof row>[], contexts: Record<string, Obs
   return out;
 }
 beforeEach(() => vi.clearAllMocks());
+afterEach(() => vi.restoreAllMocks());
 describe("system recommendation canonical evidence input", () => {
   it("uses latest usable status instead of the all-history legacy summary", async () => {
     const rows = [row("new", 301), row("old", 300)];
@@ -93,7 +95,16 @@ describe("system recommendation canonical evidence input", () => {
       .toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "newer" });
   });
 
-  it.each([0, 1, 2])("explains the latest assisted success after %i independent successes using the shared reason", async priorChecks => {
+  it("displays the historical v3 reason without enabling its policy writer", async () => {
+    vi.spyOn(domain, "nextLearningStep").mockReturnValueOnce({ activityKind: "reduced_help_practice",
+      reasonCode: "assisted_success", focusObservationId: null } as never);
+    const out = await read([row("helped", 301)], { helped: input(301) });
+    expect(out.data[0]?.step).toMatchObject({ reasonCode: "assisted_success" });
+    expect(out.data[0]?.summary).toContain("最近一次在获得帮助后答对，接下来减少帮助练习");
+    expect(domain.NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-2");
+  });
+
+  it.each([0, 1, 2])("uses the v2 rule after %i independent successes", async priorChecks => {
     for (const assistance of ["hinted", "revealed"] as const) {
       const rows = [row("helped", 301), ...Array.from({ length: priorChecks }, (_, i) => row(`prior-${i}`, 300 - i))];
       const contexts = Object.fromEntries(rows.map((r, i) => [r.id, input(301 - i)]));
@@ -102,8 +113,8 @@ describe("system recommendation canonical evidence input", () => {
           { attemptId: "attempt-2", problemId: "problem-1", delivered: true, deliveredAt: 250, level: assistance },
         ] } } });
       const out = await read(rows, contexts);
-      expect(out.data[0]?.step).toEqual({ activityKind: "reduced_help_practice", reasonCode: "assisted_success", focusObservationId: null });
-      expect(out.data[0]?.summary).toContain("最近一次在获得帮助后答对，接下来减少帮助练习");
+      expect(out.data[0]?.step).toEqual({ activityKind: priorChecks === 0 ? "reduced_help_practice" : "diagnose",
+        reasonCode: priorChecks === 0 ? "assistance_dependent" : "needs_check", focusObservationId: null });
       contexts.helped.context = { ...contexts.helped.context, version: { applicability: "unavailable" } };
       expect((await read(rows, contexts)).data[0]?.step).not.toMatchObject({ reasonCode: "assisted_success" });
     }

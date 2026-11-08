@@ -25,7 +25,8 @@ export type LegacyThinTutorAction = {
   problemRef: string | null; reason: string; evidenceIds: string[];
 };
 
-export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-3";
+// Reader-first bridge: retain v3 receipt types, but write the v2 policy only.
+export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-2";
 
 /** Four-stage selection is metadata around the existing activity policy. */
 export function learningPhaseForInput(input: Pick<NextLearningStepInput, "observations" | "dueRetest" | "learningPhase" | "phaseSource">): { phase: LearningPhase; source: "automatic" | "explicit" } {
@@ -88,10 +89,6 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   if (check("targeted_explain", latest!.verifiedCorrect === "no", "verified_incorrect", "latest_not_verified_incorrect", [`observation:${latest!.id}`]))
     return result("targeted_explain", "verified_incorrect", latest!.id);
   if (check("diagnose", observations.every(row => row.verifiedCorrect === "unknown"), "unverified_only", "has_verified_evidence", refs)) return result("diagnose", "unverified_only");
-  const assistedSuccess = latest?.verifiedCorrect === "yes"
-    && (latest.assistance === "hinted" || latest.assistance === "revealed");
-  if (check("reduced_help_practice", assistedSuccess, "assisted_success", "not_assisted_success", latest ? [`observation:${latest.id}`] : refs))
-    return result("reduced_help_practice", "assisted_success");
   const recent = observations.slice(0, 3);
   const assistedCount = recent.filter(row => row.assistance === "hinted" || row.assistance === "revealed").length;
   if (check("reduced_help_practice", assistedCount > recent.length / 2, "assistance_dependent", "no_assisted_majority", recent.map(row => `observation:${row.id}`)))
