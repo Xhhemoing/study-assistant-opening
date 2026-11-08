@@ -82,11 +82,12 @@ async function scoredCourse() {
   await sql`UPDATE courses SET intervention_settings='{"nodes":{"allowOnLowEvidence":true}}'::jsonb WHERE id=${id}`;
   await sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
     VALUES(${workspaceId},${id},'source',${sourceId},'core','private')`;
+  const learning = createOpeningLearningRepository(sql), evidence = createOpeningSkillEvidenceRepository(sql);
+  // Source admission records the real available version before graph evidence is validated.
+  const session = await learning.createSession(scope, { courseId: id, skillLabel: matrixSkill, sourceIds: [sourceId] });
   await createOpeningKnowledgeRepository(sql).replace(scope, id, { expectedVersion: 0, sourceVersions: { [sourceId]: 1 },
     snapshot: { courseId: id, version: 1, edges: [], nodes: [{ id: nodeId, courseId: id, label: matrixSkill,
       kind: 'concept', status: 'supported', evidenceChunkIds: [chunkId] }] } });
-  const learning = createOpeningLearningRepository(sql), evidence = createOpeningSkillEvidenceRepository(sql);
-  const session = await learning.createSession(scope, { courseId: id, skillLabel: matrixSkill, sourceIds: [sourceId] });
   const service = createOpeningAttemptService(sql);
   const answer = async (variant: number, assisted = false, value = "[2,3]") => {
     const attempt = await service.create(scope, { sessionId: session.id, clientKey: randomUUID(),

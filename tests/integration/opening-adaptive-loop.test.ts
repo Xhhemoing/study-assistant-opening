@@ -266,6 +266,7 @@ describe("opening adaptive loop (K02 Data)", () => {
       hasCheckedIndependent: false,
       hasAssistance: false,
       evidenceIds: [],
+      observationIds: [],
     });
   });
 
