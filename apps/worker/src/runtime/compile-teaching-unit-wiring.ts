@@ -13,16 +13,13 @@ import {
   readOpeningTeachingParentBudget,
   assertOpeningCourseRouteReady,
   readOpeningCourseRouteEvidenceRefs,
-  admitOpeningReservedCandidate,
   type OpeningBudgetRepository,
   type createOpeningPrivacyRepository,
   type createOpeningSourceChunksRepository,
 } from "@aistudy/database";
 // Repository helper shares the authoritative saved question/key projection (not a new provider channel).
 import { resolveOpeningTeachingBlindSolveQuestion } from "../../../../packages/database/src/repositories/opening-teaching-question-evaluation";
-import { readCourseRequirements } from "../../../../packages/database/src/repositories/opening-course-route-read";
 import { createCompilerProviderInput, parseModelJson, solveTeachingBlind, type TeachingBlindSolveReceipt } from "@aistudy/ai";
-import { admitReservedQuestionOutput, buildReservedQuestionProviderInput, type ReservedQuestionProducerInput } from "../../../../packages/ai/src/opening/reserved-question-producer";
 import { createDbModelGateway, scopeBudget, teachingBlindSolveConfig } from "./model-gateway";
 import { createOpeningMaterialRetriever } from "./material-retrieval";
 import { createSourcePageImages, openingPageStorage } from "./source-page-images";
@@ -84,7 +81,6 @@ export function createCompileTeachingUnitWorkerDeps(
   const teachingValidationOn = isTeachingValidationEnabled();
   const models = createDbModelGateway(sql);
   const generatorSnapshots = new WeakMap<ProviderOutput, OpeningModelSnapshot>();
-  const reservedContexts = new WeakMap<object, ReservedQuestionProducerInput>();
   const retrieveContext = createOpeningMaterialRetriever(sql, budget);
   const pageImages = shared.pageImages ?? createSourcePageImages(sql, openingPageStorage());
   const loadChunks = (ownedScope: unknown, sourceIds: string[]) => chunks.listForSources(ownedScope as Scope, sourceIds);
@@ -102,38 +98,6 @@ export function createCompileTeachingUnitWorkerDeps(
               await options.beforeSend?.();
             } });
           if (snapshot) generatorSnapshots.set(output, snapshot);
-          const pinned = reservedContexts.get(input);
-          if (pinned) {
-            const generation = generationPins.get(input);
-            if (!generation) throw Object.assign(new Error("original private generation purpose pin missing"), { code: "CONFLICT" });
-            const activityId = options.resultRef.replace(/^teaching_activity:/, "");
-            const assertPrivateCurrent = async () => {
-              const jobId = options.operationId.replace(/^compile-teaching-unit:/, "");
-              const [job] = await sql`SELECT state FROM opening_jobs WHERE id=${jobId} AND workspace_id=${scope.workspaceId}
-                AND owner_user_id=${scope.ownerUserId}`;
-              if (job?.state !== "running") throw new Error("private generation job no longer running");
-              await assertGenerationCurrent(scope, generation);
-              await assertOpeningCourseRouteReady(sql, scope, activityId);
-              await options.beforeSend?.();
-            };
-            await models.call(scope, "teaching.compile", {
-                  budget: scopeBudget(budget, scope), input: buildReservedQuestionProviderInput(pinned),
-                  operationId: `${options.operationId}:reserved`, resultRef: `reserved-generation:${activityId}`,
-                  parentBudget: options.parentBudget,
-                  beforeSend: assertPrivateCurrent,
-                  // Admission precedes settlement. Nothing persists the raw response
-                  // in a job, public config, replay body or library revision.
-                  persistResult: async privateOutput => {
-                    await admitReservedQuestionOutput(pinned, privateOutput.text, async candidate => {
-                      await assertPrivateCurrent();
-                      const { text, interaction, answer, scope: ownedScope, ...context } = candidate;
-                      return admitOpeningReservedCandidate(sql, ownedScope, activityId, context, { text, interaction, answer }, {
-                        assertPinnedContext: tx => purposes.assertSourcePurposePin(scope, generation.pin, tx),
-                      });
-                    });
-                  },
-            });
-          }
           return output;
         },
         buildProviderInput: async (scope, payload, options) => {
@@ -168,17 +132,6 @@ export function createCompileTeachingUnitWorkerDeps(
             ...focus,
           })(scope, payload);
           generationPins.set(input, pinned);
-          if (activity?.routeManaged && activity.courseId) {
-            const route = await assertOpeningCourseRouteReady(sql, scope, payload.activityId);
-            const requirement = route && (await readCourseRequirements(sql, scope, activity.courseId)).find(row => row.id === route.requirementId);
-            const sourceVersions = Object.fromEntries(requirement?.sourceRefs.map(ref => [ref.sourceId, ref.sourceVersion]) ?? []);
-            if (requirement?.requirementKey === "arithmetic" && input.chunks.length && !input.chunks.some(chunk => chunk.imageObjectKey)) reservedContexts.set(input, {
-              scope, courseId: activity.courseId, requirementId: requirement.id,
-              requirementRevision: requirement.revision, sourceVersions,
-              requirementText: "Generate a pure rational arithmetic expression, with all conditions in text and no units or figures.",
-              evidence: { chunks: input.chunks },
-            });
-          }
           return input;
         },
       }
@@ -261,8 +214,7 @@ export function createCompileTeachingUnitWorkerDeps(
             learnerFocus: activity?.learnerFocus,
             writeLibraryBlocks: async (blocks) => { compiledBlocks = blocks; },
           });
-          // Private output has a separate provider call and may never piggyback
-          // on the public compiler response, even if the model ignores instructions.
+          // Private assessment output may never enter the public compiler response.
           if (providerOutput) {
             const raw = parseModelJson(providerOutput.text);
             if (raw && typeof raw === "object" && "reservedQuestions" in raw)

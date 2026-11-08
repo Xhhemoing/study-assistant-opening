@@ -462,17 +462,15 @@ it("rejects a changed purpose between the actual compiler input and public block
     .rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
 });
-it("runs fake-provider generation through the production worker, real budget ledger and private admission without replay resend", async () => {
+it("runs only public compilation through the production worker and real budget ledger without private generation or replay resend", async () => {
   const x = await setup(), requests: string[] = [];
   const server = createServer(async (request, response) => {
     const body: Buffer[] = [];
     for await (const bytes of request) body.push(Buffer.from(bytes));
     const raw = Buffer.concat(body).toString("utf8"); requests.push(raw);
-    const messages = (JSON.parse(raw) as { messages: Array<{ content: unknown }> }).messages;
-    const privateCall = JSON.stringify(messages).includes("Generate one new reserved assessment question");
     const source = x.chunkId;
     const hints = { direction: "Use operations.", concept: "Rational arithmetic.", firstStep: "Add the numbers." };
-    const output = privateCall ? candidate : { blocks: [
+    const output = { blocks: [
       { type: "text", text: "Arithmetic operations on rational numbers.", citedChunkIds: source ? [source] : [] },
       { type: "prompt", text: "2+3", interaction: { kind: "numeric" } },
       { type: "answer_key", text: "5", hints, ...rankPedagogy },
@@ -498,17 +496,18 @@ it("runs fake-provider generation through the production worker, real budget led
       chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
     const handler = createCompileTeachingUnitHandler(deps);
     expect(await handler(job, payload)).toMatchObject({ generateStatus: "needs_check" });
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(1);
     const rows = await f.sql`SELECT question_json,key_json FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`;
-    expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ question_json: { text: candidate.text }, key_json: { answer: candidate.answer } });
+    expect(rows).toHaveLength(0);
     const revisions = JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`);
     expect(revisions).not.toContain(candidate.text); expect(revisions).not.toContain(candidate.answer);
     const budget = await f.sql`SELECT state,result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY request_id`;
-    expect(budget).toHaveLength(2); expect(budget.every(row => row.state === "completed")).toBe(true);
-    expect(await handler(job, payload)).toMatchObject({ replayed: true }); expect(requests).toHaveLength(2);
-    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(2);
+    expect(budget).toHaveLength(1); expect(budget.every(row => row.state === "completed")).toBe(true);
+    expect(budget.some(row => String(row.result_ref).startsWith("reserved-generation:"))).toBe(false);
+    expect(await handler(job, payload)).toMatchObject({ replayed: true }); expect(requests).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`)).toBe(revisions);
-    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
     expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
