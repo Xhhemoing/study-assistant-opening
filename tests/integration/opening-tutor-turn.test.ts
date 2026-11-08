@@ -10,6 +10,7 @@ import {
 } from "@aistudy/database";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 
 /**
  * Guarded durable-tutor-path gate (plan 03-tutor.md): real PostgreSQL, fake
@@ -75,10 +76,12 @@ function buildDeps(citedChunkId: string | null, providerError?: Error) {
       };
     }),
   };
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
   const deps = {
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql),
     chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }),
+    budget,
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     provider,
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 2_048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
   };
@@ -495,11 +498,13 @@ describe("opening tutor turn durable path (guarded)", () => {
 
   it("fails definitively on provider auth errors and releases the reservation", async () => {
     const seeded = await seedConversationAndSource();
-    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_AUTH", "bad key"));
-    await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toThrow();
+    const { deps, provider } = buildDeps(null, new OpeningProviderError("PROVIDER_AUTH", "bad key"));
+    await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toMatchObject({ code: "PROVIDER_AUTH" });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
     const job = await deps.tutorJobs.get(fixture.scope, seeded.jobId);
     expect(job?.status).toBe("failed");
     const reservations = await fixture.sql`SELECT state FROM opening_budget_reservations WHERE workspace_id = ${fixture.scope.workspaceId}`;
+    expect(reservations).toHaveLength(1);
     expect(reservations[0].state).toBe("released");
     const turns = await fixture.sql`SELECT status, text FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
     expect(turns[0]).toMatchObject({ status: "failed", text: "AI 服务授权失败，请在设置中核对该服务的密钥。" });
@@ -508,12 +513,15 @@ describe("opening tutor turn durable path (guarded)", () => {
 
   it("keeps outcome unknown and retains the reservation on provider timeouts", async () => {
     const seeded = await seedConversationAndSource();
-    const { deps } = buildDeps(null, new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true));
-    await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toThrow();
+    const { deps, provider } = buildDeps(null, new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true));
+    await expect(createTutorTurnHandler(deps)(seeded.jobId)).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
     const job = await deps.tutorJobs.get(fixture.scope, seeded.jobId);
     expect(job?.status).toBe("outcome_unknown");
-    const reservations = await fixture.sql`SELECT state FROM opening_budget_reservations WHERE workspace_id = ${fixture.scope.workspaceId}`;
+    const reservations = await fixture.sql`SELECT state, outcome_unknown_at FROM opening_budget_reservations WHERE workspace_id = ${fixture.scope.workspaceId}`;
+    expect(reservations).toHaveLength(1);
     expect(reservations[0].state).toBe("reserved");
+    expect(reservations[0].outcome_unknown_at).not.toBeNull();
     const turns = await fixture.sql`SELECT status, text FROM opening_turns WHERE id = ${seeded.assistantTurnId}`;
     expect(turns[0]).toMatchObject({
       status: "outcome_unknown",
