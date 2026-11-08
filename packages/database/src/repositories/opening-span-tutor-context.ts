@@ -1,6 +1,6 @@
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
 import { buildDecisionInput, captureNextLearningStep, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
-  studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
+  studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
@@ -8,6 +8,9 @@ import { getSpanReservedProblem } from "@aistudy/domain/span-heldout-catalog";
 import { contextSourceRefsIncluded, mergeContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningCourseEvidence } from "./opening-learning-read";
+import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
+import { mapLearningObservation } from "./opening-learning-facts";
+import { z } from "zod";
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
 import { createOpeningRetestActivityRepository } from "./opening-retest-activities";
 import { readSpanTutorAuthorization, lockSpanTutorAuthorization } from "./opening-span-tutor-grant";
@@ -50,12 +53,15 @@ export const SPAN_TUTOR_EXECUTION_POLICY_VERSION = `${NEXT_LEARNING_STEP_VERSION
 const conflict = (message: string) => learningError("CONFLICT", message);
 const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}`;
 export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
-  return receipt && ["next-learning-step-1/span-tutor-execution-1", SPAN_TUTOR_EXECUTION_POLICY_VERSION].includes(receipt.policyVersion)
+  return receipt && ["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2",
+    "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2",
+    "next-learning-step-5/span-tutor-execution-2"].includes(receipt.policyVersion)
     ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
 }
 export function spanTutorQuestionInScope(question: string): boolean {
   return /\bspan\b|线性组合|张成(?:空间|集合)?/i.test(question)
     || studyIntentForMessage(null, question)?.intent.learningPhase !== undefined
+    || studyIntentForMessage(null, question)?.intent.purpose === "overview"
     || learningContinuationIntent(question) !== null;
 }
 export function spanTutorExactProjection(rows: SnapshotObservation[], evaluations: Array<{ id: string; evaluatorVersion: string | null }>) {
@@ -88,6 +94,83 @@ async function selectedSources(tx: TransactionSql, scope: Scope, courseId: strin
   await admitLearningSources(tx, scope, sourceIds, { readOnly: true, recordVersions: false });
   return { sourceIds, sourceVersions };
 }
+const cycleOriginSchema = z.object({ activityId: z.string().uuid(), observationId: z.string().uuid().nullable() });
+async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: Awaited<ReturnType<typeof readOpeningCourseEvidence>>,
+  current: SnapshotObservation[], focusObservationId: string | undefined | null, sourceVersions: Record<string, number>) {
+  const selected = all.observations.find(row => row.id === (focusObservationId === undefined ? current[0]?.id : focusObservationId));
+  if (!selected) return undefined;
+  const activities = await db`SELECT a.id,s.id AS session_id,a.goal_json FROM opening_teaching_activities a
+    JOIN opening_learning_sessions s ON s.activity_id=a.id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+    WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
+      AND a.create_intent->>'protocol'='span-lesson-v1'`;
+  const byId = new Map(activities.map(row => [String(row.id), row]));
+  let activity = activities.find(row => row.session_id === selected.sessionId);
+  const chain: (typeof activities)[number][] = [], visited = new Set<string>();
+  while (activity && !visited.has(String(activity.id))) {
+    visited.add(String(activity.id));
+    chain.unshift(activity);
+    const origin = cycleOriginSchema.safeParse((activity.goal_json as { tutorNextAction?: { originReference?: unknown } } | null)?.tutorNextAction?.originReference);
+    activity = origin.success ? byId.get(origin.data.activityId) : undefined;
+  }
+  const rootIds = [...new Set(all.observations.map(row => row.rootObservationId ?? row.id))];
+  const originIds = chain.flatMap(row => {
+    const origin = cycleOriginSchema.safeParse((row.goal_json as { tutorNextAction?: { originReference?: unknown } } | null)?.tutorNextAction?.originReference);
+    return origin.success && origin.data.observationId ? [origin.data.observationId] : [];
+  });
+  const raw = rootIds.length ? await db`SELECT * FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND id=ANY(${[...new Set([...rootIds, ...originIds])]}::uuid[])` : [];
+  const roots = raw.filter(row => rootIds.includes(String(row.id))).map(mapLearningObservation);
+  const originalContexts = await readOpeningLearningEvidenceContexts(db, scope, roots);
+  const original = spanTutorExactProjection(toSnapshotEvidence({ observations: roots, evidenceContexts: originalContexts }, new Date()).observations,
+    roots.map(row => ({ id: row.id, evaluatorVersion: row.serverEvaluation?.evaluatorVersion ?? null })));
+  const help = chain.length ? await db`SELECT h.id,h.session_id,h.attempt_id,a.problem_id,a.item_version_id,h.kind,h.level,h.delivered_at FROM opening_help_exposures h
+    JOIN opening_learning_attempts a ON a.id=h.attempt_id AND a.workspace_id=h.workspace_id AND a.owner_user_id=h.owner_user_id
+      AND a.session_id=h.session_id AND a.course_id=h.course_id
+    WHERE h.workspace_id=${scope.workspaceId} AND h.owner_user_id=${scope.ownerUserId} AND h.course_id=${courseId}
+      AND h.session_id=ANY(${chain.map(row => String(row.session_id))}::uuid[]) AND h.delivered=TRUE
+      AND a.requirement_key=${SPAN_REQUIREMENT_KEY} AND a.source_versions=${db.json(sourceVersions)}::jsonb
+      AND h.level IN ('hinted','revealed') AND h.kind IN ('hint','solution','instruction') AND h.support_domain<>'language'` : [];
+  const identity = (versions: Record<string, number>) => JSON.stringify(Object.entries(versions).sort(([a], [b]) => a.localeCompare(b)));
+  const expectedIdentity = identity(sourceVersions);
+  const facts: RemediationCycleActivity[] = chain.map(row => {
+    const origin = cycleOriginSchema.safeParse((row.goal_json as { tutorNextAction?: { originReference?: unknown } } | null)?.tutorNextAction?.originReference);
+    const heads = all.observations.filter(item => item.sessionId === row.session_id
+      && item.requirementKey === SPAN_REQUIREMENT_KEY && item.skillLabel === SPAN_SKILL_LABEL);
+    const matching = heads.filter(item => item.sourceVersions && identity(item.sourceVersions) === expectedIdentity);
+    return { id: String(row.id), parentActivityId: origin.success ? origin.data.activityId : null,
+      originObservationId: origin.success && origin.data.observationId ? (() => {
+        const captured = raw.find(item => item.id === origin.data.observationId);
+        const rootId = captured ? String(captured.root_observation_id ?? captured.id) : null;
+        return all.observations.find(item => (item.rootObservationId ?? item.id) === rootId)?.id ?? null;
+      })() : null,
+      identity: matching.length === heads.length && heads.length ? expectedIdentity : `unqualified:${row.id}`,
+      observations: heads.map(item => {
+        const rootId = item.rootObservationId ?? item.id;
+        const root = original.find(candidate => candidate.id === rootId);
+        const capturedRoot = roots.find(candidate => candidate.id === rootId);
+        const head = matching.includes(item) ? current.find(candidate => candidate.id === item.id) : undefined;
+        // Revisions replace qualification, never append a later submission. Use
+        // the original server-recorded event time even if a revision is newer.
+        const answerAt = Date.parse(capturedRoot?.recordedAt ?? capturedRoot?.submittedAt ?? item.occurredAt);
+        const rootVersionMatches = capturedRoot?.sourceVersions && identity(capturedRoot.sourceVersions) === expectedIdentity;
+        // A redo creates a new attempt for the same persisted question. Help
+        // delivered on the original attempt remains real evidence; never infer
+        // that relation from a learner's assistance declaration or session alone.
+        const deliveredHelpIds = head ? help.filter(receipt => receipt.session_id === item.sessionId
+          && receipt.problem_id === item.problemId && receipt.item_version_id === item.itemVersionId
+          && receipt.kind !== "instruction" && new Date(receipt.delivered_at as string | Date).getTime() < answerAt)
+          .map(receipt => String(receipt.id)) : [];
+        return { id: item.id, rootId, verifiedCorrect: head?.verifiedCorrect ?? "unknown" as const,
+          independentFailure: Boolean(rootVersionMatches && head?.verifiedCorrect === "no" && head.independentAttempt === "yes"
+            && root?.verifiedCorrect === "no" && root.independentAttempt === "yes" && root.usableForCurrentVersion === "yes"),
+          deliveredAssistance: deliveredHelpIds.length > 0, deliveredHelpIds,
+          answerAt, verifiedErrorLabels: (head?.errors ?? []).filter(error => error.source === "verified_steps").map(error => error.label) };
+      }).sort((a, b) => a.answerAt - b.answerAt || a.id.localeCompare(b.id)),
+      help: help.filter(item => item.session_id === row.session_id).map(item => ({ id: String(item.id),
+        deliveredAt: new Date(item.delivered_at as string | Date).getTime(), level: item.level as 'hinted' | 'revealed' })) };
+  });
+  return summarizeRemediationCycles(facts);
+}
 async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent, dueRetestId: string | null, focusObservationId?: string | null) {
   const db = transactionClient(tx);
   await selectedSources(tx, scope, courseId, sourceIds, sourceVersions);
@@ -118,9 +201,11 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   if (!admitted) throw conflict("学习记录关联材料已变化，请重新读取后继续。");
   // An explicit continuation answers this activity's result. A newer session
   // can inform later course planning, but cannot replace the selected origin.
-  const selected = focusObservationId ? current.filter(row => row.id === focusObservationId) : current;
+  const selected = focusObservationId !== undefined ? current.filter(row => row.id === focusObservationId) : current;
   const decisionInput = buildDecisionInput({ observations: selected, wantsFullExplanation: intent.explanationStyle === "full",
     ...(intent.learningPhase ? { learningPhase: intent.learningPhase } : {}), phaseSource: intent.learningPhase ? "explicit" : "automatic", dueRetest: Boolean(dueRetestId) });
+  const cycles = await remediationCycles(db, scope, courseId, all, current, focusObservationId, sourceVersions);
+  if (cycles?.completedCycles.length) decisionInput.remediationCycles = cycles;
   return { sourceRefs, decisionInput };
 }
 async function nextSession(db: Sql, scope: Scope, courseId: string) {
@@ -218,7 +303,8 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
 
         const decision = nextLearningStep(projection.decisionInput);
-        const reserved = await reservedChoice(db, scope, position.resumeSession, intent, decision, position.dueRetestId);
+        const reserved = decision.reasonCode === "remediation_limit" ? null
+          : await reservedChoice(db, scope, position.resumeSession, intent, decision, position.dueRetestId);
         return { courseId: request.courseId, grantRevision: authorization.grant.revision, privacyEpoch: Number(workspace!.privacy_epoch),
           ...(request.originReference ? { originReference: request.originReference, originSnapshotRevision: origin!.session.revision } : {}),
           ...(reserved?.kind === "unavailable" ? { unseenUnavailableReason: reserved.reason } : {}),
@@ -287,7 +373,16 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await assertContext(tx, scope, context);
           } else if (position.dueRetestId !== context.dueRetestId && context.intent.learningPhase !== "new_learning" && context.intent.learningPhase !== "consolidate") throw conflict("当前到期复测已变化，请重新读取后继续。");
         }
-        const availability = await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
+        const intentOnlyOverview = context.needsIntentUpdate && context.intent.purpose === "overview"
+          && context.resumeSession?.status === "active" && context.resumeSession.intent.purpose !== "overview"
+          && !context.resumeSession.retestId && !context.resumeSession.moveId.endsWith("-reserved")
+          && !context.dueRetestId && !context.needsReservedIssue && !context.intentChangeRequiresChoice;
+        if (input.decision.reasonCode === "remediation_limit" && !intentOnlyOverview) throw Object.assign(conflict("已完成两轮有据纠偏，请明确换讲法、重新诊断或暂缓；没有新增题目或活动。"),
+          { code: "SPAN_REMEDIATION_LIMIT" });
+        // A confirmed method change can save only the existing lesson state.
+        // Never select/reserve a question or budget as part of this exception.
+        const availability = intentOnlyOverview ? null
+          : await reservedChoice(db, scope, context.resumeSession, context.intent, input.decision, context.dueRetestId);
         if (availability?.kind === "unavailable") throw Object.assign(conflict("未见题暂不可发放，请保留原进度并核对课程记录；没有新增活动。"),
           { reason: availability.reason, code: "SPAN_UNSEEN_UNAVAILABLE" });
         // Capture before origin completion, session/attempt creation and budget reservation.
@@ -329,7 +424,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             await saveDecision(context.resumeSession, "resume_issue");
           }
           if (context.needsIntentUpdate) {
-            const moveId = input.decision.activityKind === "full_explain" ? "self-example"
+            const moveId = intentOnlyOverview ? "overview-links" : input.decision.activityKind === "full_explain" ? "self-example"
               : input.decision.activityKind === "reduced_help_practice" ? "self-faded" : context.resumeSession.moveId;
             context.resumeSession = await sessions.save(scope, context.resumeSession.activityId, { expectedRevision: context.resumeSession.revision,
               intent: context.intent, moveId, status: context.resumeSession.status });

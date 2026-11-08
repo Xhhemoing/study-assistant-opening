@@ -29,17 +29,27 @@ const result = (step: unknown) => ({
 // The read-only query passes current evidence but no phase or due-retest controls.
 // Exercise real policy outputs, not a second hand-written list of allowed codes.
 const cases = [
+  { reason: "remediation_limit", activity: "diagnose", request: input({ remediationCycles: { completedCycles: [id, olderId].map(failureRootId => ({
+    failureRootId, evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`, `observation:followup-${failureRootId}`],
+    repeatedVerifiedError: true, persistentDeliveredAssistance: false })) } }) },
   { reason: "no_evidence", activity: "diagnose", request: input() },
   { reason: "unverified_only", activity: "diagnose", request: input({ observations: [observation({ verifiedCorrect: "unknown" })] }) },
   { reason: "verified_incorrect", activity: "targeted_explain", request: input({ observations: [observation({ verifiedCorrect: "no" })] }) },
   { reason: "repeated_assisted_error", activity: "full_explain", request: input({ observations: [error(id), error(olderId)] }) },
   { reason: "assistance_dependent", activity: "reduced_help_practice", request: input({ observations: [observation({ assistance: "hinted", independentAttempt: "no" })] }) },
+  { reason: "assistance_dependent", activity: "reduced_help_practice", request: input({ observations: [observation(), observation({ id: olderId, assistance: "hinted" }), observation({ assistance: "revealed" })] }) },
   { reason: "independent", activity: "transfer_check", request: input({ status: "observed_independent", observations: [observation()] }) },
   { reason: "correct_needs_independent_check", activity: "transfer_check", request: input({ observations: [observation({ assistance: "unknown", independentAttempt: "unknown" })] }) },
   { reason: "needs_check", activity: "diagnose", request: input({ observations: [observation({ independentAttempt: "no" })] }) },
 ];
 
 describe("current-evidence recommendation reason compatibility", () => {
+  it("accepts the historical v3 reason while new v5 bridge decisions do not select it", () => {
+    expect(systemQueryResultSchema.safeParse(result({ activityKind: "reduced_help_practice",
+      reasonCode: "assisted_success", focusObservationId: null })).success).toBe(true);
+    const step = nextLearningStep(input({ observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation({ id: olderId })] }));
+    expect(step.reasonCode).toBe("needs_check");
+  });
   it.each(cases)("accepts the real $reason decision without reshaping it", ({ reason, activity, request }) => {
     const step = nextLearningStep(request);
     expect(step).toMatchObject({ reasonCode: reason, activityKind: activity });

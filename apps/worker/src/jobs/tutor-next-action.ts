@@ -44,8 +44,15 @@ export async function prepareTutorNextAction(service: TutorNextActionService, sc
       choice: { message: `原学习位置需重新确认：${context.agenda.invalidationReasons.join("、") || context.agenda.status}`,
         label: "核对原学习记录", href: `/opening/courses/${context.courseId}#course-learning-records` } };
   }
-  if (context.resume && !context.resumeRequiresExecution && !context.unavailableAction)
-    return { context, action: context.resume, decision: context.agenda?.decisionCurrent === false ? nextLearningStep(context.decisionInput) : context.historicalDecision ?? null, resumed: true };
+  if (context.resume && !context.resumeRequiresExecution && !context.unavailableAction) {
+    // A current-policy suggestion is not the result of an already committed
+    // operation. Replay only the exact server-resolved key, after the same
+    // authorization/origin and agenda resumability checks as ordinary resumes.
+    const exactReplay = context.spanContext?.historicalOperationId === request.operationId;
+    const decision = exactReplay && context.historicalDecision ? context.historicalDecision
+      : context.agenda?.decisionCurrent === false ? nextLearningStep(context.decisionInput) : context.historicalDecision ?? null;
+    return { context, action: context.resume, decision, resumed: true };
+  }
   const decision = nextLearningStep(context.decisionInput);
   if (context.unavailableAction) return { context, action: null, decision, resumed: false, choice: context.unavailableAction };
   const action = context.resume && !context.resumeRequiresExecution ? context.resume : await service.execute(scope, { ...request, context, decision });

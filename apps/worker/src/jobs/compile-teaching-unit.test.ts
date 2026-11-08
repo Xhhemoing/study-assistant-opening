@@ -139,6 +139,22 @@ describe("createCompileTeachingUnitHandler", () => {
     expect(deps.publishActivitySpec).not.toHaveBeenCalled();
   });
 
+  it.each(["cancelled", "privacy", "source"])("does not publish after a blind solve %s fence changes", async changed => {
+    let epoch = 3;
+    const deps = baseDeps({ privacy: { getWorkspaceEpoch: async () => epoch, listExcludedSourceIds: async () => [] } });
+    const validate = vi.fn(async () => {});
+    const blindSolveBeforePublish = vi.fn(async (_scope, input) => {
+      if (changed === "cancelled") deps._setJobState("cancelled");
+      if (changed === "privacy") epoch = 4;
+      if (changed === "source") validate.mockRejectedValue(new Error("source changed"));
+      await input.beforeSend();
+      return [];
+    });
+    await expect(createCompileTeachingUnitHandler({ ...deps, validateSourceRefs: validate, blindSolveBeforePublish })(job, generatePayload)).rejects.toThrow();
+    expect(blindSolveBeforePublish).toHaveBeenCalledTimes(1);
+    expect(deps.publishActivitySpec).not.toHaveBeenCalled();
+  });
+
   it("cancel discards late write-back", async () => {
     const deps = baseDeps();
     deps.provider = {

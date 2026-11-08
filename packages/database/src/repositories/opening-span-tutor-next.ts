@@ -9,7 +9,7 @@ import { readOpeningSpanTutorOrigin, readOpeningSpanTutorOriginChange, type Open
 import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 
 export type OpeningSpanNextInput = OpeningSpanTutorOriginReference & { clientKey: string };
-export type OpeningSpanNextChoiceReason = "unknown_evidence" | "source_unavailable" | "authorization_required" | "cancelled" | "expired" | "unseen_unavailable" | "evidence_changed";
+export type OpeningSpanNextChoiceReason = "unknown_evidence" | "source_unavailable" | "authorization_required" | "cancelled" | "expired" | "unseen_unavailable" | "evidence_changed" | "remediation_limit";
 export type OpeningSpanNextResult = { kind: "ready"; session: SpanLessonSnapshot; decision: NextLearningStep | null; replayed: boolean }
   | { kind: "choice"; reason: OpeningSpanNextChoiceReason; courseId: string; originSession: SpanLessonSnapshot | null; historicalSession?: SpanLessonSnapshot };
 function transactionClient(tx: TransactionSql): Sql {
@@ -64,12 +64,14 @@ export function createOpeningSpanTutorNextRepository(sql: Sql) {
       const repository = createOpeningSpanTutorContextRepository(db);
       const context = await repository.read(scope, { courseId: original.courseId, sourceIds: [], sourceVersions: {}, question: "继续学习", originReference: reference, entry: "span-next" });
       if (!context) return choice("authorization_required");
-      if (context.unseenUnavailableReason) return choice("unseen_unavailable");
       const decision = nextLearningStep(context.decisionInput);
+      if (decision.reasonCode === "remediation_limit") return choice("remediation_limit");
+      if (context.unseenUnavailableReason) return choice("unseen_unavailable");
       try {
         const session = await repository.execute(scope, { context, decision, operationId });
         return { kind: "ready", session, decision, replayed: false };
       } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "SPAN_REMEDIATION_LIMIT") return choice("remediation_limit");
         if (error && typeof error === "object" && "code" in error && error.code === "SPAN_UNSEEN_UNAVAILABLE") return choice("unseen_unavailable");
         throw error;
       }

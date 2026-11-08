@@ -30,6 +30,7 @@ export const MODEL_TASKS = {
   "materials.recognize-page": { label: "资料页视觉转写", group: "materials", purpose: "recognize-source-page", needs: ["vision"], defaultModelName: "gpt-6-luna" },
   "teaching.compile-visual": { label: "视觉资料主讲内容编译", group: "teaching", purpose: "compile-teaching-unit", needs: ["vision"], defaultModelName: "gpt-6-luna" },
   "knowledge.extract": { label: "课程知识图谱抽取", group: "materials", purpose: "build-course-knowledge" },
+  "teaching.solve": { label: "教学题异家族盲解", group: "teaching", purpose: "teaching-solve" },
   "teaching.compile": { label: "AI 主讲内容编译", group: "teaching", purpose: "compile-teaching-unit" },
   "practice.grade-text": { label: "文字作答批改", group: "practice", purpose: "grade-text" },
   "practice.exam": { label: "真题考点与模拟练习", group: "practice", purpose: "course-exam" },

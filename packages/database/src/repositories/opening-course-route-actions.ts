@@ -172,12 +172,16 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const receiptInput=await captureOpeningCourseRouteDecision(tx,scope,{courseId,goal,request:input,entry:origin?"next":"start",requestedId,progress,
       excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context,decisionInput,
       ...(action==="return"&&returnAfterUnknown?{returnBasis:"uncalibrated" as const}:{})});
+    const focusedPart=all.projected.find(row=>row.id===decision.focusObservationId
+      &&row.requirementKey===selected.requirement.requirementKey&&row.courseRequirement?.id===selected.requirement.id
+      &&row.courseRequirement.revision===selected.requirement.revision&&row.courseRequirement.stableSkillId===selected.requirement.stableSkillId
+      &&row.verifiedCorrect==="no"&&row.usableForCurrentVersion==="yes")?.examPartFocus;
     const activity=await createOpeningTeachingActivityInTransaction(tx,scope,{clientKey:key,intentKind:"goal",intentSummary:summary.slice(0,2000),courseId,sourceIds,
       createIntent:{kind:"course_route",goalId:goal.id,requirementId:selected.requirement.id,...("taskId" in input&&input.taskId?{source:"task",taskId:input.taskId}:{}),
         ...(origin?{originActivityId:origin.input.activityId,observationId:origin.input.observationId}:{clientKey:input.clientKey})},
       goalJson:{courseRoute:context,learnerFocus:{skillLabel:selected.requirement.title,requirementKey:selected.requirement.requirementKey,
         activityKind:decision.activityKind,reasonCode:decision.reasonCode,
-        focusObservationId:decision.focusObservationId,recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:true});
+        focusObservationId:decision.focusObservationId,...(focusedPart?{examPartFocus:focusedPart}:{}),recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:true});
     await reserveOpeningLearningActivityBudget(tx,scope,{activityId:activity.id,minutes:input.minutes,goalId:goal.id,expectedGoalRevision:goal.revision});
     if(origin)await tx`UPDATE opening_teaching_activities SET status='completed',path_version=path_version+1,updated_at=now() WHERE id=${origin.input.activityId} AND workspace_id=${scope.workspaceId}`;
     await recordOpeningLearningDecision(tx,scope,{...receiptInput,targetId:activity.id},`course-route-activity:${activity.id}`);

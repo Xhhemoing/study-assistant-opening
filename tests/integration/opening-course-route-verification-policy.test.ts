@@ -13,6 +13,9 @@ import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { controlledCourseGrading } from "./opening-controlled-grade-fixture";
+import { evaluateOpeningTeachingKeyAttempt } from "../../packages/database/src/repositories/opening-teaching-question-evaluation";
+import { refreshOpeningLearningEligibility } from "../../packages/database/src/repositories/opening-learning-eligibility";
+import { readOpeningCourseObservationHeads } from "../../packages/database/src/repositories/opening-learning-read";
 let f: OpeningFixture;
 let gradingFixture: ReturnType<typeof controlledCourseGrading>;
 beforeEach(async () => { f=await createOpeningFixture(); gradingFixture=controlledCourseGrading(); vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED","1"); vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED","0"); });
@@ -27,10 +30,22 @@ async function setup() {
   return {courseId, sourceId, chunkId, rows, goal, requirement, route};
 }
 /** Real job/library/publish/attempt flow; only the model response is a controlled fixture. No external model is called. */
-async function compile(activity:TeachingActivity,variant=0){
+async function compile(activity:TeachingActivity,variant=0,arithmetic=false){
   const deps=createCompileTeachingUnitWorkerDeps(f.sql,{budget:createOpeningBudgetRepository(f.sql),chunks:createOpeningSourceChunksRepository(f.sql),privacy:createOpeningPrivacyRepository(f.sql)});
-  deps.buildProviderInput=async()=>({instruction:"教学编译测试",text:activity.intentSummary,chunks:await createOpeningSourceChunksRepository(f.sql).listForSources(f.scope,activity.sourceIds),mode:"explain",maxOutputTokens:5500,mediaCapability:"text_only",imageParts:[],outputFormat:"json"});
-  deps.callModel=async(_scope,input,options)=>{await options.beforeSend?.();expect(input.chunks.length).toBeGreaterThan(0);return {text:JSON.stringify({itemTitles:["秩与零空间"],blocks:[
+  // Arithmetic exercises keep the production input builder as well as publish/evaluation wiring.
+  if(!arithmetic)deps.buildProviderInput=async()=>({instruction:"教学编译测试",text:activity.intentSummary,chunks:await createOpeningSourceChunksRepository(f.sql).listForSources(f.scope,activity.sourceIds),mode:"explain",maxOutputTokens:5500,mediaCapability:"text_only",imageParts:[],outputFormat:"json"});
+  deps.callModel=async(_scope,input,options)=>{await options.beforeSend?.();expect(input.chunks.length).toBeGreaterThan(0);return {text:JSON.stringify({itemTitles:[arithmetic?"数值运算":"秩与零空间"],blocks:arithmetic?[
+    {type:"text",text:"加法可以按位计算，并通过减法核对。",citedChunkIds:input.chunks.map(chunk=>chunk.id)},
+    ...[0,1].flatMap(index=>{
+      const left=12+variant*10+index, right=7+index;
+      return [{type:"prompt",text:`${left}+${right}`,interaction:{kind:"numeric"}},
+        {type:"answer_key",text:String(left+right),hints:{direction:"按位相加。",concept:"相同数位的值相加，满十进一。",firstStep:`先对齐${left}和${right}的个位。`},
+          misconceptions:[
+            {id:"subtract",manifestation:"把加号当成减号。",reason:"没有按题目的运算符计算。",correction:"先确认加号，再相加。"},
+            {id:"place_value",manifestation:"把不同数位相加。",reason:"没有对齐数位。",correction:"先将个位与个位对齐。"},
+          ],startChoice:{correct:{step:"先对齐个位。",why:"相同数位才能直接相加。"},misconception:{step:"把加号改成减号。",why:"这改变了题目的运算。",misconceptionId:"subtract"}}}];
+    }),
+  ]:[
     {type:"text",text:"秩与零空间维数之和等于列数。",citedChunkIds:input.chunks.map(chunk=>chunk.id)},
     {type:"prompt",text:`一个3×${5+variant*3}矩阵的秩为2，零空间维数是多少？`},{type:"answer_key",...rankPedagogy,text:`${5+variant*3} − 2 = ${3+variant*3}`,hints:{direction:"先找列数。",concept:"秩与零空间维数之和等于列数。",firstStep:`用${5+variant*3}减去2。`}},
     {type:"text",text:"再换一个列数验证。"},
@@ -126,6 +141,103 @@ it("keeps a confirmed exact requirement ready through route start and next when 
   // The action path only issues transfer_check for a ready requirement whose sources are available.
   const next=await enabled.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,expectedPathVersion:current.currentActivity!.pathVersion,observationId:checked.observation.id,clientKey:randomUUID(),minutes:20});
   expect(next).toMatchObject({kind:"ready",requirementId:exact.id,action:"transfer_check"});
+});
+it("retains the evaluator-enabled arithmetic expectation as an independent real compiler/evaluator leaf", async () => {
+  gradingFixture.restore();
+  const x=await setup();
+  await f.sql`UPDATE opening_source_chunks SET text='加法按位计算，相同数位相加。',image_object_key=NULL WHERE id=${x.chunkId}`;
+  await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[x.requirement],confirmScope:true});
+  const start=await x.route.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirement.id,
+    expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
+  if(start.kind!=="ready")throw new Error(JSON.stringify(start));
+  const spec=await compile(start.activity,0,true);
+  const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:start.activity.id,courseId:x.courseId,
+    skillLabel:start.activity.learnerFocus!.skillLabel,sourceIds:start.activity.sourceIds});
+  const attempt=await createOpeningAttemptService(f.sql).create(f.scope,{sessionId:session.id,clientKey:randomUUID(),
+    teachingBlock:{blockId:spec.blockOrder.find(block=>block.role==="prompt")!.blockId,contentVersion:1}});
+  await f.sql.begin(async tx=>{
+    const [saved]=await tx`SELECT * FROM opening_learning_attempts WHERE id=${attempt.id}`;
+    expect(await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,"19",[])).toMatchObject({
+      evaluatorVersion:"teaching-key-exact-v1",specVersion:"teaching-key-v1",decision:"correct",outcome:"correct",priorFeedback:false});
+    expect(await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,"-99",[])).toMatchObject({decision:"incorrect",outcome:"incorrect"});
+  });
+});
+it("bridges new compiler submissions and reads evaluator-era exact readiness with an unseen transfer question", async () => {
+  // The bridge must not claim complete evaluator integration. New submissions
+  // remain unknown; the retained real evaluator is a separate leaf, and its
+  // persisted-era facts exercise route qualification without fake AI approval.
+  gradingFixture.restore();
+  const x=await setup(), exact={...x.requirement,requirementKey:"arithmetic",title:"加法运算",
+    verification:{kind:"exact" as const,status:"missing" as const,exerciseKeys:[],rubric:"独立计算加法的数值结果。",missingReasons:[]}};
+  // Seed text-only material so the real compiler input builder needs no external image storage.
+  await f.sql`UPDATE opening_source_chunks SET text='加法按位计算，相同数位相加，满十进一。',image_object_key=NULL WHERE id=${x.chunkId}`;
+  const route=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true,exactVerificationEnabled:true});
+  const confirmed=await route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[exact],confirmScope:true});
+  expect(confirmed).toMatchObject({scopeState:"confirmed",summary:{blocked:0}});
+  expect(confirmed.requirements[0]).toMatchObject({status:"unobserved",sourcesAvailable:true,
+    requirement:{revision:1,verification:{kind:"exact",status:"ready",exerciseKeys:[],missingReasons:[]}}});
+
+  const start=await route.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:exact.id,
+    expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
+  if(start.kind!=="ready")throw new Error(JSON.stringify(start));
+  const submitArithmetic=async(activity:TeachingActivity,stem:string,value:string)=>{
+    const spec=await createOpeningTeachingContentRepository(f.sql).getActivitySpec(f.scope,activity.id);
+    const prompts=spec!.blockOrder.filter(block=>block.role==="prompt");
+    expect(prompts).toHaveLength(2);
+    const session=await createOpeningLearningRepository(f.sql).createSession(f.scope,{activityId:activity.id,courseId:x.courseId,
+      skillLabel:activity.learnerFocus!.skillLabel,sourceIds:activity.sourceIds});
+    const service=createOpeningAttemptService(f.sql);
+    const attempt=await service.create(f.scope,{sessionId:session.id,clientKey:randomUUID(),
+      teachingBlock:{blockId:prompts[0]!.blockId,contentVersion:1}});
+    expect(attempt.stemSnapshot).toBe(stem);
+    expect(attempt.courseRequirement).toMatchObject({id:exact.id,revision:1});
+    const submitted=await service.submit(f.scope,attempt.id,{clientKey:randomUUID(),answer:value,outcome:"unverified",
+      assistance:"independent",verdictSource:"self_report"});
+    expect(submitted).toMatchObject({outcome:"unverified",verdictSource:"self_report",allowsIndependent:false});
+    expect(submitted.serverEvaluation).toBeUndefined();
+    expect((await route.read(f.scope,x.courseId)).requirements[0]!.status).not.toBe("verified");
+    // Explicit historical fixture, not production submit wiring.
+    await f.sql.begin(async tx=>{
+      const [saved]=await tx`SELECT * FROM opening_learning_attempts WHERE id=${attempt.id}`;
+      const evaluation=await evaluateOpeningTeachingKeyAttempt(tx,f.scope,saved,value,[]);
+      expect(evaluation).toMatchObject({evaluatorVersion:"teaching-key-exact-v1",decision:"correct",priorFeedback:false});
+      const {priorFeedback:_prior,...facts}=evaluation!;
+      const receipt={...facts,observationId:submitted.id,attemptId:attempt.id,problemId:attempt.problemId!,
+        itemVersionId:attempt.itemVersionId!,requirementKey:attempt.requirementKey!,evaluatedAt:submitted.recordedAt!};
+      await tx`UPDATE opening_learning_observations SET outcome='correct',verdict_source='deterministic',
+        server_evaluation=${tx.json(receipt)} WHERE id=${submitted.id}`;
+      await refreshOpeningLearningEligibility(tx,f.scope,[submitted.id]);
+    });
+    const head=(await readOpeningCourseObservationHeads(f.sql,f.scope,x.courseId)).find(row=>row.id===submitted.id)!;
+    const observation={...head,allowsIndependent:head.eligibility?.verifiedCorrect==="yes"&&head.eligibility.independentAttempt==="yes"};
+    expect(observation).toMatchObject({attemptId:attempt.id,outcome:"correct",assistance:"independent",verdictSource:"deterministic",
+      serverEvaluation:{evaluatorVersion:"teaching-key-exact-v1",decision:"correct"},
+      eligibility:{verifiedCorrect:"yes",usableForCurrentVersion:"yes",independentAttempt:"yes"}});
+    expect(observation.aiEvaluation).toBeUndefined();
+    return {attempt,observation};
+  };
+  await compile(start.activity,0,true);
+  const first=await submitArithmetic(start.activity,"12+7","19");
+  const current=await route.read(f.scope,x.courseId,start.activity.id);
+  expect(current.requirements[0]).toMatchObject({status:"needs_verification",observationId:first.observation.id,
+    requirement:{revision:1,verification:{kind:"exact",status:"ready"}}});
+  expect(current.summary.blocked).toBe(0);
+  const next=await route.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,
+    expectedPathVersion:current.currentActivity!.pathVersion,observationId:first.observation.id,clientKey:randomUUID(),minutes:20});
+  expect(next).toMatchObject({kind:"ready",requirementId:exact.id,action:"transfer_check"});
+  if(next.kind!=="ready")throw new Error(JSON.stringify(next));
+  expect(next.activity.id).not.toBe(start.activity.id);
+  await compile(next.activity,1,true);
+  const second=await submitArithmetic(next.activity,"22+7","29");
+  expect(second.attempt.id).not.toBe(first.attempt.id);
+  expect(second.attempt.problemId).not.toBe(first.attempt.problemId);
+  expect(second.attempt.stemSnapshot).not.toBe(first.attempt.stemSnapshot);
+  const verified=await route.read(f.scope,x.courseId,next.activity.id);
+  expect(verified.requirements[0]).toMatchObject({status:"verified",observationId:second.observation.id,
+    requirement:{revision:1,verification:{kind:"exact",status:"ready"}}});
+  expect(verified.summary).toMatchObject({verified:1,blocked:0});
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND kind='grade-observation'
+    AND payload->>'observationId' IN (${first.observation.id},${second.observation.id})`).toHaveLength(0);
 });
 it("defaults suggested verification to unavailable until exact capability is enabled", async () => {
   const x=await setup(), nodeId=randomUUID();

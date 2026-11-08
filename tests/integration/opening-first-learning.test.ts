@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningPlanningSettingsRepository, createOpeningFirstLearningRepository, createOpeningLearningGoalRepository } from "@aistudy/database";
+import { createOpeningPlanningSettingsRepository, createOpeningFirstLearningRepository, createOpeningLearningGoalRepository,
+  createOpeningLearningDecisionsRepository } from "@aistudy/database";
 import { createOpeningTeachingActivityService } from "../../apps/web/src/features/opening/teaching/activity-service";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { startFirstLearning } from "../../apps/web/src/features/workspace/first-learning-service";
@@ -21,7 +22,12 @@ describe("first-learning persistence and recovery", () => {
   it("replays one real activity and task without accepting a plan or recording an assessment", async () => {
     const { deps, input } = setup();
     const first = await startFirstLearning(deps, fixture.scope, input);
+    const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+    const saved = await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId });
+    expect(saved).toHaveLength(1);
+    expect(await decisions.explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: true, invalidationReasons: [] });
     const replay = await startFirstLearning(deps, fixture.scope, input);
+    expect(await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId })).toEqual(saved);
     expect(replay.activityId).toBe(first.activityId);
     expect(replay.taskId).toBe(first.taskId);
     const [activity] = await fixture.sql`SELECT intent_summary,goal_json,content_version FROM opening_teaching_activities WHERE id=${first.activityId}`;
@@ -54,6 +60,8 @@ describe("first-learning persistence and recovery", () => {
       (SELECT count(*)::int FROM opening_teaching_activities WHERE workspace_id=${fixture.otherScope.workspaceId} AND client_key=${`first-learning:${input.clientKey}:activity`}) AS activities,
       (SELECT count(*)::int FROM opening_tasks WHERE workspace_id=${fixture.otherScope.workspaceId} AND client_key=${`first-learning-activity:${resumed.activityId}`}) AS tasks`;
     expect(counts).toMatchObject({ activities: 1, tasks: 1 });
+    expect(await createOpeningLearningDecisionsRepository(fixture.sql).list(fixture.otherScope,
+      { layer: "activity", targetId: resumed.activityId })).toHaveLength(1);
     expect(resumed.scheduleInitialized).toBe(true);
     expect((await deps.settings.get(fixture.otherScope)).settings?.dailyWindow).toEqual({ start: "19:00", end: "19:30" });
   });
@@ -68,8 +76,11 @@ describe("first-learning persistence and recovery", () => {
     deps.now = () => new Date("2026-10-19T15:59:00Z");
     const sameDay = { ...input, targetDate: "2026-10-19" };
     const first = await startFirstLearning(deps, fixture.scope, sameDay);
+    const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+    const saved = await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId });
     deps.now = () => new Date("2026-10-19T16:01:00Z");
     expect((await startFirstLearning(deps, fixture.scope, sameDay)).activityId).toBe(first.activityId);
+    expect(await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId })).toEqual(saved);
     const otherKey = randomUUID();
     await expect(startFirstLearning(deps, fixture.scope, { ...sameDay, clientKey: otherKey })).rejects.toThrow();
     const [count] = await fixture.sql`SELECT count(*)::int AS count FROM opening_teaching_activities WHERE workspace_id=${fixture.scope.workspaceId} AND client_key=${`first-learning:${otherKey}:activity`}`;
@@ -93,6 +104,10 @@ it("starts and replays without a schedule, preserving existing workspace setting
   expect(goal.weeklyMinutes).toBe(0);
   expect(row!.adaptive_planning.courseGoalRefs[courseId]).toBe(goal.id);
   expect(row!.adaptive_planning.courseGoals[courseId]).toBeUndefined();
+  const decisions = createOpeningLearningDecisionsRepository(fixture.sql);
+  const saved = await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId });
+  expect(saved).toHaveLength(1);
+  expect(await decisions.explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: true, invalidationReasons: [] });
   const editedGoal = await goals.update(fixture.scope, goal.id, { expectedRevision: goal.revision, weeklyMinutes: 90 });
   const replay = await startFirstLearning(deps, fixture.scope, unscheduled);
   expect(replay).toMatchObject({ activityId: first.activityId, courseId: first.courseId, taskId: null, plannedDays: 0 });
@@ -102,6 +117,8 @@ it("starts and replays without a schedule, preserving existing workspace setting
   const afterGoals = await goals.list(fixture.scope, courseId);
   expect(afterGoals.goals).toEqual([editedGoal]);
   expect(editedGoal).toMatchObject({ id: goal.id, weeklyMinutes: 90, revision: goal.revision + 1 });
+  expect(await decisions.list(fixture.scope, { layer: "activity", targetId: first.activityId })).toEqual(saved);
+  expect(await decisions.explain(fixture.scope, saved[0]!.id)).toMatchObject({ current: false, invalidationReasons: ["goal_changed"] });
   expect(await deps.settings.get(fixture.scope)).toEqual(before);
   const [counts] = await fixture.sql`SELECT count(*)::int AS count FROM opening_tasks WHERE course_id=${first.courseId!}`;
   expect(counts!.count).toBe(0);

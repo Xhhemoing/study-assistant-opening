@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { captureNextLearningStep, nextLearningStep } from "./next-learning-step";
+import { captureNextLearningStep, nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import { verifySpanAnswer } from "../span-verifier";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "../span-teaching-catalog";
 import type { NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
@@ -24,6 +24,32 @@ const input = (overrides: Partial<NextLearningStepInput> = {}): NextLearningStep
 });
 
 describe("nextLearningStep", () => {
+  it("labels bridge v2 plus D4 as v5 without restoring D5 assisted-success selection", () => {
+    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-5");
+    const request = input({ status: "observed_independent", observations: [observation({ assistance: "hinted", independentAttempt: "no" }), observation()] });
+    expect(nextLearningStep(request)).toMatchObject({ activityKind: "transfer_check", reasonCode: "independent" });
+    expect(captureNextLearningStep(request).candidates.some(row => row.reasonCodes.includes("assisted_success"))).toBe(false);
+  });
+  const cycles = { completedCycles: ["failure-1", "failure-2"].map(failureRootId => ({ failureRootId,
+    evidenceRefs: [`observation:${failureRootId}`, `help_exposure:${failureRootId}`, `observation:followup-${failureRootId}`],
+    repeatedVerifiedError: false, persistentDeliveredAssistance: true })) };
+  it("recommends a method choice only from the trusted two-cycle summary, keeping the selected focus", () => {
+    const request = input({ observations: [observation({ id: "selected-origin", assistance: "hinted" })], remediationCycles: cycles });
+    expect(nextLearningStep(request)).toEqual({ activityKind: "diagnose", reasonCode: "remediation_limit", focusObservationId: "selected-origin" });
+    expect(captureNextLearningStep(request).candidates.at(-1)).toMatchObject({ action: "diagnose", eligible: true,
+      reasonCodes: ["remediation_limit"], evidenceRefs: expect.arrayContaining(["observation:failure-1", "observation:failure-2"]) });
+    for (const completedCycles of [[], cycles.completedCycles.slice(0, 1), [cycles.completedCycles[0]!, cycles.completedCycles[0]!],
+      cycles.completedCycles.map(row => ({ ...row, evidenceRefs: [] }))]) {
+      expect(nextLearningStep({ ...request, remediationCycles: { completedCycles } }).reasonCode).toBe("assistance_dependent");
+    }
+  });
+  it("keeps explicit full/new learning and legal due retest ahead of remediation, not ordinary consolidate", () => {
+    for (const [controls, reason] of [[{ wantsFullExplanation: true }, "requested_full"],
+      [{ learningPhase: "new_learning" }, "requested_full"], [{ dueRetest: true }, "due_retest"],
+      [{ learningPhase: "consolidate" }, "remediation_limit"]] as const) {
+      expect(nextLearningStep(input({ observations: [observation()], remediationCycles: cycles, ...controls })).reasonCode).toBe(reason);
+    }
+  });
   it("captures phase policy once and prioritizes the latest effective head", () => {
     for (const request of [input({ learningPhase: "new_learning", dueRetest: true }), input({ learningPhase: "consolidate" }), input({ dueRetest: true, wantsFullExplanation: true })]) {
       expect(captureNextLearningStep(request).decision).toEqual(nextLearningStep(request));
@@ -108,7 +134,7 @@ describe("nextLearningStep", () => {
       vectors: [["1", "0"], ["0", "1"]], target: ["1", "2"], knowledgeComponents: [] },
     { membership: "in_span", coefficients: ["0", "0"] });
     expect(verified.outcome).toBe("incorrect");
-    return observation({ id, rootObservationId: id, attemptId: `attempt-${id}`, skillLabel: SPAN_SKILL_LABEL,
+    return observation({ id, skillLabel: SPAN_SKILL_LABEL,
       requirementKey: SPAN_REQUIREMENT_KEY, attemptedAt: id === "older" ? "2026-10-15T07:00:00Z" : "2026-10-16T07:00:00Z",
       verifiedCorrect: "no", assistance: "hinted", errors: Object.entries(verified.skills)
         .filter(([, verdict]) => verdict === "incorrect")
@@ -181,6 +207,38 @@ describe("nextLearningStep", () => {
     });
   });
 
+  it.each([0, 1, 2])("keeps the v2 majority rule with %i earlier independent successes", priorChecks => {
+    for (const assistance of ["hinted", "revealed"] as const) {
+      const request = input({ status: "observed_independent", observations: [
+        observation({ assistance, independentAttempt: "no" }),
+        ...Array.from({ length: priorChecks }, (_, i) => observation({ id: `prior-${i}` })),
+      ] });
+      const captured = captureNextLearningStep(request);
+      const majority = priorChecks === 0;
+      expect(captured.decision).toEqual({ activityKind: majority ? "reduced_help_practice" : "transfer_check",
+        reasonCode: majority ? "assistance_dependent" : "independent", focusObservationId: null });
+      expect(captured.candidates.some(candidate => candidate.reasonCodes.includes("assisted_success")
+        || candidate.reasonCodes.includes("not_assisted_success"))).toBe(false);
+      for (const [controls, reason] of [
+        [{ learningPhase: "new_learning", dueRetest: true }, "requested_full"],
+        [{ dueRetest: true }, "due_retest"],
+        [{ learningPhase: "consolidate" }, "requested_consolidate"],
+        [{ wantsFullExplanation: true }, "requested_full"],
+      ] as const) expect(nextLearningStep({ ...request, ...controls }).reasonCode).toBe(reason);
+    }
+  });
+
+  it("does not promote unknown, incorrect, stale or older helped success to the new reason", () => {
+    for (const latest of [observation({ assistance: "hinted", verifiedCorrect: "unknown" }),
+      observation({ assistance: "revealed", verifiedCorrect: "no" }),
+      ...["no", "unknown", undefined].map(usableForCurrentVersion => observation({ assistance: "hinted", usableForCurrentVersion: usableForCurrentVersion as SnapshotObservation["usableForCurrentVersion"] })),
+      observation({ assistance: "unknown" }), observation()]) {
+      expect(nextLearningStep(input({ observations: [latest] })).reasonCode).not.toBe("assisted_success");
+    }
+    expect(nextLearningStep(input({ observations: [observation({ verifiedCorrect: "unknown" }), observation({ id: "older", assistance: "hinted" })] })).reasonCode)
+      .not.toBe("assisted_success");
+  });
+
   it("combines hinted and revealed attempts when checking the recent majority", () => {
     expect(nextLearningStep(input({
       observations: [
@@ -213,7 +271,7 @@ describe("nextLearningStep", () => {
     for (const assistance of ["independent", "unknown"] as const) {
       expect(nextLearningStep(input({
         status: "observed_independent",
-        observations: [observation({ assistance: "hinted" }), observation({ id: "older", assistance })],
+        observations: [observation({ assistance }), observation({ id: "older", assistance: "hinted" })],
       }))).toEqual({ activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" });
     }
   });
