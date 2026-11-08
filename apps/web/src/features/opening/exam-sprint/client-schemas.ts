@@ -1,9 +1,10 @@
-import { examErrorCauseSchema, examWorkReviewProposalSchema, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamWorkReview } from "@aistudy/contracts";
+import { examRunConversionSchema, examErrorCauseSchema, examWorkReviewProposalSchema, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamWorkReview } from "@aistudy/contracts";
 import { z } from "zod";
 
 const runSchema = z.object({
   id: z.string(), mode: z.enum(["diagnostic", "practice", "retest", "mock-a", "mock-b"]), questionIds: z.array(z.string()),
   startedAt: z.string(), deadlineAt: z.string().nullable(), completedAt: z.string().nullable(),
+  conversion: examRunConversionSchema.optional(),
 });
 const attemptSchema = z.object({
   id: z.string(), questionId: z.string(), runId: z.string(), presentedAt: z.string(), answeredAt: z.string().nullable(),
@@ -42,6 +43,29 @@ export const overviewSchema: z.ZodType<ExamSprintOverview> = z.object({
   summary: z.object({ sourceTotal: z.number(), sourceCovered: z.number(), sourceIndependent: z.number(), sourceDelayed: z.number(), onlineAnswered: z.number(), onlineIndependentCorrect: z.number() }),
   recommendations: z.array(z.object({ title: z.string(), reason: z.string(), lessonId: z.string().nullable(), mode: z.enum(["practice", "retest"]) })),
   workload: z.object({ remainingItems: z.number(), estimatedMinutes: z.number().nullable(), availableMinutes: z.number().nullable(), overloaded: z.boolean(), message: z.string() }),
+}).superRefine((overview, ctx) => {
+  for (const run of overview.state.runs) {
+    const c = run.conversion;
+    if (!c) continue;
+    const attempts = overview.attempts.filter(a => a.id === c.attemptId), attempt = attempts[0];
+    const receipts = (overview.state.lessonExposures ?? []).filter(e => e.id === c.exposureId), receipt = receipts[0];
+    const lessons = overview.pack.lessons.filter(l => l.id === c.lessonId), identity = lessons[0]?.exposureIdentity;
+    if ((run.mode !== "mock-a" && run.mode !== "mock-b") || c.runId !== run.id || c.packId !== overview.pack.id
+      || c.packVersion !== overview.pack.version || c.convertedAt !== run.completedAt
+      || Date.parse(c.convertedAt) < Date.parse(run.startedAt) || overview.activeRun?.id === run.id
+      || attempts.length !== 1 || !attempt || attempt.runId !== run.id || !run.questionIds.includes(attempt.questionId)
+      || overview.attempts.filter(a => a.runId === run.id).at(-1)?.id !== attempt.id
+      || attempt.question.lessonId !== c.lessonId || attempt.answeredAt !== null || attempt.answer !== null || attempt.correct !== null
+      || Date.parse(attempt.presentedAt) > Date.parse(c.convertedAt)
+      || !attempt.help.some(h => h.kind === "solution" && h.at === c.convertedAt) || !attempt.lessonExposureIds?.includes(c.exposureId)
+      || receipts.length !== 1 || !receipt || receipt.runId !== run.id || receipt.lessonId !== c.lessonId
+      || receipt.packId !== c.packId || receipt.packVersion !== c.packVersion || receipt.openedAt !== c.convertedAt
+      || receipt.clientKey !== c.clientKey || receipt.contentFingerprint !== c.contentFingerprint || receipt.mappingVersion !== c.mappingVersion
+      || lessons.length !== 1 || !identity || identity.packVersion !== c.packVersion
+      || identity.contentFingerprint !== c.contentFingerprint || identity.mappingVersion !== c.mappingVersion) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "转教学记录与原模拟、题目或帮助记录不一致", path: ["state", "runs"] });
+    }
+  }
 });
 
 export const integrationSchema: z.ZodType<ExamIntegrationOverview> = z.object({

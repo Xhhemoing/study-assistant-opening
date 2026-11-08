@@ -284,8 +284,38 @@ function openLesson(state: ExamSprintState, command: Extract<ExamSprintCommand, 
   if (current) captureExamAttemptExposures(current, state, pack, context?.exposureCoverage);
 }
 
+function switchToTeaching(state: ExamSprintState, command: Extract<ExamSprintCommand, { action: "switch_to_teaching" }>, pack: ExamPack, now: string, context?: ExamSelectionContext): void {
+  const run = activeRun(state), attempt = run ? currentAttempt(state, run) : null;
+  if (!run || !isMock(run.mode) || run.id !== command.expectedRunId || !attempt
+    || attempt.id !== command.expectedAttemptId || attempt.answeredAt !== null) {
+    fail("CONFLICT", "模拟或当前未提交题已改变，请重新载入；已提交答案不能转为受助作答。");
+  }
+  const question = questionFor(pack, attempt.questionId);
+  if (command.lessonId !== question.lessonId || at(now) < at(attempt.presentedAt)) fail("CONFLICT", "转教学的题目或时间无法校验。");
+  const lesson = pack.lessons.find(item => item.id === command.lessonId);
+  const mapping = lesson ? validExamLessonExposure(lesson) : null;
+  if (!mapping || command.packVersion !== pack.version || command.contentFingerprint !== mapping.contentFingerprint
+    || command.mappingVersion !== mapping.mappingVersion || command.confirmedEndScoredMock !== true) {
+    fail("CONFLICT", "串讲内容版本或已审核曝光映射无法校验，请重新载入。");
+  }
+  const exposures = state.lessonExposures ??= [];
+  const exposureId = `lesson-exposure-${exposures.length + 1}-${command.clientKey.slice(0, 60)}`;
+  exposures.push({ id: exposureId, clientKey: command.clientKey, openedAt: now, runId: run.id,
+    lessonId: lesson!.id, packId: pack.id, packVersion: pack.version, ...structuredClone(mapping) });
+  if (!attempt.help.some(help => help.kind === "solution")) attempt.help.push({ kind: "solution", at: now });
+  captureExamAttemptExposures(attempt, state, pack, context?.exposureCoverage);
+  run.completedAt = now;
+  run.conversion = { runId: run.id, packId: pack.id, packVersion: pack.version, attemptId: attempt.id,
+    lessonId: lesson!.id, exposureId, clientKey: command.clientKey, convertedAt: now,
+    contentFingerprint: mapping.contentFingerprint, mappingVersion: mapping.mappingVersion };
+}
+
 export function applyExamSprintCommand(state: ExamSprintState, command: ExamSprintCommand, pack: ExamPack, now: string, context?: ExamSelectionContext): ExamSprintState {
   const result = structuredClone(state);
+  if (command.action === "switch_to_teaching") {
+    switchToTeaching(result, command, pack, now, context);
+    return result;
+  }
   if (command.action === "open_lesson") {
     openLesson(result, command, pack, now, context);
     return result;
@@ -418,9 +448,11 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   const lessonContents: ExamSprintOverview["lessonContents"] = active && isMock(active.mode) ? [] : lessons.flatMap(lesson => {
     const mapping = validExamLessonExposure(lesson);
     if (!mapping) return [];
-    const exposure = (state.lessonExposures ?? []).find(item => item.packId === pack.id && item.packVersion === pack.version
+    const matching = (state.lessonExposures ?? []).filter(item => item.packId === pack.id && item.packVersion === pack.version
       && (!active || item.runId === active.id)
       && item.lessonId === lesson.id && item.contentFingerprint === mapping.contentFingerprint && item.mappingVersion === mapping.mappingVersion);
+    const conversion = !active ? state.runs.at(-1)?.conversion : undefined;
+    const exposure = matching.find(item => item.id === conversion?.exposureId) ?? matching[0];
     return exposure ? [{ exposureId: exposure.id, lesson: structuredClone(lesson) }] : [];
   });
   const { attempts: _attempts, ...publicState } = state;
