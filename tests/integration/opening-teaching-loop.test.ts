@@ -83,26 +83,30 @@ beforeEach(async () => {
   await f.sql`DELETE FROM courses WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
 });
 
-async function seedCourseSource() {
+async function seedCourseSource(withMembership = true) {
   const rows = backupRows(f.sql, f.scope);
   const sourceId = await rows.source();
   const chunkId = await rows.chunk(sourceId);
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${f.scope.workspaceId}, 'V2-16 teaching loop', ${courseId})`;
+  if (withMembership) {
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+      VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
+  }
   return { courseId, sourceId, chunkId };
 }
 
 describe("ActivitySpec publication source trust boundary (PG)", () => {
   async function seedBoundary() {
-    const { courseId, sourceId, chunkId } = await seedCourseSource();
+    const { courseId, sourceId, chunkId } = await seedCourseSource(false);
     const oldChunkId = randomUUID();
     await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
     await f.sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${chunkId}`;
     await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
       VALUES (${oldChunkId},${sourceId},1,1,'历史版本')`;
     const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
-      clientKey: randomUUID(), intentKind: "material", intentSummary: "边界", courseId, sourceIds: [sourceId], createIntent: {},
+      clientKey: randomUUID(), intentKind: "material", intentSummary: "边界", courseId, sourceIds: [], createIntent: {},
     });
     const content = createOpeningTeachingContentRepository(f.sql);
     const unit = await content.createUnit(f.scope, { title: "边界", blocks: [{ id: randomUUID(), type: "text", content: { text: "seed" } }] });
