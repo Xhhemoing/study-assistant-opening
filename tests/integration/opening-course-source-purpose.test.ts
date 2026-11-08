@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createCourseMembershipRepository, createOpeningSourceRepository, createOpeningKnowledgeRepository } from "@aistudy/database";
+import type { ProviderInput } from "@aistudy/contracts";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createCourseMembershipRepository, createOpeningSourceRepository, createOpeningKnowledgeRepository, createOpeningJobRepository } from "@aistudy/database";
 import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 import { POST, PATCH } from "../../apps/web/src/app/api/courses/[id]/memberships/route";
 import { GET as GET_ASSETS } from "../../apps/web/src/app/api/courses/[id]/assets/route";
+import { createBuildCourseKnowledgeHandler } from "../../apps/worker/src/jobs/build-course-knowledge";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { courseSourcePurposeAllows } from "../../packages/contracts/src/opening/sources";
 import { listReadySourceIdsForCourse, createOpeningCourseReadySourcesRepository } from "../../packages/database/src/repositories/opening-course-ready-sources";
@@ -122,13 +124,77 @@ describe("course source purpose storage and concurrency", () => {
     const changed = await courses.updateAssetMembership({ ...input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString() });
     expect(await knowledge.listAuthorizedChunks(f.scope, course.id)).toEqual([]);
     expect(await knowledge.get(f.scope, course.id)).toBeNull();
-    expect(await knowledge.getForRebuild(f.scope, course.id)).toBeNull();
+    expect(await knowledge.getForRebuild(f.scope, course.id)).toEqual({ version: saved.version + 1,
+      snapshot: { courseId: course.id, version: saved.version + 1, nodes: [], edges: [] }, sourceVersions: {}, nodeDefinitions: {} });
     await expect(knowledge.assertExtractionBatch(f.scope, course.id, chunks)).rejects.toMatchObject({ code: "VALIDATION" });
     expect(await f.sql`SELECT * FROM opening_course_knowledge WHERE course_id=${course.id}`).toEqual(before);
     expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(confirmations);
     await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
     expect((await knowledge.get(f.scope, course.id))?.snapshot.nodes[0]?.status).toBe("supported");
     expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(confirmations);
+  });
+
+  it.each(["practice", "reference", "mock_exam"] as const)("rebuilds A+B to B using the real CAS version after A becomes %s", async purpose => {
+    const { courses, source: a, course, input, membership } = await setup();
+    const b = await createOpeningSourceRepository(f.sql).create(f.scope, {
+      name: "allowed-b.pdf", mime: "application/pdf", bytes: 12, sha256: "b".repeat(64),
+    });
+    await courses.addAssetMembership({ ...input, assetId: b.id, role: "core", visibility: "private" });
+    await ready(a.id); await ready(b.id);
+    await f.sql`UPDATE opening_source_chunks SET text='Restricted A definition' WHERE source_id=${a.id}`;
+    await f.sql`UPDATE opening_source_chunks SET text='Allowed B definition' WHERE source_id=${b.id}`;
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const chunks = await knowledge.listAuthorizedChunks(f.scope, course.id);
+    const aChunk = chunks.find(chunk => chunk.sourceId === a.id)!;
+    const bChunk = chunks.find(chunk => chunk.sourceId === b.id)!;
+    const aNodeId = randomUUID(), bNodeId = randomUUID();
+    const versions = { [a.id]: 0, [b.id]: 0 };
+    const original = await knowledge.replace(f.scope, course.id, { expectedVersion: 0, sourceVersions: versions,
+      snapshot: { courseId: course.id, version: 1, nodes: [
+        { id: aNodeId, courseId: course.id, label: "Restricted A", kind: "concept", status: "needs_check", evidenceChunkIds: [aChunk.id] },
+        { id: bNodeId, courseId: course.id, label: "Allowed B", kind: "concept", status: "needs_check", evidenceChunkIds: [bChunk.id] },
+      ], edges: [] } });
+    const confirmedA = await knowledge.confirmNode(f.scope, course.id, aNodeId, { expectedVersion: original.version, sourceVersions: versions });
+    const confirmed = await knowledge.confirmNode(f.scope, course.id, bNodeId, { expectedVersion: confirmedA.version, sourceVersions: versions });
+    const receipts = await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`;
+    expect(receipts).toHaveLength(2);
+    const changed = await courses.updateAssetMembership({ ...input, purpose, expectedUpdatedAt: membership.updatedAt.toISOString() });
+    const safe = await knowledge.getForRebuild(f.scope, course.id);
+    expect(safe?.version).toBe(confirmed.version);
+    expect(safe?.snapshot.nodes.map(node => node.id)).toEqual([bNodeId]);
+    expect(Object.keys(safe!.nodeDefinitions)).toEqual([bNodeId]);
+    expect(JSON.stringify(safe)).not.toContain("Restricted A");
+    expect(safe?.sourceVersions).toEqual({ [b.id]: 0 });
+    expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(receipts);
+    const provider = { complete: vi.fn(async (_input: ProviderInput) => ({ text: JSON.stringify({ nodes: [{ label: "Allowed B", kind: "concept",
+      evidenceChunkIds: [bChunk.id], status: "supported" }], edges: [] }), citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 })) };
+    const replace = vi.fn(knowledge.replace.bind(knowledge));
+    const handler = createBuildCourseKnowledgeHandler({
+      get: (scope, id) => knowledge.getForRebuild(scope, id),
+      listAuthorizedChunks: (scope, id) => knowledge.listAuthorizedChunks(scope, id),
+      listReferencedNodeIds: (scope, id) => knowledge.listReferencedNodeIds(scope, id),
+      replace, provider,
+    });
+    const queued = await knowledge.enqueueRebuild(f.scope, course.id, { clientKey: randomUUID() });
+    const job = await createOpeningJobRepository(f.sql).claim(queued.jobId);
+    if (!job) throw new Error("Expected real rebuild job claim");
+    const rebuilt = await handler(job, job.payload);
+    expect(provider.complete).toHaveBeenCalledOnce();
+    const sent = provider.complete.mock.calls[0]!;
+    expect(JSON.stringify(sent)).not.toContain("Restricted A");
+    expect(JSON.stringify(sent)).not.toContain(aChunk.id);
+    expect(JSON.stringify(sent)).toContain("Allowed B definition");
+    expect(replace.mock.calls[0]![2].expectedVersion).toBe(confirmed.version);
+    expect(rebuilt.version).toBe(confirmed.version + 1);
+    expect(rebuilt.snapshot.nodes).toHaveLength(1);
+    expect(rebuilt.snapshot.nodes[0]).toMatchObject({ id: bNodeId, label: "Allowed B", evidenceChunkIds: [bChunk.id], status: "needs_check" });
+    expect((await knowledge.get(f.scope, course.id))?.sourceVersions).toEqual({ [b.id]: 0 });
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toHaveLength(0);
+    await courses.updateAssetMembership({ ...input, purpose: null, expectedUpdatedAt: changed.updatedAt.toISOString() });
+    expect((await knowledge.get(f.scope, course.id))?.snapshot.nodes).toEqual(rebuilt.snapshot.nodes);
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toHaveLength(0);
+    await expect(knowledge.replace(f.scope, course.id, { expectedVersion: 0, sourceVersions: { [b.id]: 0 },
+      snapshot: rebuilt.snapshot })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it.each([null, "teaching", "practice", "reference", "mock_exam"] as const)("retrieves explicit material only for admitted course/use: %s", async purpose => {
