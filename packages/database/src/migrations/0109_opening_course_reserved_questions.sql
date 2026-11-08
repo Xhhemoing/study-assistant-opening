@@ -195,6 +195,19 @@ CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON openi
 CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON opening_learning_item_versions
   FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
 
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF content ON library_blocks
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF stem_snapshot ON opening_problem_refs
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+-- Checkpoint edits are conservatively treated as lost historical presentation;
+-- frequent checkpoint saves can therefore leave coverage permanently unknown.
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF checkpoint_json ON opening_teaching_activities
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE OR UPDATE OF answer ON opening_learning_observations
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+CREATE TRIGGER opening_course_question_history_invalidate BEFORE DELETE ON opening_course_question_exposures
+  FOR EACH ROW EXECUTE FUNCTION opening_course_question_history_invalidate();
+
 -- These row triggers preserve deletion gaps; they do NOT serialize every
 -- surface INSERT against scan/reserve. Do not claim concurrency-safe unseen
 -- until each writer acquires history -> coverage -> business locks at entry.
