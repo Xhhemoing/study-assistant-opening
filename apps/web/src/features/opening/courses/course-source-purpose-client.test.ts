@@ -53,6 +53,9 @@ describe("course source purpose transport", () => {
     { ...current, purpose: undefined },
     { ...current, purpose: "unknown" },
     { ...current, updatedAt: "invalid" },
+    { ...current, updatedAt: "2026-11-08T12:00:00.123456Z" },
+    { ...current, updatedAt: "2026-11-08T12:00:00Z" },
+    { ...current, updatedAt: "2026-11-08T12:00:00.123+00:00" },
   ])("rejects incompatible or legacy responses rather than claiming success", async row => {
     const transport = vi.fn<typeof fetch>(async () => Response.json({ assets: [row] }));
     await expect(createCourseSourcePurposeClient(transport).read(courseId, sourceId)).rejects.toThrow();

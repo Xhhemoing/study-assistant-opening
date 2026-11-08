@@ -1,13 +1,14 @@
 import { z } from "zod";
+import { courseSourcePurposeSchema as purposeSchema } from "@aistudy/contracts";
 import { createSessionFetch } from "../../auth/session-expiry";
 
-// Thin UI boundary until the source-purpose contract owner hands back its export.
-export const courseSourcePurposeSchema = z.enum(["teaching", "practice", "mock_exam", "reference"]).nullable();
+/** Nullable UI value; enum ownership stays with the shared source contract. */
+export const courseSourcePurposeSchema = purposeSchema.nullable();
 export type CourseSourcePurpose = z.infer<typeof courseSourcePurposeSchema>;
 const membershipSchema = z.object({
   id: z.string().uuid(), courseId: z.string().uuid(), assetType: z.literal("source"),
   assetId: z.string().uuid(), purpose: courseSourcePurposeSchema,
-  updatedAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime().regex(/\.\d{3}Z$/),
 });
 export type CourseSourceMembership = z.infer<typeof membershipSchema>;
 export const sourcePurposeLabels = {
