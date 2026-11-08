@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { Sql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { KnowledgeSnapshot } from "@aistudy/contracts";
 import {
   createOpeningKnowledgeRepository,
+  createSqlClient,
   createOpeningSourceActionsRepository,
   createOpeningSourceChunksRepository,
   OpeningKnowledgeError,
@@ -100,6 +102,40 @@ function snapshotFor(
         },
       ];
   return { courseId, version, nodes, edges };
+}
+
+// Pause only the test's transaction boundary AFTER real repository SQL ran, BEFORE commit.
+// No query mock, database trigger, production hook or timing sleep controls these interleavings.
+async function pauseBeforeCommit<T>(operation: (repo: ReturnType<typeof createOpeningKnowledgeRepository>) => Promise<T>) {
+  let release!: () => void, reached!: () => void;
+  const ready = new Promise<void>(resolve => { reached = resolve; });
+  const proceed = new Promise<void>(resolve => { release = resolve; });
+  let pid = 0;
+  const gated = new Proxy(f.sql, {
+    get(target, property) {
+      if (property !== "begin") return Reflect.get(target, property);
+      return (callback: (tx: Sql) => Promise<T>) => target.begin(async tx => {
+        const [backend] = await tx`SELECT pg_backend_pid() AS pid`;
+        pid = Number(backend!.pid);
+        const result = await callback(tx as unknown as Sql);
+        reached();
+        await proceed;
+        return result;
+      });
+    },
+  });
+  const result = operation(createOpeningKnowledgeRepository(gated));
+  await Promise.race([ready, result.then(() => { throw new Error("Expected a transaction paused before commit"); })]);
+  return { result, release, pid };
+}
+
+async function expectBlockedBy(pid: number, blocker: number) {
+  // Observe the real server lock dependency, not elapsed time or a promise that merely started.
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const [row] = await f.sql`SELECT ${blocker}::integer = ANY(pg_blocking_pids(${pid})) AS blocked`;
+    if (row!.blocked) return;
+  }
+  throw new Error("Concurrent repository transaction never reached the expected PostgreSQL lock barrier");
 }
 
 describe("opening knowledge manual confirmation", () => {
@@ -215,6 +251,121 @@ describe("opening knowledge manual confirmation", () => {
     expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
   });
 
+  it.each(["confirm", "replace"] as const)("maintenance commits before queued %s: stale CAS conflicts without resurrecting receipts", async operation => {
+    const { repo, courseId, nodeId, record, sourceId } = await pending();
+    const confirmed = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions });
+    await repo.markNeedsCheckForSources(f.scope, [sourceId]);
+    const alreadyPending = (await repo.get(f.scope, courseId))!;
+    expect(alreadyPending.snapshot.nodes.every(node => node.status === "needs_check")).toBe(true);
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    const maintenance = await pauseBeforeCommit(gated => gated.markNeedsCheckForSources(f.scope, [sourceId]));
+    const contender = createSqlClient(process.env.OPENING_TEST_DATABASE_URL!, { max: 1 });
+    let queued: Promise<unknown> | undefined;
+    try {
+      const [backend] = await contender`SELECT pg_backend_pid() AS pid`;
+      const concurrent = createOpeningKnowledgeRepository(contender);
+      queued = operation === "confirm"
+        ? concurrent.confirmNode(f.scope, courseId, nodeId,
+          { expectedVersion: alreadyPending.version, sourceVersions: alreadyPending.sourceVersions })
+        : concurrent.replace(f.scope, courseId, { expectedVersion: alreadyPending.version,
+          expectedReferencedNodeIds: [], snapshot: structuredClone(alreadyPending.snapshot), sourceVersions: alreadyPending.sourceVersions });
+      const outcome = queued.then(value => ({ value }), error => ({ error }));
+      await expectBlockedBy(Number(backend!.pid), maintenance.pid);
+      // The receipt deletion / CAS update is not visible before the maintenance commit.
+      expect(await repo.get(f.scope, courseId)).toEqual(alreadyPending);
+      maintenance.release();
+      expect(await maintenance.result).toEqual({ updated: 0, courseIds: [courseId] });
+      expect(await outcome).toMatchObject({ error: { code: "CONFLICT" } });
+      const maintained = (await repo.get(f.scope, courseId))!;
+      expect(maintained.version).toBe(alreadyPending.version + 1);
+      expect(maintained.snapshot.nodes.every(node => node.status === "needs_check")).toBe(true);
+      expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+      const rebuilt = await repo.replace(f.scope, courseId, { expectedVersion: maintained.version,
+        expectedReferencedNodeIds: [], snapshot: structuredClone(confirmed.snapshot), sourceVersions: confirmed.sourceVersions });
+      expect(rebuilt.snapshot.nodes.every(node => node.status === "needs_check")).toBe(true);
+      expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+      const checked = await repo.confirmNode(f.scope, courseId, nodeId,
+        { expectedVersion: rebuilt.version, sourceVersions: rebuilt.sourceVersions });
+      expect(checked.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe("supported");
+      const receipts = await f.sql`SELECT graph_version_before,graph_version_after FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+      expect(receipts).toEqual([{ graph_version_before: rebuilt.version, graph_version_after: checked.version }]);
+    } finally {
+      maintenance.release();
+      await Promise.allSettled([maintenance.result, ...(queued ? [queued] : [])]);
+      await contender.end({ timeout: 5 });
+    }
+  });
+
+  it.each(["confirm", "replace"] as const)("maintenance waits for %s commit, then permanently revokes its confirmation", async operation => {
+    const { repo, courseId, nodeId, record, sourceId } = await pending();
+    const before = operation === "replace" ? await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions }) : record;
+    const writer = await pauseBeforeCommit(gated => operation === "confirm"
+      ? gated.confirmNode(f.scope, courseId, nodeId, { expectedVersion: before.version, sourceVersions: before.sourceVersions })
+      : gated.replace(f.scope, courseId, { expectedVersion: before.version, expectedReferencedNodeIds: [],
+        snapshot: structuredClone(record.snapshot), sourceVersions: before.sourceVersions }));
+    const contender = createSqlClient(process.env.OPENING_TEST_DATABASE_URL!, { max: 1 });
+    let queued: Promise<unknown> | undefined;
+    try {
+      const [backend] = await contender`SELECT pg_backend_pid() AS pid`;
+      queued = createOpeningKnowledgeRepository(contender).markNeedsCheckForSources(f.scope, [sourceId]);
+      await expectBlockedBy(Number(backend!.pid), writer.pid);
+      expect(await repo.get(f.scope, courseId)).toEqual(before);
+      writer.release();
+      const written = await writer.result;
+      await queued;
+      const maintained = (await repo.get(f.scope, courseId))!;
+      expect(maintained.version).toBe(written.version + 1);
+      expect(maintained.snapshot.nodes.every(node => node.status === "needs_check")).toBe(true);
+      expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+      const rebuilt = await repo.replace(f.scope, courseId, { expectedVersion: maintained.version,
+        expectedReferencedNodeIds: [], snapshot: structuredClone(written.snapshot), sourceVersions: written.sourceVersions });
+      expect(rebuilt.snapshot.nodes.every(node => node.status === "needs_check")).toBe(true);
+      expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    } finally {
+      writer.release();
+      await Promise.allSettled([writer.result, ...(queued ? [queued] : [])]);
+      await contender.end({ timeout: 5 });
+    }
+  });
+
+  it("scope-isolates maintenance and rejects forged owners without changing graph or receipts", async () => {
+    const { repo, courseId, nodeId, record, sourceId } = await pending();
+    const confirmed = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions });
+    const receipts = await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+    await expect(repo.markNeedsCheckForSources({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, [sourceId]))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await repo.markNeedsCheckForSources(f.otherScope, [sourceId])).toEqual({ updated: 0, courseIds: [] });
+    expect(await repo.get(f.scope, courseId)).toEqual(confirmed);
+    expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toEqual(receipts);
+  });
+
+  it("rolls back maintenance receipt deletion, CAS update and graph changes on a real transaction failure", async () => {
+    const { repo, courseId, nodeId, record, sourceId } = await pending();
+    const confirmed = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions });
+    const receipts = await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+    // Test-only outer transaction: the repository's real maintenance runs in a savepoint.
+    // Division by zero aborts AFTER its DELETE/UPDATE, proving both roll back together.
+    await expect(f.sql.begin(async tx => {
+      const nested = createOpeningKnowledgeRepository(new Proxy(f.sql, {
+        get(target, property) {
+          return property === "begin" ? (callback: (inner: Sql) => Promise<unknown>) =>
+            tx.savepoint(inner => callback(inner as unknown as Sql)) : Reflect.get(target, property);
+        },
+      }));
+      await nested.markNeedsCheckForSources(f.scope, [sourceId]);
+      expect(await tx`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+      const [changed] = await tx`SELECT version FROM opening_course_knowledge WHERE course_id=${courseId}`;
+      expect(Number(changed!.version)).toBe(confirmed.version + 1);
+      await tx`SELECT 1 / 0`;
+    })).rejects.toMatchObject({ code: "22012" });
+    expect(await repo.get(f.scope, courseId)).toEqual(confirmed);
+    expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toEqual(receipts);
+  });
+
   it("rolls back the status/version when the confirmation insert fails", async () => {
     const { repo, courseId, nodeId, record, chunkId } = await pending();
     // Force the insert to fail at the database unique constraint, after the graph UPDATE.
@@ -265,6 +416,27 @@ describe("opening knowledge manual confirmation", () => {
     expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
   });
 
+  it("permanently revokes a confirmation on a semantic graph edit even when the original graph returns", async () => {
+    const { repo, courseId, nodeId, record } = await pending();
+    const confirmed = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: record.version, sourceVersions: record.sourceVersions });
+    const changed = structuredClone(confirmed.snapshot);
+    changed.edges = [];
+    const edited = await repo.replace(f.scope, courseId, { expectedVersion: confirmed.version,
+      snapshot: changed, sourceVersions: confirmed.sourceVersions });
+    expect(edited.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe("needs_check");
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    const returned = await repo.replace(f.scope, courseId, { expectedVersion: edited.version,
+      expectedReferencedNodeIds: [], snapshot: structuredClone(confirmed.snapshot), sourceVersions: confirmed.sourceVersions });
+    expect(returned.snapshot.edges).toEqual(confirmed.snapshot.edges);
+    expect(returned.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe("needs_check");
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    const checked = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: returned.version, sourceVersions: returned.sourceVersions });
+    expect(await f.sql`SELECT graph_version_after FROM opening_knowledge_confirmations WHERE course_id=${courseId}`)
+      .toEqual([{ graph_version_after: checked.version }]);
+  });
+
   it("withdraws the confirmation when a manual edit moves the node back to needs_check", async () => {
     const { repo, courseId, nodeId, record } = await pending();
     const confirmed = await repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
@@ -275,6 +447,11 @@ describe("opening knowledge manual confirmation", () => {
     const rebuilt = await repo.replace(f.scope, courseId, { expectedVersion: 3, expectedReferencedNodeIds: [],
       snapshot: structuredClone(record.snapshot), sourceVersions: record.sourceVersions });
     expect(rebuilt.snapshot.nodes.find(node => node.id === nodeId)!.status).toBe("needs_check");
+    expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+    const checked = await repo.confirmNode(f.scope, courseId, nodeId,
+      { expectedVersion: rebuilt.version, sourceVersions: rebuilt.sourceVersions });
+    expect(await f.sql`SELECT graph_version_after FROM opening_knowledge_confirmations WHERE course_id=${courseId}`)
+      .toEqual([{ graph_version_after: checked.version }]);
   });
 
   it("confirms a node whose evidence repeats a chunk id and keeps it through an identical rebuild", async () => {

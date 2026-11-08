@@ -319,7 +319,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
     /**
      * CAS replace. Stores newVersion = expectedVersion + 1.
      * Snapshot.version from the caller is overwritten to newVersion.
-     * Soft-idempotent: if row already at expectedVersion+1 with the same graph, returns it.
+     * Soft-idempotent only for nonempty, fully reviewed graphs at expectedVersion+1.
+     * Pending graphs require a fresh CAS: maintenance may have advanced the same-looking graph.
      */
     async replace(
       scope: Scope,
@@ -364,7 +365,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
 
         if (current && currentVersion === newVersion) {
           const existing = mapRecord(current);
-          if (sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
+          const replayable = existing.snapshot.nodes.length > 0
+            && [...existing.snapshot.nodes, ...existing.snapshot.edges].every(item => item.status !== "needs_check");
+          if (replayable && sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
         }
         if (currentVersion !== input.expectedVersion) {
           throw new OpeningKnowledgeError("CONFLICT", "stale knowledge version");

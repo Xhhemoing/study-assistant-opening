@@ -106,6 +106,26 @@ it("preserves only the manually confirmed definition across rebuilds and recheck
   expect(changed.snapshot.nodes.map(node => node.status)).toEqual(["needs_check", "needs_check"]);
   expect(changed.snapshot.nodes.find(node => node.id === selected.id)!.evidenceChunkIds).toEqual([a.chunkId]);
   expect(changed.sourceVersions).toEqual({ [a.sourceId]: 2, [b.sourceId]: 1 });
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  // Restore the old live source/chunk version in this isolated fixture. The old receipt must
+  // stay revoked even when the original graph, UUIDs, evidence and versions reappear.
+  await sql`UPDATE opening_sources SET version=1 WHERE id=${a.sourceId}`;
+  await sql`UPDATE opening_source_chunks SET source_version=1 WHERE id=${a.chunkId}`;
+  const returned = await rebuild(courseId);
+  expect(returned.sourceVersions).toEqual(original.sourceVersions);
+  expect(returned.snapshot.nodes.map(node => node.status)).toEqual(["needs_check", "needs_check"]);
+  expect(returned.snapshot.nodes.find(node => node.id === selected.id)!.evidenceChunkIds).toEqual(selected.evidenceChunkIds);
+  expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
+  const reconfirmed = await knowledge.confirmNode(scope, courseId, selected.id,
+    { expectedVersion: returned.version, sourceVersions: returned.sourceVersions });
+  const [newReceipt] = await sql`SELECT graph_version_before,graph_version_after,source_versions
+    FROM opening_knowledge_confirmations WHERE course_id=${courseId}`;
+  expect(newReceipt).toMatchObject({ graph_version_before: returned.version,
+    graph_version_after: reconfirmed.version, source_versions: { [a.sourceId]: 1 } });
+  expect(reconfirmed.snapshot.nodes.find(node => node.id === selected.id)!.status).toBe("supported");
+  expect(reconfirmed.snapshot.nodes.find(node => node.id === other.id)!.status).toBe("needs_check");
+  const rebuiltAgain = await rebuild(courseId);
+  expect(rebuiltAgain.snapshot.nodes.find(node => node.id === selected.id)!.status).toBe("supported");
   expect(await sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(1);
 });
 

@@ -212,6 +212,14 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
     expect(f.updates[0]![0]).toBe(3);
     expect(f.updates[0]![1]).toMatchObject({ version: 3, nodes: [{ status: "needs_check" }] });
   });
+  it("rejects a same-looking pending graph's stale CAS instead of treating maintenance as replace replay", async () => {
+    const old = graph([node({ status: "needs_check" })]);
+    const f = replaceFixture(old);
+    await expect(f.repo.replace(scope, courseId, { expectedVersion: 1, expectedReferencedNodeIds: [],
+      snapshot: structuredClone(old), sourceVersions })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.deletes).toEqual([]);
+    expect(f.updates).toEqual([]);
+  });
   it("does not delete on a stale-version conflict", async () => {
     const f = replaceFixture(graph([node()]));
     await expect(f.repo.replace(scope, courseId, { expectedVersion: 1, snapshot: graph([]), sourceVersions: {} }))

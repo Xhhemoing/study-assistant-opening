@@ -164,7 +164,9 @@ ledger/checksum/attestation，也不通过修改 `OLD_TARGET` 或 transition 绕
   worker status 重分类才可保留。手动撤销、删除节点和 source maintenance 都删除 receipt，
   即使节点已是 needs_check 也删除；变回旧图/旧源不能复活旧确认。
   confirm/replace/maintenance 按 workspace → graph 顺序串行；maintenance 即使 status 未变也
-  推进 graph version 的 CAS 栅栏，使维护前提交的确认冲突，失败事务不得留下半次确认。
+  推进 graph version 的 CAS 栅栏，使维护前提交的确认/替换冲突。含 needs_check 的图
+  不走旧 CAS 的 soft replay（即使内容看起来相同），避免把维护误认成重放；非空且无待核对
+  项的精确同内容重放仍保留。失败事务不得留下半次确认。
 
 在已获得单独的操作授权、独立核准兼容锚点和候选精确 SHA 后，可由受管操作人员运行：
 
