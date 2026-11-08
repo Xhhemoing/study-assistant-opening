@@ -21,9 +21,7 @@ const content = vi.hoisted(() => ({
 
 const model = vi.hoisted(() => ({ complete: vi.fn(), task: vi.fn() }));
 const readFocus = vi.hoisted(() => vi.fn());
-const readRequirements = vi.hoisted(() => vi.fn(async () => [] as unknown[]));
 const assertRoute = vi.hoisted(() => vi.fn(async () => null as unknown));
-vi.mock("../../../../packages/database/src/repositories/opening-course-route-read", () => ({ readCourseRequirements: readRequirements }));
 const admitReserved = vi.hoisted(() => vi.fn<typeof import("@aistudy/database").admitOpeningReservedCandidate>(async () => ({ privateRefId: "private-ref" })));
 const purposePins = vi.hoisted(() => ({ readSourcePurposePin: vi.fn(), assertSourcePurposePin: vi.fn(),
   readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn() }));
@@ -140,7 +138,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   stagedFixture.blocks = null;
   readFocus.mockResolvedValue({});
-  assertRoute.mockResolvedValue(null); readRequirements.mockResolvedValue([]);
+  assertRoute.mockResolvedValue(null);
   const pin = { activityId: ACTIVITY, courseId: null, materialUse: "teaching", sources: [{ sourceId: SOURCE, sourceVersion: 1,
     membershipId: null, purposeRevision: null, purpose: null }] };
   purposePins.readSourcePurposePin.mockResolvedValue(pin);
@@ -802,35 +800,25 @@ describe("server-owned compiler purpose pin", () => {
 });
 
 describe("private reserved producer isolation", () => {
-  it("calls a separate budgeted provider and persists only through pinned authoritative admission", async () => {
+  it("does not call a private producer or reserve its budget for a managed arithmetic route", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
-    const courseId = "course", requirementId = "requirement";
-    activities.get.mockResolvedValue({ id: ACTIVITY, courseId, routeManaged: true, intentSummary: "Arithmetic", intentKind: "material" });
-    assertRoute.mockResolvedValue({ requirementId });
-    readRequirements.mockResolvedValue([{ id: requirementId, revision: 1, requirementKey: "arithmetic", sourceRefs: [{ sourceId: SOURCE, sourceVersion: 1 }] }]);
-    const candidate = { text: "137*19", answer: "2603", interaction: { kind: "numeric" } };
-    model.complete.mockImplementation(async (input: { instruction: string }) => input.instruction.startsWith("Generate one new reserved")
-      ? { text: JSON.stringify(candidate), citedChunkIds: [], requestId: "private", candidates: [], inputTokens: 1, outputTokens: 1 }
-      : modelAnswer(input as { text: string }));
+    activities.get.mockResolvedValue({ id: ACTIVITY, courseId: "course", routeManaged: true, intentSummary: "Arithmetic", intentKind: "material" });
+    assertRoute.mockResolvedValue({ requirementId: "requirement" });
     const dependencies = shared(), deps = createCompileTeachingUnitWorkerDeps(jobStateSql, dependencies);
     const parentBudget = { id: `study-activity:${ACTIVITY}` };
     const input = await deps.buildProviderInput!(scope, payload, { parentBudget });
     const output = await deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`,
       resultRef: `teaching_activity:${ACTIVITY}`, parentBudget });
-    expect(model.complete).toHaveBeenCalledTimes(2);
-    expect(admitReserved).toHaveBeenCalledExactlyOnceWith(jobStateSql, scope, ACTIVITY,
-      { courseId, requirementId, requirementRevision: 1, sourceVersions: { [SOURCE]: 1 } }, candidate,
-      { assertPinnedContext: expect.any(Function) });
-    const originalPin = purposePins.readSourcePurposePin.mock.results[0]!.value;
-    const tx = {} as import("postgres").TransactionSql;
-    await admitReserved.mock.calls[0]![5].assertPinnedContext(tx);
-    expect(purposePins.assertSourcePurposePin).toHaveBeenLastCalledWith(scope, await originalPin, tx);
+    expect(model.complete).toHaveBeenCalledTimes(1);
+    expect(admitReserved).not.toHaveBeenCalled();
     expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+    expect(purposePins.assertSourcePurposePin).toHaveBeenCalled();
     expect(JSON.stringify(input)).not.toContain("purposeRevision");
+    expect(dependencies.budget.reserve).toHaveBeenCalledTimes(1);
     expect(dependencies.budget.reserve).toHaveBeenCalledWith(scope, expect.objectContaining({
-      requestId: `compile-teaching-unit:${job.id}:reserved`, parentBudget,
+      requestId: `compile-teaching-unit:${job.id}`, parentBudget,
     }));
-    expect(output.text).not.toContain(candidate.text); expect(output.text).not.toContain(candidate.answer);
+    expect(output.text).not.toContain("137*19");
     expect(content.writeUnitBlocks).not.toHaveBeenCalled();
   });
   it("rejects a private slot in the public compiler response before any persistence", async () => {
