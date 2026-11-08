@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { NEXT_LEARNING_STEP_VERSION } from "@aistudy/domain";
 import { applyMigrations, createSqlClient, createOpeningKnowledgeRepository,
-  createOpeningLearningRepository, createOpeningSkillEvidenceRepository } from "@aistudy/database";
+  createOpeningLearningRepository, createOpeningSkillEvidenceRepository, readOpeningCourseEvidence } from "@aistudy/database";
+import { buildDecisionInput, toSnapshotEvidence } from "@aistudy/domain";
+import { createOpeningApi } from "../../../apps/web/src/features/opening/client/api";
 import { createOpeningAttemptService } from "../../../apps/web/src/features/opening/learning/attempt-service";
 import { backupRows } from "../opening-backup-records-fixture";
 import { matrixSkill } from "../opening-matrix-attempt-fixture";
@@ -21,6 +24,18 @@ let workspaceId = "";
 let courseId = "";
 let sessionId = "";
 let otherCookie = "";
+
+// Fixed version protocol: the separate D5 restoration must pass all three real
+// evaluator/HTTP cases against v3 gold, especially the 1/2-prior-success cases.
+function assistedSuccessGold(policyVersion: string) {
+  const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
+  const clarify = { kind: "clarify", problemRef: null } as const;
+  switch (policyVersion) {
+    case "next-learning-step-2": return [variant, clarify, clarify] as const;
+    case "next-learning-step-3": return [variant, variant, variant] as const;
+    default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
+  }
+}
 
 type RegisterResult = {
   cookie: string;
@@ -239,18 +254,49 @@ describe("K02a tutor-actions route", () => {
     expect(response.status).toBe(404);
   });
 
-  it.each([0, 1, 2])("uses the latest assisted server-correct head after %i independent successes", async count => {
+  it.each([0, 1, 2])("uses explicit policy gold for latest assisted server-correct head after %i independent successes", async count => {
     const fixture = await scoredCourse();
     for (let index = 0; index < count; index++) await fixture.answer(index);
     const { observation, link } = await fixture.answer(count, true);
+    expect(observation.eligibility).toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForCurrentVersion: "yes" });
+    expect(observation.serverEvaluation).toMatchObject({ evaluatorVersion: "matrix-exact-v1", decision: "correct" });
     expect(link.id).not.toBe(observation.id);
     const response = await get(fixture.id, { skillLabel: matrixSkill, nodeId: fixture.nodeId });
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.actions[0]).toMatchObject({ kind: "independent_variant", nodeId: fixture.nodeId });
+    expect(body.actions).toHaveLength(1);
+    expect(body.actions[0]).toMatchObject({ ...assistedSuccessGold(NEXT_LEARNING_STEP_VERSION)[count]!, nodeId: fixture.nodeId });
     expect(body.actions[0].evidenceIds).toContain(link.id);
     expect(body.actions[0].evidenceIds).not.toContain(observation.id);
   });
+
+  it("keeps large node/non-node responses client-parseable without clipping canonical evidence", async () => {
+    const fixture = await scoredCourse();
+    for (let index = 0; index < 200; index++) await fixture.answer(index % 9);
+    const latest = await fixture.answer(0, false, "[3,2]");
+    const evidence = await readOpeningCourseEvidence(sql, fixture.scope, fixture.id);
+    const snapshot = toSnapshotEvidence(evidence, new Date());
+    const decision = buildDecisionInput({ observations: snapshot.observations });
+    expect(decision.observations).toHaveLength(201);
+    expect(decision.observations.every(row => row.usableForCurrentVersion === "yes")).toBe(true);
+    expect(decision.observations[0]!.id).toBe(latest.observation.id);
+    const flags = await createOpeningSkillEvidenceRepository(sql).flagsForNode(fixture.scope, fixture.id, fixture.nodeId);
+    expect(flags.evidenceIds).toHaveLength(201);
+    for (const node of [false, true]) {
+      const query = { skillLabel: matrixSkill, ...(node ? { nodeId: fixture.nodeId } : {}) };
+      const response = await get(fixture.id, query);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const api = createOpeningApi(async () => Response.json(body));
+      const actions = await api.listTutorActions({ courseId: fixture.id, ...query });
+      expect(actions).toHaveLength(1);
+      expect(actions[0]).toMatchObject({ kind: "guided", nodeId: node ? fixture.nodeId : null });
+      const allIds = node ? flags.evidenceIds : decision.observations.map(row => row.id);
+      expect(actions[0]!.evidenceIds).toEqual([...new Set(allIds)].slice(0, 200));
+      expect(new Set(actions[0]!.evidenceIds).size).toBe(200);
+      expect(actions[0]!.evidenceIds).not.toContain(node ? latest.observation.id : latest.link.id);
+    }
+  }, 60_000);
 
   it("uses canonical revised heads behind old links and excludes withdrawn or stale evidence", async () => {
     const fixture = await scoredCourse(), { observation, link } = await fixture.answer(0);

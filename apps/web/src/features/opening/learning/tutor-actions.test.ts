@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
+import { NEXT_LEARNING_STEP_VERSION, toSnapshotEvidence, type CourseEvidence } from "@aistudy/domain";
 import type { LearningObservation } from "@aistudy/contracts";
+import { createOpeningApi } from "../client/api";
 import {
   aggregateHighestExposure,
   buildTutorActions,
@@ -17,6 +18,18 @@ const OBS = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const LINK = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
 const scope = { workspaceId: "workspace-1", ownerUserId: "user-1" };
 const emptyEvidence = (): CourseEvidence => ({ observations: [], evidenceContexts: {} });
+
+// Fixed policy gold, not derived from the action under test. The separate D5
+// restoration must pass the v3 column with these same assisted-success inputs.
+function assistedSuccessGold(policyVersion: string) {
+  const variant = { kind: "independent_variant", problemRef: "variant:1" } as const;
+  const clarify = { kind: "clarify", problemRef: null } as const;
+  switch (policyVersion) {
+    case "next-learning-step-2": return [variant, clarify, clarify] as const;
+    case "next-learning-step-3": return [variant, variant, variant] as const;
+    default: throw new Error(`Unsupported assisted-success policy: ${policyVersion}`);
+  }
+}
 
 type EvidenceOptions = {
   id?: string; at?: number; assistance?: "independent" | "hinted" | "revealed";
@@ -92,6 +105,9 @@ describe("tutor-actions query boundary", () => {
 });
 
 describe("canonical tutor action mapping (pure seam)", () => {
+  it("refuses an unspecified policy instead of falling back to another gold column", () => {
+    expect(() => assistedSuccessGold("next-learning-step-unknown")).toThrow("Unsupported assisted-success policy");
+  });
   it("maps no evidence and unknown-only evidence to clarify, even with a selected page", () => {
     expect(recommend(emptyEvidence())).toMatchObject({ kind: "clarify", currentPage: 2, evidenceIds: [] });
     expect(recommend(evidenceRow({ unknown: true, assistance: "hinted" })).kind).toBe("clarify");
@@ -107,11 +123,59 @@ describe("canonical tutor action mapping (pure seam)", () => {
     }));
     expect(buildTutorActions({ skillLabel: "chain rule", observations, retestDue: false })[0]!.kind).toBe("worked_example");
   });
-  it.each([0, 1, 2])("D5: latest verified assisted success after %i independent successes stays reduced-help", count => {
+  it.each([0, 1, 2])("uses explicit policy gold for latest verified assisted success after %i independent successes", count => {
     const earlier = Array.from({ length: count }, (_, index) => evidenceRow({ id: `independent-${index}`, at: 100_000 + index * 1000 }));
-    const action = recommend(combine(...earlier, evidenceRow({ at: 200_000, assistance: "hinted" })));
-    expect(action).toMatchObject({ kind: "independent_variant", problemRef: "variant:1" });
+    const evidence = combine(...earlier, evidenceRow({ at: 200_000, assistance: "hinted" }));
+    expect(toSnapshotEvidence(evidence, new Date()).observations.find(row => row.id === OBS))
+      .toMatchObject({ verifiedCorrect: "yes", independentAttempt: "no", usableForCurrentVersion: "yes" });
+    const action = recommend(evidence);
+    expect(action).toMatchObject(assistedSuccessGold(NEXT_LEARNING_STEP_VERSION)[count]!);
     expect(action).not.toHaveProperty("masteryPercent");
+  });
+  it.each([false, true])("bounds only response references with node=%s, preserving full canonical decisions", async node => {
+    const at = Date.parse("2026-11-01T10:00:00Z");
+    const observationId = (index: number) => `bbbbbbbb-bbbb-4bbb-8bbb-${String(index).padStart(12, "0")}`;
+    const linkIds = Array.from({ length: 202 }, (_, index) => `cccccccc-cccc-4ccc-8ccc-${String(index).padStart(12, "0")}`);
+    const olderError = evidenceRow({ id: observationId(0), at, assistance: "hinted", outcome: "incorrect" });
+    const newerError = evidenceRow({ id: observationId(201), at: at + 201_000, assistance: "hinted", outcome: "incorrect" });
+    // Real server-evaluated step errors straddle the 200-reference boundary.
+    for (const item of [olderError, newerError]) {
+      const row = item.observations[0]!;
+      const facts = item.evidenceContexts[row.id]!;
+      row.serverEvaluation = { ...facts.context.serverEvaluation!,
+        evaluatorVersion: "span-exact-v1", specVersion: "span-v1", coreEvidenceComplete: false,
+        skills: { equation: "incorrect", coefficients: "unobserved", allCoordinates: "unobserved" } };
+      facts.context.serverEvaluation = row.serverEvaluation;
+    }
+    const evidence = combine(olderError, ...Array.from({ length: 200 }, (_, index) =>
+      evidenceRow({ id: observationId(index + 1), at: at + (index + 1) * 1000, unknown: true })), newerError,
+      evidenceRow({ id: observationId(200), at: at + 200_000, unknown: true }));
+    const observations = toSnapshotEvidence(evidence, new Date()).observations;
+    expect(observations).toHaveLength(203);
+    expect(observations.every(row => row.usableForCurrentVersion === "yes")).toBe(true);
+    const descendingIds = Array.from({ length: 202 }, (_, index) => observationId(201 - index));
+    const nodeRefs = [linkIds[201]!, linkIds[201]!, ...linkIds.slice(0, 201)];
+    const deps = createDeps({ readCourseEvidence: vi.fn(async () => evidence),
+      flagsForNode: vi.fn(async () => ({ hasAssistance: true, hasCheckedIndependent: false,
+        evidenceIds: nodeRefs, observationIds: descendingIds })),
+      getIntervention: vi.fn(async () => intervention()),
+    });
+    // Losing the oldest error after canonical sorting would incorrectly downgrade to guided.
+    expect(buildTutorActions({ skillLabel: "chain rule", observations: observations.filter(row => row.id !== observationId(0)),
+      retestDue: false })[0]!.kind).toBe("guided");
+    // Losing the newest error by slicing raw input would instead lead to clarification.
+    expect(buildTutorActions({ skillLabel: "chain rule", observations: observations.slice(0, 200),
+      retestDue: false })[0]!.kind).toBe("clarify");
+    const actions = await list(deps, node ? { nodeId: NODE } : {});
+    expect(actions[0]).toMatchObject({ kind: "worked_example", nodeId: node ? NODE : null });
+    const expectedRefs = node ? [linkIds[201]!, ...linkIds.slice(0, 199)] : descendingIds.slice(0, 200);
+    expect(actions[0]!.evidenceIds).toEqual(expectedRefs);
+    expect(new Set(actions[0]!.evidenceIds).size).toBe(200);
+    // Exercise the existing private client schema through its public parser, not a copy.
+    const api = createOpeningApi(async () => Response.json({ actions }));
+    await expect(api.listTutorActions({ courseId: COURSE, skillLabel: "chain rule", nodeId: node ? NODE : null })).resolves.toEqual(actions);
+    deps.getIntervention = vi.fn(async () => intervention({ ...interventionPrefs, quietMode: true }));
+    expect(await list(deps, node ? { nodeId: NODE } : {})).toEqual([]);
   });
   it("maps independent transfer to a variant, and only a server-due retest to delayed_retest", () => {
     expect(recommend(evidenceRow()).kind).toBe("independent_variant");

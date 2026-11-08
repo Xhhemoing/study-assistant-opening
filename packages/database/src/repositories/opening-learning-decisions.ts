@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Scope } from "@aistudy/contracts";
-import { learningDecisionInvalidation, validateLearningDecision, type LearningDecision, type LearningDecisionInput,
+import { z } from "zod";
+import { learningDecisionInvalidation, NEXT_LEARNING_STEP_VERSION, validateLearningDecision, type LearnerState, type LearningDecision, type LearningDecisionInput,
   type LearningDecisionVersions } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockLearningOwner } from "./opening-learning-facts";
 import { readOpeningLearnerState } from "./opening-learner-state-read";
+import { readLearningGoal } from "./opening-learning-goals";
 
 type Row = Record<string, unknown>;
 function mapDecision(row: Row): LearningDecision {
@@ -25,12 +27,65 @@ export async function readOpeningLearningDecisionByClientKey(tx: TransactionSql,
   return row ? mapDecision(row) : null;
 }
 
+const firstLearningVersionSchema = z.object({ protocol: z.literal("first-learning-1"), courseId: z.string().uuid(),
+  goalId: z.string().uuid(), createIntent: z.object({ source: z.literal("onboarding"), clientKey: z.string().uuid(),
+    sourceIds: z.array(z.string().uuid()) }).passthrough(),
+  plan: z.object({ startDate: z.string(), endDate: z.string(), timeZone: z.string(), taskKeys: z.array(z.string()) }).strict() }).strict();
+
+/** Only this entry owns revalidation of its persisted initialization inputs. Never repairs old activities. */
+async function explainFirstLearning(tx: TransactionSql, scope: Scope, decision: LearningDecision, state: LearnerState) {
+  if (decision.layer !== "activity" || !/^first-learning-1\/next-learning-step-\d+$/.test(decision.policyVersion)) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(decision.intentVersion); } catch { return null; }
+  const parsed = firstLearningVersionSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const captured = parsed.data;
+  const [activity] = await tx`SELECT a.course_id,a.client_key,a.create_intent,a.source_ids,a.goal_json,c.archived_at
+    FROM opening_teaching_activities a JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id
+    WHERE a.id=${decision.targetId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
+  const { firstLearningPlan: plan, ...createIntent } = (activity?.create_intent ?? {}) as Row;
+  const goalJson = (activity?.goal_json ?? {}) as Row;
+  const identityMatches = activity?.course_id === captured.courseId
+    && activity.client_key === `first-learning:${captured.createIntent.clientKey}:activity`
+    && createIntent.source === "onboarding" && createIntent.clientKey === captured.createIntent.clientKey;
+  const persistedIntent = { protocol: "first-learning-1", courseId: activity?.course_id ?? null,
+    goalId: captured.goalId, createIntent, plan };
+  // UUID identity is case-insensitive; keep submitted intent JSON untouched for replay equality.
+  const activitySourceIds = new Set((activity?.source_ids as string[] | undefined ?? []).map(id => id.toLowerCase()));
+  const capturedSourceIds = [...new Set(captured.createIntent.sourceIds.map(id => id.toLowerCase()))].sort();
+  const sourcesMatch = isDeepStrictEqual([...activitySourceIds].sort(), capturedSourceIds);
+  const goalMatches = goalJson.learningGoal === captured.createIntent.goal && goalJson.targetDate === captured.createIntent.targetDate;
+  const intentVersion = identityMatches && sourcesMatch && goalMatches && isDeepStrictEqual(persistedIntent, raw)
+    ? decision.intentVersion : "first-learning-persisted-intent-changed";
+  const goal = await readLearningGoal(tx, scope, captured.goalId);
+  const goalVersion = goal?.courseIds.includes(captured.courseId)
+    ? `goal:${goal.id}:v${goal.revision}:${goal.lifecycle}` : "first-learning-goal-unavailable";
+  const ids = capturedSourceIds.filter(id => Object.hasOwn(decision.sourceVersions, id));
+  const sources = ids.length && identityMatches ? await tx`SELECT s.id,s.version FROM opening_sources s
+    JOIN course_asset_memberships m ON m.asset_id=s.id AND m.workspace_id=s.workspace_id
+      AND m.course_id=${captured.courseId} AND m.asset_type='source'
+    WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${ids}::uuid[]) AND s.upload_state='uploaded'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)` : [];
+  const sourceVersions = structuredClone(state.sourceVersions);
+  for (const id of ids) {
+    const source = sources.find(row => String(row.id).toLowerCase() === id);
+    sourceVersions[id] = source && activitySourceIds.has(id)
+      ? [...new Set([...(sourceVersions[id] ?? []), Number(source.version)])].sort((a, b) => a - b) : [];
+  }
+  const invalidationReasons = learningDecisionInvalidation(decision, { stateVersion: state.stateVersion, sourceVersions,
+    goalVersion, intentVersion, policyVersion: `first-learning-1/${NEXT_LEARNING_STEP_VERSION}` });
+  if (!activity || activity.archived_at) invalidationReasons.push("course_unavailable");
+  return { decision, current: invalidationReasons.length === 0, invalidationReasons, dataAsOf: state.dataAsOf };
+}
+
 /** Historical reasons stay historical; validity is rechecked without updating the receipt. */
 export async function explainOpeningLearningDecision(tx: TransactionSql, scope: Scope, id: string,
   currentVersions?: Pick<LearningDecisionVersions, "goalVersion" | "intentVersion" | "policyVersion">) {
   const decision = await readOpeningLearningDecision(tx, scope, id);
   if (!decision) return null;
   const state = await readOpeningLearnerState(tx, scope);
+  const firstLearning = await explainFirstLearning(tx, scope, decision, state);
+  if (firstLearning) return firstLearning;
   // The persisted session intent is authoritative even if a caller supplies an
   // older version. Activity receipts follow their exact parent session.
   const [intent] = decision.layer === "plan" ? [] : await tx`SELECT e.id,e.version
