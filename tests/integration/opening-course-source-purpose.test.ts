@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createCourseMembershipRepository, createOpeningSourceRepository, createOpeningKnowledgeRepository, createOpeningJobRepository, createOpeningConversationRepository, createOpeningTutorJobsRepository, createOpeningSourceChunksRepository, createOpeningBudgetRepository } from "@aistudy/database";
+import { createCourseMembershipRepository, createOpeningSourceRepository, createOpeningKnowledgeRepository, createOpeningJobRepository, createOpeningConversationRepository, createOpeningTutorJobsRepository, createOpeningSourceChunksRepository, createOpeningBudgetRepository, createOpeningStudyContextRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
 import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 import { POST, PATCH } from "../../apps/web/src/app/api/courses/[id]/memberships/route";
@@ -46,6 +46,7 @@ async function ready(sourceId: string) {
 
 const callerConfig = { maxContextCharacters: 5000, maxOutputTokens: 256, reservedCents: 10,
   inputCentsPerMillion: 1, outputCentsPerMillion: 1 };
+type CallerBarrier = "pre-send" | "stream" | "final" | "privacy-send" | "privacy-stream" | "delivery-stream" | "learner-send";
 const callerOutput: ProviderOutput = { requestId: "purpose-test-provider", text: "Synthetic material answer", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 };
 
 async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | "reference" | "practice" | "mock_exam") {
@@ -62,6 +63,12 @@ async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | 
     await seeded.courses.updateAssetMembership({ ...seeded.input, purpose: "mock_exam", expectedUpdatedAt: membership.updatedAt.toISOString() });
   };
   const released = vi.fn(async (_text: string) => {});
+  const learnerContext = {
+    read: async () => ({ courseId: seeded.course.id, title: "Purpose learner", asOf: new Date().toISOString(),
+      privacyEpoch: 0, sourceRefs: [], goal: { description: "", targetDate: null, weeklyMinutes: null },
+      weaknesses: [], recentMistakes: [], observationIds: [] }),
+    assertCurrent: async () => { await changePurpose(); },
+  };
   const selected = { provider, modelSnapshot: { id: "test", providerId: "test", modelName: "test",
     inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 };
   if (kind === "saved") {
@@ -71,32 +78,55 @@ async function callerFixture(kind: "saved" | "ephemeral", purpose: "teaching" | 
       text: "Explain this selected passage", mode: "explain", clientKey: randomUUID(), sourceIds: [seeded.source.id],
       learningSessionId: null, currentPage: null, chunkId: null });
     const jobs = createOpeningTutorJobsRepository(f.sql);
-    return { ...seeded, provider, changePurpose, released, run: async (stage?: "pre-send" | "stream" | "final", selector?: string) => {
+    return { ...seeded, provider, changePurpose, released, run: async (stage?: CallerBarrier, selector?: string) => {
       if (selector) throw new Error("saved course must come from its persisted conversation");
       if (stage === "stream" || stage === "final") provider.complete.mockImplementation(async (_input, _signal, delta) => {
         await changePurpose(); if (stage === "stream") await delta?.("must not release"); return callerOutput;
       });
       const append = vi.fn(async (_workspace: string, _job: string, text: string) => { await released(text); return 1; });
+      let epochReads = 0;
       const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, provider, retrieveContext, config: callerConfig,
         ...(stage === "pre-send" ? { resolveModel: async () => { await changePurpose(); return selected; } } : {}),
+        ...(stage === "learner-send" ? { learnerContext } : {}),
+        ...(stage === "privacy-send" ? { privacy: { getWorkspaceEpoch: async () => {
+          if (++epochReads === 2) await changePurpose(); return 0;
+        }, listExcludedSourceIds: async () => [] } } : {}),
         ...(stage === "stream" ? { stream: { begin: async () => {}, append } } : {}) });
       await handler(saved.jobId);
       return { append, stored: await f.sql`SELECT status,text FROM opening_turns WHERE id=${saved.assistantTurnId}` };
     }, getStored: () => f.sql`SELECT status,text FROM opening_turns WHERE id=${saved.assistantTurnId}` };
   }
-  return { ...seeded, provider, changePurpose, released, run: async (stage?: "pre-send" | "stream" | "final", selector?: string) => {
+  return { ...seeded, provider, changePurpose, released, run: async (stage?: CallerBarrier, selector?: string) => {
     if (stage === "stream" || stage === "final") provider.complete.mockImplementation(async (_input, _signal, delta) => {
       await changePurpose(); if (stage === "stream") await delta?.("must not release"); return callerOutput;
     });
+    if (stage === "privacy-stream" || stage === "delivery-stream") provider.complete.mockImplementation(async (_input, _signal, delta) => {
+      await delta?.("must not release"); return callerOutput;
+    });
+    let epochReads = 0;
     const append = released;
     const service = createEphemeralTutorService({ retrieveContext, chunks, provider, config: callerConfig,
+      ...(stage === "learner-send" ? { learnerContext } : {}),
       sources: { listOwnedIds: async (scope, ids) => (await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${scope.workspaceId} AND id=ANY(${ids}::uuid[])`).map(row => String(row.id)) },
-      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => {
+        const read = ++epochReads;
+        if (stage === "privacy-send" && read === 1 || stage === "privacy-stream" && read === 2) await changePurpose();
+        return 0;
+      } },
       budget: { reserve: input => budget.reserve(f.scope, input), release: (id, reason) => budget.release(f.scope, id, reason),
         claimExecution: id => budget.claimExecution(f.scope, id), settle: (...args) => budget.settle(f.scope, ...args), markUnknown: id => budget.markUnknown(f.scope, id) },
+      ...(stage === "delivery-stream" ? { studyContext: createOpeningStudyContextRepository(f.sql), exposures: {
+        deliver: async (scope, input) => {
+          const receipt = await createOpeningStudyExposureRepository(f.sql).deliver(scope, input);
+          await changePurpose();
+          return receipt;
+        },
+      } } : {}),
       ...(stage === "pre-send" ? { resolveModel: async () => { await changePurpose(); return selected; } } : {}) });
     await service.replyEphemeral(f.scope, { text: "Explain this selected passage", courseId: selector ?? seeded.course.id,
-      sourceIds: [seeded.source.id], history: [], mode: "explain", clientKey: randomUUID() }, undefined, stage === "stream" ? append : undefined);
+      sourceIds: [seeded.source.id], history: [], mode: "explain", clientKey: randomUUID(),
+      ...(stage === "delivery-stream" ? { contextAnchor: { purpose: "material_read" as const, courseId: seeded.course.id, sourceId: seeded.source.id } } : {}) },
+      undefined, stage === "stream" || stage === "privacy-stream" || stage === "delivery-stream" ? append : undefined);
     return { append, stored: [] };
   }, getStored: async () => [] };
 }
@@ -125,6 +155,112 @@ describe("course source purpose storage and concurrency", () => {
     else expect(caller.provider.complete).toHaveBeenCalledOnce();
     expect((await caller.getStored())[0]?.status).not.toBe("complete");
     expect(caller.released).not.toHaveBeenCalled();
+  });
+
+  it.each(["saved", "ephemeral"] as const)("rechecks the same pin after the %s privacy await even when epoch stays unchanged", async kind => {
+    const caller = await callerFixture(kind, "teaching");
+    await expect(caller.run("privacy-send")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(caller.provider.complete).not.toHaveBeenCalled();
+    expect(caller.released).not.toHaveBeenCalled();
+    expect((await caller.getStored())[0]?.status).not.toBe("complete");
+  });
+
+  it.each(["saved", "ephemeral"] as const)("rechecks the original pin after the %s learner-context await", async kind => {
+    const caller = await callerFixture(kind, "teaching");
+    await expect(caller.run("learner-send")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(caller.provider.complete).not.toHaveBeenCalled();
+    expect(caller.released).not.toHaveBeenCalled();
+  });
+
+  it("blocks an ephemeral delta when purpose changes inside the stream privacy await without epoch drift", async () => {
+    const caller = await callerFixture("ephemeral", "teaching");
+    await expect(caller.run("privacy-stream")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(caller.provider.complete).toHaveBeenCalledOnce();
+    expect(caller.released).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the same pin after real ephemeral deliverHelp commits before releasing any delta", async () => {
+    const caller = await callerFixture("ephemeral", "teaching");
+    await expect(caller.run("delivery-stream")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(caller.provider.complete).toHaveBeenCalledOnce();
+    expect(caller.released).not.toHaveBeenCalled();
+    expect(await f.sql`SELECT id FROM opening_help_exposures WHERE workspace_id=${f.scope.workspaceId}
+      AND context_anchor->>'sourceId'=${caller.source.id} AND released_at IS NOT NULL`).toHaveLength(1);
+  });
+
+  it.each(["purpose-first", "completion-first"] as const)("serializes real completion with purpose updates under the same workspace lock: %s", async order => {
+    const seeded = await setup(); await ready(seeded.source.id);
+    const conversations = createOpeningConversationRepository(f.sql);
+    const conversation = await conversations.create(f.scope, { courseId: seeded.course.id, title: "Completion barrier" });
+    const saved = await conversations.appendSavedTurn({ scope: f.scope, conversationId: conversation.id, text: "Explain passage",
+      mode: "explain", clientKey: randomUUID(), sourceIds: [seeded.source.id], learningSessionId: null, currentPage: null, chunkId: null });
+    const jobs = createOpeningTutorJobsRepository(f.sql);
+    const claimed = await jobs.claim(saved.jobId);
+    if (!claimed) throw new Error("expected claimed real tutor job");
+    const pin = await createOpeningCourseReadySourcesRepository(f.sql).readMaterialPurposePin(f.scope, {
+      courseId: seeded.course.id, materialUse: "citation", sourceIds: [seeded.source.id],
+    });
+    const budget = createOpeningBudgetRepository(f.sql, { envCapCents: 100000 });
+    const reservation = await budget.reserve(f.scope, { requestId: `purpose-completion:${saved.jobId}`, purpose: "tutor", amountCents: 10 });
+    await budget.settle(f.scope, reservation.id, 1, { resultRef: `opening_turn:${saved.assistantTurnId}` });
+    const spendBefore = await f.sql`SELECT id,state,amount_cents FROM opening_budget_reservations WHERE id=${reservation.id}`;
+    const first = await openRaceSession().ready, second = await openRaceSession().ready;
+    let entered = () => {}, release = () => {};
+    const opened = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const input = { scope: f.scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId, claimToken: claimed.claimToken,
+      text: "Complete only if still authorized", citations: [], candidates: [{ sourceIds: [seeded.source.id], payload: { kind: "memory", text: "candidate", temporary: false } }] };
+    const complete = (sql: typeof f.sql) => createOpeningTutorJobsRepository(sql).completeTurn(input, { materialPurposePin: pin });
+    const update = (sql: typeof f.sql) => createCourseMembershipRepository(sql).updateAssetMembership({ ...seeded.input,
+      purpose: "mock_exam", expectedUpdatedAt: seeded.membership.updatedAt.toISOString() });
+    const hold = track(first.sql.begin(async tx => {
+      await tx`SELECT id FROM workspaces WHERE id=${f.scope.workspaceId} FOR UPDATE`;
+      if (order === "purpose-first") await tx`UPDATE course_asset_memberships SET purpose='mock_exam',updated_at=clock_timestamp() WHERE id=${seeded.membership.id}`;
+      entered(); await gate;
+    }));
+    let pending: Promise<unknown> | undefined;
+    try {
+      await opened;
+      if (order === "purpose-first") {
+        pending = track(complete(second.sql));
+        await waitUntilBlocked(f.sql, second.pid, first.pid, "completion workspace lock barrier");
+        release(); await hold;
+        await expect(pending).rejects.toMatchObject({ code: "CONFLICT" });
+        expect((await f.sql`SELECT status FROM opening_turns WHERE id=${saved.assistantTurnId}`)[0]!.status).toBe("pending");
+        expect((await jobs.get(f.scope, saved.jobId))?.status).toBe("running");
+        expect(await f.sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${saved.assistantTurnId}`).toHaveLength(0);
+      } else {
+        release(); await hold;
+        // Hold the actual candidate INSERT after completeTurn has acquired its
+        // workspace lock and asserted the original pin. No fake publication tx.
+        const blocker = await openRaceSession().ready;
+        let readyLock = () => {}, finish = () => {};
+        const hasLock = new Promise<void>(resolve => { readyLock = resolve; });
+        const finishGate = new Promise<void>(resolve => { finish = resolve; });
+        const locked = track(blocker.sql.begin(async tx => {
+          await tx`LOCK TABLE opening_assistant_candidates IN SHARE MODE`;
+          readyLock(); await finishGate;
+        }));
+        let completion: Promise<unknown> | undefined;
+        try {
+          await hasLock;
+          completion = track(complete(first.sql));
+          await waitUntilBlocked(f.sql, first.pid, blocker.pid, "actual completion candidate insert after pin assertion");
+          pending = track(update(second.sql));
+          await waitUntilBlocked(f.sql, second.pid, first.pid, "purpose update behind actual completion transaction");
+          finish(); await locked; await completion; await pending;
+        } finally {
+          finish(); await Promise.allSettled([locked, ...(completion ? [completion] : []), ...(pending ? [pending] : [])]);
+          await closeRace(blocker.sql);
+        }
+        expect((await jobs.get(f.scope, saved.jobId))?.status).toBe("succeeded");
+        expect(await f.sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${saved.assistantTurnId}`).toHaveLength(1);
+      }
+      expect(await f.sql`SELECT id,state,amount_cents FROM opening_budget_reservations WHERE id=${reservation.id}`).toEqual(spendBefore);
+    } finally {
+      release(); await Promise.allSettled([hold, ...(pending ? [pending] : [])]);
+      await closeRace(first.sql); await closeRace(second.sql);
+    }
   });
 
   it("treats an ephemeral course id only as a selector, rejecting foreign and unlinked courses", async () => {

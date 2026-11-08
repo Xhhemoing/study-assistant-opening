@@ -99,7 +99,7 @@ describe("ephemeral tutor service", () => {
     const f = deps({ retrieveContext });
     await f.service.replyEphemeral(scope, { text: "read source", courseId: chunkId, sourceIds: [sourceId], history: [] });
     expect(retrieveContext).toHaveBeenCalledWith(scope, expect.objectContaining({ courseContext: { courseId: chunkId, materialUse: "citation" } }));
-    expect(assertCurrent).toHaveBeenCalledTimes(3);
+    expect(assertCurrent).toHaveBeenCalledTimes(4);
   });
   it("does not send after a purpose change between retrieval and provider pre-send", async () => {
     const assertCurrent = vi.fn(async () => { throw Object.assign(new Error("purpose changed"), { code: "CONFLICT" }); });

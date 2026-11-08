@@ -309,7 +309,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       };
       if (allowedSourceIds.length && !deps.retrieveContext) throw Object.assign(new Error("material admission service unavailable"), { code: "CONFLICT" });
       const retrieved = deps.retrieveContext ? await deps.retrieveContext(scope, retrievalInput) : null;
-      if (allowedSourceIds.length && !retrieved?.assertCurrent) throw Object.assign(new Error("material admission pin unavailable"), { code: "CONFLICT" });
+      if (allowedSourceIds.length && (!retrieved?.assertCurrent || !retrieved.purposePin)) throw Object.assign(new Error("material admission pin unavailable"), { code: "CONFLICT" });
       const assertMaterialsCurrent = async () => { await retrieved?.assertCurrent?.(); };
       const context = (retrieved?.chunks ?? selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
       const { history, sourceRefs: historySourceRefs } = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
@@ -435,6 +435,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             await assertMaterialsCurrent();
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+            await assertMaterialsCurrent();
           },
         });
       };
@@ -542,7 +543,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         expectedPrivacyEpoch: jobEpoch ?? undefined,
         claimToken: claimed.claimToken,
         enqueueMetadata: Boolean(deps.stream),
-      });
+      }, { materialPurposePin: retrieved?.purposePin });
       // The answer and optional metadata outbox entry are durable. Release this
       // tutor worker slot; suggestions run in their own bounded queue.
       return { skipped: false };

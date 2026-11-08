@@ -52,6 +52,7 @@ describe("shared material retriever", () => {
   it("retains the exact captured purpose pin for the real provider-send check", async () => {
     const result = await createOpeningMaterialRetriever(sql, budget, null)(scope, input);
     const pin = await mocks.readMaterialPurposePin.mock.results[0]!.value;
+    expect(result.purposePin).toBe(pin);
     mocks.assertMaterialPurposePin.mockRejectedValue(Object.assign(new Error("changed after retrieval"), { code: "CONFLICT" }));
     await expect(result.assertCurrent()).rejects.toMatchObject({ code: "CONFLICT" });
     expect(mocks.readMaterialPurposePin).toHaveBeenCalledOnce();

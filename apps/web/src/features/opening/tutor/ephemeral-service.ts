@@ -272,6 +272,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         }
         // A partial hint already shown to the learner must count even if the stream later fails.
         await deliverHelp();
+        await assertMaterialsCurrent();
         await onTextDelta(delta);
       } : undefined;
       let selected: ResolvedTaskModel | undefined;
@@ -346,6 +347,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
             if (signal?.aborted) {
               throw new EphemeralServiceError("ABORTED", "ephemeral request aborted before sending", 499);
             }
+            await assertMaterialsCurrent();
           },
         }).catch((error: unknown) => {
           // Keep fallback semantics; only an acknowledged pre-send release may

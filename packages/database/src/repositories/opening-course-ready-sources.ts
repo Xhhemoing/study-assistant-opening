@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
-import { courseSourcePurposeAllows, type CourseSourcePurpose, type CourseSourceUse } from "@aistudy/contracts";
+import { courseSourcePurposeAllows, type CourseSourcePurpose, type CourseSourceUse, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningKnowledgeError } from "./opening-knowledge";
 
@@ -7,20 +7,8 @@ import { OpeningKnowledgeError } from "./opening-knowledge";
 export const READY_COURSE_SOURCE_IDS_CAP = 32;
 
 /** Server-owned snapshot, not client/model input. Revision preserves PostgreSQL microseconds. */
-export type OpeningSourcePurposePin = {
-  activityId: string;
-  courseId: string | null;
-  materialUse: CourseSourceUse;
-  sources: Array<{
-    sourceId: string;
-    sourceVersion: number;
-    membershipId: string | null;
-    purposeRevision: string | null;
-    purpose: CourseSourcePurpose | null;
-  }>;
-};
-
-export type OpeningMaterialPurposePin = Omit<OpeningSourcePurposePin, "activityId">;
+export type { OpeningMaterialPurposePin } from "@aistudy/contracts";
+export type OpeningSourcePurposePin = OpeningMaterialPurposePin & { readonly activityId: string };
 type MaterialPurposeSelection = { courseId: string | null; sourceIds: readonly string[]; materialUse: CourseSourceUse };
 
 export type OpeningCourseReadySourcesRepository = {
@@ -118,7 +106,7 @@ async function readMaterialPurposePinInTx(
       AND archived_at IS NULL FOR SHARE`;
     if (!course.length) throw new OpeningKnowledgeError("CONFLICT", "course is no longer available");
   }
-  const sources: OpeningSourcePurposePin["sources"] = [];
+  const sources: Array<OpeningSourcePurposePin["sources"][number]> = [];
   if (ids.length) {
     const rows = await tx`SELECT s.id,s.version FROM opening_sources s
       WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${ids}::uuid[])

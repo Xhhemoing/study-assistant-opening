@@ -15,6 +15,7 @@ export {
   courseSourcePurposeAllows,
   type CourseSourcePurpose,
   type CourseSourceUse,
+  type OpeningMaterialPurposePin,
   sourceMimeSchema,
   uploadInputSchema,
   sourceRecordSchema,
