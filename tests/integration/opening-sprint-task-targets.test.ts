@@ -87,14 +87,18 @@ it("projects a real binding into a navigable URL, restores its checkpoint and le
 it("restores the real persisted continuation after completing a section without completing its task", async () => {
   const courseId = await course(), selected = await task(courseId), request = input(selected);
   const root = await teaching().create(f.scope, request);
-  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${root.id}`;
+  await f.sql`UPDATE opening_teaching_activities SET status='completed',updated_at='2099-01-01T00:00:00Z' WHERE id=${root.id}`;
   const next = await teaching().create(f.scope, request);
   expect(next.id).not.toBe(root.id);
+  await f.sql`UPDATE opening_teaching_activities SET status='paused' WHERE id=${next.id}`;
+  await teaching().create(f.scope, { ...request, clientKey: `task:${selected.id}:next:${randomUUID()}`, createIntent: {} });
   const [stored] = await f.sql`SELECT create_intent FROM opening_teaching_activities WHERE id=${next.id}`;
   expect(stored!.create_intent.continuesActivityId).toBe(root.id);
   expect((await readTask(selected.id)).teachingTarget).toEqual({ activityId: next.id, courseId, requirementKey: null });
   const before = await counts(), api = client();
-  expect(await openCourseStudy(api, { ...options(courseId), taskId: selected.id })).toEqual({ kind: "activity", activity: next });
+  expect(await openCourseStudy(api, { ...options(courseId), taskId: selected.id })).toEqual({ kind: "activity", activity: await teaching().assertOwnedActivity(f.scope, next.id) });
+  expect((await teaching().assertOwnedActivity(f.scope, next.id)).status).toBe("paused");
+  await expect(openCourseStudy(api, { ...options(courseId), taskId: selected.id, activityId: root.id })).rejects.toThrow("目标已变化");
   expect(api.listTeachingActivities).not.toHaveBeenCalled(); expect(api.createTeachingActivity).not.toHaveBeenCalled();
   expect(await counts()).toEqual(before);
 });
