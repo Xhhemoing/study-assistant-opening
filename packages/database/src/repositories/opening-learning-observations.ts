@@ -13,6 +13,7 @@ import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { linkOpeningSkillEvidenceInTx } from "./opening-skill-evidence";
 import { evaluateOpeningSpanAttempt } from "./opening-span-evaluation";
 import { evaluateOpeningMatrixAttempt } from "./opening-matrix-evaluation";
+import { evaluateOpeningTeachingKeyAttempt } from "./opening-teaching-question-evaluation";
 import { evaluateOpeningExamAttempt } from "./opening-exam-integration-evaluation";
 import type { AiGradingWorkSource } from "@aistudy/contracts";
 import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
@@ -144,10 +145,8 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   const examEvaluation = await evaluateOpeningExamAttempt(tx, scope, attempt, input.answer, attemptSources, opts.examSprintPublication === true);
   const spanEvaluation = examEvaluation ? null : await evaluateOpeningSpanAttempt(tx, scope, attempt, input.answer, attemptSources);
   const matrixEvaluation = examEvaluation || spanEvaluation ? null : await evaluateOpeningMatrixAttempt(tx, scope, attempt, input.answer, attemptSources);
-  // Reader-first bridge: retain historical teaching-key verdict support, but do
-  // not produce new ones here. Teaching answers use the existing AI admission;
-  // exam/span/matrix evaluators and exact client-key replay remain unchanged.
-  const controlledEvaluation = examEvaluation ?? spanEvaluation ?? (matrixEvaluation ? { ...matrixEvaluation, specVersion: "matrix-arithmetic-v1" as const } : null);
+  const teachingEvaluation = examEvaluation || spanEvaluation || matrixEvaluation ? null : await evaluateOpeningTeachingKeyAttempt(tx, scope, attempt, input.answer, attemptSources);
+  const controlledEvaluation = examEvaluation ?? spanEvaluation ?? (matrixEvaluation ? { ...matrixEvaluation, specVersion: "matrix-arithmetic-v1" as const } : null) ?? teachingEvaluation;
   if ((attempt?.create_intent as { teachingBlock?: unknown } | undefined)?.teachingBlock) {
     const activities = await tx`SELECT status,content_version FROM opening_teaching_activities
       WHERE id=${String(session.activity_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
@@ -182,7 +181,7 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     ...(spanEvaluation ? { skills: spanEvaluation.skills, coreEvidenceComplete: spanEvaluation.coreEvidenceComplete, membershipOutcome: spanEvaluation.membershipOutcome } : {}),
   } : null;
   const effectiveOutcome = controlledEvaluation?.outcome ?? input.outcome;
-  const effectiveAssistance = (matrixEvaluation?.priorFeedback || spanEvaluation?.priorFeedback) ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
+  const effectiveAssistance = (matrixEvaluation?.priorFeedback || spanEvaluation?.priorFeedback || teachingEvaluation?.priorFeedback) ? resolveAssistance(input.assistance, ["hinted"]) : input.assistance;
   const effectiveVerdictSource = controlledEvaluation ? "deterministic" : verdictSource;
   const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
   const activityId = String(session.activity_id);
