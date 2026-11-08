@@ -664,11 +664,21 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
     },
 
     async getClientInit(scope: Scope, activityId: string): Promise<ActivitySpecClientInit | null> {
-      await sql.begin(async tx => {
-        await lockWorkspaceLearningHistory(tx, scope);
-        await issueOpeningReservedQuestion(tx, scope, activityId, reservedPorts);
-      });
-      const activity = await assertOwnedActivity(sql, scope, activityId);
+      let activity = await assertOwnedActivity(sql, scope, activityId);
+      if (reservedPorts) {
+        await sql.begin(async tx => {
+          await lockWorkspaceLearningHistory(tx, scope);
+          await issueOpeningReservedQuestion(tx, scope, activityId, reservedPorts);
+        });
+        activity = await assertOwnedActivity(sql, scope, activityId);
+      } else {
+        // Production readers cannot consume private inventory. Only a real
+        // scope-bound pending reservation blocks ordinary saved-content replay.
+        const pending = await sql`SELECT id FROM opening_course_reserved_questions
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND reserved_activity_id=${activityId} AND state='reserved' LIMIT 1`;
+        if (pending.length) throw learningError("CONFLICT", "保留题曝光资格暂未接入生产供给");
+      }
       const spec = await this.getActivitySpec(scope, activityId);
       if (!spec) return null;
 

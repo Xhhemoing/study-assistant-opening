@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import type { Sql, TransactionSql } from "postgres";
+import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { readCourseQuestionExposure, recordCourseQuestionExposure, refreshCourseQuestionExposure } from "../../packages/database/src/repositories/opening-course-question-exposure";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -9,6 +11,25 @@ afterEach(async () => { await f?.close(); });
 const question = () => ({ reservedQuestionId: randomUUID(), identityRefId: randomUUID(), courseId: randomUUID(),
   requirementId: randomUUID(), requirementRevision: 1, sourceVersions: {}, text: "137*19",
   interaction: { kind: "numeric" as const }, familyId: "arithmetic:*" });
+// Transparent forwarding only: every observed statement executes on real PG.
+function observe(db: Sql | TransactionSql, queries: string[], after?: (query: string) => Promise<void>): Sql {
+  return new Proxy(db, {
+    apply(target, receiver, args) {
+      const query = Array.isArray(args[0]) && "raw" in args[0] ? args[0].join("?") : null;
+      const result = Reflect.apply(target, receiver, args);
+      if (!query) return result;
+      queries.push(query);
+      return Promise.resolve(result).then(async rows => { await after?.(query); return rows; });
+    },
+    get(target, key, receiver) {
+      if (key === "begin") return (...args: unknown[]) => (target as Sql).begin(
+        ...(args.slice(0, -1) as []),
+        tx => (args.at(-1) as (tx: TransactionSql) => Promise<unknown>)(observe(tx, queries, after) as unknown as TransactionSql),
+      );
+      return Reflect.get(target, key, receiver);
+    },
+  }) as Sql;
+}
 it("requires DB genesis plus a real scan and cannot retrofit unknown historical coverage", async () => {
   const [genesis] = await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
   expect(genesis).toMatchObject({ complete: false, invalidated: false });
@@ -17,6 +38,70 @@ it("requires DB genesis plus a real scan and cannot retrofit unknown historical 
   await expect(f.sql`INSERT INTO opening_course_question_exposure_coverage(workspace_id,owner_user_id,protocol,history_revision,complete,covered_surface_count)
     VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},'course-question-exposure-1',0,true,0)`).rejects.toMatchObject({ code: "23514" });
   expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
+});
+it.each(["missing", "invalidated"] as const)("rejects %s origin before history and maintenance locks without exposure writes", async state => {
+  if (state === "missing") await f.sql`DELETE FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+  else await f.sql`UPDATE opening_course_question_exposure_coverage SET invalidated=true WHERE workspace_id=${f.scope.workspaceId}`;
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const holder = f.sql.begin(async tx => {
+    await lockWorkspaceLearningHistory(tx, f.scope);
+    await tx`LOCK TABLE opening_learning_observations,opening_teaching_activities IN SHARE UPDATE EXCLUSIVE MODE`;
+    entered(); await held;
+  });
+  const queries: string[] = [];
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error("holder exited before release"); })]);
+    await f.sql.begin(async tx => {
+      await tx`SET LOCAL lock_timeout='200ms'`;
+      expect(await refreshCourseQuestionExposure(observe(tx, queries) as unknown as TransactionSql, f.scope)).toBe(false);
+    });
+    expect(await readCourseQuestionExposure(observe(f.sql, queries), f.scope, question())).toMatchObject({ coverage: "unknown" });
+    expect(queries.some(query => /FOR UPDATE|LOCK TABLE|INSERT INTO|UPDATE opening_course_question_exposure_coverage/.test(query))).toBe(false);
+    expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    // Preserve the exact original workspace error, before the coverage probe.
+    for (const scope of [{ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, { ...f.scope, workspaceId: randomUUID() }]) {
+      const rejected: string[] = [];
+      await expect(readCourseQuestionExposure(observe(f.sql, rejected), scope, question()))
+        .rejects.toMatchObject({ code: "NOT_FOUND", message: "workspace not found" });
+      expect(rejected).toHaveLength(1);
+    }
+  } finally { release(); await holder; }
+});
+it.each(["invalidate", "descriptor"] as const)("rechecks a real %s committed after the candidate probe", async change => {
+  const queries: string[] = [];
+  let probed = false;
+  const sql = observe(f.sql, queries, async query => {
+    if (probed || !query.includes("SELECT invalidated FROM opening_course_question_exposure_coverage\n")) return;
+    probed = true;
+    if (change === "invalidate") await f.sql`UPDATE opening_course_question_exposure_coverage SET invalidated=true WHERE workspace_id=${f.scope.workspaceId}`;
+    else await f.sql.begin(tx => recordCourseQuestionExposure(tx, f.scope, {
+      surfaceKey: "probe-race", kind: "presented", text: "137*19", sourceVersions: {},
+    }));
+  });
+  expect(await readCourseQuestionExposure(sql, f.scope, question())).toMatchObject(change === "invalidate"
+    ? { coverage: "unknown" } : { coverage: "complete", exactExposed: true, familyExposed: true });
+  expect(probed).toBe(true);
+  expect(queries.some(query => query.includes("LOCK TABLE"))).toBe(true);
+  expect(queries.some(query => query.includes("protocol=") && query.includes("FOR UPDATE"))).toBe(true);
+  if (change === "invalidate") {
+    expect(queries.some(query => query.includes("pg_trigger") || query.includes("INSERT INTO opening_course_question_exposures"))).toBe(false);
+    expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  }
+});
+it("retains descriptor insertion fencing after the locked origin recheck", async () => {
+  let checked = false;
+  const sql = observe(f.sql, [], async query => {
+    if (checked || !query.includes("SELECT invalidated FROM opening_course_question_exposure_coverage c")) return;
+    checked = true;
+    await expect(f.sql.begin(async tx => {
+      await tx`SET LOCAL lock_timeout='100ms'`;
+      await recordCourseQuestionExposure(tx, f.scope, { surfaceKey: "locked-race", kind: "presented", text: "137*19", sourceVersions: {} });
+    })).rejects.toMatchObject({ code: "55P03" });
+  });
+  expect(await readCourseQuestionExposure(sql, f.scope, question())).toMatchObject({ coverage: "complete", exactExposed: false });
+  expect(checked).toBe(true);
+  expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} AND surface_key='locked-race'`).toHaveLength(0);
 });
 it("persists a presentation before answer, keeps replay idempotent and rolls back failed writes", async () => {
   const input = { surfaceKey: "presented:question", kind: "presented" as const, text: "137*19", sourceVersions: {} };

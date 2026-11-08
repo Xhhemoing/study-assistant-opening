@@ -10,7 +10,14 @@ import { produceReservedQuestion } from "../../packages/ai/src/opening/reserved-
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
-import type { TransactionSql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
+import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
+import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
+import { buildLongTermSuggestions } from "../../packages/database/src/repositories/opening-long-term-maintenance";
+import { createOpeningTeachingContentService } from "../../apps/web/src/features/opening/teaching/teaching-content-service";
+import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
+import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
+import { GET as getRoute } from "../../apps/web/src/app/api/opening/courses/[id]/learning-route/route";
 import { readCourseQuestionExposure } from "../../packages/database/src/repositories/opening-course-question-exposure";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
@@ -48,9 +55,126 @@ async function setup() {
     const { scope, text, interaction, answer, ...pinned } = candidate;
     return admitOpeningReservedCandidate(f.sql, scope, activity.activity.id, pinned, { text, interaction, answer }, admission);
   };
-  return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit, admission };
+  return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit, admission, goal, definition };
 }
 const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, answer: "2603" };
+// Observe actual SQL, including nested transaction clients, without stubbing rows.
+function observedSql(db: Sql | TransactionSql, queries: string[]): Sql {
+  return new Proxy(db, {
+    apply(target, receiver, args) {
+      if (Array.isArray(args[0]) && "raw" in args[0]) queries.push(args[0].join("?"));
+      return Reflect.apply(target, receiver, args);
+    },
+    get(target, key, receiver) {
+      if (key === "begin") return (...args: unknown[]) => (target as Sql).begin(
+        ...(args.slice(0, -1) as []),
+        tx => (args.at(-1) as (tx: TransactionSql) => Promise<unknown>)(observedSql(tx, queries) as unknown as TransactionSql),
+      );
+      return Reflect.get(target, key, receiver);
+    },
+  }) as Sql;
+}
+async function effects() {
+  const db = f.sql, scope = f.scope;
+  return {
+    private: await db`SELECT * FROM opening_course_reserved_questions WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    attempts: await db`SELECT * FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    exposures: await db`SELECT * FROM opening_course_question_exposures WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    coverage: await db`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${scope.workspaceId}`,
+    history: await db`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`,
+    jobs: await db`SELECT * FROM opening_jobs WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+    budget: await db`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`,
+  };
+}
+const assertNoScanner = (queries: string[]) => {
+  expect(queries.some(query => /LOCK TABLE|pg_trigger|covered_surface_count|INSERT INTO opening_course_question_exposures|UPDATE opening_course_question_exposure_coverage/.test(query))).toBe(false);
+};
+it.each(["opening_learning_observations", "opening_teaching_activities"] as const)("production route matrix stays off scanner/exposure writes under %s maintenance", async table => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  // Keep the direct readiness assertion; production unknown is a separate policy.
+  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "ready", available: 1 });
+  const before = await effects(), queries: string[] = [], sql = observedSql(f.sql, queries);
+  const route = createOpeningCourseRouteRepository(sql, { compilerEnabled: true, exactVerificationEnabled: true });
+  const runtime = createAuthRuntime({ databaseUrl: process.env.OPENING_TEST_DATABASE_URL!, authSecret: process.env.AUTH_SECRET!,
+    sessionCookieSecure: false, sessionTtlSeconds: 3600, authCookieName: "aistudy_session" });
+  setAuthRuntimeForTests({ ...runtime, sql: observedSql(runtime.sql, queries) });
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const holder = f.sql.begin(async tx => { await tx`LOCK TABLE ${tx(table)} IN SHARE UPDATE EXCLUSIVE MODE`; entered(); await held; });
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error("maintenance exited before release"); })]);
+    const response = await getRoute(new Request(`http://localhost/api/opening/courses/${x.courseId}/learning-route`, {
+      headers: { cookie: f.cookie },
+    }), { params: Promise.resolve({ id: x.courseId }) });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.requirements[0].reservedSupply).toEqual({ status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" });
+    const replay = await route.confirm(f.scope, x.courseId, { expectedRevisions: [], requirements: [x.definition], confirmScope: true });
+    expect(replay.requirements[0]!.requirement.revision).toBe(1);
+    expect(await effects()).toEqual(before);
+    // Actual read-only transaction: no scanner writes permitted by PG either.
+    expect(await createOpeningCourseRouteVerificationRepository(sql).read(f.scope, x.courseId, x.activityId)).toMatchObject({ available: false, items: [] });
+    const start = await route.start(f.scope, x.courseId, { goalId: x.goal.id, expectedGoalRevision: 1,
+      requirementId: x.requirement.id, expectedRequirementRevision: 1, clientKey: randomUUID(), minutes: 20 });
+    expect(start).toMatchObject({ kind: "ready", resumed: true, activity: { id: x.activityId } });
+    const snapshot = await route.read(f.scope, x.courseId, x.activityId);
+    expect(await route.next(f.scope, x.courseId, { goalId: x.goal.id, expectedGoalRevision: 1, activityId: x.activityId,
+      expectedPathVersion: snapshot.currentActivity!.pathVersion, observationId: null, clientKey: randomUUID(), minutes: 20 })).toMatchObject({ kind: "choice", reason: "evidence_unknown" });
+    await expect(createOpeningCourseRouteRetestRepository(sql).schedule(f.scope, x.courseId, { goalId: x.goal.id, expectedGoalRevision: 1,
+      activityId: x.activityId, expectedPathVersion: snapshot.currentActivity!.pathVersion, observationId: randomUUID(), clientKey: randomUUID(), minutes: 10 }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const maintenanceGoal = { ...x.goal, lifecycle: "maintenance" as const, maintenanceIntervalDays: 7 };
+    const suggestions = await buildLongTermSuggestions(sql, f.scope, { date: "2026-11-08", timeZone: "UTC", now: new Date("2026-11-08T12:00:00Z"),
+      goals: [maintenanceGoal], tasks: [], exactVerificationEnabled: true });
+    expect(suggestions.suggestions.some(row => row.courseId === x.courseId && row.key.includes(":maintenance:"))).toBe(true);
+    expect(await effects()).toEqual(before);
+    const changed = await route.confirm(f.scope, x.courseId, { expectedRevisions: [{ id: x.requirement.id, revision: 1 }],
+      requirements: [{ ...x.definition, title: "Arithmetic revised" }], confirmScope: true });
+    expect(changed.requirements[0]!.requirement).toMatchObject({ revision: 2, title: "Arithmetic revised" });
+    expect(await effects()).toEqual(before);
+    assertNoScanner(queries);
+    expect(queries.some(query => query.includes("UPDATE course_requirements"))).toBe(true);
+  } finally { release(); await holder; setAuthRuntimeForTests(null); await runtime.close(); }
+});
+it("default pending init rejects with HTTP 409 and no consumption, while ownership precedes its SELECT", async () => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  await f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" }));
+  const before = await effects(), queries: string[] = [], sql = observedSql(f.sql, queries);
+  await expect(createOpeningTeachingContentService(sql).getClientInit(f.scope, x.activityId))
+    .rejects.toMatchObject({ status: 409, code: "CONFLICT", message: "保留题曝光资格暂未接入生产供给" });
+  for (const [scope, activityId] of [[f.otherScope, x.activityId], [f.scope, randomUUID()],
+    [{ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, x.activityId]] as const) {
+    const start = queries.length;
+    await expect(createOpeningTeachingContentRepository(sql).getClientInit(scope, activityId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(queries.slice(start).some(query => query.includes("opening_course_reserved_questions"))).toBe(false);
+  }
+  expect(await effects()).toEqual(before);
+  assertNoScanner(queries);
+  expect(queries.some(query => /FOR UPDATE|INSERT INTO|UPDATE /.test(query))).toBe(false);
+});
+it("ordinary saved handout and card variant replay do not consume available private inventory", async () => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  const content = createOpeningTeachingContentRepository(f.sql);
+  for (const card of [false, true]) {
+    const activityId = await insertTestTeachingActivity(f.sql, f.scope, x.courseId);
+    if (card) await f.sql`UPDATE opening_teaching_activities SET create_intent=${f.sql.json({ kind: "card_review_variant", cardId: randomUUID() })} WHERE id=${activityId}`;
+    const blockId = randomUUID(), keyId = randomUUID();
+    const blocks = [{ id: blockId, type: "prompt", content: { text: "2+3" } }, { id: keyId, type: "answer_key", content: { text: "5" } }];
+    const unit = await content.createUnit(f.scope, { title: card ? "Card variant" : "Handout", blocks });
+    await content.publishActivitySpec(f.scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1,
+      blockOrder: blocks.map((block, position) => ({ blockId: block.id, blockType: block.type, role: block.type as "prompt" | "answer_key", position })) });
+    const before = await effects(), queries: string[] = [], repository = createOpeningTeachingContentRepository(observedSql(f.sql, queries));
+    const init = await repository.getClientInit(f.scope, activityId);
+    expect(init?.blocks[0]?.content).toEqual({ text: "2+3" });
+    expect(init?.blocks[1]).toMatchObject({ content: null, answerRef: { revealState: "hidden" } });
+    expect(await repository.getClientInit(f.scope, activityId)).toEqual(init);
+    expect(await effects()).toEqual(before); assertNoScanner(queries);
+    expect(queries.some(query => /FOR UPDATE|INSERT INTO|UPDATE /.test(query))).toBe(false);
+  }
+});
 it.each([
   ["137*19", "Example: 137 · 19"], ["$137*19$", "137*19"], ["137*19", "$137*19$"],
   ["\\(137 \\times 19\\)", "137*19"],
@@ -67,6 +191,26 @@ it.each([
   await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
     .rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
+});
+it.each(["opening_learning_observations", "opening_teaching_activities"] as const)("fails closed while %s has a real maintenance lock", async table => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  const input = { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
+    text: candidate.text, interaction: candidate.interaction, familyId: "arithmetic:*" };
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const holder = f.sql.begin(async tx => {
+    await tx`LOCK TABLE ${tx(table)} IN SHARE UPDATE EXCLUSIVE MODE`;
+    entered(); await held;
+  });
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error("maintenance barrier exited before release"); })]);
+    await expect(readCourseQuestionExposure(f.sql, f.scope, input)).rejects.toMatchObject({ code: "55P03" });
+    await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+      .rejects.toMatchObject({ code: "55P03" });
+    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
+  } finally { release(); await holder; }
 });
 it.each(["Example: 137 · 19 +", "137*19 if x>0", "See (137+2)*19 in figure", "Example: x+1"])("keeps unresolved history unknown with zero reservation: %s", async history => {
   const x = await setup();
@@ -190,10 +334,20 @@ it("proves real generated supply through coverage, racing reservation, issued ow
     .rejects.toThrow("after issue");
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
   expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} AND kind='presented'`).toHaveLength(0);
-  const content = createOpeningTeachingContentRepository(f.sql);
+  // Production containment does not consume even genuinely ready inventory.
+  const production = createOpeningTeachingContentRepository(f.sql);
+  await expect(production.getClientInit(f.scope, activityId)).rejects.toMatchObject({
+    code: "CONFLICT", message: "保留题曝光资格暂未接入生产供给",
+  });
+  expect(await f.sql`SELECT state FROM opening_course_reserved_questions WHERE id=${reserved!.id}`).toEqual([{ state: "reserved" }]);
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} AND kind='presented'`).toHaveLength(0);
+  // Explicit trusted capability still exercises the REAL scanner, not complete=true.
+  const content = createOpeningTeachingContentRepository(f.sql, { readExposure: readCourseQuestionExposure });
   const [one, two] = await Promise.all([content.getClientInit(f.scope, activityId), content.getClientInit(f.scope, activityId)]);
   expect(one?.blocks).toEqual(two?.blocks); expect(one?.blocks).toHaveLength(1);
   expect(one?.blocks[0]?.content).toMatchObject({ text: candidate.text });
+  expect(await production.getClientInit(f.scope, activityId)).toEqual(one);
   expect(JSON.stringify(one)).not.toContain(candidate.answer);
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
   const [issued] = await f.sql`SELECT state,issued_item_version_id FROM opening_course_reserved_questions WHERE id=${reserved!.id}`;
@@ -308,17 +462,15 @@ it("rejects a changed purpose between the actual compiler input and public block
     .rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
 });
-it("runs fake-provider generation through the production worker, real budget ledger and private admission without replay resend", async () => {
+it("runs only public compilation through the production worker and real budget ledger without private generation or replay resend", async () => {
   const x = await setup(), requests: string[] = [];
   const server = createServer(async (request, response) => {
     const body: Buffer[] = [];
     for await (const bytes of request) body.push(Buffer.from(bytes));
     const raw = Buffer.concat(body).toString("utf8"); requests.push(raw);
-    const messages = (JSON.parse(raw) as { messages: Array<{ content: unknown }> }).messages;
-    const privateCall = JSON.stringify(messages).includes("Generate one new reserved assessment question");
     const source = x.chunkId;
     const hints = { direction: "Use operations.", concept: "Rational arithmetic.", firstStep: "Add the numbers." };
-    const output = privateCall ? candidate : { blocks: [
+    const output = { blocks: [
       { type: "text", text: "Arithmetic operations on rational numbers.", citedChunkIds: source ? [source] : [] },
       { type: "prompt", text: "2+3", interaction: { kind: "numeric" } },
       { type: "answer_key", text: "5", hints, ...rankPedagogy },
@@ -344,27 +496,29 @@ it("runs fake-provider generation through the production worker, real budget led
       chunks: createOpeningSourceChunksRepository(f.sql), privacy: createOpeningPrivacyRepository(f.sql) });
     const handler = createCompileTeachingUnitHandler(deps);
     expect(await handler(job, payload)).toMatchObject({ generateStatus: "needs_check" });
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(1);
     const rows = await f.sql`SELECT question_json,key_json FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`;
-    expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ question_json: { text: candidate.text }, key_json: { answer: candidate.answer } });
+    expect(rows).toHaveLength(0);
     const revisions = JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`);
     expect(revisions).not.toContain(candidate.text); expect(revisions).not.toContain(candidate.answer);
     const budget = await f.sql`SELECT state,result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY request_id`;
-    expect(budget).toHaveLength(2); expect(budget.every(row => row.state === "completed")).toBe(true);
-    expect(await handler(job, payload)).toMatchObject({ replayed: true }); expect(requests).toHaveLength(2);
-    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(2);
+    expect(budget).toHaveLength(1); expect(budget.every(row => row.state === "completed")).toBe(true);
+    expect(budget.some(row => String(row.result_ref).startsWith("reserved-generation:"))).toBe(false);
+    expect(await handler(job, payload)).toMatchObject({ replayed: true }); expect(requests).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`)).toBe(revisions);
-    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
     expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
-it("keeps unsupported private inventory missing while saved-question exposure and mastery remain unknown", async () => {
+it("keeps production supply unknown while direct unsupported inventory stays missing and mastery unknown", async () => {
   const x = await setup();
   await f.sql`UPDATE course_requirements SET requirement_key='rank',verification=${f.sql.json({ kind: "rubric", status: "ready",
     exerciseKeys: ["rank"], rubric: "Explain rank", missingReasons: [] })} WHERE id=${x.requirement.id}`;
   const route = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
   const snapshot = await route.read(f.scope, x.courseId), item = snapshot.requirements[0]!;
-  expect(item.reservedSupply).toMatchObject({ status: "missing", available: 0 });
+  expect(await readOpeningReservedSupply(f.sql, f.scope, item.requirement)).toMatchObject({ status: "missing", available: 0 });
+  expect(item.reservedSupply).toEqual({ status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" });
   expect(item.questionCoverage).toEqual({ savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" });
   expect(snapshot.summary.verified).toBe(0);
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
