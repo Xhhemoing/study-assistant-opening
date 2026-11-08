@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   applyMigrations,
@@ -228,8 +230,15 @@ describe("migration registry order and verification", () => {
       path.join(canonical, entry.filename), entry.sha256);
     for (const entry of manifest.controls) await writeVerified(entry.path, path.join(artifactFixtures, entry.fixture), entry.sha256);
     for (const entry of manifest.runtimeFiles) await writeVerified(entry.path, path.resolve(entry.path), entry.sha256);
-    // Dependencies are runtime-only; all historical source/SQL bytes are verified.
-    await symlink(path.resolve("node_modules"), path.join(root, "node_modules"), "dir");
+    // Dependencies are runtime-only; all historical source/SQL bytes stay verified.
+    // Keep hermes-db.mjs untouched; its private tsx entry starts one Node loader
+    // instead of paying for the tsx CLI's additional Node process on every call.
+    await mkdir(path.join(root, "node_modules/.bin"), { recursive: true });
+    await symlink(path.resolve("node_modules/postgres"), path.join(root, "node_modules/postgres"), "dir");
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+    await writeFile(path.join(root, "node_modules/.bin/tsx"),
+      `#!/bin/sh\nexec ${quote(process.execPath)} --import ${quote(loader)} "$@"\n`, { mode: 0o700 });
     return root;
   }
 
