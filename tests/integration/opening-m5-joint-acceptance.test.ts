@@ -17,6 +17,7 @@ import { createOpeningAttemptService } from "../../apps/web/src/features/opening
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningCourseSharedSkillRepository } from "../../packages/database/src/repositories/opening-course-shared-skill";
 import { refreshOpeningLearningEligibility } from "../../packages/database/src/repositories/opening-learning-eligibility";
+import { learningTransactionClient } from "../../packages/database/src/repositories/opening-long-term-planning";
 import { buildLongTermSuggestions } from "../../packages/database/src/repositories/opening-long-term-maintenance";
 import { evaluateOpeningTeachingKeyAttempt } from "../../packages/database/src/repositories/opening-teaching-question-evaluation";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -236,7 +237,25 @@ it("does not turn unknown self reports or an explicit shared mapping into master
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(2);
 });
 
-it("deduplicates multi-goal shared-card work and budget, but never copies its grade into course evidence", async () => {
+// The shared integration DB also runs legacy restore tests with whole-table DELETE.
+// Exercise real card writes and nested repository transactions, then roll back only
+// this fixture: never delete append-only events or truncate another suite's facts.
+async function withRolledBackCardFixture(run: () => Promise<void>) {
+  const sql = f.sql, rollback = new Error("Rollback completed card fixture");
+  const events = await sql`SELECT id FROM learning_events WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  try {
+    await expect(sql.begin(async tx => {
+      f.sql = learningTransactionClient(tx);
+      await run();
+      throw rollback;
+    })).rejects.toBe(rollback);
+  } finally {
+    f.sql = sql;
+  }
+  expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(events);
+}
+
+it("deduplicates multi-goal shared-card work and budget, but never copies its grade into course evidence", async () => withRolledBackCardFixture(async () => {
   const x = await sharedPair(), clock = new Date(), startedAt = new Date(clock.getTime() - 180000);
   await budget(30, clock);
   const cards = createCardRepository(f.sql), courses = createCourseMembershipRepository(f.sql);
@@ -278,4 +297,4 @@ it("deduplicates multi-goal shared-card work and budget, but never copies its gr
   await management(new Date(clock.getTime() + 14 * 86400000)).read(f.scope);
   expect(await cards.getState({ ...f.scope, cardId: card.id })).toEqual(state);
   for (const id of [x.source.id, x.target.id]) expect((await routes().read(f.scope, id)).requirements[0]!.status).toBe("unobserved");
-});
+}));
