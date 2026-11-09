@@ -139,7 +139,7 @@ export {
 
 
 export * from "./schema/opening-teaching-activities";
-export { assertPublicTeachingActivityIntent } from "./repositories/opening-span-course-binding";
+export { assertPublicTeachingActivityIntent, readOpeningSpanCourseBinding } from "./repositories/opening-span-course-binding";
 export * from "./schema/opening-teaching-content";
 export { openingCourseReservedQuestions, openingCourseQuestionExposures, openingCourseQuestionExposureCoverage } from "./schema/opening-course-reserved-questions";
 export {

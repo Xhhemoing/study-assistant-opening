@@ -3,8 +3,9 @@ import { courseRequirementProgress, toSnapshotEvidence } from "@aistudy/domain";
 import type { Sql,TransactionSql } from "postgres";
 import { learningError, learningIso, mapLearningObservation } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
-import { mapTeachingActivity } from "./opening-teaching-activities";
+import { assertOwnedActivity, mapTeachingActivity } from "./opening-teaching-activities";
 import { randomUUID } from "node:crypto";
+import { readOpeningSpanCourseAttempt } from "./opening-span-course-binding";
 import { z } from "zod";
 import { courseRouteDelayedProtocolSchema,readOpeningCourseRouteRetestOutcome } from "./opening-course-route-retest-state";
 import type { CourseRouteSourceChunk } from "@aistudy/domain";
@@ -47,6 +48,20 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
     ORDER BY a.started_at,a.id`;
   const identity=(stem:unknown)=>typeof stem==="string"&&stem.trim()?stem.normalize("NFKC").replace(/\s+/gu," ").trim():null;
   const first=new Map<string,string>();for(const row of history){const key=identity(row.stem_snapshot);if(key&&!first.has(key))first.set(key,String(row.id));}
+  const spanBindings = new Map<string, NonNullable<Awaited<ReturnType<typeof readOpeningSpanCourseAttempt>>>["binding"]["requirement"]>();
+  for (const row of rows) {
+    if (!row.attempt_id || !(row.route_goal as {spanCourseBinding?:unknown}|null)?.spanCourseBinding) continue;
+    const [attempt] = await db`SELECT * FROM opening_learning_attempts WHERE id=${String(row.attempt_id)}
+      AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    if (!attempt || attempt.session_id !== row.session_id || attempt.item_version_id !== row.item_version_id || attempt.problem_id !== row.problem_id) continue;
+    try {
+      const trusted = await readOpeningSpanCourseAttempt(db, scope, attempt);
+      if (trusted) spanBindings.set(String(row.id), trusted.binding.requirement);
+    } catch (error) {
+      if ((error as {reasonCode?:string}).reasonCode !== "SPAN_COURSE_BINDING_CHANGED") throw error;
+      // Current drift removes authority, never the historical fact or its original bytes.
+    }
+  }
   const projected:ExamCourseRouteObservation[]=toSnapshotEvidence({observations,evidenceContexts},new Date()).observations.map(observation=>{
     const row=rows.find(row=>String(row.id)===observation.id)!,binding=bindingSchema.safeParse((row.evaluation_spec as {courseRequirement?:unknown}|null)?.courseRequirement);
     const actual=history.find(item=>String(item.id)===row.attempt_id),questionIdentity=identity(actual?.stem_snapshot);
@@ -56,7 +71,7 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
     return {...observation,activityId:String(row.route_activity_id),routeAction:(row.route_goal as {courseRoute?:{action?:string}}|null)?.courseRoute?.action,
       comprehensiveRunKey:(row.route_goal as {courseRoute?:{comprehensiveRunKey?:string}}|null)?.courseRoute?.comprehensiveRunKey,
       ...(block?{evidenceContext:{responseFormat,elapsedSeconds}}:{}),questionIdentity,firstQuestionExposure:questionIdentity!==null&&first.get(questionIdentity)===row.attempt_id,
-      ...(binding.success?{courseRequirement:binding.data}:{})};
+      ...(spanBindings.has(observation.id)?{courseRequirement:spanBindings.get(observation.id)!}:binding.success?{courseRequirement:binding.data}:{})};
   });
   const {projectExamCourseEvidence,readExamCourseEvidenceLinks}=await import("./opening-course-exam-evidence-projection");
   const links=await readExamCourseEvidenceLinks(db,scope,courseId);
@@ -136,7 +151,8 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
     .sort((a,b)=>Date.parse(b.submittedAt??b.occurredAt)-Date.parse(a.submittedAt??a.occurredAt)||b.id.localeCompare(a.id))[0]:null;
   return {courseId,scopeState:!requirements.length?"missing":requirements.every(row=>row.approvedAt!==null)?"confirmed":"unconfirmed",requirements:progress,
     ...(exactVerificationEnabled ? { spanBindingOptions: readCourseSpanBindingOptions() } : {}),
-    suggestions:await suggestions(db,scope,courseId,requirements,exactVerificationEnabled),materials,currentActivity:current?mapTeachingActivity(current):null,currentRoute,observationId:currentHead?.id??null,
+    suggestions:await suggestions(db,scope,courseId,requirements,exactVerificationEnabled),materials,currentActivity:current?((current.create_intent as {courseSpanRequest?:unknown})?.courseSpanRequest
+      ?await assertOwnedActivity(db as Sql,scope,String(current.id)):mapTeachingActivity(current)):null,currentRoute,observationId:currentHead?.id??null,
     summary:{total:progress.length,mandatory:progress.filter(row=>row.requirement.mandatory).length,
       verified:progress.filter(row=>row.status==="verified").length,blocked:progress.filter(row=>row.status==="blocked").length}};
 }

@@ -465,14 +465,18 @@ it.each(['receipt', 'existing'] as const)('rejects a pre-private delayed activit
   const [retest] = await f.sql`SELECT id FROM opening_retest_activities WHERE task_id=${x.input.taskId}`;
   const [origin] = await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${x.origin.id}`;
   // Historical shape: a task-linked compiled activity, never a private reservation,
-  // receipt or issued item. Do not manufacture this by stripping a new issued row.
+  // receipt or issued item. First create an ordinary legal activity; fixture-only
+  // SQL then models the pre-private stored record, not a public authority writer.
   const legacy = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
-    clientKey: entrance === 'receipt' ? `course-route-task:${x.input.taskId}` : randomUUID(),
-    intentKind: 'goal', intentSummary: 'Legacy delayed arithmetic', courseId: x.courseId, sourceIds: [x.sourceId],
-    createIntent: { kind: 'course_route', source: 'task', taskId: x.input.taskId, goalId: x.input.goalId, requirementId: x.requirement.id },
-    goalJson: { courseRoute: { ...origin!.goal_json.courseRoute, action: 'transfer_check', retestId: retest!.id },
-      learningBudget: origin!.goal_json.learningBudget },
+    clientKey: randomUUID(), intentKind: 'goal', intentSummary: 'Legacy delayed arithmetic',
+    courseId: x.courseId, sourceIds: [x.sourceId], createIntent: {},
   });
+  await f.sql`UPDATE opening_teaching_activities SET
+    client_key=${entrance === 'receipt' ? `course-route-task:${x.input.taskId}` : legacy.clientKey},
+    create_intent=${f.sql.json({ kind: 'course_route', source: 'task', taskId: x.input.taskId, goalId: x.input.goalId, requirementId: x.requirement.id })},
+    goal_json=${f.sql.json({ courseRoute: { ...origin!.goal_json.courseRoute, action: 'transfer_check', retestId: retest!.id },
+      learningBudget: origin!.goal_json.learningBudget })}
+    WHERE id=${legacy.id} AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
   await publishBaseline(legacy, x.sourceId);
   const facts = async () => ({
     activities: await f.sql`SELECT id,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`,

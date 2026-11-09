@@ -1,5 +1,5 @@
-import { hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
-import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent, type SpanRepairPlan } from "@aistudy/contracts";
+import { hasOpeningSpanCourseBinding, readOpeningSpanCourseAttempt } from "./opening-span-course-binding";
+import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent, type SpanRepairPlan, type SpanCourseBinding } from "@aistudy/contracts";
 import { createOpeningSpanRepairPlanInTx, readOpeningSpanRepair } from "./opening-span-repair";
 import { buildDecisionInput, captureNextLearningStep, createSpanTeachingSequence, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
@@ -100,15 +100,22 @@ async function selectedSources(tx: TransactionSql, scope: Scope, courseId: strin
 }
 const cycleOriginSchema = z.object({ activityId: z.string().uuid(), observationId: z.string().uuid().nullable() });
 async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: Awaited<ReturnType<typeof readOpeningCourseEvidence>>,
-  current: SnapshotObservation[], focusObservationId: string | undefined | null, sourceVersions: Record<string, number>) {
+  current: SnapshotObservation[], focusObservationId: string | undefined | null, sourceVersions: Record<string, number>, courseBinding?: SpanCourseBinding) {
   const selected = all.observations.find(row => row.id === (focusObservationId === undefined ? current[0]?.id : focusObservationId));
   if (!selected) return undefined;
   const activities = await db`SELECT a.id,s.id AS session_id,a.goal_json FROM opening_teaching_activities a
     JOIN opening_learning_sessions s ON s.activity_id=a.id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
       AND a.create_intent->>'protocol'='span-lesson-v1'`;
-  const byId = new Map(activities.map(row => [String(row.id), row]));
-  let activity = activities.find(row => row.session_id === selected.sessionId);
+  const scoped = activities.filter(row => {
+    const goal = row.goal_json as {spanCourseBinding?:SpanCourseBinding};
+    return courseBinding ? goal.spanCourseBinding?.goalId === courseBinding.goalId
+      && goal.spanCourseBinding.goalRevision === courseBinding.goalRevision
+      && isDeepStrictEqual(goal.spanCourseBinding.requirement, courseBinding.requirement)
+      : !Object.hasOwn(goal, "spanCourseBinding");
+  });
+  const byId = new Map(scoped.map(row => [String(row.id), row]));
+  let activity = scoped.find(row => row.session_id === selected.sessionId);
   const chain: (typeof activities)[number][] = [], visited = new Set<string>();
   while (activity && !visited.has(String(activity.id))) {
     visited.add(String(activity.id));
@@ -175,11 +182,31 @@ async function remediationCycles(db: Sql, scope: Scope, courseId: string, all: A
   });
   return summarizeRemediationCycles(facts);
 }
-async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent, dueRetestId: string | null, focusObservationId?: string | null) {
+async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent, dueRetestId: string | null, focusObservationId?: string | null, courseBinding?: SpanCourseBinding) {
   const db = transactionClient(tx);
   await selectedSources(tx, scope, courseId, sourceIds, sourceVersions);
   const all = await readOpeningCourseEvidence(db, scope, courseId);
-  const observations = all.observations.filter(row => row.requirementKey === SPAN_REQUIREMENT_KEY && row.skillLabel === SPAN_SKILL_LABEL);
+  const marked = await tx`SELECT s.id AS session_id FROM opening_learning_sessions s JOIN opening_teaching_activities a
+    ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+    WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} AND s.course_id=${courseId}
+      AND (a.goal_json ? 'spanCourseBinding' OR a.create_intent ? 'courseSpanRequest')`;
+  const candidates = all.observations.filter(row => row.requirementKey === SPAN_REQUIREMENT_KEY && row.skillLabel === SPAN_SKILL_LABEL);
+  const observations: typeof candidates = [];
+  for (const observation of candidates) {
+    if (!courseBinding) {
+      if (!marked.some(row => row.session_id === observation.sessionId)) observations.push(observation);
+      continue;
+    }
+    if (!observation.attemptId || !marked.some(row => row.session_id === observation.sessionId)) continue;
+    const [attempt] = await tx`SELECT * FROM opening_learning_attempts WHERE id=${observation.attemptId}
+      AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    if (!attempt) continue;
+    const saved = (attempt.create_intent as { spanCourseBinding?: SpanCourseBinding })?.spanCourseBinding;
+    if (!saved || saved.goalId !== courseBinding.goalId || saved.goalRevision !== courseBinding.goalRevision
+      || !isDeepStrictEqual(saved.requirement, courseBinding.requirement)) continue;
+    await readOpeningSpanCourseAttempt(tx, scope, attempt);
+    observations.push(observation);
+  }
   const projected = toSnapshotEvidence({ observations, evidenceContexts: all.evidenceContexts }, new Date());
   const current = spanTutorExactProjection(projected.observations, observations.map(row => ({ id: row.id,
     evaluatorVersion: row.serverEvaluation?.evaluatorVersion ?? null }))).filter(row => row.usableForCurrentVersion === "yes")
@@ -208,9 +235,16 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   const selected = focusObservationId !== undefined ? current.filter(row => row.id === focusObservationId) : current;
   const decisionInput = buildDecisionInput({ observations: selected, wantsFullExplanation: intent.explanationStyle === "full",
     ...(intent.learningPhase ? { learningPhase: intent.learningPhase } : {}), phaseSource: intent.learningPhase ? "explicit" : "automatic", dueRetest: Boolean(dueRetestId) });
-  const cycles = await remediationCycles(db, scope, courseId, all, current, focusObservationId, sourceVersions);
+  const cycles = await remediationCycles(db, scope, courseId,
+    { ...all, observations }, current, focusObservationId, sourceVersions, courseBinding);
   if (cycles?.completedCycles.length) decisionInput.remediationCycles = cycles;
   return { sourceRefs, decisionInput };
+}
+/** R1 explicit-root entry uses the same rule over only this exact requirement's trusted evidence. */
+export async function readOpeningCourseSpanDecisionInTx(tx: TransactionSql, scope: Scope, binding: SpanCourseBinding,
+  sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent) {
+  const projection = await facts(tx, scope, binding.courseId, sourceIds, sourceVersions, intent, null, undefined, binding);
+  return { ...projection, decision: nextLearningStep(projection.decisionInput) };
 }
 async function nextSession(db: Sql, scope: Scope, courseId: string) {
   const sessions = createOpeningSpanSessionRepository(db);

@@ -26,6 +26,17 @@ it("prefers unseen families but supplies unseen content after every fixed item w
   const exhausted = { ...empty(), problemIds: new Set(fixed.map(p => p.id)), familyIds: new Set(fixed.map(p => p.familyId)) };
   expect(chooseOpeningSpanReservedProblem(exhausted, "self_study")).toMatchObject({ kind: "available", problem: { familyId: "span:rational-3d" } });
 });
+it("scopes candidates before choosing, never falling back outside the confirmed set", () => {
+  const candidate = listSpanReservedProblems("validation").find(row => row.familyId === "span:independent-2d")!;
+  const seen = empty();
+  expect(chooseOpeningSpanReservedProblem(seen, "self_study", "validation", undefined, [candidate.id]))
+    .toMatchObject({ kind: "available", problem: { id: candidate.id } });
+  seen.problemIds.add(candidate.id);
+  expect(chooseOpeningSpanReservedProblem(seen, "self_study", "validation", undefined, [candidate.id]))
+    .toEqual({ kind: "unavailable", reason: "exhausted" });
+  expect(chooseOpeningSpanReservedProblem(empty(), "challenge", "validation", undefined, []))
+    .toEqual({ kind: "unavailable", reason: "exhausted" });
+});
 it("does not advertise a check when history is unknown or the actual content pool is exhausted", () => {
   expect(chooseOpeningSpanReservedProblem({ ...empty(), unknownHistory: true }, "self_study")).toEqual({ kind: "unavailable", reason: "unknown_history" });
   const seen = empty();

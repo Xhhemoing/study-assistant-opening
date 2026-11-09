@@ -14,9 +14,13 @@ import { recordOpeningLearningDecision } from "./opening-learning-decisions";
 import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedRecovery, type CourseReservedStart } from "./opening-course-route-reserved-start";
 
 import { readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
+import { createOpeningCourseSpanSessionInTx } from "./opening-span-session";
+import { readOpeningSpanCourseBinding, hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
+import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
+import { assertOwnedActivity } from "./opening-teaching-activities";
 
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
-const messages={binding_unavailable:"已确认 span 内容归属，但课程静态 span 执行桥尚不可用；未创建通用教学活动或消耗预算。",scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
+const messages={authorization_required:"导师工具尚未授权；未创建课程 span 活动或消耗预算。",binding_unavailable:"已确认 span 内容归属，但课程静态 span 执行桥尚不可用；未创建通用教学活动或消耗预算。",scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
   verification_unavailable:"本要求尚缺可用习题或判定标准；保留已有学习与答案，请补充验证材料。",evidence_unknown:"当前答案尚无可靠判定，请先核对评价；不会把缺少证据当作不会。",
   evidence_changed:"原活动的要求、材料或评价已变化，请读取当前课程路线再选择；已有活动和答案保留。",configuration:"教学内容生成尚未开启，未创建空白活动。",
   course_complete:"已完成当前确认范围的当前检查与逐项综合收尾；延迟验证单独记录。可回看课程记录，或明确安排延迟复测与维护。",
@@ -33,6 +37,15 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
+      if (hasOpeningSpanCourseBinding(receipt.goal_json, receipt.create_intent)) {
+        if (origin || "taskId" in input && input.taskId) return choice(courseId, "binding_unavailable");
+        const session = await createOpeningCourseSpanSessionInTx(tx, scope, { ...input as CourseRouteStart, courseId });
+        const authority = await readOpeningSpanCourseBinding(tx, scope, session.activityId);
+        if (!authority) throw learningError("CONFLICT", "原课程 span 身份缺失。");
+        const activity = await assertOwnedActivity(tx as unknown as Sql, scope, session.activityId);
+        return { kind: "ready", activity, href: href(courseId, activity.id), resumed: true,
+          requirementId: authority.binding.requirement.id, action: (receipt.goal_json as {courseRoute:CourseRouteActivityContext}).courseRoute.action };
+      }
       await assertCourseReservedRecovery(sql,tx,scope,courseId,receipt,input,snapshot.requirements.map(row=>row.requirement));
       const context=courseRouteActivityContextSchema.parse((receipt.goal_json as {courseRoute:unknown}).courseRoute);
       if(context.goalId!==input.goalId)throw learningError("CONFLICT","原请求属于不同目标。");
@@ -63,9 +76,19 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const current=progress.find(row=>row.requirement.id===requestedId);
     if(!current)throw learningError("CONFLICT","要求已移出当前目标范围，请重新读取课程路线。");
     if("requirementId" in input&&current.requirement.revision!==input.expectedRequirementRevision)throw learningError("CONFLICT","课程要求已更新，请重新读取。");
-    // Safe checkpoint: confirmed canonical scope must never fall through to compiler/generic execution.
-    if (readConfirmedCourseSpanExerciseKeys(current.requirement.requirementKey, current.requirement.verification))
-      return choice(courseId, "binding_unavailable", [current.requirement.id]);
+    // Only an explicit start of P itself may enter R1. No next/task/retest or recursive T -> P admission.
+    if (readConfirmedCourseSpanExerciseKeys(current.requirement.requirementKey, current.requirement.verification)) {
+      if (origin || !("requirementId" in input) || input.taskId) return choice(courseId, "binding_unavailable", [current.requirement.id]);
+      if (!options.exactVerificationEnabled) return choice(courseId, "configuration", [current.requirement.id]);
+      if (!current.sourcesAvailable) return choice(courseId, "source_unavailable", [current.requirement.id]);
+      const authorization = await readSpanTutorAuthorization(tx, scope, courseId);
+      if (!authorization.authorized) return choice(courseId, "authorization_required", [current.requirement.id]);
+      const session = await createOpeningCourseSpanSessionInTx(tx, scope, { ...input, courseId });
+      const activity = await assertOwnedActivity(tx as unknown as Sql, scope, session.activityId);
+      const [created] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id=${activity.id} AND workspace_id=${scope.workspaceId}`;
+      const route = courseRouteActivityContextSchema.parse((created!.goal_json as {courseRoute:unknown}).courseRoute);
+      return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: current.requirement.id, action: route.action };
+    }
     let boundRetestId:string|undefined;
     if("requirementId" in input&&input.taskId){
       const [task]=await tx`SELECT * FROM opening_tasks WHERE id=${input.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;

@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readOpeningCourseSpanDecisionInTx } from "./opening-span-tutor-context";
+import { readOpeningSpanReservedChoice } from "./opening-span-reserved-selection";
+import { createOpeningLearningAttemptInTx } from "./opening-learning-attempts";
 import { COURSE_SPAN_START_POLICY, readOpeningSpanCourseBinding, readOpeningSpanCourseScope } from "./opening-span-course-binding";
 import { assertLearningGoalAction } from "./opening-learning-goals";
 import { lockSpanTutorAuthorization, readSpanTutorAuthorization } from "./opening-span-tutor-grant";
@@ -61,7 +64,7 @@ async function read(sql: Sql | TransactionSql, scope: Scope, activityId: string,
   return rows[0] ?? null;
 }
 
-/** Internal R1 writer: caller owns the route history transaction; public start remains unavailable until content/runtime isolation is complete. */
+/** Internal R1 writer: one original route history/authorization/budget transaction. */
 export async function createOpeningCourseSpanSessionInTx(tx: TransactionSql, scope: Scope, input: {
   courseId: string; goalId: string; expectedGoalRevision: number; requirementId: string;
   expectedRequirementRevision: number; clientKey: string; minutes: number;
@@ -103,11 +106,21 @@ export async function createOpeningCourseSpanSessionInTx(tx: TransactionSql, sco
   if (memberships.length !== sourceIds.length) throw learningError("CONFLICT", "课程材料用途已变化。");
   // Recheck versions/chunks after acquiring the existing source and membership shares.
   await readOpeningSpanCourseScope(tx, scope, binding);
-  const intent = spanLessonCreateInputSchema.shape.intent.parse({ ...DEFAULT_STUDY_SESSION_INTENT, purpose: "self_study", explanationStyle: "full", timeBudgetMinutes: input.minutes });
+  const intent = spanLessonCreateInputSchema.shape.intent.parse({ ...DEFAULT_STUDY_SESSION_INTENT, purpose: "self_study", timeBudgetMinutes: input.minutes });
+  const versions = Object.fromEntries(current.requirement.sourceRefs.map(ref => [ref.sourceId, ref.sourceVersion]));
+  const { decision, decisionInput } = await readOpeningCourseSpanDecisionInTx(tx, scope, binding, sourceIds, versions, intent);
+  // R1 does not create A repair or recurse into T/P repair; those decisions remain explicit refusals.
+  if (decision.activityKind === "targeted_explain" || decision.reasonCode === "remediation_limit")
+    throw learningError("CONFLICT", "本要求需要另行明确的纠偏执行；R1 未创建替代活动。");
+  const moveId = decision.activityKind === "full_explain" ? "self-example"
+    : decision.activityKind === "reduced_help_practice" ? "self-faded" : "self_study-reserved";
+  const reserved = moveId.endsWith("-reserved")
+    ? await readOpeningSpanReservedChoice(tx, scope, "self_study", "validation", undefined, current.allowedExerciseKeys) : null;
+  if (reserved?.kind === "unavailable") throw learningError("CONFLICT", "本要求范围内未见题不可用；未创建活动或消耗预算。");
   const courseRoute = { goalId: input.goalId, goalRevision: input.expectedGoalRevision, requirementId: input.requirementId,
     requirementRevision: input.expectedRequirementRevision, stableSkillId: binding.requirement.stableSkillId,
-    requirementKey: binding.requirement.requirementKey, action: "full_explain" as const };
-  const checkpoint = { spanLesson: { sessionId, intent, moveId: "self-example", retestId: null } };
+    requirementKey: binding.requirement.requirementKey, action: decision.activityKind };
+  const checkpoint = { spanLesson: { sessionId, intent, moveId, retestId: null } };
   await tx`INSERT INTO opening_teaching_activities
     (id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,goal_json,
       path_version,content_version,checkpoint_json,client_key,create_intent)
@@ -124,12 +137,15 @@ export async function createOpeningCourseSpanSessionInTx(tx: TransactionSql, sco
   const evidenceRefs = current.requirement.sourceRefs.map(ref => `source:${ref.sourceId}:v${ref.sourceVersion}`);
   await recordOpeningLearningDecision(tx, scope, { layer: "activity", targetId: activityId,
     stateVersion: state.stateVersion, dataAsOf: state.dataAsOf, goalVersion: `goal:${input.goalId}:v${input.expectedGoalRevision}`,
-    intentVersion: JSON.stringify({ courseBinding: binding, courseRoute, sessionId, sourceIds }), policyVersion: COURSE_SPAN_START_POLICY,
+    intentVersion: JSON.stringify({ courseBinding: binding, courseRoute, sessionId, sourceIds, ruleDecision: decision, decisionInput }), policyVersion: COURSE_SPAN_START_POLICY,
     sourceVersions, invalidationConditions: ["state_changed", "goal_changed", "source_changed", "intent_changed", "policy_changed"],
     selectedAction: "create:course-span", reasonCodes: ["explicit_confirmed_requirement"], evidenceRefs,
     candidates: [{ action: "create:course-span", eligible: true, reasonCodes: ["explicit_confirmed_requirement"], evidenceRefs }] },
   `course-span-start:${activityId}`);
   await readOpeningSpanCourseBinding(tx, scope, activityId);
+  if (reserved?.kind === "available") await createOpeningLearningAttemptInTx(tx, scope, { sessionId,
+    clientKey: `course-span-start:${activityId}:issue`, spanExercise: { sourceId: sourceIds[0]!,
+      problemId: reserved.problem.id, version: Number(reserved.problem.version) } });
   return snapshot((await read(tx, scope, activityId))!);
 }
 
@@ -243,7 +259,12 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         if (Object.hasOwn((row.goal_json ?? {}) as object, "spanCourseBinding")
           || Object.hasOwn((row.create_intent ?? {}) as object, "courseSpanRequest")) {
           const pause = input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
-          if (!pause) throw learningError("CONFLICT", "课程 span 执行桥尚不可用；仅可保留当前步骤并暂停。");
+          if (!pause) {
+            await readOpeningSpanCourseBinding(tx, scope, activityId);
+            if (!isDeepStrictEqual(input.intent, current.intent) || current.retestId || input.status === "completed"
+              || !["self-example", "self-faded", "self_study-reserved"].includes(input.moveId))
+              throw learningError("CONFLICT", "课程 span 仅允许原目的内的学习步骤；未开启递归或课程返回执行。");
+          }
         }
         await assertOpeningSpanRepairTransition(tx, scope, current, input);
         const preservingRepairPause = (Object.hasOwn((row.goal_json ?? {}) as object, "spanRepair")

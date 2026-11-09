@@ -1,5 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
-import { readOpeningSpanCourseBinding } from "./opening-span-course-binding";
+import { readOpeningSpanCourseBinding, readOpeningSpanCourseAttempt } from "./opening-span-course-binding";
 import { assertOpeningSpanRepairAttempt, readOpeningSpanRepair, isOpeningSpanRepairAttemptKey, inheritOpeningSpanRepairRetryHelp } from "./opening-span-repair";
 import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
@@ -55,13 +55,15 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
   const courseId = String(session.course_id);
-  // Authority is closed first. Public route start remains unavailable until the
-  // bound chooser/facts/attempt runtime is implemented as one atomic bridge.
-  if (session.activity_id && await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id))) {
-    throw Object.assign(learningError("CONFLICT", "课程 span 发题执行桥尚不可用，未创建作答或消耗预算。"), { reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
-  }
   await lockLearningHistory(tx, scope, courseId);
-  const sources = await admitLearningSources(tx, scope, session.source_ids as string[]);
+  let sources;
+  try { sources = await admitLearningSources(tx, scope, session.source_ids as string[]); }
+  catch (error) {
+    if ((error as {code?:string}).code !== "VALIDATION") throw error;
+    await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id));
+    throw error;
+  }
+  const courseSpan = await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id), { lockSources: true });
   const sourceVersions = Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)]));
   let requirementKey = input.requirementKey ?? null;
   const spanExercise = input.spanExercise ? (getSpanTeachingProblem(input.spanExercise.problemId, input.spanExercise.version) ?? getSpanReservedProblem(input.spanExercise.problemId, input.spanExercise.version)) : null;
@@ -71,6 +73,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!(session.source_ids as string[]).includes(input.spanExercise.sourceId)) throw learningError("VALIDATION", "span exercise source is outside session");
     if (session.skill_label !== SPAN_SKILL_LABEL) throw learningError("VALIDATION", "span exercise does not match session skill");
     requirementKey = SPAN_REQUIREMENT_KEY;
+  }
+  if (courseSpan && (!spanExercise || !courseSpan.allowedExerciseKeys.includes(spanExercise.id)
+    || courseSpan.sessionId !== input.sessionId || input.problemId || input.problem || input.teachingBlock || input.matrixExercise)) {
+    throw Object.assign(learningError("CONFLICT", "题目不属于本次已确认课程 span 范围。"), { reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
   }
   let matrixExercise = input.matrixExercise ? createMatrixExerciseSpec(input.matrixExercise.exerciseKey, input.matrixExercise.variant) : null;
   if (input.matrixExercise) {
@@ -100,8 +106,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     const replayIntent = { ...replay[0].create_intent as Record<string, unknown> };
     delete replayIntent.spanValidation;
     delete replayIntent.reservedRetestQualification;
+    delete replayIntent.spanCourseBinding;
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
-    return mapLearningAttempt(replay[0]);
+    const trusted = await readOpeningSpanCourseAttempt(tx, scope, replay[0], courseSpan);
+    return { ...mapLearningAttempt(replay[0]), ...(trusted ? { courseRequirement: trusted.binding.requirement } : {}) };
   }
   if (repair) {
     const prefix = `span-repair:${String(session.activity_id)}:v1:variant:retry:`;
@@ -147,7 +155,8 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     spanValidation = { eligible: spanItemIdentity?.purpose !== "teaching" && !previous && !repeatedContent, firstFamilyExposure: spanItemIdentity?.purpose !== "teaching" && !previous,
       reasonCode: history.unknownHistory ? "prior_span_identity_unknown" : repeatedContent ? "content_previously_issued" : previous ? "family_previously_issued" : null };
   }
-  const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}) };
+  const savedIntent = { ...intent, ...(spanValidation ? { spanValidation } : {}),
+    ...(courseSpan ? { spanCourseBinding: courseSpan.binding } : {}) };
   let problemId = input.problemId ?? null, itemVersionId: string | null = null, itemStem: string | null = null;
   // Older browser checkpoints still contain a material problem payload. Retain it
   // only as request identity; classroom content always comes from the saved revision.
@@ -264,7 +273,9 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json(savedAnchor)} WHERE id=${String(rows[0].id)}`;
   if (repair) await inheritOpeningSpanRepairRetryHelp(tx, scope, String(session.activity_id), input.clientKey, String(rows[0].id));
   await captureOpeningLearnerShadowPredictions(tx, scope, String(rows[0].id));
-  return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: teachingQuestion?.spec ?? spanSpec ?? matrixExercise, item_stem_snapshot: itemStem });
+  await readOpeningSpanCourseAttempt(tx, scope, rows[0], courseSpan);
+  return { ...mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: teachingQuestion?.spec ?? spanSpec ?? matrixExercise, item_stem_snapshot: itemStem }),
+    ...(courseSpan ? { courseRequirement: courseSpan.binding.requirement } : {}) };
 
 }
 
@@ -277,9 +288,12 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
         const [existing] = await tx`SELECT create_intent FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
         const original = (existing?.create_intent as LearningAttemptCreateInput | undefined)?.spanExercise;
+        const session = await lockLearningSession(tx, scope, input.sessionId);
+        const courseSpan = await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id));
         const history = original ? null : await readOpeningSpanExposureHistory(tx, scope);
         const problem = original ? getSpanTeachingProblem(original.problemId, original.version)
-          : listSpanWorkedProblems().find(candidate => !history!.unknownHistory && !history!.contentKeys.has(spanProblemContentKey(candidate)));
+          : (courseSpan ? courseSpan.allowedExerciseKeys.map(id => getSpanTeachingProblem(id)).filter((problem): problem is NonNullable<typeof problem> => problem !== null)
+            : listSpanWorkedProblems()).find(candidate => !history!.unknownHistory && !history!.contentKeys.has(spanProblemContentKey(candidate)));
         if (!problem) throw learningError("CONFLICT", "未展示的教学示范不足，请保留已有学习记录。");
         return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey: input.clientKey,
           spanExercise: { sourceId: input.sourceId, problemId: problem.id, version: Number(problem.version) } });
@@ -289,7 +303,9 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
       const rows = await sql`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a JOIN workspaces w ON w.id=a.workspace_id
         LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
         WHERE a.id=${id} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND w.owner_user_id=${scope.ownerUserId}`;
-      return rows[0] ? mapLearningAttempt(rows[0]) : null;
+      if (!rows[0]) return null;
+      const trusted = await readOpeningSpanCourseAttempt(sql, scope, rows[0]);
+      return { ...mapLearningAttempt(rows[0]), ...(trusted ? { courseRequirement: trusted.binding.requirement } : {}) };
     },
     async create(scope: Scope, input: LearningAttemptCreateInput): Promise<LearningAttempt> {
       return sql.begin(tx => createOpeningLearningAttemptInTx(tx, scope, input)) as Promise<LearningAttempt>;
@@ -325,14 +341,21 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
           AND a.activity_id = ${activityId}
         ORDER BY a.started_at DESC, a.id
         LIMIT ${capped}`;
-      return rows.map((row) => {
+      return Promise.all(rows.map(async (row) => {
         const r = row as Record<string, unknown>;
+        let trusted: Awaited<ReturnType<typeof readOpeningSpanCourseAttempt>> = null;
+        try { trusted = await readOpeningSpanCourseAttempt(sql, scope, r); }
+        catch (error) {
+          if ((error as {reasonCode?:string}).reasonCode !== "SPAN_COURSE_BINDING_CHANGED") throw error;
+          // List is historical: preserve original questions without projecting current authority.
+        }
         return {
           ...mapLearningAttempt(r),
+          ...(trusted ? { courseRequirement: trusted.binding.requirement } : {}),
           outcome: (r.obs_outcome ?? null) as string | null,
           assistance: (r.obs_assistance ?? null) as string | null,
         };
-      });
+      }));
     },
 
     async assertAccess(scope: Scope, id: string) {
@@ -342,8 +365,14 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
           LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
           WHERE a.id=${id} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
         if (!rows[0]) throw learningError("NOT_FOUND", "attempt not found");
-        await admitLearningSources(tx, scope, rows[0].source_ids as string[]);
-        return mapLearningAttempt(rows[0]);
+        try { await admitLearningSources(tx, scope, rows[0].source_ids as string[]); }
+        catch (error) {
+          if ((error as {code?:string}).code !== "VALIDATION") throw error;
+          await readOpeningSpanCourseBinding(tx, scope, String(rows[0].activity_id));
+          throw error;
+        }
+        const trusted = await readOpeningSpanCourseAttempt(tx, scope, rows[0]);
+        return { ...mapLearningAttempt(rows[0]), ...(trusted ? { courseRequirement: trusted.binding.requirement } : {}) };
       });
     },
   };

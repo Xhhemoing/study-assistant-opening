@@ -6,6 +6,8 @@ import type { Sql, TransactionSql } from "postgres";
 import { learningError, learningIso } from "./opening-learning-facts";
 import { readLearningGoal } from "./opening-learning-goals";
 import { readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
+import { parseOpeningSpanExercise } from "./opening-span-attempt";
+import { spanProblemStem } from "@aistudy/domain";
 
 type Db = Sql | TransactionSql;
 type Row = Record<string, unknown>;
@@ -67,7 +69,7 @@ export async function readOpeningSpanCourseScope(db: Db, scope: Scope, binding: 
 }
 
 /** Execution reader. No chooser, writes, history backfill, or fallback to a different identity. */
-export async function readOpeningSpanCourseBinding(db: Db, scope: Scope, activityId: string) {
+export async function readOpeningSpanCourseBinding(db: Db, scope: Scope, activityId: string, options: { lockSources?: true } = {}) {
   const [activity] = await db`SELECT a.*,s.id AS session_id,s.source_ids AS session_source_ids,s.skill_label AS session_skill_label FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
     LEFT JOIN opening_learning_sessions s ON s.id::text=a.checkpoint_json->'spanLesson'->>'sessionId'
@@ -103,9 +105,47 @@ export async function readOpeningSpanCourseBinding(db: Db, scope: Scope, activit
     || !isDeepStrictEqual(captured.courseBinding, binding) || !isDeepStrictEqual(captured.courseRoute, route.data)
     || captured.sessionId !== activity.session_id || !isDeepStrictEqual(captured.sourceIds, activity.source_ids)
     || !isDeepStrictEqual(activity.source_ids, activity.session_source_ids)) throw conflict();
+  if (options.lockSources) {
+    await db`SELECT m.asset_id FROM course_asset_memberships m WHERE m.workspace_id=${scope.workspaceId}
+      AND m.course_id=${binding.courseId} AND m.asset_type='source' AND m.asset_id=ANY(${activity.source_ids as string[]}::uuid[])
+      ORDER BY m.asset_id FOR SHARE`;
+  }
   const current = await readOpeningSpanCourseScope(db, scope, binding);
   const expectedSources = [...new Set(current.requirement.sourceRefs.map(ref => ref.sourceId))].sort();
   const expectedVersions = Object.fromEntries(current.requirement.sourceRefs.map(ref => [ref.sourceId, [ref.sourceVersion]]));
   if (!isDeepStrictEqual(expectedSources, activity.source_ids) || !isDeepStrictEqual(receipt.sourceVersions, expectedVersions)) throw conflict();
   return { binding, sessionId: String(activity.session_id), ...current };
+}
+
+/** The saved attempt, not a reusable item or a mapper field, owns this issuance's course identity. */
+export async function readOpeningSpanCourseAttempt(db: Db, scope: Scope, attempt: Row,
+  current?: Awaited<ReturnType<typeof readOpeningSpanCourseBinding>>) {
+  const authority = current === undefined ? await readOpeningSpanCourseBinding(db, scope, String(attempt.activity_id)) : current;
+  const intent = record(attempt.create_intent);
+  if (!authority) {
+    if (Object.hasOwn(intent, "spanCourseBinding")) throw conflict();
+    return null;
+  }
+  const { binding, sessionId, allowedExerciseKeys } = authority;
+  const sources = [...new Set(authority.requirement.sourceRefs.map(ref => ref.sourceId))].sort();
+  const versions = Object.fromEntries(authority.requirement.sourceRefs.map(ref => [ref.sourceId, ref.sourceVersion]));
+  const requested = record(intent.spanExercise);
+  if (!attempt.item_version_id) throw conflict();
+  const [item] = await db`SELECT v.* FROM opening_learning_item_versions v WHERE v.id=${String(attempt.item_version_id)}
+    AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.course_id=${binding.courseId}`;
+  const problem = parseOpeningSpanExercise(item?.evaluation_spec);
+  const canonicalSpec = problem ? { kind: "span", specVersion: "span-v1", problemId: problem.id, version: Number(problem.version),
+    familyId: problem.familyId, requirementKey: binding.requirement.requirementKey, knowledgeComponents: problem.knowledgeComponents,
+    transfer: problem.transfer ?? null } : null;
+  if (!isDeepStrictEqual(item?.evaluation_spec, canonicalSpec) || !isDeepStrictEqual(intent.spanCourseBinding, binding) || attempt.workspace_id !== scope.workspaceId
+    || attempt.owner_user_id !== scope.ownerUserId || attempt.session_id !== sessionId || attempt.course_id !== binding.courseId
+    || attempt.activity_id !== binding.routeActivityId || attempt.requirement_key !== binding.requirement.requirementKey
+    || attempt.skill_label !== SPAN_SKILL_LABEL || !isDeepStrictEqual(attempt.source_ids, sources)
+    || !isDeepStrictEqual(attempt.source_versions, versions) || intent.sessionId !== sessionId
+    || intent.requirementKey !== binding.requirement.requirementKey
+    || !problem || !allowedExerciseKeys.includes(problem.id) || requested.problemId !== problem.id
+    || requested.version !== Number(problem.version) || requested.sourceId !== item?.source_id
+    || !sources.includes(String(item?.source_id)) || versions[String(item?.source_id)] !== Number(item?.source_version)
+    || item?.problem_id !== attempt.problem_id || item?.stem_snapshot !== spanProblemStem(problem)) throw conflict();
+  return authority;
 }
