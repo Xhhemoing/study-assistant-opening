@@ -10,7 +10,8 @@ import { produceReservedQuestion } from "../../packages/ai/src/opening/reserved-
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
-import type { Sql, TransactionSql } from "postgres";
+import postgres, { type Sql, type TransactionSql } from "postgres";
+import { assertOpeningTestDatabase } from "@aistudy/config";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
 import { buildLongTermSuggestions } from "../../packages/database/src/repositories/opening-long-term-maintenance";
@@ -71,6 +72,93 @@ function observedSql(db: Sql | TransactionSql, queries: string[]): Sql {
         tx => (args.at(-1) as (tx: TransactionSql) => Promise<unknown>)(observedSql(tx, queries) as unknown as TransactionSql),
       );
       return Reflect.get(target, key, receiver);
+    },
+  }) as Sql;
+}
+type LockSnapshot = {
+  requester: { pid: number; began_at: string }; failed_at: string; sampled_at: string;
+  observer_pid: number; requested_query: string; requested_mode: string; failed_relation: string | null; elapsed_ms: number;
+  holder_assessment: string; visibility: string;
+  locks: { pid: number | null; relation: string; mode: string; granted: boolean; candidate: boolean;
+    backend_type: string | null; state: string | null; xact_start: string | null;
+    wait_event_type: string | null; wait_event: string | null; query: string | null }[];
+};
+// Test-only evidence, not a retry or a holder attribution. NOWAIT can leave no
+// waiting row, and a holder can disappear before this independent sample.
+function lockDiagnosedSql(db: Sql | TransactionSql, snapshots: LockSnapshot[] = [], requester?: LockSnapshot["requester"]): Sql {
+  return new Proxy(db, {
+    get(target, key, receiver) {
+      if (key === "begin") return (...args: unknown[]) => Reflect.apply((target as Sql).begin, target, [
+        ...args.slice(0, -1), async (tx: TransactionSql) => {
+          const [backend] = await tx<{ pid: number; began_at: string }[]>`SELECT pg_backend_pid() AS pid, clock_timestamp()::text AS began_at`;
+          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(
+            lockDiagnosedSql(tx, snapshots, backend!) as unknown as TransactionSql);
+          // postgres.js permits a callback to return an array of lazy queries.
+          return Array.isArray(result) ? Promise.all(result) : result;
+        },
+      ]);
+      return Reflect.get(target, key, receiver);
+    },
+    apply(target, receiver, args) {
+      const query = Reflect.apply(target, receiver, args);
+      const text = Array.isArray(args[0]) && "raw" in args[0] ? args[0].join("?").replace(/\s+/g, " ").trim() : "";
+      const lock = /^LOCK TABLE (.+) IN SHARE ROW EXCLUSIVE MODE NOWAIT$/i.exec(text);
+      if (!lock || !requester) return query;
+      let observed: Promise<unknown> | undefined;
+      // Stay lazy, execute the original query once, and await diagnostics before
+      // rejection. No queries are attempted on the now-aborted transaction.
+      const observe = () => observed ??= query.then((rows: unknown) => rows, async (error: { code?: string; message?: string }) => {
+        if (error.code === "55P03") {
+          const failedAt = new Date().toISOString(), started = Date.now();
+          try {
+            const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? "", process.env.OPENING_TEST_DB);
+            const observer = postgres(url.toString(), { max: 1, connect_timeout: 2,
+              connection: { default_transaction_read_only: "on", statement_timeout: 2000 } });
+            try {
+              const relations = lock[1]!.split(",").map(name => name.trim());
+              const rows = await observer`SELECT clock_timestamp()::text AS sampled_at, pg_backend_pid() AS observer_pid, locks.*
+                FROM (SELECT 1) sample LEFT JOIN (
+                  SELECT l.pid, n.nspname || '.' || c.relname AS relation, l.mode, l.granted,
+                    a.backend_type, a.state, a.xact_start::text, a.wait_event_type, a.wait_event,
+                    substring(a.query FROM '^[[:space:]]*([[:alpha:]]+)') || ' [redacted]' AS query
+                  FROM pg_locks l JOIN pg_class c ON c.oid=l.relation JOIN pg_namespace n ON n.oid=c.relnamespace
+                  LEFT JOIN pg_stat_activity a ON a.pid=l.pid
+                  WHERE l.locktype='relation' AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                    AND n.nspname=current_schema() AND c.relname IN ${observer(relations)}
+                ) locks ON true ORDER BY relation,pid,mode`;
+              const locks = rows.filter(row => row.relation !== null).map(row => ({ pid: row.pid, relation: row.relation, mode: row.mode, granted: row.granted,
+                candidate: row.pid !== requester.pid && row.granted && !["AccessShareLock", "RowShareLock"].includes(row.mode),
+                backend_type: row.backend_type, state: row.state, xact_start: row.xact_start,
+                wait_event_type: row.wait_event_type, wait_event: row.wait_event, query: row.query }));
+              const snapshot: LockSnapshot = { requester, failed_at: failedAt, sampled_at: rows[0]?.sampled_at ?? new Date().toISOString(),
+                observer_pid: rows[0]!.observer_pid, requested_query: text, requested_mode: "ShareRowExclusiveLock",
+                failed_relation: /could not obtain lock on relation "([a-z_]+)"/.exec(error.message ?? "")?.[1] ?? null,
+                elapsed_ms: Date.now() - started, locks,
+                visibility: "Same test database/current schema only; activity visibility follows observer privileges. Post-failure, non-atomic sample; no NOWAIT wait row required. Activity queries retain command only.",
+                holder_assessment: locks.some(row => row.candidate)
+                  ? "Incompatible granted lock candidates at sample time only; not proven holders at failure time."
+                  : "Unknown: no visible incompatible granted lock at sample time; holder may already have released.",
+              };
+              snapshots.push(snapshot);
+              console.error("[reserved-lock-diagnostic]", JSON.stringify(snapshot));
+            } finally { await observer.end({ timeout: 2 }); }
+          } catch (diagnosticError) {
+            // Evidence collection/close failure must remain visible without
+            // replacing the original 55P03 or printing URLs/error messages.
+            console.error("[reserved-lock-diagnostic-failed]", JSON.stringify({ requester, failed_at: failedAt,
+              code: (diagnosticError as { code?: string } | null)?.code ?? "unknown", elapsed_ms: Date.now() - started }));
+          }
+        }
+        throw error;
+      });
+      return new Proxy(query, {
+        get(original, key, receiver) {
+          if (key === "then") return (...args: Parameters<Promise<unknown>["then"]>) => observe().then(...args);
+          if (key === "catch") return (...args: Parameters<Promise<unknown>["catch"]>) => observe().catch(...args);
+          if (key === "finally") return (...args: Parameters<Promise<unknown>["finally"]>) => observe().finally(...args);
+          return Reflect.get(original, key, receiver);
+        },
+      });
     },
   }) as Sql;
 }
@@ -180,18 +268,45 @@ it.each([
   ["\\(137 \\times 19\\)", "137*19"],
   ["$137*19 = ?$", "137*19"], ["137*19", "$137*19 = ?$"],
 ])("real consumer never reserves exposed alias %s from %s", async (text, history) => {
-  const x = await setup();
+  const x = await setup(), sql = lockDiagnosedSql(f.sql);
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify({ ...candidate, text }), admitAndPersist: x.admit });
-  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "ready", available: 1 });
+  expect(await readOpeningReservedSupply(sql, f.scope, x.requirement)).toMatchObject({ status: "ready", available: 1 });
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
     VALUES(${randomUUID()},${x.sourceId},1,2,${history})`;
-  expect(await readCourseQuestionExposure(f.sql, f.scope, { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
+  expect(await readCourseQuestionExposure(sql, f.scope, { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
     text, interaction: candidate.interaction, familyId: "arithmetic:*" })).toMatchObject({ coverage: "complete", exactExposed: true });
-  expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement)).toMatchObject({ status: "missing", available: 0 });
-  await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+  expect(await readOpeningReservedSupply(sql, f.scope, x.requirement)).toMatchObject({ status: "missing", available: 0 });
+  await expect(sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
     .rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
 });
+it("alias lock diagnostics sample a controlled holder without replacing 55P03", async () => {
+  const x = await setup(), snapshots: LockSnapshot[] = [], sql = lockDiagnosedSql(f.sql, snapshots);
+  let entered!: () => void, release!: () => void, holderPid = 0;
+  const ready = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  // Bound this artificial holder even if sampling fails; never delay alias success paths.
+  const deadline = setTimeout(() => release(), 5000);
+  const holder = f.sql.begin(async tx => {
+    const [backend] = await tx`SELECT pg_backend_pid() AS pid`;
+    holderPid = backend!.pid;
+    await tx`SELECT id FROM library_blocks LIMIT 0`;
+    await tx`LOCK TABLE library_blocks IN SHARE ROW EXCLUSIVE MODE`;
+    entered(); await held;
+  });
+  try {
+    await Promise.race([ready, holder.then(() => { throw new Error("diagnostic holder exited before release"); })]);
+    await expect(readCourseQuestionExposure(sql, f.scope, { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
+      text: candidate.text, interaction: candidate.interaction, familyId: "arithmetic:*" })).rejects.toMatchObject({ code: "55P03" });
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]!.locks).toEqual(expect.arrayContaining([expect.objectContaining({ pid: holderPid,
+      relation: "public.library_blocks", mode: "ShareRowExclusiveLock", granted: true, candidate: true }),
+      expect.objectContaining({ pid: holderPid, relation: "public.library_blocks", mode: "AccessShareLock", granted: true, candidate: false })]));
+    expect(snapshots[0]!.failed_relation).toBe("library_blocks");
+    expect(snapshots[0]!.requester.pid).not.toBe(holderPid);
+    expect(snapshots[0]!.observer_pid).not.toBe(snapshots[0]!.requester.pid);
+    expect(snapshots[0]!.observer_pid).not.toBe(holderPid);
+  } finally { release(); clearTimeout(deadline); await holder; }
+}, 10000);
 it.each(["opening_learning_observations", "opening_teaching_activities"] as const)("fails closed while %s has a real maintenance lock", async table => {
   const x = await setup();
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
