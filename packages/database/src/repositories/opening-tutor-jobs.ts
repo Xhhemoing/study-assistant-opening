@@ -411,13 +411,32 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     },
 
     async cancel(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
+      const coordinationChanged = new Error("cancel workspace changed after history ensure");
       return sql.begin(async (tx) => {
-        // Keep cancellation in the workspace-first order used by writeback.
-        await tx`
-          SELECT id FROM workspaces
+        // Canonical ownership selects the history key only. Cancellation still
+        // authorizes against the conversation owner, including after a static workspace move.
+        const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+        let historyLocked = false;
+        if (canonical) {
+          try {
+            await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId: canonical.owner_user_id });
+            historyLocked = true;
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+              && error.message === "workspace not found")) throw error;
+            const remaining = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (remaining.length) throw error;
+            // Confirmed deletion retains the original queries and UUID errors.
+          }
+        }
+        const [workspace] = await tx`
+          SELECT id, owner_user_id FROM workspaces
           WHERE id = ${scope.workspaceId}
           FOR UPDATE
         `;
+        // New coordination refusal: roll back lazy history before returning null.
+        // Never relock a new owner or retry a write against a recreated workspace.
+        if (historyLocked && (!workspace || workspace.owner_user_id !== canonical!.owner_user_id)) throw coordinationChanged;
         const rows = await tx`
           UPDATE opening_tutor_jobs j
           SET status = 'cancelled', updated_at = now(), error = ${tx.json({ message: "cancelled by user" } as never)}
@@ -439,6 +458,18 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
         return mapJob(rows[0] as Record<string, unknown>);
+      }).catch(async (error: unknown) => {
+        if (error !== coordinationChanged) throw error;
+        // Preserve the original CAS's filtering/casts (notably invalid job UUIDs)
+        // after rollback, without retrying cancellation or exposing any row.
+        await sql`SELECT j.id FROM opening_tutor_jobs j, opening_conversations c
+          WHERE j.id = ${id}
+            AND j.workspace_id = ${scope.workspaceId}
+            AND c.id = j.conversation_id
+            AND c.workspace_id = ${scope.workspaceId}
+            AND c.owner_user_id = ${scope.ownerUserId}
+            AND j.status IN ('queued', 'running')`;
+        return null;
       });
     },
 
