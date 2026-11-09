@@ -71,13 +71,11 @@ export async function runJob(
         await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed; job discarded" }, job.claimToken);
         return false;
       }
+      let result: unknown;
+      let epochIsCurrent: boolean;
       try {
-        const result = await handler(job, job.payload);
-        if (!(await workspaceEpochIsCurrent(repository, job))) {
-          await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" }, job.claimToken);
-          return false;
-        }
-        return repository.finish(job.id, "succeeded", result, job.claimToken);
+        result = await handler(job, job.payload);
+        epochIsCurrent = await workspaceEpochIsCurrent(repository, job);
       } catch (error) {
         const state = isUnknownOutcome(error, job.kind) ? "outcome_unknown" : "failed";
         return repository.finish(job.id, state, {
@@ -85,6 +83,12 @@ export async function runJob(
           ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),
         }, job.claimToken);
       }
+      // Finish failures must propagate, not be reclassified as handler errors.
+      if (!epochIsCurrent) {
+        await repository.finish(job.id, "failed", { error: "workspace privacy epoch changed before writeback" }, job.claimToken);
+        return false;
+      }
+      return repository.finish(job.id, "succeeded", result, job.claimToken);
     },
     job.kind === "grade-observation" ? 60_000 : 30_000,
   );
