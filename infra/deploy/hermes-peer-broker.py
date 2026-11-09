@@ -74,7 +74,8 @@ class SystemdManager:
         keys = ('Id', 'ControlGroup', 'ExecStartEx', 'ExecStartPre', 'ExecStartPost',
                 'ExecCondition', 'ExecReload', 'NeedDaemonReload', 'WorkingDirectory', 'User', 'Group',
                 'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NoNewPrivileges', 'CapabilityBoundingSet',
-                'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart')
+                'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart',
+                'MemoryMax', 'MemoryHigh')
         result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=' + ','.join(keys)],
                                 check=True, capture_output=True, text=True, timeout=5)
         values = {}
@@ -131,13 +132,23 @@ class Broker:
         launch = values['ExecStartEx']
         if launch.count('path=') != 1 or 'path=/usr/bin/python3 ;' not in launch or f'argv[]={expected} ;' not in launch:
             raise PermissionError('Not sole trusted ExecStart')
-        allowed = {str(Path(plan['systemd']) / plan['unit']),
-                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '50-aistudy-release.conf'),
-                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '90-aistudy-protocol-guard.conf'),
+        allowed = {str(Path(plan['systemd']) / (plan['unit'] + '.d') /
+                        ('50-aistudy-release.conf' if plan['unit'] == UNITS[0] else '90-aistudy-protocol-guard.conf')),
                    str(Path(plan['systemd']) / (plan['unit'] + '.d') / '95-aistudy-migration-fence.conf'),
                    str(Path(plan['systemd']) / (plan['unit'] + '.d') / '96-aistudy-writer-exec.conf')}
-        if values['FragmentPath'] not in allowed or any(path not in allowed for path in values['DropInPaths'].split()):
+        resources = state_api.resource_paths(plan['systemd']) if plan['unit'] == UNITS[1] else {}
+        drops = values['DropInPaths'].split()
+        if (values['FragmentPath'] != str(Path(plan['systemd']) / plan['unit'])
+                or any(path not in allowed and path not in resources for path in drops)
+                or len(drops) != len(set(drops))):
             raise PermissionError('Unknown effective unit input')
+        if any(path in resources for path in drops):
+            binding = plan['config'].get('resourceBinding')
+            if (not binding or binding['systemd'] != plan['systemd']
+                    or plan['config'].get('effective', {}).get(plan['unit']) != values):
+                raise PermissionError('Missing plan resource binding')
+            contents = {entry['path']: state_api.read_trusted(entry['path'])[0] for entry in plan['config']['files']}
+            state_api.validate_resources(plan['config'], contents)
         if plan['unit'] == UNITS[1]:
             if (values['User'], values['Group'], values['NoNewPrivileges'], values['ProtectSystem'], values['PrivateTmp']) != ('aistudy-worker', 'aistudy-worker', 'yes', 'strict', 'yes'):
                 raise PermissionError('Worker sandbox mismatch')

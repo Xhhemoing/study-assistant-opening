@@ -111,8 +111,11 @@ export function closeBroker(broker) {
 export function configIdentity(captured) {
   return { files: captured.files.map(file => {
     const stat = statSync(file.file, { bigint: true });
-    return { path: file.file, identity: ['dev', 'ino', 'mode', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs', 'nlink'].map(key => String(stat[key])) };
-  }) };
+    const identity = ['dev', 'ino', 'mode', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs', 'nlink'].map(key => String(stat[key]));
+    if (captured.resourceBinding && identity.join(':') !== file.identity) throw new Error('Captured resource configuration changed');
+    return { path: file.file, identity,
+      ...(captured.resourceBinding ? { ancestors: file.ancestors } : {}) };
+  }), ...(captured.resourceBinding ? { resourceBinding: captured.resourceBinding } : {}) };
 }
 export function binding(owner, action, transition, target, config) {
   const stat = statSync(target);

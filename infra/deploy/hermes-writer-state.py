@@ -7,6 +7,7 @@ root release code. No session token is needed for durable boot classification.
 import errno
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -49,14 +50,175 @@ def guards(state):
     return any(present(Path(state) / name) for name in ('migration-forward-only', 'writers-fenced'))
 
 
+# Reviewed persistent profile. Runtime /run inputs have no boot-persistence proof.
+# Object-only test seam, never supplied by a plan, receipt, environment or CLI.
+RESOURCE_ROOTS = {'/etc/systemd/system': '/etc/systemd/system.control'}
+RESOURCE_KEYS = ('MemoryMax', 'MemoryHigh')
+WORKER = 'aistudy-worker.service'
+
+
+def resource_paths(systemd):
+    control = RESOURCE_ROOTS.get(systemd)
+    if control is None:
+        return {}
+    return {str(Path(systemd) / (WORKER + '.d') / 'memory.conf'): 'memory',
+            str(Path(control) / (WORKER + '.d') / '50-MemoryHigh.conf'): 'control-high'}
+
+
+def memory_bytes(value):
+    # systemd's integer binary suffixes; percentages, fractions, infinity and
+    # UINT64_MAX (the infinity sentinel) are deliberately outside this profile.
+    match = re.fullmatch(r'(0|[1-9][0-9]*)([KMGTPE]?)', value, flags=re.ASCII)
+    if not match:
+        raise ValueError('Unsupported memory value')
+    result = int(match[1]) * 1024 ** ('KMGTPE'.index(match[2]) + 1 if match[2] else 0)
+    if not 0 < result < 2**64 - 1:
+        raise ValueError('Memory value outside finite profile')
+    return str(result)
+
+
+def resource_directives(data, fragment=False):
+    if not data or any(byte not in (9, 10) and not 32 <= byte <= 126 for byte in data):
+        raise ValueError('Non-ASCII resource input')
+    section, seen_service, result = None, False, {}
+    for raw in data.decode('ascii').split('\n'):
+        line = raw.strip(' \t')
+        if '\\' in line or (not fragment and '%' in line):
+            raise ValueError('Escaped resource input')
+        if not line or line.startswith(('#', ';')):
+            continue
+        if line.startswith('['):
+            if (not fragment and (line != '[Service]' or seen_service)) or (line == '[Service]' and seen_service):
+                raise ValueError('Unknown or duplicate resource section')
+            section = line
+            if line == '[Service]':
+                seen_service = True
+            continue
+        key, separator, value = line.partition('=')
+        key, value = key.strip(' \t'), value.strip(' \t')
+        if fragment and (section != '[Service]' or key not in RESOURCE_KEYS):
+            continue
+        if section != '[Service]' or not separator or key not in RESOURCE_KEYS or key in result:
+            raise ValueError('Unknown, duplicate or misplaced resource directive')
+        result[key] = memory_bytes(value)
+    if not result:
+        raise ValueError('Empty resource input')
+    return result
+
+
+def resource_binding(systemd, effective, contents):
+    """Pure shared policy; contents are descriptor-captured bytes, not paths to trust."""
+    if systemd not in RESOURCE_ROOTS:
+        raise ValueError('Unknown or nonpersistent resource profile')
+    paths = resource_paths(systemd)
+    rows = []
+    for unit, values in effective.items():
+        drops = values['DropInPaths'].split(' ') if values['DropInPaths'] else []
+        known = [str(Path(systemd) / (unit + '.d') / name) for name in
+                 (('50-aistudy-release.conf' if unit == 'aistudy-web.service' else '90-aistudy-protocol-guard.conf'),
+                  '95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')]
+        fragment = str(Path(systemd) / unit)
+        if (unit not in ('aistudy-web.service', WORKER) or values['FragmentPath'] != fragment
+                or len(drops) != len(set(drops)) or known[0] not in drops
+                or any(path not in known and (unit != WORKER or path not in paths) for path in drops)):
+            raise ValueError('Unknown effective unit input')
+        resources = [path for path in drops if path in paths]
+        if not resources:
+            continue
+        if any(path not in drops for path in known):
+            raise ValueError('Missing required execution/guard input')
+        limits = resource_directives(contents[fragment], fragment=True)
+        if limits != {'MemoryMax': '1073741824', 'MemoryHigh': '939524096'}:
+            raise ValueError('Unreviewed worker fragment resource base')
+        inputs = []
+        # systemd orders drop-ins by basename, irrespective of directory. This
+        # profile has unique basenames, so no directory-precedence ambiguity.
+        for path in sorted(drops, key=lambda value: Path(value).name):
+            data = contents[path]
+            if path not in resources:
+                # Fixed execution/guard files cannot secretly override resources.
+                if re.search(rb'(?m)^[ \t]*Memory[A-Za-z]*[ \t]*=', data):
+                    raise ValueError('Resource override outside reviewed profile')
+                continue
+            parsed = resource_directives(data)
+            if paths[path] == 'control-high' and parsed != {'MemoryHigh': '2147483648'}:
+                raise ValueError('Unreviewed control MemoryHigh')
+            limits.update(parsed)
+            inputs.append({'path': path, 'directives': parsed, 'bytes': data.hex()})
+        actual = {key: values.get(key) for key in RESOURCE_KEYS}
+        if actual != limits:
+            raise ValueError('Resource input/effective mismatch')
+        # MemoryHigh > MemoryMax is valid systemd input: retain the actual pair,
+        # do not invent a clamped effective value or rewrite production settings.
+        rows.append({'unit': unit, 'inputs': inputs, 'effective': limits})
+    return {'profile': 'worker-persistent-memory-v1', 'systemd': systemd, 'units': rows} if rows else None
+
+
+def validate_resources(config, contents):
+    binding = config.get('resourceBinding')
+    effective = config.get('effective', {})
+    if binding is None:
+        # Old receipts cannot acquire a new unbound resource input at boot.
+        for values in effective.values():
+            fragment = values['FragmentPath']
+            unit = Path(fragment).name
+            if unit not in ('aistudy-web.service', WORKER):
+                raise ValueError('Unknown configuration fragment')
+            known = {str(Path(fragment).parent / (unit + '.d') / name) for name in
+                     ('50-aistudy-release.conf' if unit == 'aistudy-web.service' else '90-aistudy-protocol-guard.conf',
+                      '95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')}
+            if any(path not in known for path in values['DropInPaths'].split()):
+                raise ValueError('Missing resource binding')
+        return
+    if resource_binding(binding['systemd'], effective, contents) != binding:
+        raise ValueError('Resource binding changed')
+    required = {row['path'] for unit in binding['units'] for row in unit['inputs']}
+    entries = {entry['path']: entry for entry in config['files']}
+    if any(path not in entries or not entries[path].get('ancestors') for path in required):
+        raise ValueError('Missing resource ancestor binding')
+
+
 def validate_config(config, sync=False):
+    contents = {}
     for entry in config['files']:
-        _, actual = read_trusted(entry['path'], sync=sync)
+        data, actual = read_trusted(entry['path'], sync=sync)
+        contents[entry['path']] = data
         if actual != entry['identity']:
             raise ValueError('Configuration identity changed')
+        if 'ancestors' in entry:
+            paths = [str(parent) for parent in reversed(Path(entry['path']).parents)]
+            if [row['path'] for row in entry['ancestors']] != paths:
+                raise ValueError('Incomplete configuration ancestors')
+            for row in entry['ancestors']:
+                # read_trusted already checks descriptor-relative DAC; bind each
+                # directory's identity too, including same-byte parent swaps.
+                st = os.lstat(row['path'])
+                value = ':'.join(str(value) for value in (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid))
+                if value != row['identity']:
+                    raise ValueError('Configuration ancestor changed')
+    validate_resources(config, contents)
     if sync:
         for directory in sorted({str(Path(e['path']).parent) for e in config['files']}):
             sync_dir(directory)
+        for entry in config['files']:
+            if 'ancestors' not in entry:
+                continue
+            fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for row in entry['ancestors']:
+                    if row['path'] != '/':
+                        child = os.open(Path(row['path']).name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        os.close(fd)
+                        fd = child
+                    st = os.fstat(fd)
+                    actual = ':'.join(str(value) for value in (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid))
+                    if actual != row['identity']:
+                        raise ValueError('Configuration ancestor changed during persistence')
+                    os.fsync(fd)
+            finally:
+                os.close(fd)
+        # Close the cross-file/fsync window before trusting the effective snapshot.
+        validate_config(config, sync=False)
     if 'effective' in config:
         # One implementation for boot/query and online admission; no permissive
         # production adapter fallback when systemd is unavailable.
@@ -158,6 +320,11 @@ def commit(state, current, broker, binding):
 
 
 def main():
+    if sys.argv[1:] == ['resource-policy']:
+        payload = json.load(sys.stdin)
+        contents = {row['path']: bytes.fromhex(row['bytes']) for row in payload['files']}
+        print(json.dumps(resource_binding(payload['systemd'], payload['effective'], contents)))
+        return
     mode, state, current, broker = sys.argv[1:5]
     if mode == 'check-plan':
         plan = json.loads(read_trusted(Path(state) / ('writer-' + broker + '.json'), private=True)[0])

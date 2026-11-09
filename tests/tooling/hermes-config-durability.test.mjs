@@ -5,6 +5,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { captureConfiguration, persistConfiguration } from "../../infra/deploy/hermes-config-durability.mjs";
+import { configIdentity } from '../../infra/deploy/hermes-writer-control.mjs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 function fixture(t) {
   const root = fs.mkdtempSync(join(tmpdir(), "hermes-durable-"));
@@ -27,6 +30,77 @@ function fixture(t) {
   const run = command => ({ ok: true, stdout: effective[units.indexOf(command.at(-1))] });
   return { root, args, target, files, effective, run };
 }
+function resources(t) {
+  const f = fixture(t), unit = 'aistudy-worker.service';
+  const memory = join(f.args[6], `${unit}.d/memory.conf`);
+  const high = join(f.root, 'system.control', `${unit}.d/50-MemoryHigh.conf`);
+  fs.mkdirSync(join(high, '..'), { recursive: true });
+  fs.writeFileSync(memory, '[Service]\nMemoryMax=1G\n', { mode: 0o600 });
+  fs.writeFileSync(high, '[Service]\nMemoryHigh=2147483648\n', { mode: 0o600 });
+  fs.writeFileSync(join(f.args[6], unit), '[Service]\nMemoryMax=1024M\nMemoryHigh=896M\n');
+  const wrapper = join(f.args[6], `${unit}.d/96-aistudy-writer-exec.conf`);
+  fs.writeFileSync(wrapper, '# fixed trusted wrapper\n', { mode: 0o600 });
+  const controls = join(f.args[4], 'writer-controls');
+  fs.mkdirSync(controls, { recursive: true });
+  for (const name of ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py']) {
+    fs.writeFileSync(join(controls, name), '# fixture control\n', { mode: 0o600 });
+  }
+  f.effective[1] = f.effective[1].replace('DropInPaths=', `DropInPaths=${memory} ${high} ${wrapper} `)
+    + 'MemoryMax=1073741824\nMemoryHigh=2147483648\n';
+  const options = { trustedUid: process.geteuid(),
+    resourceProfile: { systemd: f.args[6], control: join(f.root, 'system.control') },
+    resourcePolicy: payload => {
+      const result = spawnSync('/usr/bin/python3', ['-B', fileURLToPath(new URL('./hermes_writer_protocol_test.py', import.meta.url)), 'resource-policy-fixture'],
+        { input: JSON.stringify(payload), encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' } });
+      if (result.status !== 0) throw new Error('Shared Python resource policy refused');
+      return JSON.parse(result.stdout);
+    },
+  };
+  return { ...f, memory, high, options };
+}
+test('shared Python parser accepts only resource corpus and preserves actual high above max', t => {
+  const corpus = JSON.parse(fs.readFileSync(new URL('./hermes-resource-policy-corpus.json', import.meta.url)));
+  for (const row of corpus) {
+    const f = resources(t);
+    fs.writeFileSync(f.memory, row.text);
+    const effective = row.parsed ? { MemoryMax: '1073741824', MemoryHigh: '2147483648', ...row.parsed } : {};
+    if (row.parsed) {
+      f.effective[1] = f.effective[1].replace('MemoryMax=1073741824', `MemoryMax=${effective.MemoryMax}`)
+        .replace('MemoryHigh=2147483648', `MemoryHigh=${effective.MemoryHigh}`);
+      const captured = captureConfiguration(f.args, f.run, f.options);
+      assert.deepEqual(captured.resourceBinding.units[0].effective, effective, row.name);
+      assert.deepEqual(configIdentity(captured).resourceBinding, captured.resourceBinding);
+      persistConfiguration(captured, f.args, f.run, f.options);
+    } else assert.throws(() => captureConfiguration(f.args, f.run, f.options), undefined, row.name);
+  }
+});
+test('synthetic resource paths require explicit profile and root DAC remains default', t => {
+  const f = resources(t);
+  assert.throws(() => captureConfiguration(f.args, f.run), /Unknown or stale/);
+  assert.throws(() => captureConfiguration(f.args, f.run, { ...f.options, trustedUid: 12345 }), /Untrusted configuration/);
+  for (const path of [join(f.root, 'other', 'memory.conf'), join(f.root, 'system.control', 'unknown.conf'),
+    '/run/systemd/system.control/aistudy-worker.service.d/50-MemoryHigh.conf']) {
+    const run = command => ({ ok: true, stdout: f.run(command).stdout.replace('DropInPaths=', `DropInPaths=${path} `) });
+    assert.throws(() => captureConfiguration(f.args, run, f.options), /Unknown or stale/);
+  }
+});
+test('resource byte identity, metadata, effective drift, links and fsync failures refuse', t => {
+  for (const defect of ['replace', 'edit', 'mode', 'parent', 'link', 'hardlink', 'missing', 'effective', 'fsync']) {
+    const f = resources(t), captured = captureConfiguration(f.args, f.run, f.options);
+    if (defect === 'replace') { fs.writeFileSync(`${f.memory}.next`, fs.readFileSync(f.memory), { mode: 0o600 }); fs.renameSync(`${f.memory}.next`, f.memory); }
+    if (defect === 'edit') fs.writeFileSync(f.memory, '[Service]\nMemoryMax=2G\n');
+    if (defect === 'mode') fs.chmodSync(f.memory, 0o620);
+    if (defect === 'parent') fs.chmodSync(join(f.high, '..'), 0o775);
+    if (defect === 'link') { fs.unlinkSync(f.memory); fs.symlinkSync(f.high, f.memory); }
+    if (defect === 'hardlink') { fs.unlinkSync(f.memory); fs.linkSync(f.high, f.memory); }
+    if (defect === 'missing') fs.unlinkSync(f.memory);
+    if (defect === 'effective') f.effective[1] = f.effective[1].replace('MemoryHigh=2147483648', 'MemoryHigh=939524096');
+    const original = fs.fsyncSync;
+    if (defect === 'fsync') { fs.fsyncSync = fd => { if (fs.readlinkSync(`/proc/self/fd/${fd}`) === f.high) throw new Error('resource fsync fault'); original(fd); }; syncBuiltinESMExports(); }
+    try { assert.throws(() => persistConfiguration(captured, f.args, f.run, f.options), undefined, defect); }
+    finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+  }
+});
 test('installed loader and every sibling are required durable identity inputs', t => {
   const f = fixture(t);
   const names = ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'];

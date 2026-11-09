@@ -337,13 +337,207 @@ entry.extract(sys.stdin.buffer,Path(sys.argv[2]),uid=os.geteuid())
             self.assertNotEqual(result.returncode, 0)
 
 
+class ResourcePolicyTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.systemd = str(self.root / 'systemd')
+        self.control = str(self.root / 'system.control')
+        patch.object(state, 'RESOURCE_ROOTS', {**state.RESOURCE_ROOTS, self.systemd: self.control}).start()
+        self.fragment = str(Path(self.systemd) / state.WORKER)
+        self.memory, self.high = state.resource_paths(self.systemd)
+        self.guard = str(Path(self.systemd) / (state.WORKER + '.d') / '90-aistudy-protocol-guard.conf')
+        self.contents = {self.fragment: b'[Service]\nMemoryMax=1024M\nMemoryHigh=896M\n',
+                         self.memory: b'[Service]\nMemoryMax=1G\n',
+                         self.high: b'[Service]\nMemoryHigh=2147483648\n',
+                         self.guard: b'[Unit]\nConditionPathExists=!/pause\n'}
+        self.required = [str(Path(self.systemd) / (state.WORKER + '.d') / name) for name in
+                         ('95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')]
+        self.contents.update({path: b'# fixed trusted execution input\n' for path in self.required})
+        self.values = {'FragmentPath': self.fragment, 'DropInPaths': ' '.join((self.memory, self.guard, self.high, *self.required)),
+                       'MemoryMax': '1073741824', 'MemoryHigh': '2147483648'}
+        self.effective = {state.WORKER: self.values}
+
+    def policy(self):
+        return state.resource_binding(self.systemd, self.effective, self.contents)
+
+    def install(self):
+        entries = []
+        for path, data in self.contents.items():
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600)
+            ancestors = []
+            for parent in reversed(path.parents):
+                st = parent.stat()
+                ancestors.append({'path': str(parent), 'identity': ':'.join(str(v) for v in
+                                  (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid))})
+            entries.append({'path': str(path), 'identity': state.identity(path.stat()), 'ancestors': ancestors})
+        self.binding['config'] = {'files': entries, 'effective': self.effective, 'resourceBinding': self.policy()}
+        state.durable_write(self.root / 'protocol2-transition.json', self.binding)
+        manager = type('Manager', (), {'configuration': lambda _, unit: copy.deepcopy(self.effective[unit])})
+        patch.object(peer, 'SystemdManager', manager).start()
+
+    def test_shared_resource_corpus(self):
+        corpus = json.loads((Path(__file__).with_name('hermes-resource-policy-corpus.json')).read_text())
+        for row in corpus:
+            with self.subTest(name=row['name']):
+                if 'parsed' in row:
+                    self.assertEqual(state.resource_directives(row['text'].encode()), row['parsed'])
+                else:
+                    with self.assertRaises(ValueError):
+                        state.resource_directives(row['text'].encode())
+
+    def test_given_high_above_max_and_lexical_precedence(self):
+        binding = self.policy()
+        self.assertEqual(binding['units'][0]['effective'], {'MemoryMax': '1073741824', 'MemoryHigh': '2147483648'})
+        # memory.conf sorts AFTER 50-MemoryHigh.conf, regardless of manager list order.
+        self.contents[self.memory] = b'[Service]\nMemoryMax=1G\nMemoryHigh=768M\n'
+        self.values['MemoryHigh'] = '805306368'
+        self.assertEqual(self.policy()['units'][0]['effective']['MemoryHigh'], '805306368')
+        self.values['DropInPaths'] = ' '.join(reversed(self.values['DropInPaths'].split()))
+        self.assertEqual(self.policy()['units'][0]['effective']['MemoryHigh'], '805306368')
+
+    def test_unknown_paths_runtime_fragment_mismatch_and_control_value_refuse(self):
+        original = copy.deepcopy(self.values)
+        for path in ('/other/memory.conf', self.control + '/unknown.conf',
+                     '/run/systemd/system.control/' + state.WORKER + '.d/50-MemoryHigh.conf'):
+            self.values['DropInPaths'] = original['DropInPaths'] + ' ' + path
+            with self.assertRaises(ValueError):
+                self.policy()
+        self.values.update(original)
+        for fragment in (self.memory, self.high):
+            self.values['FragmentPath'] = fragment
+            with self.assertRaises(ValueError):
+                self.policy()
+        self.values.update(original)
+        self.values['MemoryHigh'] = '939524096'
+        with self.assertRaisesRegex(ValueError, 'effective mismatch'):
+            self.policy()
+        self.values.update(original)
+        self.contents[self.high] = b'[Service]\nMemoryHigh=1G\n'
+        with self.assertRaisesRegex(ValueError, 'control MemoryHigh'):
+            self.policy()
+        self.assertEqual(state.resource_paths('/run/systemd/system'), {})
+        self.assertEqual(state.resource_paths('/unknown/systemd'), {})
+        self.assertEqual(state.resource_paths('/etc/systemd/system'), {
+            '/etc/systemd/system/aistudy-worker.service.d/memory.conf': 'memory',
+            '/etc/systemd/system.control/aistudy-worker.service.d/50-MemoryHigh.conf': 'control-high'})
+
+    def test_boot_query_binds_bytes_metadata_manager_and_ancestors(self):
+        self.install()
+        self.commit()
+        self.assertEqual(self.classify(sync=True), 'committed')
+        self.values['MemoryHigh'] = '939524096'
+        with self.assertRaises(ValueError):
+            self.classify()
+        self.values['MemoryHigh'] = '2147483648'
+        path = Path(self.memory)
+        replacement = path.with_suffix('.next')
+        replacement.write_bytes(path.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(path)
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            self.classify()
+
+    def test_resource_file_dac_links_missing_and_same_inode_mutations(self):
+        for defect in ('symlink', 'hardlink', 'writable', 'owner', 'missing', 'bytes', 'mode', 'ancestor'):
+            with self.subTest(defect=defect):
+                self.install()
+                config = self.binding['config']
+                path = Path(self.memory)
+                if defect == 'symlink':
+                    path.unlink(); path.symlink_to(self.high)
+                elif defect == 'hardlink':
+                    path.unlink(); os.link(self.high, path)
+                elif defect == 'writable':
+                    path.chmod(0o620)
+                elif defect == 'missing':
+                    path.unlink()
+                elif defect == 'bytes':
+                    path.write_bytes(b'[Service]\nMemoryMax=2G\n')
+                elif defect == 'mode':
+                    path.chmod(0o400)
+                elif defect == 'ancestor':
+                    parent = path.parent
+                    parent.rename(str(parent) + '.old')
+                    parent.mkdir()
+                    for source in Path(str(parent) + '.old').iterdir():
+                        (parent / source.name).write_bytes(source.read_bytes())
+                try:
+                    with patch.object(state, 'TRUSTED_UID', 12345 if defect == 'owner' else os.geteuid()):
+                        with self.assertRaises((OSError, ValueError)):
+                            state.validate_config(config, sync=True)
+                finally:
+                    for candidate in (Path(self.memory), Path(self.high), Path(self.guard)):
+                        if candidate.exists() or candidate.is_symlink():
+                            candidate.unlink()
+
+    def test_resource_plan_exact_fragment_and_binding_required(self):
+        self.install()
+        wrapper = '/trusted/hermes-trusted-loader.py'
+        values = {**self.values, 'User': 'aistudy-worker', 'Group': 'aistudy-worker',
+                  'NoNewPrivileges': 'yes', 'ProtectSystem': 'strict', 'PrivateTmp': 'yes',
+                  'CapabilityBoundingSet': 'cap_setuid cap_setgid',
+                  'ExecStartEx': '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B '
+                    + wrapper + ' exec ' + str(self.root) + ' ' + state.WORKER + ' ; flags=no-setuid ; }'}
+        self.effective[state.WORKER] = values
+        plan = {'unit': state.WORKER, 'systemd': self.systemd, 'state': str(self.root),
+                'effective': values, 'config': self.binding['config']}
+        broker = type('PlanOnly', (), {'wrapper': wrapper})()
+        peer.Broker.validate_plan(broker, plan)
+        for defect in ('fragment', 'unknown', 'missing', 'value', 'bytes'):
+            candidate = copy.deepcopy(plan)
+            if defect == 'fragment':
+                candidate['effective']['FragmentPath'] = self.memory
+            elif defect == 'unknown':
+                candidate['effective']['DropInPaths'] += ' ' + self.control + '/unknown.conf'
+            elif defect == 'missing':
+                del candidate['config']['resourceBinding']
+            elif defect == 'value':
+                candidate['effective']['MemoryHigh'] = '939524096'
+            else:
+                candidate['config']['resourceBinding']['units'][0]['inputs'][0]['bytes'] = '00'
+            with self.subTest(defect=defect), self.assertRaises((PermissionError, ValueError)):
+                peer.Broker.validate_plan(broker, candidate)
+
+    def test_resource_fsync_failure_and_last_fsync_drift_refuse(self):
+        self.install()
+        original = os.fsync
+        for fault in ('file', 'ancestor', 'last-drift'):
+            injected = False
+            def fsync(fd):
+                nonlocal injected
+                path = os.readlink('/proc/self/fd/' + str(fd))
+                if (fault == 'file' and path == self.high) or (fault == 'ancestor' and path == str(self.root)):
+                    raise OSError('resource fsync fault')
+                original(fd)
+                if fault == 'last-drift' and path == str(self.root) and not injected:
+                    injected = True
+                    Path(self.memory).write_bytes(b'[Service]\nMemoryMax=2G\n')
+            with self.subTest(fault=fault), patch.object(state.os, 'fsync', fsync):
+                with self.assertRaises((OSError, ValueError)):
+                    state.validate_config(self.binding['config'], sync=True)
+
+    def test_missing_binding_and_unbound_guard_memory_refuse(self):
+        self.install()
+        config = self.binding['config']
+        del config['resourceBinding']
+        with self.assertRaisesRegex(ValueError, 'Missing resource binding'):
+            state.validate_config(config)
+        self.contents[self.guard] += b'[Service]\nMemoryHigh=2G\n'
+        with self.assertRaisesRegex(ValueError, 'outside reviewed profile'):
+            self.policy()
+
+
 class RawManagerTests(unittest.TestCase):
     def setUp(self):
         self.unit = peer.UNITS[0]
         self.values = dict.fromkeys(('Id', 'ControlGroup', 'ExecStartEx', 'ExecStartPre', 'ExecStartPost',
             'ExecCondition', 'ExecReload', 'NeedDaemonReload', 'WorkingDirectory', 'User', 'Group',
             'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NoNewPrivileges', 'CapabilityBoundingSet',
-            'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart'), '')
+            'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart',
+            'MemoryMax', 'MemoryHigh'), '')
         self.single = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B /controls/hermes-trusted-loader.py exec /state aistudy-web.service ; flags=no-setuid ; }'
         self.values.update(Id=self.unit, NeedDaemonReload='no', ExecStartEx=self.single)
 
@@ -903,4 +1097,11 @@ class KernelBrokerTests(Fixture):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    if sys.argv[1:] == ['resource-policy-fixture']:
+        payload = json.load(sys.stdin)
+        # Explicit test-object injection; production CLI has no profile/UID switch.
+        state.RESOURCE_ROOTS = {payload['systemd']: str(Path(payload['systemd']).parent / 'system.control')}
+        print(json.dumps(state.resource_binding(payload['systemd'], payload['effective'],
+              {row['path']: bytes.fromhex(row['bytes']) for row in payload['files']})))
+    else:
+        unittest.main()
