@@ -1,3 +1,4 @@
+import { hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
 import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent, type SpanRepairPlan } from "@aistudy/contracts";
 import { createOpeningSpanRepairPlanInTx, readOpeningSpanRepair } from "./opening-span-repair";
 import { buildDecisionInput, captureNextLearningStep, createSpanTeachingSequence, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
@@ -237,8 +238,18 @@ async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot
   } else if (!dueRetestId && ["full_explain", "targeted_explain", "reduced_help_practice"].includes(decision.activityKind)) return null;
   return readOpeningSpanReservedChoice(db, scope, spanModeForIntent(intent), (session?.retestId || dueRetestId) ? "retest" : "validation");
 }
+async function assertGenericSpanContext(db: Sql | TransactionSql, scope: Scope, activityId: string | undefined) {
+  if (!activityId) return;
+  const [row] = await db`SELECT goal_json,create_intent FROM opening_teaching_activities
+    WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (row && hasOpeningSpanCourseBinding(row.goal_json, row.create_intent)) {
+    throw conflict("课程 span 事实隔离与执行桥尚不可用；原活动仅可回看或暂停。");
+  }
+}
 async function assertContext(tx: TransactionSql, scope: Scope, context: OpeningSpanTutorContext) {
   const db = transactionClient(tx);
+  await assertGenericSpanContext(db, scope, context.resumeSession?.activityId);
+  await assertGenericSpanContext(db, scope, context.originReference?.activityId);
   const authorization = await readSpanTutorAuthorization(db, scope, context.courseId);
   if (!authorization.authorized || authorization.grant?.revision !== context.grantRevision) throw conflict("导师试用授权已变化，请重新读取后继续。");
   const [workspace] = await db`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -287,6 +298,7 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         const db = transactionClient(tx);
         const origin = request.originReference ? await readOpeningSpanTutorOrigin(db, scope, request.originReference, request.courseId) : null;
         const position = origin ? { resumeSession: null, dueRetestId: null } : await nextSession(db, scope, request.courseId);
+        await assertGenericSpanContext(db, scope, origin?.session.activityId ?? position.resumeSession?.activityId);
         if (position.resumeSession) {
           const originChange = await readOpeningSpanTutorOriginChange(db, scope, position.resumeSession.activityId);
           if (originChange) {
@@ -341,6 +353,8 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         // Serialize both the receipt probe and action creation, not only the insert.
         await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
+        await assertGenericSpanContext(tx, scope, context.resumeSession?.activityId);
+        await assertGenericSpanContext(tx, scope, context.originReference?.activityId);
         const prior = await readOpeningLearningDecisionByClientKey(tx, scope, decisionKey(input.operationId));
         if (prior) {
           const captured = JSON.parse(prior.intentVersion) as OpeningSpanTutorContext;

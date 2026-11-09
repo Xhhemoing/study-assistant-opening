@@ -1,4 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { readOpeningSpanCourseBinding } from "./opening-span-course-binding";
 import { assertOpeningSpanRepairAttempt, readOpeningSpanRepair, isOpeningSpanRepairAttemptKey, inheritOpeningSpanRepairRetryHelp } from "./opening-span-repair";
 import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
@@ -54,6 +55,11 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
   const courseId = String(session.course_id);
+  // Authority is closed first. Public route start remains unavailable until the
+  // bound chooser/facts/attempt runtime is implemented as one atomic bridge.
+  if (session.activity_id && await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id))) {
+    throw Object.assign(learningError("CONFLICT", "课程 span 发题执行桥尚不可用，未创建作答或消耗预算。"), { reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
+  }
   await lockLearningHistory(tx, scope, courseId);
   const sources = await admitLearningSources(tx, scope, session.source_ids as string[]);
   const sourceVersions = Object.fromEntries(sources.map((s) => [String(s.id), Number(s.version)]));

@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { createOpeningCourseSpanSessionInTx } from "../../packages/database/src/repositories/opening-span-session";
+import { readOpeningSpanCourseBinding } from "../../packages/database/src/repositories/opening-span-course-binding";
+import { createOpeningTeachingActivitiesRepository } from "../../packages/database/src/repositories/opening-teaching-activities";
+import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/repositories/opening-backup-evaluation";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { resolveCourseSpanExerciseKeys } from "../../packages/database/src/repositories/opening-course-route-verification-policy";
@@ -178,6 +182,107 @@ it("confirms public span content through the normal manifest API without trustin
     expectedRequirementRevision: stored.revision, clientKey: randomUUID(), minutes: 20 })).toMatchObject({ kind: "choice", reason: "binding_unavailable" });
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
   expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(budget.usedMinutes);
+});
+async function courseSpanAuthorityFixture(dailyMinutes = 40) {
+  const x = await confirmSpanContent();
+  const confirmed = await createCourseRouteService(f.sql).confirm(f.scope, x.courseId, x.request);
+  const requirement = confirmed.requirements[0]!.requirement;
+  await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope, { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
+  const at = new Date().toISOString();
+  await f.sql`UPDATE workspace_preferences SET adaptive_planning=${f.sql.json({ ...DEFAULT_OPENING_ADAPTIVE_PREFS,
+    spanTutorGrants: { [x.courseId]: { enabled: true, dailyMinutes, revision: 1, confirmedAt: at, updatedAt: at, expiresOn: null } } })}
+    WHERE workspace_id=${f.scope.workspaceId}`;
+  const request = { courseId: x.courseId, goalId: x.goal.id, expectedGoalRevision: 1, requirementId: requirement.id,
+    expectedRequirementRevision: requirement.revision, clientKey: randomUUID(), minutes: 20 };
+  const create = () => f.sql.begin(tx => createOpeningCourseSpanSessionInTx(tx, f.scope, request));
+  return { ...x, requirement, writerRequest: request, create };
+}
+it("writes course span authority only from normal confirmation with one budget and an exact atomic receipt; public start stays unavailable", async () => {
+  const x = await courseSpanAuthorityFixture(), before = await readOpeningLearningCapacity(f.sql, f.scope);
+  const session = await x.create();
+  const read = await readOpeningSpanCourseBinding(f.sql, f.scope, session.activityId);
+  expect(read?.binding.requirement).toEqual({ id: x.requirement.id, revision: x.requirement.revision,
+    stableSkillId: x.requirement.stableSkillId, requirementKey: SPAN_REQUIREMENT_KEY });
+  expect(read?.allowedExerciseKeys).toEqual(resolveCourseSpanExerciseKeys(["span-example-2d"]));
+  expect((await x.create()).activityId).toBe(session.activityId);
+  expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(before.usedMinutes + 20);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND kind='compile-teaching-unit'`).toHaveLength(0);
+  const [activity] = await f.sql`SELECT * FROM opening_teaching_activities WHERE id=${session.activityId}`;
+  expect(activity!.goal_json).toHaveProperty("tutorBudget");
+  expect(activity!.goal_json).not.toHaveProperty("learningBudget");
+  const decisions = await createOpeningLearningDecisionsRepository(f.sql).list(f.scope, { layer: "activity", targetId: session.activityId });
+  expect(decisions).toHaveLength(1);
+  expect(decisions[0]?.policyVersion).toBe("course-span-start-1");
+  await expect(readOpeningSpanCourseBinding(f.sql, { ...f.scope, ownerUserId: randomUUID() }, session.activityId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  const repo = createOpeningTeachingActivitiesRepository(f.sql);
+  await expect(repo.associateCourse(f.scope, session.activityId, { courseId: null })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(repo.setStatus(f.scope, session.activityId, { status: "completed" })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(repo.requestCompile(f.scope, session.activityId, randomUUID())).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(createOpeningAttemptService(f.sql).create(f.scope, { sessionId: session.sessionId, clientKey: randomUUID(),
+    spanExercise: { sourceId: x.sourceId, problemId: "span-example-2d", version: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${session.activityId}`).toHaveLength(0);
+  // Preserve history and permit pause even after authority drift; never reinterpret it as an ordinary span session.
+  const imported = normalizeOpeningImportedEvaluation("opening_teaching_activities", activity!);
+  expect(imported.goal_json).not.toHaveProperty("spanCourseBinding");
+  await f.sql.begin(async tx => {
+    await tx`UPDATE opening_teaching_activities SET goal_json=${tx.json(imported.goal_json as never)} WHERE id=${session.activityId}`;
+    await expect(readOpeningSpanCourseBinding(tx, f.scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+    throw Object.assign(new Error("test rollback"), { testRollback: true });
+  }).catch(error => { if (!error.testRollback) throw error; });
+  expect((await readOpeningSpanCourseBinding(f.sql, f.scope, session.activityId))?.binding).toEqual(read?.binding);
+  await repo.setStatus(f.scope, session.activityId, { status: "paused" });
+  await expect(repo.setStatus(f.scope, session.activityId, { status: "active" })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(readOpeningSpanCourseBinding(f.sql, f.scope, randomUUID())).rejects.toMatchObject({ code: "NOT_FOUND" });
+});
+it("rejects public course span authority spoofing and another requirement without creating receipts or budgets", async () => {
+  const x = await courseSpanAuthorityFixture();
+  const repo = createOpeningTeachingActivitiesRepository(f.sql);
+  for (const payload of [
+    { goalJson: { spanCourseBinding: { version: 1 } }, createIntent: {} },
+    { goalJson: { courseRoute: { requirementId: x.requirement.id } }, createIntent: {} },
+    { goalJson: { spanPrerequisiteRepair: {} }, createIntent: {} },
+    { createIntent: { protocol: "span-lesson-v1" } },
+    { createIntent: { kind: "course_route" } },
+  ]) await expect(repo.create(f.scope, { clientKey: randomUUID(), intentKind: "topic", intentSummary: "forged",
+    courseId: x.courseId, sourceIds: [x.sourceId], ...payload })).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(f.sql.begin(tx => createOpeningCourseSpanSessionInTx(tx, f.scope, {
+    ...x.writerRequest, requirementId: x.requirements[0]!.id,
+  }))).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(0);
+  expect(await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+it.each(["budget", "receipt"])("rolls back course span authority/session/budget/history on %s failure", async failure => {
+  const x = await courseSpanAuthorityFixture(failure === "budget" ? 10 : 40);
+  const tables = ["opening_teaching_activities", "opening_learning_sessions", "opening_learning_decisions"];
+  const counts = async () => Promise.all(tables.map(table => f.sql.unsafe(`SELECT * FROM ${table} WHERE workspace_id=$1 ORDER BY id`, [f.scope.workspaceId])));
+  const before = await counts(), history = await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`;
+  const budget = await readOpeningLearningCapacity(f.sql, f.scope);
+  if (failure === "receipt") vi.spyOn(decisionWriter, "recordOpeningLearningDecision").mockRejectedValueOnce(Object.assign(new Error("receipt write failure"), { code: "55P03" }));
+  await expect(x.create()).rejects.toMatchObject({ code: failure === "receipt" ? "55P03" : "CONFLICT" });
+  expect(await counts()).toEqual(before);
+  expect(await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual(history);
+  expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(budget.usedMinutes);
+});
+it.each(["requirement", "goal", "source", "receipt", "receipt_binding", "session", "source_purpose", "chunk"])("rejects current course span %s drift without changing original history", async drift => {
+  const x = await courseSpanAuthorityFixture(), session = await x.create();
+  const [original] = await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${session.activityId}`;
+  if (drift === "requirement") await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
+  if (drift === "goal") await f.sql`UPDATE course_goals SET revision=revision+1 WHERE id=${x.goal.id}`;
+  if (drift === "source") await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${x.sourceId}`;
+  if (drift === "receipt") await f.sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{intentVersion}',${f.sql.json(JSON.stringify({ courseBinding: {} }))}) WHERE target_id=${session.activityId}`;
+  if (drift === "receipt_binding") {
+    const [decision] = await f.sql`SELECT id,receipt FROM opening_learning_decisions WHERE target_id=${session.activityId}`;
+    const captured = JSON.parse(decision!.receipt.intentVersion);
+    captured.courseBinding.requirement.id = randomUUID();
+    await f.sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{intentVersion}',${f.sql.json(JSON.stringify(captured))}) WHERE id=${decision!.id}`;
+  }
+  if (drift === "session") await f.sql`UPDATE opening_learning_sessions SET source_ids=${[] as string[]} WHERE id=${session.sessionId}`;
+  if (drift === "source_purpose") await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
+  if (drift === "chunk") await f.sql`UPDATE opening_source_chunks SET text='',image_object_key=NULL WHERE id=${x.chunkId}`;
+  await expect(readOpeningSpanCourseBinding(f.sql, f.scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
+  await createOpeningSpanSessionRepository(f.sql).save(f.scope, session.activityId, { expectedRevision: session.revision,
+    intent: session.intent, moveId: session.moveId, status: "paused" });
+  expect((await f.sql`SELECT goal_json->'spanCourseBinding' AS binding FROM opening_teaching_activities WHERE id=${session.activityId}`)[0]?.binding).toEqual(original!.goal_json.spanCourseBinding);
 });
 it("rejects hidden span identities, disabled features, changed skill identities and missing source fragments atomically", async () => {
   const x = await confirmSpanContent();

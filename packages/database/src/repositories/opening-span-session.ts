@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { COURSE_SPAN_START_POLICY, readOpeningSpanCourseBinding, readOpeningSpanCourseScope } from "./opening-span-course-binding";
+import { assertLearningGoalAction } from "./opening-learning-goals";
+import { lockSpanTutorAuthorization, readSpanTutorAuthorization } from "./opening-span-tutor-grant";
+import { reserveSpanTutorActivityBudget } from "./opening-span-tutor-budget";
+import { recordOpeningLearningDecision } from "./opening-learning-decisions";
+import { readOpeningLearnerState } from "./opening-learner-state-read";
 import { assertOpeningSpanRepairTransition } from "./opening-span-repair";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
-import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, spanLessonSnapshotSchema,
-  type Scope, type SpanHintLevel, type SpanLessonCreateInput, type SpanLessonSaveInput, type SpanLessonSnapshot } from "@aistudy/contracts";
-import { createSpanTeachingSequence, spanModeForIntent, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { courseRouteStartSchema, spanLessonCreateInputSchema, spanLessonSaveInputSchema, spanLessonSnapshotSchema,
+  type Scope, type SpanHintLevel, type SpanLessonCreateInput, type SpanLessonSaveInput, type SpanLessonSnapshot, type SpanCourseBinding } from "@aistudy/contracts";
+import { DEFAULT_STUDY_SESSION_INTENT, createSpanTeachingSequence, spanModeForIntent, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { admitLearningSources, learningError, learningIso, lockLearningOwner,
   lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 
@@ -53,6 +59,78 @@ async function read(sql: Sql | TransactionSql, scope: Scope, activityId: string,
       AND a.create_intent->>'protocol'=${protocol}
     ${lock ? sql`FOR UPDATE OF a` : sql``}`;
   return rows[0] ?? null;
+}
+
+/** Internal R1 writer: caller owns the route history transaction; public start remains unavailable until content/runtime isolation is complete. */
+export async function createOpeningCourseSpanSessionInTx(tx: TransactionSql, scope: Scope, input: {
+  courseId: string; goalId: string; expectedGoalRevision: number; requirementId: string;
+  expectedRequirementRevision: number; clientKey: string; minutes: number;
+}): Promise<SpanLessonSnapshot> {
+  const { courseId: _courseId, ...request } = input;
+  courseRouteStartSchema.parse(request);
+  await lockWorkspaceLearningHistory(tx, scope);
+  await assertLearningGoalAction(tx, scope, input.goalId, input.expectedGoalRevision);
+  const priorAuthorization = await readSpanTutorAuthorization(tx, scope, input.courseId);
+  if (!priorAuthorization.grant) throw learningError("CONFLICT", "导师工具尚未授权。");
+  const authorization = await lockSpanTutorAuthorization(tx, scope, input.courseId, priorAuthorization.grant.revision);
+  if (!authorization.authorized || !authorization.grant) throw learningError("CONFLICT", "导师工具尚未授权，未创建课程 span 活动。");
+  const key = `course-route-start:${input.courseId}:${input.clientKey}`;
+  const [existing] = await tx`SELECT id,create_intent FROM opening_teaching_activities
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
+  const createIntent = { protocol, kind: "course_route", courseSpanRequest: input };
+  if (existing) {
+    if (!isDeepStrictEqual(existing.create_intent, createIntent)) throw learningError("CONFLICT", "课程 span 请求身份已改变。");
+    if (!await readOpeningSpanCourseBinding(tx, scope, String(existing.id))) throw learningError("CONFLICT", "原课程 span 绑定已不可用。");
+    const current = await read(tx, scope, String(existing.id));
+    if (!current) throw learningError("CONFLICT", "课程 span 会话身份不完整。");
+    return snapshot(current);
+  }
+  const [requirement] = await tx`SELECT stable_skill_id,requirement_key FROM course_requirements
+    WHERE id=${input.requirementId} AND course_id=${input.courseId} AND workspace_id=${scope.workspaceId}
+      AND owner_user_id=${scope.ownerUserId}`;
+  if (!requirement) throw learningError("CONFLICT", "课程要求已变化。");
+  const activityId = randomUUID(), sessionId = randomUUID();
+  const binding: SpanCourseBinding = { version: 1, origin: "confirmed_course_route", courseId: input.courseId,
+    routeActivityId: activityId, goalId: input.goalId, goalRevision: input.expectedGoalRevision,
+    requirement: { id: input.requirementId, revision: input.expectedRequirementRevision,
+      stableSkillId: String(requirement.stable_skill_id), requirementKey: String(requirement.requirement_key) } };
+  const current = await readOpeningSpanCourseScope(tx, scope, binding);
+  const sourceIds = [...new Set(current.requirement.sourceRefs.map(ref => ref.sourceId))].sort();
+  await admitCourseSources(tx, scope, input.courseId, sourceIds);
+  const memberships = await tx`SELECT asset_id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+    AND course_id=${input.courseId} AND asset_type='source' AND asset_id=ANY(${sourceIds}::uuid[])
+    AND (purpose IS NULL OR purpose='teaching') FOR SHARE`;
+  if (memberships.length !== sourceIds.length) throw learningError("CONFLICT", "课程材料用途已变化。");
+  // Recheck versions/chunks after acquiring the existing source and membership shares.
+  await readOpeningSpanCourseScope(tx, scope, binding);
+  const intent = spanLessonCreateInputSchema.shape.intent.parse({ ...DEFAULT_STUDY_SESSION_INTENT, purpose: "self_study", explanationStyle: "full", timeBudgetMinutes: input.minutes });
+  const courseRoute = { goalId: input.goalId, goalRevision: input.expectedGoalRevision, requirementId: input.requirementId,
+    requirementRevision: input.expectedRequirementRevision, stableSkillId: binding.requirement.stableSkillId,
+    requirementKey: binding.requirement.requirementKey, action: "full_explain" as const };
+  const checkpoint = { spanLesson: { sessionId, intent, moveId: "self-example", retestId: null } };
+  await tx`INSERT INTO opening_teaching_activities
+    (id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,goal_json,
+      path_version,content_version,checkpoint_json,client_key,create_intent)
+    VALUES (${activityId},${scope.workspaceId},${scope.ownerUserId},${input.courseId},'active','ready','goal',
+      ${current.requirement.title},${sourceIds},${tx.json({ sessionIntent: intent, spanCourseBinding: binding, courseRoute })},
+      1,0,${tx.json(checkpoint)},${key},${tx.json(createIntent)})`;
+  await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)
+    VALUES (${sessionId},${scope.workspaceId},${scope.ownerUserId},${input.courseId},${activityId},${SPAN_SKILL_LABEL},${sourceIds})`;
+  await reserveSpanTutorActivityBudget(tx, scope, { courseId: input.courseId, activityId, minutes: input.minutes,
+    expectedGrantRevision: authorization.grant.revision });
+  await nextWorkspaceLearningHistoryRevision(tx, scope);
+  const state = await readOpeningLearnerState(tx, scope, { courseId: input.courseId });
+  const sourceVersions = Object.fromEntries(current.requirement.sourceRefs.map(ref => [ref.sourceId, [ref.sourceVersion]]));
+  const evidenceRefs = current.requirement.sourceRefs.map(ref => `source:${ref.sourceId}:v${ref.sourceVersion}`);
+  await recordOpeningLearningDecision(tx, scope, { layer: "activity", targetId: activityId,
+    stateVersion: state.stateVersion, dataAsOf: state.dataAsOf, goalVersion: `goal:${input.goalId}:v${input.expectedGoalRevision}`,
+    intentVersion: JSON.stringify({ courseBinding: binding, courseRoute, sessionId, sourceIds }), policyVersion: COURSE_SPAN_START_POLICY,
+    sourceVersions, invalidationConditions: ["state_changed", "goal_changed", "source_changed", "intent_changed", "policy_changed"],
+    selectedAction: "create:course-span", reasonCodes: ["explicit_confirmed_requirement"], evidenceRefs,
+    candidates: [{ action: "create:course-span", eligible: true, reasonCodes: ["explicit_confirmed_requirement"], evidenceRefs }] },
+  `course-span-start:${activityId}`);
+  await readOpeningSpanCourseBinding(tx, scope, activityId);
+  return snapshot((await read(tx, scope, activityId))!);
 }
 
 /** Static span lessons keep one owned activity/session; facts stay in the existing evidence tables. */
@@ -162,8 +240,15 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         }
         if (unchanged) return current;
         if (current.status === "completed") throw learningError("CONFLICT", "已结束的学习保留为小结，请开始新会话。");
+        if (Object.hasOwn((row.goal_json ?? {}) as object, "spanCourseBinding")
+          || Object.hasOwn((row.create_intent ?? {}) as object, "courseSpanRequest")) {
+          const pause = input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
+          if (!pause) throw learningError("CONFLICT", "课程 span 执行桥尚不可用；仅可保留当前步骤并暂停。");
+        }
         await assertOpeningSpanRepairTransition(tx, scope, current, input);
-        const preservingRepairPause = Object.hasOwn((row.goal_json ?? {}) as object, "spanRepair")
+        const preservingRepairPause = (Object.hasOwn((row.goal_json ?? {}) as object, "spanRepair")
+          || Object.hasOwn((row.goal_json ?? {}) as object, "spanCourseBinding")
+          || Object.hasOwn((row.create_intent ?? {}) as object, "courseSpanRequest"))
           && input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
         if (!preservingRepairPause) await admitCourseSources(tx, scope, current.courseId, current.sourceIds);
         const previous = row.checkpoint_json as Record<string, unknown>;
