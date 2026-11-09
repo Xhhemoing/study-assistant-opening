@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as history from "./opening-learning-facts";
 import type { Sql } from "postgres";
 import { createOpeningJobRepository } from "./opening-jobs";
 
@@ -14,6 +15,9 @@ function db(handler: (query: string, values: unknown[]) => unknown[]) {
     if (!Object.hasOwn(strings as object, "raw")) return strings;
     const query = (strings as TemplateStringsArray).join("?");
     if (/INSERT|UPDATE|DELETE/.test(query)) writes.push({ query, values });
+    if (query.includes("SELECT w.id, w.owner_user_id")) return Promise.resolve([{ id: workspaceId, owner_user_id: ownerUserId }]);
+    if (query.includes("SELECT workspace_id, owner_user_id")) return Promise.resolve([{ workspace_id: workspaceId, owner_user_id: ownerUserId }]);
+    if (query.includes("SELECT id FROM workspaces") || query.includes("SELECT id FROM opening_sources")) return Promise.resolve([{ id: workspaceId }]);
     return Promise.resolve(handler(query, values));
   }) as unknown as Sql;
   sql.begin = ((callback: (tx: Sql) => unknown) => callback(sql)) as Sql["begin"];
@@ -22,6 +26,25 @@ function db(handler: (query: string, values: unknown[]) => unknown[]) {
 }
 
 describe("opening_jobs.cancel (V2-07)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["NOT_FOUND", "workspace not found"], ["NOT_FOUND", "other missing"], ["55P03", "lock unavailable"],
+  ])("propagates helper error identity %s / %s when candidate is unchanged", async (code, message) => {
+    const error = Object.assign(new Error(message), { code });
+    vi.spyOn(history, "lockWorkspaceLearningHistory").mockRejectedValueOnce(error);
+    const { sql, writes } = db(query => query.includes("SELECT w.owner_user_id") ? [{ owner_user_id: ownerUserId }] : []);
+    await expect(createOpeningJobRepository(sql).cancel(scope, jobId)).rejects.toBe(error);
+    expect(writes).toEqual([]);
+  });
+
+  it.each(["owner", "missing"])("returns null only for confirmed helper-time %s identity drift", async drift => {
+    const error = Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
+    vi.spyOn(history, "lockWorkspaceLearningHistory").mockRejectedValueOnce(error);
+    const { sql, writes } = db(query => query.includes("SELECT w.owner_user_id") && drift === "owner" ? [{ owner_user_id: "changed" }] : []);
+    expect(await createOpeningJobRepository(sql).cancel(scope, jobId)).toBeNull();
+    expect(writes).toEqual([]);
+  });
   it("cancels queued compile-teaching-unit and fences activity generate_status", async () => {
     const { sql, writes } = db((query) => {
       if (query.includes("FROM workspaces") || query.includes("SELECT id FROM workspaces")) {
