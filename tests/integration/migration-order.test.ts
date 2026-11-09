@@ -312,14 +312,40 @@ describe("migration registry order and verification", () => {
     const scopedUrl = new URL(databaseUrl!);
     scopedUrl.searchParams.set("options", `-c search_path=${schema},public`);
     await writeFile(config, `DATABASE_URL=${scopedUrl.href}\n`);
-    const runHistorical = (candidate = artifactRoot, digest = expectedArtifactContentDigest) => {
+    // Run the untouched historical module in a fresh process per check, without
+    // another Node wrapper spawning tsx. Keep one real helper invocation below
+    // and require its exit/report to agree with this runner.
+    const historicalRunner = path.join(directory, "historical-preflight.mjs");
+    const moduleUrl = pathToFileURL(path.join(artifactRoot, "packages/database/src/migrate.ts")).href;
+    const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+    await writeFile(historicalRunner, `
+      import { readFileSync } from "node:fs";
+      import { parseEnv } from "node:util";
+      import { resolve } from "node:path";
+      const [configFile, candidate, digest] = process.argv.slice(2);
+      Object.assign(process.env, parseEnv(readFileSync(configFile, "utf8")));
+      const { createSqlClient, preflightConfirmationRecovery } = await import(${JSON.stringify(moduleUrl)});
+      const sql = createSqlClient(process.env.DATABASE_URL, { max: 1 });
+      try { console.log(JSON.stringify(await preflightConfirmationRecovery(sql, {
+        artifactRoot: resolve(candidate), expectedArtifactContentDigest: digest
+      }))); } catch (error) {
+        console.log(JSON.stringify({ eligible: false, code: /^MIGRATION_[A-Z0-9_]+$/.test(error.code ?? "")
+          ? error.code : "MIGRATION_RECOVERY_INCOMPATIBLE", automaticRecovery: false }));
+        process.exitCode = 1;
+      } finally { await sql.end({ timeout: 5 }); }
+    `);
+    const runHistorical = (candidate = artifactRoot, digest = expectedArtifactContentDigest, helper = false) => {
+      // A delivered timeout must not start another child; this cannot cancel
+      // an already-running spawnSync or an in-flight migration.
+      ctx.signal.throwIfAborted();
       const call = ++historicalCall;
       const callStarted = performance.now();
       log("begin", { historicalCall: call });
       // This observes only synchronous return / collected stdio, not an
       // independent close event or inner validation vs. sql.end timing.
-      const result = spawnSync(process.execPath,
-        [path.join(artifactRoot, "infra/deploy/hermes-db.mjs"), "confirmation-recovery-preflight", config, candidate, digest], { encoding: "utf8" });
+      const result = spawnSync(process.execPath, helper
+        ? [path.join(artifactRoot, "infra/deploy/hermes-db.mjs"), "confirmation-recovery-preflight", config, candidate, digest]
+        : ["--import", loader, historicalRunner, config, candidate, digest], { encoding: "utf8", cwd: artifactRoot });
       log("end", { historicalCall: call, callElapsedMs: performance.now() - callStarted,
         status: result.status, signal: result.signal, errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
         stdoutBytes: Buffer.byteLength(result.stdout ?? "", "utf8"), stderrBytes: Buffer.byteLength(result.stderr ?? "", "utf8") });
@@ -348,7 +374,7 @@ describe("migration registry order and verification", () => {
       writerProtocol: "graph-source-revocation-v1", artifactContentDigest: expectedArtifactContentDigest });
     expect(await ledger()).toEqual(before108);
     beginPhase("historical-helper108");
-    const helper = runHistorical();
+    const helper = runHistorical(artifactRoot, expectedArtifactContentDigest, true);
     expect(helper.status, helper.stderr || helper.stdout).toBe(0);
     expect(JSON.parse(helper.stdout)).toEqual(report);
     expect(await ledger()).toEqual(before108);
