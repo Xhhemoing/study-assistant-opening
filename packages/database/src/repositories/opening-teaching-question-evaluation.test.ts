@@ -46,6 +46,7 @@ function setup(options: FixtureOptions = {}) {
       evaluation_spec: "evaluationSpec" in options ? options.evaluationSpec : spec,
       blocks: savedBlocks(),
     }]);
+    if (sql.includes("FROM opening_course_reserved_questions q")) return Promise.resolve([]);
     if (sql.includes("SELECT r.blocks,s.block_order,s.source_refs")) return Promise.resolve(options.missingIdentity ? [] : [{
       blocks: savedBlocks(), block_order: options.blockOrder ?? order, source_refs: [{ sourceId: id(7), version: 1 }],
     }]);
