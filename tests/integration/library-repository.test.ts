@@ -310,6 +310,151 @@ describe("library repository foundation", () => {
     expect(await historyRows()).toEqual([]);
   });
 
+  type LifecycleOperation = "softDeleteDocument" | "restoreDocument";
+  const lifecycleOperations: LifecycleOperation[] = ["softDeleteDocument", "restoreDocument"];
+
+  async function lifecycleFixture(operation: LifecycleOperation, legacy = false) {
+    const scope = await ownerScope();
+    const document = await repo.createDocument({
+      workspaceId: workspaceA, title: "Lifecycle history fence",
+      jobScope: legacy ? { ...scope, ownerUserId: (await ownerScope(workspaceB)).ownerUserId } : undefined,
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "retain graph" } }],
+    });
+    if (operation === "restoreDocument") {
+      await sql`UPDATE library_documents SET deleted_at = '2026-01-01T00:00:00Z' WHERE id = ${document.id}`;
+    }
+    return { workspaceId: workspaceA, documentId: document.id };
+  }
+
+  async function lifecycleSnapshot(documentId: string, client = sql) {
+    const [document] = await client`SELECT * FROM library_documents WHERE id = ${documentId}`;
+    const blocks = await client`SELECT * FROM library_blocks WHERE document_id = ${documentId} ORDER BY position`;
+    const revisions = await client`SELECT * FROM library_revisions WHERE document_id = ${documentId} ORDER BY revision_number`;
+    return { document, blocks, revisions };
+  }
+
+  it.each(lifecycleOperations)("%s waits on history before locking the document and retains the committed graph", async (operation) => {
+    const input = await lifecycleFixture(operation);
+    const original = await lifecycleSnapshot(input.documentId);
+    const scope = await ownerScope();
+    await sql`UPDATE opening_workspace_history_revisions SET revision = 29 WHERE workspace_id = ${workspaceA}`;
+    const holder = openRaceSession();
+    const writer = openRaceSession();
+    const observer = openRaceSession();
+    let pending: Promise<unknown> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async (tx) => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}
+          AND owner_user_id = ${scope.ownerUserId} FOR UPDATE`;
+        const started = performance.now();
+        pending = track<unknown>(createLibraryRepository(writer.sql)[operation](input));
+        await waitUntilBlocked(observer.sql, writer.pid, holder.pid, `library ${operation} history`,
+          /opening_workspace_history_revisions[\s\S]*FOR UPDATE/);
+        // Actual lock availability, not an elapsed-time approximation of ordering.
+        await tx`SELECT id FROM library_documents WHERE id = ${input.documentId} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM workspaces WHERE id = ${workspaceA} FOR UPDATE NOWAIT`;
+        expect(await lifecycleSnapshot(input.documentId, observer.sql)).toEqual(original);
+        expect(await createLibraryRepository(observer.sql).getDocument({ ...input, includeDeleted: true }))
+          .toMatchObject({ deletedAt: original.document!.deleted_at, currentRevisionNumber: 1 });
+        console.info(`[library lifecycle barrier:${operation}] actual blocked observation ${Math.round(performance.now() - started)}ms`);
+      });
+      await pending;
+      const after = await lifecycleSnapshot(input.documentId);
+      expect(after.blocks).toEqual(original.blocks);
+      expect(after.revisions).toEqual(original.revisions);
+      expect(after.document).toEqual({ ...original.document,
+        deleted_at: operation === "softDeleteDocument" ? expect.any(Date) : null,
+        updated_at: expect.any(Date),
+      });
+      expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: 29 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each(lifecycleOperations)("%s lazily ensures legacy history at zero and never advances existing history", async (operation) => {
+    const scope = await ownerScope();
+    for (const legacy of [false, true]) {
+      for (const revision of [null, 0, 37]) {
+        const input = await lifecycleFixture(operation, legacy);
+        await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+        if (revision !== null) {
+          await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+            VALUES (${workspaceA}, ${scope.ownerUserId}, ${revision})`;
+        }
+        const original = await lifecycleSnapshot(input.documentId);
+        await repo[operation](input);
+        expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: revision ?? 0 }]);
+        const after = await lifecycleSnapshot(input.documentId);
+        expect(after.blocks).toEqual(original.blocks);
+        expect(after.revisions).toEqual(original.revisions);
+        expect(after.document!.current_revision_number).toBe(original.document!.current_revision_number);
+      }
+    }
+  });
+
+  it.each(lifecycleOperations)("%s retains missing, cross-workspace and unchanged-state errors after commit", async (operation) => {
+    const input = await lifecycleFixture(operation);
+    const missingId = randomUUID();
+    const missingWorkspace = randomUUID();
+    await expect(repo[operation]({ workspaceId: workspaceA, documentId: missingId }))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: `Document not found: ${missingId}` });
+    await expect(repo[operation]({ workspaceId: missingWorkspace, documentId: missingId }))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: `Document not found: ${missingId}` });
+    for (const workspaceId of [workspaceB, missingWorkspace]) {
+      await expect(repo[operation]({ ...input, workspaceId })).rejects.toMatchObject({
+        code: "WORKSPACE_MISMATCH", message: `Document ${input.documentId} is not in workspace ${workspaceId}`,
+      });
+    }
+    if (operation === "softDeleteDocument") await repo.softDeleteDocument(input);
+    else await sql`UPDATE library_documents SET deleted_at = NULL WHERE id = ${input.documentId}`;
+    const original = await lifecycleSnapshot(input.documentId);
+    await expect(repo[operation](input)).rejects.toMatchObject({ code: "NOT_FOUND", message: operation === "softDeleteDocument"
+      ? `Document already deleted or missing: ${input.documentId}` : `Document is not soft-deleted: ${input.documentId}` });
+    expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+  });
+
+  it.each(lifecycleOperations)("%s rolls back an actual UPDATE and first history ensure when failure occurs before commit", async (operation) => {
+    const input = await lifecycleFixture(operation);
+    const scope = await ownerScope();
+    const failure = new Error("injected after lifecycle UPDATE before commit");
+    for (const revision of [null, 41]) {
+      await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+      if (revision !== null) {
+        await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+          VALUES (${workspaceA}, ${scope.ownerUserId}, ${revision})`;
+      }
+      const original = await lifecycleSnapshot(input.documentId);
+      const originalHistory = await historyRows();
+      let injected = false;
+      // Execute the real transaction callback and UPDATE. Fail only after its
+      // returning row is available, while the transaction is still uncommitted.
+      const failing = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property !== "begin") return Reflect.get(target, property, receiver);
+          return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(async (tx) => {
+            const result = await execute(tx);
+            expect(result).toEqual([{ id: input.documentId }]);
+            const [changed] = await tx`SELECT deleted_at FROM library_documents WHERE id = ${input.documentId}`;
+            expect(changed!.deleted_at).toEqual(operation === "softDeleteDocument" ? expect.any(Date) : null);
+            const [history] = await tx`SELECT revision::int FROM opening_workspace_history_revisions
+              WHERE workspace_id = ${workspaceA} AND owner_user_id = ${scope.ownerUserId}`;
+            expect(history!.revision).toBe(revision ?? 0);
+            expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+            injected = true;
+            throw failure;
+          });
+        },
+      });
+      await expect(createLibraryRepository(failing)[operation](input)).rejects.toBe(failure);
+      expect(injected).toBe(true);
+      expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+      expect(await historyRows()).toEqual(originalHistory);
+    }
+  });
+
   it("lists active workspace documents newest first with their blocks", async () => {
     const older = await repo.createDocument({
       workspaceId: workspaceA,

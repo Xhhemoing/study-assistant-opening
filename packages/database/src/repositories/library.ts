@@ -383,6 +383,17 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     }
   }
 
+  async function lockDocumentLifecycleHistory(tx: TransactionSql, workspaceId: string): Promise<void> {
+    const [workspace] = await tx<{ owner_user_id: string }[]>`
+      SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId} LIMIT 1
+    `;
+    if (!workspace) return;
+    await lockWorkspaceLearningHistory(tx, {
+      workspaceId,
+      ownerUserId: workspace.owner_user_id,
+    });
+  }
+
   async function loadBlocks(
     workspaceId: string,
     documentId: string,
@@ -859,14 +870,17 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async softDeleteDocument(input) {
-      const result = await sql`
-        UPDATE library_documents
-        SET deleted_at = now(), updated_at = now()
-        WHERE id = ${input.documentId}
-          AND workspace_id = ${input.workspaceId}
-          AND deleted_at IS NULL
-        RETURNING id
-      `;
+      const result = await sql.begin(async (tx) => {
+        await lockDocumentLifecycleHistory(tx, input.workspaceId);
+        return tx`
+          UPDATE library_documents
+          SET deleted_at = now(), updated_at = now()
+          WHERE id = ${input.documentId}
+            AND workspace_id = ${input.workspaceId}
+            AND deleted_at IS NULL
+          RETURNING id
+        `;
+      });
       if (!result.length) {
         await getDocumentRow(input.workspaceId, input.documentId, {
           includeDeleted: true,
@@ -879,14 +893,17 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async restoreDocument(input) {
-      const result = await sql`
-        UPDATE library_documents
-        SET deleted_at = NULL, updated_at = now()
-        WHERE id = ${input.documentId}
-          AND workspace_id = ${input.workspaceId}
-          AND deleted_at IS NOT NULL
-        RETURNING id
-      `;
+      const result = await sql.begin(async (tx) => {
+        await lockDocumentLifecycleHistory(tx, input.workspaceId);
+        return tx`
+          UPDATE library_documents
+          SET deleted_at = NULL, updated_at = now()
+          WHERE id = ${input.documentId}
+            AND workspace_id = ${input.workspaceId}
+            AND deleted_at IS NOT NULL
+          RETURNING id
+        `;
+      });
       if (!result.length) {
         await getDocumentRow(input.workspaceId, input.documentId, {
           includeDeleted: true,
