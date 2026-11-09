@@ -84,9 +84,10 @@ function effective(args, run, options = {}) {
     if (options.preflight && index === 1 && values.LoadState === 'not-found') {
       // Only an explicitly absent, quiescent worker is a first installation.
       // Missing manager fields, stale inputs and failed queries are not absence.
-      const absent = { FragmentPath: '', DropInPaths: '', EnvironmentFiles: '', NeedDaemonReload: 'no',
+      const absent = { FragmentPath: '', DropInPaths: '', NeedDaemonReload: 'no',
         ActiveState: 'inactive', SubState: 'dead', MainPID: '0', ControlPID: '0', Job: '', ControlGroup: '' };
-      if (Object.entries(absent).some(([key, value]) => values[key] !== value)) {
+      if (Object.entries(absent).some(([key, value]) => values[key] !== value)
+        || (Object.hasOwn(values, 'EnvironmentFiles') && values.EnvironmentFiles !== '')) {
         throw new Error('Unknown or stale effective configuration; success refused');
       }
       for (const path of [fragment, `${fragment}.d`, runtime,

@@ -207,7 +207,7 @@ case "$1" in
   if [[ "$*" == *FragmentPath* ]]; then
    if [[ "$*" == *LoadState* ]]; then
     if [[ "$unit" == aistudy-worker.service && "$MOCK_WORKER" == missing && ! -f "$SYSTEMD_DIR/$unit" ]]; then
-     printf 'LoadState=not-found\\nFragmentPath=\\nDropInPaths=\\nEnvironmentFiles=\\nNeedDaemonReload=no\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nControlPID=0\\nJob=\\nControlGroup=\\n'
+     printf 'LoadState=not-found\\nFragmentPath=\\nDropInPaths=\\nNeedDaemonReload=no\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nControlPID=0\\nJob=\\nControlGroup=\\n'
      exit
     fi
     printf 'LoadState=loaded\\n'

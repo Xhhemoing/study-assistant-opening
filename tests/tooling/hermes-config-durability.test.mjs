@@ -140,8 +140,21 @@ function missingWorker(f) {
   fs.unlinkSync(join(f.args[6], 'aistudy-worker.service'));
   fs.rmSync(join(f.args[6], 'aistudy-worker.service.d'), { recursive: true });
   fs.unlinkSync(join(f.args[7], 'worker-runtime.env'));
-  f.effective[1] = 'LoadState=not-found\nFragmentPath=\nDropInPaths=\nEnvironmentFiles=\nNeedDaemonReload=no\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n';
+  f.effective[1] = 'LoadState=not-found\nFragmentPath=\nDropInPaths=\nNeedDaemonReload=no\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n';
 }
+for (const [label, output, accepted] of [
+  ['omitted', '', true], ['empty', 'EnvironmentFiles=\n', true],
+  ['nonempty', 'EnvironmentFiles=/unknown/env (ignore_errors=no)\n', false],
+  ['duplicate empty', 'EnvironmentFiles=\nEnvironmentFiles=\n', false],
+  ['duplicate nonempty', 'EnvironmentFiles=\nEnvironmentFiles=/unknown/env (ignore_errors=no)\n', false],
+]) test(`absent-worker preflight EnvironmentFiles ${label} is ${accepted ? 'accepted' : 'refused'}`, t => {
+  const f = fixture(t); missingWorker(f);
+  f.effective[1] += output;
+  if (accepted) {
+    preflightConfiguration(f.args, f.run, { trustedUid: process.geteuid() });
+    assert.throws(() => captureConfiguration(f.args, f.run), /Unknown or stale/);
+  } else assert.throws(() => preflightConfiguration(f.args, f.run), /Unknown or stale/);
+});
 test('preflight admits only a genuinely absent worker; activation still requires both units', t => {
   const f = fixture(t);
   missingWorker(f);
@@ -152,14 +165,14 @@ test('preflight admits only a genuinely absent worker; activation still requires
   assert.throws(() => captureConfiguration(f.args, f.run), /Unknown or stale/);
   for (const [key, value] of [['LoadState', 'unknown'], ['LoadState', 'error'], ['LoadState', 'loaded'], ['LoadState', 'failed'],
     ['FragmentPath', join(f.args[6], 'aistudy-worker.service')], ['DropInPaths', '/unknown/drop.conf'],
-    ['EnvironmentFiles', '/unknown/env (ignore_errors=no)'], ['NeedDaemonReload', 'yes'], ['ActiveState', 'failed'],
+    ['NeedDaemonReload', 'yes'], ['ActiveState', 'failed'],
     ['SubState', 'failed'], ['MainPID', '123'], ['ControlPID', '124'], ['Job', '91'], ['ControlGroup', '/residual']]) {
     const run = command => ({ ok: true, stdout: command.at(-1) === 'aistudy-worker.service'
       ? f.run(command).stdout.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${value}`) : f.run(command).stdout });
     assert.throws(() => preflightConfiguration(f.args, run), undefined, `${key}=${value}`);
   }
   assert.throws(() => preflightConfiguration(f.args, command => ({ ok: command.at(-1) !== 'aistudy-worker.service', stdout: f.run(command).stdout })), /unavailable/);
-  for (const key of ['LoadState', 'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NeedDaemonReload', 'ActiveState', 'SubState', 'MainPID', 'ControlPID', 'Job', 'ControlGroup']) {
+  for (const key of ['LoadState', 'FragmentPath', 'DropInPaths', 'NeedDaemonReload', 'ActiveState', 'SubState', 'MainPID', 'ControlPID', 'Job', 'ControlGroup']) {
     assert.throws(() => preflightConfiguration(f.args, command => ({ ok: true, stdout: command.at(-1) === 'aistudy-worker.service'
       ? f.run(command).stdout.replace(new RegExp(`^${key}=.*\\n`, 'm'), '') : f.run(command).stdout })), undefined, key);
   }
