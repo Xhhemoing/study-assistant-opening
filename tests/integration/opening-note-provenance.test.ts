@@ -326,7 +326,7 @@ describe("Opening snippet workspace history fence", () => {
       await Promise.allSettled(pending ? [pending] : []);
       await Promise.all([closeRace(holder.sql), closeRace(writer.sql)]);
     }
-  }, 20_000);
+  });
 
   it.each(origins)("%s waits behind real permanent deletion on history, then rejects without leaking a note graph", async kind => {
     const sourceId = await source(), input = { title: "Denied excerpt", text: "PRIVATE-SNIPPET", ...await origin(kind, [{ sourceId, sourceVersion: 0 }]) };
@@ -364,7 +364,7 @@ describe("Opening snippet workspace history fence", () => {
       await Promise.allSettled(pending);
       await Promise.all([closeRace(gate.sql), closeRace(deletion.sql), closeRace(writer.sql)]);
     }
-  }, 20_000);
+  });
 
   it.each(origins)("%s in another workspace completes while this workspace history remains locked", async kind => {
     const other = await createIdentityRepository(sql).createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Other fenced snippet", passwordHash: "unused" });
