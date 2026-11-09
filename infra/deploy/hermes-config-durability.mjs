@@ -65,7 +65,8 @@ function effective(args, run, options = {}) {
   const snapshot = [];
   const files = new Set([config, join(args[4], "runtime-identity.mjs")]);
   for (const [index, unit] of names.entries()) {
-    const result = run(["show", "--property=FragmentPath,DropInPaths,EnvironmentFiles,NeedDaemonReload,MemoryMax,MemoryHigh", unit]);
+    const result = run(["show", ...(options.preflight ? ["--all"] : []),
+      `--property=FragmentPath,DropInPaths,EnvironmentFiles,NeedDaemonReload,MemoryMax,MemoryHigh${options.preflight ? ',LoadState,ActiveState,SubState,MainPID,ControlPID,Job,ControlGroup' : ''}`, unit]);
     if (!result.ok) throw new Error("Effective configuration unavailable");
     const entries = result.stdout.trim().split("\n").map(line => {
       const at = line.indexOf('=');
@@ -80,6 +81,23 @@ function effective(args, run, options = {}) {
       } else values[key] = value;
     }
     const fragment = join(systemd, unit);
+    if (options.preflight && index === 1 && values.LoadState === 'not-found') {
+      // Only an explicitly absent, quiescent worker is a first installation.
+      // Missing manager fields, stale inputs and failed queries are not absence.
+      const absent = { FragmentPath: '', DropInPaths: '', EnvironmentFiles: '', NeedDaemonReload: 'no',
+        ActiveState: 'inactive', SubState: 'dead', MainPID: '0', ControlPID: '0', Job: '', ControlGroup: '' };
+      if (Object.entries(absent).some(([key, value]) => values[key] !== value)) {
+        throw new Error('Unknown or stale effective configuration; success refused');
+      }
+      for (const path of [fragment, `${fragment}.d`, runtime,
+        '/etc/systemd/system.control/aistudy-worker.service.d', '/run/systemd/system.control/aistudy-worker.service.d']) {
+        // ENOENT is accepted only for these absent-worker paths, never inspect().
+        try { lstatSync(path); }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+        throw new Error('Residual worker configuration; first installation refused');
+      }
+      continue;
+    }
     const allowedDrops = [join(systemd, `${unit}.d/96-aistudy-writer-exec.conf`), join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`),
       join(systemd, `${unit}.d/${index === 0 ? "50-aistudy-release.conf" : "90-aistudy-protocol-guard.conf"}`),
       ...(index === 0 ? [join(systemd, `${unit}.d/49-aistudy-legacy-cwd.conf`)] : [])];
@@ -90,7 +108,7 @@ function effective(args, run, options = {}) {
     ] : [];
     const drops = values.DropInPaths ? values.DropInPaths.split(" ") : [];
     const expectedEnv = `${config} (ignore_errors=no)${index === 1 ? ` ${runtime} (ignore_errors=no)` : ""}`;
-    if (values.NeedDaemonReload !== "no" || values.FragmentPath !== fragment
+    if ((options.preflight && values.LoadState !== 'loaded') || values.NeedDaemonReload !== "no" || values.FragmentPath !== fragment
       || drops.some(path => !allowedDrops.includes(path) && !resourceDrops.includes(path)) || new Set(drops).size !== drops.length
       || (!options.preflight && !drops.includes(allowedDrops[2]))
       || (values.EnvironmentFiles !== expectedEnv && !(index === 0 && values.EnvironmentFiles === `${expectedEnv} ${expectedEnv}`))) {

@@ -22,12 +22,13 @@ function fixture(t) {
     const fragment = join(args[6], unit);
     const drops = [join(args[6], `${unit}.d/95-aistudy-migration-fence.conf`), join(args[6], `${unit}.d/${index ? "90-aistudy-protocol-guard.conf" : "50-aistudy-release.conf"}`)];
     files.push(fragment, ...drops);
-    return `FragmentPath=${fragment}\nDropInPaths=${drops.join(" ")}\nEnvironmentFiles=${environment} (ignore_errors=no)\nEnvironmentFiles=${index ? runtime : environment} (ignore_errors=no)\nNeedDaemonReload=no\n`;
+    return `LoadState=loaded\nFragmentPath=${fragment}\nDropInPaths=${drops.join(" ")}\nEnvironmentFiles=${environment} (ignore_errors=no)\nEnvironmentFiles=${index ? runtime : environment} (ignore_errors=no)\nNeedDaemonReload=no\n`;
   });
   for (const file of files) { fs.mkdirSync(join(file, ".."), { recursive: true }); fs.writeFileSync(file, "private-input", { mode: 0o600 }); }
   fs.writeFileSync(join(target, ".release-sha"), `${args[9]}\n`);
   fs.writeFileSync(join(target, ".worker-protocol"), "delivery-leases-study-v2\n");
-  const run = command => ({ ok: true, stdout: effective[units.indexOf(command.at(-1))] });
+  const run = command => ({ ok: true, stdout: command.some(arg => arg.includes('LoadState'))
+    ? effective[units.indexOf(command.at(-1))] : effective[units.indexOf(command.at(-1))].replace(/^LoadState=.*\n/m, '') });
   return { root, args, target, files, effective, run };
 }
 function resources(t) {
@@ -134,6 +135,63 @@ test('old-environment preflight is read-only, needs no 95/96, release markers or
   fs.appendFileSync(path, 'EnvironmentFile=/unknown\n');
   assert.throws(() => preflightConfiguration(f.args, f.run, f.options), /legacy working directory/);
   assert.throws(() => captureConfiguration(f.args, f.run, f.options));
+});
+function missingWorker(f) {
+  fs.unlinkSync(join(f.args[6], 'aistudy-worker.service'));
+  fs.rmSync(join(f.args[6], 'aistudy-worker.service.d'), { recursive: true });
+  fs.unlinkSync(join(f.args[7], 'worker-runtime.env'));
+  f.effective[1] = 'LoadState=not-found\nFragmentPath=\nDropInPaths=\nEnvironmentFiles=\nNeedDaemonReload=no\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nControlGroup=\n';
+}
+test('preflight admits only a genuinely absent worker; activation still requires both units', t => {
+  const f = fixture(t);
+  missingWorker(f);
+  const original = fs.fsyncSync;
+  fs.fsyncSync = () => { throw new Error('preflight must not fsync'); }; syncBuiltinESMExports();
+  try { preflightConfiguration(f.args, f.run, { trustedUid: process.geteuid() }); }
+  finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+  assert.throws(() => captureConfiguration(f.args, f.run), /Unknown or stale/);
+  for (const [key, value] of [['LoadState', 'unknown'], ['LoadState', 'error'], ['LoadState', 'loaded'], ['LoadState', 'failed'],
+    ['FragmentPath', join(f.args[6], 'aistudy-worker.service')], ['DropInPaths', '/unknown/drop.conf'],
+    ['EnvironmentFiles', '/unknown/env (ignore_errors=no)'], ['NeedDaemonReload', 'yes'], ['ActiveState', 'failed'],
+    ['SubState', 'failed'], ['MainPID', '123'], ['ControlPID', '124'], ['Job', '91'], ['ControlGroup', '/residual']]) {
+    const run = command => ({ ok: true, stdout: command.at(-1) === 'aistudy-worker.service'
+      ? f.run(command).stdout.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${value}`) : f.run(command).stdout });
+    assert.throws(() => preflightConfiguration(f.args, run), undefined, `${key}=${value}`);
+  }
+  assert.throws(() => preflightConfiguration(f.args, command => ({ ok: command.at(-1) !== 'aistudy-worker.service', stdout: f.run(command).stdout })), /unavailable/);
+  for (const key of ['LoadState', 'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NeedDaemonReload', 'ActiveState', 'SubState', 'MainPID', 'ControlPID', 'Job', 'ControlGroup']) {
+    assert.throws(() => preflightConfiguration(f.args, command => ({ ok: true, stdout: command.at(-1) === 'aistudy-worker.service'
+      ? f.run(command).stdout.replace(new RegExp(`^${key}=.*\\n`, 'm'), '') : f.run(command).stdout })), undefined, key);
+  }
+  assert.throws(() => preflightConfiguration(f.args, command => ({ ...f.run(command), ok: false })), /unavailable/);
+  f.effective[0] = f.effective[1];
+  assert.throws(() => preflightConfiguration(f.args, f.run), /Unknown or stale/);
+});
+test('not-found worker cannot hide a fragment, dangling link, drop-in directory or runtime environment', t => {
+  for (const residue of ['fragment', 'symlink', 'dropins', 'runtime']) {
+    const f = fixture(t); missingWorker(f);
+    const path = residue === 'runtime' ? join(f.args[7], 'worker-runtime.env')
+      : join(f.args[6], `aistudy-worker.service${residue === 'dropins' ? '.d' : ''}`);
+    if (residue === 'dropins') fs.mkdirSync(path);
+    else if (residue === 'symlink') fs.symlinkSync('/nonexistent-worker', path);
+    else fs.writeFileSync(path, 'residual');
+    assert.throws(() => preflightConfiguration(f.args, f.run), /Residual worker configuration/, residue);
+  }
+});
+test('absent-worker path observation errors other than ENOENT are not absence', t => {
+  const f = fixture(t); missingWorker(f);
+  const original = fs.lstatSync;
+  fs.lstatSync = (...args) => {
+    if (args[0] === join(f.args[7], 'worker-runtime.env')) throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
+    return original(...args);
+  }; syncBuiltinESMExports();
+  try { assert.throws(() => preflightConfiguration(f.args, f.run), { code: 'EACCES' }); }
+  finally { fs.lstatSync = original; syncBuiltinESMExports(); }
+});
+test('loaded worker remains strict even in preflight when its fragment is missing', t => {
+  const f = fixture(t);
+  fs.unlinkSync(join(f.args[6], 'aistudy-worker.service'));
+  assert.throws(() => preflightConfiguration(f.args, f.run, { trustedUid: process.geteuid() }), { code: 'ENOENT' });
 });
 test('shared Python parser accepts only resource corpus and preserves actual high above max', t => {
   const corpus = JSON.parse(fs.readFileSync(new URL('./hermes-resource-policy-corpus.json', import.meta.url)));

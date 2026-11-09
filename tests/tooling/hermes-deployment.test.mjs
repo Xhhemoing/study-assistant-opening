@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -205,6 +205,13 @@ case "$1" in
    exit
   fi
   if [[ "$*" == *FragmentPath* ]]; then
+   if [[ "$*" == *LoadState* ]]; then
+    if [[ "$unit" == aistudy-worker.service && "$MOCK_WORKER" == missing && ! -f "$SYSTEMD_DIR/$unit" ]]; then
+     printf 'LoadState=not-found\\nFragmentPath=\\nDropInPaths=\\nEnvironmentFiles=\\nNeedDaemonReload=no\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nControlPID=0\\nJob=\\nControlGroup=\\n'
+     exit
+    fi
+    printf 'LoadState=loaded\\n'
+   fi
    printf 'FragmentPath=%s/%s\\nNeedDaemonReload=no\\n' "$SYSTEMD_DIR" "$unit"
    if [[ "$unit" == aistudy-web.service ]]; then
     drops="$SYSTEMD_DIR/aistudy-web.service.d/50-aistudy-release.conf"
@@ -706,13 +713,37 @@ for (const failure of ["", "migrate"]) {
   test(`first installation without a worker unit supports ${failure || "normal deployment"}`, t => {
     const f = fixture(t, { MOCK_WORKER: "missing", MOCK_FAIL: failure, MOCK_PENDING: failure ? '1' : '0' });
     rmSync(join(f.systemd, "aistudy-worker.service"));
+    rmSync(join(f.workerConfig, "worker-runtime.env"));
     const result = f.run();
     assert.equal(result.status === 0, !failure, result.stderr);
     assert.doesNotMatch(result.log, /systemctl restart aistudy-worker.service/);
     assert.match(result.log, /systemctl stop aistudy-worker.service/);
-    if (failure) assert.equal(readlinkSync(f.current), f.server);
+    assert.match(result.log, /db plan current=/);
+    if (failure) {
+      assert.match(result.log, /migrate current=/);
+      assert.match(result.stderr, /FORWARD FIX REQUIRED/);
+      assert.equal(readlinkSync(f.current), f.server);
+    } else assert.match(result.stdout, /部署完成/);
   });
 }
+
+for (const residue of ['fragment', 'dropins', 'runtime']) test(`first installation refuses residual worker ${residue} before backup or writer stop`, t => {
+  const f = fixture(t, { MOCK_WORKER: 'missing', MOCK_PENDING: '1' });
+  rmSync(join(f.systemd, 'aistudy-worker.service'));
+  if (residue !== 'runtime') rmSync(join(f.workerConfig, 'worker-runtime.env'));
+  if (residue === 'fragment') {
+    // Manager explicitly reports not-found but the local path is a dangling link.
+    symlinkSync('/nonexistent-worker', join(f.systemd, 'aistudy-worker.service'));
+  }
+  if (residue === 'dropins') {
+    mkdirSync(join(f.systemd, 'aistudy-worker.service.d'));
+    writeFileSync(join(f.systemd, 'aistudy-worker.service.d/unknown.conf'), '[Service]\nEnvironmentFile=/unknown\n');
+  }
+  const result = f.run();
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Residual worker configuration/);
+  assert.doesNotMatch(result.log, /pg_dump\n|systemctl stop|migrate current=|db plan|db quiescence|worker --snapshot/);
+});
 
 test("migration failure retains the pointer/configuration and backup with both writers fenced", t => {
   const f = fixture(t, { MOCK_FAIL: "migrate", MOCK_PENDING: '1' });
