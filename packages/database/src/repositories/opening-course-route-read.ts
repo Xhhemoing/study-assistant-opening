@@ -12,6 +12,7 @@ import { decideCourseRouteVerification } from "./opening-course-route-verificati
 import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
 import type { ExamCourseRouteObservation } from "./opening-course-exam-evidence-projection";
+import { readOpeningCourseCitationCoverage } from "./opening-course-citation-coverage";
 const bindingSchema=z.object({id:z.string().uuid(),revision:z.number().int().positive(),stableSkillId:z.string().uuid(),requirementKey:z.string()}).strict();
 export type CourseRouteDb=Sql|TransactionSql;
 export async function assertCourseRouteCourse(db:CourseRouteDb,scope:Scope,courseId:string){
@@ -68,6 +69,7 @@ export async function readCourseRouteSourceChunks(db:CourseRouteDb,scope:Scope,c
   const rows=await db`SELECT ch.id,ch.source_id,ch.source_version,ch.page FROM opening_source_chunks ch JOIN opening_sources s
     ON s.id=ch.source_id AND s.workspace_id=${scope.workspaceId} AND s.version=ch.source_version
     JOIN course_asset_memberships m ON m.asset_id=s.id AND m.workspace_id=s.workspace_id AND m.asset_type='source' AND m.course_id=${courseId}
+      AND (m.purpose IS NULL OR m.purpose='teaching')
     WHERE s.upload_state='uploaded' AND s.parse_state='ready' AND (length(btrim(ch.text))>0 OR ch.image_object_key IS NOT NULL)
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)`;
   return rows.map(row=>({id:String(row.id),sourceId:String(row.source_id),sourceVersion:Number(row.source_version),page:row.page==null?null:Number(row.page)}));
@@ -76,7 +78,8 @@ export async function readCourseRouteMaterials(db:CourseRouteDb,scope:Scope,cour
   const rows=await db`SELECT s.id,s.version,s.name,s.upload_state,s.parse_state,
     NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id) AS included
     FROM course_asset_memberships m JOIN opening_sources s ON s.id=m.asset_id AND s.workspace_id=m.workspace_id
-    WHERE m.workspace_id=${scope.workspaceId} AND m.course_id=${courseId} AND m.asset_type='source' ORDER BY m.sort_order,s.id`;
+    WHERE m.workspace_id=${scope.workspaceId} AND m.course_id=${courseId} AND m.asset_type='source'
+      AND (m.purpose IS NULL OR m.purpose='teaching') ORDER BY m.sort_order,s.id`;
   return rows.map(row=>({sourceId:String(row.id),sourceVersion:Number(row.version),
     title:String(row.name),
     available:row.upload_state==="uploaded"&&row.parse_state==="ready"&&row.included===true}));
@@ -89,6 +92,7 @@ async function suggestions(db:CourseRouteDb,scope:Scope,courseId:string,requirem
   const chunks=await db`SELECT ch.id,ch.source_id,ch.source_version,ch.page FROM opening_source_chunks ch
     JOIN opening_sources s ON s.id=ch.source_id AND s.version=ch.source_version AND s.workspace_id=${scope.workspaceId}
     JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.asset_id=s.id AND m.asset_type='source' AND m.course_id=${courseId}
+      AND (m.purpose IS NULL OR m.purpose='teaching')
     WHERE s.upload_state='uploaded' AND s.parse_state='ready' AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)`;
   const identities=new Map(nodes.map(node=>[node.id,{id:randomUUID(),skillId:randomUUID()}]));
   return nodes.map((node,position)=>{ const sourceRefs=chunks.filter(chunk=>node.evidenceChunkIds.includes(String(chunk.id))).map(chunk=>({sourceId:String(chunk.source_id),sourceVersion:Number(chunk.source_version),chunkId:String(chunk.id),...(chunk.page?{page:Number(chunk.page)}:{})})); return ({id:identities.get(node.id)!.id,stableSkillId:identities.get(node.id)!.skillId,knowledgeNodeId:node.id,requirementKey:`knowledge:${node.id}`,title:node.label.slice(0,200),
@@ -103,6 +107,12 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
   const observations=await readCourseRouteObservations(db,scope,courseId);
   const progress=courseRequirementProgress(requirements,observations.projected,new Map(materials.filter(row=>row.available).map(row=>[row.sourceId,row.sourceVersion])),await readCourseRouteSourceChunks(db,scope,courseId));
   await readCourseRouteCompilation(db,scope,courseId,progress);
+  const citations=await readOpeningCourseCitationCoverage(db,scope,courseId,progress);
+  for(const item of progress){
+    const citation=citations.get(item.requirement.id);
+    if(citation?.coverage)item.citationCoverage=citation.coverage;
+    if(citation?.reason)item.missingReasons.push(citation.reason);
+  }
   const retests=await db`SELECT id,task_id,learning_protocol,not_before_at FROM opening_retest_activities WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND learning_protocol->>'protocolId'='course-route-delayed-v1' ORDER BY created_at DESC,id DESC`;
   for(const item of progress){

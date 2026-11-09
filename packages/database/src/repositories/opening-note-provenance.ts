@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import type { OpeningScope } from "./opening-sources";
 
 type Db = Sql | TransactionSql;
@@ -37,6 +38,11 @@ export function createOpeningNoteRepository(sql: Sql) {
     async saveSnippet(scope: OpeningScope, raw: SnippetCreateInput, structured?: SnippetNoteBlock[]): Promise<{ documentId: string }> {
       const input = snippetCreateInputSchema.parse(raw);
       return sql.begin(async tx => {
+        // Preserve note-specific owner errors without taking a workspace row lock
+        // ahead of history (privacy mutations acquire history first as well).
+        const visibleOwner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!visibleOwner.length) throw new OpeningNoteError("NOT_FOUND", "workspace not found");
+        await lockWorkspaceLearningHistory(tx, scope);
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningNoteError("NOT_FOUND", "workspace not found");
         const origins = input.savedTurnId !== undefined

@@ -141,9 +141,21 @@ it("signals a committed privacy change even when the fixed course visible count 
   const f = await learningAttemptFixture(fixture), other = await learningAttemptFixture(fixture);
   await submit(f); await submit(f);
   const first = await page(f.courseId, { limit: 1 });
-  await createOpeningSourceActionsRepository(fixture.sql).apply(fixture.scope, other.sourceId,
-    { action: "exclude", expectedVersion: 1, expectedMembershipIds: [] },
-    { stagingKey: id => `opening/sources/${id}/staging`, finalKey: (id, version) => `opening/sources/${id}/${version}` }, new Date());
+  const sources = createOpeningSourceActionsRepository(fixture.sql);
+  const impact = await sources.impact(fixture.scope, other.sourceId);
+  const expectedMembershipIds = impact.courses.map(course => course.membershipId);
+  expect(expectedMembershipIds).toHaveLength(1);
+  const keys = { stagingKey: (id: string) => `opening/sources/${id}/staging`,
+    finalKey: (id: string, version: number) => `opening/sources/${id}/${version}` };
+  for (const staleIds of [expectedMembershipIds.slice(1), [randomUUID()]]) {
+    await expect(sources.apply(fixture.scope, other.sourceId,
+      { action: "exclude", expectedVersion: impact.version, expectedMembershipIds: staleIds }, keys, new Date()))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await sources.impact(fixture.scope, other.sourceId)).toEqual(impact);
+    expect((await page(f.courseId, { cursor: first.nextCursor, limit: 1 })).visibilityChanged).toBe(false);
+  }
+  await sources.apply(fixture.scope, other.sourceId,
+    { action: "exclude", expectedVersion: impact.version, expectedMembershipIds }, keys, new Date());
   const continuation = await page(f.courseId, { cursor: first.nextCursor, limit: 1 });
   expect(continuation.totalCount).toBe(first.totalCount);
   expect(continuation.visibilityChanged).toBe(true);

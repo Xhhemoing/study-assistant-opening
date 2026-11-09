@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { issueOpeningReservedQuestion, type OpeningReservedPorts } from "./opening-course-reserved-selection";
 import { assertReferenceTextRevision } from "./opening-teaching-reference-revision";
 
 type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
@@ -266,10 +267,10 @@ async function assertPublishSourceRefs(
   }
 }
 
-export function createOpeningTeachingContentRepository(sql: Sql) {
+export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?: OpeningReservedPorts) {
   const library = createLibraryRepository(sql);
 
-  return {
+  const units = {
     /** Restore a precise question, including its current revision, without replaying writes. */
     async getSubmittedAttempt(scope: Scope, activityId: string, blockId: string, contentVersion: number) {
       return sql.begin(async tx => {
@@ -399,15 +400,22 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       });
     },
 
-    /**
-     * Publish / upsert current ActivitySpec and bump activity.content_version with CAS.
-     * Soft-idempotent: if already at expectedVersion+1 AND sameSpecGraph → success.
-     */
-    async publishActivitySpec(
-      scope: Scope,
-      input: ActivitySpecPublishInput,
-      referenceRevision?: ReferenceRevisionInput,
-    ): Promise<ActivitySpec> {
+  };
+
+  type CompiledActivity = {
+    blocks: NonNullable<TeachingUnitCreateInput["blocks"]>;
+    expectedDocumentRevision: number;
+    revisionId: string;
+  };
+
+  async function publishInTx(
+    tx: TransactionSql,
+    scope: Scope,
+    input: ActivitySpecPublishInput,
+    referenceRevision?: ReferenceRevisionInput,
+    assertPinnedContext?: (tx: TransactionSql) => Promise<void>,
+    compiled?: CompiledActivity,
+  ): Promise<ActivitySpec> {
       if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) {
         throw learningError("VALIDATION", "expectedVersion must be a non-negative integer");
       }
@@ -427,10 +435,20 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         generationConfig,
       };
 
-      return sql.begin(async (tx) => {
         await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
+        await assertPinnedContext?.(tx);
         await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
+
+        const activityRows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${input.activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        if (!activityRows.length) throw learningError("NOT_FOUND", "teaching activity not found");
+        const activity = activityRows[0] as Record<string, unknown>;
+        const currentContentVersion = Number(activity.content_version);
 
         const unitRows = await tx`
           SELECT * FROM opening_teaching_units
@@ -442,7 +460,7 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         const unit = unitRows[0] as Record<string, unknown>;
         desiredGraph.documentId = String(unit.document_id);
 
-        if (input.expectedRevisionNumber != null) {
+        if (input.expectedRevisionNumber != null && !compiled) {
           const rev = Number(unit.current_revision_number);
           if (input.expectedRevisionNumber !== rev) {
             throw learningError(
@@ -451,16 +469,6 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
             );
           }
         }
-
-        const activityRows = await tx`
-          SELECT * FROM opening_teaching_activities
-          WHERE id = ${input.activityId}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
-        if (!activityRows.length) throw learningError("NOT_FOUND", "teaching activity not found");
-        const activity = activityRows[0] as Record<string, unknown>;
-        const currentContentVersion = Number(activity.content_version);
 
         const existingSpecRows = await tx`
           SELECT * FROM opening_teaching_activity_specs
@@ -499,6 +507,33 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
           await assertOpeningCourseRouteCurrent(tx, scope, input.activityId);
         }
 
+        if (compiled) {
+          if (!assertPinnedContext) throw learningError("CONFLICT", "compiler publication purpose pin missing");
+          if (input.revisionNumber !== compiled.expectedDocumentRevision + 1) {
+            throw learningError("CONFLICT", "compiled document revision prediction changed");
+          }
+          // Lock after activity/unit and retain the original document CAS even on replay.
+          const [document] = await tx`SELECT current_revision_number FROM library_documents
+            WHERE id=${desiredGraph.documentId} AND workspace_id=${scope.workspaceId} AND deleted_at IS NULL FOR UPDATE`;
+          if (!document) throw learningError("NOT_FOUND", "teaching document not found");
+          const [revision] = await tx`SELECT id,blocks FROM library_revisions
+            WHERE workspace_id=${scope.workspaceId} AND document_id=${desiredGraph.documentId}
+              AND revision_number=${input.revisionNumber}`;
+          if (revision) {
+            const blocks = compiled.blocks.map(({ id, type, content }, position) => ({ id, type, content, position }));
+            if (String(revision.id) !== compiled.revisionId) throw learningError("CONFLICT", "compiled publication revision identity changed");
+            if (!isDeepStrictEqual(revision.blocks, blocks)) throw learningError("CONFLICT", "compiled publication body changed");
+            if (Number(document.current_revision_number) !== input.revisionNumber) throw learningError("CONFLICT", "compiled publication document changed");
+            if (!existingSpec || !sameActivitySpecGraph(existingSpec, {
+              ...desiredGraph, verificationStatus: existingSpec.verificationStatus,
+            })) throw learningError("CONFLICT", "compiled publication spec graph changed");
+          } else {
+            if (currentContentVersion !== input.expectedVersion || Number(document.current_revision_number) !== compiled.expectedDocumentRevision) {
+              throw learningError("CONFLICT", "compiled publication document changed");
+            }
+          }
+        }
+
         if (currentContentVersion === newVersion && existingSpec) {
           if (
             sameActivitySpecGraph(existingSpec, {
@@ -516,6 +551,17 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
         }
         if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot publish new content");
         await assertPublishSourceRefs(tx, scope, sourceRefs);
+
+        if (compiled) {
+          const [revision] = await tx`SELECT id FROM library_revisions
+            WHERE workspace_id=${scope.workspaceId} AND document_id=${desiredGraph.documentId}
+              AND revision_number=${input.revisionNumber}`;
+          if (!revision) await library.updateDocumentInTx(tx, {
+            workspaceId: scope.workspaceId, jobScope: scope, documentId: desiredGraph.documentId,
+            expectedRevisionNumber: compiled.expectedDocumentRevision, blocks: compiled.blocks,
+            reason: "teaching-compile",
+          }, compiled.revisionId);
+        }
 
         const specId = existingSpec?.id ?? randomUUID();
         const upserted = await tx`
@@ -564,7 +610,20 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
             AND workspace_id = ${scope.workspaceId}`;
 
         return mapSpec(upserted[0] as Record<string, unknown>);
-      });
+  }
+
+  return {
+    ...units,
+    /** Existing publication entry point; all writes share the caller-owned transaction. */
+    async publishActivitySpec(scope: Scope, input: ActivitySpecPublishInput, referenceRevision?: ReferenceRevisionInput,
+      assertPinnedContext?: (tx: TransactionSql) => Promise<void>): Promise<ActivitySpec> {
+      return sql.begin(tx => publishInTx(tx, scope, input, referenceRevision, assertPinnedContext));
+    },
+    /** Server-only compiled graph and pinned authority; neither belongs in public input/config. */
+    async publishCompiledActivity(scope: Scope, input: ActivitySpecPublishInput, compiled: CompiledActivity,
+      assertPinnedContext: (tx: TransactionSql) => Promise<void>): Promise<ActivitySpec> {
+      if (!assertPinnedContext) throw learningError("CONFLICT", "compiler publication purpose pin missing");
+      return sql.begin(tx => publishInTx(tx, scope, input, undefined, assertPinnedContext, compiled));
     },
 
     async adoptReferenceRevision(scope: Scope, activityId: string, input: ReferenceRevisionInput): Promise<ActivitySpec> {
@@ -605,7 +664,21 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
     },
 
     async getClientInit(scope: Scope, activityId: string): Promise<ActivitySpecClientInit | null> {
-      const activity = await assertOwnedActivity(sql, scope, activityId);
+      let activity = await assertOwnedActivity(sql, scope, activityId);
+      if (reservedPorts) {
+        await sql.begin(async tx => {
+          await lockWorkspaceLearningHistory(tx, scope);
+          await issueOpeningReservedQuestion(tx, scope, activityId, reservedPorts);
+        });
+        activity = await assertOwnedActivity(sql, scope, activityId);
+      } else {
+        // Production readers cannot consume private inventory. Only a real
+        // scope-bound pending reservation blocks ordinary saved-content replay.
+        const pending = await sql`SELECT id FROM opening_course_reserved_questions
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND reserved_activity_id=${activityId} AND state='reserved' LIMIT 1`;
+        if (pending.length) throw learningError("CONFLICT", "保留题曝光资格暂未接入生产供给");
+      }
       const spec = await this.getActivitySpec(scope, activityId);
       if (!spec) return null;
 
@@ -616,6 +689,10 @@ export function createOpeningTeachingContentRepository(sql: Sql) {
       });
 
       const blocks = redactBlocksForClientInit(spec.blockOrder, revision.blocks);
+      // Ordinary saved handouts remain read-only. The exposure scanner already
+      // conservatively counts every persisted library revision/block as exposed,
+      // including examples and unanswered prompts before any client reads them.
+      // Reserved issuance records its first presentation in the transaction above.
       const checkpointJson = sanitizeCheckpointForRestore(
         activity.checkpointJson as Record<string, unknown> | undefined,
       );

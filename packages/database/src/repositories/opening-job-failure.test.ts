@@ -7,13 +7,20 @@ const SOURCE = "00000000-0000-4000-8000-000000000003";
 
 type Recorded = { query: string; values: unknown[] };
 
-function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }, workspaceEpoch = 7) {
+function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }, workspaceEpoch = 7,
+  intercept?: (query: string, values: unknown[]) => unknown[] | undefined) {
   const recorded: Recorded[] = [];
   const kind = job.kind ?? "parse";
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     recorded.push({ query, values });
+    const result = intercept?.(query, values);
+    if (result !== undefined) return Promise.resolve(result);
     if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: workspaceEpoch }]);
+    if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: WORKSPACE }]);
+    if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return Promise.resolve([]);
+    if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return Promise.resolve([{ revision: 17 }]);
+    if (query.startsWith("SELECT id FROM opening_sources")) return Promise.resolve([{ id: SOURCE }]);
     if (query.startsWith("UPDATE opening_jobs")) {
       const { kind: _ignored, ...rest } = job;
       return Promise.resolve([{ kind, owner_user_id: "user-1", ...rest }]);
@@ -123,24 +130,63 @@ describe("opening parse job failure projection", () => {
   });
 
   it("releases the claim without projecting when cancellation won the job CAS", async () => {
-    const recorded: Recorded[] = [];
-    const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
-      const query = parts.join("?").replace(/\s+/g, " ").trim();
-      recorded.push({ query, values });
-      if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: 7 }]);
-      if (query.startsWith("UPDATE opening_jobs")) return Promise.resolve([]);
-      if (query.startsWith("SELECT kind, payload")) return Promise.resolve([{ kind: "parse", payload: { sourceId: SOURCE } }]);
-      if (query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
-      throw new Error(`unexpected query: ${query}`);
-    }) as unknown as Sql;
-    sql.json = ((value: unknown) => value) as never;
-    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+    const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE }, privacy_epoch: 7 }, 7, query => {
+      if (query.startsWith("UPDATE opening_jobs")) return [];
+      if (query.startsWith("SELECT kind, payload")) return [{ kind: "parse", payload: { sourceId: SOURCE } }];
+    });
 
     await expect(failOpeningJob(sql, "job-1", { error: "late" })).resolves.toBe(false);
     const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources"));
     expect(sourceUpdates).toHaveLength(1);
     expect(sourceUpdates[0]!.query).toContain("parse_state = 'not_started'");
     expect(sourceUpdates[0]!.query).not.toContain("'failed'");
+  });
+
+  it.each(["owner", "missing"])("rolls back instead of committing lazy history on locked workspace %s drift", async drift => {
+    let rolledBack = false;
+    const { sql } = fakeSql({ payload: {}, privacy_epoch: 7 }, 7, query => {
+      if (query.includes("FOR UPDATE OF w")) return drift === "missing" ? [] : [{ id: WORKSPACE, owner_user_id: "new-owner", privacy_epoch: 7 }];
+    });
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => {
+      try { return await callback(sql); } catch (error) { rolledBack = true; throw error; }
+    }) as Sql["begin"];
+    await expect(failOpeningJob(sql, "job-1", {})).resolves.toBe(false);
+    expect(rolledBack).toBe(true);
+  });
+
+  it("maps only precisely confirmed history workspace disappearance to false", async () => {
+    let reads = 0;
+    const { sql } = fakeSql({ payload: {}, privacy_epoch: 7 }, 7, query => {
+      if (query.startsWith("SELECT id FROM workspaces")) { reads++; return []; }
+    });
+    await expect(failOpeningJob(sql, "job-1", {})).resolves.toBe(false);
+    expect(reads).toBe(2);
+  });
+
+  it.each(["55P03", "22P02", "08006"])("never converts SQL %s errors into identity false", async code => {
+    const failure = Object.assign(new Error("database error"), { code });
+    const { sql } = fakeSql({ payload: {}, privacy_epoch: 7 }, 7, query => {
+      if (query.startsWith("SELECT revision")) throw failure;
+      return undefined;
+    });
+    await expect(failOpeningJob(sql, "job-1", {})).rejects.toBe(failure);
+  });
+
+  it("does not swallow an unrelated NOT_FOUND while the canonical workspace still exists", async () => {
+    const failure = Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
+    const { sql } = fakeSql({ payload: {}, privacy_epoch: 7 }, 7, query => {
+      if (query.startsWith("SELECT revision")) throw failure;
+      return undefined;
+    });
+    await expect(failOpeningJob(sql, "job-1", {})).rejects.toBe(failure);
+  });
+
+  it("skips cross-scope claim cleanup without changing successful job termination", async () => {
+    const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE }, privacy_epoch: 7 }, 7, query => {
+      if (query.startsWith("SELECT id FROM opening_sources")) return [];
+    });
+    await expect(failOpeningJob(sql, "job-1", {})).resolves.toBe(true);
+    expect(recorded.some(entry => entry.query.includes("SET parse_state = 'not_started'"))).toBe(false);
   });
 
   it("does not touch sources for non-parse jobs", async () => {

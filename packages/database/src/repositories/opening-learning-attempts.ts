@@ -1,4 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { resolveOpeningStudyContext } from "./opening-study-context";
@@ -25,6 +26,12 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
   const spanValidation = !canonicalSpan && (restored || row.requirement_key === SPAN_REQUIREMENT_KEY)
     ? { eligible: false, firstFamilyExposure: false, reasonCode: spanExercise ? "restored_identity_unverified" : "restored_identity_unavailable" }
     : (row.create_intent as { spanValidation?: LearningAttempt["spanValidation"] } | undefined)?.spanValidation;
+  const reservedIntent = row.create_intent as { reservedRetestQualification?: unknown } | undefined;
+  // A stored diagnostic is not authority. Mapping cannot recheck current pins;
+  // remain unavailable even if historical JSON purports to say eligible=true.
+  const reservedQualification = reservedIntent?.reservedRetestQualification !== undefined
+    || (typeof row.client_key === "string" && row.client_key.startsWith("reserved-issued:"))
+    ? unconfirmedReservedRetestQualification() : undefined;
   return { id: String(row.id), workspaceId: String(row.workspace_id), sessionId: String(row.session_id), courseId: String(row.course_id),
     skillLabel: String(row.skill_label), requirementKey: row.requirement_key as string | null, problemId: row.problem_id as string | null,
     itemVersionId: row.item_version_id as string | null, sourceIds: row.source_ids as string[], sourceVersions: row.source_versions as Record<string, number>,
@@ -36,6 +43,7 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
     ...(spanValidation ? { spanValidation } : {}),
     ...(typeof row.client_key === "string" && /^span-variant:[0-9a-f-]{36}$/.test(row.client_key)
       ? { spanPracticeOriginAttemptId: row.client_key.slice("span-variant:".length) } : {}),
+    ...(reservedQualification ? { reservedRetestQualification: reservedQualification } : {}),
     ...(routeBinding?{courseRequirement:routeBinding}:{}) };
 }
 
@@ -79,6 +87,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   if (replay[0]) {
     const replayIntent = { ...replay[0].create_intent as Record<string, unknown> };
     delete replayIntent.spanValidation;
+    delete replayIntent.reservedRetestQualification;
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
   }
@@ -127,10 +136,26 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   if (teachingQuestion) {
     const spec = teachingQuestion.spec;
     itemStem = Array.from(teachingQuestion.stem).slice(0, 2000).join("");
-    const [existing] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
+    const issued = await readOpeningReservedIssuedItem(tx, scope, String(session.activity_id), spec.blockId);
+    const [saved] = await tx`SELECT problem_id,id FROM opening_learning_item_versions
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
         AND activity_id=${String(session.activity_id)} AND teaching_revision_id=${spec.revisionId} AND teaching_block_id=${spec.blockId}
         AND evaluation_spec=${tx.json(spec)} ORDER BY created_at,id LIMIT 1`;
+    if (issued) {
+      // The issuer already created the sole canonical attempt. The actual web
+      // caller prepares a session before discovering it; resume the original,
+      // never create an unbound second attempt against an issued private key.
+      const [original] = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot
+        FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id
+          AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
+        WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
+          AND a.activity_id=${String(session.activity_id)} AND a.item_version_id=${String(issued.id)}
+          AND a.course_id=${courseId} AND a.problem_id=v.problem_id
+          AND a.client_key=${`reserved-issued:${String(issued.reserved_question_id)}`} FOR SHARE OF a,v`;
+      if (!original) throw learningError("CONFLICT", "保留题原始作答记录不可用，请返回原任务。");
+      return mapLearningAttempt(original);
+    }
+    const existing = saved;
     problemId = existing ? String(existing.problem_id) : randomUUID();
     itemVersionId = existing ? String(existing.id) : randomUUID();
     if (!existing) {

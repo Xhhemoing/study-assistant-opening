@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import type { Sql, TransactionSql } from "postgres";
+import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 import { createOpeningCourseExamRepository, createOpeningTeachingContentRepository, createOpeningLearningRepository,
   createOpeningAiGradingRepository, createOpeningExamSprintRepository, createScopedOpeningSystemQueryReader } from "@aistudy/database";
 import type { CourseExamProposal, ExamPack } from "@aistudy/contracts";
@@ -18,12 +20,100 @@ const proposal = (chunkId: string): CourseExamProposal => ({ title: "线性代�
     evidenceChunkIds: [chunkId], estimatedMinutes: 5 })) });
 async function seed() {
   const f = await learningAttemptFixture(fixture);
-  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${fixture.scope.workspaceId},${f.courseId},'source',${f.sourceId},'reference','private')`;
+  await fixture.sql`UPDATE course_asset_memberships SET role='reference',visibility='private'
+    WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${f.courseId} AND asset_type='source' AND asset_id=${f.sourceId}`;
   await fixture.sql`UPDATE opening_source_chunks SET text='线性代数期末真题：求矩阵的秩；判断列向量是否线性无关。' WHERE id=${f.chunkId}`;
   const repo = createOpeningCourseExamRepository(fixture.sql), input = { clientKey: randomUUID(), sourceId: f.sourceId, questionCount: 3 };
   return { ...f, repo, input, begin: () => repo.begin(fixture.scope, f.courseId, input) };
 }
+
+it.each(["begin", "read-expiry", "complete", "fail"] as const)("%s fences the nonempty exam graph before owner/course/source/sprint locks", async operation => {
+  const f = await seed(), ctx = await f.begin();
+  if (operation === "read-expiry") {
+    const earlier = new Date(Date.now() - 11 * 60_000).toISOString();
+    await fixture.sql`UPDATE opening_exam_sprints SET pack_snapshot=jsonb_set(pack_snapshot,'{requests,0,createdAt}',to_jsonb(${earlier}::text)) WHERE course_id=${f.courseId}`;
+  }
+  await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=17 WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const graph = () => fixture.sql`SELECT to_jsonb(s) AS sprint,
+    (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id),'[]'::jsonb) FROM opening_teaching_activities a WHERE a.course_id=${f.courseId}) AS activities
+    FROM opening_exam_sprints s WHERE course_id=${f.courseId}`;
+  const before = await graph();
+  expect(before).toHaveLength(1);
+  const holder = await openRaceSession().ready, writer = await openRaceSession().ready, probe = await openRaceSession().ready;
+  let release = () => {}, entered = () => {};
+  const opened = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const holding = track(holder.sql.begin(async tx => {
+    await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId} FOR UPDATE`;
+    entered(); await held;
+  }));
+  const pending: Promise<unknown>[] = [holding];
+  try {
+    await opened;
+    const repo = createOpeningCourseExamRepository(writer.sql);
+    const scope = { ...fixture.scope, workspaceId: fixture.scope.workspaceId.toUpperCase() };
+    const work = track<unknown>(operation === "begin" ? repo.begin(scope, f.courseId, { ...f.input, clientKey: randomUUID() })
+      : operation === "read-expiry" ? repo.read(scope, f.courseId)
+        : operation === "complete" ? repo.complete(scope, f.courseId, ctx.request.id, proposal(f.chunkId), null)
+          : repo.fail(scope, f.courseId, ctx.request.id, "failed"));
+    pending.push(work);
+    await waitUntilBlocked(fixture.sql, writer.pid, holder.pid, operation, /opening_workspace_history_revisions/);
+    expect(await graph()).toEqual(before);
+    await probe.sql.begin(async tx => {
+      await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE NOWAIT`;
+      await tx`SELECT id FROM courses WHERE id=${f.courseId} FOR UPDATE NOWAIT`;
+      await tx`SELECT id FROM opening_sources WHERE id=${f.sourceId} FOR UPDATE NOWAIT`;
+      await tx`SELECT id FROM opening_exam_sprints WHERE course_id=${f.courseId} FOR UPDATE NOWAIT`;
+    });
+    expect((await createOpeningCourseExamRepository(probe.sql).read(fixture.otherScope, await otherCourse())).papers).toEqual([]);
+    release(); await holding; await work;
+    expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual([{ revision: "17" }]);
+    expect(await graph()).not.toEqual(before);
+  } finally { release(); await Promise.allSettled(pending); await closeRace(holder.sql); await closeRace(writer.sql); await closeRace(probe.sql); }
+});
+
+async function otherCourse() {
+  const id = randomUUID();
+  await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${id},${fixture.otherScope.workspaceId},'Other',${id})`;
+  return id;
+}
+
+it("rolls back a lazy history ensure on source conflict, while preserving input and missing request errors", async () => {
+  const f = await seed();
+  await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+  await expect(f.repo.begin(fixture.scope, f.courseId, { ...f.input, sourceId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(f.repo.fail(fixture.scope, f.courseId, randomUUID(), "failed")).rejects.toMatchObject({ code: "NOT_FOUND" });
+  await expect(f.repo.begin(fixture.scope, "not-a-uuid", f.input)).rejects.toMatchObject({ code: "22P02" });
+  expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual([]);
+  expect(await fixture.sql`SELECT * FROM opening_exam_sprints WHERE course_id=${f.courseId}`).toEqual([]);
+});
+
+it("rejects course deletion after precheck and rolls the lazy history ensure back without retry", async () => {
+  const f = await seed();
+  await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const writer = await openRaceSession().ready;
+  let release = () => {}, enter = () => {};
+  const opened = new Promise<void>(resolve => { enter = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const wrapped = new Proxy(writer.sql, { get(target, property) {
+    if (property !== "begin") return Reflect.get(target, property);
+    return (work: (tx: TransactionSql) => Promise<unknown>) => target.begin(async tx => work(new Proxy(tx, {
+      apply(query, thisArg, args: [TemplateStringsArray, ...unknown[]]) {
+        const result = Reflect.apply(query, thisArg, args);
+        if (!/SELECT id FROM courses/.test(args[0].join("?"))) return result;
+        return Promise.resolve(result).then(async rows => { enter(); await held; return rows; });
+      },
+    })));
+  } }) as Sql;
+  const work = track(createOpeningCourseExamRepository(wrapped).begin(fixture.scope, f.courseId, f.input));
+  try {
+    await Promise.race([opened, work.then(() => { throw new Error("precheck barrier bypassed"); })]);
+    await fixture.sql`DELETE FROM courses WHERE id=${f.courseId}`;
+    release();
+    await expect(work).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual([]);
+  } finally { release(); await Promise.allSettled([work]); await closeRace(writer.sql); }
+});
 
 it("publishes a course-specific mock with hidden answers and grades free answers through the canonical loop", async () => {
   const f = await seed(), ctx = await f.begin();

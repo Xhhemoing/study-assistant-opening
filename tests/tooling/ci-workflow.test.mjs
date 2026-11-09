@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { load } from "js-yaml";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const workflow = readFileSync(`${root}.github/workflows/ci.yml`, "utf8").replaceAll("\r\n", "\n");
 const docs = readFileSync(`${root}docs/operations/ci.md`, "utf8").replaceAll("\r\n", "\n");
+const parsedJobs = load(workflow).jobs;
 
 function pushBranches(yaml) {
   const block = yaml.match(/^on:\n([\s\S]*?)\n\nconcurrency:/m)?.[1] ?? "";
@@ -58,7 +60,8 @@ test("operations doc binds release evidence to the exact SHA and says GitHub run
 test("static-unit installs the shared parser venv before real PDF renderer units", () => {
   const block = workflow.match(/^[ ]{2}static-unit:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   assert.ok(block, "static-unit job must exist");
-  assert.match(block, /^[ ]{4}env: \*quality-env$/m);
+  assert.deepEqual(parsedJobs["static-unit"].env, parsedJobs["handler-browser-spikes"].env,
+    "static-unit inherits the shared test env regardless of anchor location");
   const requiredSteps = [
     "      - *setup-parser-python",
     "      - *cache-parser-venv",
@@ -75,9 +78,9 @@ test("static-unit installs the shared parser venv before real PDF renderer units
 
   const parser = workflow.match(/^[ ]{2}integration-parser:\n[\s\S]*?(?=^[ ]{2}[a-z][\w-]*:|$(?![\s\S]))/m)?.[0];
   assert.ok(parser, "integration-parser job must exist");
-  assert.match(parser, /^[ ]{4}env: &quality-env$/m);
   for (const variable of ["PARSER_PYTHON", "PARSER_CWD", "HF_HOME", "HF_HUB_OFFLINE"]) {
-    assert.match(parser, new RegExp(`^      ${variable}:`, "m"));
+    assert.equal(parsedJobs["integration-parser"].env[variable], parsedJobs["static-unit"].env[variable],
+      `${variable} is shared by the real parser and PDF renderer units`);
   }
   previous = -1;
   for (const step of [
@@ -181,8 +184,57 @@ test("quality gate requires both split jobs and handler-browser-spikes shares th
   }
   assert.deepEqual([...gate].sort(), needs.filter((name) => !["changes", "docs"].includes(name)).sort(),
     "every worker the quality job waits for is also required to succeed");
-  assert.match(jobs["handler-browser-spikes"], /^[ ]{4}env: \*quality-env$/m);
-  assert.match(jobs["integration-parser"], /^[ ]{4}env: &quality-env$/m);
+  // Assert resolved consumer values, not which job happens to define the anchor.
+  const commonEnv = {
+    HERMES_HEAVY_ENABLED: "0",
+    NODE_ENV: "test",
+    OPENING_TEST_DB: "1",
+    E2E_DATABASE_URL: "postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e",
+    E2E_BASE_URL: "http://127.0.0.1:3000",
+    REDIS_URL: "redis://127.0.0.1:6379",
+    S3_ENDPOINT: "http://127.0.0.1:9000",
+    S3_REGION: "us-east-1",
+    S3_BUCKET: "aistudy",
+    S3_ACCESS_KEY_ID: "minioadmin",
+    S3_SECRET_ACCESS_KEY: "minioadmin",
+    S3_FORCE_PATH_STYLE: "true",
+    PUBLIC_BASE_URL: "http://localhost:3000",
+    AUTH_SECRET: "ci-test-auth-secret-at-least-32-chars",
+    SESSION_COOKIE_SECURE: "false",
+    SESSION_TTL_SECONDS: "3600",
+    AUTH_COOKIE_NAME: "aistudy_session",
+    PARSER_PYTHON: "${{ github.workspace }}/.local/docling-venv/bin/python",
+    PARSER_CWD: "${{ github.workspace }}/services/parser",
+    HF_HOME: "${{ github.workspace }}/.local/hf-home",
+    HF_HUB_OFFLINE: "1",
+  };
+  const testDatabaseUrl = "postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test";
+  for (const name of ["handler-browser-spikes", "static-unit", "build"]) {
+    assert.deepEqual(parsedJobs[name].env, {
+      ...commonEnv,
+      OPENING_TEST_DATABASE_URL: testDatabaseUrl,
+      DATABASE_URL: testDatabaseUrl,
+    }, `${name} retains the shared env and guarded test DB URLs`);
+  }
+  for (const name of ["handler-browser-spikes", "static-unit"]) {
+    assert.deepEqual(parsedJobs[name].services.postgres.ports, ["55432:5432"], `${name} test DB port`);
+    assert.deepEqual(parsedJobs[name].services["postgres-e2e"].ports, ["5433:5432"], `${name} E2E DB port`);
+  }
+
+  const { steps, ...integrationConfig } = parsedJobs["integration-parser"];
+  assert.deepEqual(integrationConfig.env, commonEnv, "integration job env excludes step-only database URLs");
+  assert.doesNotMatch(JSON.stringify(integrationConfig), /job\.services\.postgres\.ports/,
+    "the service port context is unavailable in job-level configuration");
+  assert.deepEqual(integrationConfig.services.postgres.ports, ["5432/tcp"], "integration allocates a dynamic host port");
+  assert.doesNotMatch(jobs["integration-parser"], /\b55432\b/, "integration must not consume the fixed handler DB port");
+  const integration = steps.find((step) => step.name === "Integration tests");
+  assert.ok(integration, "Integration tests step exists");
+  assert.match(integration.run, /^npm run test:integration(?: |$)/);
+  const integrationDatabaseUrl = "postgres://aistudy:aistudy@127.0.0.1:${{ job.services.postgres.ports[5432] }}/aistudy_opening_test";
+  assert.deepEqual(integration.env, {
+    OPENING_TEST_DATABASE_URL: integrationDatabaseUrl,
+    DATABASE_URL: integrationDatabaseUrl,
+  }, "both integration DB consumers use the allocated postgres port at step scope");
   const dir = `${root}.github/workflows/`;
   for (const file of readdirSync(dir).filter((name) => /\.ya?ml$/.test(name))) {
     assert.doesNotMatch(readFileSync(`${dir}${file}`, "utf8"), /^\s+cache:\s*["']?pip/m,

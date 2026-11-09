@@ -25,8 +25,6 @@ const choice: Question = { prompt: "计算 2/3 + 1/6", key: "B", interaction: { 
 
 async function seed(questions: Question[] = [numeric, choice]) {
   const base = await learningAttemptFixture(f);
-  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${f.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
   const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, {
     clientKey: randomUUID(), courseIds: [base.courseId], title: "分数运算", kind: "custom", targetDate: null,
     examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "独立完成分数加法",

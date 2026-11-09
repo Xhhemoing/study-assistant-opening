@@ -15,12 +15,16 @@ const content = vi.hoisted(() => ({
   getUnit: vi.fn(),
   writeUnitBlocks: vi.fn(),
   readRevision: vi.fn(),
-  publishActivitySpec: vi.fn(),
+  publishCompiledActivity: vi.fn(),
   validateActivitySourceRefs: vi.fn(),
 }));
 
 const model = vi.hoisted(() => ({ complete: vi.fn(), task: vi.fn() }));
 const readFocus = vi.hoisted(() => vi.fn());
+const assertRoute = vi.hoisted(() => vi.fn(async () => null as unknown));
+const admitReserved = vi.hoisted(() => vi.fn<typeof import("@aistudy/database").admitOpeningReservedCandidate>(async () => ({ privateRefId: "private-ref" })));
+const purposePins = vi.hoisted(() => ({ readSourcePurposePin: vi.fn(), assertSourcePurposePin: vi.fn(),
+  readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn() }));
 vi.mock("./model-gateway", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./model-gateway")>();
   const { createModelGateway } = await import("@aistudy/ai");
@@ -41,16 +45,38 @@ vi.mock("./model-gateway", async (importOriginal) => {
 
 vi.mock("@aistudy/database", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@aistudy/database")>()),
+  createLibraryRepository: () => ({ getDocument: vi.fn(async () => ({ currentRevisionNumber: 1 })) }),
   createOpeningTeachingActivitiesRepository: () => activities,
   createOpeningTeachingContentRepository: () => content,
+  createOpeningCourseReadySourcesRepository: () => purposePins,
   readOpeningTeachingCompilerFocus: readFocus,
-  assertOpeningCourseRouteReady: vi.fn(async () => {}),
+  admitOpeningReservedCandidate: admitReserved,
+  assertOpeningCourseRouteReady: assertRoute,
   readOpeningCourseRouteEvidenceRefs: vi.fn(async () => null),
   createOpeningSourceEmbeddingsRepository: () => ({
     authorizeChunks: async (_scope: unknown, chunks: SourceChunk[]) => ({ chunks, privacyEpoch: 0 }),
     hasIndex: async () => false,
   }),
 }));
+
+// Resolver cases supply their graph at the compiler boundary, BEFORE the real
+// wiring snapshots it. Mutating blockOrder after staging is intentionally refused.
+const stagedFixture = vi.hoisted(() => ({ blocks: null as Array<{ id: string; type: string; content: Record<string, unknown> }> | null }));
+vi.mock("../jobs/compile-teaching-unit", async importOriginal => {
+  const actual = await importOriginal<typeof import("../jobs/compile-teaching-unit")>();
+  return { ...actual, createTeachingCompilerPublishInput: (options: Parameters<typeof actual.createTeachingCompilerPublishInput>[0]) => {
+    const build = actual.createTeachingCompilerPublishInput({ ...options, writeLibraryBlocks: async blocks => {
+      await options?.writeLibraryBlocks?.(stagedFixture.blocks ?? blocks);
+    } });
+    return async (...args: Parameters<typeof build>) => {
+      const input = await build(...args);
+      if (stagedFixture.blocks) input.blockOrder = stagedFixture.blocks.map((block, position) => ({
+        blockId: block.id, position, blockType: block.type, role: position % 2 ? "answer_key" : "prompt",
+      }));
+      return input;
+    };
+  } };
+});
 
 import { createCompileTeachingUnitHandler } from "../jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "./compile-teaching-unit-wiring";
@@ -110,7 +136,15 @@ let published: ActivitySpecPublishInput[];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  stagedFixture.blocks = null;
   readFocus.mockResolvedValue({});
+  assertRoute.mockResolvedValue(null);
+  const pin = { activityId: ACTIVITY, courseId: null, materialUse: "teaching", sources: [{ sourceId: SOURCE, sourceVersion: 1,
+    membershipId: null, purposeRevision: null, purpose: null }] };
+  purposePins.readSourcePurposePin.mockResolvedValue(pin);
+  purposePins.assertSourcePurposePin.mockResolvedValue(undefined);
+  purposePins.readMaterialPurposePin.mockResolvedValue({ courseId: null, materialUse: "teaching", sources: pin.sources });
+  purposePins.assertMaterialPurposePin.mockResolvedValue(undefined);
   content.getActivitySpec.mockResolvedValue(null);
   content.validateActivitySourceRefs.mockResolvedValue(undefined);
   model.complete.mockImplementation(async (input: { text: string }) => modelAnswer(input));
@@ -131,7 +165,9 @@ beforeEach(() => {
   content.readRevision.mockImplementation(async () => ({
     blocks: writtenBlocks.map((b, position) => ({ ...b, position })),
   }));
-  content.publishActivitySpec.mockImplementation(async (_s: unknown, input: ActivitySpecPublishInput) => {
+  content.publishCompiledActivity.mockImplementation(async (_s: unknown, input: ActivitySpecPublishInput,
+    compiled: { blocks: typeof writtenBlocks }) => {
+    writtenBlocks = compiled.blocks;
     published.push(input);
     return { id: "spec-1" };
   });
@@ -183,7 +219,7 @@ async function blindFixture(lineage: string, failure?: string) {
     OPENING_TEACHING_SOLVER_FAMILY: "family-b", OPENING_TEACHING_GENERATOR_PROVIDER_ID: "p", OPENING_TEACHING_GENERATOR_MODEL: "real-model",
     OPENING_TEACHING_GENERATOR_FAMILY: "family-a" })) vi.stubEnv(name, value);
   const questionId = "22222222-2222-4222-8222-222222222222", keyId = "33333333-3333-4333-8333-333333333333";
-  const revisionId = "11111111-1111-4111-8111-111111111111", sourceTurnId = "server-owned-user-turn";
+  const sourceTurnId = "server-owned-user-turn";
   const parentId = lineage === "study-turn" ? `study-turn:${sourceTurnId}` : `study-activity:${ACTIVITY}`;
   const blocks = [{ id: questionId, type: "prompt", content: { text: "2+2", interaction: { kind: "numeric" } } },
     { id: keyId, type: "answer_key", content: { text: "", markdown: "4" } }] as Array<{ id: string; type: string; content: Record<string, unknown> }>;
@@ -227,8 +263,8 @@ async function blindFixture(lineage: string, failure?: string) {
     const row = ledger.get(id)!; row.state = "completed"; row.resultRef = options?.resultRef; return row;
   }) as typeof dependencies.budget.settle;
   dependencies.budget.markUnknown = vi.fn(async (_scope, id) => { parentUnknown = true; return ledger.get(id)!; }) as typeof dependencies.budget.markUnknown;
-  content.readRevision.mockImplementation(async () => ({ id: revisionId, blocks }));
-  content.publishActivitySpec.mockImplementation(async (_scope, input: ActivitySpecPublishInput) => {
+  stagedFixture.blocks = blocks;
+  content.publishCompiledActivity.mockImplementation(async (_scope, input: ActivitySpecPublishInput) => {
     expect(input.expectedVersion).toBe(currentVersion);
     currentVersion++; currentInput = input; return { version: currentVersion };
   });
@@ -238,12 +274,9 @@ async function blindFixture(lineage: string, failure?: string) {
   });
   activities.get.mockResolvedValue({ id: ACTIVITY, generateStatus: "needs_check" });
   const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
-  deps.buildProviderInput = async () => ({ instruction: "compile", text: "authorized sources", mode: "explain", chunks: [], imageParts: [], mediaCapability: "text_only", maxOutputTokens: 32 });
-  deps.buildPublishInput = async () => ({ activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
-    sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
-      { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
-      { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" },
-    ] });
+  const productionBuild = deps.buildPublishInput!;
+  deps.buildPublishInput = (ownedScope, body, _output, providerInput) =>
+    productionBuild(ownedScope, body, modelAnswer({ text: CHUNK, chunks: [chunk] }), providerInput);
   return { deps, sql, blocks, questionId, keyId, parentId, reservations, version: () => currentVersion, persisted: () => persisted };
 }
 
@@ -279,7 +312,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(model.complete).not.toHaveBeenCalled();
     expect(dependencies.budget.reserve).not.toHaveBeenCalled();
     expect(content.createUnit).not.toHaveBeenCalled();
-    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
     expect(activities.setGenerateStatus).toHaveBeenCalledWith(expect.anything(), ACTIVITY, "failed", expect.anything());
   });
 
@@ -340,13 +373,12 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     for (const [name, value] of Object.entries({ OPENING_TEACHING_SOLVER_PROVIDER_ID: "solver-p", OPENING_TEACHING_SOLVER_MODEL: "solver-model",
       OPENING_TEACHING_SOLVER_FAMILY: "family-b", OPENING_TEACHING_GENERATOR_PROVIDER_ID: "p", OPENING_TEACHING_GENERATOR_MODEL: "real-model",
       OPENING_TEACHING_GENERATOR_FAMILY: "family-a" })) vi.stubEnv(name, value);
-    const revisionId = "11111111-1111-4111-8111-111111111111";
     const questionId = "22222222-2222-4222-8222-222222222222";
     const keyId = "33333333-3333-4333-8333-333333333333";
-    content.readRevision.mockResolvedValue({ id: revisionId, blocks: [
+    stagedFixture.blocks = [
       { id: questionId, type: "prompt", content: { text: "2+2", interaction: { kind: "numeric" } } },
       { id: keyId, type: "answer_key", content: { answer: "4" } },
-    ] });
+    ];
     const stored: unknown[] = [];
     const sql = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
       if (parts.join(" ").includes("UPDATE opening_jobs")) stored.push(values);
@@ -355,24 +387,27 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     sql.json = ((value: unknown) => value) as typeof sql.json;
     const dependencies = shared();
     const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
-    const input = { instruction: "compile", text: "question", mode: "explain" as const, chunks: [], imageParts: [], mediaCapability: "text_only" as const, maxOutputTokens: 32 };
+    const input = await deps.buildProviderInput!(scope, payload);
     const output = await deps.callModel!(scope, input, { operationId: "compile:fake", resultRef: `teaching_activity:${ACTIVITY}` });
     model.complete.mockResolvedValue({ text: '{"answer":"4","family":"ignored"}', citedChunkIds: [], requestId: "fake", candidates: [], inputTokens: 1, outputTokens: 1 });
+    const publishInput = await deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, output, input);
     const beforeSend = vi.fn(async () => {});
     const receipts = await deps.blindSolveBeforePublish!(scope, { job, providerOutput: output, beforeSend, parentBudget: { id: `study-turn:server-turn` },
-      publishInput: { activityId: ACTIVITY, teachingUnitId: UNIT, expectedVersion: 0, revisionNumber: 2,
-        sourceRefs: [{ sourceId: SOURCE, version: 1 }], blockOrder: [
-          { blockId: questionId, position: 0, blockType: "prompt", role: "prompt" },
-          { blockId: keyId, position: 1, blockType: "answer_key", role: "answer_key" },
-        ] } });
+      publishInput });
+    const revisionId = receipts[0]!.identity.teachingRevisionId;
+    expect(revisionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(receipts).toMatchObject([{ decision: "match", identity: { teachingRevisionId: revisionId, sourceVersions: { [SOURCE]: 1 } } }]);
+    expect(content.readRevision).not.toHaveBeenCalled();
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
     expect(model.task).toHaveBeenLastCalledWith("teaching.solve");
     expect(model.complete.mock.calls.at(-1)![0]).toMatchObject({ text: "2+2", chunks: [] });
     expect(JSON.stringify(model.complete.mock.calls.at(-1)![0])).not.toContain('"4"');
     expect(dependencies.budget.reserve).toHaveBeenLastCalledWith(scope, expect.objectContaining({ parentBudget: { id: "study-turn:server-turn" } }));
     expect(stored).toHaveLength(1);
     expect(stored[0]).toEqual(expect.arrayContaining([job.id, scope.workspaceId, scope.ownerUserId]));
-    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
+    await deps.publishActivitySpec(scope, publishInput);
+    expect(content.publishCompiledActivity.mock.calls.at(-1)![2]).toMatchObject({ revisionId, blocks: stagedFixture.blocks });
   });
 
   it.each(["study-turn", "study-activity"])("publishes, promotes, reads and replays a receipt at the exact final version with %s lineage", async lineage => {
@@ -430,14 +465,8 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
 
   it("bounds optional solves to one per job, leaves other questions unknown", async () => {
     const f = await blindFixture("study-turn");
-    const originalBuild = f.deps.buildPublishInput!;
-    f.deps.buildPublishInput = async (...args) => {
-      const input = await originalBuild(...args);
-      const q2 = "55555555-5555-4555-8555-555555555555";
-      f.blocks.push({ id: q2, type: "prompt", content: { text: "3+1", interaction: { kind: "numeric" } } });
-      return { ...input, blockOrder: [...input.blockOrder, { blockId: q2, position: 2, blockType: "prompt", role: "prompt" },
-        { blockId: f.keyId, position: 3, blockType: "answer_key", role: "answer_key" }] };
-    };
+    f.blocks.push({ id: "55555555-5555-4555-8555-555555555555", type: "prompt", content: { text: "3+1", interaction: { kind: "numeric" } } },
+      { ...f.blocks[1]!, id: "66666666-6666-4666-8666-666666666666" });
     const result = await createCompileTeachingUnitHandler(f.deps)(job, payload) as { teachingBlindSolveReceipts: Record<string, TeachingBlindSolveReceipt> };
     expect(Object.values(result.teachingBlindSolveReceipts).map(receipt => receipt.decision)).toEqual(["match", "unknown"]);
     expect(model.complete).toHaveBeenCalledTimes(2);
@@ -462,12 +491,11 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(content.createUnit).toHaveBeenCalledWith(scope, expect.objectContaining({
       blocks: [expect.objectContaining({ type: "meta" })],
     }));
-    expect(content.writeUnitBlocks).toHaveBeenCalledWith(scope, UNIT, expect.any(Array));
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
     expect(writtenBlocks.length).toBeGreaterThan(0);
     expect(published).toHaveLength(1);
-    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
+    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.publishCompiledActivity.mock.invocationCallOrder[0]!);
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
-    expect(content.writeUnitBlocks.mock.invocationCallOrder[0]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
     const spec = published[0]!;
     expect(spec.revisionNumber).toBe(2);
     expect(spec.blockOrder.map((ref) => ref.blockId)).toEqual(writtenBlocks.map((b) => b.id));
@@ -480,8 +508,15 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(sent.text).toContain("学习意图：秩与零空间");
     expect(sent.chunks.map(chunk => chunk.id)).toContain(CHUNK);
     // Preserve formula provenance without treating a citation as a correctness check.
-    expect(writtenBlocks.find((b) => b.type === "formula")!.content).toEqual({
+    const formula = writtenBlocks.find((b) => b.type === "formula")!;
+    expect(formula.content).toEqual({
       latex: "\\operatorname{rank}(A) + \\dim N(A) = n", citedChunkIds: [CHUNK],
+      citationBinding: {
+        blockId: formula.id,
+        role: "teach", status: "bound",
+        refs: [{ sourceId: SOURCE, sourceVersion: 1, chunkId: CHUNK, page: 1 }],
+        factualSupport: "unverified",
+      },
     });
     const answerKey = writtenBlocks.find((b) => b.type === "answer_key")!;
     expect(answerKey.content).toMatchObject({ answer: "5 − 2 = 3", hints: rankHints, hidden: true });
@@ -509,6 +544,9 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
         if (query.includes("FROM opening_jobs")) return Promise.resolve([{ state: "running" }]);
         if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{ id: ACTIVITY, content_version: 0 }]);
         if (query.includes("FROM opening_teaching_units")) return Promise.resolve([{ id: UNIT, document_id: DOC }]);
+        if (query.includes("FROM library_documents") || query.includes("UPDATE library_documents")) return Promise.resolve([{
+          id: DOC, workspace_id: scope.workspaceId, current_revision_number: 1, title: "Lesson", lifecycle: "candidate",
+        }]);
         if (query.includes("FROM opening_sources")) return Promise.resolve([{ id: SOURCE, version: 1 }]);
         if (query.includes("FROM opening_source_versions")) return Promise.resolve([{ version: 1, availability: "available" }]);
         if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ id: CHUNK, source_version: 1 }]);
@@ -528,7 +566,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     const { createOpeningTeachingContentRepository } = await import("../../../../packages/database/src/repositories/opening-teaching-content");
     const repository = createOpeningTeachingContentRepository(sql);
     content.validateActivitySourceRefs.mockImplementation(repository.validateActivitySourceRefs);
-    content.publishActivitySpec.mockImplementation(repository.publishActivitySpec);
+    content.publishCompiledActivity.mockImplementation(repository.publishCompiledActivity);
     const dependencies = shared();
     const deps = createCompileTeachingUnitWorkerDeps(sql, dependencies);
     // Exercise the optional verifier once without an extra metadata publication.
@@ -537,8 +575,10 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     await createCompileTeachingUnitHandler(deps)(job, payload);
 
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
-    expect(content.publishActivitySpec).toHaveBeenCalledTimes(1);
+    expect(content.publishCompiledActivity).toHaveBeenCalledTimes(1);
     expect(sql.begin).toHaveBeenCalledTimes(2);
+    expect(queries.filter(({ query }) => /(?:UPDATE library_documents|INSERT INTO library_revisions|INSERT INTO library_blocks|INSERT INTO opening_teaching_activity_specs)/.test(query))
+      .map(({ transaction }) => transaction).every(transaction => transaction === 2)).toBe(true);
     // Every row lock must go through a begin() callback's handle, never the pool.
     const rowLocks = queries.filter(({ query }) => /\bFOR (UPDATE|SHARE)\b/.test(query));
     expect(rowLocks.length).toBeGreaterThan(0);
@@ -553,8 +593,8 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(chunkLocks.map(({ transaction }) => transaction)).toEqual([1, 2]);
     const routeChecks = queries.filter(({ query }) => query.includes("SELECT course_id,goal_json,create_intent FROM opening_teaching_activities"));
     expect(routeChecks.map(({ transaction }) => transaction)).toEqual([1, 2]);
-    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.writeUnitBlocks.mock.invocationCallOrder[0]!);
-    expect(content.writeUnitBlocks.mock.invocationCallOrder[0]).toBeLessThan(content.publishActivitySpec.mock.invocationCallOrder[0]!);
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
+    expect(content.validateActivitySourceRefs.mock.invocationCallOrder[0]).toBeLessThan(content.publishCompiledActivity.mock.invocationCallOrder[0]!);
     expect(verify).toHaveBeenCalledTimes(flag === "1" ? 1 : 0);
     expect(dependencies.budget.reserve).toHaveBeenCalledTimes(1);
     expect(dependencies.budget.settle).toHaveBeenCalledTimes(1);
@@ -571,7 +611,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
       activityId: ACTIVITY, sourceRefs: [{ sourceId: SOURCE, version: 1, page: 1, chunkId: CHUNK }],
     }));
     expect(content.writeUnitBlocks).not.toHaveBeenCalled();
-    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
   });
 
@@ -583,7 +623,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     content.validateActivitySourceRefs.mockRejectedValue(Object.assign(new Error("invalid chunk"), { code: "VALIDATION" }));
     await expect(createCompileTeachingUnitHandler(deps)(job, payload)).rejects.toMatchObject({ code: "VALIDATION" });
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
-    expect(content.publishActivitySpec).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
   });
 
@@ -607,7 +647,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
 
   it("publication still rejects refs invalidated after a successful preflight", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
-    content.publishActivitySpec.mockRejectedValue(Object.assign(new Error("source ref version no longer exists"), { code: "CONFLICT" }));
+    content.publishCompiledActivity.mockRejectedValue(Object.assign(new Error("source ref version no longer exists"), { code: "CONFLICT" }));
     await expect(createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()))(job, payload))
       .rejects.toMatchObject({ code: "CONFLICT" });
     expect(content.validateActivitySourceRefs).toHaveBeenCalledTimes(1);
@@ -668,7 +708,7 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
 
   it("a failed block write fails the job and marks the activity failed (no publish)", async () => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
-    content.writeUnitBlocks.mockRejectedValue(new Error("document revision conflict"));
+    content.publishCompiledActivity.mockRejectedValue(new Error("document revision conflict"));
     const run = createCompileTeachingUnitHandler(createCompileTeachingUnitWorkerDeps(jobStateSql, shared()));
     await expect(run(job, payload)).rejects.toThrow("document revision conflict");
     expect(published).toEqual([]);
@@ -709,5 +749,86 @@ describe("compile-teaching-unit worker wiring (compiler on)", () => {
     expect(published).toEqual([]);
     expect(content.writeUnitBlocks).not.toHaveBeenCalled();
     expect(statuses).toEqual(["generating", "failed"]);
+  });
+});
+
+
+describe("server-owned compiler purpose pin", () => {
+  it.each(["owned-course", null])("passes the owned activity course/use (%s) to the real retriever and checks the original pin in the final transaction", async courseId => {
+    const pin = { activityId: ACTIVITY, courseId, materialUse: "teaching", sources: [{ sourceId: SOURCE,
+      sourceVersion: 1, membershipId: "membership", purposeRevision: "2026-11-08T00:00:00.123456Z", purpose: "teaching" }] };
+    purposePins.readSourcePurposePin.mockResolvedValue(pin);
+    activities.get.mockResolvedValue({ id: ACTIVITY, courseId, intentSummary: "Lesson", intentKind: "material" });
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    expect(purposePins.readMaterialPurposePin).toHaveBeenCalledWith(scope, {
+      courseId, materialUse: "teaching", sourceIds: [SOURCE],
+    });
+    const output = await deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`, resultRef: `teaching_activity:${ACTIVITY}` });
+    const publish = await deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, output, input);
+    await deps.publishActivitySpec(scope, publish);
+    const callback = content.publishCompiledActivity.mock.calls.at(-1)![3] as (tx: typeof jobStateSql) => Promise<void>;
+    const originalTx = {} as typeof jobStateSql;
+    await callback(originalTx);
+    expect(purposePins.assertSourcePurposePin).toHaveBeenLastCalledWith(scope, pin, originalTx);
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(publish)).not.toContain("purposeRevision");
+    expect(JSON.stringify(input)).not.toContain("membership");
+  });
+  it("rejects changed-back purpose pins before send without recapture or model call", async () => {
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    const error = Object.assign(new Error("original purpose revision changed"), { code: "CONFLICT" });
+    purposePins.assertSourcePurposePin.mockRejectedValue(error);
+    await expect(deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`, resultRef: `teaching_activity:${ACTIVITY}` }))
+      .rejects.toBe(error);
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+  });
+  it("retains the same purpose authority for metadata promotion and rejects missing provenance", async () => {
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    const input = await deps.buildProviderInput!(scope, payload);
+    const output = modelAnswer({ text: CHUNK, chunks: [chunk] });
+    const publish = await deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, output, input);
+    await deps.publishActivitySpec(scope, { ...publish, expectedVersion: publish.expectedVersion + 1, verificationStatus: "structure_ok" });
+    expect(content.publishCompiledActivity).toHaveBeenCalled();
+    expect(() => deps.publishActivitySpec(scope, { ...publish, blockOrder: [...publish.blockOrder] }))
+      .toThrow("publication graph missing or changed");
+    publish.blockOrder[0]!.blockId = "changed";
+    expect(() => deps.publishActivitySpec(scope, publish)).toThrow("publication graph missing or changed");
+  });
+});
+
+describe("private reserved producer isolation", () => {
+  it("does not call a private producer or reserve its budget for a managed arithmetic route", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    activities.get.mockResolvedValue({ id: ACTIVITY, courseId: "course", routeManaged: true, intentSummary: "Arithmetic", intentKind: "material" });
+    assertRoute.mockResolvedValue({ requirementId: "requirement" });
+    const dependencies = shared(), deps = createCompileTeachingUnitWorkerDeps(jobStateSql, dependencies);
+    const parentBudget = { id: `study-activity:${ACTIVITY}` };
+    const input = await deps.buildProviderInput!(scope, payload, { parentBudget });
+    const output = await deps.callModel!(scope, input, { operationId: `compile-teaching-unit:${job.id}`,
+      resultRef: `teaching_activity:${ACTIVITY}`, parentBudget });
+    expect(model.complete).toHaveBeenCalledTimes(1);
+    expect(admitReserved).not.toHaveBeenCalled();
+    expect(purposePins.readSourcePurposePin).toHaveBeenCalledTimes(1);
+    expect(purposePins.assertSourcePurposePin).toHaveBeenCalled();
+    expect(JSON.stringify(input)).not.toContain("purposeRevision");
+    expect(dependencies.budget.reserve).toHaveBeenCalledTimes(1);
+    expect(dependencies.budget.reserve).toHaveBeenCalledWith(scope, expect.objectContaining({
+      requestId: `compile-teaching-unit:${job.id}`, parentBudget,
+    }));
+    expect(output.text).not.toContain("137*19");
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
+  });
+  it("rejects a private slot in the public compiler response before any persistence", async () => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared()), base = modelAnswer({ text: CHUNK, chunks: [chunk] });
+    const raw = { ...JSON.parse(base.text), reservedQuestions: [{ text: "137*19", interaction: { kind: "numeric" }, answer: "2603" }] };
+    const input = await deps.buildProviderInput!(scope, payload);
+    await expect(deps.buildPublishInput!(scope, { ...payload, teachingUnitId: UNIT }, { ...base, text: JSON.stringify(raw) }, input))
+      .rejects.toThrow("forbidden in public compile response");
+    expect(admitReserved).not.toHaveBeenCalled();
+    expect(content.writeUnitBlocks).not.toHaveBeenCalled();
   });
 });

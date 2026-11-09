@@ -1,10 +1,40 @@
-import type { Scope, TeachingBlockRef, TeachingSourceRef } from "@aistudy/contracts";
+import { z } from "zod";
+import { uuidSchema, type Scope, type TeachingBlockRef, type TeachingSourceRef } from "@aistudy/contracts";
 import { courseRouteActivityContextSchema, questionIdentitySchema, teachingMisconceptionsSchema, teachingQuestionInteractionSchema, teachingSourceRefSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer, type ResolvedCourseQuestion } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
+import { readOpeningReservedKey } from "./opening-course-reserved-selection";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
+
+// Persisted compiler metadata is not rendered question content or evidence of a
+// correct answer. Parse this closed representation before excluding it from
+// identity conditions; never open the stem to arbitrary extra/visual payloads.
+const citationMetadataSchema = z.object({
+  citedChunkIds: z.array(uuidSchema).optional(),
+  rejectedCitationCount: z.number().int().nonnegative().safe().optional(),
+  citationBinding: z.object({
+    blockId: uuidSchema,
+    role: z.enum(["teach", "prompt", "example", "answer_key", "meta"]),
+    status: z.enum(["bound", "missing", "mismatch"]),
+    refs: z.array(z.object({
+      sourceId: uuidSchema, sourceVersion: z.number().int().nonnegative().safe(),
+      chunkId: uuidSchema, page: z.number().int().positive().safe().nullable(),
+    }).strict()),
+    factualSupport: z.literal("unverified"),
+  }).strict().optional(),
+}).strict();
+const citationMetadataFields = ["citedChunkIds", "rejectedCitationCount", "citationBinding"];
+function hasValidCitationMetadata(block: Block, role: "prompt" | "answer_key"): boolean {
+  const metadata = citationMetadataSchema.safeParse(Object.fromEntries(
+    Object.entries(block.content).filter(([field]) => citationMetadataFields.includes(field)),
+  ));
+  if (!metadata.success) return false;
+  const binding = metadata.data.citationBinding;
+  return !binding || binding.blockId === block.id && binding.role === role;
+}
+
 export type TeachingQuestionSpec = {
   kind: "teaching_question"; specVersion: "teaching-question-v1";
   activityId: string; teachingUnitId: string; contentVersion: number;
@@ -121,7 +151,8 @@ export async function readResolvedTeachingQuestion(tx: TransactionSql, scope: Sc
         ${lock ? tx`FOR SHARE OF s` : tx``}`;
     if (!source || Number(source.version) !== Number(ref.version) || source.has_figures || String(source.mime).startsWith("image/")) return null;
   }
-  if (Object.keys(prompt.content).some(field => !["text", "markdown", "prompt", "question", "answer", "solution", "interaction"].includes(field))
+  if (!hasValidCitationMetadata(prompt, "prompt") || !hasValidCitationMetadata(key, "answer_key")) return null;
+  if (Object.keys(prompt.content).some(field => !["text", "markdown", "prompt", "question", "answer", "solution", "interaction", ...citationMetadataFields].includes(field))
     || /(?:图|figure|diagram|image|!\[|<img|\\includegraphics)/i.test(prompt.content.text)) return null;
   const identity = questionIdentitySchema.safeParse({ protocolVersion: "question-identity-1", identityRefId: spec.blockId,
     questionRef: { kind: "teaching_question", activityId: spec.activityId, documentId: spec.documentId,
@@ -215,6 +246,13 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
   }
   const stem = teachingQuestionText(blocks.find(block => block.id === spec.blockId)?.content);
   if (!stem) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
+  const reserved = await readOpeningReservedKey(tx, scope, String(item.id));
+  if (reserved) {
+    if (reserved.text !== stem) throw learningError("CONFLICT", "已发保留题身份不一致。");
+    // Deliberately omit key text: this helper also serves ordinary verification responses.
+    // The private deterministic key is not public reference material.
+    return { stem, misconceptions: [], sourceRefs: reserved.sourceRefs, referenceText: "" };
+  }
   const answer = blocks.find(block => block.id === spec.answerBlockId && ["answer_key", "solution"].includes(block.type));
   const text = resolved?.answer ?? teachingQuestionText(answer?.content);
   if (text && checkArithmeticAnswer(stem, text) === "incorrect") {

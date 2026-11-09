@@ -20,6 +20,8 @@ beforeEach(async () => { f=await createOpeningFixture(); gradingFixture=controll
 afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await f?.close(); });
 async function setup() {
   const courseId=randomUUID(), rows=backupRows(f.sql,f.scope), sourceId=await rows.source("uploaded",1), chunkId=await rows.chunk(sourceId,1);
+  // This fixture is plain text; visual evidence is covered by dedicated image cases.
+  await f.sql`UPDATE opening_source_chunks SET image_object_key=NULL WHERE id=${chunkId}`;
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'Verification policy',${courseId})`;
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility) VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
   const goal=await createOpeningLearningGoalRepository(f.sql).create(f.scope,{clientKey:randomUUID(),courseIds:[courseId],title:"掌握全课",kind:"custom",targetDate:null,examDate:null,weeklyMinutes:120,priority:1,learningMode:"understand",successCriteria:"独立解释"});
@@ -30,8 +32,6 @@ async function setup() {
 /** Real job/library/publish/attempt flow; only the model response is a controlled fixture. No external model is called. */
 async function compile(activity:TeachingActivity,variant=0,arithmetic=false){
   const deps=createCompileTeachingUnitWorkerDeps(f.sql,{budget:createOpeningBudgetRepository(f.sql),chunks:createOpeningSourceChunksRepository(f.sql),privacy:createOpeningPrivacyRepository(f.sql)});
-  // Arithmetic exercises keep the production input builder as well as publish/evaluation wiring.
-  if(!arithmetic)deps.buildProviderInput=async()=>({instruction:"教学编译测试",text:activity.intentSummary,chunks:await createOpeningSourceChunksRepository(f.sql).listForSources(f.scope,activity.sourceIds),mode:"explain",maxOutputTokens:5500,mediaCapability:"text_only",imageParts:[],outputFormat:"json"});
   deps.callModel=async(_scope,input,options)=>{await options.beforeSend?.();expect(input.chunks.length).toBeGreaterThan(0);return {text:JSON.stringify({itemTitles:[arithmetic?"数值运算":"秩与零空间"],blocks:arithmetic?[
     {type:"text",text:"加法可以按位计算，并通过减法核对。",citedChunkIds:input.chunks.map(chunk=>chunk.id)},
     ...[0,1].flatMap(index=>{

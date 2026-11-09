@@ -85,6 +85,10 @@ export async function readCourseRouteCompilation(db: Sql | TransactionSql, scope
       ? await readQuestionCoverage(db, scope, courseId, String(row!.id), String(row!.revision_id), row!.block_order as TeachingBlockRef[], row!.blocks as Block[])
       : { coverage: { savedQuestions: 0, withReferenceAnswers: 0, issuedQuestions: 0, unexposedEligibility: "unknown" as const },
         referenceChecks: { matched: 0, mismatched: 0, unsupported: 0 } };
+    item.reservedSupply = { status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" };
+    // Inventory is not exposure evidence for the saved/public questions above.
+    // In particular an unsupported private producer or an empty pool cannot turn
+    // their unknown historical qualification into either unseen or exhausted.
     item.questionCoverage = facts.coverage;
     item.referenceChecks = facts.referenceChecks;
     item.compilation = courseRequirementProgressSchema.shape.compilation.parse({

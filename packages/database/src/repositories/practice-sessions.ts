@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { createPracticeContentRepository } from "./practice-content";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
   mapSession,
   PracticeContentRepositoryError,
@@ -14,9 +15,11 @@ async function assertWorkspaceOwner(
   sql: Sql,
   workspaceId: string,
   ownerUserId: string,
+  lock = false,
 ): Promise<void> {
   const rows = await sql<{ owner_user_id: string }[]>`
     SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId} LIMIT 1
+    ${lock ? sql`FOR SHARE` : sql``}
   `;
   if (!rows.length) {
     throw new PracticeContentRepositoryError("NOT_FOUND", `Workspace not found: ${workspaceId}`);
@@ -36,14 +39,14 @@ export function createPracticeSessionRepository(sql: Sql): PracticeSessionReposi
     workspaceId: string;
     ownerUserId: string;
     sessionId: string;
-  }) {
+  }, lock = true) {
     const rows = await sql`
       SELECT * FROM practice_sessions
       WHERE workspace_id = ${input.workspaceId}
         AND owner_user_id = ${input.ownerUserId}
         AND id = ${input.sessionId}
       LIMIT 1
-      FOR UPDATE
+      ${lock ? sql`FOR UPDATE` : sql``}
     `;
     if (!rows[0]) {
       throw new PracticeContentRepositoryError(
@@ -69,16 +72,27 @@ export function createPracticeSessionRepository(sql: Sql): PracticeSessionReposi
       if (current[0]?.archived_at) {
         throw new PracticeContentRepositoryError("ARCHIVED", "Archived items cannot start a session");
       }
-      const rows = await sql`
-        INSERT INTO practice_sessions (
-          id, workspace_id, owner_user_id, practice_item_id, content_version
-        ) VALUES (
-          ${randomUUID()}, ${input.workspaceId}, ${input.ownerUserId},
-          ${input.practiceItemId}, ${item.contentVersion}
-        )
-        RETURNING *
-      `;
-      return mapSession(rows[0] as Row);
+      return sql.begin(async tx => {
+        const client = tx as Sql;
+        await lockWorkspaceLearningHistory(tx, input);
+        await assertWorkspaceOwner(client, input.workspaceId, input.ownerUserId, true);
+        const [current] = await tx`SELECT archived_at FROM practice_items
+          WHERE workspace_id=${input.workspaceId} AND id=${input.practiceItemId} FOR SHARE`;
+        if (!current) throw new PracticeContentRepositoryError("NOT_FOUND", "Practice item was not found");
+        if (current.archived_at) throw new PracticeContentRepositoryError("ARCHIVED", "Archived items cannot start a session");
+        const currentItem = await createPracticeContentRepository(client).getPublicItem({
+          workspaceId: input.workspaceId, itemId: item.id,
+        });
+        const rows = await tx`
+          INSERT INTO practice_sessions (
+            id, workspace_id, owner_user_id, practice_item_id, content_version
+          ) VALUES (
+            ${randomUUID()}, ${input.workspaceId}, ${input.ownerUserId},
+            ${input.practiceItemId}, ${currentItem.contentVersion}
+          ) RETURNING *
+        `;
+        return mapSession(rows[0] as Row);
+      });
     },
 
     async lock(input) {
@@ -88,8 +102,11 @@ export function createPracticeSessionRepository(sql: Sql): PracticeSessionReposi
 
     async recordHint(input) {
       await assertWorkspaceOwner(sql, input.workspaceId, input.ownerUserId);
+      await lockSession(input, false);
       return sql.begin(async (tx) => {
         const client = tx as Sql;
+        await lockWorkspaceLearningHistory(tx, input);
+        await assertWorkspaceOwner(client, input.workspaceId, input.ownerUserId, true);
         const session = await createPracticeSessionRepository(client).lock(input);
         if (session.submittedAt) {
           throw new PracticeContentRepositoryError("CONFLICT", "Submitted sessions cannot request hints");
@@ -117,17 +134,23 @@ export function createPracticeSessionRepository(sql: Sql): PracticeSessionReposi
 
     async recordAnswerReveal(input) {
       await assertWorkspaceOwner(sql, input.workspaceId, input.ownerUserId);
-      const session = await lockSession(input);
-      if (session.submittedAt) {
-        throw new PracticeContentRepositoryError("CONFLICT", "Submitted sessions cannot reveal answers");
-      }
-      const rows = await sql`
-        UPDATE practice_sessions
-        SET answer_revealed_at = COALESCE(answer_revealed_at, now())
-        WHERE id = ${session.id} AND workspace_id = ${input.workspaceId}
-        RETURNING *
-      `;
-      return mapSession(rows[0] as Row);
+      await lockSession(input, false);
+      return sql.begin(async tx => {
+        const client = tx as Sql;
+        await lockWorkspaceLearningHistory(tx, input);
+        await assertWorkspaceOwner(client, input.workspaceId, input.ownerUserId, true);
+        const session = await createPracticeSessionRepository(client).lock(input);
+        if (session.submittedAt) {
+          throw new PracticeContentRepositoryError("CONFLICT", "Submitted sessions cannot reveal answers");
+        }
+        const rows = await tx`
+          UPDATE practice_sessions
+          SET answer_revealed_at = COALESCE(answer_revealed_at, now())
+          WHERE id = ${session.id} AND workspace_id = ${input.workspaceId}
+          RETURNING *
+        `;
+        return mapSession(rows[0] as Row);
+      });
     },
 
     async markSubmitted(input) {

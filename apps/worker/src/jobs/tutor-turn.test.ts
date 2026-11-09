@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError, OpeningModelRoutingError } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
 import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
@@ -58,7 +58,9 @@ describe("tutor turn handler", () => {
       claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
-    const deps = { tutorJobs, chunks, budget, provider, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
+    // Unit adapter only; real admission and pin persistence are covered by purpose PG.
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: selectContext(input), mode: "lexical" as const, purposePin: { courseId: null, materialUse: "citation" as const, sources: [] }, assertCurrent: async () => {} }));
+    const deps = { tutorJobs, chunks, budget, provider, retrieveContext, config: { maxContextCharacters: 5000, reservedCents: 100, maxOutputTokens: 2048, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } };
     const freezeHelpInputSnapshot = vi.fn(async (): Promise<HelpInputSnapshot> => {
       const selected = jobs.getUserTurn.mock.results.at(-1)?.value;
       const saved = await selected as typeof turn & { studyIntent?: StudyIntentEvent };
@@ -69,6 +71,37 @@ describe("tutor turn handler", () => {
     const jobs = { ...tutorJobs, freezeHelpInputSnapshot };
     return { deps: { ...deps, tutorJobs: jobs }, tutorJobs: jobs, chunks, budget, provider };
   }
+
+  it("passes the persisted course and server-selected use, retaining the original pre-send assertion", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const assertCurrent = vi.fn(async () => {});
+    const purposePin = { courseId: claimedJob.conversationId, materialUse: "citation" as const, sources: [] };
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const, purposePin, assertCurrent }));
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId: claimedJob.conversationId, sourceVersions: { [chunkA.sourceId]: 0 } });
+    await createTutorTurnHandler({ ...deps, retrieveContext })(claimedJob.id);
+    expect(retrieveContext).toHaveBeenCalledWith({ workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      expect.objectContaining({ courseContext: { courseId: claimedJob.conversationId, materialUse: "citation" }, sourceIds: [chunkA.sourceId] }));
+    expect(assertCurrent).toHaveBeenCalledTimes(4);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), { materialPurposePin: purposePin });
+    expect(provider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("blocks the real provider send after the captured admission changes without retrying retrieval", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const assertCurrent = vi.fn(async () => { throw Object.assign(new Error("purpose changed"), { code: "CONFLICT" }); });
+    const retrieveContext = vi.fn(async (_scope, input) => ({ chunks: input.chunks, mode: "lexical" as const,
+      purposePin: { courseId: null, materialUse: "citation" as const, sources: [] }, assertCurrent }));
+    await expect(createTutorTurnHandler({ ...deps, retrieveContext })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(retrieveContext).toHaveBeenCalledOnce();
+    expect(provider.complete).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("fails closed rather than using the old lexical path when material admission is absent", async () => {
+    const { deps, provider } = setup();
+    await expect(createTutorTurnHandler({ ...deps, retrieveContext: undefined })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
 
   it.each(["继续学习", "继续", "下一步", "再来一道题", "带我继续学", "我们继续吧", "开始学习", "从哪里开始", "出一道题"])("opens a real course-scoped span action for %s before the proposal/model path", async text => {
     const { deps, tutorJobs, provider, budget } = setup();
@@ -110,7 +143,7 @@ describe("tutor turn handler", () => {
     })(claimedJob.id);
     expect(provider.complete).toHaveBeenCalledOnce();
     expect(provider.complete.mock.calls[0][0]).toMatchObject({ history, text });
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       text: "F = ma", contextSourceRefs: [{ sourceId: chunkA.sourceId, sourceVersion: 0 }],
     }));
     expect(tutorJobs.loadHistoryContext).toHaveBeenCalledTimes(1);
@@ -251,7 +284,7 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler({ ...deps,
       nextAction: { read: async () => { throw new Error("must not replace an active attempt"); }, assertCurrent: async () => {}, execute: async () => { throw new Error("must not execute"); } },
     })(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "F = ma" }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ text: "F = ma" }));
     expect(provider.complete).toHaveBeenCalledOnce();
   });
 
@@ -357,7 +390,7 @@ describe("tutor turn handler", () => {
       expect(budget.settle).toHaveBeenCalledOnce();
     });
     await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       text: "F = ma [1]", citations: [expect.objectContaining({ chunkId: chunkA.id })], candidates: [], enqueueMetadata: true,
     }));
     expect(provider.complete).toHaveBeenCalledOnce();
@@ -370,7 +403,7 @@ describe("tutor turn handler", () => {
   it("does not enqueue another metadata extraction for legacy structured answers", async () => {
     const { deps, tutorJobs } = setup();
     await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       enqueueMetadata: false, candidates: [expect.objectContaining({ payload: expect.objectContaining({ kind: "memory" }) })],
     }));
   });
@@ -392,7 +425,7 @@ describe("tutor turn handler", () => {
     const generated = streamExposures.generate.mock.calls[0][1];
     expect(generated).toMatchObject({ hintStage: null, initiatedBy: "user" });
     expect(tutorJobs.getUserTurn).toHaveBeenCalledWith(claimedJob.userTurnId, claimedJob.workspaceId, claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ generatedExposure: generated }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ generatedExposure: generated }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
 
@@ -418,7 +451,7 @@ describe("tutor turn handler", () => {
     await createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id);
     expect(stream.append).toHaveBeenCalledOnce();
     expect(onStreamUnavailable).toHaveBeenCalledOnce();
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "first second" }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ text: "first second" }));
   });
 
   it.each(["hint", "explain", "listen", "think_together"])("generates a context-only receipt in %s mode without claiming delivery", async mode => {
@@ -427,7 +460,7 @@ describe("tutor turn handler", () => {
       contextAnchor: { purpose: "material_read" as const, sourceId: chunkA.sourceId, sourceVersion: 0, chunkId: chunkA.id, page: 1 } };
     tutorJobs.getUserTurn.mockResolvedValueOnce(selected);
     await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       generatedExposure: expect.objectContaining({ releaseKey: `assistant:${claimedJob.assistantTurnId}`, contextAnchor: selected.contextAnchor,
         origin: "assistant", kind: mode === "explain" ? "solution" : "hint" }),
     }));
@@ -556,7 +589,7 @@ describe("tutor turn handler", () => {
     expect(provider.complete.mock.calls[0]![0].instruction).toContain("先确定受力方向");
     expect(provider.complete.mock.calls[0]![0].instruction).toContain('"weeklyMinutes":75');
     expect(provider.complete.mock.calls[0]![0].instruction).toContain('"course":{"assessmentEnabled":false}');
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ contextSourceRefs: expect.arrayContaining(context.sourceRefs) }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ contextSourceRefs: expect.arrayContaining(context.sourceRefs) }));
     const blocked = setup();
     await expect(createTutorTurnHandler({ ...blocked.deps, learnerContext: { read, assertCurrent: async () => { throw new Error("context changed"); } } })(claimedJob.id)).rejects.toThrow("context changed");
     expect(blocked.provider.complete).not.toHaveBeenCalled();
@@ -746,7 +779,7 @@ describe("tutor turn handler", () => {
     expect(input.history).toEqual([{ role: "user", text: "yesterday" }, { role: "assistant", text: "step two" }]);
     expect(input.instruction).toContain("完整答案");
     expect(budget.settle).toHaveBeenCalledWith(expect.anything(), "res-1", expect.any(Number), { resultRef: `opening_turn:${claimedJob.assistantTurnId}` });
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ jobId: claimedJob.id, assistantTurnId: claimedJob.assistantTurnId, text: "F = ma", candidates: [expect.objectContaining({ sourceIds: [chunkA.sourceId] })] }));
     expect(tutorJobs.completeTurn.mock.calls[0][0]).not.toHaveProperty("helpExposure");
   });
 
@@ -765,7 +798,7 @@ describe("tutor turn handler", () => {
       }),
     });
     await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       candidates: [{ payload: memory, sourceIds: [chunkA.sourceId] }],
     }));
   });
@@ -785,7 +818,7 @@ describe("tutor turn handler", () => {
       }),
     });
     await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       candidates: [
         { payload: task, sourceIds: [chunkA.sourceId] },
         { payload: memory, sourceIds: [chunkA.sourceId] },
@@ -807,7 +840,7 @@ describe("tutor turn handler", () => {
       }),
     });
     await createTutorTurnHandler(deps)(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       candidates: [
         { payload: task, sourceIds: [chunkA.sourceId] },
         { payload: memory, sourceIds: [chunkA.sourceId] },
@@ -1095,7 +1128,7 @@ describe("tutor turn handler", () => {
     tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 1 }] });
     const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [] })) };
     await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       contextSourceRefs: [
         { sourceId: chunkA.sourceId, sourceVersion: 0 },
         { sourceId: secondSourceId, sourceVersion: 1 },
@@ -1113,7 +1146,7 @@ describe("tutor turn handler", () => {
 
     await createTutorTurnHandler({ ...deps, privacy })(claimedJob.id);
 
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       expectedPrivacyEpoch: 7,
     }));
   });
@@ -1130,7 +1163,7 @@ describe("tutor turn handler", () => {
 
     await expect(createTutorTurnHandler({ ...deps, privacy })(claimedJob.id)).rejects.toThrow(/privacy epoch drift/);
 
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ expectedPrivacyEpoch: 7 }));
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({ expectedPrivacyEpoch: 7 }));
     expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
     expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
     expect(budget.markUnknown).not.toHaveBeenCalled();
@@ -1162,7 +1195,7 @@ describe("tutor turn handler", () => {
     const claimed = { ...claimedJob, mode: "hint" };
     deps.tutorJobs.claim = vi.fn(async () => claimed);
     await createTutorTurnHandler(deps)(claimed.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       helpExposure: expect.objectContaining({
         sessionId,
         turnId: claimed.assistantTurnId,
@@ -1186,7 +1219,7 @@ describe("tutor turn handler", () => {
     const claimed = { ...claimedJob, mode: "explain" };
     deps.tutorJobs.claim = vi.fn(async () => claimed);
     await createTutorTurnHandler(deps)(claimed.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       helpExposure: expect.objectContaining({
         sessionId,
         problemId: null,
@@ -1211,7 +1244,7 @@ describe("tutor turn handler", () => {
     const claimed = { ...claimedJob, mode: "explain" };
     deps.tutorJobs.claim = vi.fn(async () => claimed);
     await createTutorTurnHandler(deps)(claimed.id);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       helpExposure: expect.objectContaining({ attemptId, kind: "hint", level: "revealed" }),
     }));
   });
@@ -1237,7 +1270,7 @@ describe("tutor turn handler", () => {
     );
 
     expect(learning.insertHelpExposure).not.toHaveBeenCalled();
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       helpExposure: expect.objectContaining({ sessionId }),
     }));
   });
@@ -1274,7 +1307,7 @@ describe("tutor turn handler", () => {
 
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).resolves.toEqual({ skipped: false });
     expect(provider.complete).toHaveBeenCalledTimes(1);
-    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       text: "F = ma",
       citations: [],
     }));

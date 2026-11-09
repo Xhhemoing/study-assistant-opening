@@ -2,6 +2,7 @@
 # Verify the exact release SHA + CI, then prepare and atomically activate on Hermes.
 set -euo pipefail
 
+EXPLICIT_HOST="${HOST:-}"
 HOST="${HOST:-hermes}"
 DIR="${DIR:-/opt/aistudy}"
 RELEASES_DIR="${RELEASES_DIR:-${DIR}-releases}"
@@ -10,7 +11,9 @@ DEPLOY_STATE="${DEPLOY_STATE:-${DIR}-deployment}"
 BACKUP_DIR="${BACKUP_DIR:-${DIR}-backups}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 WORKER_CONFIG_DIR="${WORKER_CONFIG_DIR:-/etc/aistudy}"
-MIN_FREE_KB="${MIN_FREE_KB:-4194304}"
+MIN_FREE_KB="${MIN_FREE_KB:-6291456}"
+ARTIFACT_RUN_ID="${ARTIFACT_RUN_ID:-}"
+TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
@@ -32,7 +35,7 @@ verify_release() {
     DEPLOY_REMOTE=origin
     if git remote get-url study-assistant-opening >/dev/null 2>&1; then DEPLOY_REMOTE=study-assistant-opening; fi
   fi
-  local remote_sha remote_url repository ci_url ci_json
+  local remote_sha remote_url ci_json
   remote_sha="$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)"
   [[ "$COMMIT" == "$remote_sha" ]] || fail 'HEAD differs from the remote 发布主干 feat/opening-release.'
   remote_url="$(git remote get-url "$DEPLOY_REMOTE")"
@@ -51,22 +54,66 @@ verify_release() {
 
 remote_archive=''
 local_archive=''
-cleanup() { [[ -z "$local_archive" ]] || rm -f -- "$local_archive"; }
+artifact_directory=''
+control_archive=''
+remote_control=''
+artifact_digest=''
+cleanup() {
+  [[ -z "$local_archive" ]] || rm -f -- "$local_archive"
+  [[ -z "$control_archive" ]] || rm -f -- "$control_archive"
+  [[ -z "$artifact_directory" ]] || rm -rf -- "$artifact_directory"
+}
 trap cleanup EXIT
 if [[ "$ACTION" == deploy ]]; then
   verify_release
+  if [[ -n "$ARTIFACT_RUN_ID" ]]; then
+    [[ "$ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ && "$TARGET_SHA" == "$COMMIT" ]] || fail 'Artifact deployment requires explicit run ID and matching TARGET_SHA.'
+    [[ "$repository" == Xhhemoing/study-assistant-opening ]] || fail 'Artifact source must be the formal repository.'
+    [[ -n "$EXPLICIT_HOST" ]] || fail 'Explicit HOST is required for artifact deployment.'
+    [[ "$MIN_FREE_KB" =~ ^[1-9][0-9]*$ && "$MIN_FREE_KB" -ge 6291456 ]] || fail 'Artifact mode requires at least 6 GiB free space.'
+    artifact_directory="$(mktemp -d "${TMPDIR:-/tmp}/aistudy-download.XXXXXXXX")"
+    artifact_digest="$(node "$SCRIPT_DIR/verify-release-artifact.mjs" download "$COMMIT" "$ARTIFACT_RUN_ID" "$artifact_directory/payload")" || fail 'Artifact provenance verification failed; no rebuild fallback.'
+    local_archive="$artifact_directory/payload/release.tar.gz"
+    # Control-plane scripts come from reviewed Git, NOT from the downloaded blob.
+    control_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-control.XXXXXXXX.tar.gz")"
+    git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$control_archive" "$COMMIT" infra/deploy
+    [[ "$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)" == "$COMMIT" ]] || fail 'Release tip changed while verifying artifact.'
+  else
+    [[ -z "$TARGET_SHA" || "$TARGET_SHA" == "$COMMIT" ]] || fail 'TARGET_SHA differs from HEAD.'
+    local_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-source.XXXXXXXX.tar.gz")"
+    # Committed bytes only, without local CRLF conversion.
+    git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$local_archive" "$COMMIT"
+  fi
   ssh_run true || fail 'Trusted SSH connection unavailable; no deployment was attempted.'
-  local_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-source.XXXXXXXX.tar.gz")"
-  # The server matches committed text such as .worker-protocol exactly; local CRLF conversion must not apply.
-  git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$local_archive" "$COMMIT"
   remote_archive="$(ssh_run 'mktemp /tmp/aistudy-source.XXXXXXXX.tar.gz')"
   [[ "$remote_archive" =~ ^/tmp/aistudy-source\.[A-Za-z0-9]+\.tar\.gz$ ]] || fail 'Invalid remote staging path.'
   scp -q -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
     -- "$local_archive" "$HOST:$remote_archive"
+  if [[ -n "$ARTIFACT_RUN_ID" ]]; then
+    remote_control="$(ssh_run 'mktemp /tmp/aistudy-control.XXXXXXXX.tar.gz')"
+    [[ "$remote_control" =~ ^/tmp/aistudy-control\.[A-Za-z0-9]+\.tar\.gz$ ]] || fail 'Invalid remote control path.'
+    scp -q -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -- "$control_archive" "$HOST:$remote_control"
+    # Repeat latest CI and tip verification immediately before the managed transition.
+    verify_release
+    [[ "$TARGET_SHA" == "$COMMIT" && "$ci_url" == "https://github.com/Xhhemoing/study-assistant-opening/actions/runs/$ARTIFACT_RUN_ID" ]] || fail 'Target/latest CI changed.'
+  fi
 fi
 
 remote_command='bash -o pipefail -s --'
-for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive"; do
+for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive" "$artifact_digest" "$remote_control"; do
   remote_command+=" $(quote "$value")"
 done
-ssh_run "$remote_command" < "$SCRIPT_DIR/hermes-release.sh"
+if [[ "$ACTION" == status || "$ACTION" == logs ]]; then
+  ssh_run "$remote_command" < "$SCRIPT_DIR/hermes-release.sh"
+else
+  # The reviewed entry owns both supervisor and owner bytes. No remote installed
+  # helper or operator-started systemctl process is needed for crash fencing.
+  remote_command='entry=$(mktemp -d /tmp/aistudy-entry.XXXXXXXX) || exit; trap '\''rm -rf -- "$entry"'\'' EXIT; '
+  # The extractor is reviewed bootstrap text, not code read from the archive.
+  remote_command+="/usr/bin/python3 -I -S -B -c $(quote "$(< "$SCRIPT_DIR/hermes-entry.py")") extract \"\$entry\" || exit; "
+  remote_command+='node "$entry/hermes-supervisor.mjs" run "$entry/hermes-release.sh"'
+  for value in "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" "${COMMIT:-}" "$remote_archive" "$artifact_digest" "$remote_control"; do
+    remote_command+=" $(quote "$value")"
+  done
+  /usr/bin/python3 -I -S -B "$SCRIPT_DIR/hermes-entry.py" pack "$SCRIPT_DIR" | ssh_run "$remote_command"
+fi

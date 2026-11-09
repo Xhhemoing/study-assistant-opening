@@ -80,12 +80,20 @@ describe("parse failure source projection", () => {
   for (const change of ["version", "epoch", "ready", "unsupported", "excluded", "foreign workspace", "wrong owner"] as const) {
     it(`records job failure without overwriting a source after ${change} changes`, async () => {
       const { sourceId, job, repository, sources } = await seed();
+      let claimedSource: Record<string, unknown> | undefined;
+      const originalScopeHistory = change === "foreign workspace"
+        ? await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id = ${fixture.scope.workspaceId}`
+        : null;
       expect(await runJob(repository, job.id, async () => {
         if (change === "version") await fixture.sql`UPDATE opening_sources SET version = 1 WHERE id = ${sourceId}`;
         if (change === "epoch") await fixture.sql`UPDATE workspaces SET privacy_epoch = 1 WHERE id = ${fixture.scope.workspaceId}`;
         if (change === "ready" || change === "unsupported") await fixture.sql`UPDATE opening_sources SET parse_state = ${change} WHERE id = ${sourceId}`;
         if (change === "excluded") await fixture.sql`INSERT INTO opening_privacy_exclusions (workspace_id, source_id, deleted_at) VALUES (${fixture.scope.workspaceId}, ${sourceId}, now())`;
-        if (change === "foreign workspace") await fixture.sql`UPDATE opening_jobs SET workspace_id = ${fixture.otherScope.workspaceId}, owner_user_id = ${fixture.otherScope.ownerUserId} WHERE id = ${job.id}`;
+        if (change === "foreign workspace") {
+          [claimedSource] = await fixture.sql`SELECT * FROM opening_sources WHERE id = ${sourceId}`;
+          expect(claimedSource).toMatchObject({ workspace_id: fixture.scope.workspaceId, parse_state: "running" });
+          await fixture.sql`UPDATE opening_jobs SET workspace_id = ${fixture.otherScope.workspaceId}, owner_user_id = ${fixture.otherScope.ownerUserId} WHERE id = ${job.id}`;
+        }
         if (change === "wrong owner") await fixture.sql`UPDATE opening_jobs SET owner_user_id = ${fixture.otherScope.ownerUserId} WHERE id = ${job.id}`;
         throw new Error("conversion failed");
       })).toBe(true);
@@ -95,6 +103,13 @@ describe("parse failure source projection", () => {
         // PARSE_STALE failure so the inbox does not stay pending forever.
         expect(record.parseState).toBe("failed");
         expect(record.error).toMatchObject({ code: "PARSE_STALE", retryable: false });
+      } else if (change === "foreign workspace") {
+        // Failure cleanup is fenced to the job's new workspace, not the original source's scope.
+        expect(record).toMatchObject({ parseState: "running", error: null });
+        expect(await fixture.sql`SELECT * FROM opening_sources WHERE id = ${sourceId}`).toEqual([claimedSource]);
+        expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id = ${fixture.scope.workspaceId}`)
+          .toEqual(originalScopeHistory);
+        expect(await repository.get(fixture.otherScope, job.id)).toMatchObject({ state: "failed" });
       } else {
         expect(record.parseState).toBe(change === "ready" || change === "unsupported" ? change : "not_started");
         expect(record.error).toBeNull();

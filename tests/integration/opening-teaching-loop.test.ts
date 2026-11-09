@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Sql, TransactionSql } from "postgres";
 import type { ActivitySpecPublishInput } from "@aistudy/contracts";
 import {
   conversationResumeSchema,
@@ -13,10 +14,13 @@ import {
   type TeachingActivity,
 } from "@aistudy/contracts";
 import {
+  createLibraryRepository,
+  createOpeningTeachingCommandsRepository,
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   createOpeningTeachingContentRepository,
   createOpeningTeachingActivitiesRepository,
+  ensureCourseContinueActivity,
 } from "@aistudy/database";
 import { probeMaterialsAvailability } from "@aistudy/domain";
 import {
@@ -34,6 +38,7 @@ import { createOpeningTeachingResumeService } from "../../apps/web/src/features/
 import { isTeachingWorkspaceContentUsable } from "../../apps/web/src/features/opening/teaching/teaching-workspace";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 let f: OpeningFixture;
 
@@ -50,8 +55,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!f) return;
-  await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.close();
+  try {
+    await f.sql.begin(async tx => {
+      await tx`TRUNCATE library_revisions`;
+      await tx`DELETE FROM opening_learning_sessions WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
+      await tx`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
+    });
+  } finally {
+    await f.close();
+  }
 });
 
 beforeEach(async () => {
@@ -83,26 +95,30 @@ beforeEach(async () => {
   await f.sql`DELETE FROM courses WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
 });
 
-async function seedCourseSource() {
+async function seedCourseSource(withMembership = true) {
   const rows = backupRows(f.sql, f.scope);
   const sourceId = await rows.source();
   const chunkId = await rows.chunk(sourceId);
   const courseId = randomUUID();
   await f.sql`INSERT INTO courses (id, workspace_id, title, slug)
     VALUES (${courseId}, ${f.scope.workspaceId}, 'V2-16 teaching loop', ${courseId})`;
+  if (withMembership) {
+    await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+      VALUES (${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
+  }
   return { courseId, sourceId, chunkId };
 }
 
 describe("ActivitySpec publication source trust boundary (PG)", () => {
   async function seedBoundary() {
-    const { courseId, sourceId, chunkId } = await seedCourseSource();
+    const { courseId, sourceId, chunkId } = await seedCourseSource(false);
     const oldChunkId = randomUUID();
     await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
     await f.sql`UPDATE opening_source_chunks SET source_version=2 WHERE id=${chunkId}`;
     await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
       VALUES (${oldChunkId},${sourceId},1,1,'历史版本')`;
     const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
-      clientKey: randomUUID(), intentKind: "material", intentSummary: "边界", courseId, sourceIds: [sourceId], createIntent: {},
+      clientKey: randomUUID(), intentKind: "material", intentSummary: "边界", courseId, sourceIds: [], createIntent: {},
     });
     const content = createOpeningTeachingContentRepository(f.sql);
     const unit = await content.createUnit(f.scope, { title: "边界", blocks: [{ id: randomUUID(), type: "text", content: { text: "seed" } }] });
@@ -280,6 +296,441 @@ async function seedReadyTeachingContent(activity: TeachingActivity) {
   const clientInit = await content.getClientInit(f.scope, activity.id);
   return { unit, clientInit, activity: refreshed };
 }
+
+describe("teaching command history and rewrite atomicity (PG)", () => {
+  async function ready() {
+    const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+      clientKey: randomUUID(), intentKind: "topic", intentSummary: "Atomic command", sourceIds: [], createIntent: {},
+    });
+    return seedReadyTeachingContent(activity);
+  }
+
+  async function graph(sql: Sql = f.sql) {
+    const rows = [];
+    for (const table of ["library_documents", "library_blocks", "library_revisions", "opening_teaching_units",
+      "opening_teaching_activity_specs", "opening_teaching_activities", "opening_workspace_history_revisions",
+      "opening_jobs", "opening_outbox", "opening_budget_reservations"]) {
+      rows.push(await sql`SELECT to_jsonb(t) AS row FROM ${sql(table)} t WHERE workspace_id=${f.scope.workspaceId} ORDER BY to_jsonb(t)::text`);
+    }
+    return JSON.stringify(rows);
+  }
+
+  async function watermark() {
+    return f.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+      AND owner_user_id=${f.scope.ownerUserId}`;
+  }
+
+  function rewrite(activity: TeachingActivity) {
+    return { clientKey: randomUUID(), kind: "rephrase" as const, blockId: blockA,
+      expectedVersion: activity.contentVersion, expectedPathVersion: activity.pathVersion, expectedRevisionNumber: 1,
+      prompt: "Simpler explanation" };
+  }
+
+  // Execute all SQL unchanged; pause/fail only after the real revision write,
+  // immediately before the command's spec UPDATE. No canned SQL results.
+  function beforeSpec(sql: Sql, effect: (tx: TransactionSql) => Promise<void>): Sql {
+    return new Proxy(sql, { get(target, property) {
+      if (property === "begin") return (callback: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => {
+        const wrapped = new Proxy(tx, { apply(client, _self, args: [TemplateStringsArray, ...unknown[]]) {
+          const query = Array.isArray(args[0]) && args[0].join("?");
+          if (query && query.includes("UPDATE opening_teaching_activity_specs")) {
+            return effect(tx).then(() => Reflect.apply(client, client, args));
+          }
+          return Reflect.apply(client, client, args);
+        } });
+        return callback(wrapped);
+      });
+      return Reflect.get(target, property);
+    } });
+  }
+
+  it("waits on history before workspace/job/activity/spec/document locks, then succeeds without advancing history", async () => {
+    const x = await ready(), history = await watermark();
+    const jobId = randomUUID(), token = randomUUID();
+    await f.sql`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,state,claim_token)
+      VALUES(${jobId},${f.scope.workspaceId},${f.scope.ownerUserId},${randomUUID()},'compile-teaching-unit','{}','running',${token})`;
+    const [workspace] = await f.sql`SELECT privacy_epoch FROM workspaces WHERE id=${f.scope.workspaceId}`;
+    const scope = { ...f.scope, jobExecution: { id: jobId, token, privacyEpoch: Number(workspace!.privacy_epoch) } };
+    const holder = openRaceSession(), writer = openRaceSession(), probe = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready, probe.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("history holder ended before opening"); })]);
+      const command = track(createOpeningTeachingCommandsRepository(writer.sql).executeCommand(scope, x.activity.id, rewrite(x.activity)));
+      pending.push(command);
+      await waitUntilBlocked(f.sql, writer.pid, holder.pid, "teaching command history", /opening_workspace_history_revisions/);
+      await probe.sql.begin(async tx => {
+        expect(await tx`SELECT id FROM workspaces WHERE id=${f.scope.workspaceId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_jobs WHERE id=${jobId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_teaching_activities WHERE id=${x.activity.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_teaching_activity_specs WHERE activity_id=${x.activity.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM library_documents WHERE id=${x.unit.documentId} FOR UPDATE NOWAIT`).toHaveLength(1);
+      });
+      release(); await holding;
+      expect(await command).toMatchObject({ ok: true, revisionNumber: 2 });
+      expect(await watermark()).toEqual(history);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end(), probe.sql.end()]);
+    }
+  });
+
+  it.each([false, true])("keeps the old complete graph outside the rewrite transaction; injected failure=%s", async fail => {
+    const x = await ready(), old = await graph(), history = await watermark();
+    const writer = openRaceSession(), observer = openRaceSession();
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([writer.ready, observer.ready]);
+      const sql = beforeSpec(writer.sql, async tx => {
+        expect(await tx`SELECT revision_number FROM library_revisions WHERE document_id=${x.unit.documentId} ORDER BY revision_number`)
+          .toEqual([{ revision_number: 1 }, { revision_number: 2 }]);
+        expect((await tx`SELECT current_revision_number FROM library_documents WHERE id=${x.unit.documentId}`)[0]?.current_revision_number).toBe(2);
+        const blocks = await tx`SELECT content FROM library_blocks WHERE document_id=${x.unit.documentId} AND id=${blockA}`;
+        expect(blocks[0]?.content).not.toEqual({ markdown: "矩阵的秩与零空间维数之和等于列数。" });
+        entered(); await held;
+        if (fail) throw new Error("injected command failure after revision before spec");
+      });
+      const request = rewrite(x.activity);
+      const command = track(createOpeningTeachingCommandsRepository(sql).executeCommand(f.scope, x.activity.id, request));
+      pending.push(command);
+      await Promise.race([reached, command.then(() => { throw new Error("command missed spec barrier"); })]);
+      expect(await graph(observer.sql)).toBe(old);
+      release();
+      if (fail) {
+        await expect(command).rejects.toThrow("injected command failure after revision before spec");
+        expect(await graph(observer.sql)).toBe(old);
+      } else {
+        expect(await command).toMatchObject({ ok: true, contentVersion: x.activity.contentVersion + 1, revisionNumber: 2 });
+        expect(await observer.sql`SELECT revision_number FROM library_revisions WHERE document_id=${x.unit.documentId} ORDER BY revision_number`)
+          .toEqual([{ revision_number: 1 }, { revision_number: 2 }]);
+        expect((await observer.sql`SELECT revision_number,version FROM opening_teaching_activity_specs WHERE activity_id=${x.activity.id}`)[0])
+          .toMatchObject({ revision_number: 2, version: x.activity.contentVersion + 1 });
+        expect((await observer.sql`SELECT current_revision_number FROM opening_teaching_units WHERE id=${x.unit.id}`)[0]?.current_revision_number).toBe(2);
+        const [activity] = await observer.sql`SELECT content_version,checkpoint_json FROM opening_teaching_activities WHERE id=${x.activity.id}`;
+        expect(activity?.content_version).toBe(x.activity.contentVersion + 1);
+        expect(activity?.checkpoint_json.commandReplay[request.clientKey]).toMatchObject({ ok: true, revisionNumber: 2 });
+        const committed = await graph(observer.sql);
+        // CAS is intentionally ahead of replay: an old rewrite retry stays stale.
+        expect(await createOpeningTeachingCommandsRepository(writer.sql).executeCommand(f.scope, x.activity.id, request))
+          .toMatchObject({ ok: false, conflict: "stale_content_version" });
+        expect(await graph(observer.sql)).toBe(committed);
+      }
+      expect(await watermark()).toEqual(history);
+      expect(await observer.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await observer.sql`SELECT id FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await observer.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([writer.sql.end(), observer.sql.end()]);
+    }
+  });
+
+  it("maps a document advanced before rewrite to stale_revision with no partial command writes", async () => {
+    const x = await ready();
+    await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: x.unit.documentId,
+      expectedRevisionNumber: 1, blocks: [{ id: blockA, type: "text", content: { text: "concurrent library edit" } }] });
+    const old = await graph();
+    expect(await createOpeningTeachingCommandsRepository(f.sql).executeCommand(f.scope, x.activity.id, rewrite(x.activity)))
+      .toMatchObject({ ok: false, conflict: "stale_revision" });
+    expect(await graph()).toBe(old);
+  });
+
+  it("preserves skip/why replay, CAS precedence, mismatch, generation, revision/draft and completed/ownership gates", async () => {
+    const x = await ready(), commands = createOpeningTeachingCommandsRepository(f.sql), history = await watermark();
+    const skip = { clientKey: randomUUID(), kind: "skip" as const, blockId: blockA, expectedVersion: x.activity.contentVersion };
+    expect(await commands.executeCommand(f.scope, x.activity.id, skip)).toMatchObject({ ok: true, pathVersion: 2 });
+    expect(await commands.executeCommand(f.scope, x.activity.id, skip)).toMatchObject({ ok: true, replayed: true, pathVersion: 2 });
+    const why = { ...skip, clientKey: randomUUID(), kind: "why" as const };
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, assist: { kind: "why" } });
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, replayed: true });
+    const old = await graph();
+    for (const [request, conflict] of [
+      [{ ...skip, expectedVersion: 0 }, "stale_content_version"],
+      [{ ...skip, expectedPathVersion: 1 }, "stale_path_version"],
+      [{ ...skip, kind: "why" as const }, "client_key_intent_mismatch"],
+      [{ ...rewrite(x.activity), expectedPathVersion: 2, expectedRevisionNumber: 99 }, "stale_revision"],
+    ] as const) expect(await commands.executeCommand(f.scope, x.activity.id, request)).toMatchObject({ ok: false, conflict });
+    expect(await graph()).toBe(old);
+    await f.sql`UPDATE opening_teaching_activities SET generate_status='generating' WHERE id=${x.activity.id}`;
+    expect(await commands.executeCommand(f.scope, x.activity.id, { ...rewrite(x.activity), expectedPathVersion: 2 }))
+      .toMatchObject({ ok: false, conflict: "generate_in_flight" });
+    const lostBlock = randomUUID();
+    await f.sql`UPDATE opening_teaching_activities SET generate_status='ready',
+      checkpoint_json=jsonb_set(checkpoint_json,'{drafts}',${f.sql.json([{ blockId: lostBlock, contentVersion: 1, draftText: "keep" }])}) WHERE id=${x.activity.id}`;
+    const draftGraph = await graph();
+    expect(await commands.executeCommand(f.scope, x.activity.id, { ...rewrite(x.activity), expectedPathVersion: 2 }))
+      .toMatchObject({ ok: false, conflict: "draft_anchor_lost", lostBlockIds: [lostBlock] });
+    expect(await graph()).toBe(draftGraph);
+    await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${x.activity.id}`;
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, replayed: true });
+    const completed = await graph();
+    await expect(commands.executeCommand(f.scope, x.activity.id, { ...why, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(commands.executeCommand(f.otherScope, x.activity.id, why)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(commands.executeCommand({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, x.activity.id, why))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await graph()).toBe(completed);
+    expect(await watermark()).toEqual(history);
+    expect(await f.sql`SELECT id FROM library_revisions WHERE document_id=${x.unit.documentId}`).toHaveLength(1);
+  });
+});
+
+describe("teaching root batch history fence (PG)", () => {
+  const roots = ["ensure", "status", "generate", "request", "enqueue"] as const;
+  type Root = typeof roots[number];
+  async function seed() {
+    const { courseId, sourceId } = await seedCourseSource();
+    const repo = createOpeningTeachingActivitiesRepository(f.sql);
+    const activity = await repo.create(f.scope, { clientKey: randomUUID(), intentKind: "material",
+      intentSummary: "Batch root", courseId, sourceIds: [sourceId], createIntent: {} });
+    // A real, nonempty teaching + learning graph must survive every failed root.
+    await seedReadyTeachingContent(await repo.create(f.scope, { clientKey: randomUUID(), intentKind: "topic",
+      intentSummary: "Existing content", courseId, sourceIds: [sourceId], createIntent: {} }));
+    const learning = createOpeningLearningRepository(f.sql);
+    const session = await learning.createSession(f.scope, { activityId: activity.id, courseId, sourceIds: [sourceId], skillLabel: "Batch" });
+    await learning.insertObservation(f.scope, { sessionId: session.id, courseId, sourceIds: [sourceId], skillLabel: "Batch",
+      answer: "Existing answer", outcome: "incorrect", assistance: "independent", clientKey: randomUUID() });
+    const jobId = randomUUID(), token = randomUUID();
+    await f.sql`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,state,claim_token)
+      VALUES(${jobId},${f.scope.workspaceId},${f.scope.ownerUserId},${randomUUID()},'compile-teaching-unit','{}','running',${token})`;
+    const [workspace] = await f.sql`SELECT privacy_epoch FROM workspaces WHERE id=${f.scope.workspaceId}`;
+    return { activity, courseId, jobId, token,
+      scope: { ...f.scope, jobExecution: { id: jobId, token, privacyEpoch: Number(workspace!.privacy_epoch) } } };
+  }
+  type Seed = Awaited<ReturnType<typeof seed>>;
+  function run(sql: Sql, root: Root, x: Seed) {
+    const repo = createOpeningTeachingActivitiesRepository(sql);
+    switch (root) {
+      case "ensure": return ensureCourseContinueActivity(sql, x.scope, x.courseId);
+      case "status": return repo.setStatus(x.scope, x.activity.id, { status: "paused", expectedUpdatedAt: x.activity.updatedAt });
+      case "generate": return repo.setGenerateStatus(x.scope, x.activity.id, "generating", { from: ["ready"] });
+      case "request": return repo.requestCompile(x.scope, x.activity.id, "batch-request");
+      case "enqueue": return repo.enqueueCompileTeachingUnit(x.scope, { activityId: x.activity.id, mode: "generate",
+        clientKey: "batch-enqueue", expectedContentVersion: 0, sourceIds: x.activity.sourceIds });
+    }
+  }
+  async function graph() {
+    const rows = [];
+    for (const table of ["courses", "course_asset_memberships", "opening_teaching_activities", "opening_teaching_activity_specs",
+      "opening_teaching_units", "library_documents", "library_blocks", "library_revisions", "opening_learning_sessions",
+      "opening_learning_observations", "opening_source_versions", "opening_workspace_history_revisions",
+      "opening_learning_history_revisions", "opening_jobs", "opening_outbox", "opening_budget_reservations"]) {
+      rows.push(await f.sql`SELECT to_jsonb(t) AS row FROM ${f.sql(table)} t
+        WHERE workspace_id=${f.scope.workspaceId} ORDER BY to_jsonb(t)::text`);
+    }
+    return JSON.stringify(rows);
+  }
+  const watermark = () => f.sql`SELECT revision FROM opening_workspace_history_revisions
+    WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+
+  it.each(roots)("%s waits on history before business locks; other workspace progresses; watermark stays unchanged", async root => {
+    const x = await seed(), before = await graph(), history = await watermark();
+    const other = await createOpeningTeachingActivitiesRepository(f.sql).create(f.otherScope, { clientKey: randomUUID(),
+      intentKind: "topic", intentSummary: "Independent workspace", createIntent: {} });
+    const holder = openRaceSession(), writer = openRaceSession(), probe = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready, probe.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("history holder ended early"); })]);
+      const mutation = track(run(writer.sql, root, x)); pending.push(mutation);
+      await waitUntilBlocked(f.sql, writer.pid, holder.pid, `batch ${root}`, /opening_workspace_history_revisions/);
+      await probe.sql.begin(async tx => {
+        expect(await tx`SELECT id FROM workspaces WHERE id=${f.scope.workspaceId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_jobs WHERE id=${x.jobId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM courses WHERE id=${x.courseId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_teaching_activities WHERE id=${x.activity.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+      });
+      expect(await createOpeningTeachingActivitiesRepository(probe.sql).setGenerateStatus(f.otherScope, other.id, "failed")).toBe(true);
+      expect(await createOpeningTeachingActivitiesRepository(probe.sql).setGenerateStatus(f.otherScope, x.activity.id, "failed")).toBe(false);
+      expect(await graph()).toBe(before);
+      release(); await holding; await mutation;
+      expect(await graph()).not.toBe(before);
+      expect(await watermark()).toEqual(history);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end(), probe.sql.end()]);
+    }
+  });
+
+  it.each([
+    "missing status", "status CAS", "completed status", "missing request", "completed request", "queued request",
+    "content request", "source request", "purpose request", "dedup request", "ordinary from-set", "missing generate",
+    "stale token", "stale state", "stale epoch", "missing course", "completed enqueue", "purpose enqueue", "dedup enqueue",
+  ])("priority %s returns the original no-write result while history is held", async name => {
+    const x = await seed(), repo = createOpeningTeachingActivitiesRepository(f.sql);
+    if (name.startsWith("completed")) await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${x.activity.id}`;
+    if (name === "queued request") await f.sql`UPDATE opening_teaching_activities SET generate_status='queued' WHERE id=${x.activity.id}`;
+    if (name === "content request") await f.sql`UPDATE opening_teaching_activities SET content_version=1 WHERE id=${x.activity.id}`;
+    if (name === "source request") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id)
+      VALUES(${f.scope.workspaceId},${x.activity.sourceIds[0]!})`;
+    if (name.startsWith("purpose")) {
+      await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
+      // A read-only request probe must not journal versions on its way to this failure.
+      await f.sql`DELETE FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`;
+    }
+    const input = { activityId: x.activity.id, mode: "generate" as const, clientKey: "priority-dedup", expectedContentVersion: 0 };
+    if (name.startsWith("dedup")) {
+      await repo.enqueueCompileTeachingUnit(f.scope, input);
+      await f.sql`UPDATE opening_teaching_activities SET generate_status='ready' WHERE id=${x.activity.id}`;
+    }
+    if (name === "stale state") await f.sql`UPDATE opening_jobs SET state='cancelled' WHERE id=${x.jobId}`;
+    const before = await graph(), holder = openRaceSession(), writer = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("priority history holder ended early"); })]);
+      const commands = createOpeningTeachingActivitiesRepository(writer.sql);
+      let operation: Promise<unknown>, expected: { code: string; message: string } | false;
+      if (name.includes("status")) {
+        operation = commands.setStatus(f.scope, name === "missing status" ? randomUUID() : x.activity.id,
+          { status: "active", ...(name === "status CAS" ? { expectedUpdatedAt: "2020-01-01T00:00:00.000Z" } : {}) });
+        expected = name === "missing status" ? { code: "NOT_FOUND", message: "teaching activity not found" }
+          : { code: "CONFLICT", message: name === "status CAS" ? "teaching activity updated_at mismatch" : "completed teaching activity cannot be reopened" };
+      } else if (name.includes("request")) {
+        operation = commands.requestCompile(f.scope, name === "missing request" ? randomUUID() : x.activity.id,
+          name === "dedup request" ? input.clientKey : "priority-request");
+        expected = name === "missing request" ? { code: "NOT_FOUND", message: "teaching activity not found" }
+          : name === "source request" ? { code: "VALIDATION", message: "source unavailable or privacy-excluded" }
+          : { code: "CONFLICT", message: name === "completed request" ? "completed teaching activity cannot generate new content"
+            : name === "queued request" ? "teaching content is already being generated"
+            : name === "content request" ? "teaching content already exists"
+            : name === "purpose request" ? "课程资料用途已变化，不能作为本次教材；请重新选择材料。" : "compile request clientKey already used" };
+      } else if (name.includes("enqueue")) {
+        operation = commands.enqueueCompileTeachingUnit(f.scope, { ...input, expectedContentVersion: 1 });
+        expected = { code: "CONFLICT", message: name === "completed enqueue" ? "completed teaching activity cannot generate new content"
+          : name === "purpose enqueue" ? "课程资料用途已变化，不能作为本次教材；请重新选择材料。" : "idempotency payload differs for the same key" };
+      } else if (name === "missing course") {
+        operation = ensureCourseContinueActivity(writer.sql, f.scope, randomUUID());
+        expected = { code: "NOT_FOUND", message: "course not found" };
+      } else {
+        const scope = name.startsWith("stale") ? { ...x.scope, jobExecution: { ...x.scope.jobExecution,
+          ...(name === "stale token" ? { token: randomUUID() } : {}),
+          ...(name === "stale epoch" ? { privacyEpoch: x.scope.jobExecution.privacyEpoch + 1 } : {}) } } : f.scope;
+        operation = commands.setGenerateStatus(scope, name === "missing generate" ? randomUUID() : x.activity.id, "failed", { from: ["queued"] });
+        expected = name.startsWith("stale") ? { code: "CONFLICT", message: "job execution is no longer current" } : false;
+      }
+      pending.push(track(operation));
+      // Await under the live holder, using Vitest's unchanged default deadline.
+      // A misplaced history wait cannot be mistaken for an ordinary rejection.
+      if (expected === false) expect(await operation).toBe(false);
+      else await expect(operation).rejects.toMatchObject(expected);
+      expect(await graph()).toBe(before);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end()]);
+    }
+  });
+
+  it.each(["active", "completed"] as const)("%s enqueue dedup success still waits on the history guard", async status => {
+    const x = await seed(), repo = createOpeningTeachingActivitiesRepository(f.sql);
+    const input = { activityId: x.activity.id, mode: "generate" as const, clientKey: "guarded-dedup", expectedContentVersion: 0 };
+    const first = await repo.enqueueCompileTeachingUnit(f.scope, input);
+    if (status === "completed") await repo.setStatus(f.scope, x.activity.id, { status });
+    const before = await graph(), holder = openRaceSession(), writer = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("dedup history holder ended early"); })]);
+      const replay = track(createOpeningTeachingActivitiesRepository(writer.sql).enqueueCompileTeachingUnit(f.scope, input));
+      pending.push(replay);
+      await waitUntilBlocked(f.sql, writer.pid, holder.pid, "enqueue dedup history", /opening_workspace_history_revisions/);
+      expect(await graph()).toBe(before);
+      release(); await holding;
+      expect(await replay).toEqual({ ...first, created: false });
+      expect(await graph()).toBe(before);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end()]);
+    }
+  });
+
+  it.each(roots)("%s rolls back its actual writes, jobs and outbox on injected failure", async root => {
+    const x = await seed(), before = await graph();
+    let injected = false;
+    const pattern = root === "ensure" ? "INSERT INTO opening_teaching_activities"
+      : root === "request" || root === "enqueue" ? "INSERT INTO opening_outbox" : "UPDATE opening_teaching_activities";
+    const sql = new Proxy(f.sql, { get(target, key) {
+      if (key === "begin") return (callback: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => callback(new Proxy(tx, {
+        apply(client, _self, args: [TemplateStringsArray, ...unknown[]]) {
+          const query = Array.isArray(args[0]) && args[0].join("?");
+          const result = Reflect.apply(client, client, args);
+          if (query && query.includes(pattern)) return Promise.resolve(result).then(() => {
+            injected = true; throw new Error("injected after batch root write");
+          });
+          return result;
+        },
+      })));
+      return Reflect.get(target, key);
+    } });
+    await expect(run(sql, root, x)).rejects.toThrow("injected after batch root write");
+    expect(injected).toBe(true);
+    expect(await graph()).toBe(before);
+  });
+
+  it("preserves status CAS, generation from-set, stale execution, compile dedup and original errors", async () => {
+    const x = await seed(), repo = createOpeningTeachingActivitiesRepository(f.sql), before = await graph();
+    await expect(repo.setStatus(x.scope, x.activity.id, { status: "paused", expectedUpdatedAt: "2020-01-01T00:00:00.000Z" }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "teaching activity updated_at mismatch" });
+    expect(await repo.setGenerateStatus(x.scope, x.activity.id, "failed", { from: ["queued"] })).toBe(false);
+    await expect(repo.setGenerateStatus({ ...x.scope, jobExecution: { ...x.scope.jobExecution, token: randomUUID() } }, x.activity.id, "failed"))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "job execution is no longer current" });
+    await expect(ensureCourseContinueActivity(f.sql, x.scope, randomUUID()))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: "course not found" });
+    await expect(repo.requestCompile(x.scope, randomUUID(), "missing-activity"))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: "teaching activity not found" });
+    await expect(repo.enqueueCompileTeachingUnit(x.scope, { activityId: x.activity.id, mode: "generate", clientKey: "short", expectedContentVersion: 0 }))
+      .rejects.toMatchObject({ code: "VALIDATION", message: "clientKey is too short" });
+    await expect(repo.setStatus(f.otherScope, x.activity.id, { status: "paused" }))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: "teaching activity not found" });
+    expect(await graph()).toBe(before);
+    const history = await watermark(), id = await ensureCourseContinueActivity(f.sql, x.scope, x.courseId);
+    expect(await ensureCourseContinueActivity(f.sql, x.scope, x.courseId)).toBe(id);
+    const input = { activityId: x.activity.id, mode: "generate" as const, clientKey: "compile-dedup", expectedContentVersion: 0 };
+    const first = await repo.enqueueCompileTeachingUnit(x.scope, input), committed = await graph();
+    expect(await repo.enqueueCompileTeachingUnit(x.scope, input)).toEqual({ ...first, created: false });
+    await expect(repo.enqueueCompileTeachingUnit(x.scope, { ...input, expectedContentVersion: 1 }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "idempotency payload differs for the same key" });
+    await expect(repo.requestCompile(x.scope, x.activity.id, "already-queued"))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "teaching content is already being generated" });
+    expect(await graph()).toBe(committed);
+    expect(await watermark()).toEqual(history);
+  });
+});
 
 describe("V2-16 teaching loop flags (dual injection)", () => {
   it("T1 dual flags on after injection; default-off when unset", () => {

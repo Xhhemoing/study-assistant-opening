@@ -15,8 +15,6 @@ afterEach(async () => { await f?.close(); });
 async function seed(secondContent: Record<string, unknown> = { text: "1+1", interaction: { kind: "numeric" } },
   firstContent: Record<string, unknown> = { text: "1+1", interaction: { kind: "numeric" } }) {
   const base = await learningAttemptFixture(f);
-  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${f.scope.workspaceId},${base.courseId},'source',${base.sourceId},'core','course')`;
   const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, { clientKey: randomUUID(), courseIds: [base.courseId],
     title: "Identity", kind: "custom", targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand", successCriteria: "Calculate" });
   const requirement = { id: randomUUID(), stableSkillId: randomUUID(), knowledgeNodeId: null, requirementKey: "identity:add", title: "Addition",

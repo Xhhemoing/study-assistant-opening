@@ -456,6 +456,48 @@ it("the v2 progress owner supplies the revision when switching to overview after
   } finally { await act(async () => root.unmount()); host.remove(); }
 });
 
+it.each(["系数代入后，第3坐标没对上。", undefined])("the v2 lesson carries recovered focus %s into the existing explanation, then explicitly advances within its activity", async targetedFocus => {
+  const { attempt, details, courseId, activityId } = fixture("self-example");
+  details.targetedFocus = targetedFocus;
+  // This is the existing generic presentation, not a generated targeted lesson or proof of model quality.
+  mocks.request.mockImplementation(async (path: string, _schema: unknown, init?: RequestInit) => {
+    if (!init) return details;
+    if (path.endsWith("/presentation")) return { problem, solution, exposureReceipt: { id: uuid() } };
+    if (init.method === "PATCH") return { ...details.session, ...JSON.parse(String(init.body)), revision: 7 };
+    if (path.endsWith("/session")) return {};
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  mocks.createAttempt.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
+  mocks.hint.mockImplementation(async (_attempt: unknown, level: number) => hintResponse(level));
+  const host = document.createElement("div"), root = createRoot(host); document.body.append(host);
+  try {
+    await act(async () => root.render(<SpanLessonSession courseId={courseId} sourceIds={attempt.sourceIds} sourceLoadError={false} initialActivityId={activityId} />));
+    const focus = host.querySelector("section[aria-label='上次错在这一步']");
+    if (targetedFocus) expect(focus?.textContent).toContain(targetedFocus);
+    else expect(focus).toBeNull();
+    expect(mocks.request.mock.calls.filter(call => call[2]?.method === "PATCH")).toHaveLength(0);
+    expect(mocks.createAttempt).not.toHaveBeenCalled();
+    expect(mocks.submitAttempt).not.toHaveBeenCalled();
+    const presentation = mocks.request.mock.calls.find(call => String(call[0]).endsWith("/presentation"))!;
+    expect(JSON.parse(presentation[2].body)).toEqual({ courseId, sourceId: attempt.sourceIds[0], sessionId: details.session!.sessionId,
+      kind: "worked", clientKey: `span-demo:${details.session!.sessionId}:${attempt.sourceIds[0]}:worked:v1` });
+    expect(mocks.ack).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: expect.any(String) }));
+    expect(host.querySelector("[data-primary-action]")?.textContent).toBe("开始做题");
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-primary-action]")!.click());
+    const patches = mocks.request.mock.calls.filter(call => call[2]?.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]![0]).toBe(`/api/opening/teaching/span/lesson?activityId=${activityId}`);
+    expect(JSON.parse(patches[0]![2].body)).toEqual({ expectedRevision: 1, intent: details.session!.intent, moveId: "self-faded", status: "active" });
+    expect(host.querySelector("section[aria-label='上次错在这一步']")).toBeNull();
+    expect(host.querySelector("select")).not.toBeNull();
+    expect(mocks.createAttempt).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: details.session!.sessionId,
+      spanExercise: { sourceId: attempt.sourceIds[0], problemId: "span-faded-3d", version: 1 } }));
+    expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
+    expect(mocks.submitAttempt).not.toHaveBeenCalled(); expect(mocks.push).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); host.remove(); }
+});
+
 it("a failed lesson save preserves the result for retry without requesting adaptive next", async () => {
   const { attempt, details } = fixture("self-independent", "span-independent-3d");
   details.attempts = [attempt];

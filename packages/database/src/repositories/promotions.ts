@@ -5,6 +5,7 @@ import {
   type PromotionRecord,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 export type PromotionErrorCode =
   "NOT_FOUND" | "VALIDATION" | "WORKSPACE_MISMATCH" | "CONFLICT";
 export class PromotionRepositoryError extends Error {
@@ -170,6 +171,18 @@ export function createPromotionRepository(sql: Sql): PromotionRepository {
     },
     async accept(input) {
       return sql.begin(async (tx) => {
+        // Preserve validation/lookup errors without taking a business lock before history.
+        await find(input.workspaceId, input.promotionId, tx);
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.workspaceId}`;
+        if (!workspace) {
+          // A committed workspace deletion cascades to its promotions between reads.
+          throw new PromotionRepositoryError("NOT_FOUND", `Promotion not found: ${input.promotionId}`);
+        }
+        await lockWorkspaceLearningHistory(tx, {
+          workspaceId: input.workspaceId,
+          ownerUserId: workspace.owner_user_id as string,
+        });
+        // Re-read under the original lock; the first read may now be stale.
         const current = await find(
           input.workspaceId,
           input.promotionId,

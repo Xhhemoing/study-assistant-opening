@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   assetTypeSchema,
+  courseSourcePurposeSchema,
+  isoDateTimeSchema,
+  type CourseSourcePurpose,
   type AssetType,
   type SourceRecord,
   type CourseLearningPreferencesUpdate,
@@ -59,6 +62,7 @@ export type AssetMembershipRecord = {
   role: CourseRole;
   sortOrder: number;
   visibility: CourseVisibility;
+  purpose: CourseSourcePurpose | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -106,6 +110,7 @@ export type CourseMembershipRepository = {
     role: CourseRole;
     sortOrder?: number;
     visibility: CourseVisibility;
+    purpose?: CourseSourcePurpose | null;
   }): Promise<AssetMembershipRecord>;
 
   updateAssetMembership(input: {
@@ -116,6 +121,9 @@ export type CourseMembershipRepository = {
     role?: CourseRole;
     sortOrder?: number;
     visibility?: CourseVisibility;
+    purpose?: CourseSourcePurpose | null;
+    /** Required for purpose changes; use the last returned membership.updatedAt ISO string. */
+    expectedUpdatedAt?: string;
   }): Promise<AssetMembershipRecord>;
 
   removeAssetMembership(input: {
@@ -169,6 +177,13 @@ function assertVisibility(value: string): asserts value is CourseVisibility {
   }
 }
 
+function assertPurpose(assetType: AssetType, purpose: unknown): void {
+  if (purpose === undefined || purpose === null) return;
+  if (assetType !== "source" || !courseSourcePurposeSchema.safeParse(purpose).success) {
+    throw new CourseMembershipError("VALIDATION", "purpose must be a source-only course purpose");
+  }
+}
+
 function assertAssetType(value: string): asserts value is AssetType {
   if (!ASSET_TYPES.has(value as AssetType)) {
     throw new CourseMembershipError(
@@ -209,6 +224,7 @@ function mapMembership(row: Record<string, unknown>): AssetMembershipRecord {
     role: row.role as CourseRole,
     sortOrder: row.sort_order as number,
     visibility: row.visibility as CourseVisibility,
+    purpose: (row.purpose ?? null) as CourseSourcePurpose | null,
     createdAt: new Date(row.created_at as string | Date),
     updatedAt: new Date(row.updated_at as string | Date),
   };
@@ -413,6 +429,7 @@ export function createCourseMembershipRepository(
       assertAssetType(input.assetType);
       assertRole(input.role);
       assertVisibility(input.visibility);
+      assertPurpose(input.assetType, input.purpose);
       assertUuid(input.assetId, "assetId");
 
       const course = await loadCourse(input.workspaceId, input.courseId);
@@ -450,7 +467,8 @@ export function createCourseMembershipRepository(
             asset_id,
             role,
             sort_order,
-            visibility
+            visibility,
+            purpose
           ) VALUES (
             ${input.workspaceId},
             ${input.courseId},
@@ -458,7 +476,8 @@ export function createCourseMembershipRepository(
             ${input.assetId},
             ${input.role},
             ${sortOrder},
-            ${input.visibility}
+            ${input.visibility},
+            ${input.purpose ?? null}
           )
           RETURNING *
         `;
@@ -489,39 +508,45 @@ export function createCourseMembershipRepository(
 
     async updateAssetMembership(input) {
       await ensureWorkspace(input.workspaceId);
-      const current = await this.getMembership(input);
-
-      const role = input.role ?? current.role;
-      const visibility = input.visibility ?? current.visibility;
-      const sortOrder = input.sortOrder ?? current.sortOrder;
-      assertRole(role);
-      assertVisibility(visibility);
-      if (!Number.isInteger(sortOrder)) {
-        throw new CourseMembershipError(
-          "VALIDATION",
-          "sortOrder must be an integer",
-        );
+      assertAssetType(input.assetType);
+      assertUuid(input.courseId, "courseId");
+      assertUuid(input.assetId, "assetId");
+      assertPurpose(input.assetType, input.purpose);
+      if (input.role !== undefined) assertRole(input.role);
+      if (input.visibility !== undefined) assertVisibility(input.visibility);
+      if (input.sortOrder !== undefined && !Number.isInteger(input.sortOrder)) {
+        throw new CourseMembershipError("VALIDATION", "sortOrder must be an integer");
       }
-
-      const rows = await sql`
-        UPDATE course_asset_memberships
-        SET role = ${role},
-            sort_order = ${sortOrder},
-            visibility = ${visibility},
-            updated_at = now()
-        WHERE course_id = ${input.courseId}
-          AND workspace_id = ${input.workspaceId}
-          AND asset_type = ${input.assetType}
-          AND asset_id = ${input.assetId}
-        RETURNING *
-      `;
-      if (!rows.length) {
-        throw new CourseMembershipError(
-          "NOT_FOUND",
-          "Membership not found for update",
-        );
+      const changesPurpose = input.purpose !== undefined;
+      if ((changesPurpose && input.expectedUpdatedAt === undefined)
+        || (input.expectedUpdatedAt !== undefined && !isoDateTimeSchema.safeParse(input.expectedUpdatedAt).success)) {
+        throw new CourseMembershipError("VALIDATION", "purpose changes require a valid expectedUpdatedAt");
       }
-      return mapMembership(rows[0] as Record<string, unknown>);
+      const expected = input.expectedUpdatedAt === undefined ? null : new Date(input.expectedUpdatedAt);
+      return sql.begin(async tx => {
+        // Serialize with publication/knowledge owners' workspace-first lock order.
+        await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} FOR UPDATE`;
+        const rows = await tx`
+          UPDATE course_asset_memberships
+          SET role = COALESCE(${input.role ?? null}, role),
+              sort_order = COALESCE(${input.sortOrder ?? null}::integer, sort_order),
+              visibility = COALESCE(${input.visibility ?? null}, visibility),
+              purpose = CASE WHEN ${changesPurpose} THEN ${input.purpose ?? null} ELSE purpose END,
+              updated_at = GREATEST(date_trunc('milliseconds', clock_timestamp()),
+                date_trunc('milliseconds', updated_at) + interval '1 millisecond')
+          WHERE course_id = ${input.courseId}
+            AND workspace_id = ${input.workspaceId}
+            AND asset_type = ${input.assetType}
+            AND asset_id = ${input.assetId}
+            AND (${expected}::timestamptz IS NULL OR date_trunc('milliseconds', updated_at) = ${expected}::timestamptz)
+          RETURNING *`;
+        if (rows.length) return mapMembership(rows[0] as Record<string, unknown>);
+        const current = await tx`SELECT id FROM course_asset_memberships
+          WHERE course_id=${input.courseId} AND workspace_id=${input.workspaceId}
+            AND asset_type=${input.assetType} AND asset_id=${input.assetId}`;
+        throw new CourseMembershipError(current.length ? "CONFLICT" : "NOT_FOUND",
+          current.length ? "Membership changed; reload before updating purpose" : "Membership not found for update");
+      });
     },
 
     async removeAssetMembership(input) {

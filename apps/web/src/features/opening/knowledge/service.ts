@@ -22,6 +22,12 @@ const replaceBodySchema = z
   })
   .strict();
 
+const confirmBodySchema = z.object({
+  nodeId: uuidSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  sourceVersions: sourceVersionsSchema,
+}).strict();
+
 const rebuildBodySchema = z
   .object({
     clientKey: z.string().min(8).max(200),
@@ -67,6 +73,16 @@ export function createOpeningKnowledgeService(sql: Sql) {
           snapshot: input.snapshot as KnowledgeSnapshot,
           sourceVersions: input.sourceVersions,
         });
+      } catch (error) {
+        mapError(error);
+      }
+    },
+
+    async confirmNode(scope: Scope, courseIdRaw: string, body: unknown) {
+      const courseId = uuidSchema.parse(courseIdRaw);
+      const input = confirmBodySchema.parse(body);
+      try {
+        return await repo.confirmNode(scope, courseId, input.nodeId, input);
       } catch (error) {
         mapError(error);
       }

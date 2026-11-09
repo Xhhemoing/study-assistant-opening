@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations, createSqlClient, createIdentityRepository, createLibraryRepository, createBackupRestoreRepository,
   createOpeningBudgetRepository, createOpeningEphemeralProvenanceRepository, createOpeningNoteRepository,
-  createRevisionProposalRepository, createOpeningSourceActionsRepository,
+  createRevisionProposalRepository, createOpeningSourceActionsRepository, OpeningNoteError,
 } from "@aistudy/database";
 import type { ContextSourceRef } from "@aistudy/database";
 import { openRaceSession, closeRace, track, waitUntilBlocked } from "./opening-race-helpers";
@@ -266,6 +267,194 @@ describe("Opening linked note persistence", () => {
   });
 });
 
+describe("Opening snippet workspace history fence", () => {
+  const origins = ["saved", "ephemeral"] as const;
+  async function origin(kind: typeof origins[number], refs: ContextSourceRef[] | null = [], owner = scope) {
+    return kind === "saved" ? { savedTurnId: (await savedReply(refs, owner)).savedTurnId }
+      : { provenanceId: (await receipt(refs, owner)).id };
+  }
+  async function history(client = sql) {
+    return client`SELECT workspace_id,owner_user_id,revision::int FROM opening_workspace_history_revisions
+      WHERE workspace_id=${scope.workspaceId}`;
+  }
+  async function setHistory(revision: number | null) {
+    await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`;
+    if (revision !== null) await sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+      VALUES(${scope.workspaceId},${scope.ownerUserId},${revision})`;
+  }
+  async function graph(client: typeof sql | TransactionSql = sql, owner = scope) {
+    const [counts] = await client`SELECT
+      (SELECT count(*)::int FROM library_documents WHERE workspace_id=${owner.workspaceId}) AS documents,
+      (SELECT count(*)::int FROM library_blocks WHERE workspace_id=${owner.workspaceId}) AS blocks,
+      (SELECT count(*)::int FROM library_revisions WHERE workspace_id=${owner.workspaceId}) AS revisions,
+      (SELECT count(*)::int FROM opening_note_provenance WHERE workspace_id=${owner.workspaceId}) AS provenance`;
+    return counts;
+  }
+  const emptyGraph = { documents: 0, blocks: 0, revisions: 0, provenance: 0 };
+
+  it.each(origins)("%s waits on same-workspace history before workspace/graph locks, then commits one complete note", async kind => {
+    const input = { title: "History-fenced excerpt", text: "ONLY-CONFIRMED-EXCERPT", ...await origin(kind) };
+    await setHistory(23);
+    const holder = openRaceSession(), writer = openRaceSession();
+    let pending: Promise<{ documentId: string }> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        pending = track(createOpeningNoteRepository(writer.sql).saveSnippet(scope, input));
+        await waitUntilBlocked(sql, writer.pid, holder.pid, `snippet ${kind} history`,
+          /opening_workspace_history_revisions[\s\S]*FOR UPDATE/i);
+        // Lock availability and actual backend relation locks, not a sleep-based inference.
+        await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} FOR UPDATE NOWAIT`;
+        expect(await sql`SELECT l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+          WHERE l.pid=${writer.pid} AND c.relname IN
+            ('library_documents','library_blocks','library_revisions','opening_note_provenance')`).toEqual([]);
+        expect(await graph()).toEqual(emptyGraph);
+        const [wait] = await sql`SELECT extract(epoch FROM clock_timestamp()-query_start)*1000 AS query_age_ms
+          FROM pg_stat_activity WHERE pid=${writer.pid} AND wait_event_type='Lock'
+            AND ${holder.pid}=ANY(pg_blocking_pids(pid))`;
+        expect(wait).toBeDefined();
+        console.info(`[snippet ${kind} history] observed blocked query age ${Number(wait!.query_age_ms).toFixed(1)}ms`);
+      });
+      const result = await pending!;
+      expect(await graph()).toEqual({ documents: 1, blocks: 1, revisions: 1, provenance: 1 });
+      expect((await library.getDocument({ workspaceId: scope.workspaceId, ...result })).blocks[0]!.content)
+        .toMatchObject({ blockNoteContent: input.text });
+      expect(await history()).toEqual([{ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, revision: 23 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql)]);
+    }
+  });
+
+  it.each(origins)("%s waits behind real permanent deletion on history, then rejects without leaking a note graph", async kind => {
+    const sourceId = await source(), input = { title: "Denied excerpt", text: "PRIVATE-SNIPPET", ...await origin(kind, [{ sourceId, sourceVersion: 0 }]) };
+    await setHistory(31);
+    const gate = openRaceSession(), deletion = openRaceSession(), writer = openRaceSession();
+    const pending: Promise<unknown>[] = [];
+    let saved: Promise<unknown> | undefined;
+    try {
+      await Promise.all([gate.ready, deletion.ready, writer.ready]);
+      await gate.sql.begin(async tx => {
+        await tx`SELECT id FROM opening_sources WHERE id=${sourceId} FOR UPDATE`;
+        pending.push(track(createOpeningSourceActionsRepository(deletion.sql).apply(scope, sourceId,
+          { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, sourceKeys, new Date())));
+        await waitUntilBlocked(sql, deletion.pid, gate.pid, "snippet source deletion", /FROM opening_sources[\s\S]*FOR UPDATE/i);
+        saved = track(createOpeningNoteRepository(writer.sql).saveSnippet(scope, input));
+        pending.push(saved);
+        await waitUntilBlocked(sql, writer.pid, deletion.pid, `snippet ${kind} privacy history`,
+          /opening_workspace_history_revisions[\s\S]*FOR UPDATE/i);
+        const [wait] = await sql`SELECT extract(epoch FROM clock_timestamp()-query_start)*1000 AS query_age_ms
+          FROM pg_stat_activity WHERE pid=${writer.pid} AND wait_event_type='Lock'
+            AND ${deletion.pid}=ANY(pg_blocking_pids(pid))`;
+        expect(wait).toBeDefined();
+        console.info(`[snippet ${kind} privacy history] observed blocked query age ${Number(wait!.query_age_ms).toFixed(1)}ms`);
+        expect(await graph()).toEqual(emptyGraph);
+      });
+      await pending[0];
+      await expect(saved).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+      expect(await sql`SELECT id FROM opening_sources WHERE id=${sourceId}`).toEqual([]);
+      expect(await sql`SELECT asset_deleted_at FROM opening_privacy_exclusions
+        WHERE workspace_id=${scope.workspaceId} AND source_id=${sourceId}`).toEqual([{ asset_deleted_at: expect.any(Date) }]);
+      expect(await graph()).toEqual(emptyGraph);
+      // Only the real privacy mutation advances history; the rejected save does not.
+      expect(await history()).toEqual([{ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, revision: 32 }]);
+    } finally {
+      await Promise.allSettled(pending);
+      await Promise.all([closeRace(gate.sql), closeRace(deletion.sql), closeRace(writer.sql)]);
+    }
+  });
+
+  it.each(origins)("%s in another workspace completes while this workspace history remains locked", async kind => {
+    const other = await createIdentityRepository(sql).createUserWithWorkspace({ email: `${randomUUID()}@example.com`, displayName: "Other fenced snippet", passwordHash: "unused" });
+    const otherScope = { workspaceId: other.workspace.id, ownerUserId: other.user.id }; scopes.push(otherScope);
+    const input = { title: "Independent excerpt", text: "OTHER-WORKSPACE", ...await origin(kind, [], otherScope) };
+    await setHistory(17);
+    const holder = openRaceSession(), writer = openRaceSession();
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        const result = await createOpeningNoteRepository(writer.sql).saveSnippet(otherScope, input);
+        expect((await library.getDocument({ workspaceId: otherScope.workspaceId, ...result })).title).toBe(input.title);
+        expect(await graph(sql, otherScope)).toEqual({ documents: 1, blocks: 1, revisions: 1, provenance: 1 });
+        expect(await history()).toEqual([{ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, revision: 17 }]);
+      });
+    } finally {
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql)]);
+    }
+  });
+
+  it.each(origins)("%s lazily ensures history at zero and does not advance zero/nonzero history", async kind => {
+    const input = { title: "No history advance", text: "Excerpt", ...await origin(kind) };
+    for (const revision of [null, 0, 41]) {
+      await setHistory(revision);
+      await notes.saveSnippet(scope, input);
+      expect(await history()).toEqual([{ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, revision: revision ?? 0 }]);
+    }
+    expect(await graph()).toEqual({ documents: 3, blocks: 3, revisions: 3, provenance: 3 });
+  });
+
+  it.each(origins)("%s retains OpeningNoteError for foreign/missing owner without ensuring history", async kind => {
+    const input = { title: "Denied owner", text: "Excerpt", ...await origin(kind) };
+    await setHistory(null);
+    for (const invalid of [{ ...scope, ownerUserId: randomUUID() }, { ...scope, workspaceId: randomUUID() }]) {
+      const result = notes.saveSnippet(invalid, input);
+      await expect(result).rejects.toBeInstanceOf(OpeningNoteError);
+      await expect(result).rejects.toMatchObject({ code: "NOT_FOUND", message: "workspace not found" });
+      expect(await sql`SELECT workspace_id FROM opening_workspace_history_revisions WHERE workspace_id=${invalid.workspaceId}`).toEqual([]);
+    }
+    expect(await history()).toEqual([]);
+    expect(await graph()).toEqual(emptyGraph);
+  });
+
+  it.each(origins)("%s rolls back first ensure on business rejection and retains source admission errors", async kind => {
+    for (const state of ["unknown", "changed", "excluded", "deleted", "unavailable"] as const) {
+      const sourceId = await source();
+      const input = { title: "Rejected origin", text: "PRIVATE-SNIPPET", ...await origin(kind, state === "unknown" ? null : [{ sourceId, sourceVersion: 0 }]) };
+      if (state === "changed") await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+      if (state === "excluded") await exclude(sourceId);
+      if (state === "deleted") await sql`DELETE FROM opening_sources WHERE id=${sourceId}`;
+      if (state === "unavailable") await sql`INSERT INTO opening_source_versions(source_id,workspace_id,version,bytes,sha256,availability)
+        VALUES(${sourceId},${scope.workspaceId},0,1,${'a'.repeat(64)},'unavailable')`;
+      await setHistory(null);
+      await expect(notes.saveSnippet(scope, input)).rejects.toMatchObject({ code: state === "unknown" ? "PROVENANCE_UNKNOWN" : "SOURCE_UNAVAILABLE" });
+      expect(await history()).toEqual([]);
+      expect(await graph()).toEqual(emptyGraph);
+    }
+  });
+
+  it.each(origins)("%s rolls back the whole actual note graph and first ensure when the transaction fails before commit", async kind => {
+    const input = { title: "Atomic excerpt", text: "PRIVATE-UNCOMMITTED-EXCERPT", ...await origin(kind) };
+    const failure = new Error("injected after complete snippet graph before commit");
+    for (const revision of [null, 43]) {
+      await setHistory(revision);
+      const before = await history();
+      let injected = false;
+      const failing = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property !== "begin") return Reflect.get(target, property, receiver);
+          return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(async tx => {
+            await execute(tx);
+            expect(await graph(tx)).toEqual({ documents: 1, blocks: 1, revisions: 1, provenance: 1 });
+            expect(await tx`SELECT revision::int FROM opening_workspace_history_revisions
+              WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`).toEqual([{ revision: revision ?? 0 }]);
+            expect(await graph()).toEqual(emptyGraph);
+            injected = true;
+            throw failure;
+          });
+        },
+      });
+      await expect(createOpeningNoteRepository(failing).saveSnippet(scope, input)).rejects.toBe(failure);
+      expect(injected).toBe(true);
+      expect(await history()).toEqual(before);
+      expect(await graph()).toEqual(emptyGraph);
+    }
+  });
+});
+
 const proposalSource = { kind: "user" as const, provider: null, model: null, sourceId: null, metadata: {} };
 const sourceKeys = { stagingKey: (id: string) => `opening/sources/${id}/staging`, finalKey: (id: string, version: number) => `opening/sources/${id}/${version}` };
 async function proposalFixture(status: "pending" | "conflicted" | "accepted" | "rejected" = "pending") {
@@ -333,6 +522,13 @@ describe("Opening linked note revision proposal privacy", () => {
   it.each(["get", "review", "resolve"] as const)("serializes %s behind in-flight permanent deletion before exposing or changing snapshots", async operation => {
     const fixture = await proposalFixture(operation === "resolve" ? "conflicted" : "pending");
     const before = await proposalState(fixture.documentId);
+    // Snippet saves may already have committed a lazy zero counter; conflict
+    // review may also have advanced it. Observe the fixture rather than reset it.
+    const historyBefore = await sql`SELECT * FROM opening_workspace_history_revisions
+      WHERE workspace_id=${scope.workspaceId}`;
+    expect(historyBefore.length).toBeLessThanOrEqual(1);
+    if (historyBefore.length) expect(historyBefore[0]).toMatchObject({ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId });
+    const historyRevision = Number(historyBefore[0]?.revision ?? 0);
     const gate = openRaceSession(), deletion = openRaceSession(), reader = openRaceSession();
     let unlock = () => {};
     const pending: Promise<unknown>[] = [];
@@ -358,12 +554,32 @@ describe("Opening linked note revision proposal privacy", () => {
         : operation === "review" ? repository.review({ ...target, action: "accept", actorUserId: scope.ownerUserId })
           : repository.resolveConflict({ ...target, action: "preserve_both", selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId, expectedCurrentRevisionNumber: 2 }));
       pending.push(read);
-      await waitUntilBlocked(sql, readerSession.pid, deletionSession.pid, `proposal ${operation}`, /FROM workspaces[\s\S]*FOR (UPDATE|SHARE)/i);
+      let settled = false;
+      void read.then(() => { settled = true; }, () => { settled = true; });
+      const statement = operation === "get" ? /FROM workspaces[\s\S]*FOR (UPDATE|SHARE)/i
+        : historyBefore.length
+          ? /^\s*SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id\s*=\s*\$1\s+AND owner_user_id\s*=\s*\$2\s+FOR UPDATE\s*$/i
+          : /^\s*INSERT INTO opening_workspace_history_revisions\(workspace_id,\s*owner_user_id,\s*revision\)\s+VALUES\s*\(\$1,\s*\$2,\s*0\)\s+ON CONFLICT DO NOTHING\s*$/i;
+      await waitUntilBlocked(sql, readerSession.pid, deletionSession.pid, `proposal ${operation}`, statement);
+      if (operation !== "get") {
+        // The observed blocker and waiter both hold locks on this database's
+        // history table, not an unrelated relation or another database's PID.
+        expect(await sql`SELECT DISTINCT pid FROM pg_locks
+          WHERE pid IN (${deletionSession.pid},${readerSession.pid}) AND granted
+            AND database = (SELECT oid FROM pg_database WHERE datname=current_database())
+            AND relation = 'opening_workspace_history_revisions'::regclass ORDER BY pid`)
+          .toEqual([deletionSession.pid, readerSession.pid].sort((a, b) => a - b).map(pid => ({ pid })));
+      }
+      expect(settled).toBe(false);
+      expect(await proposalState(fixture.documentId)).toEqual(before);
+      expect(await sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`).toEqual(historyBefore);
       unlock();
       await held;
       await deleted;
       await expect(read).rejects.toMatchObject({ code: "NOT_FOUND" });
       expect(await proposalState(fixture.documentId)).toEqual(before);
+      expect(await sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}`)
+        .toEqual([{ workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, revision: String(historyRevision + 1) }]);
     } finally {
       unlock();
       await Promise.allSettled(pending);

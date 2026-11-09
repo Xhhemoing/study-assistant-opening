@@ -56,7 +56,7 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
 it.each(["normal", "archived", "pending"] as const)("opens each saved handout without a goal or write command when %s", async mode => {
   sessionStorage.clear();
   if (mode === "pending") sessionStorage.setItem(`aistudy:route-command:${courseId}`, JSON.stringify({ kind: "confirm", input: { expectedRevisions: [], requirements: [requirement], confirmScope: true } }));
-  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
+  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [], reservedSupply: { status: "unknown" as const, available: 0, reason: "资格尚未确认" } };
   const saved = { activityId: id, generateStatus: "needs_check" as const, contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" as const };
   const secondActivity = "22222222-2222-4222-8222-222222222222";
   const compilations: Array<typeof base & { compilation?: CourseRouteSnapshot["requirements"][number]["compilation"] }> = [
@@ -78,6 +78,7 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
   expect(links.map(link => link.closest("li")?.querySelector("h3")?.textContent)).toEqual(["要求0 · 必修", "要求1 · 必修"]);
   expect(host.querySelector("select")?.value).toBe("");
+  expect([...host.querySelectorAll<HTMLButtonElement>("button")].filter(node => node.textContent === "学习这一项").every(node => node.disabled)).toBe(true);
   await act(async () => { links.forEach(link => link.click()); });
   expect(clicked).toEqual(hrefs);
   expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
@@ -87,6 +88,50 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   expect(host.textContent).not.toContain("讲义核对通过");
   expect(host.textContent).not.toContain("已掌握");
   sessionStorage.clear();
+});
+it.each([
+  { supply: { status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" }, label: "还不能确认哪些题可用于复测" },
+  { supply: { status: "missing", available: 0, reason: "服务端报告暂无保留题" }, label: "保留题：暂无保留题" },
+  { supply: { status: "ready", available: 3, reason: null }, label: "已记录保留题 3 道（不代表可以独立复测）" },
+  { supply: { status: "ready", available: 0, reason: null }, label: "已记录保留题 0 道（不代表可以独立复测）" },
+  { supply: undefined, label: "尚未收到保留题信息" },
+  { supply: { status: "unknown", available: 9, reason: "资格待核对" }, label: "还不能确认哪些题可用于复测" },
+  { supply: { status: "missing", available: 7, reason: null }, label: "保留题：暂无保留题" },
+  { supply: { status: "unknown", available: 0, reason: '<img src=x onerror="alert(1)"><script>alert(2)</script>' }, label: "还不能确认哪些题可用于复测" },
+] satisfies Array<{ supply: CourseRouteSnapshot["requirements"][number]["reservedSupply"]; label: string }>)("renders reserved supply $label ($supply) as read-only server facts without blocking ordinary learning", async ({ supply, label }) => {
+  sessionStorage.clear();
+  const row: CourseRouteSnapshot["requirements"][number] = { ...confirmed.requirements[0]!,
+    ...(supply ? { reservedSupply: supply } : {}),
+    questionCoverage: { savedQuestions: 12, withReferenceAnswers: 4, issuedQuestions: 2, unexposedEligibility: "unknown" },
+    compilation: { activityId: id, generateStatus: "ready", contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" },
+  };
+  const transport = vi.fn(async () => Response.json({ ...confirmed, requirements: [row] }));
+  const api = createCourseRouteClient(transport), start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  start.mockResolvedValue({ kind: "choice", reason: "configuration", message: "请核对配置", courseId, href: `/opening/courses/${courseId}?tab=units`, requirementIds: [id] });
+  await render(api, { goals: selectedGoal });
+  const supplyLine = [...host.querySelectorAll("li p")].find(node => node.textContent?.startsWith(label));
+  expect(supplyLine?.textContent).toBe(label + (supply?.reason != null ? ` · 原因：${supply.reason}` : ""));
+  if (!supply || supply.status !== "ready") {
+    expect(supplyLine?.textContent).not.toMatch(/\d+\s*道|已记录保留题/);
+  }
+  if (supply?.status === "unknown") expect(supplyLine?.textContent).not.toContain("暂无保留题");
+  if (supply?.status === "ready") expect(supplyLine?.textContent).not.toContain("暂无保留题");
+  if (!supply) expect(supplyLine?.textContent).not.toMatch(/还不能确认哪些题可用于复测|暂无保留题/);
+  expect(host.querySelector("img, script, [onerror]")).toBeNull();
+  if (supply?.reason?.startsWith("<img")) {
+    expect(supplyLine?.innerHTML).toContain("&lt;img");
+    expect(supplyLine?.innerHTML).toContain("&lt;script&gt;");
+  }
+  expect(host.textContent).toContain("已保存题目 12 道 · 附参考解答 4 道 · 曾发题 2 道 · 能否作为独立新题尚未确认");
+  expect(supplyLine?.querySelector("a, button")).toBeNull();
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+  const handout = [...host.querySelectorAll("a")].find(link => link.textContent === "打开已保存讲义");
+  expect(handout?.getAttribute("href")).toBe(`/opening/courses/${courseId}/handouts/${id}`);
+  expect(button("学习这一项").disabled).toBe(false);
+  await act(async () => button("学习这一项").click());
+  expect(start).toHaveBeenCalledExactlyOnceWith(courseId, { goalId, expectedGoalRevision: goal.revision, requirementId: id, expectedRequirementRevision: 1, minutes: 20, clientKey: expect.stringMatching(/^route-start:/) });
+  expect(confirm).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1);
 });
 it("rejects invented compilation states and private bodies at the strict client boundary", async () => {
   const compilation = { activityId: id, generateStatus: "queued", contentVersion: Number.MAX_SAFE_INTEGER, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
@@ -121,6 +166,62 @@ it("accepts count-only reference checks and rejects private or invalid aggregate
     expect(courseRouteSnapshotSchema.safeParse({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }).success).toBe(false);
     await expect(createCourseRouteClient(async () => new Response(JSON.stringify({ ...value, requirements: [{ ...row, referenceChecks: invalid }] }))).read(courseId)).rejects.toThrow();
   }
+});
+it("renders count-only citation coverage without inferring correctness or issuing write commands", async () => {
+  const citationCoverage = { total: 7, bound: 2, missing: 2, mismatch: 1, unknown: 2, factualSupport: "unverified" as const,
+    byRole: {
+      teach: { total: 2, bound: 1, missing: 1, mismatch: 0, unknown: 0 },
+      prompt: { total: 1, bound: 0, missing: 0, mismatch: 1, unknown: 0 },
+      example: { total: 1, bound: 0, missing: 0, mismatch: 0, unknown: 1 },
+      answer_key: { total: 3, bound: 1, missing: 1, mismatch: 0, unknown: 1 },
+    } };
+  const row = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null },
+    status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage };
+  const transport = vi.fn(async () => new Response(JSON.stringify({ ...snapshot, requirements: [row] })));
+  const api = createCourseRouteClient(transport);
+  const start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  await render(api);
+  const details = [...host.querySelectorAll("details")].find(node => node.querySelector("summary")?.textContent?.startsWith("引用绑定"))!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")?.textContent).toContain("2 / 7 块已绑定");
+  expect(details.textContent).toContain("题干：应引 1 · 已绑定 0 · 缺失 0 · 不匹配 1 · 未知 0");
+  expect(details.textContent).toContain("隐藏答案：应引 3 · 已绑定 1 · 缺失 1 · 不匹配 0 · 未知 1");
+  expect(details.textContent).toContain("事实支持未验证");
+  expect(details.textContent).toContain("不表示答案正确、可作为独立新题或已经掌握");
+  expect(details.querySelector("a, button")).toBeNull();
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+it.each([undefined, "empty"] as const)("distinguishes absent citation coverage from a recorded empty population: %s", async mode => {
+  const zero = { total: 0, bound: 0, missing: 0, mismatch: 0, unknown: 0 };
+  const citationCoverage = mode ? { ...zero, factualSupport: "unverified" as const,
+    byRole: { teach: zero, prompt: zero, example: zero, answer_key: zero } } : undefined;
+  await render(client({ ...snapshot, requirements: [{ requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null },
+    status: "unobserved", observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage }] }));
+  if (mode) {
+    expect(host.textContent).toContain("引用绑定：0 / 0 块已绑定");
+    expect(host.textContent).not.toContain("未提供引用覆盖");
+  } else {
+    expect(host.textContent).toContain("未提供引用覆盖");
+    expect(host.textContent).not.toContain("0 / 0");
+  }
+  expect(host.textContent).not.toContain("100%");
+});
+it("rejects private citation details at the real HTTP client boundary", async () => {
+  const counts = { total: 1, bound: 0, missing: 0, mismatch: 0, unknown: 1 };
+  const citationCoverage = { total: 4, bound: 0, missing: 0, mismatch: 0, unknown: 4, factualSupport: "unverified",
+    byRole: { teach: counts, prompt: counts, example: counts, answer_key: counts } };
+  for (const field of ["text", "prompt", "answer", "id", "key", "refs"]) {
+    for (const invalid of [{ ...citationCoverage, [field]: "private-value" },
+      { ...citationCoverage, byRole: { ...citationCoverage.byRole, answer_key: { ...counts, [field]: "private-value" } } }]) {
+      const api = createCourseRouteClient(async () => new Response(JSON.stringify({ ...snapshot, requirements: [{
+        requirement: { ...requirement, courseId, revision: 1, lifecycle: "active", approvedAt: null }, status: "unobserved",
+        observationId: null, sourcesAvailable: true, missingReasons: [], citationCoverage: invalid,
+      }] })));
+      await expect(api.read(courseId)).rejects.toThrow();
+    }
+  }
+  expect(host.textContent).not.toContain("private-value");
 });
 it("shows the full material inventory while keeping extracted suggestions unconfirmed", async () => { const api = client(); await render(api); expect(host.textContent).toContain("资料 33"); expect(host.textContent).toContain("尚未确认全课范围"); expect(api.confirm).not.toHaveBeenCalled(); expect(api.start).not.toHaveBeenCalled(); });
 it("confirms the explicitly reviewed full list without replacing stable identities", async () => { const api = client(); await render(api); await act(async () => button("检查与确认课程范围").click()); expect(host.textContent).toContain("概念一"); await act(async () => button("确认这份全课范围").click()); expect(api.confirm).toHaveBeenCalledWith(courseId, { expectedRevisions: [], requirements: [requirement], confirmScope: true }); });

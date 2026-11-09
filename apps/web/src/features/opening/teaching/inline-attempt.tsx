@@ -360,6 +360,13 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
   const answerLocked = !ready || Boolean(draftConflict) || pending || Boolean(submission.current) || context.status === "completed";
   return <div className="mt-3 space-y-3 border-t border-line pt-3" data-inline-attempt={blockId}>
     <LessonFlow phase={hintPending ? "hint" : recorded ? checked ? "next" : "feedback" : pending && submission.current ? "submit" : "attempt"}>
+    {attempt?.reservedRetestQualification && !attempt.reservedRetestQualification.eligible ? <div role="status" className="space-y-1 rounded-lg bg-surface-2 p-3 text-xs text-text-2">
+      <p>本题仅作教学练习，暂不能计作独立复测；判对也不代表已掌握。</p>
+      <details><summary className="cursor-pointer">为什么不能独立复测？</summary><ul className="mt-2 list-disc space-y-1 pl-4">
+        {attempt.reservedRetestQualification.reasons.map(reason => <li key={reason.code}>{reason.message}</li>)}
+      </ul></details>
+      {hints.length || answerKey ? <p>已查看的提示或答案也不能作为独立作答的证据。</p> : null}
+    </div> : null}
     {!context.courseId && context.status !== "completed" ? <div className="space-y-2"><p role="status" className="text-xs text-text-2">正在准备本次学习…</p>{error ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => void bindCourse()}>{studentCopy.retry}</button> : null}</div> : null}
     {ready && restoring ? <p role="status" className="text-xs text-text-2">正在恢复已保存的作答…</p> : restoreFailed ? <button type="button" className={ui.secondary} onClick={() => setRestoreRetry(value => value + 1)}>重新读取已保存的作答</button> : !recorded && context.status === "completed" ? <p className="text-xs text-text-2">本题没有可恢复的已提交作答。{initialDraft?.answer ? "本页保留的答案尚未确认保存：" : ""}{initialDraft?.answer ? <span className="block whitespace-pre-wrap">{initialDraft.answer}</span> : null}</p> : !recorded ? <form className="space-y-2" onKeyDown={event => {
       if (event.key !== "Enter") return;

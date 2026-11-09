@@ -65,6 +65,20 @@ it.each(["active", "completed"] as const)("restores durable answer on fresh %s m
   expect(context.onObservationReady).toHaveBeenCalledWith(id, saved.observation);
   unmount(); render(status); await settle(); expect(text(render(status))).toContain(saved.observation.answer);
 });
+it("shows why a reserved hinted attempt is not an independent retest on restore", async () => {
+  api.getSubmittedAttempt.mockResolvedValueOnce({ ...saved, attempt: { ...canonicalAttempt,
+    reservedRetestQualification: { eligible: false, reasons: [
+      { code: 'independent_blind_solve_missing', message: '缺少独立盲解核验证据；确定性判分不等于独立复测。' },
+      { code: 'stable_identity_missing', message: '保留题身份尚未接入独立作答证据规则。' },
+    ] } } });
+  render(); await settle();
+  const output = text(render());
+  expect(output).toContain('本题仅作教学练习');
+  expect(output).toContain('为什么不能独立复测');
+  expect(output).toContain('缺少独立盲解核验证据');
+  expect(output).toContain('保留题身份尚未接入');
+  expect(api.submitAttempt).not.toHaveBeenCalled();
+});
 it("preserves recovered answer when the explicit reference read fails", async () => {
   hintApi.request.mockRejectedValueOnce(new Error("reference offline")); render(); await settle();
   const tree = render(); const ladder = findNode(tree, node => node.type === HintLadder)!;

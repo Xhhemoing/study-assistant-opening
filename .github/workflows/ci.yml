@@ -73,14 +73,14 @@ jobs:
 
     # Integration exercises the real parser, queue and object storage, not E2E.
     services:
-      postgres: &test-postgres
+      postgres:
         image: pgvector/pgvector:0.8.7-pg16
         env:
           POSTGRES_USER: aistudy
           POSTGRES_PASSWORD: aistudy
           POSTGRES_DB: aistudy_opening_test
         ports:
-          - 55432:5432
+          - 5432/tcp
         options: >-
           --health-cmd "pg_isready -U aistudy -d aistudy_opening_test"
           --health-interval 5s
@@ -115,13 +115,10 @@ jobs:
           --health-timeout 5s
           --health-retries 15
 
-    env: &quality-env
+    env:
       HERMES_HEAVY_ENABLED: "0"
       NODE_ENV: test
       OPENING_TEST_DB: "1"
-      # Real collectors reject the default DB port; integration uses this DB.
-      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
-      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
       # E2E_* are read only by the Playwright browser tests in handler-browser-spikes
       # (separate postgres-e2e service on 5433); other jobs inherit them unused.
       E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
@@ -203,6 +200,9 @@ jobs:
         run: npm ci
 
       - name: Integration tests
+        env:
+          OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:${{ job.services.postgres.ports[5432] }}/aistudy_opening_test
+          DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:${{ job.services.postgres.ports[5432] }}/aistudy_opening_test
         run: npm run test:integration -- --reporter=default --reporter=json --reporter=github-actions --outputFile.json=test-reports/integration.json
 
       - name: Upload failure artifacts
@@ -227,7 +227,19 @@ jobs:
     # Handler/spikes use the guarded test DB; Playwright resets a separate E2E DB.
     # The Chromium spike shares Playwright setup. No worker/parser runs here.
     services:
-      postgres: *test-postgres
+      postgres: &test-postgres
+        image: pgvector/pgvector:0.8.7-pg16
+        env:
+          POSTGRES_USER: aistudy
+          POSTGRES_PASSWORD: aistudy
+          POSTGRES_DB: aistudy_opening_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U aistudy -d aistudy_opening_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       postgres-e2e: &e2e-postgres
         image: pgvector/pgvector:0.8.7-pg16
         env:
@@ -244,7 +256,33 @@ jobs:
       redis: *test-redis
       minio: *test-minio
 
-    env: *quality-env
+    env: &quality-env
+      HERMES_HEAVY_ENABLED: "0"
+      NODE_ENV: test
+      OPENING_TEST_DB: "1"
+      # Real collectors reject the default DB port; integration uses this DB.
+      OPENING_TEST_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:55432/aistudy_opening_test
+      # E2E_* are read only by the Playwright browser tests in handler-browser-spikes
+      # (separate postgres-e2e service on 5433); other jobs inherit them unused.
+      E2E_DATABASE_URL: postgres://aistudy:aistudy@127.0.0.1:5433/aistudy_e2e
+      E2E_BASE_URL: http://127.0.0.1:3000
+      REDIS_URL: redis://127.0.0.1:6379
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: aistudy
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_FORCE_PATH_STYLE: "true"
+      PUBLIC_BASE_URL: http://localhost:3000
+      AUTH_SECRET: ci-test-auth-secret-at-least-32-chars
+      SESSION_COOKIE_SECURE: "false"
+      SESSION_TTL_SECONDS: "3600"
+      AUTH_COOKIE_NAME: aistudy_session
+      PARSER_PYTHON: ${{ github.workspace }}/.local/docling-venv/bin/python
+      PARSER_CWD: ${{ github.workspace }}/services/parser
+      HF_HOME: ${{ github.workspace }}/.local/hf-home
+      HF_HUB_OFFLINE: "1"
 
     steps:
       - name: Checkout
@@ -357,6 +395,10 @@ jobs:
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env: *quality-env
     steps:
       - uses: actions/checkout@v4
@@ -367,7 +409,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build
+        env:
+          AISTUDY_COMMIT: ${{ github.sha }}
         run: npm run build
+      # Pack existing build, never bypass lint/typecheck or rebuild on the host.
+      # Only mainline push artifacts are trusted by the deployment verifier.
+      - name: Pack release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        run: |
+          mkdir -m 700 release-artifact
+          node infra/deploy/verify-release-artifact.mjs pack . release-artifact/release.tar.gz "$GITHUB_SHA"
+      - name: Attest release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release-artifact/release.tar.gz
+      - name: Upload release runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feat/opening-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: release-artifact/release.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
   opening-worker-flow:
     name: isolated-worker-pdf-browser

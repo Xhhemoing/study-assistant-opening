@@ -12,6 +12,7 @@ import {
   createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 /** RP1: real Postgres + handler + adapter; fetch is the only mock. */
@@ -80,10 +81,12 @@ function captureFetch() {
 }
 
 function handler(fetchImpl: typeof fetch) {
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(fixture.sql),
     chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget: createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 }),
+    budget,
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     provider: createOpeningProvider({
       baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl,
     }),

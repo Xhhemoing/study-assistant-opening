@@ -9,6 +9,7 @@ import {
   createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import {
   awaitAllSettled, closeRace, holdRow, openRaceSession, track, waitUntilBlocked,
@@ -50,10 +51,12 @@ function barrierFetch(chunkId: string) {
 }
 
 function handler(sql: Parameters<typeof createOpeningTutorJobsRepository>[0], fetchImpl: typeof fetch) {
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000_000 });
   return createTutorTurnHandler({
     tutorJobs: createOpeningTutorJobsRepository(sql),
     chunks: createOpeningSourceChunksRepository(sql),
-    budget: createOpeningBudgetRepository(sql, { envCapCents: 100_000_000 }),
+    budget,
+    retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
     provider: createOpeningProvider({
       baseUrl: "https://offline.invalid", apiKey: "fake", model: "fake", fetchImpl,
     }),
@@ -97,7 +100,7 @@ describe("opening worker privacy race (handler/repository)", () => {
       held = undefined;
       await gateDone;
       await expect(deleted).resolves.toMatchObject({ privacyEpoch: 1, excludedSourceIds: [seeded.sourceId] });
-      await expect(processed).rejects.toMatchObject({ code: "PRIVACY_EPOCH_MISMATCH", message: "privacy epoch mismatch: job=0 current=1" });
+      await expect(processed).rejects.toMatchObject({ code: "CONFLICT", message: "source material unavailable or excluded" });
       const again = await handler(writer.sql, barrier.fetchImpl)(seeded.jobId);
       expect(again).toEqual({ skipped: true });
       expect(barrier.calls).toHaveLength(1);

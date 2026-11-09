@@ -24,6 +24,8 @@ async function baseline() {
   const rows = backupRows(fixture.sql, fixture.scope), sourceId = await rows.source(), courseId = randomUUID();
   await rows.chunk(sourceId);
   await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Span delayed race',${courseId})`;
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES (${fixture.scope.workspaceId},${courseId},'source',${sourceId},'core','course',NULL)`;
   const learning = createOpeningLearningRepository(fixture.sql);
   const session = await learning.createSession(fixture.scope, { courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [sourceId] });
   const attempt = await createOpeningLearningAttemptRepository(fixture.sql).create(fixture.scope,
