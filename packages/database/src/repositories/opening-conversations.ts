@@ -368,6 +368,18 @@ export function createOpeningConversationRepository(sql: Sql) {
       const jobId = randomUUID();
 
       return sql.begin(async (tx) => {
+        // Preserve conversation-not-found precedence without taking a business
+        // lock before the history fence. Recheck ownership under FOR UPDATE below.
+        const owned = await tx`SELECT id FROM opening_conversations
+          WHERE id=${input.conversationId} AND workspace_id=${input.scope.workspaceId}
+            AND owner_user_id=${input.scope.ownerUserId}`;
+        if (!owned.length) {
+          throw new OpeningConversationError(
+            "NOT_FOUND",
+            `Conversation not found: ${input.conversationId}`,
+          );
+        }
+        await lockWorkspaceLearningHistory(tx, input.scope);
         const conversations = await tx`
           SELECT id, course_id FROM opening_conversations
           WHERE id = ${input.conversationId}
