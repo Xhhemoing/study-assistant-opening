@@ -61,11 +61,18 @@ async function setup() {
 const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, answer: "2603" };
 // Like the reserved-start privacy test, exempt only semantic ID paths AND a
 // complete UUID. Never skip create_intent, context, receipts or body text.
-function assertNoPrivateAnswer(value: unknown, answer: string, path = ""): void {
+function assertNoPrivateAnswer(value: unknown, answer: string, path: readonly string[] = []): void {
   if (typeof value === "string") {
-    const rowId = /^tables\.[^.]+\.\d+\.(?:id|[a-z_]+_id|source_ids\.\d+)$/;
-    const contextId = /^tables\.opening_learning_attempts\.\d+\.(?:context_anchor|create_intent\.contextAnchor)\.(?:courseId|activityId|blockId|attemptId|itemVersionId|sourceId|chunkId)$/;
-    if ((rowId.test(path) || contextId.test(path)) && uuidSchema.safeParse(value).success) return;
+    // Match actual path segments, never a dot-joined path: literal dotted keys
+    // in arbitrary JSON are content, not trusted metadata references.
+    const row = path[0] === "tables" && /^[a-z_]+$/.test(path[1] ?? "") && /^\d+$/.test(path[2] ?? "");
+    const rowId = row && (path.length === 4 && /^(?:id|[a-z_]+_id)$/.test(path[3]!)
+      || path.length === 5 && path[3] === "source_ids" && /^\d+$/.test(path[4]!));
+    const contextField = /^(?:courseId|activityId|blockId|attemptId|itemVersionId|sourceId|chunkId)$/;
+    const contextId = row && path[1] === "opening_learning_attempts"
+      && (path.length === 5 && path[3] === "context_anchor" && contextField.test(path[4]!)
+        || path.length === 6 && path[3] === "create_intent" && path[4] === "contextAnchor" && contextField.test(path[5]!));
+    if ((rowId || contextId) && uuidSchema.safeParse(value).success) return;
     // Receipts may themselves be JSON strings. Parse only JSON containers, and
     // retain their original semantic path so their text is checked recursively.
     if (/^\s*[[{]/.test(value)) {
@@ -73,12 +80,12 @@ function assertNoPrivateAnswer(value: unknown, answer: string, path = ""): void 
       try { parsed = JSON.parse(value); } catch { /* Non-JSON text is checked below. */ }
       if (parsed !== undefined) { assertNoPrivateAnswer(parsed, answer, path); return; }
     }
-    expect(value, path).not.toContain(answer);
-  } else if (typeof value === "number") expect(String(value), path).not.toContain(answer);
-  else if (Array.isArray(value)) value.forEach((entry, index) => assertNoPrivateAnswer(entry, answer, `${path}.${index}`));
+    expect(value, JSON.stringify(path)).not.toContain(answer);
+  } else if (typeof value === "number") expect(String(value), JSON.stringify(path)).not.toContain(answer);
+  else if (Array.isArray(value)) value.forEach((entry, index) => assertNoPrivateAnswer(entry, answer, [...path, String(index)]));
   else if (value && typeof value === "object") for (const [key, entry] of Object.entries(value)) {
-    expect(key, path).not.toContain(answer);
-    assertNoPrivateAnswer(entry, answer, path ? `${path}.${key}` : key);
+    expect(key, JSON.stringify(path)).not.toContain(answer);
+    assertNoPrivateAnswer(entry, answer, [...path, key]);
   }
 }
 it("ignores answer digits only in UUID backup row IDs and context references", () => {
@@ -99,6 +106,9 @@ it("still detects private answers in backup text, nested JSON and stringified re
     { id: candidate.answer }, { id: `prefix-${id}` }, { id: `${id}-suffix` },
     { text: `The answer is ${candidate.answer}.` }, { text: id },
     { create_intent: { problem: { answer: candidate.answer } } },
+    { create_intent: { "contextAnchor.attemptId": id } },
+    { "context_anchor.attemptId": id },
+    { create_intent: JSON.stringify({ "contextAnchor.attemptId": id }) },
     { create_intent: { contextAnchor: { attemptId: candidate.answer } } },
     { context_anchor: { attemptId: `answer=${candidate.answer}` } },
     { context_anchor: { text: candidate.answer } },
