@@ -1,4 +1,5 @@
 import type { Sql } from "postgres";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 /**
  * claim() marks a parse source `running` (G7). When the job ends without
@@ -22,14 +23,41 @@ export async function releaseOpeningParseClaim(tx: Sql, payload: unknown): Promi
 export async function failOpeningJob(sql: Sql, id: string, value: unknown,
   state: "failed" | "outcome_unknown" = "failed",
   options: { claimToken?: string | null; staleBefore?: Date; expectedState?: "queued" | "running" } = {}): Promise<boolean> {
+  // Only this local signal maps identity drift to false; SQL/lock errors propagate.
+  const identityChanged = Symbol("job failure workspace identity changed");
   return sql.begin(async (tx) => {
-    // Match privacy deletion's workspace-first lock order. Never lock a job first.
+    // Canonical owner is coordination identity, not the job/payload's authority.
+    // Ordinary discovery must precede history, then the original graph locks.
+    const [candidate] = await tx<{ id: string; owner_user_id: string }[]>`
+      SELECT w.id, w.owner_user_id FROM workspaces w JOIN opening_jobs j ON j.workspace_id = w.id
+      WHERE j.id = ${id}`;
+    if (!candidate) return false;
+    try {
+      await lockWorkspaceLearningHistory(tx, { workspaceId: candidate.id, ownerUserId: candidate.owner_user_id });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+        const [current] = await tx`SELECT id FROM workspaces
+          WHERE id = ${candidate.id} AND owner_user_id = ${candidate.owner_user_id}`;
+        if (!current) throw identityChanged;
+      }
+      throw error;
+    }
+    // Match privacy deletion's workspace-first graph lock order, after history.
     const workspaces = await tx<{ id: string; owner_user_id: string; privacy_epoch: number }[]>`
       SELECT w.id, w.owner_user_id, w.privacy_epoch
       FROM workspaces w JOIN opening_jobs j ON j.workspace_id = w.id
-      WHERE j.id = ${id} FOR UPDATE OF w`;
+      WHERE j.id = ${id} AND w.id = ${candidate.id} FOR UPDATE OF w`;
     const workspace = workspaces[0];
-    if (!workspace) return false;
+    if (!workspace || workspace.id !== candidate.id || workspace.owner_user_id !== candidate.owner_user_id) throw identityChanged;
+    // Conservative same-scope cleanup only. Hold the source lock through commit
+    // so it cannot move after the check and before the shared helper writes.
+    const releaseClaim = async (payload: unknown): Promise<void> => {
+      const sourceId = payload && typeof payload === "object" && "sourceId" in payload ? payload.sourceId : null;
+      if (typeof sourceId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) return;
+      const [source] = await tx`SELECT id FROM opening_sources
+        WHERE id = ${sourceId} AND workspace_id = ${workspace.id} FOR UPDATE`;
+      if (source) await releaseOpeningParseClaim(tx, payload);
+    };
     const jobs = await tx<{
       kind: string; owner_user_id: string; payload: unknown; privacy_epoch: number;
     }[]>`
@@ -44,7 +72,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
       const [ended] = await tx<{ kind: string; payload: unknown }[]>`
         SELECT kind, payload FROM opening_jobs WHERE id = ${id} AND workspace_id = ${workspace.id}`;
       if (ended && (ended.kind === "parse" || ended.kind === "parse-media")) {
-        await releaseOpeningParseClaim(tx, ended.payload);
+        await releaseClaim(ended.payload);
       }
       return false;
     }
@@ -59,7 +87,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
     }
     if (job.kind !== "parse" && job.kind !== "parse-media") return true;
     if (job.owner_user_id !== workspace.owner_user_id) {
-      await releaseOpeningParseClaim(tx, job.payload);
+      await releaseClaim(job.payload);
       return true;
     }
     const sourceId = job.payload && typeof job.payload === "object" && "sourceId" in job.payload
@@ -109,7 +137,10 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     }
     // Fenced-out failures (new version, exclusion) leave the claim marker behind.
-    await releaseOpeningParseClaim(tx, job.payload);
+    await releaseClaim(job.payload);
     return true;
+  }).catch((error: unknown) => {
+    if (error === identityChanged) return false;
+    throw error;
   });
 }
