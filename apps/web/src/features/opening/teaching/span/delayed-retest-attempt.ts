@@ -14,8 +14,9 @@ export function readDelayedRetestAttempt(identity: DelayedRetestIdentity): Delay
   const attempt = attemptSchema.parse(JSON.parse(raw));
   if (attempt.courseId !== identity.courseId || attempt.observationId !== identity.observationId
     || attempt.rootId !== identity.rootId) throw new Error("自动复测触发记录不一致，请查看原任务或手动确认。");
-  // A changed grant may reconsider a definite refusal, never silently change an unknown request.
-  return attempt.phase === "conflict" && attempt.grantRevision !== identity.grantRevision ? null : attempt;
+  // Return the exact stored snapshot; the caller may reconsider only a definite
+  // conflict after reading current permission, never an unknown request.
+  return attempt;
 }
 export function saveDelayedRetestAttempt(identity: DelayedRetestIdentity, phase: DelayedRetestAttempt["phase"]): void {
   window.sessionStorage.setItem(key(identity), JSON.stringify({ ...identity, phase }));

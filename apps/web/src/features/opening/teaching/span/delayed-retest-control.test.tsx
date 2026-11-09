@@ -290,3 +290,30 @@ it.each(["network", "invalid"])("retains unknown automatic identity across a %s 
   await act(async () => button("重新确认自动安排").click());
   expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
 });
+
+it("uses one recovered pending snapshot even if a second storage read would fail", async () => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(Response.json(receipt));
+  await render(); await act(async () => root.render(null));
+  const original = Storage.prototype.getItem;
+  const storage = vi.spyOn(Storage.prototype, "getItem").mockImplementationOnce(function(this: Storage, key) { return original.call(this, key); }).mockImplementation(() => { throw new Error("second read unavailable"); });
+  mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: { [courseId]: { enabled: true, revision: 4 } } } });
+  await render();
+  expect(storage).toHaveBeenCalledTimes(1); expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+  storage.mockRestore();
+});
+it("blocks all scheduling when pending storage cannot be read, then explicitly restores the same request", async () => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(Response.json(receipt));
+  await render(); await act(async () => root.render(null));
+  const storage = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("read unavailable"); });
+  await render();
+  expect(button("安排 3 天后再练习").disabled).toBe(true);
+  await act(async () => button("安排 3 天后再练习").click());
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(host.querySelector('a[href="/opening/today"]')).not.toBeNull();
+  storage.mockRestore();
+  await act(async () => button("重新读取安排记录").click());
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+});
