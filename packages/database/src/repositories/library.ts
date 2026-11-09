@@ -771,7 +771,23 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
     },
 
     async updateDocument(input) {
-      return sql.begin(tx => this.updateDocumentInTx(tx, input));
+      return sql.begin(async (tx) => {
+        if (input.jobScope && input.jobScope.workspaceId !== input.workspaceId) {
+          throw new LibraryError("CONFLICT", "job execution workspace differs from document workspace");
+        }
+        assertUuid(input.workspaceId, "workspaceId");
+        const [workspace] = await tx<{ owner_user_id: string }[]>`
+          SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId} LIMIT 1
+        `;
+        if (!workspace) {
+          throw new LibraryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+        }
+        await lockWorkspaceLearningHistory(tx, {
+          workspaceId: input.workspaceId,
+          ownerUserId: workspace.owner_user_id,
+        });
+        return this.updateDocumentInTx(tx, input);
+      });
     },
 
     async updateDocumentInTx(tx, input, revisionId) {
