@@ -142,6 +142,53 @@ it("scans examples, hints, unanswered prompts and retained old source versions",
   await f.sql`DELETE FROM opening_sources WHERE id=${sourceId}`;
   expect(await readCourseQuestionExposure(f.sql, f.scope, question())).toMatchObject({ coverage: "unknown" });
 });
+it.each([["137*19", "+137*19"], ["+137*19", "137*19"], ["1*2", "1*+2"], ["1*+2", "1*2"]])(
+  "scans a real genesis source %s as exposed to %s", async (exposed, candidate) => {
+    const [genesis] = await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+    expect(genesis).toMatchObject({ complete: false, invalidated: false });
+    const sourceId = await backupRows(f.sql, f.scope).source();
+    await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+      VALUES(${randomUUID()},${sourceId},1,1,${`Hint: ${exposed}`})`;
+    expect(await readCourseQuestionExposure(f.sql, f.scope, { ...question(), text: candidate }))
+      .toMatchObject({ coverage: "complete", exactExposed: true, familyExposed: true });
+    const [descriptor] = await f.sql`SELECT kind,exact_content FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}`;
+    expect(descriptor).toMatchObject({ kind: "teaching", exact_content: { grammar: "reserved-arithmetic-3", complete: true,
+      expressions: [candidate.startsWith("1*") ? "1*2" : "137*19"], families: ["arithmetic:*"] } });
+    expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  });
+it.each([[], ["137*19"], ["+137*19"]])("keeps immutable v2 descriptor %j unknown after a real rescan", async expressions => {
+  const sourceId = await backupRows(f.sql, f.scope).source();
+  await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+    VALUES(${randomUUID()},${sourceId},1,1,'Example: +137*19')`;
+  const id = randomUUID(), old = { grammar: "reserved-arithmetic-2", complete: true, expressions, families: ["arithmetic:*+"] };
+  // Historical input only: ordinary INSERT, no coverage writes or disabled guards.
+  await f.sql`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
+    VALUES(${id},${f.scope.workspaceId},${f.scope.ownerUserId},'legacy-v2','teaching',${f.sql.json(old)},'{}',0)`;
+  for (const text of ["137*19", "+137*19"]) {
+    expect(await readCourseQuestionExposure(f.sql, f.scope, { ...question(), text }))
+      .toMatchObject({ coverage: "unknown", exactExposed: false, familyExposed: false });
+  }
+  const [retained] = await f.sql`SELECT exact_content FROM opening_course_question_exposures WHERE id=${id}`;
+  expect(retained!.exact_content).toEqual(old);
+  const current = await f.sql`SELECT exact_content FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} AND id<>${id}`;
+  expect(current).toHaveLength(1);
+  expect(current[0]!.exact_content).toMatchObject({ grammar: "reserved-arithmetic-3", complete: true, expressions: ["137*19"] });
+  const [coverage] = await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(coverage).toMatchObject({ complete: false, invalidated: false });
+});
+it("rolls back unary-plus exposure and scanner coverage together", async () => {
+  await expect(f.sql.begin(async tx => {
+    await recordCourseQuestionExposure(tx, f.scope, { surfaceKey: "rolled-back-alias", kind: "hint", text: "+137*19", sourceVersions: {} });
+    expect(await readCourseQuestionExposure(tx, f.scope, question()))
+      .toMatchObject({ coverage: "complete", exactExposed: true, familyExposed: true });
+    throw new Error("rollback alias exposure");
+  })).rejects.toThrow("rollback alias exposure");
+  expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  const [coverage] = await f.sql`SELECT complete,invalidated FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(coverage).toMatchObject({ complete: false, invalidated: false });
+  expect(await readCourseQuestionExposure(f.sql, f.scope, { ...question(), text: "+137*19" }))
+    .toMatchObject({ coverage: "complete", exactExposed: false, familyExposed: false });
+});
 it("never promotes partial extraction or unknown old history to unseen", async () => {
   await f.sql.begin(tx => recordCourseQuestionExposure(tx, f.scope, { surfaceKey: "unparsed", kind: "example",
     body: { text: "See (137+2)*19 in figure", imageObjectKey: "figure" }, sourceVersions: {} }));

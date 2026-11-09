@@ -12,7 +12,8 @@ import * as starts from "../../packages/database/src/repositories/opening-course
 import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
-import type { CourseRouteActionResult, CourseRouteStart, TeachingActivity } from "@aistudy/contracts";
+import { activitySpecClientInitSchema, courseRouteActionResultSchema, uuidSchema,
+  type CourseRouteActionResult, type CourseRouteStart, type TeachingActivity } from "@aistudy/contracts";
 
 let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
@@ -22,6 +23,32 @@ const ready = (result: CourseRouteActionResult) => {
   if (result.kind !== "ready") throw new Error(JSON.stringify(result));
   return result;
 };
+// Only explicit metadata paths may contain answer-like digits inside UUIDs.
+// Never exempt UUID-shaped strings in prompt bodies, feedback, hints or checkpoints.
+function assertNoPrivateKey(value: unknown, answer: string, path = ''): void {
+  if (typeof value === 'string') {
+    const metadata = /^(result\.requirementId|result\.activity\.(id|workspaceId|ownerUserId|courseId|sourceIds\.\d+)|init\.(id|activityId|teachingUnitId|documentId)|init\.(blocks|blockOrder)\.\d+\.blockId|init\.sourceRefs\.\d+\.(sourceId|chunkId))$/;
+    if (metadata.test(path) && uuidSchema.safeParse(value).success) return;
+    const href = path === 'result.href' ? /^\/opening\/courses\/([^/]+)\/study\?activity=(.+)$/.exec(value) : null;
+    if (href && uuidSchema.safeParse(href[1]).success && uuidSchema.safeParse(href[2]).success) return;
+    if (path === 'result.activity.clientKey' && value.startsWith('course-route-task:')
+      && uuidSchema.safeParse(value.slice('course-route-task:'.length)).success) return;
+    expect(value, path).not.toContain(answer);
+  } else if (typeof value === 'number') expect(String(value), path).not.toContain(answer);
+  else if (Array.isArray(value)) value.forEach((entry, index) => assertNoPrivateKey(entry, answer, `${path}.${index}`));
+  else if (value && typeof value === 'object') for (const [key, entry] of Object.entries(value)) {
+    expect(key, `${path}.${key}`).not.toMatch(/^(?:answer|key)(?:$|_|[A-Z])/);
+    expect(key, path).not.toContain(answer);
+    assertNoPrivateKey(entry, answer, path ? `${path}.${key}` : key);
+  }
+}
+function assertPrivatePromptOnly(result: unknown, init: unknown, answer: string) {
+  // Parse the original values, not a stripped/projected copy: unknown API fields
+  // must still fail even if their value does not contain the answer's digits.
+  courseRouteActionResultSchema.parse(result);
+  activitySpecClientInitSchema.parse(init);
+  assertNoPrivateKey({ result, init }, answer);
+}
 // Synthetic PG fixture. Only successful eligibility tests replace the exposure
 // reader; no production coverage marker, provider, paid API or model is created.
 async function setup(candidate = { text: '137*19', answer: '2603' }) {
@@ -98,7 +125,7 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
   expect(await f.sql`SELECT state FROM opening_course_reserved_questions WHERE course_id=${x.courseId}`).toEqual([{ state: 'issued' }]);
   const init = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
   expect(init?.blocks[0]?.content).toMatchObject({ text: '137*19' });
-  expect(JSON.stringify([result, init])).not.toContain('2603');
+  assertPrivatePromptOnly(result, init, '2603');
   const [attempt] = await f.sql`SELECT a.id,a.requirement_key,v.evaluation_spec FROM opening_learning_attempts a
     JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${result.activity.id}`;
   expect(attempt).toMatchObject({ requirement_key: 'arithmetic', evaluation_spec: { courseRequirement: {
@@ -111,10 +138,32 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
   if (expected !== 'unverified') {
     expect(answer).toMatchObject({ verdictSource: 'deterministic', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
     expect(answer.serverEvaluation).toMatchObject({ decision: expected, evaluatorVersion: 'teaching-key-exact-v1' });
-    expect(JSON.stringify(answer.serverEvaluation)).not.toContain('2603');
+    assertNoPrivateKey(answer.serverEvaluation, '2603');
   }
   const feedback = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
-  expect(JSON.stringify(feedback)).not.toContain('2603');
+  assertPrivatePromptOnly(result, feedback, '2603');
+});
+it('accepts UUID metadata containing answer digits but detects private fields and visible-body leaks', async () => {
+  const x = await setup(), result = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const init = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
+  if (!init) throw new Error('missing client init');
+  const publicInit = structuredClone(init);
+  publicInit.sourceRefs[0]!.chunkId = '7f02603b-68d7-4281-888f-3b8b7b7c9ccd';
+  expect(() => assertPrivatePromptOnly(result, publicInit, '2603')).not.toThrow();
+  for (const content of [
+    { text: '137*19', answer: '2603' }, { text: '137*19', key: { answer: '2603' } },
+    { text: '137*19', key_json: { answer: '2603' } }, { text: '137*19', keyRefId: randomUUID() },
+    { text: '137*19', answer: publicInit.sourceRefs[0]!.chunkId }, { text: '137*19', body: 2603 },
+    { text: '137*19 = 2603' }, { text: '137*19', body: '2603' },
+    { text: '137*19', feedback: 'The answer is 2603.' }, { text: '137*19', hints: ['2603'] },
+    { text: publicInit.sourceRefs[0]!.chunkId }, // UUID shape is not a body exemption.
+  ]) {
+    const leaked = structuredClone(publicInit);
+    leaked.blocks[0]!.content = content;
+    expect(() => assertPrivatePromptOnly(result, leaked, '2603')).toThrow();
+  }
+  expect(() => assertPrivatePromptOnly({ ...result, answer: 'redacted' }, publicInit, '2603')).toThrow();
+  expect(() => assertPrivatePromptOnly(result, { ...publicInit, key: 'redacted' }, '2603')).toThrow();
 });
 it.each([
   ['1+2*3+3', '10', 'correct'], ['1+2*3+3', '127', 'incorrect'],
@@ -220,7 +269,8 @@ it('explicit real service start issues once across concurrent clicks and replays
   const content = createOpeningTeachingContentRepository(f.sql), init = await content.getClientInit(f.scope, one.activity.id);
   expect(init?.blocks).toHaveLength(1);
   expect(init?.blocks[0]?.content).toMatchObject({ text: '137*19' });
-  expect(JSON.stringify([a, b, init])).not.toContain('2603');
+  assertPrivatePromptOnly(a, init, '2603');
+  assertPrivatePromptOnly(b, init, '2603');
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${one.activity.id}`).toHaveLength(1);
   expect(await f.sql`SELECT state FROM opening_course_reserved_questions WHERE course_id=${x.courseId}`).toEqual([{ state: 'issued' }]);
   expect(await f.sql`SELECT id FROM opening_jobs WHERE kind='compile-teaching-unit' AND payload->>'activityId'=${one.activity.id}`).toHaveLength(0);

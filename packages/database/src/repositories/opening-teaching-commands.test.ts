@@ -97,6 +97,30 @@ describe("opening teaching commands (unit)", () => {
     expect(sameCommandIntent(base, { ...base, targetBlockId: blockB })).toBe(false);
   });
 
+  it("locks the supplied workspace history before owner/activity even on stale CAS, without advancing it", async () => {
+    const queries: Array<{ query: string; values: unknown[] }> = [];
+    const { sql, writes } = db((query, values) => {
+      queries.push({ query, values });
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow({ content_version: 5 })];
+      return [];
+    });
+    expect(await createOpeningTeachingCommandsRepository(sql).executeCommand(scope, activityId, {
+      clientKey: "stale-history-order", kind: "skip", blockId: blockA, expectedVersion: 1,
+    })).toMatchObject({ ok: false, conflict: "stale_content_version" });
+    expect(queries.slice(0, 4).map(({ query }) => query.replace(/\s+/g, " ").trim())).toEqual([
+      "SELECT id FROM workspaces WHERE id=? AND owner_user_id=?",
+      "INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision) VALUES (?,?,0) ON CONFLICT DO NOTHING",
+      "SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=? AND owner_user_id=? FOR UPDATE",
+      "SELECT id FROM workspaces WHERE id = ? AND owner_user_id = ? FOR SHARE",
+    ]);
+    for (const { values } of queries.slice(0, 4)) expect(values).toEqual([workspaceId, ownerUserId]);
+    // Lazy counter creation is allowed; neither the watermark nor business rows change.
+    const mutations = writes.filter(({ query }) => /^\s*(INSERT|UPDATE|DELETE)\b/.test(query));
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.query).toContain("INSERT INTO opening_workspace_history_revisions");
+  });
+
   it("T2 stale expectedVersion → stale_content_version (no LWW write)", async () => {
     const { sql, writes } = db((query) => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
@@ -170,7 +194,7 @@ describe("opening teaching commands (unit)", () => {
     expect(result).toMatchObject({ ok: false, conflict: "client_key_intent_mismatch" });
   });
 
-  it("T3 soft-idempotent replay success", async () => {
+  it("T3 soft-idempotent replay still succeeds on a completed activity", async () => {
     const fingerprint = JSON.stringify({
       kind: "skip",
       blockId: blockA,
@@ -194,6 +218,7 @@ describe("opening teaching commands (unit)", () => {
       if (query.includes("FROM opening_teaching_activities") && query.includes("FOR UPDATE")) {
         return [
           activityRow({
+            status: "completed",
             path_version: 2,
             checkpoint_json: {
               commandLog: [

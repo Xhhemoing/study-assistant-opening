@@ -17,7 +17,17 @@ export function reservedArithmeticIdentity(text: string) {
   // Validate before removing spaces: mixed fractions must not become different numbers.
   const value = evaluateArithmeticQuestion(expression);
   if (!value || text.length > 400) return null;
-  expression = expression.replace(/\s/g, "");
+  // Only unary + is an identity alias. Token context preserves binary +,
+  // unary -, number spelling and parentheses; validation above must come first.
+  const tokens = expression.replace(/\s/g, "").match(/\d+(?:\.\d+)?|\.\d+|[()+*/-]/g)!;
+  const canonical: string[] = [];
+  let expectsOperand = true;
+  for (const token of tokens) {
+    if (token === "+" && expectsOperand) continue;
+    canonical.push(token);
+    expectsOperand = token !== ")" && !/^[\d.]/.test(token);
+  }
+  expression = canonical.join("");
   return { expression, familyId: `arithmetic:${[...new Set(expression.match(/[+*/-]/g))].sort().join("")}`,
     value: `${value.n}/${value.d}` };
 }

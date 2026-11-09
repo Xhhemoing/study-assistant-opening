@@ -5,15 +5,20 @@ it("matches exact arithmetic across UUIDs and formatting without treating family
   const one = extractCourseQuestionExposure({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: "计算 137 × 19" });
   const two = extractCourseQuestionExposure({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", text: "137*19 = ?" });
   expect(one).toEqual(two);
-  expect(one).toEqual({ grammar: "reserved-arithmetic-2", complete: true, expressions: ["137*19"], families: ["arithmetic:*"] });
+  expect(one).toEqual({ grammar: "reserved-arithmetic-3", complete: true, expressions: ["137*19"], families: ["arithmetic:*"] });
   const different = extractCourseQuestionExposure("139*23");
   expect(different.families).toEqual(one.families);
   expect(different.expressions).not.toEqual(one.expressions);
 });
 it("covers teaching/example/hint/nested checkpoint text, not only submitted prompts", () => {
   expect(extractCourseQuestionExposure({ blocks: [{ type: "example", content: { text: "Example: 137*19" } }],
-    hints: { firstStep: "139*23" }, checkpoint: { presented: "141*29" } })).toEqual({ grammar: "reserved-arithmetic-2", complete: true,
+    hints: { firstStep: "139*23" }, checkpoint: { presented: "141*29" } })).toEqual({ grammar: "reserved-arithmetic-3", complete: true,
     expressions: ["137*19", "139*23", "141*29"], families: ["arithmetic:*"] });
+});
+it("deduplicates unary-plus aliases in teaching, hints and nested prompts without merging same-answer questions", () => {
+  expect(extractCourseQuestionExposure({ teaching: "137*19", hint: "Hint: +137*19", prompts: ["1*+2", "1*2", "2+3", "1+4"] }))
+    .toEqual({ grammar: "reserved-arithmetic-3", complete: true, expressions: ["1*2", "1+4", "137*19", "2+3"],
+      families: ["arithmetic:*", "arithmetic:+"] });
 });
 it.each([{ text: "Compute (137+2)*19 = ? in the figure" }, { imageObjectKey: "private/figure" },
   { vector: [1, 2] }, { status: "outcome_unknown" }, { text: "Example \\frac{1}{2}+3" }])("keeps partial or unknown surfaces incomplete %#", body => {
