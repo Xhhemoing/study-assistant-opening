@@ -4,6 +4,7 @@ import type { Sql } from "postgres";
 import { failOpeningJob, releaseOpeningParseClaim } from "./opening-job-failure";
 import type { OpeningScope } from "./opening-sources";
 import { dispatchOpeningOutbox } from "./opening-job-dispatch";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 export type OpeningJobErrorCode = "NOT_FOUND" | "CONFLICT";
 
@@ -139,36 +140,63 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       return Number((rows[0] as Record<string, unknown>).privacy_epoch ?? 0);
     },
     async claim(id) {
-      return sql.begin(async (tx) => {
-        await tx`SELECT w.id FROM workspaces w JOIN opening_jobs j ON j.workspace_id = w.id
-          WHERE j.id = ${id} FOR SHARE OF w`;
-        // Never take over an execution with an unknown external outcome. The
-        // recovery sweep ends stale running jobs instead of executing them twice.
-        const rows = await tx`
-          UPDATE opening_jobs SET state = 'running', claim_token = ${randomUUID()}, updated_at = now()
-          WHERE id = ${id} AND state = 'queued'
-          RETURNING *
-        `;
-        if (!rows.length) return null;
-        const job = mapJob(rows[0] as Record<string, unknown>);
-        // Honest source status: parse / parse-media claim → source running (G7).
-        // Keep version fence; never overwrite ready/failed/unsupported.
-        if (job.kind === "parse" || job.kind === "parse-media") {
-          const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
-          const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
-          if (sourceId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
-            const rawVersion = payload && "sourceVersion" in payload ? payload.sourceVersion : null;
-            const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
-            await tx`
-              UPDATE opening_sources s SET parse_state = 'running', updated_at = now()
-              WHERE s.id = ${sourceId} AND s.workspace_id = ${job.workspaceId}
-                AND s.upload_state = 'uploaded'
-                AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
-                AND s.parse_state IN ('not_started', 'queued', 'running')`;
+      // Only identity drift becomes null, after rolling back any lazy ensure.
+      const identityChanged = new Error("claim history coordination changed");
+      try {
+        return await sql.begin(async (tx) => {
+          const [candidate] = await tx`SELECT w.id, w.owner_user_id FROM workspaces w
+            JOIN opening_jobs j ON j.workspace_id = w.id WHERE j.id = ${id}`;
+          if (!candidate) return null;
+          const scope = { workspaceId: String(candidate.id), ownerUserId: String(candidate.owner_user_id) };
+          try {
+            await lockWorkspaceLearningHistory(tx, scope);
+          } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+              const [current] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+              if (!current || current.owner_user_id !== candidate.owner_user_id) throw identityChanged;
+            }
+            throw error;
           }
-        }
-        return job;
-      });
+          // Retain the table fence, but only after history and for the original
+          // candidate. Job owner is not API authorization or canonical identity.
+          const [locked] = await tx`SELECT w.id FROM workspaces w
+            WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId} FOR SHARE OF w`;
+          if (!locked) throw identityChanged;
+          // Never take over an execution with an unknown external outcome. The
+          // recovery sweep ends stale running jobs instead of executing them twice.
+          const rows = await tx`
+            UPDATE opening_jobs SET state = 'running', claim_token = ${randomUUID()}, updated_at = now()
+            WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND state = 'queued'
+            RETURNING *
+          `;
+          if (!rows.length) {
+            const [current] = await tx`SELECT workspace_id FROM opening_jobs WHERE id=${id}`;
+            if (!current || current.workspace_id !== scope.workspaceId) throw identityChanged;
+            return null;
+          }
+          const job = mapJob(rows[0] as Record<string, unknown>);
+          // Honest source status: parse / parse-media claim → source running (G7).
+          // Keep version fence; never overwrite ready/failed/unsupported.
+          if (job.kind === "parse" || job.kind === "parse-media") {
+            const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
+            const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
+            if (sourceId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
+              const rawVersion = payload && "sourceVersion" in payload ? payload.sourceVersion : null;
+              const sourceVersion = typeof rawVersion === "number" && Number.isInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null;
+              await tx`
+                UPDATE opening_sources s SET parse_state = 'running', updated_at = now()
+                WHERE s.id = ${sourceId} AND s.workspace_id = ${job.workspaceId}
+                  AND s.upload_state = 'uploaded'
+                  AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
+                  AND s.parse_state IN ('not_started', 'queued', 'running')`;
+            }
+          }
+          return job;
+        });
+      } catch (error) {
+        if (error === identityChanged) return null;
+        throw error;
+      }
     },
     async heartbeat(id, claimToken, scope) {
       const rows = await sql`UPDATE opening_jobs SET updated_at = now()
