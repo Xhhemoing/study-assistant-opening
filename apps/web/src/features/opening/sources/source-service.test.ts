@@ -72,6 +72,11 @@ function makeFakeSql() {
     if (query.startsWith("WITH quota_objects AS")) {
       return [{ bytes: [...sources.values()].reduce((sum, row) => sum + Number(row.bytes), 0), objects: sources.size }];
     }
+    if (query === "SELECT owner_user_id FROM workspaces WHERE id=?"
+      || query === "SELECT owner_user_id FROM workspaces WHERE id=? FOR SHARE") {
+      const owner = [principal, otherPrincipal].find(candidate => candidate.workspaceId === values[0]);
+      return owner ? [{ owner_user_id: owner.userId }] : [];
+    }
     if (query.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
     if (query.startsWith("SELECT id, privacy_epoch FROM workspaces")) return [{ id: values[0], privacy_epoch: 7 }];
     if (query.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
