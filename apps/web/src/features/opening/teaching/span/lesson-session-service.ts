@@ -57,7 +57,9 @@ export function createSpanLessonSessionService(sql: Sql) {
       const decision = spanTutorReceiptDecision(receipt ?? null);
       const focus = !originChange && decision?.activityKind === "targeted_explain" ? heads.find(row => row.id === decision.focusObservationId
         && row.revisionKind !== "retract" && (!row.effectiveHeadId || row.effectiveHeadId === row.id)) : undefined;
-      const repairPlan = await readOpeningSpanRepair(sql, scope, session.activityId);
+      // Superseded activities return read-only history with originChange; do not try to
+      // qualify their obsolete plan as runnable content (nor replace it with generic content).
+      const repairPlan = originChange ? null : await readOpeningSpanRepair(sql, scope, session.activityId);
       const repair = repairPlan ? spanRepairPublicContext(repairPlan) : undefined;
       const targetedFocus = repairPlan ? undefined : focus && receipt ? await readTargetedFocus(sql, scope, focus, receipt.intentVersion) : undefined;
       const executionPhase = decision?.phase && decision.phaseSource ? { phase: decision.phase, source: decision.phaseSource } : null;

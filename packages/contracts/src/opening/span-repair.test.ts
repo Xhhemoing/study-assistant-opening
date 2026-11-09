@@ -24,6 +24,13 @@ it("accepts client activity/version/stage/key only, never chosen targets or froz
   expect(spanRepairIssueInputSchema.safeParse({ ...issue, problemId: "future" }).success).toBe(false);
   expect(spanRepairIssueInputSchema.safeParse({ ...issue, spanExercise: {} }).success).toBe(false);
 });
+it("allows only an explicit variant retry parent and still rejects client evaluation authority", () => {
+  const request = { activityId: id, repairVersion: 1, expectedRevision: 1, stage: "variant", clientKey: "retry-request", retryAfterAttemptId: id };
+  expect(spanRepairIssueInputSchema.parse(request)).toEqual(request);
+  for (const extra of [{ stage: "confirmation" }, { retryAfterAttemptId: "bad-id" }, { correct: true }, { serverEvaluation: {} }, { targetSkill: "equation" }]) {
+    expect(spanRepairIssueInputSchema.safeParse({ ...request, ...extra }).success).toBe(false);
+  }
+});
 it("public context rejects private plan identities and never labels external prerequisites verified", () => {
   const context = { status: "ready", version: 1, contentVersion: 1, targetSkill: "coefficients", focusSummary: "本题步骤", prerequisiteStatus: "unknown" };
   expect(spanRepairContextSchema.safeParse(context).success).toBe(true);

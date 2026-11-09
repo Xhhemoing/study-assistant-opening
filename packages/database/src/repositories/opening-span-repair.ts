@@ -8,6 +8,7 @@ import { contextSourceRefsIncluded, type ContextSourceRef } from "./opening-cont
 import { learningError, mapLearningObservation } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { parseOpeningSpanExercise, readOpeningSpanExposureHistory } from "./opening-span-attempt";
+import { generateOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
 
 const prerequisite = { status: "unknown" as const, reasonCode: "prerequisite_binding_missing" as const };
 const conflict = (message: string) => Object.assign(learningError("CONFLICT", message), { reasonCode: "SPAN_REPAIR_CHANGED" });
@@ -139,8 +140,63 @@ export async function readOpeningSpanRepair(db: Db, scope: Scope, activityId: st
 
 export const spanRepairAttemptKey = (activityId: string, stage: "example" | "variant" | "confirmation") => `span-repair:${activityId}:v1:${stage}`;
 
+const retryPrefix = (activityId: string) => `${spanRepairAttemptKey(activityId, "variant")}:retry:`;
+export function isOpeningSpanRepairAttemptKey(activityId: string, key: string): boolean {
+  return ["example", "variant", "confirmation"].some(stage => key === spanRepairAttemptKey(activityId, stage as "example" | "variant" | "confirmation"))
+    || key.startsWith(retryPrefix(activityId)) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(key.slice(retryPrefix(activityId).length));
+}
+/** Read only already-authorized stage attempts. Random client keys never enter this lineage. */
+export async function readOpeningSpanRepairVariant(db: Db, scope: Scope, activityId: string) {
+  const key = spanRepairAttemptKey(activityId, "variant"), prefix = retryPrefix(activityId);
+  const [row] = await db`SELECT id,client_key,create_intent,item_version_id FROM opening_learning_attempts
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND activity_id=${activityId}
+      AND (client_key=${key} OR left(client_key,${prefix.length})=${prefix}) ORDER BY history_revision DESC,id DESC LIMIT 1`;
+  return row ?? null;
+}
+/** Returns one stable child key; replays do not authorize a grandchild, stale parents cannot fork. */
+export async function openingSpanRepairRetryKey(db: Db, scope: Scope, activityId: string, parentId: string) {
+  const current = await readOpeningSpanRepairVariant(db, scope, activityId);
+  const key = `${retryPrefix(activityId)}${parentId}`;
+  if (current?.client_key === key) return key;
+  if (current?.id !== parentId) throw conflict("重答的前题已变化或不属于当前步骤，请重新读取。");
+  const [head] = await db`SELECT o.server_evaluation,o.revision_kind FROM opening_learning_attempts a
+    JOIN opening_learning_observations root ON root.id=a.observation_id AND root.attempt_id=a.id
+      AND root.workspace_id=a.workspace_id AND root.owner_user_id=a.owner_user_id
+    JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
+      AND o.workspace_id=root.workspace_id AND o.owner_user_id=root.owner_user_id
+    WHERE a.id=${parentId} AND a.activity_id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
+  const evaluation = head?.server_evaluation as { decision?: string; coreEvidenceComplete?: boolean } | null;
+  if (!head || head.revision_kind === "retract" || evaluation?.decision === "correct" && evaluation.coreEvidenceComplete) {
+    throw conflict("请先保留当前题的首答；已完整核验正确的变式不再发放重答。");
+  }
+  return key;
+}
+
+/** Same-item feedback and released help remain real help in the new attempt; never erase the first answer. */
+export async function inheritOpeningSpanRepairRetryHelp(tx: TransactionSql, scope: Scope, activityId: string, key: string, attemptId: string) {
+  if (!key.startsWith(retryPrefix(activityId))) return;
+  const parentId = key.slice(retryPrefix(activityId).length);
+  const [parent] = await tx`SELECT a.item_version_id,a.session_id,o.assistance FROM opening_learning_attempts a
+    JOIN opening_learning_observations root ON root.id=a.observation_id AND root.attempt_id=a.id
+      AND root.workspace_id=a.workspace_id AND root.owner_user_id=a.owner_user_id
+    JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
+      AND o.workspace_id=root.workspace_id AND o.owner_user_id=root.owner_user_id
+    WHERE a.id=${parentId} AND a.activity_id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
+  if (!parent) throw conflict("原重答帮助事实不可读取。");
+  const [revealed] = await tx`SELECT 1 AS ok FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} AND item_version_id=${String(parent.item_version_id)} AND delivered=TRUE
+    AND kind<>'instruction' AND level='revealed' AND support_domain<>'language'`;
+  const level = revealed || parent.assistance === "revealed" ? "revealed" : "hinted";
+  const receipt = await generateOpeningStudyExposure(tx, scope, { releaseKey: `${key}:inherited-help`,
+    contextAnchor: { activityId, attemptId, itemVersionId: String(parent.item_version_id), purpose: "learning_help" },
+    sessionId: String(parent.session_id), origin: "assistant", supportDomain: "math", kind: level === "revealed" ? "solution" : "hint", level });
+  await releaseOpeningStudyExposure(tx, scope, receipt.id);
+}
+
 /** Owned issued attempt + current exact head, including regrade lineage, never client completion claims. */
 async function stageResult(db: Db, scope: Scope, current: SpanLessonSnapshot, stage: "variant" | "confirmation", requireCorrect: boolean) {
+  const variant = stage === "variant" ? await readOpeningSpanRepairVariant(db, scope, current.activityId) : null;
+  const key = variant ? String(variant.client_key) : spanRepairAttemptKey(current.activityId, stage);
   const [row] = await db`SELECT o.*,a.item_version_id AS issued_item,a.problem_id AS issued_problem,v.evaluation_spec
     FROM opening_learning_attempts a
     JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
@@ -149,7 +205,7 @@ async function stageResult(db: Db, scope: Scope, current: SpanLessonSnapshot, st
     JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
       AND o.workspace_id=root.workspace_id AND o.owner_user_id=root.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.activity_id=${current.activityId}
-      AND a.session_id=${current.sessionId} AND a.course_id=${current.courseId} AND a.client_key=${spanRepairAttemptKey(current.activityId, stage)}
+      AND a.session_id=${current.sessionId} AND a.course_id=${current.courseId} AND a.client_key=${key}
       AND COALESCE(o.revision_kind,'original')<>'retract'`;
   if (!row) throw conflict("请先提交当前已发题目；未推进本题步骤。");
   const observation = mapLearningObservation(row), evaluation = observation.serverEvaluation;
@@ -213,7 +269,12 @@ export async function assertOpeningSpanRepairAttempt(db: Db, scope: Scope, activ
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const move = (activity?.checkpoint_json as { spanLesson?: { moveId?: string } })?.spanLesson?.moveId;
   const stage = move === "self-example" ? "example" : move === "self-faded" ? "variant" : move === "self_study-reserved" ? "confirmation" : null;
-  if (!stage || input.clientKey !== spanRepairAttemptKey(activityId, stage)) throw conflict("题目请求不属于当前本题步骤。");
+  if (!stage) throw conflict("题目请求不属于当前本题步骤。");
+  if (stage === "variant" && input.clientKey.startsWith(retryPrefix(activityId))) {
+    const parentId = input.clientKey.slice(retryPrefix(activityId).length);
+    if (!isOpeningSpanRepairAttemptKey(activityId, input.clientKey)
+      || await openingSpanRepairRetryKey(db, scope, activityId, parentId) !== input.clientKey) throw conflict("重答请求不属于当前本题步骤。");
+  } else if (input.clientKey !== spanRepairAttemptKey(activityId, stage)) throw conflict("题目请求不属于当前本题步骤。");
   if (stage !== "confirmation") {
     const identity = stage === "example" ? plan.teachingExample : plan.practiceVariant;
     if (input.spanExercise.problemId !== identity.problemId || String(input.spanExercise.version) !== identity.version) throw conflict("题目身份与本题步骤计划不一致。");

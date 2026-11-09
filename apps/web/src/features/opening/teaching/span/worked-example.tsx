@@ -1,13 +1,18 @@
 "use client";
 import { useState } from "react";
 import { ui } from "../../design/ui";
-import { useSpanPresentation } from "./use-span-presentation";
-export function SpanWorkedExample({ courseId, sourceId, fast, sessionId }: { courseId: string; sourceId?: string; fast: boolean; sessionId?: string }) {
-  const { content, error, reload } = useSpanPresentation(courseId, sourceId, "worked", sessionId);
+import { useSpanPresentation, type SpanRepairPresentationBinding } from "./use-span-presentation";
+import type { SpanRepairContext } from "@aistudy/contracts";
+import { SpanTargetedExplanation } from "./span-targeted-explanation";
+export function SpanWorkedExample({ courseId, sourceId, fast, sessionId, repair }: { courseId: string; sourceId?: string; fast: boolean; sessionId?: string; repair?: SpanRepairPresentationBinding & { context: SpanRepairContext } }) {
+  const { content, error, reload } = useSpanPresentation(courseId, sourceId, "worked", sessionId, repair);
   const [reveal, setReveal] = useState(0);
   const shown = fast ? 2 : reveal;
   if (error) return <div role="status" className="space-y-2 text-xs text-warn"><p>{error}</p><button type="button" className={ui.secondary} onClick={reload}>重新读取示范</button></div>;
   if (!content) return <p role="status" className="text-xs text-text-2">正在准备例题…</p>;
+  if (repair) return content.targetedExplanation && repair.context.status === "ready" && content.targetedExplanation.targetSkill === repair.context.targetSkill
+    ? <SpanTargetedExplanation context={repair.context} explanation={content.targetedExplanation} />
+    : <p role="alert">本题步骤短讲缺失或不匹配；原进度保留，未回退通用讲解。</p>;
   const problem = content.problem;
   return <div className="space-y-4 rounded-xl border border-line bg-accent-soft text-text p-4"><p className="font-mono text-sm">v=({problem.vectors[0].join(", ")})，w=({problem.vectors[1].join(", ")})，u=({problem.target.join(", ")})</p><p className="prose-reading">span 是所有 αv+βw 的集合。判断 u 能否到达，就是找一组让所有坐标同时成立的系数。</p>{shown >= 1 ? <div className="font-mono text-sm leading-8"><p>α({problem.vectors[0].join(",")})+β({problem.vectors[1].join(",")})=({problem.target.join(",")})</p>{problem.target.map((coordinate, index) => <p key={index}>第{index + 1}坐标：{problem.vectors[0][index]}α + {problem.vectors[1][index]}β = {coordinate}</p>)}</div> : null}{shown >= 2 && content.solution.kind === "unique" ? <p className="prose-reading">所以 α={content.solution.coefficients[0]}，β={content.solution.coefficients[1]}。分别代回上面的每一个坐标方程；所有等式同时成立，因此属于 span。</p> : null}{shown < 2 ? <button type="button" className={ui.secondary} onClick={() => setReveal(value => value + 1)}>{reveal ? "揭示系数与全部坐标核对" : "揭示如何建立方程"}</button> : null}<p className="text-xs leading-6 text-text-2">看完后，试着补全下一道题的关键一步。</p></div>;
 }

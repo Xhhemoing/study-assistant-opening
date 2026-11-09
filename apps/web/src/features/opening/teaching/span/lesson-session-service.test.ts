@@ -40,6 +40,15 @@ function targetedOrigin() {
     intentVersion: JSON.stringify({ ruleDecision: { activityKind: "targeted_explain", focusObservationId: origin.id }, sourceRefs: [{ sourceId: id, sourceVersion: 1 }] }) }]);
   return origin;
 }
+it("returns superseded plan history without trying to qualify obsolete runnable repair content", async () => {
+  mocks.originChange.mockResolvedValue({ reason: "evidence_changed", originSession: session, observationId: null });
+  mocks.repair.mockRejectedValue(new Error("obsolete basis must not be rendered"));
+  mocks.listByActivity.mockResolvedValue([attempt]);
+  const details = await service().read(scope, id, id);
+  expect(details).toMatchObject({ originChange: { reason: "evidence_changed" }, attempts: [attempt] });
+  expect(details).not.toHaveProperty("repair");
+  expect(mocks.repair).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+});
 it("reads the original third-coordinate error from the receipt without exposing a solution, including on return", async () => {
   targetedOrigin();
   // The focus is from another session, not this derived activity's attempts.

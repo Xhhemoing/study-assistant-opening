@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LearningObservation, Scope } from "@aistudy/contracts";
+import type { LearningObservation, Scope, SpanProblem } from "@aistudy/contracts";
 import { createOpeningAdaptivePrefsRepository, createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -12,6 +12,8 @@ import { POST as automaticRetest } from "../../../apps/web/src/app/api/opening/t
 import { PATCH as updateTask } from "../../../apps/web/src/app/api/opening/tasks/[id]/route";
 import { GET as readLesson, POST as createLesson, PATCH as saveLesson } from "../../../apps/web/src/app/api/opening/teaching/span/lesson/route";
 import { POST as presentation } from "../../../apps/web/src/app/api/opening/teaching/span/presentation/route";
+import { POST as issueRepair } from "../../../apps/web/src/app/api/opening/teaching/span/reserved/route";
+import { solveSpanProblem } from "@aistudy/domain";
 import { POST as hint } from "../../../apps/web/src/app/api/opening/teaching/span/hint/route";
 import { POST as nextActivity } from "../../../apps/web/src/app/api/opening/teaching/span/next/route";
 import { backupRows } from "../opening-backup-records-fixture";
@@ -105,6 +107,13 @@ function lessonGet(courseId: string, activityId?: string, retestId?: string) {
   return new Request(url, { headers: { cookie: fixture.cookie } });
 }
 
+function equationError(problem: SpanProblem) {
+  const solved = solveSpanProblem(problem);
+  if (solved.kind !== "unique") throw new Error("fixture requires a unique canonical problem");
+  return JSON.stringify({ membership: "in_span", coefficients: solved.coefficients,
+    equation: { vectors: problem.vectors, target: problem.target.map(() => "0") }, coordinateChecks: problem.target });
+}
+
 describe("authenticated span tutor learning flow", () => {
   it("restores a paused lesson by ordinary GET after leaving, then executes and reads its actual correction", async () => {
     const fixture = currentFixture(), f = await start();
@@ -130,10 +139,10 @@ describe("authenticated span tutor learning flow", () => {
     }));
     expect(resume.status).toBe(200); const active = await resume.json();
     const submitted = await submitAttempt(request(`/api/opening/attempts/${attempt.id}/submit`, {
-      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), outcome: "unverified", assistance: "independent",
+      clientKey: randomUUID(), answer: equationError(attempt.spanExercise), outcome: "unverified", assistance: "independent",
     }), { params: Promise.resolve({ id: attempt.id }) });
     expect(submitted.status).toBe(201); const observed = await submitted.json() as LearningObservation;
-    expect(observed).toMatchObject({ outcome: "incorrect", sessionId: f.origin.sessionId, serverEvaluation: { decision: "incorrect" } });
+    expect(observed).toMatchObject({ outcome: "incorrect", sessionId: f.origin.sessionId, serverEvaluation: { decision: "incorrect", skills: { equation: "incorrect" } } });
     const nextBody = { activityId: f.origin.activityId, expectedRevision: active.revision, observationId: observed.id, clientKey: randomUUID() };
     const response = await nextActivity(request(nextPath, nextBody));
     expect(response.status).toBe(200); const next = await response.json();
@@ -141,13 +150,15 @@ describe("authenticated span tutor learning flow", () => {
     expect(next.activityId).not.toBe(f.origin.activityId);
     expect(next.href).toBe(`/opening/courses/${f.courseId}/study/span?lesson=${next.activityId}`);
     const worked = await presentation(request("/api/opening/teaching/span/presentation", {
-      sessionId: next.sessionId, courseId: f.courseId, sourceId: f.sourceId, kind: "worked", clientKey: randomUUID(),
+      activityId: next.activityId, repairVersion: 1, stage: "example", clientKey: randomUUID(),
     }));
-    expect(worked.status).toBe(200); const presented = await worked.json();
+    expect(worked.status, JSON.stringify(await worked.clone().json())).toBe(200); const presented = await worked.json();
     const afterWork = await persistedCourse(f.courseId);
     const finalRead = await readLesson(lessonGet(f.courseId));
     expect(finalRead.status).toBe(200); const final = await finalRead.json();
     expect(final.session).toMatchObject({ activityId: next.activityId, sessionId: next.sessionId, moveId: "self-example", status: "active", retestId: null });
+    expect(final.repair).toMatchObject({ status: "ready", targetSkill: "equation", prerequisiteStatus: "unknown" });
+    expect(presented.targetedExplanation).toMatchObject({ targetSkill: "equation" });
     expect(final.attempts).toHaveLength(1);
     const finalAttempt = final.attempts[0];
     expect(finalAttempt).toMatchObject({ sessionId: next.sessionId,
@@ -172,6 +183,50 @@ describe("authenticated span tutor learning flow", () => {
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ kind: "ready", resumed: true, activityId: next.activityId, sessionId: next.sessionId });
     expect(await persistedCourse(f.courseId)).toEqual(afterWork);
+
+    // Continue through the real HTTP stage owner, including P1's explicit same-item retry.
+    const move = async (snapshot: typeof final.session, moveId: string) => {
+      const response = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${snapshot.activityId}`, {
+        expectedRevision: snapshot.revision, intent: snapshot.intent, moveId, status: "active" }));
+      expect(response.status, JSON.stringify(await response.clone().json())).toBe(200); return response.json();
+    };
+    const variantSession = await move(final.session, "self-faded");
+    const issue = async (stage: string, revision: number, retryAfterAttemptId?: string) => {
+      const response = await issueRepair(request("/api/opening/teaching/span/reserved", { activityId: next.activityId,
+        repairVersion: 1, expectedRevision: revision, stage, clientKey: randomUUID(), ...(retryAfterAttemptId ? { retryAfterAttemptId } : {}) }));
+      expect(response.status, JSON.stringify(await response.clone().json())).toBe(200); return response.json();
+    };
+    const variant = await issue("variant", variantSession.revision);
+    const wrongResponse = await submitAttempt(request(`/api/opening/attempts/${variant.id}/submit`, { clientKey: randomUUID(),
+      answer: JSON.stringify({ membership: "in_span", coefficients: ["0", "0"] }), outcome: "unverified", assistance: "independent" }), { params: Promise.resolve({ id: variant.id }) });
+    expect(wrongResponse.status).toBe(201); const wrong = await wrongResponse.json();
+    expect(wrong.serverEvaluation.decision).toBe("incorrect");
+    const denied = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${next.activityId}`, {
+      expectedRevision: variantSession.revision, intent: variantSession.intent, moveId: "self_study-reserved", status: "active" }));
+    expect(denied.status).toBe(409);
+    const retried = await issue("variant", variantSession.revision, variant.id);
+    expect(retried.id).not.toBe(variant.id);
+    expect(await issue("variant", variantSession.revision, variant.id)).toEqual(retried);
+    const submitRight = async (attempt: { id: string; spanExercise: SpanProblem }) => {
+      const p = attempt.spanExercise, solved = solveSpanProblem(p);
+      if (solved.kind !== "unique") throw new Error("expected consistent same-family question");
+      const response = await submitAttempt(request(`/api/opening/attempts/${attempt.id}/submit`, { clientKey: randomUUID(),
+        answer: JSON.stringify({ membership: "in_span", coefficients: solved.coefficients, equation: { vectors: p.vectors, target: p.target }, coordinateChecks: p.target }),
+        outcome: "unverified", assistance: "independent" }), { params: Promise.resolve({ id: attempt.id }) });
+      expect(response.status).toBe(201); return response.json();
+    };
+    expect(await submitRight(retried)).toMatchObject({ assistance: "hinted", serverEvaluation: { decision: "correct", coreEvidenceComplete: true } });
+    const confirmationSession = await move(variantSession, "self_study-reserved");
+    const confirmation = await issue("confirmation", confirmationSession.revision);
+    expect(confirmation.spanExercise.id).not.toBe(retried.spanExercise.id);
+    const result = await submitRight(confirmation);
+    expect(result).toMatchObject({ assistance: "independent", serverEvaluation: { decision: "correct", coreEvidenceComplete: true } });
+    const beforeResultRead = await persistedCourse(f.courseId);
+    const resultRead = await readLesson(lessonGet(f.courseId, next.activityId));
+    expect(resultRead.status).toBe(200);
+    expect((await resultRead.json()).observations).toContainEqual(expect.objectContaining({ id: result.id }));
+    expect(await persistedCourse(f.courseId)).toEqual(beforeResultRead);
+    expect(beforeResultRead.observations.find(row => row.id === wrong.id)?.answer).toBe(wrong.answer);
   });
 
   it("restores the most recently updated active or paused lesson, breaking ties by descending activity id", async () => {
@@ -273,7 +328,7 @@ describe("authenticated span tutor learning flow", () => {
     expect(issued.spanExercise?.id).toBe("span-reserved-fraction");
     expect(issued.spanValidation).toMatchObject({ eligible: true, firstFamilyExposure: true });
     const submitted = await submitAttempt(request(`/api/opening/attempts/${issued.id}/submit`, {
-      clientKey: randomUUID(), answer: JSON.stringify({ membership: "not_in_span" }), outcome: "unverified", assistance: "independent",
+      clientKey: randomUUID(), answer: equationError(issued.spanExercise!), outcome: "unverified", assistance: "independent",
     }), { params: Promise.resolve({ id: issued.id }) });
     expect(submitted.status).toBe(201);
     const observation = await submitted.json() as LearningObservation;
@@ -315,10 +370,9 @@ describe("authenticated span tutor learning flow", () => {
 
     // Retracting the origin must stop recommending its derived correction without erasing history.
     const presentationPath = "/api/opening/teaching/span/presentation";
-    const presentationBody = { sessionId: next.sessionId, courseId: f.courseId, sourceId: f.sourceId,
-      kind: "worked", clientKey: `flow-presentation:${randomUUID()}` };
+    const presentationBody = { activityId: next.activityId, repairVersion: 1, stage: "example", clientKey: `flow-presentation:${randomUUID()}` };
     const presented = await presentation(request(presentationPath, presentationBody));
-    expect(presented.status).toBe(200);
+    expect(presented.status, JSON.stringify(await presented.clone().json())).toBe(200);
     const oldPresentation = await presented.json();
     const correctionBefore = await f.lessons.get(fixture.scope, next.activityId);
     const activityBefore = await fixture.sql`SELECT * FROM opening_teaching_activities WHERE id=${next.activityId}`;
@@ -339,9 +393,12 @@ describe("authenticated span tutor learning flow", () => {
     });
     expect(resumed).toMatchObject({ action: null });
     expect(resumed?.choice?.href).toContain(`/opening/courses/${f.courseId}`);
+    // A stale new-plan basis cannot re-release content, even with the old key. Read-only history
+    // still retains the actual canonical example and its earlier exposure receipt.
     const oldHelp = await presentation(request(presentationPath, presentationBody));
-    expect(oldHelp.status).toBe(200);
-    expect(await oldHelp.json()).toEqual(oldPresentation);
+    expect(oldHelp.status).toBe(409);
+    expect(changed.attempts[0]?.spanExercise).toEqual(oldPresentation.problem);
+    expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${oldPresentation.exposureReceipt.id}`)[0]?.delivered).toBe(true);
     const staleNewPresentation = await presentation(request(presentationPath, { ...presentationBody, clientKey: randomUUID() }));
     expect(staleNewPresentation.status).toBe(409);
     expect(attemptsBefore).toHaveLength(1);

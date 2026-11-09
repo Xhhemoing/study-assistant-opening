@@ -52,4 +52,8 @@ export const spanRepairPresentationInputSchema = z.object({ activityId: uuidSche
 export const spanRepairIssueInputSchema = z.object({ activityId: uuidSchema, repairVersion: z.literal(1),
   expectedRevision: z.number().int().positive(), stage: z.enum(["variant", "confirmation"]),
   clientKey: z.string().min(8).max(160),
-}).strict();
+  /** Explicit same-item retry; the server derives its identity from this currently authorized parent. */
+  retryAfterAttemptId: uuidSchema.optional(),
+}).strict().superRefine((input, ctx) => {
+  if (input.retryAfterAttemptId && input.stage !== "variant") ctx.addIssue({ code: "custom", path: ["retryAfterAttemptId"], message: "Only the current teaching variant accepts a same-item retry" });
+});

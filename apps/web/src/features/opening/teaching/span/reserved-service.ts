@@ -1,6 +1,6 @@
 import { spanRepairIssueInputSchema, type Scope } from "@aistudy/contracts";
 import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice,
-  readOpeningSpanRepair, spanRepairAttemptKey, createOpeningSpanSessionRepository } from "@aistudy/database";
+  readOpeningSpanRepair, spanRepairAttemptKey, createOpeningSpanSessionRepository, readOpeningSpanRepairVariant, openingSpanRepairRetryKey } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
 import { getSpanReservedProblem, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -19,7 +19,10 @@ export function createSpanReservedService(sql: Sql) {
         if (!session || session.status !== "active" || session.revision !== input.expectedRevision || session.moveId !== expectedMove || plan?.status !== "ready") {
           throw Object.assign(new Error("本题步骤或版本已变化，请重新读取；未提前发放确认题。"), { code: "CONFLICT" });
         }
-        const clientKey = spanRepairAttemptKey(input.activityId, input.stage);
+        const currentVariant = input.stage === "variant" ? await readOpeningSpanRepairVariant(tx, scope, input.activityId) : null;
+        const clientKey = input.retryAfterAttemptId
+          ? await openingSpanRepairRetryKey(tx, scope, input.activityId, input.retryAfterAttemptId)
+          : currentVariant ? String(currentVariant.client_key) : spanRepairAttemptKey(input.activityId, input.stage);
         const [existing] = await tx`SELECT create_intent FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}`;
         const original = (existing?.create_intent as { spanExercise?: { sourceId: string; problemId: string; version: number } } | undefined)?.spanExercise;
@@ -33,7 +36,8 @@ export function createSpanReservedService(sql: Sql) {
           identity = { problemId: choice.problem.id, version: choice.problem.version };
         }
         return createOpeningLearningAttemptInTx(tx, scope, { sessionId: session.sessionId, clientKey,
-          spanExercise: { sourceId: session.sourceIds[0]!, problemId: identity.problemId, version: Number(identity.version) } });
+          spanExercise: { sourceId: session.sourceIds[0]!, problemId: identity.problemId, version: Number(identity.version) } },
+        input.retryAfterAttemptId ? { spanRepairRetryParentId: input.retryAfterAttemptId } : undefined);
       });
     }
     const input = inputSchema.parse(raw);
