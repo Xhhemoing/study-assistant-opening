@@ -182,12 +182,18 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     row.query_system = false;
     expect(validateOpeningRestore(corrupted, [], snapshot.memoryDeletions).errors).toContain("turn query receipt is invalid");
     await fixture.sql`DELETE FROM opening_conversations WHERE id=${conversation.id}`;
+    // The saved-turn fence lazily creates durable history outside the conversation cascade.
+    // Empty this fixture's target namespace just as the real executor requires.
+    await fixture.sql`DELETE FROM opening_workspace_history_revisions
+      WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
     const restored = await applyOpeningRestore({ sql: fixture.sql, confirmLocalRestore: true, backup, currentDeletionJournal: snapshot.deletionJournal, currentMemoryDeletions: snapshot.memoryDeletions });
-    expect(restored).toMatchObject({ ok: true, code: "APPLY_OK" });
+    expect(restored, restored.errors.join("; ")).toMatchObject({ ok: true, code: "APPLY_OK" });
     // Queue/job rows are deliberately not restored; compare persisted records by identity.
     expect(Object.fromEntries((await tutor.listTurns(fixture.scope, conversation.id)).map(turn => [turn.id, turn])))
       .toEqual(Object.fromEntries(before.map(turn => [turn.id, turn])));
     const [intent] = await fixture.sql`SELECT query_system FROM opening_turns WHERE id=${queued.turnId}`;
     expect(intent!.query_system).toBe(true); expect(forbidden).not.toHaveBeenCalled();
+    expect((await readOpeningBackupRecords(fixture.sql, fixture.scope)).tables.opening_workspace_history_revisions)
+      .toEqual(snapshot.tables.opening_workspace_history_revisions);
   });
 });
