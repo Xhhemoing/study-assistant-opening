@@ -54,8 +54,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!f) return;
-  await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.close();
+  try {
+    await f.sql.begin(async tx => {
+      await tx`TRUNCATE library_revisions`;
+      await tx`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
+    });
+  } finally {
+    await f.close();
+  }
 });
 
 beforeEach(async () => {
