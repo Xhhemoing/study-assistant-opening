@@ -4,6 +4,7 @@ import type { Scope, TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionInteractionSchema, teachingBlindSolveReceiptSchema, type TeachingBlindSolveIdentity } from "@aistudy/contracts";
 import { compareCourseQuestionIdentity, evaluateTeachingAnswer } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
+import { evaluateOpeningTeachingReservedAttempt } from "./opening-teaching-reserved-evaluation";
 import { readResolvedTeachingQuestion, teachingQuestionIdentityMatches, teachingQuestionText, type TeachingQuestionSpec } from "./opening-teaching-question";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
@@ -72,7 +73,8 @@ export async function evaluateOpeningTeachingKeyAttempt(tx: TransactionSql, scop
   const row = rows[0];
   if (!row || !Array.isArray(row.blocks)) return null;
   const spec = row.evaluation_spec as TeachingQuestionSpec;
-  if (spec?.kind !== "teaching_question" || spec.specVersion !== "teaching-question-v1" || !spec.answerBlockId) return null;
+  if (spec?.kind !== "teaching_question" || spec.specVersion !== "teaching-question-v1") return null;
+  if (!spec.answerBlockId) return evaluateOpeningTeachingReservedAttempt(tx, scope, attempt, spec, answer);
   const blocks = row.blocks as Block[];
   const prompt = blocks.find(block => block.id === spec.blockId && ["prompt", "question"].includes(block.type));
   if (prompt && repairDecodedLatexInJson(prompt.content).repairs > 0) return null;

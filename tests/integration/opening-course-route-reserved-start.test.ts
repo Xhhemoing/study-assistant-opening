@@ -91,7 +91,7 @@ it.each(['missing', 'invalidated'] as const)('real service rejects %s default co
   await expect(x.service.start(f.scope, x.courseId, x.input)).rejects.toMatchObject({ code: 'CONFLICT' });
   await noPublication(x);
 });
-it('uses the unmodified durable reader to issue only when real PG genesis and history qualify', async () => {
+it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverified']] as const)('real caller grades %s as %s after durable prompt-only issuance', async (submitted, expected) => {
   const x = await setup();
   const result = ready(await x.service.start(f.scope, x.courseId, x.input));
   expect(result.activity.contentVersion).toBe(1);
@@ -105,11 +105,78 @@ it('uses the unmodified durable reader to issue only when real PG genesis and hi
     id: x.requirement.id, revision: 1, stableSkillId: x.requirement.stableSkillId, requirementKey: 'arithmetic' } } });
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE course_id=${x.courseId}`).toHaveLength(1); // issuance alone is no mastery evidence
   const answer = await createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
-    clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
+    clientKey: randomUUID(), answer: submitted, outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
   expect(answer.retestId).toBeTruthy();
-  // Existing shared evaluator requires a public answerBlockId. This caller
-  // cannot fix that out-of-scope grading gap or promote issuance into mastery.
-  expect(answer.outcome).toBe('unverified');
+  expect(answer.outcome).toBe(expected);
+  if (expected !== 'unverified') {
+    expect(answer).toMatchObject({ verdictSource: 'deterministic', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
+    expect(answer.serverEvaluation).toMatchObject({ decision: expected, evaluatorVersion: 'teaching-key-exact-v1' });
+    expect(JSON.stringify(answer.serverEvaluation)).not.toContain('2603');
+  }
+  const feedback = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
+  expect(JSON.stringify(feedback)).not.toContain('2603');
+});
+it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'protocol'] as const)('rejects reserved submission after %s changes without recording an answer', async changed => {
+  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
+  if (changed === 'requirement') await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
+  if (changed === 'source') await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${x.sourceId}`;
+  if (changed === 'purpose_cas') await f.sql`UPDATE course_asset_memberships SET updated_at=updated_at+interval '1 microsecond' WHERE course_id=${x.courseId}`;
+  if (changed === 'purpose') await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
+  if (changed === 'task_version') await f.sql`UPDATE opening_tasks SET version=version+1 WHERE id=${x.input.taskId}`;
+  if (changed === 'protocol') await f.sql`UPDATE opening_retest_activities SET learning_protocol=jsonb_set(learning_protocol,'{stableSkillId}',to_jsonb(${randomUUID()}::text)) WHERE task_id=${x.input.taskId}`;
+  await expect(createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+    clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
+  })).rejects.toMatchObject({ code: changed === 'source' ? 'VALIDATION' : 'CONFLICT' });
+  expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(0);
+});
+it.each(['unsupported', 'interaction', 'spec', 'other_key', 'bad_key', 'stale_issued', 'shadow_body'] as const)('withholds deterministic authority for %s private content', async changed => {
+  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const [attempt] = await f.sql`SELECT a.*,v.teaching_revision_id FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${issued.activity.id}`;
+  const submit = () => createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+    clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
+  });
+  if (changed === 'spec') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=jsonb_set(evaluation_spec,'{activityId}',to_jsonb(${randomUUID()}::text)) WHERE id=${attempt!.item_version_id}`;
+  if (changed === 'stale_issued') {
+    await expect(f.sql`UPDATE opening_course_reserved_questions SET issued_item_version_id=NULL WHERE course_id=${x.courseId}`).rejects.toMatchObject({ code: '23514' });
+    return;
+  }
+  if (changed === 'bad_key') {
+    await expect(f.sql`UPDATE opening_course_reserved_questions SET key_json=jsonb_set(key_json,'{answer}','"2604"') WHERE course_id=${x.courseId}`).rejects.toThrow('reserved question content is immutable');
+    return;
+  }
+  if (changed === 'other_key') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=evaluation_spec||'{"id":"caller-chosen-key","itemVersionId":"caller-chosen-item"}'::jsonb WHERE id=${attempt!.item_version_id}`;
+  if (changed === 'unsupported') {
+    await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,'{0,content,text}','"137^19"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
+    return;
+  }
+  if (changed === 'interaction' || changed === 'shadow_body') {
+    const path = changed === 'interaction' ? '{0,content,interaction}' : '{0,content,figure}';
+    await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,${path}::text[],'"untrusted"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
+    return;
+  }
+  const result = await submit();
+  expect(result.outcome).toBe('unverified');
+  expect(result.verdictSource).not.toBe('deterministic');
+});
+it('replays one verdict without jobs or budget changes and never upgrades a later submission to independent', async () => {
+  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const [attempt] = await f.sql`SELECT * FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
+  const service = createOpeningAttemptService(f.sql), input = { clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' };
+  const capacity = await readOpeningLearningCapacity(f.sql, f.scope);
+  const jobs = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  const reservations = await f.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`;
+  const first = await service.submit(f.scope, String(attempt!.id), input);
+  expect((await service.submit(f.scope, String(attempt!.id), input)).id).toBe(first.id);
+  await expect(service.submit(f.otherScope, String(attempt!.id), input)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  expect(first).toMatchObject({ outcome: 'correct', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
+  await expect(service.create(f.scope, { sessionId: attempt!.session_id, clientKey: randomUUID(),
+    teachingBlock: attempt!.create_intent.teachingBlock })).rejects.toMatchObject({ code: 'CONFLICT' });
+  await expect(service.submit(f.scope, String(attempt!.id), { ...input, clientKey: randomUUID() })).rejects.toMatchObject({ code: 'CONFLICT' });
+  expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(1);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(jobs);
+  expect(await f.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(reservations);
+  expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(capacity.usedMinutes);
 });
 it('explicit real service start issues once across concurrent clicks and replays, without exposing the private key', async () => {
   const x = await setup(); qualifyTestOnly();
