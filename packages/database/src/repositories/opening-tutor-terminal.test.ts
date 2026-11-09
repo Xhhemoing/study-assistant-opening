@@ -306,6 +306,7 @@ describe("opening tutor jobs repository", () => {
 
   it("rejects completeTurn when the locked workspace privacy epoch drifted", async () => {
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
       if (query.includes("SELECT privacy_epoch FROM workspaces")) {
         return [{ privacy_epoch: 8 }];
       }
@@ -329,14 +330,63 @@ describe("opening tutor jobs repository", () => {
       expectedPrivacyEpoch: 7,
     })).rejects.toThrow(/privacy epoch drift/);
 
-    expect(sql.calls[0]).toContain("SELECT privacy_epoch FROM workspaces");
-    expect(sql.calls[0]).toContain("FOR UPDATE");
-    expect(sql.calls).not.toEqual(expect.arrayContaining([
-      expect.stringContaining("UPDATE opening_turns"),
-    ]));
-    expect(sql.calls).not.toEqual(expect.arrayContaining([
-      expect.stringContaining("INSERT"),
-    ]));
+    expect(sql.calls[0]).toContain("SELECT id FROM workspaces");
+    expect(sql.calls[0]).toContain("owner_user_id");
+    expect(sql.calls[0]).not.toContain("FOR UPDATE");
+    const historyLock = sql.calls.findIndex(query => query.includes("SELECT revision FROM opening_workspace_history_revisions"));
+    const workspaceLock = sql.calls.findIndex(query => query.includes("SELECT privacy_epoch FROM workspaces"));
+    expect(historyLock).toBeGreaterThan(0);
+    expect(sql.calls[historyLock]).toContain("FOR UPDATE");
+    expect(workspaceLock).toBeGreaterThan(historyLock);
+    expect(sql.calls[workspaceLock]).toContain("FOR UPDATE");
+    for (const table of ["opening_turns", "opening_tutor_jobs", "opening_workspace_history_revisions"]) {
+      expect(sql.calls.some(query => query.includes(`UPDATE ${table}`))).toBe(false);
+    }
+    expect(sql.calls.filter(query => query.includes("INSERT"))).toEqual([
+      expect.stringContaining("INSERT INTO opening_workspace_history_revisions"),
+    ]);
+  });
+
+  it.each([false, true])("preserves permission errors without changing the existing exposure error (exposure=%s)", async exposure => {
+    let ownerReads = 0;
+    const sql = fakeSql(query => {
+      if (query.includes("SELECT id FROM workspaces")) return ++ownerReads === 1 && !exposure ? [{ id: scope.workspaceId }] : [];
+      return [];
+    });
+    const error = await createOpeningTutorJobsRepository(sql).completeTurn({ scope, jobId: "job-1", assistantTurnId: "assistant-turn-1",
+      text: "answer", citations: [], candidates: [], ...(exposure ? { helpExposure: {
+        id: "exposure-1", sessionId: "session-1", problemId: null, turnId: "assistant-turn-1",
+        kind: "hint" as const, level: "hinted" as const, delivered: true as const,
+      } } : {}) }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject(exposure ? { code: "NOT_FOUND", message: "workspace not found" } : { message: "workspace permission changed" });
+    if (!exposure) expect(error).not.toHaveProperty("code");
+    expect(sql.calls.some(query => /UPDATE|INSERT/.test(query))).toBe(false);
+  });
+
+  it("still rejects ownership drift at the locked reread after history ensure", async () => {
+    const sql = fakeSql(query => query.includes("SELECT id FROM workspaces") ? [{ id: scope.workspaceId }] : []);
+    await expect(createOpeningTutorJobsRepository(sql).completeTurn({ scope, jobId: "job-1", assistantTurnId: "assistant-turn-1",
+      text: "answer", citations: [], candidates: [] })).rejects.toThrow("workspace permission changed");
+    expect(sql.calls.some(query => query.includes("SELECT privacy_epoch FROM workspaces") && query.includes("FOR UPDATE"))).toBe(true);
+    expect(sql.calls.some(query => query.includes("UPDATE opening_"))).toBe(false);
+    expect(sql.calls.filter(query => query.includes("INSERT"))).toEqual([
+      expect.stringContaining("INSERT INTO opening_workspace_history_revisions"),
+    ]);
+  });
+
+  it.each([
+    Object.assign(new Error("workspace not found"), { code: "CONFLICT" }),
+    Object.assign(new Error("other entity not found"), { code: "NOT_FOUND" }),
+    Object.assign(new Error("query failed"), { code: "23503" }),
+  ])("does not mask unrelated history errors: %s", async failure => {
+    let reads = 0;
+    const sql = fakeSql(query => {
+      if (query.includes("SELECT id FROM workspaces") && ++reads === 1) return [{ id: scope.workspaceId }];
+      throw failure;
+    });
+    await expect(createOpeningTutorJobsRepository(sql).completeTurn({ scope, jobId: "job-1", assistantTurnId: "assistant-turn-1",
+      text: "answer", citations: [], candidates: [] })).rejects.toBe(failure);
   });
 
   it("refuses completion before any durable write when workspace ownership no longer matches", async () => {
