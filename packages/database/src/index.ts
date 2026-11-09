@@ -304,6 +304,7 @@ export * from "./repositories/opening-teaching-hints";
 export * from "./repositories/opening-today-courses";
 
 export * from "./repositories/opening-span-session";
+export * from "./repositories/opening-span-repair";
 
 export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
 export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";

@@ -1,5 +1,6 @@
-import type { Scope } from "@aistudy/contracts";
-import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice } from "@aistudy/database";
+import { spanRepairIssueInputSchema, type Scope } from "@aistudy/contracts";
+import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice,
+  readOpeningSpanRepair, spanRepairAttemptKey, createOpeningSpanSessionRepository } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
 import { getSpanReservedProblem, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -8,6 +9,33 @@ const inputSchema = z.object({ sessionId: z.string().uuid(), sourceId: z.string(
 /** Reserved operands are issued here only. No solution enters a browser bundle or response. */
 export function createSpanReservedService(sql: Sql) {
   return { async issue(scope: Scope, raw: unknown) {
+    if (raw && typeof raw === "object" && "repairVersion" in raw) {
+      const input = spanRepairIssueInputSchema.parse(raw);
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const plan = await readOpeningSpanRepair(tx, scope, input.activityId);
+        const session = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, input.activityId);
+        const expectedMove = input.stage === "variant" ? "self-faded" : "self_study-reserved";
+        if (!session || session.status !== "active" || session.revision !== input.expectedRevision || session.moveId !== expectedMove || plan?.status !== "ready") {
+          throw Object.assign(new Error("本题步骤或版本已变化，请重新读取；未提前发放确认题。"), { code: "CONFLICT" });
+        }
+        const clientKey = spanRepairAttemptKey(input.activityId, input.stage);
+        const [existing] = await tx`SELECT create_intent FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}`;
+        const original = (existing?.create_intent as { spanExercise?: { sourceId: string; problemId: string; version: number } } | undefined)?.spanExercise;
+        if (original) return createOpeningLearningAttemptInTx(tx, scope, { sessionId: session.sessionId, clientKey, spanExercise: original });
+        let identity = plan.practiceVariant;
+        if (input.stage === "confirmation") {
+          const example = getSpanTeachingProblem(plan.teachingExample.problemId, plan.teachingExample.version)!;
+          const choice = await readOpeningSpanReservedChoice(tx, scope, "self_study", "validation", example.familyId);
+          if (choice.kind !== "available") throw Object.assign(new Error(choice.reason === "unknown_history"
+            ? "曝光历史身份不可核实，新题确认暂不可用。" : "同族新题已耗尽，未借用研究题或复测题。"), { code: "CONFLICT", reasonCode: choice.reason });
+          identity = { problemId: choice.problem.id, version: choice.problem.version };
+        }
+        return createOpeningLearningAttemptInTx(tx, scope, { sessionId: session.sessionId, clientKey,
+          spanExercise: { sourceId: session.sourceIds[0]!, problemId: identity.problemId, version: Number(identity.version) } });
+      });
+    }
     const input = inputSchema.parse(raw);
     return sql.begin(async tx => {
       await lockWorkspaceLearningHistory(tx, scope);
@@ -18,6 +46,7 @@ export function createSpanReservedService(sql: Sql) {
         AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
       const lesson = (activity?.checkpoint_json as { spanLesson?: { retestId?: string | null; intent?: { purpose?: string } } } | undefined)?.spanLesson;
       const retestId = lesson?.retestId;
+      if (await readOpeningSpanRepair(tx, scope, String(session.activity_id))) throw Object.assign(new Error("本活动只接受已绑定版本和阶段的本题步骤发题请求。"), { code: "CONFLICT" });
       let familyId: string | undefined;
       // A learner-requested same-family practice is anchored to a real corrected attempt,
       // never a client-selected family or a way around tutor/retest admission.

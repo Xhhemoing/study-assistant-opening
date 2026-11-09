@@ -1,4 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { assertOpeningSpanRepairAttempt, readOpeningSpanRepair, spanRepairAttemptKey } from "./opening-span-repair";
 import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
@@ -81,6 +82,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
     ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}) };
+  const repair = session.activity_id ? await readOpeningSpanRepair(tx, scope, String(session.activity_id)) : null;
+  if (repair && !["example", "variant", "confirmation"].some(stage => input.clientKey === spanRepairAttemptKey(String(session.activity_id), stage as "example" | "variant" | "confirmation"))) {
+    throw learningError("CONFLICT", "本活动只接受服务端绑定的本题步骤题目请求。");
+  }
   const replay = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a
     LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.client_key=${input.clientKey}`;
@@ -91,6 +96,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
   }
+  if (repair) await assertOpeningSpanRepairAttempt(tx, scope, String(session.activity_id), input);
   await assertOpeningSpanTutorOriginCurrent(tx, scope, String(session.activity_id));
   await assertOpeningCourseRouteCurrent(tx, scope, String(session.activity_id));
   const teachingQuestion = input.teachingBlock ? await readTeachingQuestionForAttempt(tx, scope,

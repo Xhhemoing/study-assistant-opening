@@ -1,4 +1,5 @@
-import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent } from "@aistudy/contracts";
+import { controlledLearningToolPermission, type Scope, type SpanLessonSnapshot, type StudySessionIntent, type SpanRepairPlan } from "@aistudy/contracts";
+import { createOpeningSpanRepairPlanInTx, readOpeningSpanRepair } from "./opening-span-repair";
 import { buildDecisionInput, captureNextLearningStep, createSpanTeachingSequence, NEXT_LEARNING_STEP_VERSION, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL, spanModeForIntent,
   studyIntentForMessage, learningContinuationIntent, toSnapshotEvidence, summarizeRemediationCycles, type RemediationCycleActivity, type NextLearningStep, type NextLearningStepInput } from "@aistudy/domain";
 import type { LearningDecisionInput, SnapshotObservation } from "@aistudy/domain";
@@ -44,6 +45,7 @@ export type OpeningSpanTutorContext = {
   historicalDecision?: NextLearningStep | null;
   historicalOperationId?: string;
   entry?: "worker" | "span-next";
+  spanRepair?: SpanRepairPlan;
 };
 export type OpeningSpanTutorExecuteInput = {
   context: OpeningSpanTutorContext; decision: NextLearningStep; operationId: string;
@@ -221,6 +223,8 @@ async function nextSession(db: Sql, scope: Scope, courseId: string) {
 }
 async function reservedChoice(db: Sql, scope: Scope, session: SpanLessonSnapshot | null, intent: StudySessionIntent, decision: NextLearningStep, dueRetestId: string | null) {
   if (session) {
+    // Bound repair issuance belongs to its current stage, never the generic resume issuer.
+    if (await readOpeningSpanRepair(db, scope, session.activityId)) return null;
     if (session.status === "paused") return null;
     if (!session.moveId.endsWith("-reserved")) return null;
     const attempts = await db`SELECT v.evaluation_spec FROM opening_learning_attempts a
@@ -331,8 +335,9 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
       await sql.begin("isolation level repeatable read read only", tx => assertContext(tx, scope, context));
     },
     async execute(scope: Scope, input: OpeningSpanTutorExecuteInput): Promise<SpanLessonSnapshot> {
-      return sql.begin(async tx => {
-        const { context } = input;
+      // Publish successful context updates only after commit, preserving existing caller semantics.
+      const context = structuredClone(input.context);
+      const result = await sql.begin(async tx => {
         // Serialize both the receipt probe and action creation, not only the insert.
         await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
@@ -390,7 +395,11 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
         if (availability?.kind === "unavailable") throw Object.assign(conflict("未见题暂不可发放，请保留原进度并核对课程记录；没有新增活动。"),
           { reason: availability.reason, code: "SPAN_UNSEEN_UNAVAILABLE" });
         // Capture before origin completion, session/attempt creation and budget reservation.
-        const capturedContext = structuredClone(context);
+        const spanRepair = !context.resumeSession && !context.dueRetestId && context.intent.purpose === "self_study"
+          && input.decision.activityKind === "targeted_explain" ? await createOpeningSpanRepairPlanInTx(tx, scope, {
+            courseId: context.courseId, focusObservationId: input.decision.focusObservationId, sourceRefs: context.sourceRefs,
+          }) : undefined;
+        const capturedContext = { ...structuredClone(context), ...(spanRepair ? { spanRepair } : {}) };
         const rule = captureNextLearningStep(context.decisionInput);
         const state = await readOpeningLearnerState(tx, scope, { courseId: context.courseId });
         const saveDecision = async (session: SpanLessonSnapshot, kind: "create" | "resume_issue") => {
@@ -463,14 +472,16 @@ export function createOpeningSpanTutorContextRepository(sql: Sql) {
             problemId: availability.problem.id, version: Number(availability.problem.version) } });
         await reserveSpanTutorActivityBudget(tx, scope, { courseId: context.courseId, activityId: session.activityId,
           minutes: context.intent.timeBudgetMinutes, expectedGrantRevision: context.grantRevision });
-        await tx`UPDATE opening_teaching_activities SET goal_json=goal_json || ${tx.json({ tutorNextAction: {
+        await tx`UPDATE opening_teaching_activities SET goal_json=goal_json || ${tx.json({ ...(spanRepair ? { spanRepair } : {}), tutorNextAction: {
           operationId: input.operationId, decision: input.decision, observationIds: context.decisionInput.observations.map(row => row.id), sourceRefs: context.sourceRefs, grantRevision: context.grantRevision,
           ...(context.originReference ? { originReference: context.originReference } : {}) } })}::jsonb
           WHERE id=${session.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         context.resumeSession = (await sessions.get(scope, session.activityId))!;
         await saveDecision(context.resumeSession, "create");
         return context.resumeSession;
-      }) as Promise<SpanLessonSnapshot>;
+      }) as SpanLessonSnapshot;
+      Object.assign(input.context, context);
+      return result;
     },
   };
 }
