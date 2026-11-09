@@ -72,8 +72,10 @@ describe("completeTurn history fence", () => {
   it("no-exposure completion waits on history before workspace/job/turn locks or graph writes", async () => {
     const input = await completion();
     const original = await graph(input);
-    await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-      VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},17)`;
+    expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+    expect(await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=17
+      WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} RETURNING revision::int`)
+      .toEqual([{ revision: 17 }]);
     const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
     let pending: Promise<void> | undefined;
     let settled = false;
@@ -112,12 +114,18 @@ describe("completeTurn history fence", () => {
     }
   });
 
-  it.each([null, 0, 23])("ensures no-exposure history lazily without advancing revision %s or another workspace", async revision => {
+  it.each([null, 0, 23])("preserves conversation-created no-exposure history at revision %s without touching another workspace", async revision => {
     const input = await completion();
     await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
       VALUES (${fixture.otherScope.workspaceId},${fixture.otherScope.ownerUserId},41)`;
-    if (revision !== null) await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-      VALUES (${input.scope.workspaceId},${input.scope.ownerUserId},${revision})`;
+    expect(await history()).toHaveLength(2);
+    expect(await history()).toEqual(expect.arrayContaining([
+      { workspace_id: input.scope.workspaceId, owner_user_id: input.scope.ownerUserId, revision: 0 },
+      { workspace_id: fixture.otherScope.workspaceId, owner_user_id: fixture.otherScope.ownerUserId, revision: 41 },
+    ]));
+    if (revision !== null) expect(await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision}
+      WHERE workspace_id=${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} RETURNING revision::int`)
+      .toEqual([{ revision }]);
     await createOpeningTutorJobsRepository(fixture.sql).completeTurn(input);
     expect(await history()).toEqual(expect.arrayContaining([
       { workspace_id: input.scope.workspaceId, owner_user_id: input.scope.ownerUserId, revision: revision ?? 0 },
@@ -139,13 +147,15 @@ describe("completeTurn history fence", () => {
     expect(await history()).toEqual([{ workspace_id: input.scope.workspaceId, owner_user_id: input.scope.ownerUserId, revision: 0 }]);
   });
 
-  it.each(["epoch", "pin", "receipt", "missing assistant"] as const)("rolls back history ensure and the entire graph on %s rejection", async invalid => {
+  it.each(["epoch", "pin", "receipt", "missing assistant"] as const)("preserves conversation-created history and rolls back the entire graph on %s rejection", async invalid => {
     const input = await completion();
     const original = await graph(input);
     const jobs = createOpeningTutorJobsRepository(fixture.sql);
-    for (const revision of [null, 29]) {
-      if (revision !== null) await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-        VALUES (${input.scope.workspaceId},${input.scope.ownerUserId},${revision})`;
+    expect(await history()).toEqual([{ workspace_id: input.scope.workspaceId, owner_user_id: input.scope.ownerUserId, revision: 0 }]);
+    for (const revision of [0, 29]) {
+      expect(await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision}
+        WHERE workspace_id=${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} RETURNING revision::int`)
+        .toEqual([{ revision }]);
       const beforeHistory = await history();
       if (invalid === "epoch") await expect(jobs.completeTurn({ ...input, expectedPrivacyEpoch: 999 })).rejects.toThrow("privacy epoch drift");
       if (invalid === "pin") await expect(jobs.completeTurn(input, { materialPurposePin: {
@@ -172,7 +182,7 @@ describe("completeTurn history fence", () => {
     const error = await createOpeningTutorJobsRepository(fixture.sql).completeTurn({ ...input, scope }).catch((cause: unknown) => cause);
     expect(error).toMatchObject({ message: "workspace permission changed" });
     expect(error).not.toHaveProperty("code");
-    expect(await history()).toEqual([]);
+    expect(await history()).toEqual([{ workspace_id: input.scope.workspaceId, owner_user_id: input.scope.ownerUserId, revision: 0 }]);
     expect(await graph(input)).toEqual(original);
   });
 
@@ -258,8 +268,10 @@ describe("markTerminal history fence", () => {
       VALUES (${randomUUID()},${fixture.scope.workspaceId},${job!.conversation_id},
         ${input.assistantTurnId},'[]','{"kind":"memory","text":"old candidate","temporary":false}')`;
     const original = await graph(input);
-    await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-      VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},17)`;
+    expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+    expect(await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=17
+      WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} RETURNING revision::int`)
+      .toEqual([{ revision: 17 }]);
     const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
     let pending: Promise<void> | undefined;
     let settled = false;
@@ -417,11 +429,13 @@ describe("markTerminal history fence", () => {
     expect((await fixture.sql`SELECT status FROM opening_turns WHERE id=${input.assistantTurnId}`)[0]!.status).toBe("pending");
   });
 
-  it.each(["fail", "markUnknown"] as const)("%s rolls back actual job/turn writes and history ensure on SQL failure", async method => {
-    for (const revision of [null, 29]) {
+  it.each(["fail", "markUnknown"] as const)("%s rolls back actual job/turn writes without changing conversation-created history on SQL failure", async method => {
+    for (const revision of [0, 29]) {
       const input = await terminal();
-      if (revision !== null) await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-        VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${revision})`;
+      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+      expect(await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision}
+        WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} RETURNING revision::int`)
+        .toEqual([{ revision }]);
       const original = await graph(input), beforeHistory = await history();
       const coordinated = new Proxy(fixture.sql, {
         get(target, property, receiver) {
@@ -443,7 +457,7 @@ describe("markTerminal history fence", () => {
     }
   });
 
-  it.each(["before helper", "after helper"] as const)("deletion %s leaves no lazy history and retains missing-workspace UUID errors", async window => {
+  it.each(["before helper", "after helper"] as const)("deletion %s preserves conversation-created history without adding lazy history and retains missing-workspace UUID errors", async window => {
     for (const invalid of ["valid", "job", "token"] as const) {
       const workspaceId = randomUUID(), ownerUserId = randomUUID();
       await fixture.sql`INSERT INTO users(id,email,display_name,password_hash)
@@ -456,6 +470,11 @@ describe("markTerminal history fence", () => {
         clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
       const claimed = await createOpeningTutorJobsRepository(fixture.sql).claim(saved.jobId);
       expect(await fixture.sql`SELECT id FROM opening_turns WHERE workspace_id=${workspaceId}`).toHaveLength(2);
+      // History has no workspace FK: create's committed canonical zero survives
+      // deletion. A terminal operation must neither remove it nor add another row.
+      const beforeHistory = await fixture.sql`SELECT workspace_id,owner_user_id,revision::int
+        FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+      expect(beforeHistory).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: 0 }]);
       const mutator = openRaceSession();
       let scheduled = false;
       const coordinated = new Proxy(fixture.sql, {
@@ -480,7 +499,8 @@ describe("markTerminal history fence", () => {
         if (invalid !== "valid") await expect(result).rejects.toMatchObject({ code: "22P02" });
         else await expect(result).resolves.toBeUndefined();
         expect(scheduled).toBe(true);
-        expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual([]);
+        expect(await fixture.sql`SELECT workspace_id,owner_user_id,revision::int
+          FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual(beforeHistory);
         expect(await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${workspaceId}`).toEqual([]);
         expect(await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${workspaceId}`).toEqual([]);
       } finally {
