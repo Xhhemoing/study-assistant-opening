@@ -21,7 +21,7 @@ b.TRUSTED_UID=os.geteuid();m=b.SourceLoader(Path(sys.argv[1]).parent).load('herm
 p=json.load(sys.stdin);m.TRUSTED_UID=os.geteuid();original=m.validate_config
 def validate(config,sync=False):
  original({'files':config['files']},sync)
- if config.get('effective') != p['effective']: raise ValueError('Manager changed')
+ if 'effective' in config and config['effective'] != p['effective']: raise ValueError('Manager changed')
 m.validate_config=validate
 if p.get('fault'):
  name=p['fault'];original_call=getattr(m.os,name);hit=[False]
@@ -33,11 +33,17 @@ if p.get('fault'):
   return original_call(*args,**kw)
  setattr(m.os,name,fail)
 if p['mode']=='commit': m.commit(p['state'],p['current'],p['broker'],p['record'])
+elif p['mode']=='validate': m.validate_config(p['record'],sync=True)
 else: print(m.classify(p['state'],p['current'],p['broker'],p.get('scope'),sync=True))
 `;
 export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hermes-supervisor-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sockets = new Set();
+  const trackSocket = socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    return socket;
+  };
   const args = ['deploy', join(root, 'legacy'), join(root, 'releases'), join(root, 'current'), join(root, 'state'), join(root, 'backups'), join(root, 'systemd'), join(root, 'config'), '1', 'a'.repeat(40), 'archive'];
   for (const dir of [args[1], args[2], args[4], args[6], args[7]]) mkdirSync(dir, { mode: 0o700 });
   const target = join(args[2], 'candidate'), transition = join(args[4], 'releases', 'transition');
@@ -71,6 +77,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     // Real server and sockets. Intercept end only at the actual reply boundary,
     // after synchronous terminalCommit, before any success response byte is sent.
     createServer: listener => createServer(socket => {
+      trackSocket(socket);
       if (lostReply) {
         const end = socket.end.bind(socket);
         socket.end = body => {
@@ -120,7 +127,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
   writeFileSync(join(transition, 'expected-target'), target);
   function request(action, extra = {}) {
     return new Promise((resolve, reject) => {
-      const socket = createConnection(ownerEnv.HERMES_SUPERVISOR_SOCKET);
+      const socket = trackSocket(createConnection(ownerEnv.HERMES_SUPERVISOR_SOCKET));
       let body = '';
       socket.on('error', reject);
       socket.on('connect', () => socket.write(JSON.stringify({ action, token: ownerEnv.HERMES_SUPERVISOR_TOKEN, transition, release: target, target, required, ...extra }) + '\n'));
@@ -129,6 +136,18 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     });
   }
   const running = supervise('test-owner', args, dependencies);
+  let finished = false;
+  running.then(() => { finished = true; }, () => { finished = true; });
+  t.after(async () => {
+    try {
+      await Promise.race([ownerReady, running]);
+      if (!finished) owner.emit('message', { result: 1 });
+      for (const socket of sockets) socket.destroy();
+      await running;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   return { args, target, transition, configFile, events, effective, grants, used, broker, request, ownerReady, brokerReady, running,
     environment: () => ({ ...ownerEnv, HERMES_STATE: args[4], HERMES_CURRENT: args[3], HERMES_TRANSITION: transition, HERMES_RELEASE: target, HERMES_TARGET: target, HERMES_WORKER_REQUIRED: required }),
     classify: dependencies.classify,
@@ -136,6 +155,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     ownerExit: () => { owner.connected = false; owner.emit('exit', 137); },
     resume: () => resumeBroker(), finish: result => owner.emit('message', { result }),
     query: () => python('query'),
+    validateConfiguration: config => python('validate', config),
   };
 }
 

@@ -1,10 +1,79 @@
 // Component-injected manager/broker and trusted UID; real socket/receipt IO.
 // This does not attest production root DAC, systemd or sandbox behavior.
 import assert from 'node:assert/strict';
-import { existsSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { existsSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fixture, units } from './hermes-supervisor-fixture.mjs';
+
+test('fixture files-only validation survives sync recursion and still checks file identity', async t => {
+  const f = fixture(t); await f.ownerReady;
+  assert.equal((await f.request('activate')).ok, true);
+  const { config } = JSON.parse(readFileSync(join(f.args[4], 'protocol2-transition.json'), 'utf8'));
+  const filesOnly = { files: config.files };
+  assert.doesNotThrow(() => f.validateConfiguration(filesOnly));
+  writeFileSync(f.configFile, 'changed fixture configuration\n');
+  assert.throws(() => f.validateConfiguration(filesOnly), /Configuration identity changed/);
+});
+
+test('fixture outer effective snapshot rejects real manager drift after files-only recursion', async t => {
+  const f = fixture(t); await f.ownerReady;
+  assert.equal((await f.request('activate')).ok, true);
+  const { config } = JSON.parse(readFileSync(join(f.args[4], 'protocol2-transition.json'), 'utf8'));
+  assert.doesNotThrow(() => f.validateConfiguration(config));
+  f.effective[units[0]].NeedDaemonReload = 'yes';
+  assert.throws(() => f.validateConfiguration(config), /Manager changed/);
+  assert.equal((await f.request('success')).ok, false);
+  assert.equal((await f.request('query-success')).state, 'fenced');
+});
+
+test('failed assertion tears down fixture owner, broker and open sockets before child exits', async t => {
+  const source = `
+    import assert from 'node:assert/strict';
+    import { once } from 'node:events';
+    import { existsSync } from 'node:fs';
+    import { createConnection } from 'node:net';
+    import test from 'node:test';
+    import { fixture } from ${JSON.stringify(new URL('./hermes-supervisor-fixture.mjs', import.meta.url).href)};
+    test('intentional fixture assertion failure', async t => {
+      const signals = process.listenerCount('SIGTERM');
+      const f = fixture(t); await f.ownerReady;
+      assert.equal((await f.request('activate')).ok, true);
+      const path = f.environment().HERMES_SUPERVISOR_SOCKET;
+      const socket = createConnection(path);
+      await once(socket, 'connect');
+      const closed = once(socket, 'close');
+      t.after(async () => {
+        await closed;
+        assert.equal(await f.running, 1);
+        assert(!existsSync(path));
+        assert(!existsSync(f.args[4]));
+        assert(f.events.includes('broker:closed-unlinked'));
+        assert.equal(process.listenerCount('SIGTERM'), signals);
+      });
+      process.send({ path, state: f.args[4] });
+      process.disconnect();
+      assert.fail('synthetic assertion before f.finish');
+    });
+  `;
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', source], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+  let stdout = '', stderr = '', paths;
+  child.stdout.on('data', data => { stdout += data; });
+  child.stderr.on('data', data => { stderr += data; });
+  child.on('message', message => { paths = message; });
+  const [code, signal] = await once(child, 'close');
+  assert.equal(signal, null, stderr);
+  assert.equal(code, 1, stdout + stderr);
+  assert.match(stdout, /synthetic assertion before f.finish/);
+  assert.doesNotMatch(stdout, /hookFailed/);
+  assert(paths, stdout + stderr);
+  assert(!existsSync(paths.path));
+  assert(!existsSync(paths.state));
+});
 for (const required of ['0', '1']) test(`supervisor grants only required units, terminal receipt and immutable committed generation (${required})`, async t => {
   const f = fixture(t, { required }); await f.ownerReady;
   assert.deepEqual(await f.request('activate'), { ok: true });
