@@ -56,6 +56,8 @@ describe("opening conversation repository", () => {
       learningSessionId: null,
     })).digest("hex");
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT id FROM workspaces WHERE id=") && query.includes("owner_user_id=")) return [{ id: scope.workspaceId }];
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions") && query.includes("FOR UPDATE")) return [{ revision: 0 }];
       if (query.includes("FROM opening_conversations")) {
         return [{ id: "conversation-1", title: "Replay", course_id: null, updated_at: new Date() }];
       }
@@ -89,11 +91,15 @@ describe("opening conversation repository", () => {
     };
 
     const first = await repository.appendSavedTurn(input);
+    const beforeReplay = sql.calls.length;
     const replay = await repository.appendSavedTurn(input);
 
     expect(first.jobId).toEqual(expect.any(String));
     expect(first.assistantTurnId).toEqual(expect.any(String));
     expect(replay).toEqual({ turnId: "user-turn-1", jobId: "job-1", assistantTurnId: "assistant-turn-1" });
+    expect(inserts).toBe(2);
+    expect(sql.calls.slice(beforeReplay).filter(query => /^\s*(INSERT|UPDATE|DELETE)\b/.test(query)
+      && !query.includes("INSERT INTO opening_workspace_history_revisions"))).toEqual([]);
   });
 
   it("rejects a client-key replay when the intent changes", async () => {
@@ -103,6 +109,8 @@ describe("opening conversation repository", () => {
     })).digest("hex");
     let replayLookups = 0;
     const sql = fakeSql((query) => {
+      if (query.includes("SELECT id FROM workspaces WHERE id=") && query.includes("owner_user_id=")) return [{ id: scope.workspaceId }];
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions") && query.includes("FOR UPDATE")) return [{ revision: 0 }];
       if (query.includes("FROM opening_conversations")) return [{ id: "conversation-1" }];
       if (query.includes("SELECT t.id AS turn_id")) {
         replayLookups += 1;
@@ -114,7 +122,10 @@ describe("opening conversation repository", () => {
     const repository = createOpeningConversationRepository(sql);
     const input = { scope, conversationId: "conversation-1", text: "same request", mode: "explain" as const, clientKey: "client-key-1", sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null };
     await repository.appendSavedTurn(input);
+    const beforeReplay = sql.calls.length;
     await expect(repository.appendSavedTurn({ ...input, text: "changed request" })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(sql.calls.slice(beforeReplay).filter(query => /^\s*(INSERT|UPDATE|DELETE)\b/.test(query)
+      && !query.includes("INSERT INTO opening_workspace_history_revisions"))).toEqual([]);
   });
 });
 
