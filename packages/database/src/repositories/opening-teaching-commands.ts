@@ -41,6 +41,7 @@ import {
   learningError,
   learningIso,
   lockLearningOwner,
+  lockWorkspaceLearningHistory,
 } from "./opening-learning-facts";
 import {
   createLibraryRepository,
@@ -168,6 +169,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
 
       try {
         return await sql.begin(async (tx) => {
+          await lockWorkspaceLearningHistory(tx, scope);
           await lockLearningOwner(tx, scope);
 
           const activityRows = await tx`
@@ -376,7 +378,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             }
 
             try {
-              await createLibraryRepository(tx as unknown as Sql).updateDocument({
+              await createLibraryRepository(sql).updateDocumentInTx(tx, {
                 workspaceId: scope.workspaceId,
                 documentId,
                 expectedRevisionNumber: pinnedRev,

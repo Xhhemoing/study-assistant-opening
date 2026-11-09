@@ -17,7 +17,8 @@ import {
   type RevisionProposalSource,
   type RevisionProposalSupportState,
 } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { openingNoteReadable } from "./opening-note-provenance";
 
 export type RevisionProposalErrorCode =
@@ -137,6 +138,14 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     const rows = await db`SELECT id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
     if (!rows.length) throw new RevisionProposalRepositoryError("NOT_FOUND", `Workspace not found: ${workspaceId}`);
   }
+  async function lockReviewHistory(workspaceId: string, tx: TransactionSql): Promise<void> {
+    assertUuid(workspaceId, "workspaceId");
+    // Reviewer identity is audit data, not an owner authorization check. Resolve
+    // the internal history scope from trusted DB state before any business lock.
+    const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
+    if (!workspace) throw new RevisionProposalRepositoryError("NOT_FOUND", `Workspace not found: ${workspaceId}`);
+    await lockWorkspaceLearningHistory(tx, { workspaceId, ownerUserId: workspace.owner_user_id as string });
+  }
   // All entry points hold the workspace lock until snapshots and mutations finish.
   // Check provenance separately from document soft deletion to preserve terminal replay.
   async function ensureDocumentReadable(db: Sql, workspaceId: string, documentId: string): Promise<void> {
@@ -237,6 +246,7 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     async review(input) {
       assertUuid(input.actorUserId, "actorUserId");
       return sql.begin(async (tx) => {
+        await lockReviewHistory(input.workspaceId, tx);
         await ensureWorkspace(input.workspaceId, tx);
         const current = await findProposal(input.workspaceId, input.proposalId, tx, true);
         if ((current.status as string) !== "pending") return mapResult(current, tx);
@@ -267,6 +277,7 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     async resolveConflict(input) {
       assertUuid(input.actorUserId, "actorUserId");
       return sql.begin(async (tx) => {
+        await lockReviewHistory(input.workspaceId, tx);
         await ensureWorkspace(input.workspaceId, tx);
         const current = await findProposal(input.workspaceId, input.proposalId, tx, true);
         const proposal = map(current);
