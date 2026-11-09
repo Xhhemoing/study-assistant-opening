@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import { courseExamInputSchema, courseExamProposalSchema, courseExamSnapshotSchema, openingAdaptivePrefsSchema,
   type CourseExamInput, type CourseExamOverview, type CourseExamProposal, type CourseExamSnapshot, type Scope, type SourceChunk } from "@aistudy/contracts";
-import { learningError, lockLearningOwner } from "./opening-learning-facts";
+import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { proposalTransactionClient } from "./opening-assistant-proposal-effects";
 import { createOpeningTeachingActivitiesRepository } from "./opening-teaching-activities";
 import { createOpeningTeachingContentRepository } from "./opening-teaching-content";
@@ -21,6 +21,22 @@ function snapshot(value: unknown) {
   const parsed = courseExamSnapshotSchema.safeParse(value);
   if (!parsed.success) throw conflict("考前练习记录无法读取，请保留记录并联系维护者。");
   return parsed.data;
+}
+
+async function fenceCourse(tx: TransactionSql, scope: Scope, courseId: string, requestId?: string) {
+  const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owner) throw learningError("NOT_FOUND", "workspace not found");
+  const [row] = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+  if (!row) throw learningError("NOT_FOUND", "课程不存在或已归档。");
+  if (requestId !== undefined) {
+    const [sprint] = await tx`SELECT pack_snapshot FROM opening_exam_sprints
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+    if (!sprint) throw learningError("NOT_FOUND", "找不到考前练习。");
+    if (!snapshot(sprint.pack_snapshot).requests.some(request => request.id === requestId)) {
+      throw learningError("NOT_FOUND", "找不到这次组卷请求。");
+    }
+  }
+  await lockWorkspaceLearningHistory(tx, scope);
 }
 
 async function course(tx: TransactionSql, scope: Scope, courseId: string) {
@@ -82,6 +98,8 @@ export function createOpeningCourseExamRepository(sql: Sql) {
   return {
     async read(scope: Scope, courseId: string): Promise<CourseExamOverview> {
       return sql.begin(async tx => {
+        // read() can persist expiry; fence before its owner/source/sprint locks too.
+        await fenceCourse(tx, scope, courseId);
         const c = await course(tx, scope, courseId), sources = await availableSources(tx, scope, courseId);
         const [row] = await tx`SELECT id,pack_snapshot FROM opening_exam_sprints WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} FOR UPDATE`;
@@ -106,6 +124,7 @@ export function createOpeningCourseExamRepository(sql: Sql) {
     async begin(scope: Scope, courseId: string, raw: CourseExamInput): Promise<CourseExamContext> {
       const input = courseExamInputSchema.parse(raw);
       return sql.begin(async tx => {
+        await fenceCourse(tx, scope, courseId);
         await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         const c = await course(tx, scope, courseId);
         const [row] = await tx`SELECT id,pack_snapshot FROM opening_exam_sprints WHERE workspace_id=${scope.workspaceId}
@@ -142,6 +161,7 @@ export function createOpeningCourseExamRepository(sql: Sql) {
     async complete(scope: Scope, courseId: string, requestId: string, raw: CourseExamProposal, modelLabel: string | null) {
       const proposal = courseExamProposalSchema.parse(raw);
       return sql.begin(async tx => {
+        await fenceCourse(tx, scope, courseId, requestId);
         const current = await located(tx, scope, courseId, requestId, true), { request } = current;
         if (request.status === "ready") return request.activityId!;
         if (request.status !== "pending" || expired(request)) throw conflict("组卷请求已结束。");
@@ -175,6 +195,7 @@ export function createOpeningCourseExamRepository(sql: Sql) {
     },
     async fail(scope: Scope, courseId: string, requestId: string, status: "failed" | "unknown") {
       return sql.begin(async tx => {
+        await fenceCourse(tx, scope, courseId, requestId);
         const current = await located(tx, scope, courseId, requestId, true);
         if (current.request.status !== "pending") return;
         current.request.status = status;
