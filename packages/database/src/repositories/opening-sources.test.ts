@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import {
   PENDING_UPLOAD_TTL_FALLBACK_MS,
   PENDING_UPLOAD_TTL_SWEEP_LIMIT,
   UPLOAD_TTL_EXPIRED_ERROR,
   createOpeningSourceRepository,
+  OpeningSourceError,
   sweepExpiredPendingUploads,
   sweepExpiredPendingUploadsAll,
 } from "./opening-sources";
@@ -122,6 +123,84 @@ describe("opening source upload completion boundary", () => {
       actual: { bytes: 12, sha256: SHA, mime: "application/pdf" },
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(revision()).toBe(0);
+  });
+});
+
+describe("upload ticket history coordination boundary", () => {
+  const ticket = { uploadUrl: "/staging/ticket", expiresAt: "2030-01-01T00:00:00.000Z" };
+  function ticketSql(handle?: (query: string, values: unknown[]) => unknown[] | undefined) {
+    const queries: { query: string; values: unknown[] }[] = [];
+    const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      queries.push({ query, values });
+      const rows = handle?.(query, values);
+      if (rows !== undefined) return Promise.resolve(rows);
+      if (query.startsWith("SELECT * FROM opening_sources")) return Promise.resolve([pendingRow()]);
+      if (query.startsWith("SELECT owner_user_id FROM workspaces")) return Promise.resolve([{ owner_user_id: scope.ownerUserId }]);
+      if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: W }]);
+      if (query.startsWith("INSERT INTO opening_workspace_history_revisions") || query.startsWith("UPDATE opening_sources")) return Promise.resolve([]);
+      if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return Promise.resolve([{ revision: 17 }]);
+      throw new Error("unexpected: " + query);
+    }) as unknown as Sql;
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
+    return { sql, queries };
+  }
+
+  it.each(["missing", "nonpending"])("preserves static %s error before history and signer", async state => {
+    const { sql, queries } = ticketSql(q => q.startsWith("SELECT * FROM opening_sources")
+      ? state === "missing" ? [] : [pendingRow({ upload_state: "uploaded" })] : undefined);
+    const sign = vi.fn(async () => ticket);
+    const work = createOpeningSourceRepository(sql).issueUploadTicket(scope, S, sign);
+    await expect(work).rejects.toBeInstanceOf(OpeningSourceError);
+    await expect(work).rejects.toMatchObject(state === "missing"
+      ? { code: "NOT_FOUND", message: "Source not found" }
+      : { code: "CONFLICT", message: "Upload is no longer pending" });
+    expect(queries).toHaveLength(1);
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it("uses canonical owner only for history and signs the locked, not preflight, source", async () => {
+    const { sql, queries } = ticketSql(q => q.startsWith("SELECT * FROM opening_sources") && q.includes("FOR UPDATE")
+      ? [pendingRow({ name: "locked.pdf", bytes: 22 })] : undefined);
+    const sign = vi.fn(async () => ticket);
+    const result = await createOpeningSourceRepository(sql).issueUploadTicket({ ...scope, ownerUserId: "not-a-uuid" }, S, sign);
+    expect(result).toMatchObject({ source: { name: "locked.pdf", bytes: 22 }, ...ticket });
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(sign.mock.calls[0]).toEqual([result.source]);
+    expect(queries.find(q => q.query.startsWith("INSERT INTO opening_workspace_history_revisions"))!.values)
+      .toEqual([W, scope.ownerUserId]);
+    expect(queries.flatMap(q => q.values)).not.toContain("not-a-uuid");
+    expect(queries.filter(q => q.query.includes("opening_sources") && q.query.startsWith("SELECT")))
+      .toHaveLength(2);
+    expect(queries.filter(q => q.query.startsWith("UPDATE opening_workspace_history_revisions"))).toEqual([]);
+  });
+
+  it.each(["helper", "workspace-lock", "source-lock", "lease"])("propagates driver errors at %s unchanged", async boundary => {
+    const failure = Object.assign(new Error("database failure"), { code: "55P03" });
+    const { sql } = ticketSql(q => {
+      if ((boundary === "helper" && q.startsWith("INSERT INTO opening_workspace_history_revisions"))
+        || (boundary === "workspace-lock" && q.includes("FOR SHARE"))
+        || (boundary === "source-lock" && q.includes("opening_sources") && q.includes("FOR UPDATE"))
+        || (boundary === "lease" && q.startsWith("UPDATE opening_sources"))) throw failure;
+      return undefined;
+    });
+    const sign = vi.fn(async () => ticket);
+    await expect(createOpeningSourceRepository(sql).issueUploadTicket(scope, S, sign)).rejects.toBe(failure);
+    expect(sign).toHaveBeenCalledTimes(boundary === "lease" ? 1 : 0);
+  });
+
+  it.each([
+    { code: "NOT_FOUND", message: "other helper failure" },
+    { code: "XX000", message: "workspace not found" },
+  ])("does not translate a non-exact helper failure: %j", async details => {
+    const failure = Object.assign(new Error(details.message), { code: details.code });
+    const { sql } = ticketSql(q => {
+      if (q.startsWith("INSERT INTO opening_workspace_history_revisions")) throw failure;
+      return undefined;
+    });
+    const sign = vi.fn(async () => ticket);
+    await expect(createOpeningSourceRepository(sql).issueUploadTicket(scope, S, sign)).rejects.toBe(failure);
+    expect(sign).not.toHaveBeenCalled();
   });
 });
 

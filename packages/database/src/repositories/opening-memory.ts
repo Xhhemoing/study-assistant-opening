@@ -11,6 +11,7 @@ import { listMemoriesForContext, loadMemoryContext } from "./opening-memory-cont
 import { confirmOwnedMemory, rejectOwnedMemory } from "./opening-memory-decision";
 import { deleteOwnedMemory } from "./opening-memory-delete";
 import { memoryUsesDeletedSource } from "./opening-source-actions-privacy";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { decideOwnedMemoryCandidate, type MemoryCandidateDecisionInput } from "./opening-memory-candidate";
 import { replaceOwnedMemory, type ReplaceMemoryInput } from "./opening-memory-replace";
 import {
@@ -78,6 +79,19 @@ export function createOpeningMemoryRepository(
       }
       const kind = input.expiresAt ? "temporary" : "candidate";
       return sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces
+          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+        if (!owners.length) throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+        // Fence before business locks; re-read ownership under the original lock below.
+        try {
+          await lockWorkspaceLearningHistory(tx, scope);
+        } catch (error) {
+          if (error instanceof Error && "code" in error
+            && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+            throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+          }
+          throw error;
+        }
         await lockOwnedWorkspace(tx, scope);
         await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds);
         await assertCourseInWorkspace(tx, scope, input.courseId);

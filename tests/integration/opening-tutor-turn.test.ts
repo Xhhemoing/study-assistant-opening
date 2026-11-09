@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
+import { openRaceSession } from "./opening-race-helpers";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningProvider, OpeningProviderError } from "@aistudy/ai";
 import {
@@ -96,6 +98,199 @@ beforeEach(async () => {
 });
 afterAll(async () => {
   await fixture?.close();
+});
+
+function barrier() {
+  let release!: () => void;
+  const ready = new Promise<void>(resolve => { release = resolve; });
+  return { ready, release };
+}
+
+async function savedTurnGraph(conversationId: string) {
+  return {
+    conversation: await fixture.sql`SELECT * FROM opening_conversations WHERE id=${conversationId}`,
+    turns: await fixture.sql`SELECT * FROM opening_turns WHERE conversation_id=${conversationId} ORDER BY id`,
+    jobs: await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE conversation_id=${conversationId} ORDER BY id`,
+    budget: await fixture.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`,
+    exposures: await fixture.sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`,
+  };
+}
+
+function savedTurnInput(conversationId: string, scope = fixture.scope) {
+  return { scope, conversationId, text: "history-fenced question", mode: "explain" as const,
+    clientKey: randomUUID(), sourceIds: [] as string[], learningSessionId: null, currentPage: null, chunkId: null };
+}
+
+async function savedTurnHistoryRace(revision: number) {
+  const repo = createOpeningConversationRepository(fixture.sql);
+  const conversation = await repo.create(fixture.scope, { title: "history fence", courseId: null });
+  const oldInput = savedTurnInput(conversation.id);
+  const old = await repo.appendSavedTurn(oldInput);
+  // Also makes the baseline counter exist, so the expected wait is SELECT FOR UPDATE.
+  await fixture.sql.begin(tx => lockWorkspaceLearningHistory(tx, fixture.scope));
+  await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision} WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const history = await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+  const before = await savedTurnGraph(conversation.id);
+  const holder = openRaceSession(), writer = openRaceSession();
+  const held = barrier(), inspect = barrier(), inspected = barrier(), release = barrier();
+  let holding: Promise<unknown> | undefined, appending: Promise<unknown> | undefined;
+  try {
+    await Promise.all([holder.ready, writer.ready]);
+    holding = holder.sql.begin(async tx => {
+      await lockWorkspaceLearningHistory(tx, fixture.scope);
+      held.release();
+      await inspect.ready;
+      expect(await tx`SELECT id FROM opening_conversations WHERE id=${conversation.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+      expect(await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE NOWAIT`).toHaveLength(1);
+      inspected.release();
+      await release.ready;
+    });
+    holding.catch(() => undefined);
+    await Promise.race([held.ready, holding]);
+    const input = savedTurnInput(conversation.id);
+    let finished = false;
+    appending = createOpeningConversationRepository(writer.sql).appendSavedTurn(input);
+    const outcome = appending.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+      .finally(() => { finished = true; });
+    let wait: Record<string, unknown> | undefined;
+    const startedAt = Date.now();
+    // This deadline only bounds observation; overlap is proved by PG's actual
+    // ungranted lock plus the exact holder PID and blocked SQL, never a 40ms sample.
+    while (Date.now() - startedAt < 1000) {
+      [wait] = await fixture.sql`SELECT a.query,${holder.pid}::int=ANY(pg_blocking_pids(a.pid)) AS blocked
+        FROM pg_stat_activity a WHERE a.pid=${writer.pid}
+          AND EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND NOT l.granted)`;
+      if (wait?.blocked || finished) break;
+    }
+    expect(wait?.blocked, "append must wait on the real history holder before any business lock").toBe(true);
+    expect(wait?.query).toMatch(/SELECT revision FROM opening_workspace_history_revisions/);
+    const locks = await fixture.sql`SELECT c.relname AS relation,l.mode FROM pg_locks l JOIN pg_class c ON c.oid=l.relation
+      WHERE l.pid=${writer.pid} AND l.granted AND l.locktype='relation' AND c.relkind='r'
+        AND l.mode IN ('RowShareLock','RowExclusiveLock') ORDER BY c.relname,l.mode`;
+    expect(locks.length).toBeGreaterThan(0);
+    expect(locks.every(lock => lock.relation === 'opening_workspace_history_revisions')).toBe(true);
+    expect(await savedTurnGraph(conversation.id)).toEqual(before);
+    console.info('[saved-turn history barrier]', { revision, blocked: wait?.blocked, query: wait?.query, locks });
+    inspect.release();
+    await Promise.race([inspected.ready, holding]);
+    // A different authenticated workspace must not share this history fence.
+    const other = await repo.create(fixture.otherScope, { title: "other workspace", courseId: null });
+    await repo.appendSavedTurn(savedTurnInput(other.id, fixture.otherScope));
+    expect(await savedTurnGraph(conversation.id)).toEqual(before);
+    release.release();
+    await holding;
+    const result = await outcome;
+    if (!result.ok) throw result.error;
+    expect(await repo.appendSavedTurn(input)).toEqual(result.value);
+    expect(await repo.appendSavedTurn(oldInput)).toEqual(old);
+    const after = await savedTurnGraph(conversation.id);
+    expect(after.turns).toHaveLength(before.turns.length + 2);
+    expect(after.jobs).toHaveLength(before.jobs.length + 1);
+    expect(after.turns.find(row => row.id === result.value.turnId)).toMatchObject({ role: 'user', status: 'complete' });
+    expect(after.turns.find(row => row.id === result.value.assistantTurnId)).toMatchObject({ role: 'assistant', status: 'pending' });
+    expect(after.jobs.find(row => row.id === result.value.jobId)).toMatchObject({
+      user_turn_id: result.value.turnId, assistant_turn_id: result.value.assistantTurnId, status: 'queued',
+    });
+    expect(after.turns.filter(row => before.turns.some(previous => previous.id === row.id))).toEqual(before.turns);
+    expect(after.jobs.filter(row => before.jobs.some(previous => previous.id === row.id))).toEqual(before.jobs);
+    expect(after.budget).toEqual(before.budget);
+    expect(after.exposures).toEqual(before.exposures);
+    expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual(history);
+    console.info('[saved-turn history released]', { revision, result: result.value });
+  } finally {
+    inspect.release();
+    release.release();
+    await Promise.allSettled([holding, appending].filter(Boolean));
+    await Promise.all([holder.sql.end({ timeout: 5 }), writer.sql.end({ timeout: 5 })]);
+  }
+}
+
+describe("saved-turn workspace history fence", () => {
+  it.each([0, 17])("waits before business locks and preserves the old graph and revision %i", async revision => {
+    await savedTurnHistoryRace(revision);
+  });
+
+  it("lazily creates revision zero without advancing and rolls back a new counter on validation failure", async () => {
+    const repo = createOpeningConversationRepository(fixture.sql);
+    const conversation = await repo.create(fixture.scope, { title: "lazy history", courseId: null });
+    await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const input = savedTurnInput(conversation.id);
+    const before = await savedTurnGraph(conversation.id);
+    await expect(repo.appendSavedTurn({ ...input, sourceIds: [randomUUID()] })).rejects.toMatchObject({
+      name: "OpeningConversationError", code: "NOT_FOUND", message: "one or more requested sources are unavailable",
+    });
+    expect(await savedTurnGraph(conversation.id)).toEqual(before);
+    expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual([]);
+    const saved = await repo.appendSavedTurn(input);
+    expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`)
+      .toMatchObject([{ revision: "0" }]);
+    expect(await repo.appendSavedTurn(input)).toEqual(saved);
+    await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=23 WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const committed = await savedTurnGraph(conversation.id);
+    await expect(repo.appendSavedTurn({ ...input, text: "different intent" })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await savedTurnGraph(conversation.id)).toEqual(committed);
+    expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`)
+      .toMatchObject([{ revision: "23" }]);
+  });
+
+  it("preserves conversation NOT_FOUND class, message and priority for missing or foreign scope", async () => {
+    const repo = createOpeningConversationRepository(fixture.sql);
+    const own = await repo.create(fixture.scope, { title: "owned", courseId: null });
+    const foreign = await repo.create(fixture.otherScope, { title: "foreign", courseId: null });
+    for (const input of [savedTurnInput(randomUUID()), savedTurnInput(foreign.id),
+      savedTurnInput(own.id, { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId }),
+      savedTurnInput(own.id, { workspaceId: randomUUID(), ownerUserId: fixture.scope.ownerUserId })]) {
+      const history = await fixture.sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id,owner_user_id`;
+      await expect(repo.appendSavedTurn({ ...input, clientKey: `retry-${randomUUID()}`, learningSessionId: randomUUID(), sourceIds: [randomUUID()] }))
+        .rejects.toMatchObject({ name: "OpeningConversationError", code: "NOT_FOUND", message: `Conversation not found: ${input.conversationId}` });
+      expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id,owner_user_id`).toEqual(history);
+    }
+  });
+
+  it("rechecks conversation ownership after waiting for history, without changing the authenticated owner", async () => {
+    const repo = createOpeningConversationRepository(fixture.sql);
+    const conversation = await repo.create(fixture.scope, { title: "owner change", courseId: null });
+    await fixture.sql.begin(tx => lockWorkspaceLearningHistory(tx, fixture.scope));
+    const history = await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const before = await savedTurnGraph(conversation.id);
+    const holder = openRaceSession(), writer = openRaceSession();
+    const held = barrier(), release = barrier();
+    let holding: Promise<unknown> | undefined, appending: Promise<unknown> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      holding = holder.sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, fixture.scope);
+        held.release();
+        await release.ready;
+        await tx`UPDATE opening_conversations SET owner_user_id=${fixture.otherScope.ownerUserId} WHERE id=${conversation.id}`;
+      });
+      holding.catch(() => undefined);
+      await Promise.race([held.ready, holding]);
+      let finished = false;
+      appending = createOpeningConversationRepository(writer.sql).appendSavedTurn(savedTurnInput(conversation.id));
+      const outcome = appending.then(() => null, error => error).finally(() => { finished = true; });
+      let blocked = false;
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 1000) {
+        const [wait] = await fixture.sql`SELECT ${holder.pid}::int=ANY(pg_blocking_pids(${writer.pid})) AS blocked
+          WHERE EXISTS(SELECT 1 FROM pg_locks WHERE pid=${writer.pid} AND NOT granted)`;
+        if (wait?.blocked) { blocked = true; break; }
+        if (finished) break;
+      }
+      expect(blocked).toBe(true);
+      release.release();
+      await holding;
+      expect(await outcome).toMatchObject({ name: "OpeningConversationError", code: "NOT_FOUND", message: `Conversation not found: ${conversation.id}` });
+      const after = await savedTurnGraph(conversation.id);
+      expect(after.turns).toEqual(before.turns);
+      expect(after.jobs).toEqual(before.jobs);
+      expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`).toEqual(history);
+    } finally {
+      release.release();
+      await Promise.allSettled([holding, appending].filter(Boolean));
+      await Promise.all([holder.sql.end({ timeout: 5 }), writer.sql.end({ timeout: 5 })]);
+    }
+  });
 });
 
 describe("opening tutor turn durable path (guarded)", () => {

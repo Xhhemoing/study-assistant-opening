@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import postgres, { type Sql, type TransactionSql } from "postgres";
+import { assertOpeningTestDatabase } from "@aistudy/config";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createOpeningLearningGoalRepository, createOpeningLearningRepository, createOpeningTeachingContentRepository,
   createOpeningLearningAttemptRepository, createWorkspacePreferencesRepository, createOpeningCourseReadySourcesRepository, createOpeningTeachingActivitiesRepository } from "@aistudy/database";
@@ -211,7 +213,81 @@ it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'pro
   })).rejects.toMatchObject({ code: changed === 'source' ? 'VALIDATION' : 'CONFLICT' });
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(0);
 });
+// Local to the other_key case's fixture/call chain. Like the producer diagnostic,
+// preserve lazy query execution and sample only after the original NOWAIT 55P03.
+function routeLockDiagnosedSql(db: Sql | TransactionSql, requester?: { pid: number; began_at: string }): Sql {
+  return new Proxy(db, {
+    get(target, key, receiver) {
+      if (key === 'begin') return (...args: unknown[]) => Reflect.apply((target as Sql).begin, target, [
+        ...args.slice(0, -1), async (tx: TransactionSql) => {
+          const [backend] = await tx<{ pid: number; began_at: string }[]>`SELECT pg_backend_pid() AS pid, clock_timestamp()::text AS began_at`;
+          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(routeLockDiagnosedSql(tx, backend!) as unknown as TransactionSql);
+          return Array.isArray(result) ? Promise.all(result) : result;
+        },
+      ]);
+      return Reflect.get(target, key, receiver);
+    },
+    apply(target, receiver, args) {
+      const query = Reflect.apply(target, receiver, args);
+      const text = Array.isArray(args[0]) && 'raw' in args[0] ? args[0].join('?').replace(/\s+/g, ' ').trim() : '';
+      const lock = /^LOCK TABLE (.+) IN SHARE ROW EXCLUSIVE MODE NOWAIT$/i.exec(text);
+      if (!lock || !requester) return query;
+      let observed: Promise<unknown> | undefined;
+      const observe = () => observed ??= query.then((rows: unknown) => rows, async (error: { code?: string; message?: string }) => {
+        if (error.code === '55P03') {
+          const failedAt = new Date().toISOString(), started = Date.now();
+          try {
+            const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? '', process.env.OPENING_TEST_DB);
+            const observer = postgres(url.toString(), { max: 1, connect_timeout: 2,
+              connection: { default_transaction_read_only: true, statement_timeout: 2000 } });
+            try {
+              const relations = lock[1]!.split(',').map(name => name.trim());
+              const rows = await observer`SELECT clock_timestamp()::text AS sampled_at, pg_backend_pid() AS observer_pid,
+                pg_blocking_pids(${requester.pid}) AS blocking_pids, locks.*
+                FROM (SELECT 1) sample LEFT JOIN (
+                  SELECT l.pid, n.nspname || '.' || c.relname AS relation, l.mode, l.granted,
+                    a.backend_type, a.state, a.xact_start::text, a.wait_event_type, a.wait_event,
+                    substring(a.query FROM '^[[:space:]]*([[:alpha:]]+)') || ' [redacted]' AS query
+                  FROM pg_locks l JOIN pg_class c ON c.oid=l.relation JOIN pg_namespace n ON n.oid=c.relnamespace
+                  LEFT JOIN pg_stat_activity a ON a.pid=l.pid
+                  WHERE l.locktype='relation' AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                    AND n.nspname=current_schema() AND c.relname IN ${observer(relations)}
+                ) locks ON true ORDER BY relation,pid,mode`;
+              const locks = rows.filter(row => row.relation !== null).map(row => ({ pid: row.pid, relation: row.relation,
+                mode: row.mode, granted: row.granted,
+                candidate: row.pid !== requester.pid && row.granted && !['AccessShareLock', 'RowShareLock'].includes(row.mode),
+                backend_type: row.backend_type, state: row.state, xact_start: row.xact_start,
+                wait_event_type: row.wait_event_type, wait_event: row.wait_event, query: row.query }));
+              console.error('[route-other-key-lock-diagnostic]', JSON.stringify({ requester, failed_at: failedAt,
+                error: { code: error.code, failed_relation: /could not obtain lock on relation "([a-z_]+)"/.exec(error.message ?? '')?.[1] ?? null },
+                requested_query: text, requested_mode: 'ShareRowExclusiveLock', sampled_at: rows[0]?.sampled_at,
+                observer_pid: rows[0]?.observer_pid, blocking_pids: rows[0]?.blocking_pids, elapsed_ms: Date.now() - started, locks,
+                visibility: 'Same test database/current schema only; observer privileges apply. Post-failure non-atomic sample; NOWAIT need not leave a wait row. Queries retain command only.',
+                holder_assessment: locks.some(row => row.candidate)
+                  ? 'Incompatible granted candidates at sample time only; failure-time natural holder UNKNOWN.'
+                  : 'UNKNOWN: no visible incompatible granted candidate; holder may have disappeared.',
+              }));
+            } finally { await observer.end({ timeout: 2 }); }
+          } catch (diagnosticError) {
+            console.error('[route-other-key-lock-diagnostic-failed]', JSON.stringify({ requester, failed_at: failedAt,
+              code: (diagnosticError as { code?: string } | null)?.code ?? 'unknown', elapsed_ms: Date.now() - started }));
+          }
+        }
+        throw error; // Preserve identity, including if observation/close fails; never retry.
+      });
+      return new Proxy(query, {
+        get(original, key, receiver) {
+          if (key === 'then') return (...args: Parameters<Promise<unknown>['then']>) => observe().then(...args);
+          if (key === 'catch') return (...args: Parameters<Promise<unknown>['catch']>) => observe().catch(...args);
+          if (key === 'finally') return (...args: Parameters<Promise<unknown>['finally']>) => observe().finally(...args);
+          return Reflect.get(original, key, receiver);
+        },
+      });
+    },
+  }) as Sql;
+}
 it.each(['unsupported', 'interaction', 'spec', 'other_key', 'bad_key', 'stale_issued', 'shadow_body'] as const)('withholds deterministic authority for %s private content', async changed => {
+  if (changed === 'other_key') f.sql = routeLockDiagnosedSql(f.sql);
   const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
   const [attempt] = await f.sql`SELECT a.*,v.teaching_revision_id FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${issued.activity.id}`;
   const submit = () => createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
