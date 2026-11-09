@@ -15,6 +15,7 @@ import {
   learningError,
   learningIso,
   lockLearningOwner,
+  lockWorkspaceLearningHistory,
 } from "./opening-learning-facts";
 
 /** Teaching admission is course-local even when callers provide explicit sourceIds. */
@@ -92,6 +93,7 @@ export async function ensureCourseContinueActivity(
   const clientKey = `legacy-course-continue:${courseId}`;
   const createIntent = { intentKind: "course_continue", courseId, legacy: true };
   return sql.begin(async (tx) => {
+    await lockWorkspaceLearningHistory(tx, scope);
     await lockLearningOwner(tx, scope);
     const existing = await tx`
       SELECT id FROM opening_teaching_activities
@@ -439,6 +441,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       input: { status: "active" | "paused" | "completed"; expectedUpdatedAt?: string },
     ): Promise<TeachingActivity> {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         const rows = await tx`
           SELECT * FROM opening_teaching_activities
@@ -535,8 +538,22 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           RETURNING id`;
         return rows.length > 0;
       };
-      if (!(scope as OpeningJobScope).jobExecution) return write(sql);
       return sql.begin(async (tx) => {
+        const execution = (scope as OpeningJobScope).jobExecution;
+        // Ordinary probes retain false (and PostgreSQL UUID errors) for an
+        // absent target. Worker writes must still validate execution first.
+        if (!execution) {
+          const [activity] = await tx`SELECT id FROM opening_teaching_activities WHERE id=${activityId}
+            AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          if (!activity) return false;
+        } else {
+          const [owner] = await tx`SELECT id FROM workspaces
+            WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          if (!owner) throw learningError("CONFLICT", "job execution is no longer current");
+        }
+        // Ownership drift of an existing target now fails with the history
+        // helper's NOT_FOUND; the whole transaction rolls back.
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockOpeningJobExecution(tx, scope);
         return write(tx as unknown as Sql);
       });
@@ -553,6 +570,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       clientKey: string,
     ): Promise<{ activity: TeachingActivity; jobId: string }> {
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         const rows = await tx`
           SELECT * FROM opening_teaching_activities
@@ -618,6 +636,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       const key = `compile-teaching-unit:${input.activityId}:${input.mode}:${input.clientKey}`;
       const payload = compileJobPayload(input);
       return sql.begin(async (tx) => {
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         const activityRows = await tx`SELECT status FROM opening_teaching_activities
           WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
