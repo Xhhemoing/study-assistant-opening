@@ -1,4 +1,5 @@
 import { readOpeningObservationCardDraft } from "./opening-card-drafts";
+import type { OpeningJobScope } from "./opening-job-execution";
 import { createOpeningLearningSessionInTx } from "./opening-learning-session-create";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import type { Sql } from "postgres";
@@ -23,7 +24,34 @@ export function createOpeningLearningRepository(sql: Sql) {
     reviseObservation: (scope: Scope, input: ObservationRevisionInput) => reviseOpeningLearningObservation(sql, scope, input),
     observationHistory: (scope: Scope, id: string) => readOpeningObservationHistory(sql, scope, id),
     async createSession(scope: Scope, input: LearningSessionCreateInput): Promise<{ id: string }> {
-      return sql.begin(tx => createOpeningLearningSessionInTx(tx, scope, input));
+      return sql.begin(async tx => {
+        // Preserve the original validation order using ordinary reads before history.
+        // InTx repeats every check under its original locks after the wait.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!owners.length) throw learningError("NOT_FOUND", "workspace not found");
+        const execution = (scope as OpeningJobScope).jobExecution;
+        if (execution) {
+          const currentOwner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND privacy_epoch=${execution.privacyEpoch}`;
+          const jobs = currentOwner.length ? await tx`SELECT id FROM opening_jobs
+            WHERE id=${execution.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND state='running' AND claim_token=${execution.token}` : [];
+          if (!jobs.length) throw learningError("CONFLICT", "job execution is no longer current");
+        }
+        const course = await tx`SELECT id FROM courses WHERE id=${input.courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+        if (!course.length) throw learningError("NOT_FOUND", "course not found");
+        await admitLearningSources(tx, scope, input.sourceIds, { readOnly: true, recordVersions: false });
+        if (input.activityId) {
+          const [activity] = await tx`SELECT id,course_id,source_ids,status FROM opening_teaching_activities
+            WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          if (!activity) throw learningError("NOT_FOUND", "teaching activity not found");
+          if (activity.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot accept new attempts");
+          if (activity.course_id !== input.courseId) throw learningError("VALIDATION", "learning session course does not match teaching activity");
+          if (input.sourceIds.some(id => !(activity.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "learning session source is outside teaching activity");
+        }
+        await lockWorkspaceLearningHistory(tx, scope);
+        return createOpeningLearningSessionInTx(tx, scope, input);
+      });
     },
     async assertOwnedCourse(scope: Scope, courseId: string): Promise<void> {
       const rows = await sql`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id
