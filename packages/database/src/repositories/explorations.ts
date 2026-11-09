@@ -6,6 +6,7 @@ import {
   type ExplorationStatus,
 } from "@aistudy/contracts";
 import type { Sql } from "postgres";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 export type ExplorationErrorCode =
   | "NOT_FOUND"
@@ -238,6 +239,9 @@ export function createExplorationRepository(sql: Sql): ExplorationRepository {
       const explorationId = input.explorationId ?? randomUUID();
       const rootBranchId = randomUUID();
       await sql.begin(async (tx) => {
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId}`;
+        if (!workspace) throw new ExplorationRepositoryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+        await lockWorkspaceLearningHistory(tx, { workspaceId: input.workspaceId, ownerUserId: workspace.owner_user_id as string });
         await tx`
           INSERT INTO explorations (id, workspace_id, owner_user_id, course_id, goal_id, title, status)
           VALUES (${explorationId}, ${input.workspaceId}, ${input.ownerUserId}, ${input.courseId ?? null}, ${input.goalId ?? null}, ${title}, 'open')
