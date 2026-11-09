@@ -571,6 +571,114 @@ describe("teaching root batch history fence (PG)", () => {
     }
   });
 
+  it.each([
+    "missing status", "status CAS", "completed status", "missing request", "completed request", "queued request",
+    "content request", "source request", "purpose request", "dedup request", "ordinary from-set", "missing generate",
+    "stale token", "stale state", "stale epoch", "missing course", "completed enqueue", "purpose enqueue", "dedup enqueue",
+  ])("priority %s returns the original no-write result while history is held", async name => {
+    const x = await seed(), repo = createOpeningTeachingActivitiesRepository(f.sql);
+    if (name.startsWith("completed")) await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${x.activity.id}`;
+    if (name === "queued request") await f.sql`UPDATE opening_teaching_activities SET generate_status='queued' WHERE id=${x.activity.id}`;
+    if (name === "content request") await f.sql`UPDATE opening_teaching_activities SET content_version=1 WHERE id=${x.activity.id}`;
+    if (name === "source request") await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id)
+      VALUES(${f.scope.workspaceId},${x.activity.sourceIds[0]!})`;
+    if (name.startsWith("purpose")) {
+      await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
+      // A read-only request probe must not journal versions on its way to this failure.
+      await f.sql`DELETE FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`;
+    }
+    const input = { activityId: x.activity.id, mode: "generate" as const, clientKey: "priority-dedup", expectedContentVersion: 0 };
+    if (name.startsWith("dedup")) {
+      await repo.enqueueCompileTeachingUnit(f.scope, input);
+      await f.sql`UPDATE opening_teaching_activities SET generate_status='ready' WHERE id=${x.activity.id}`;
+    }
+    if (name === "stale state") await f.sql`UPDATE opening_jobs SET state='cancelled' WHERE id=${x.jobId}`;
+    const before = await graph(), holder = openRaceSession(), writer = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("priority history holder ended early"); })]);
+      const commands = createOpeningTeachingActivitiesRepository(writer.sql);
+      let operation: Promise<unknown>, expected: { code: string; message: string } | false;
+      if (name.includes("status")) {
+        operation = commands.setStatus(f.scope, name === "missing status" ? randomUUID() : x.activity.id,
+          { status: "active", ...(name === "status CAS" ? { expectedUpdatedAt: "2020-01-01T00:00:00.000Z" } : {}) });
+        expected = name === "missing status" ? { code: "NOT_FOUND", message: "teaching activity not found" }
+          : { code: "CONFLICT", message: name === "status CAS" ? "teaching activity updated_at mismatch" : "completed teaching activity cannot be reopened" };
+      } else if (name.includes("request")) {
+        operation = commands.requestCompile(f.scope, name === "missing request" ? randomUUID() : x.activity.id,
+          name === "dedup request" ? input.clientKey : "priority-request");
+        expected = name === "missing request" ? { code: "NOT_FOUND", message: "teaching activity not found" }
+          : name === "source request" ? { code: "VALIDATION", message: "source unavailable or privacy-excluded" }
+          : { code: "CONFLICT", message: name === "completed request" ? "completed teaching activity cannot generate new content"
+            : name === "queued request" ? "teaching content is already being generated"
+            : name === "content request" ? "teaching content already exists"
+            : name === "purpose request" ? "课程资料用途已变化，不能作为本次教材；请重新选择材料。" : "compile request clientKey already used" };
+      } else if (name.includes("enqueue")) {
+        operation = commands.enqueueCompileTeachingUnit(f.scope, { ...input, expectedContentVersion: 1 });
+        expected = { code: "CONFLICT", message: name === "completed enqueue" ? "completed teaching activity cannot generate new content"
+          : name === "purpose enqueue" ? "课程资料用途已变化，不能作为本次教材；请重新选择材料。" : "idempotency payload differs for the same key" };
+      } else if (name === "missing course") {
+        operation = ensureCourseContinueActivity(writer.sql, f.scope, randomUUID());
+        expected = { code: "NOT_FOUND", message: "course not found" };
+      } else {
+        const scope = name.startsWith("stale") ? { ...x.scope, jobExecution: { ...x.scope.jobExecution,
+          ...(name === "stale token" ? { token: randomUUID() } : {}),
+          ...(name === "stale epoch" ? { privacyEpoch: x.scope.jobExecution.privacyEpoch + 1 } : {}) } } : f.scope;
+        operation = commands.setGenerateStatus(scope, name === "missing generate" ? randomUUID() : x.activity.id, "failed", { from: ["queued"] });
+        expected = name.startsWith("stale") ? { code: "CONFLICT", message: "job execution is no longer current" } : false;
+      }
+      pending.push(track(operation));
+      // Await under the live holder, using Vitest's unchanged default deadline.
+      // A misplaced history wait cannot be mistaken for an ordinary rejection.
+      if (expected === false) expect(await operation).toBe(false);
+      else await expect(operation).rejects.toMatchObject(expected);
+      expect(await graph()).toBe(before);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end()]);
+    }
+  });
+
+  it.each(["active", "completed"] as const)("%s enqueue dedup success still waits on the history guard", async status => {
+    const x = await seed(), repo = createOpeningTeachingActivitiesRepository(f.sql);
+    const input = { activityId: x.activity.id, mode: "generate" as const, clientKey: "guarded-dedup", expectedContentVersion: 0 };
+    const first = await repo.enqueueCompileTeachingUnit(f.scope, input);
+    if (status === "completed") await repo.setStatus(f.scope, x.activity.id, { status });
+    const before = await graph(), holder = openRaceSession(), writer = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; }), opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("dedup history holder ended early"); })]);
+      const replay = track(createOpeningTeachingActivitiesRepository(writer.sql).enqueueCompileTeachingUnit(f.scope, input));
+      pending.push(replay);
+      await waitUntilBlocked(f.sql, writer.pid, holder.pid, "enqueue dedup history", /opening_workspace_history_revisions/);
+      expect(await graph()).toBe(before);
+      release(); await holding;
+      expect(await replay).toEqual({ ...first, created: false });
+      expect(await graph()).toBe(before);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end()]);
+    }
+  });
+
   it.each(roots)("%s rolls back its actual writes, jobs and outbox on injected failure", async root => {
     const x = await seed(), before = await graph();
     let injected = false;
