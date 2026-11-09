@@ -55,6 +55,8 @@ def guards(state):
 RESOURCE_ROOTS = {'/etc/systemd/system': '/etc/systemd/system.control'}
 RESOURCE_KEYS = ('MemoryMax', 'MemoryHigh')
 WORKER = 'aistudy-worker.service'
+LEGACY_CWD = '49-aistudy-legacy-cwd.conf'
+LEGACY_CWD_BYTES = b'[Service]\nWorkingDirectory=/opt/aistudy\n'
 
 
 def resource_paths(systemd):
@@ -107,26 +109,35 @@ def resource_directives(data, fragment=False):
 
 
 def resource_binding(systemd, effective, contents):
-    """Pure shared policy; contents are descriptor-captured bytes, not paths to trust."""
+    """Pure byte policy, also used before old units have 95/96 installed.
+
+    Admission/receipt callers additionally enforce installed inputs in
+    validate_resources; contents are descriptor-captured, not paths to trust.
+    """
     if systemd not in RESOURCE_ROOTS:
         raise ValueError('Unknown or nonpersistent resource profile')
     paths = resource_paths(systemd)
     rows = []
-    for unit, values in effective.items():
+    for unit, values in sorted(effective.items()):
         drops = values['DropInPaths'].split(' ') if values['DropInPaths'] else []
         known = [str(Path(systemd) / (unit + '.d') / name) for name in
                  (('50-aistudy-release.conf' if unit == 'aistudy-web.service' else '90-aistudy-protocol-guard.conf'),
                   '95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')]
+        legacy = str(Path(systemd) / (unit + '.d') / LEGACY_CWD)
+        if unit == 'aistudy-web.service':
+            known.append(legacy)
         fragment = str(Path(systemd) / unit)
         if (unit not in ('aistudy-web.service', WORKER) or values['FragmentPath'] != fragment
-                or len(drops) != len(set(drops)) or known[0] not in drops
+                or len(drops) != len(set(drops))
                 or any(path not in known and (unit != WORKER or path not in paths) for path in drops)):
             raise ValueError('Unknown effective unit input')
+        if legacy in drops:
+            if known[0] not in drops or contents[legacy] != LEGACY_CWD_BYTES:
+                raise ValueError('Unreviewed legacy working directory input')
+            rows.append({'unit': unit, 'inputs': [{'path': legacy, 'bytes': contents[legacy].hex()}], 'effective': {}})
         resources = [path for path in drops if path in paths]
         if not resources:
             continue
-        if any(path not in drops for path in known):
-            raise ValueError('Missing required execution/guard input')
         limits = resource_directives(contents[fragment], fragment=True)
         if limits != {'MemoryMax': '1073741824', 'MemoryHigh': '939524096'}:
             raise ValueError('Unreviewed worker fragment resource base')
@@ -157,6 +168,22 @@ def resource_binding(systemd, effective, contents):
 def validate_resources(config, contents):
     binding = config.get('resourceBinding')
     effective = config.get('effective', {})
+    for unit, values in effective.items():
+        fragment = values['FragmentPath']
+        drops = values['DropInPaths'].split()
+        legacy = str(Path(fragment).parent / (unit + '.d') / LEGACY_CWD)
+        primary = str(Path(fragment).parent / (unit + '.d') /
+                      ('50-aistudy-release.conf' if unit == 'aistudy-web.service' else '90-aistudy-protocol-guard.conf'))
+        if binding is not None and primary not in drops:
+            raise ValueError('Missing required release/guard input')
+        if unit == 'aistudy-web.service' and legacy in drops:
+            if contents.get(legacy) != LEGACY_CWD_BYTES or binding is None:
+                raise ValueError('Missing or unreviewed legacy working directory binding')
+        if any(Path(path).name in ('memory.conf', '50-MemoryHigh.conf') for path in drops):
+            required = [str(Path(fragment).parent / (unit + '.d') / name) for name in
+                        ('90-aistudy-protocol-guard.conf', '95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')]
+            if any(path not in drops for path in required):
+                raise ValueError('Missing required execution/guard input')
     if binding is None:
         # Old receipts cannot acquire a new unbound resource input at boot.
         for values in effective.values():
@@ -185,6 +212,10 @@ def validate_config(config, sync=False):
         contents[entry['path']] = data
         if actual != entry['identity']:
             raise ValueError('Configuration identity changed')
+        if Path(entry['path']).name == LEGACY_CWD:
+            if (Path(entry['path']).parent.name != 'aistudy-web.service.d'
+                    or data != LEGACY_CWD_BYTES or not entry.get('ancestors')):
+                raise ValueError('Unreviewed or unbound legacy working directory input')
         if 'ancestors' in entry:
             paths = [str(parent) for parent in reversed(Path(entry['path']).parents)]
             if [row['path'] for row in entry['ancestors']] != paths:
@@ -196,6 +227,18 @@ def validate_config(config, sync=False):
                 value = ':'.join(str(value) for value in (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid))
                 if value != row['identity']:
                     raise ValueError('Configuration ancestor changed')
+    for unit, values in config.get('effective', {}).items():
+        environments = [path for path in contents if Path(path).name == '.env.production']
+        runtimes = [path for path in contents if Path(path).name == 'worker-runtime.env']
+        if len(environments) != 1 or unit not in ('aistudy-web.service', WORKER):
+            raise ValueError('Missing or ambiguous environment binding')
+        expected = environments[0] + ' (ignore_errors=no)'
+        if unit == WORKER:
+            if len(runtimes) != 1:
+                raise ValueError('Missing or ambiguous runtime environment binding')
+            expected += ' ' + runtimes[0] + ' (ignore_errors=no)'
+        if values.get('EnvironmentFiles') not in ([expected, expected + ' ' + expected] if unit == 'aistudy-web.service' else [expected]):
+            raise ValueError('Unreviewed environment input')
     validate_resources(config, contents)
     if sync:
         for directory in sorted({str(Path(e['path']).parent) for e in config['files']}):

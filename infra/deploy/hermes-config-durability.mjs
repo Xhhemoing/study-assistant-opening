@@ -72,11 +72,17 @@ function effective(args, run, options = {}) {
       if (at < 1) throw new Error('Malformed effective configuration');
       return [line.slice(0, at), line.slice(at + 1)];
     });
-    if (new Set(entries.map(([key]) => key)).size !== entries.length) throw new Error('Duplicate effective configuration');
-    const values = Object.fromEntries(entries);
+    const values = {};
+    for (const [key, value] of entries) {
+      if (Object.hasOwn(values, key)) {
+        if (key !== 'EnvironmentFiles') throw new Error('Duplicate effective configuration');
+        values[key] += ` ${value}`;
+      } else values[key] = value;
+    }
     const fragment = join(systemd, unit);
     const allowedDrops = [join(systemd, `${unit}.d/96-aistudy-writer-exec.conf`), join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`),
-      join(systemd, `${unit}.d/${index === 0 ? "50-aistudy-release.conf" : "90-aistudy-protocol-guard.conf"}`)];
+      join(systemd, `${unit}.d/${index === 0 ? "50-aistudy-release.conf" : "90-aistudy-protocol-guard.conf"}`),
+      ...(index === 0 ? [join(systemd, `${unit}.d/49-aistudy-legacy-cwd.conf`)] : [])];
     // Object-only synthetic FS seam; manager paths never select a profile.
     const profile = options.resourceProfile ?? { systemd: '/etc/systemd/system', control: '/etc/systemd/system.control' };
     const resourceDrops = index === 1 && systemd === profile.systemd ? [
@@ -86,7 +92,8 @@ function effective(args, run, options = {}) {
     const expectedEnv = `${config} (ignore_errors=no)${index === 1 ? ` ${runtime} (ignore_errors=no)` : ""}`;
     if (values.NeedDaemonReload !== "no" || values.FragmentPath !== fragment
       || drops.some(path => !allowedDrops.includes(path) && !resourceDrops.includes(path)) || new Set(drops).size !== drops.length
-      || !drops.includes(allowedDrops[2]) || values.EnvironmentFiles !== expectedEnv) {
+      || (!options.preflight && !drops.includes(allowedDrops[2]))
+      || (values.EnvironmentFiles !== expectedEnv && !(index === 0 && values.EnvironmentFiles === `${expectedEnv} ${expectedEnv}`))) {
       throw new Error("Unknown or stale effective configuration; success refused");
     }
     snapshot.push({ unit, ...values });
@@ -98,13 +105,34 @@ function effective(args, run, options = {}) {
   }
   return { snapshot, files: [...files].sort() };
 }
+// Read-only old-environment compatibility check. No release markers, installed
+// controls, fsync, receipt or running-candidate claim belongs to this boundary.
+export function preflightConfiguration(args, run, options = {}) {
+  const observed = effective(args, run, { ...options, preflight: true });
+  const inputs = observed.snapshot.flatMap(row => [row.FragmentPath, ...row.DropInPaths.split(' ').filter(Boolean)]);
+  const files = inputs.map(file => inspect(file, false, true, options.trustedUid ?? 0));
+  for (const row of files) {
+    if (row.file.endsWith('/49-aistudy-legacy-cwd.conf') && !row.bytes.equals(Buffer.from('[Service]\nWorkingDirectory=/opt/aistudy\n'))) {
+      throw new Error('Unreviewed legacy working directory input');
+    }
+  }
+  if (inputs.some(path => ['memory.conf', '50-MemoryHigh.conf'].includes(path.split('/').at(-1)))) {
+    const resourcePolicy = options.resourcePolicy ?? (payload => JSON.parse(python('hermes-writer-state.py', ['resource-policy'], payload)));
+    resourcePolicy({ systemd: args[6], effective: Object.fromEntries(observed.snapshot.map(({ unit, ...values }) => [unit, values])),
+      files: files.map(row => ({ path: row.file, bytes: row.bytes.toString('hex') })) });
+  }
+}
 export function captureConfiguration(args, run, options = {}) {
   const target = realpathSync(args[3]);
   const observed = effective(args, run, options);
   // Legacy bootstrap has no reviewed release markers and is not signed off here.
   const markers = [".release-sha", ".worker-protocol"].map(name => join(target, name));
-  const resourcePaths = observed.snapshot.filter(row => row.unit === names[1]).flatMap(row => row.DropInPaths.split(' '))
-    .filter(path => ['memory.conf', '50-MemoryHigh.conf'].includes(path.split('/').at(-1)));
+  const resourcePaths = observed.snapshot.flatMap(row => row.DropInPaths.split(' '))
+    .filter(path => ['memory.conf', '50-MemoryHigh.conf', '49-aistudy-legacy-cwd.conf'].includes(path.split('/').at(-1)));
+  if (observed.snapshot.some(row => row.DropInPaths.split(' ').some(path => ['memory.conf', '50-MemoryHigh.conf'].includes(path.split('/').at(-1)))
+    && ['95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf'].some(name => !row.DropInPaths.split(' ').includes(join(args[6], `${row.unit}.d/${name}`))))) {
+    throw new Error('Missing required execution/guard input');
+  }
   const files = [...observed.files, ...markers].map(file => inspect(file, false, resourcePaths.includes(file), options.trustedUid ?? 0));
   const resourcePolicy = options.resourcePolicy ?? (payload => JSON.parse(python('hermes-writer-state.py', ['resource-policy'], payload)));
   const resourceBinding = resourcePaths.length ? resourcePolicy({ systemd: args[6],

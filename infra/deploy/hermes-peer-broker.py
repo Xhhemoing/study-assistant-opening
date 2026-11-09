@@ -81,9 +81,12 @@ class SystemdManager:
         values = {}
         for line in result.stdout.splitlines():
             key, separator, value = line.partition('=')
-            if not separator or key in values:
+            if not separator or not key or (key in values and key != 'EnvironmentFiles'):
                 raise PermissionError('Malformed or duplicate manager property')
-            values[key] = value
+            if key == 'EnvironmentFiles' and key in values:
+                values[key] += ' ' + value
+            else:
+                values[key] = value
         # Count and parse ORIGINAL bytes before normalization. A second record,
         # path/argv/flags field or unknown tail must never disappear into .*. The
         # optional runtime fields are synthetic-format tested, not manager proof.
@@ -136,13 +139,16 @@ class Broker:
                         ('50-aistudy-release.conf' if plan['unit'] == UNITS[0] else '90-aistudy-protocol-guard.conf')),
                    str(Path(plan['systemd']) / (plan['unit'] + '.d') / '95-aistudy-migration-fence.conf'),
                    str(Path(plan['systemd']) / (plan['unit'] + '.d') / '96-aistudy-writer-exec.conf')}
+        legacy = str(Path(plan['systemd']) / (UNITS[0] + '.d') / state_api.LEGACY_CWD)
+        if plan['unit'] == UNITS[0]:
+            allowed.add(legacy)
         resources = state_api.resource_paths(plan['systemd']) if plan['unit'] == UNITS[1] else {}
         drops = values['DropInPaths'].split()
         if (values['FragmentPath'] != str(Path(plan['systemd']) / plan['unit'])
                 or any(path not in allowed and path not in resources for path in drops)
                 or len(drops) != len(set(drops))):
             raise PermissionError('Unknown effective unit input')
-        if any(path in resources for path in drops):
+        if legacy in drops or any(path in resources for path in drops):
             binding = plan['config'].get('resourceBinding')
             if (not binding or binding['systemd'] != plan['systemd']
                     or plan['config'].get('effective', {}).get(plan['unit']) != values):

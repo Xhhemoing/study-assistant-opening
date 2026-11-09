@@ -448,6 +448,19 @@ else
       [[ "$version" =~ ^$tool\ \(PostgreSQL\)\ 16\. ]] || fail 'Artifact deployment requires PostgreSQL 16 backup tools.'
     done
   fi
+  # Pure read-only compatibility admission BEFORE backup, writer stop or any
+  # migration write. Inspect the OLD manager inputs, not a running candidate;
+  # old installations need not have the 95/96 boundary installed yet.
+  node --input-type=module - "$CONTROL_DIR/hermes-config-durability.mjs" "$ACTION" "$DIR" "$RELEASES_DIR" "$CURRENT" "$STATE" "$BACKUPS" "$SYSTEMD" "$WORKER_CONFIG" "$MIN_FREE_KB" "$COMMIT" "$ARCHIVE" <<'PREFLIGHT'
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+const [module, ...args] = process.argv.slice(2);
+const { preflightConfiguration } = await import(pathToFileURL(module));
+preflightConfiguration(args, command => {
+  const result = spawnSync('systemctl', command, { encoding: 'utf8', timeout: 5000 });
+  return { ok: result.status === 0, stdout: result.stdout ?? '' };
+});
+PREFLIGHT
   node "$CONTROL_DIR/hermes-db.mjs" backup "$CONFIG" "$BACKUP"
   printf '%s\n' "$BACKUP" > "$TRANSITION/database-backup"
   WORKER_HELPER="$CONTROL_DIR/provision-worker.sh"

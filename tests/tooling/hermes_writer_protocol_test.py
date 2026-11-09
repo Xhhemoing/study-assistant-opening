@@ -346,7 +346,10 @@ class ResourcePolicyTests(Fixture):
         self.fragment = str(Path(self.systemd) / state.WORKER)
         self.memory, self.high = state.resource_paths(self.systemd)
         self.guard = str(Path(self.systemd) / (state.WORKER + '.d') / '90-aistudy-protocol-guard.conf')
-        self.contents = {self.fragment: b'[Service]\nMemoryMax=1024M\nMemoryHigh=896M\n',
+        self.environment = str(self.root / '.env.production')
+        self.runtime = str(self.root / 'worker-runtime.env')
+        self.contents = {self.environment: b'fixture only\n', self.runtime: b'fixture only\n',
+                         self.fragment: b'[Service]\nMemoryMax=1024M\nMemoryHigh=896M\n',
                          self.memory: b'[Service]\nMemoryMax=1G\n',
                          self.high: b'[Service]\nMemoryHigh=2147483648\n',
                          self.guard: b'[Unit]\nConditionPathExists=!/pause\n'}
@@ -354,7 +357,8 @@ class ResourcePolicyTests(Fixture):
                          ('95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf')]
         self.contents.update({path: b'# fixed trusted execution input\n' for path in self.required})
         self.values = {'FragmentPath': self.fragment, 'DropInPaths': ' '.join((self.memory, self.guard, self.high, *self.required)),
-                       'MemoryMax': '1073741824', 'MemoryHigh': '2147483648'}
+                       'MemoryMax': '1073741824', 'MemoryHigh': '2147483648',
+                       'EnvironmentFiles': self.environment + ' (ignore_errors=no) ' + self.runtime + ' (ignore_errors=no)'}
         self.effective = {state.WORKER: self.values}
 
     def policy(self):
@@ -377,6 +381,80 @@ class ResourcePolicyTests(Fixture):
         state.durable_write(self.root / 'protocol2-transition.json', self.binding)
         manager = type('Manager', (), {'configuration': lambda _, unit: copy.deepcopy(self.effective[unit])})
         patch.object(peer, 'SystemdManager', manager).start()
+
+    def legacy(self):
+        unit = peer.UNITS[0]
+        fragment = str(Path(self.systemd) / unit)
+        path = str(Path(self.systemd) / (unit + '.d') / state.LEGACY_CWD)
+        release = str(Path(self.systemd) / (unit + '.d') / '50-aistudy-release.conf')
+        self.contents.update({path: state.LEGACY_CWD_BYTES, fragment: b'[Service]\n', release: b'# fixed release\n'})
+        self.effective[unit] = {'FragmentPath': fragment, 'DropInPaths': path + ' ' + release,
+                                'EnvironmentFiles': self.environment + ' (ignore_errors=no) '
+                                    + self.environment + ' (ignore_errors=no)'}
+        return path
+
+    def test_legacy_cwd_admission_receipt_and_boot_use_same_bound_policy(self):
+        path = self.legacy()
+        self.install()
+        wrapper = '/trusted/hermes-trusted-loader.py'
+        unit = peer.UNITS[0]
+        self.effective[unit].update(User='', Group='', ExecStartEx='{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B '
+                                  + wrapper + ' exec ' + str(self.root) + ' ' + unit + ' ; flags= ; }')
+        plan = {'unit': unit, 'systemd': self.systemd, 'state': str(self.root),
+                'effective': self.effective[unit], 'config': self.binding['config']}
+        broker = type('PlanOnly', (), {'wrapper': wrapper})()
+        peer.Broker.validate_plan(broker, plan)
+        state.durable_write(self.root / 'protocol2-transition.json', self.binding)
+        self.commit()
+        self.assertEqual(self.classify(sync=True), 'committed')
+        for extra in (b'EnvironmentFile=/evil\n', b'ExecStart=/evil\n', b'MemoryMax=1G\n', b'WorkingDirectory=/elsewhere\n'):
+            self.contents[path] = state.LEGACY_CWD_BYTES + extra
+            with self.assertRaises(ValueError):
+                self.policy()
+        self.contents[path] = state.LEGACY_CWD_BYTES
+        candidate = copy.deepcopy(plan)
+        del candidate['config']['resourceBinding']
+        with self.assertRaises(PermissionError):
+            peer.Broker.validate_plan(broker, candidate)
+        for defect in ('bytes', 'ancestor', 'missing-binding', 'missing-ancestors', 'fsync'):
+            config = copy.deepcopy(self.binding['config'])
+            if defect == 'bytes':
+                Path(path).write_bytes(state.LEGACY_CWD_BYTES + b'ExecStart=/evil\n')
+                entry = next(row for row in config['files'] if row['path'] == path)
+                entry['identity'] = state.identity(Path(path).stat())
+            elif defect == 'ancestor':
+                next(row for row in config['files'] if row['path'] == path)['ancestors'][-1]['identity'] = 'changed'
+            elif defect == 'missing-binding':
+                del config['resourceBinding']
+            elif defect == 'missing-ancestors':
+                del next(row for row in config['files'] if row['path'] == path)['ancestors']
+            original = state.os.fsync
+            def fsync(fd):
+                if defect == 'fsync' and os.readlink('/proc/self/fd/' + str(fd)) == path:
+                    raise OSError('legacy fsync fault')
+                original(fd)
+            with self.subTest(defect=defect), patch.object(state.os, 'fsync', fsync):
+                with self.assertRaises((ValueError, OSError)):
+                    state.validate_config(config, sync=True)
+            if defect == 'bytes':
+                Path(path).write_bytes(state.LEGACY_CWD_BYTES)
+                # Preserve fresh stat identity for the following negative cases.
+                next(row for row in self.binding['config']['files'] if row['path'] == path)['identity'] = state.identity(Path(path).stat())
+
+    def test_environment_binding_rejects_worker_reorder_extra_and_web_third_or_unknown(self):
+        self.legacy()
+        self.install()
+        for unit in (state.WORKER, peer.UNITS[0]):
+            original = self.effective[unit]['EnvironmentFiles']
+            if unit == peer.UNITS[0]:
+                self.effective[unit]['EnvironmentFiles'] = self.environment + ' (ignore_errors=no)'
+                state.validate_config(self.binding['config'])
+            for value in (original + ' /unknown (ignore_errors=no)', original + ' ' + self.environment + ' (ignore_errors=no)',
+                          self.runtime + ' (ignore_errors=no) ' + self.environment + ' (ignore_errors=no)'):
+                self.effective[unit]['EnvironmentFiles'] = value
+                with self.assertRaises(ValueError):
+                    state.validate_config(self.binding['config'])
+            self.effective[unit]['EnvironmentFiles'] = original
 
     def test_shared_resource_corpus(self):
         corpus = json.loads((Path(__file__).with_name('hermes-resource-policy-corpus.json')).read_text())
@@ -522,6 +600,12 @@ class ResourcePolicyTests(Fixture):
     def test_missing_binding_and_unbound_guard_memory_refuse(self):
         self.install()
         config = self.binding['config']
+        for missing in (self.guard, *self.required):
+            candidate = copy.deepcopy(config)
+            values = candidate['effective'][state.WORKER]
+            values['DropInPaths'] = ' '.join(path for path in values['DropInPaths'].split() if path != missing)
+            with self.subTest(missing=Path(missing).name), self.assertRaisesRegex(ValueError, 'Missing required'):
+                state.validate_config(candidate)
         del config['resourceBinding']
         with self.assertRaisesRegex(ValueError, 'Missing resource binding'):
             state.validate_config(config)
@@ -546,6 +630,15 @@ class RawManagerTests(unittest.TestCase):
         response = type('Response', (), {'stdout': raw})()
         with patch.object(peer.subprocess, 'run', return_value=response):
             return peer.SystemdManager()._properties(self.unit)
+
+    def test_only_environment_files_may_repeat_and_preserve_order(self):
+        self.values['EnvironmentFiles'] = '/opt/aistudy/.env.production (ignore_errors=no)'
+        expected = self.values['EnvironmentFiles'] + ' /etc/aistudy/worker-runtime.env (ignore_errors=no)'
+        self.assertEqual(self.properties('\nEnvironmentFiles=/etc/aistudy/worker-runtime.env (ignore_errors=no)')['EnvironmentFiles'], expected)
+        for key in self.values:
+            if key != 'EnvironmentFiles':
+                with self.subTest(key=key), self.assertRaises(PermissionError):
+                    self.properties('\n' + key + '=' + self.values[key])
 
     def test_raw_multi_path_record_duplicate_flags_and_unparseable_refused(self):
         for raw in (self.single + ' ' + self.single,

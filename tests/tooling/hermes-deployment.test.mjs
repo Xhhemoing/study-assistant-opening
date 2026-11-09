@@ -95,6 +95,9 @@ function fixture(t, overrides = {}) {
 
   const commands = {
     node: `
+if [[ "$1" == --input-type=module && "\${3##*/}" == hermes-config-durability.mjs ]]; then
+ exec "$REAL_NODE" "$MOCK_ENTRY_FIXTURE" preflight "$@"
+fi
 if [[ "\${1##*/}" == hermes-supervisor.mjs && "\${2:-}" == run ]]; then
  mkdir -p "$DEPLOY_STATE"
  flock --nonblock --no-fork "$DEPLOY_STATE/deploy.lock" "$REAL_NODE" "$MOCK_MANAGER_FIXTURE" "$@" && exit 0
@@ -204,10 +207,18 @@ case "$1" in
   if [[ "$*" == *FragmentPath* ]]; then
    printf 'FragmentPath=%s/%s\\nNeedDaemonReload=no\\n' "$SYSTEMD_DIR" "$unit"
    if [[ "$unit" == aistudy-web.service ]]; then
-    printf 'DropInPaths=%s/aistudy-web.service.d/50-aistudy-release.conf\\nEnvironmentFiles=%s/.env.production (ignore_errors=no)\\n' "$SYSTEMD_DIR" "$DIR"
+    drops="$SYSTEMD_DIR/aistudy-web.service.d/50-aistudy-release.conf"
+    legacy="$SYSTEMD_DIR/aistudy-web.service.d/49-aistudy-legacy-cwd.conf"
+    [[ ! -f "$legacy" ]] || drops="$legacy $drops"
+    [[ "\${MOCK_FAIL:-}" != preflight-unknown ]] || drops="/unknown/admin.conf $drops"
+    printf 'DropInPaths=%s\\nEnvironmentFiles=%s/.env.production (ignore_errors=no)\\nEnvironmentFiles=%s/.env.production (ignore_errors=no)\\n' "$drops" "$DIR" "$DIR"
    else
-    printf 'DropInPaths=%s/aistudy-worker.service.d/90-aistudy-protocol-guard.conf\\nEnvironmentFiles=%s/.env.production (ignore_errors=no) %s/worker-runtime.env (ignore_errors=no)\\n' "$SYSTEMD_DIR" "$DIR" "$WORKER_CONFIG_DIR"
+    drops=''; guard="$SYSTEMD_DIR/aistudy-worker.service.d/90-aistudy-protocol-guard.conf"
+    [[ ! -f "$guard" ]] || drops=$guard
+    printf 'DropInPaths=%s\\nEnvironmentFiles=%s/.env.production (ignore_errors=no)\\nEnvironmentFiles=%s/worker-runtime.env (ignore_errors=no)\\n' "$drops" "$DIR" "$WORKER_CONFIG_DIR"
    fi
+   [[ "\${MOCK_FAIL:-}" != preflight-duplicate ]] || printf 'NeedDaemonReload=no\\n'
+   [[ "\${MOCK_FAIL:-}" != preflight-env ]] || printf 'EnvironmentFiles=/unknown/environment (ignore_errors=no)\\n'
    exit
   fi
   load=loaded; [[ "$MOCK_WORKER" != missing || "$unit" != aistudy-worker.service ]] || load=not-found
@@ -657,6 +668,18 @@ for (const failure of ["install", "build", "parser", "backup", "backup-list", "d
   });
 }
 
+for (const failure of ['preflight-unknown', 'preflight-duplicate', 'preflight-env', 'preflight-49']) test(`old-environment ${failure} refuses before backup, stop and migration writes`, t => {
+  const f = fixture(t, { MOCK_FAIL: failure, MOCK_PENDING: '1' });
+  if (failure === 'preflight-49') writeFileSync(join(f.systemd, 'aistudy-web.service.d/49-aistudy-legacy-cwd.conf'), '[Service]\nWorkingDirectory=/opt/aistudy\nEnvironmentFile=/unknown\n');
+  const result = f.run('deploy');
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, failure === 'preflight-49' ? /Unreviewed legacy working directory/ : failure === 'preflight-duplicate' ? /Duplicate effective configuration/ : /Unknown or stale effective configuration/);
+  assert.doesNotMatch(result.log, /pg_dump\n|systemctl stop|db migrate|migrate current=|db quiescence|db plan|helper --snapshot/);
+  assert.equal(readFileSync(join(f.systemd, 'aistudy-web.service.d/50-aistudy-release.conf'), 'utf8'), 'old-web-override\n');
+  assert(!readdirSync(f.backups).some(name => name.endsWith('.dump')));
+  assert(!existsSync(join(f.state, 'writers-fenced')));
+  assert(!existsSync(join(f.state, 'migration-forward-only')));
+});
 test("deployment quiesces the old worker after backup and before the write-protocol migration", t => {
   const f = fixture(t);
   const result = f.run();

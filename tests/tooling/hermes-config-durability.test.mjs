@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { captureConfiguration, persistConfiguration } from "../../infra/deploy/hermes-config-durability.mjs";
+import { captureConfiguration, persistConfiguration, preflightConfiguration } from "../../infra/deploy/hermes-config-durability.mjs";
 import { configIdentity } from '../../infra/deploy/hermes-writer-control.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,7 @@ function fixture(t) {
     const fragment = join(args[6], unit);
     const drops = [join(args[6], `${unit}.d/95-aistudy-migration-fence.conf`), join(args[6], `${unit}.d/${index ? "90-aistudy-protocol-guard.conf" : "50-aistudy-release.conf"}`)];
     files.push(fragment, ...drops);
-    return `FragmentPath=${fragment}\nDropInPaths=${drops.join(" ")}\nEnvironmentFiles=${environment} (ignore_errors=no)${index ? ` ${runtime} (ignore_errors=no)` : ""}\nNeedDaemonReload=no\n`;
+    return `FragmentPath=${fragment}\nDropInPaths=${drops.join(" ")}\nEnvironmentFiles=${environment} (ignore_errors=no)\nEnvironmentFiles=${index ? runtime : environment} (ignore_errors=no)\nNeedDaemonReload=no\n`;
   });
   for (const file of files) { fs.mkdirSync(join(file, ".."), { recursive: true }); fs.writeFileSync(file, "private-input", { mode: 0o600 }); }
   fs.writeFileSync(join(target, ".release-sha"), `${args[9]}\n`);
@@ -58,6 +58,83 @@ function resources(t) {
   };
   return { ...f, memory, high, options };
 }
+test('manager 249 repeated EnvironmentFiles aggregate in order; other duplicate keys still refuse', t => {
+  const f = fixture(t);
+  const captured = captureConfiguration(f.args, f.run);
+  const env = `${join(f.args[1], '.env.production')} (ignore_errors=no)`;
+  assert.equal(captured.observed.snapshot[0].EnvironmentFiles, `${env} ${env}`);
+  f.effective[0] = f.effective[0].replace(`EnvironmentFiles=${env}\n`, '');
+  assert.equal(captureConfiguration(f.args, f.run).observed.snapshot[0].EnvironmentFiles, env);
+  for (const extra of [`EnvironmentFiles=${env}\nEnvironmentFiles=${env}\n`, 'MemoryMax=1\nMemoryMax=1\n', 'NeedDaemonReload=no\n', 'EnvironmentFiles=/unknown/env (ignore_errors=no)\n']) {
+    assert.throws(() => captureConfiguration(f.args, command => ({ ok: true, stdout: f.run(command).stdout + extra })));
+  }
+  const original = f.effective[1];
+  const runtime = `${join(f.args[7], 'worker-runtime.env')} (ignore_errors=no)`;
+  f.effective[1] = original.replace(`EnvironmentFiles=${env}\nEnvironmentFiles=${runtime}`, `EnvironmentFiles=${runtime}\nEnvironmentFiles=${env}`);
+  assert.throws(() => captureConfiguration(f.args, f.run), /Unknown or stale/);
+});
+function legacyCwd(f) {
+  const path = join(f.args[6], 'aistudy-web.service.d/49-aistudy-legacy-cwd.conf');
+  fs.writeFileSync(path, '[Service]\nWorkingDirectory=/opt/aistudy\n', { mode: 0o600 });
+  f.effective[0] = f.effective[0].replace('DropInPaths=', `DropInPaths=${path} `);
+  return path;
+}
+test('49 exact bytes are bound with ancestors and fsync; extra directives, swaps and faults refuse', t => {
+  for (const defect of ['none', 'env', 'exec', 'memory', 'cwd', 'replace', 'ancestor', 'fsync']) {
+    const f = resources(t), path = legacyCwd(f);
+    const captured = captureConfiguration(f.args, f.run, f.options);
+    assert(captured.resourceBinding.units.some(unit => unit.inputs.some(input => input.path === path)));
+    assert(configIdentity(captured).files.find(entry => entry.path === path).ancestors.length > 0);
+    if (defect === 'env') fs.appendFileSync(path, 'EnvironmentFile=/unknown\n');
+    if (defect === 'exec') fs.appendFileSync(path, 'ExecStart=/evil\n');
+    if (defect === 'memory') fs.appendFileSync(path, 'MemoryMax=1G\n');
+    if (defect === 'cwd') fs.writeFileSync(path, '[Service]\nWorkingDirectory=/other\n');
+    if (defect === 'replace') { fs.writeFileSync(`${path}.next`, fs.readFileSync(path), { mode: 0o600 }); fs.renameSync(`${path}.next`, path); }
+    if (defect === 'ancestor') fs.chmodSync(join(path, '..'), 0o775);
+    const original = fs.fsyncSync, synced = [];
+    fs.fsyncSync = fd => {
+      const actual = fs.readlinkSync(`/proc/self/fd/${fd}`); synced.push(actual);
+      if (defect === 'fsync' && actual === path) throw new Error('legacy fsync fault');
+      original(fd);
+    }; syncBuiltinESMExports();
+    try {
+      if (defect === 'none') { persistConfiguration(captured, f.args, f.run, f.options); assert(synced.includes(path)); }
+      else assert.throws(() => persistConfiguration(captured, f.args, f.run, f.options), undefined, defect);
+    } finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+    if (['env', 'exec', 'memory', 'cwd'].includes(defect)) assert.throws(() => captureConfiguration(f.args, f.run, f.options));
+  }
+});
+test('49 is bound even without worker resource drop-ins; required resource wrappers still refuse when missing', t => {
+  const f = resources(t), path = legacyCwd(f);
+  for (const resource of [f.memory, f.high]) f.effective[1] = f.effective[1].replace(`${resource} `, '');
+  const captured = captureConfiguration(f.args, f.run, f.options);
+  assert.deepEqual(captured.resourceBinding.units.map(row => row.unit), ['aistudy-web.service']);
+  assert(captured.resourceBinding.units[0].inputs.some(row => row.path === path));
+  persistConfiguration(captured, f.args, f.run, f.options);
+  const other = resources(t);
+  for (const name of ['95-aistudy-migration-fence.conf', '96-aistudy-writer-exec.conf']) {
+    const missing = join(other.args[6], `aistudy-worker.service.d/${name}`);
+    assert.throws(() => captureConfiguration(other.args, command => ({ ok: true, stdout: other.run(command).stdout.replace(`${missing} `, '') }), other.options), /Missing required/);
+  }
+});
+test('old-environment preflight is read-only, needs no 95/96, release markers or running candidate', t => {
+  const f = resources(t), path = legacyCwd(f);
+  for (let index = 0; index < 2; index++) {
+    const drops = f.effective[index].match(/DropInPaths=(.*)/)[1].split(' ');
+    for (const drop of drops.filter(drop => /\/(90|95|96)-/.test(drop))) {
+      f.effective[index] = f.effective[index].replace(/DropInPaths=.*/, `DropInPaths=${f.effective[index].match(/DropInPaths=(.*)/)[1].split(' ').filter(path => path !== drop).join(' ')}`);
+      fs.unlinkSync(drop);
+    }
+  }
+  fs.unlinkSync(join(f.target, '.release-sha')); fs.unlinkSync(join(f.target, '.worker-protocol')); fs.unlinkSync(f.args[3]);
+  const original = fs.fsyncSync;
+  fs.fsyncSync = () => { throw new Error('preflight must not fsync'); }; syncBuiltinESMExports();
+  try { preflightConfiguration(f.args, f.run, f.options); }
+  finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+  fs.appendFileSync(path, 'EnvironmentFile=/unknown\n');
+  assert.throws(() => preflightConfiguration(f.args, f.run, f.options), /legacy working directory/);
+  assert.throws(() => captureConfiguration(f.args, f.run, f.options));
+});
 test('shared Python parser accepts only resource corpus and preserves actual high above max', t => {
   const corpus = JSON.parse(fs.readFileSync(new URL('./hermes-resource-policy-corpus.json', import.meta.url)));
   for (const row of corpus) {
