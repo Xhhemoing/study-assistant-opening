@@ -187,6 +187,21 @@ export function verifySource({ runs, run: selected, jobs, artifact }, sha, runId
   if (!Number.isSafeInteger(artifact?.id) || artifact.expired !== false || artifact.name !== `release-${sha}`
     || artifact.workflow_run?.id !== runId || artifact.workflow_run?.head_sha !== sha) fail('Artifact does not belong to the trusted workflow run.');
 }
+// Accept only certificate fields from successful `gh attestation verify` output,
+// never the workflow-controlled predicate's invocationId.
+export function verifyRunBinding(verified, runId, runAttempt) {
+  const invocation = `https://github.com/${REPOSITORY}/actions/runs/${runId}/attempts/${runAttempt}`;
+  let bound = false;
+  if (!Array.isArray(verified)) fail('Attestation is not bound to this workflow run attempt.');
+  for (const result of verified) {
+    const certificate = result?.verificationResult?.signature?.certificate;
+    const direct = certificate?.runInvocationURI;
+    const legacy = certificate?.extensions?.runInvocationURI;
+    if (direct !== undefined && legacy !== undefined && direct !== legacy) fail('Conflicting certificate run invocation fields.');
+    if ((direct !== undefined ? direct : legacy) === invocation) bound = true;
+  }
+  if (!bound) fail('Attestation is not bound to this workflow run attempt.');
+}
 export function download(sha, runId, destination) {
   if (!/^[a-f0-9]{40}$/.test(sha) || !Number.isSafeInteger(runId) || runId < 1) fail('Explicit SHA and run ID required.');
   const runs = api(`actions/workflows/ci.yml/runs?head_sha=${sha}&branch=feat%2Fopening-release&event=push&per_page=100`);
@@ -205,14 +220,11 @@ export function download(sha, runId, destination) {
   if (!lstatSync(archive).isFile() || lstatSync(archive).isSymbolicLink()) fail('Downloaded artifact is not a regular archive.');
   // GitHub's signed provenance, not self-reported manifest hashes. Verify issuer,
   // repo, exact workflow, source ref/SHA and runner trust against the actual blob.
-  // Bind the run using the OIDC certificate extension, NOT predicate metadata
+  // Bind the run using the OIDC certificate fields, NOT predicate metadata
   // (which the originating workflow can freely set).
   const verified = JSON.parse(run('gh', ['attestation', 'verify', archive, '--repo', REPOSITORY, '--signer-workflow', `${REPOSITORY}/${WORKFLOW}`,
     '--source-ref', `refs/heads/${BRANCH}`, '--source-digest', sha, '--deny-self-hosted-runners', '--format', 'json']));
-  const invocation = `https://github.com/${REPOSITORY}/actions/runs/${runId}/attempts/${selected.run_attempt}`;
-  if (!Array.isArray(verified) || !verified.some(result => result.verificationResult?.signature?.certificate?.extensions?.runInvocationURI === invocation)) {
-    fail('Attestation is not bound to this workflow run attempt.');
-  }
+  verifyRunBinding(verified, runId, selected.run_attempt);
   return digest(readFileSync(archive));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
