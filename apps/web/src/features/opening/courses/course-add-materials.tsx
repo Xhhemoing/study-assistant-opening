@@ -3,10 +3,12 @@
 import type { SourceRecord } from "@aistudy/contracts";
 import { FolderInput, Plus, Upload, X } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi } from "../client/api";
 import { LoadError, ui } from "../design/ui";
-import { createMaterialOrganizationClient, type OrganizationResult } from "../library/material-organization-client";
+import type { OrganizationResult } from "../library/material-organization-client";
+import { createCourseSourcePurposeClient, CourseSourcePurposeError, SOURCE_PURPOSE_HELP, SOURCE_PURPOSE_SCOPE, type CourseSourcePurpose } from "./course-source-purpose-client";
+import { CourseSourcePurposeSelect } from "./course-source-purpose-control";
 import type { CourseAsset } from "./course-model";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -20,7 +22,11 @@ export function availableSourcesForCourse(sources: SourceRecord[], assets: Cours
   return sources.filter((source) => !sourceAlreadyOnCourse(source.id, assets));
 }
 
-export function CourseAddMaterials({
+export function CourseAddMaterials(props: { courseId: string; assets: CourseAsset[]; onAdded: () => void }) {
+  return <AddMaterials key={props.courseId} {...props} />;
+}
+
+function AddMaterials({
   courseId,
   assets,
   onAdded,
@@ -35,11 +41,18 @@ export function CourseAddMaterials({
   const [loadError, setLoadError] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [role, setRole] = useState<MaterialRole>("reference");
+  const [purpose, setPurpose] = useState<CourseSourcePurpose>(null);
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const addedSinceRefresh = useRef(false);
+  const [addedIds, setAddedIds] = useState<string[]>([]);
+  const active = useRef(true);
+  const [needsRefresh, setNeedsRefresh] = useState(false);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [result, setResult] = useState<OrganizationResult | null>(null);
   const [actionError, setActionError] = useState("");
 
-  const available = useMemo(() => availableSourcesForCourse(sources, assets), [sources, assets]);
+  const available = useMemo(() => availableSourcesForCourse(sources, assets).filter(row => !addedIds.includes(row.id)), [sources, assets, addedIds]);
   const uploaded = useMemo(() => available.filter((source) => source.uploadState === "uploaded"), [available]);
   const pending = useMemo(() => available.filter((source) => source.uploadState !== "uploaded"), [available]);
 
@@ -48,11 +61,11 @@ export function CourseAddMaterials({
     setLoadError("");
     try {
       const rows = await createOpeningApi().listSources();
-      setSources(rows);
+      if (active.current) setSources(rows);
     } catch {
-      setLoadError("知识库材料暂时无法读取，请重试。");
+      if (active.current) setLoadError("知识库材料暂时无法读取，请重试。");
     } finally {
-      setLoading(false);
+      if (active.current) setLoading(false);
     }
   }, []);
 
@@ -60,37 +73,64 @@ export function CourseAddMaterials({
     if (!open) return;
     setSelected([]);
     setRole("reference");
+    setPurpose(null);
     setResult(null);
     setActionError("");
     void load();
   }, [open, load]);
+
+  function close() {
+    setOpen(false);
+    if (addedSinceRefresh.current || needsRefresh) onAdded();
+  }
 
   function toggle(id: string) {
     setSelected((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   }
 
   async function confirm() {
-    if (!selected.length || busy) return;
+    if (!selected.length || inFlight.current || needsRefresh) return;
+    inFlight.current = true;
     setBusy(true);
     setActionError("");
     setResult(null);
     try {
-      const next = await createMaterialOrganizationClient().addToCourse(courseId, selected, role);
+      const next: OrganizationResult = { succeeded: [], failed: [] };
+      const client = createCourseSourcePurposeClient();
+      for (const sourceId of selected) {
+        if (!active.current) break;
+        try {
+          await client.add(courseId, sourceId, role, purpose);
+          next.succeeded.push(sourceId);
+        } catch (reason) {
+          next.failed.push({ id: sourceId, message: reason instanceof CourseSourcePurposeError ? reason.message : "挂接结果尚未确认，请刷新核对后再操作。" });
+          // Permission/conflict/unknown outcomes must not be retried or hidden as success.
+          if (active.current) setNeedsRefresh(true);
+          for (const id of selected.slice(selected.indexOf(sourceId) + 1)) next.failed.push({ id, message: "尚未提交，请刷新核对后再操作。" });
+          break;
+        }
+      }
+      if (!active.current) return;
       setResult(next);
       setSelected(next.failed.map((item) => item.id));
-      if (next.succeeded.length) onAdded();
-      if (!next.failed.length) setOpen(false);
+      if (next.succeeded.length) {
+        addedSinceRefresh.current = true;
+        setAddedIds(ids => [...ids, ...next.succeeded]);
+      }
+      // Keep partial failures visible until dismissed; a parent reload unmounts this panel.
+      if (!next.failed.length) { setOpen(false); onAdded(); }
     } catch (reason) {
       setActionError(userFacingMessage(reason, "挂接失败，请重试。"));
     } finally {
-      setBusy(false);
+      inFlight.current = false;
+      if (active.current) setBusy(false);
     }
   }
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className={ui.secondary} onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+        <button type="button" className={ui.secondary} disabled={busy} onClick={() => open ? close() : setOpen(true)} aria-expanded={open}>
           <Plus size={14} aria-hidden="true" />添加材料
         </button>
         <Link
@@ -104,7 +144,7 @@ export function CourseAddMaterials({
         <section aria-label="添加材料到课程" className="space-y-3 rounded-xl border border-line bg-surface-2 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-text-2">从知识库选择尚未挂入本课的材料。</p>
-            <button type="button" className={ui.icon} aria-label="关闭添加材料" title="关闭" onClick={() => setOpen(false)}>
+            <button type="button" className={ui.icon} aria-label="关闭添加材料" title="关闭" disabled={busy} onClick={close}>
               <X size={14} aria-hidden="true" />
             </button>
           </div>
@@ -144,9 +184,9 @@ export function CourseAddMaterials({
           ) : null}
           <div className="flex flex-wrap items-center gap-2">
             <label>
-              <span className="sr-only">材料用途</span>
+              <span className="mb-1 block text-xs text-text-2">材料角色</span>
               <select
-                aria-label="材料用途"
+                aria-label="材料角色"
                 className={`${ui.input} w-32`}
                 disabled={busy}
                 value={role}
@@ -157,11 +197,15 @@ export function CourseAddMaterials({
                 <option value="optional">拓展阅读</option>
               </select>
             </label>
-            <button type="button" className={ui.primary} disabled={busy || !selected.length} onClick={() => void confirm()}>
+            <CourseSourcePurposeSelect value={purpose} disabled={busy} onChange={setPurpose} />
+            <button type="button" className={ui.primary} disabled={busy || !selected.length || needsRefresh} onClick={() => void confirm()}>
               <FolderInput size={14} aria-hidden="true" />
               {busy ? "正在挂接…" : `确认挂接${selected.length ? `（${selected.length}）` : ""}`}
             </button>
           </div>
+          <p className="text-xs leading-6 text-text-3">{SOURCE_PURPOSE_HELP}</p>
+          <p className="text-xs leading-6 text-text-3">{SOURCE_PURPOSE_SCOPE}</p>
+          {needsRefresh ? <button type="button" className={ui.secondary} disabled={busy || loading} onClick={() => { setOpen(false); onAdded(); }}>刷新课程材料后核对</button> : null}
           {result ? (
             <div role="status" className="space-y-1 text-xs text-text-2">
               <p>

@@ -56,7 +56,7 @@ describe("course add materials", () => {
 });
 
 describe("course add materials memberships", () => {
-  it("posts memberships for selected sources with default reference role", async () => {
+  it("posts a source membership with separate reference role and unclassified purpose", async () => {
     const courseId = "11111111-1111-4111-8111-111111111111";
     const sourceId = "22222222-2222-4222-8222-222222222222";
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -65,19 +65,20 @@ describe("course add materials memberships", () => {
         return new Response(JSON.stringify([source(sourceId, "lecture.pdf")]), { status: 200 });
       }
       if (href.includes(`/api/courses/${courseId}/memberships`) && init?.method === "POST") {
-        return new Response(JSON.stringify({ membership: { id: "m1" } }), { status: 201 });
+        return new Response(JSON.stringify({ membership: { id: "33333333-3333-4333-8333-333333333333", courseId, assetType: "source", assetId: sourceId, purpose: null, updatedAt: "2026-11-08T12:00:00.123Z" } }), { status: 201 });
       }
       return new Response("not found", { status: 404 });
     });
-    const { createMaterialOrganizationClient } = await import("../library/material-organization-client");
-    const client = createMaterialOrganizationClient(fetcher);
-    const result = await client.addToCourse(courseId, [sourceId], "reference");
-    expect(result.succeeded).toEqual([sourceId]);
-    expect(result.failed).toEqual([]);
+    const { createCourseSourcePurposeClient } = await import("./course-source-purpose-client");
+    const client = createCourseSourcePurposeClient(fetcher);
+    const result = await client.add(courseId, sourceId, "reference", null);
+    expect(result.assetId).toEqual(sourceId);
+    expect(result.purpose).toBeNull();
     expect(JSON.parse(String(fetcher.mock.calls.find((call) => String(call[0]).includes("memberships"))?.[1]?.body))).toMatchObject({
       assetType: "source",
       assetId: sourceId,
       role: "reference",
+      purpose: null,
     });
   });
 });

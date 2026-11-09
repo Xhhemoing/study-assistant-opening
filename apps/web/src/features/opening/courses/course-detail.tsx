@@ -9,6 +9,7 @@ import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from 
 import { CourseLearningView, CourseSummaryPanel } from "../learning/course-view";
 import type { CourseAsset, CourseSummary } from "./course-model";
 import { CourseAddMaterials } from "./course-add-materials";
+import { CourseSourcePurposeControl } from "./course-source-purpose-control";
 import { CourseSettingsPanel } from "./course-settings-panel";
 import { createCourseStateClient } from "./course-state-client";
 import { CourseStudyActions, CourseStudyAlternatives, CourseStudyProvider } from "./course-study-actions";
@@ -74,6 +75,7 @@ export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { cou
   return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>
     <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={objectHref(`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`)} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
     <span className="shrink-0 text-xs text-text-3">{({ primary: "主要材料", reference: "参考材料", extra: "补充材料" } as Record<string, string>)[asset.role] ?? "课程材料"}</span><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(asset); setError(""); }} type="button" aria-label={`将 ${asset.document?.title ?? asset.source?.name ?? "未命名课程材料"} 移出此课程`}>移出课程</button>
+    {asset.assetType === "source" ? <CourseSourcePurposeControl courseId={courseId} sourceId={asset.assetId} sourceName={asset.source?.name ?? "课程材料"} /> : null}
     {diagnostics ? <p className="w-full break-all text-xs text-text-3">材料 ID：{asset.assetId} · 角色：{asset.role}</p> : null}
   </li>)}</ul>
     {selected ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">将“{selected.document?.title ?? selected.source?.name ?? "未命名课程材料"}”移出此课程？原件和其他课程中的引用仍保留，此操作不会删除材料或停止模型使用。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void remove()} type="button">{busy ? "移出中…" : "确认移出此课程"}</button><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(null); setError(""); }} type="button">取消</button></div></div> : null}

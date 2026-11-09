@@ -56,7 +56,7 @@ const decisionKey = (operationId: string) => `span-tutor-decision:${operationId}
 export function spanTutorReceiptDecision(receipt: { intentVersion: string; policyVersion: string } | null): NextLearningStep | null {
   return receipt && ["next-learning-step-1/span-tutor-execution-1", "next-learning-step-2/span-tutor-execution-2",
     "next-learning-step-3/span-tutor-execution-2", "next-learning-step-4/span-tutor-execution-2",
-    "next-learning-step-5/span-tutor-execution-2"].includes(receipt.policyVersion)
+    "next-learning-step-5/span-tutor-execution-2", "next-learning-step-6/span-tutor-execution-2"].includes(receipt.policyVersion)
     ? (JSON.parse(receipt.intentVersion) as { ruleDecision: NextLearningStep }).ruleDecision : null;
 }
 export function spanTutorQuestionInScope(question: string): boolean {

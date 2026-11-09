@@ -16,7 +16,7 @@ let f: OpeningFixture;
 beforeEach(async () => { f = await createOpeningFixture(); });
 afterEach(async () => { vi.restoreAllMocks(); await f?.close(); });
 
-async function seed() {
+async function seed(withKey = true) {
   const base = await learningAttemptFixture(f);
   const [session] = await f.sql`SELECT activity_id FROM opening_learning_sessions WHERE id=${base.sessionId}`;
   const activityId = String(session!.activity_id), blockId = randomUUID(), keyId = randomUUID();
@@ -30,7 +30,7 @@ async function seed() {
   await content.publishActivitySpec(f.scope, { activityId, teachingUnitId: unit.id, expectedVersion: 0,
     expectedRevisionNumber: 1, revisionNumber: 1, blockOrder: [
       { blockId, blockType: "prompt", role: "prompt", position: 0 },
-      { blockId: keyId, blockType: "answer_key", role: "answer_key", position: 1 },
+      ...(withKey ? [{ blockId: keyId, blockType: "answer_key", role: "answer_key" as const, position: 1 }] : []),
     ], sourceRefs: [{ sourceId: base.sourceId, chunkId: base.chunkId, version: 1 }] });
   const service = createOpeningAttemptService(f.sql);
   const start = () => service.create(f.scope, { sessionId: base.sessionId, clientKey: randomUUID(),
@@ -40,8 +40,8 @@ async function seed() {
     attemptId: attempt.id, problemId: attempt.problemId, answer, outcome: "unverified" as const,
     assistance: "independent" as const, clientKey,
   });
-  // Synthetic persisted facts from the evaluator-enabled era. This helper does
-  // not enable any writer or bypass bridge submit in application code.
+  // Synthetic persisted historical receipts remain a reader/replay fixture;
+  // real new-writer behavior is covered separately below and in the deterministic suite.
   const historical = async (decision: "correct" | "incorrect" | "abstain") => {
     const attempt = await start(), request = input(attempt, decision === "incorrect" ? "2" : "1");
     const original = await base.learning.insertObservation(f.scope, request);
@@ -103,10 +103,9 @@ it.each(["wrong_attempt", "wrong_problem", "unknown_evaluator", "unknown_spec", 
     else expect(qualification.verifiedCorrect).toBe("unknown");
   });
 
-it("keeps legacy AI/self-report records and new bridge answers readable without deterministic promotion", async () => {
+it("keeps legacy AI/self-report records and unsupported new answers readable without deterministic promotion", async () => {
   const x = await seed(), ordinary = await x.start();
-  const spy = vi.spyOn(evaluator, "evaluateOpeningTeachingKeyAttempt").mockRejectedValue(new Error("writer paused"));
-  const submitted = await x.submit(ordinary, { answer: "1", outcome: "unverified" });
+  const submitted = await x.submit(ordinary, { answer: "答案：1", outcome: "unverified" });
   expect(submitted).toMatchObject({ verdictSource: "self_report", outcome: "unverified", allowsIndependent: false });
   expect(submitted.serverEvaluation).toBeUndefined();
   expect(await f.sql`SELECT id FROM opening_jobs WHERE kind='grade-observation' AND payload->>'observationId'=${submitted.id}`).toHaveLength(1);
@@ -118,7 +117,16 @@ it("keeps legacy AI/self-report records and new bridge answers readable without 
   expect(graded.verdictSource).toBe("ai_graded");
   expect((await x.read()).some(row => row.verdictSource === "ai_graded" && row.serverEvaluation === undefined)).toBe(true);
   expect(await readOpeningCourseEvidence(f.sql, f.otherScope, x.courseId)).toEqual({ observations: [], evidenceContexts: {} });
-  expect(spy).not.toHaveBeenCalled();
+});
+
+it("does not grant strong evidence or enqueue a model job without a pinned key or model configuration", async () => {
+  const x = await seed(false), attempt = await x.start();
+  // No autoGrade policy/model is configured at this repository boundary.
+  const observation = await x.learning.insertObservation(f.scope, x.input(attempt, "1"));
+  expect(observation).toMatchObject({ verdictSource: "self_report", outcome: "unverified", allowsIndependent: false });
+  expect(observation.serverEvaluation).toBeUndefined();
+  expect(observation.eligibility?.verifiedCorrect).toBe("unknown");
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE kind='grade-observation' AND payload->>'observationId'=${observation.id}`).toHaveLength(0);
 });
 
 it.each(["replace", "retract"] as const)("keeps historical wrong cards paused on %s and preserves same-question feedback", async revisionKind => {
@@ -141,11 +149,12 @@ it.each(["replace", "retract"] as const)("keeps historical wrong cards paused on
   expect(JSON.stringify(historical)).toContain("teaching-key-exact-v1");
 });
 
-it("retains delivered hints for new bridge answers", async () => {
+it("retains delivered hints for restored teaching-key answers", async () => {
   const x = await seed(), attempt = await x.start();
   await createOpeningTeachingHintRepository(f.sql).read(f.scope, { attemptId: attempt.id, level: 1 });
   const result: LearningObservation = await x.service.submit(f.scope, attempt.id, { clientKey: randomUUID(), answer: "1",
     assistance: "independent", outcome: "unverified", verdictSource: "self_report" });
-  expect(result).toMatchObject({ assistance: "hinted", verdictSource: "self_report", outcome: "unverified" });
+  expect(result).toMatchObject({ assistance: "hinted", verdictSource: "deterministic", outcome: "correct",
+    serverEvaluation: { evaluatorVersion: "teaching-key-exact-v1", decision: "correct" } });
   expect(result.eligibility?.independentAttempt).toBe("no");
 });
