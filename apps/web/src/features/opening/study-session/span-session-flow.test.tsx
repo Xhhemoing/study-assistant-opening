@@ -1046,7 +1046,7 @@ it.each(["independent", "hinted", "revealed"] as const)("shows only current conf
   mocks.request.mockResolvedValue(attempt); mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: assistance === "independent" ? "none" : assistance });
   const save = vi.fn(async () => true), port = createSpanStudySession(bound, save), ui = await mount(port);
   try {
-    expect(ui.host.textContent).toContain("本次新题确认：核验正确");
+    expect(ui.host.textContent).toContain("本次新题确认：答案正确");
     expect(ui.host.textContent).toContain(assistance === "independent" ? "未使用帮助" : assistance === "hinted" ? "使用过提示" : "看过完整示范");
     expect(ui.host.textContent).toContain("不代表已掌握或外部先修已修复");
     expect(save).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled();

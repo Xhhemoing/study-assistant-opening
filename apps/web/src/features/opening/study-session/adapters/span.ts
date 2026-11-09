@@ -147,7 +147,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       result.assistance = delivered === "revealed" || record.assistance === "revealed" ? "revealed"
         : delivered === "hinted" || record.assistance === "hinted" ? "hinted" : record.assistance;
       const helpFact = result.assistance === "independent" ? "未使用帮助" : result.assistance === "hinted" ? "使用过提示" : result.assistance === "revealed" ? "看过完整示范" : "帮助情况待确认";
-      result.detail = `${repairStage === "confirmation" ? "本次新题确认" : "本次变式"}：${result.outcome === "correct" ? "核验正确" : result.outcome === "incorrect" ? "尚未正确" : "证据不足，待核对"}；${helpFact}。只记录本题结果，不代表已掌握或外部先修已修复。`;
+      result.detail = `${repairStage === "confirmation" ? "本次新题确认" : "本次变式"}：${result.outcome === "correct" ? "答案正确" : result.outcome === "incorrect" ? "尚未正确" : "证据不足，待核对"}；${helpFact}。只记录本题结果，不代表已掌握或外部先修已修复。`;
     }
     view = { ...view, help, answer, answerSummary: sealed ? spanAnswerSummary(answer) : undefined,
       sealed, result, next, photo,
