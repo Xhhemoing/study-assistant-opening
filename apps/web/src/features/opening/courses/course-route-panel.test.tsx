@@ -90,14 +90,14 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   sessionStorage.clear();
 });
 it.each([
-  { supply: { status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" }, label: "保留题：资格尚未确认" },
+  { supply: { status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" }, label: "还不能确认哪些题可用于复测" },
   { supply: { status: "missing", available: 0, reason: "服务端报告暂无保留题" }, label: "保留题：暂无保留题" },
-  { supply: { status: "ready", available: 3, reason: null }, label: "服务端报告保留题 3 道（仍非独立资格证明）" },
-  { supply: { status: "ready", available: 0, reason: null }, label: "服务端报告保留题 0 道（仍非独立资格证明）" },
-  { supply: undefined, label: "保留题状态未收集（服务端未提供）" },
-  { supply: { status: "unknown", available: 9, reason: "资格待核对" }, label: "保留题：资格尚未确认" },
+  { supply: { status: "ready", available: 3, reason: null }, label: "已记录保留题 3 道（不代表可以独立复测）" },
+  { supply: { status: "ready", available: 0, reason: null }, label: "已记录保留题 0 道（不代表可以独立复测）" },
+  { supply: undefined, label: "尚未收到保留题信息" },
+  { supply: { status: "unknown", available: 9, reason: "资格待核对" }, label: "还不能确认哪些题可用于复测" },
   { supply: { status: "missing", available: 7, reason: null }, label: "保留题：暂无保留题" },
-  { supply: { status: "unknown", available: 0, reason: '<img src=x onerror="alert(1)"><script>alert(2)</script>' }, label: "保留题：资格尚未确认" },
+  { supply: { status: "unknown", available: 0, reason: '<img src=x onerror="alert(1)"><script>alert(2)</script>' }, label: "还不能确认哪些题可用于复测" },
 ] satisfies Array<{ supply: CourseRouteSnapshot["requirements"][number]["reservedSupply"]; label: string }>)("renders reserved supply $label ($supply) as read-only server facts without blocking ordinary learning", async ({ supply, label }) => {
   sessionStorage.clear();
   const row: CourseRouteSnapshot["requirements"][number] = { ...confirmed.requirements[0]!,
@@ -112,11 +112,11 @@ it.each([
   const supplyLine = [...host.querySelectorAll("li p")].find(node => node.textContent?.startsWith(label));
   expect(supplyLine?.textContent).toBe(label + (supply?.reason != null ? ` · 原因：${supply.reason}` : ""));
   if (!supply || supply.status !== "ready") {
-    expect(supplyLine?.textContent).not.toMatch(/\d+\s*道|服务端报告保留题|可用/);
+    expect(supplyLine?.textContent).not.toMatch(/\d+\s*道|已记录保留题/);
   }
   if (supply?.status === "unknown") expect(supplyLine?.textContent).not.toContain("暂无保留题");
   if (supply?.status === "ready") expect(supplyLine?.textContent).not.toContain("暂无保留题");
-  if (!supply) expect(supplyLine?.textContent).not.toMatch(/资格尚未确认|暂无保留题/);
+  if (!supply) expect(supplyLine?.textContent).not.toMatch(/还不能确认哪些题可用于复测|暂无保留题/);
   expect(host.querySelector("img, script, [onerror]")).toBeNull();
   if (supply?.reason?.startsWith("<img")) {
     expect(supplyLine?.innerHTML).toContain("&lt;img");

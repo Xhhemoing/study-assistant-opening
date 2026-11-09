@@ -15,10 +15,10 @@ function referenceChecksLabel(value: CourseRouteSnapshot["requirements"][number]
   return value ? `一致 ${value.matched} / 矛盾 ${value.mismatched} / 不支持 ${value.unsupported}（仅当前已保存且附参考解答的题目）` : "未收集";
 }
 function reservedSupplyLabel(value: CourseRouteSnapshot["requirements"][number]["reservedSupply"]) {
-  if (!value) return "保留题状态未收集（服务端未提供）";
-  if (value.status === "unknown") return "保留题：资格尚未确认";
+  if (!value) return "尚未收到保留题信息";
+  if (value.status === "unknown") return "还不能确认哪些题可用于复测";
   if (value.status === "missing") return "保留题：暂无保留题";
-  return `服务端报告保留题 ${value.available} 道（仍非独立资格证明）`;
+  return `已记录保留题 ${value.available} 道（不代表可以独立复测）`;
 }
 const citationRoleLabels = { teach: "讲解", prompt: "题干", example: "示例", answer_key: "隐藏答案" };
 function CitationCoverage({ value }: { value: CourseRouteSnapshot["requirements"][number]["citationCoverage"] }) {
