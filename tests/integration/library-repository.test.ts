@@ -326,7 +326,7 @@ describe("library repository foundation", () => {
     return { workspaceId: workspaceA, documentId: document.id };
   }
 
-  async function lifecycleSnapshot(documentId: string, client = sql) {
+  async function lifecycleSnapshot(documentId: string, client: typeof sql | TransactionSql = sql) {
     const [document] = await client`SELECT * FROM library_documents WHERE id = ${documentId}`;
     const blocks = await client`SELECT * FROM library_blocks WHERE document_id = ${documentId} ORDER BY position`;
     const revisions = await client`SELECT * FROM library_revisions WHERE document_id = ${documentId} ORDER BY revision_number`;
@@ -452,6 +452,170 @@ describe("library repository foundation", () => {
       expect(injected).toBe(true);
       expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
       expect(await historyRows()).toEqual(originalHistory);
+    }
+  });
+
+  async function updateFixture() {
+    const document = await repo.createDocument({
+      workspaceId: workspaceA, title: "Before update",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "old complete graph" } }],
+    });
+    return {
+      workspaceId: workspaceA, documentId: document.id, expectedRevisionNumber: 1,
+      title: "After update", blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "new complete graph" } }],
+    };
+  }
+
+  it.each(["generic", "job"] as const)("%s update waits on history before workspace/job/document locks and preserves the old graph", async (kind) => {
+    const input = await updateFixture();
+    const scope = await runningJob();
+    const original = await lifecycleSnapshot(input.documentId);
+    await sql`UPDATE opening_workspace_history_revisions SET revision = 47 WHERE workspace_id = ${workspaceA}`;
+    const holder = openRaceSession();
+    const writer = openRaceSession();
+    const observer = openRaceSession();
+    let pending: ReturnType<LibraryRepository["updateDocument"]> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async (tx) => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}
+          AND owner_user_id = ${scope.ownerUserId} FOR UPDATE`;
+        const started = performance.now();
+        pending = track(createLibraryRepository(writer.sql).updateDocument({ ...input, jobScope: kind === "job" ? scope : undefined }));
+        await waitUntilBlocked(observer.sql, writer.pid, holder.pid, `library ${kind} update history`,
+          /opening_workspace_history_revisions[\s\S]*FOR UPDATE/);
+        await tx`SELECT id FROM workspaces WHERE id = ${workspaceA} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_jobs WHERE id = ${scope.jobExecution!.id} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM library_documents WHERE id = ${input.documentId} FOR UPDATE NOWAIT`;
+        expect(await lifecycleSnapshot(input.documentId, observer.sql)).toEqual(original);
+        expect(await createLibraryRepository(observer.sql).getDocument(input)).toMatchObject({
+          title: "Before update", currentRevisionNumber: 1, blocks: [{ content: { text: "old complete graph" } }],
+        });
+        console.info(`[library update barrier:${kind}] actual blocked observation ${Math.round(performance.now() - started)}ms`);
+      });
+      expect(await pending).toMatchObject({ title: input.title, currentRevisionNumber: 2, blocks: input.blocks });
+      const after = await lifecycleSnapshot(input.documentId);
+      expect(after.revisions).toHaveLength(2);
+      expect(after.revisions[0]).toEqual(original.revisions[0]);
+      expect(after.revisions[1]).toMatchObject({ revision_number: 2, parent_revision_number: 1, title: input.title });
+      expect(after.blocks).toMatchObject(input.blocks);
+      expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: 47 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each(["generic", "legacy"] as const)("%s update uses the canonical DB owner without advancing history", async (kind) => {
+    const input = await updateFixture();
+    const scope = await ownerScope();
+    const jobScope = kind === "legacy" ? { ...scope, ownerUserId: (await ownerScope(workspaceB)).ownerUserId } : undefined;
+    for (const revision of [null, 0, 53]) {
+      await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+      if (revision !== null) {
+        await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+          VALUES (${workspaceA}, ${scope.ownerUserId}, ${revision})`;
+      }
+      const updated = await repo.updateDocument({ ...input, jobScope });
+      expect(updated.currentRevisionNumber).toBe(input.expectedRevisionNumber + 1);
+      input.expectedRevisionNumber = updated.currentRevisionNumber;
+      expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: revision ?? 0 }]);
+    }
+  });
+
+  it.each(["owner", "token", "state", "epoch", "job workspace"] as const)("update preserves the execution %s gate and rolls back history ensures", async (invalid) => {
+    const input = await updateFixture();
+    const scope = await runningJob();
+    const canonical = await ownerScope();
+    if (invalid === "owner") scope.ownerUserId = (await ownerScope(workspaceB)).ownerUserId;
+    if (invalid === "token") scope.jobExecution!.token = randomUUID();
+    if (invalid === "state") await sql`UPDATE opening_jobs SET state = 'cancelled' WHERE id = ${scope.jobExecution!.id}`;
+    if (invalid === "epoch") await sql`UPDATE workspaces SET privacy_epoch = 1 WHERE id = ${workspaceA}`;
+    if (invalid === "job workspace") await sql`UPDATE opening_jobs SET workspace_id = ${workspaceB} WHERE id = ${scope.jobExecution!.id}`;
+    const original = await lifecycleSnapshot(input.documentId);
+    for (const revision of [null, 59]) {
+      await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+      if (revision !== null) {
+        await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+          VALUES (${workspaceA}, ${canonical.ownerUserId}, ${revision})`;
+      }
+      const history = await historyRows();
+      await expect(repo.updateDocument({ ...input, jobScope: scope })).rejects.toMatchObject({
+        code: "CONFLICT", message: "job execution is no longer current",
+      });
+      expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+      expect(await historyRows()).toEqual(history);
+    }
+  });
+
+  it("update retains validation, execution, cross-workspace and CAS error precedence without leaving history", async () => {
+    const input = await updateFixture();
+    const original = await lifecycleSnapshot(input.documentId);
+    const scope = await runningJob();
+    scope.jobExecution!.token = randomUUID();
+    await sql`DELETE FROM opening_workspace_history_revisions`;
+    const cases = [
+      { input: { ...input, workspaceId: "invalid", jobScope: scope, blocks: [] }, code: "CONFLICT", message: "job execution workspace differs" },
+      { input: { ...input, workspaceId: "invalid", expectedRevisionNumber: 0, blocks: [] }, code: "VALIDATION", message: "Invalid UUID for workspaceId" },
+      { input: { ...input, workspaceId: randomUUID(), expectedRevisionNumber: 0, blocks: [] }, code: "NOT_FOUND", message: "Workspace not found:" },
+      { input: { ...input, jobScope: scope, expectedRevisionNumber: 0, blocks: [] }, code: "VALIDATION", message: "expectedRevisionNumber must be a positive integer" },
+      { input: { ...input, jobScope: scope, expectedRevisionNumber: 99, blocks: [] }, code: "VALIDATION", message: "at least one block" },
+      { input: { ...input, jobScope: scope, documentId: randomUUID(), expectedRevisionNumber: 99, title: "" }, code: "CONFLICT", message: "job execution is no longer current", libraryError: false },
+      { input: { ...input, workspaceId: workspaceB, expectedRevisionNumber: 99, title: "" }, code: "WORKSPACE_MISMATCH", message: `Document ${input.documentId} is not in workspace ${workspaceB}` },
+      { input: { ...input, documentId: randomUUID(), expectedRevisionNumber: 99, title: "" }, code: "NOT_FOUND", message: "Document not found:" },
+      { input: { ...input, expectedRevisionNumber: 99, lifecycle: "invalid" as "scratch", title: "" }, code: "CONFLICT", message: "is at revision 1; expected 99" },
+      { input: { ...input, lifecycle: "invalid" as "scratch", title: "" }, code: "VALIDATION", message: "Invalid lifecycle" },
+      { input: { ...input, lifecycle: "published" as const, title: "" }, code: "INVALID_LIFECYCLE_TRANSITION", message: "scratch" },
+      { input: { ...input, title: "" }, code: "VALIDATION", message: "Document title is required" },
+    ];
+    for (const testCase of cases) {
+      const error = await repo.updateDocument(testCase.input).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(Error);
+      expect(error instanceof LibraryError).toBe(!("libraryError" in testCase) || testCase.libraryError);
+      expect(error).toMatchObject({ code: testCase.code, message: expect.stringContaining(testCase.message) });
+      expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+      expect(await historyRows()).toEqual([]);
+    }
+  });
+
+  it("update rolls back actual projection/revision writes and a newly ensured history row after a pre-commit failure", async () => {
+    const input = await updateFixture();
+    const scope = await ownerScope();
+    const original = await lifecycleSnapshot(input.documentId);
+    const failure = new Error("injected after document projection and revision before commit");
+    for (const revision of [null, 61]) {
+      await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+      if (revision !== null) {
+        await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+          VALUES (${workspaceA}, ${scope.ownerUserId}, ${revision})`;
+      }
+      const history = await historyRows();
+      let injected = false;
+      const failing = new Proxy(sql, {
+        get(target, property, receiver) {
+          if (property !== "begin") return Reflect.get(target, property, receiver);
+          return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(async (tx) => {
+            expect(await execute(tx)).toMatchObject({ currentRevisionNumber: 2, title: input.title, blocks: input.blocks });
+            const changed = await lifecycleSnapshot(input.documentId, tx);
+            expect(changed.document).toMatchObject({ current_revision_number: 2, title: input.title });
+            expect(changed.blocks).toMatchObject(input.blocks);
+            expect(changed.revisions).toHaveLength(2);
+            expect(changed.revisions[1]).toMatchObject({ revision_number: 2, parent_revision_number: 1, title: input.title,
+              blocks: input.blocks.map((block, position) => ({ ...block, position })),
+            });
+            const [ensured] = await tx`SELECT revision::int FROM opening_workspace_history_revisions
+              WHERE workspace_id = ${workspaceA} AND owner_user_id = ${scope.ownerUserId}`;
+            expect(ensured!.revision).toBe(revision ?? 0);
+            expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+            injected = true;
+            throw failure;
+          });
+        },
+      });
+      await expect(createLibraryRepository(failing).updateDocument(input)).rejects.toBe(failure);
+      expect(injected).toBe(true);
+      expect(await lifecycleSnapshot(input.documentId)).toEqual(original);
+      expect(await historyRows()).toEqual(history);
     }
   });
 
