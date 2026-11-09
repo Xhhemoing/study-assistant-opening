@@ -322,17 +322,22 @@ export function createExplorationRepository(sql: Sql): ExplorationRepository {
       if (!parsed.success) throw new ExplorationRepositoryError("VALIDATION", "Invalid exploration status");
       const row = await getExplorationRow(input.workspaceId, input.explorationId);
       if (row.status === parsed.data) throw new ExplorationRepositoryError("INVALID_TRANSITION", `Exploration is already ${parsed.data}`);
-      const rows = parsed.data === "closed"
-        ? await sql`
-            UPDATE explorations SET status = 'closed', closed_at = now(), updated_at = now()
-            WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId} AND status = 'open'
-            RETURNING *
-          `
-        : await sql`
-            UPDATE explorations SET status = 'open', closed_at = NULL, updated_at = now()
-            WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId} AND status = 'closed'
-            RETURNING *
-          `;
+      const rows = await sql.begin(async (tx) => {
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId}`;
+        if (!workspace) throw new ExplorationRepositoryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+        await lockWorkspaceLearningHistory(tx, { workspaceId: input.workspaceId, ownerUserId: workspace.owner_user_id as string });
+        return parsed.data === "closed"
+          ? await tx`
+              UPDATE explorations SET status = 'closed', closed_at = now(), updated_at = now()
+              WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId} AND status = 'open'
+              RETURNING *
+            `
+          : await tx`
+              UPDATE explorations SET status = 'open', closed_at = NULL, updated_at = now()
+              WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId} AND status = 'closed'
+              RETURNING *
+            `;
+      });
       return record(input.workspaceId, rows[0] as Row);
     },
   };
