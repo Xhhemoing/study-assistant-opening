@@ -494,7 +494,22 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       enqueueMetadata?: boolean;
     }, options?: { materialPurposePin?: OpeningMaterialPurposePin }): Promise<void> {
       await sql.begin(async (tx) => {
-        if (input.helpExposure || input.generatedExposure) await lockWorkspaceLearningHistory(tx, input.scope);
+        if (input.helpExposure || input.generatedExposure) {
+          await lockWorkspaceLearningHistory(tx, input.scope);
+        } else {
+          // Preserve completion's permission error before history's lazy ensure,
+          // without taking a business-row lock ahead of the history fence.
+          const owner = await tx`SELECT id FROM workspaces
+            WHERE id=${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId}`;
+          if (!owner.length) throw new Error("workspace permission changed");
+          try {
+            await lockWorkspaceLearningHistory(tx, input.scope);
+          } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+              && error.message === "workspace not found") throw new Error("workspace permission changed");
+            throw error;
+          }
+        }
         const workspace = await tx`
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
