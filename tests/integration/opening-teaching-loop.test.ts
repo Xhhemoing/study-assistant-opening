@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Sql, TransactionSql } from "postgres";
 import type { ActivitySpecPublishInput } from "@aistudy/contracts";
 import {
   conversationResumeSchema,
@@ -13,6 +14,8 @@ import {
   type TeachingActivity,
 } from "@aistudy/contracts";
 import {
+  createLibraryRepository,
+  createOpeningTeachingCommandsRepository,
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   createOpeningTeachingContentRepository,
@@ -34,6 +37,7 @@ import { createOpeningTeachingResumeService } from "../../apps/web/src/features/
 import { isTeachingWorkspaceContentUsable } from "../../apps/web/src/features/opening/teaching/teaching-workspace";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 let f: OpeningFixture;
 
@@ -284,6 +288,195 @@ async function seedReadyTeachingContent(activity: TeachingActivity) {
   const clientInit = await content.getClientInit(f.scope, activity.id);
   return { unit, clientInit, activity: refreshed };
 }
+
+describe("teaching command history and rewrite atomicity (PG)", () => {
+  async function ready() {
+    const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+      clientKey: randomUUID(), intentKind: "topic", intentSummary: "Atomic command", sourceIds: [], createIntent: {},
+    });
+    return seedReadyTeachingContent(activity);
+  }
+
+  async function graph(sql: Sql = f.sql) {
+    const rows = [];
+    for (const table of ["library_documents", "library_blocks", "library_revisions", "opening_teaching_units",
+      "opening_teaching_activity_specs", "opening_teaching_activities", "opening_workspace_history_revisions",
+      "opening_jobs", "opening_outbox", "opening_budget_reservations"]) {
+      rows.push(await sql`SELECT to_jsonb(t) AS row FROM ${sql(table)} t WHERE workspace_id=${f.scope.workspaceId} ORDER BY to_jsonb(t)::text`);
+    }
+    return JSON.stringify(rows);
+  }
+
+  async function watermark() {
+    return f.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+      AND owner_user_id=${f.scope.ownerUserId}`;
+  }
+
+  function rewrite(activity: TeachingActivity) {
+    return { clientKey: randomUUID(), kind: "rephrase" as const, blockId: blockA,
+      expectedVersion: activity.contentVersion, expectedPathVersion: activity.pathVersion, expectedRevisionNumber: 1,
+      prompt: "Simpler explanation" };
+  }
+
+  // Execute all SQL unchanged; pause/fail only after the real revision write,
+  // immediately before the command's spec UPDATE. No canned SQL results.
+  function beforeSpec(sql: Sql, effect: (tx: TransactionSql) => Promise<void>): Sql {
+    return new Proxy(sql, { get(target, property) {
+      if (property === "begin") return (callback: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => {
+        const wrapped = new Proxy(tx, { apply(client, _self, args: [TemplateStringsArray, ...unknown[]]) {
+          const query = Array.isArray(args[0]) && args[0].join("?");
+          if (query && query.includes("UPDATE opening_teaching_activity_specs")) {
+            return effect(tx).then(() => Reflect.apply(client, client, args));
+          }
+          return Reflect.apply(client, client, args);
+        } });
+        return callback(wrapped);
+      });
+      return Reflect.get(target, property);
+    } });
+  }
+
+  it("waits on history before workspace/job/activity/spec/document locks, then succeeds without advancing history", async () => {
+    const x = await ready(), history = await watermark();
+    const jobId = randomUUID(), token = randomUUID();
+    await f.sql`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,state,claim_token)
+      VALUES(${jobId},${f.scope.workspaceId},${f.scope.ownerUserId},${randomUUID()},'compile-teaching-unit','{}','running',${token})`;
+    const [workspace] = await f.sql`SELECT privacy_epoch FROM workspaces WHERE id=${f.scope.workspaceId}`;
+    const scope = { ...f.scope, jobExecution: { id: jobId, token, privacyEpoch: Number(workspace!.privacy_epoch) } };
+    const holder = openRaceSession(), writer = openRaceSession(), probe = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const opened = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([holder.ready, writer.ready, probe.ready]);
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}
+          AND owner_user_id=${f.scope.ownerUserId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      pending.push(holding);
+      await Promise.race([opened, holding.then(() => { throw new Error("history holder ended before opening"); })]);
+      const command = track(createOpeningTeachingCommandsRepository(writer.sql).executeCommand(scope, x.activity.id, rewrite(x.activity)));
+      pending.push(command);
+      await waitUntilBlocked(f.sql, writer.pid, holder.pid, "teaching command history", /opening_workspace_history_revisions/);
+      await probe.sql.begin(async tx => {
+        expect(await tx`SELECT id FROM workspaces WHERE id=${f.scope.workspaceId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_jobs WHERE id=${jobId} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_teaching_activities WHERE id=${x.activity.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM opening_teaching_activity_specs WHERE activity_id=${x.activity.id} FOR UPDATE NOWAIT`).toHaveLength(1);
+        expect(await tx`SELECT id FROM library_documents WHERE id=${x.unit.documentId} FOR UPDATE NOWAIT`).toHaveLength(1);
+      });
+      release(); await holding;
+      expect(await command).toMatchObject({ ok: true, revisionNumber: 2 });
+      expect(await watermark()).toEqual(history);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([holder.sql.end(), writer.sql.end(), probe.sql.end()]);
+    }
+  }, 25_000);
+
+  it.each([false, true])("keeps the old complete graph outside the rewrite transaction; injected failure=%s", async fail => {
+    const x = await ready(), old = await graph(), history = await watermark();
+    const writer = openRaceSession(), observer = openRaceSession();
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([writer.ready, observer.ready]);
+      const sql = beforeSpec(writer.sql, async tx => {
+        expect(await tx`SELECT revision_number FROM library_revisions WHERE document_id=${x.unit.documentId} ORDER BY revision_number`)
+          .toEqual([{ revision_number: 1 }, { revision_number: 2 }]);
+        expect((await tx`SELECT current_revision_number FROM library_documents WHERE id=${x.unit.documentId}`)[0]?.current_revision_number).toBe(2);
+        const blocks = await tx`SELECT content FROM library_blocks WHERE document_id=${x.unit.documentId} AND id=${blockA}`;
+        expect(blocks[0]?.content).not.toEqual({ markdown: "矩阵的秩与零空间维数之和等于列数。" });
+        entered(); await held;
+        if (fail) throw new Error("injected command failure after revision before spec");
+      });
+      const request = rewrite(x.activity);
+      const command = track(createOpeningTeachingCommandsRepository(sql).executeCommand(f.scope, x.activity.id, request));
+      pending.push(command);
+      await Promise.race([reached, command.then(() => { throw new Error("command missed spec barrier"); })]);
+      expect(await graph(observer.sql)).toBe(old);
+      release();
+      if (fail) {
+        await expect(command).rejects.toThrow("injected command failure after revision before spec");
+        expect(await graph(observer.sql)).toBe(old);
+      } else {
+        expect(await command).toMatchObject({ ok: true, contentVersion: x.activity.contentVersion + 1, revisionNumber: 2 });
+        expect(await observer.sql`SELECT revision_number FROM library_revisions WHERE document_id=${x.unit.documentId} ORDER BY revision_number`)
+          .toEqual([{ revision_number: 1 }, { revision_number: 2 }]);
+        expect((await observer.sql`SELECT revision_number,version FROM opening_teaching_activity_specs WHERE activity_id=${x.activity.id}`)[0])
+          .toMatchObject({ revision_number: 2, version: x.activity.contentVersion + 1 });
+        expect((await observer.sql`SELECT current_revision_number FROM opening_teaching_units WHERE id=${x.unit.id}`)[0]?.current_revision_number).toBe(2);
+        const [activity] = await observer.sql`SELECT content_version,checkpoint_json FROM opening_teaching_activities WHERE id=${x.activity.id}`;
+        expect(activity?.content_version).toBe(x.activity.contentVersion + 1);
+        expect(activity?.checkpoint_json.commandReplay[request.clientKey]).toMatchObject({ ok: true, revisionNumber: 2 });
+        const committed = await graph(observer.sql);
+        // CAS is intentionally ahead of replay: an old rewrite retry stays stale.
+        expect(await createOpeningTeachingCommandsRepository(writer.sql).executeCommand(f.scope, x.activity.id, request))
+          .toMatchObject({ ok: false, conflict: "stale_content_version" });
+        expect(await graph(observer.sql)).toBe(committed);
+      }
+      expect(await watermark()).toEqual(history);
+      expect(await observer.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await observer.sql`SELECT id FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await observer.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    } finally {
+      release(); await Promise.allSettled(pending);
+      await Promise.all([writer.sql.end(), observer.sql.end()]);
+    }
+  }, 25_000);
+
+  it("maps a document advanced before rewrite to stale_revision with no partial command writes", async () => {
+    const x = await ready();
+    await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: x.unit.documentId,
+      expectedRevisionNumber: 1, blocks: [{ id: blockA, type: "text", content: { text: "concurrent library edit" } }] });
+    const old = await graph();
+    expect(await createOpeningTeachingCommandsRepository(f.sql).executeCommand(f.scope, x.activity.id, rewrite(x.activity)))
+      .toMatchObject({ ok: false, conflict: "stale_revision" });
+    expect(await graph()).toBe(old);
+  });
+
+  it("preserves skip/why replay, CAS precedence, mismatch, generation, revision/draft and completed/ownership gates", async () => {
+    const x = await ready(), commands = createOpeningTeachingCommandsRepository(f.sql), history = await watermark();
+    const skip = { clientKey: randomUUID(), kind: "skip" as const, blockId: blockA, expectedVersion: x.activity.contentVersion };
+    expect(await commands.executeCommand(f.scope, x.activity.id, skip)).toMatchObject({ ok: true, pathVersion: 2 });
+    expect(await commands.executeCommand(f.scope, x.activity.id, skip)).toMatchObject({ ok: true, replayed: true, pathVersion: 2 });
+    const why = { ...skip, clientKey: randomUUID(), kind: "why" as const };
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, assist: { kind: "why" } });
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, replayed: true });
+    const old = await graph();
+    for (const [request, conflict] of [
+      [{ ...skip, expectedVersion: 0 }, "stale_content_version"],
+      [{ ...skip, expectedPathVersion: 1 }, "stale_path_version"],
+      [{ ...skip, kind: "why" as const }, "client_key_intent_mismatch"],
+      [{ ...rewrite(x.activity), expectedPathVersion: 2, expectedRevisionNumber: 99 }, "stale_revision"],
+    ] as const) expect(await commands.executeCommand(f.scope, x.activity.id, request)).toMatchObject({ ok: false, conflict });
+    expect(await graph()).toBe(old);
+    await f.sql`UPDATE opening_teaching_activities SET generate_status='generating' WHERE id=${x.activity.id}`;
+    expect(await commands.executeCommand(f.scope, x.activity.id, { ...rewrite(x.activity), expectedPathVersion: 2 }))
+      .toMatchObject({ ok: false, conflict: "generate_in_flight" });
+    const lostBlock = randomUUID();
+    await f.sql`UPDATE opening_teaching_activities SET generate_status='ready',
+      checkpoint_json=jsonb_set(checkpoint_json,'{drafts}',${f.sql.json([{ blockId: lostBlock, contentVersion: 1, draftText: "keep" }])}) WHERE id=${x.activity.id}`;
+    const draftGraph = await graph();
+    expect(await commands.executeCommand(f.scope, x.activity.id, { ...rewrite(x.activity), expectedPathVersion: 2 }))
+      .toMatchObject({ ok: false, conflict: "draft_anchor_lost", lostBlockIds: [lostBlock] });
+    expect(await graph()).toBe(draftGraph);
+    await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${x.activity.id}`;
+    expect(await commands.executeCommand(f.scope, x.activity.id, why)).toMatchObject({ ok: true, replayed: true });
+    const completed = await graph();
+    await expect(commands.executeCommand(f.scope, x.activity.id, { ...why, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(commands.executeCommand(f.otherScope, x.activity.id, why)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(commands.executeCommand({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, x.activity.id, why))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await graph()).toBe(completed);
+    expect(await watermark()).toEqual(history);
+    expect(await f.sql`SELECT id FROM library_revisions WHERE document_id=${x.unit.documentId}`).toHaveLength(1);
+  });
+});
 
 describe("V2-16 teaching loop flags (dual injection)", () => {
   it("T1 dual flags on after injection; default-off when unset", () => {
