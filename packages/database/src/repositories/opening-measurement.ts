@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import {
   measurementActionInputSchema, measurementNextInputSchema, measurementStartInputSchema, measurementStatusInputSchema,
   type MeasurementActionInput, type MeasurementExport, type MeasurementNextInput, type MeasurementOverview,
@@ -8,12 +8,29 @@ import {
 } from "@aistudy/contracts";
 import { MEASUREMENT_MODELS, predictMeasurementPair, resolveMeasurementPlugins } from "@aistudy/domain";
 import { chooseNextMeasurementItem, getMeasurementUnit, gradeMeasurementAnswer } from "@aistudy/domain/measurement-catalog";
-import { learningError } from "./opening-learning-facts";
+import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
   lockMeasurementCourse, lockMeasurementTrial, mapMeasurementAttempt, mapMeasurementTrial,
   measurementAttemptRows, measurementCatalog, measurementNow, measurementOverview, measurementPhaseComplete,
   parseMeasurementItem, recordMeasurementCommand, replayMeasurementCommand,
 } from "./opening-measurement-facts";
+
+async function precheckCourse(tx: TransactionSql, scope: Scope, courseId: string) {
+  const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owner) throw learningError("NOT_FOUND", "工作区不存在");
+  const [course] = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+  if (!course) throw learningError("NOT_FOUND", "课程不存在或已归档");
+}
+
+async function fenceTrial(tx: TransactionSql, scope: Scope, trialId: string) {
+  const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owner) throw learningError("NOT_FOUND", "workspace not found");
+  const [trial] = await tx`SELECT t.id FROM opening_measurement_trials t JOIN courses c ON c.id=t.course_id AND c.workspace_id=t.workspace_id
+    WHERE t.id=${trialId} AND t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId} AND c.archived_at IS NULL`;
+  if (!trial) throw learningError("NOT_FOUND", "测量记录不存在或课程已归档");
+  await lockWorkspaceLearningHistory(tx, scope);
+  return lockMeasurementTrial(tx, scope, trialId);
+}
 
 /** Isolated opt-in plugin. No production observations, planner facts, or mastery states are written. */
 export function createOpeningMeasurementRepository(sql: Sql) {
@@ -23,6 +40,8 @@ export function createOpeningMeasurementRepository(sql: Sql) {
       const unit = getMeasurementUnit(input.unitId);
       if (!unit) throw learningError("VALIDATION", "测量单元不可用");
       return sql.begin(async tx => {
+        await precheckCourse(tx, scope, input.courseId);
+        await lockWorkspaceLearningHistory(tx, scope);
         // Serialize enrollment before checking uniqueness; do not upgrade a shared lock.
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw learningError("NOT_FOUND", "工作区不存在");
@@ -61,7 +80,7 @@ export function createOpeningMeasurementRepository(sql: Sql) {
     async setStatus(scope: Scope, raw: MeasurementStatusInput): Promise<MeasurementOverview> {
       const input = measurementStatusInputSchema.parse(raw);
       return sql.begin(async tx => {
-        const current = await lockMeasurementTrial(tx, scope, input.trialId);
+        const current = await fenceTrial(tx, scope, input.trialId);
         if (current.status === "completed") throw learningError("CONFLICT", "已完成的测量不能重置；可撤回错误记录");
         const [row] = await tx`UPDATE opening_measurement_trials SET status=${input.status} WHERE id=${input.trialId} RETURNING *`;
         return measurementOverview(tx, row!);
@@ -71,7 +90,7 @@ export function createOpeningMeasurementRepository(sql: Sql) {
     async next(scope: Scope, raw: MeasurementNextInput): Promise<MeasurementOverview> {
       const input = measurementNextInputSchema.parse(raw);
       return sql.begin(async tx => {
-        const row = await lockMeasurementTrial(tx, scope, input.trialId);
+        const row = await fenceTrial(tx, scope, input.trialId);
         const intent = { action: "next" };
         if (await replayMeasurementCommand(tx, input.trialId, input.clientKey, intent)) return measurementOverview(tx, row);
         const trial = mapMeasurementTrial(row);
@@ -115,12 +134,13 @@ export function createOpeningMeasurementRepository(sql: Sql) {
         const found = await tx`SELECT a.trial_id FROM opening_measurement_attempts a JOIN opening_measurement_trials t ON t.id=a.trial_id
           WHERE a.id=${attemptId} AND t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId}`;
         if (!found[0]) throw learningError("NOT_FOUND", "测量作答不存在");
-        let row = await lockMeasurementTrial(tx, scope, String(found[0].trial_id));
+        let row = await fenceTrial(tx, scope, String(found[0].trial_id));
         const trialId = String(row.id);
         const intent = { attemptId, ...input };
         if (await replayMeasurementCommand(tx, trialId, input.clientKey, intent)) return measurementOverview(tx, row);
         const rows = await measurementAttemptRows(tx, trialId);
-        const stored = rows.find(attempt => attempt.id === attemptId)!;
+        const stored = rows.find(attempt => attempt.id === attemptId);
+        if (!stored) throw learningError("NOT_FOUND", "测量作答不存在");
         const attempt = mapMeasurementAttempt(stored);
         const item = parseMeasurementItem(stored.item_snapshot);
         const now = await measurementNow(tx);

@@ -5,6 +5,7 @@ import {
   createIdentityRepository,
   createPracticeContentRepository,
   createPracticeSessionRepository,
+  createOpeningMeasurementRepository,
   createSqlClient,
   PracticeContentRepositoryError,
   type IdentityRepository,
@@ -12,6 +13,7 @@ import {
   type PracticeSessionRepository,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
+import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -26,6 +28,7 @@ describe("practice content repository", () => {
   let workspaceId: string;
   let ownerUserId: string;
   let otherWorkspaceId: string;
+  let otherOwnerUserId: string;
   let packageId: string;
   let itemId: string;
 
@@ -54,6 +57,7 @@ describe("practice content repository", () => {
     workspaceId = owner.workspace.id;
     ownerUserId = owner.user.id;
     otherWorkspaceId = other.workspace.id;
+    otherOwnerUserId = other.user.id;
     ({ packageId, itemId } = await seedItem(sql, workspaceId));
   });
 
@@ -135,6 +139,85 @@ describe("practice content repository", () => {
         idempotencyKey: "attempt-submit-02",
       }),
     ).rejects.toBeInstanceOf(PracticeContentRepositoryError);
+  });
+
+  it.each(["start", "hint", "reveal", "trial-start", "status", "next", "act"] as const)(
+    "%s waits for history before business locks without advancing either workspace", async operation => {
+      const scope = { workspaceId, ownerUserId };
+      const session = await sessions.start({ ...scope, practiceItemId: itemId });
+      const courseId = randomUUID();
+      await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${workspaceId},'Measurement',${courseId})`;
+      const measurement = createOpeningMeasurementRepository(sql);
+      const trial = (await measurement.start(scope, { courseId, unitId: "calculus-parts-v1", clientKey: randomUUID() })).trial!;
+      const attempt = (await measurement.next(scope, { trialId: trial.id, clientKey: randomUUID() })).attempts[0]!;
+      const otherItem = await seedItem(sql, otherWorkspaceId);
+      await sql`UPDATE opening_workspace_history_revisions SET revision=17 WHERE workspace_id=${workspaceId}`;
+      await sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+        VALUES(${otherWorkspaceId},${otherOwnerUserId},29)`;
+      const graph = () => sql`SELECT
+        (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM practice_sessions s WHERE workspace_id=${workspaceId}) AS sessions,
+        (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM opening_measurement_trials t WHERE workspace_id=${workspaceId}) AS trials,
+        (SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM opening_measurement_attempts a WHERE trial_id=${trial.id}) AS attempts`;
+      const before = await graph();
+      expect(before[0]!.sessions).toHaveLength(1);
+      expect(before[0]!.attempts).toHaveLength(1);
+      const holder = await openRaceSession().ready, writer = await openRaceSession().ready, probe = await openRaceSession().ready;
+      let release = () => {}, entered = () => {};
+      const opened = new Promise<void>(resolve => { entered = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const holding = track(holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId} FOR UPDATE`;
+        entered(); await held;
+      }));
+      const pending: Promise<unknown>[] = [holding];
+      try {
+        await opened;
+        const practice = createPracticeSessionRepository(writer.sql), repo = createOpeningMeasurementRepository(writer.sql);
+        const input = { ...scope, sessionId: session.id };
+        const work = track(operation === "start" ? practice.start({ ...scope, practiceItemId: itemId })
+          : operation === "hint" ? practice.recordHint(input) : operation === "reveal" ? practice.recordAnswerReveal(input)
+            : operation === "trial-start" ? repo.start(scope, { courseId, unitId: "calculus-parts-v1", clientKey: randomUUID() })
+              : operation === "status" ? repo.setStatus(scope, { trialId: trial.id, status: "paused" })
+                : operation === "next" ? repo.next(scope, { trialId: trial.id, clientKey: randomUUID() })
+                  : repo.act(scope, attempt.id, { action: "help", kind: "hint", clientKey: randomUUID() }));
+        pending.push(work);
+        await waitUntilBlocked(sql, writer.pid, holder.pid, operation, /opening_workspace_history_revisions/);
+        expect(await graph()).toEqual(before);
+        await probe.sql.begin(async tx => {
+          await tx`SELECT id FROM workspaces WHERE id=${workspaceId} FOR UPDATE NOWAIT`;
+          await tx`SELECT id FROM practice_sessions WHERE id=${session.id} FOR UPDATE NOWAIT`;
+          await tx`SELECT id FROM practice_items WHERE id=${itemId} FOR UPDATE NOWAIT`;
+          await tx`SELECT id FROM courses WHERE id=${courseId} FOR UPDATE NOWAIT`;
+          await tx`SELECT id FROM opening_measurement_trials WHERE id=${trial.id} FOR UPDATE NOWAIT`;
+        });
+        await createPracticeSessionRepository(probe.sql).start({ workspaceId: otherWorkspaceId, ownerUserId: otherOwnerUserId, practiceItemId: otherItem.itemId });
+        release(); await holding; await work;
+        expect(await sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual([{ revision: "17" }]);
+        expect(await sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${otherWorkspaceId}`).toEqual([{ revision: "29" }]);
+      } finally { release(); await Promise.allSettled(pending); await closeRace(holder.sql); await closeRace(writer.sql); await closeRace(probe.sql); }
+    },
+  );
+
+  it("preserves raw history lock timeout and does not partially deliver a hint", async () => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    const holder = await openRaceSession().ready, writer = await openRaceSession().ready;
+    try {
+      await writer.sql`SET lock_timeout='150ms'`;
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId} FOR UPDATE`;
+        await expect(createPracticeSessionRepository(writer.sql).recordHint({ workspaceId, ownerUserId, sessionId: session.id }))
+          .rejects.toMatchObject({ code: "55P03" });
+      });
+      expect(await sql`SELECT hint_count,answer_revealed_at,submitted_at FROM practice_sessions WHERE id=${session.id}`)
+        .toEqual([{ hint_count: 0, answer_revealed_at: null, submitted_at: null }]);
+    } finally { await closeRace(holder.sql); await closeRace(writer.sql); }
+  });
+
+  it("keeps original owner, missing-row and UUID errors ahead of history creation", async () => {
+    await expect(sessions.start({ workspaceId, ownerUserId: otherOwnerUserId, practiceItemId: itemId })).rejects.toMatchObject({ code: "WORKSPACE_MISMATCH" });
+    await expect(sessions.recordHint({ workspaceId, ownerUserId, sessionId: randomUUID() })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(sessions.recordAnswerReveal({ workspaceId, ownerUserId, sessionId: "not-a-uuid" })).rejects.toMatchObject({ code: "22P02" });
+    expect(await sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual([]);
   });
 
   it("blocks new sessions for archived items while historical versions stay readable", async () => {
