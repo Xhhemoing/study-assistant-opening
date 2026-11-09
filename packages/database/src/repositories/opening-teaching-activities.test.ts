@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningTeachingActivitiesRepository } from "./opening-teaching-activities";
+import { createOpeningTeachingActivitiesRepository, ensureCourseContinueActivity } from "./opening-teaching-activities";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
 import {
   nextLearningActivityHistoryRevision,
@@ -290,6 +290,8 @@ describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
 
   it("setGenerateStatus fences from-set", async () => {
     const { sql, writes } = db((query) => {
+      if (query.includes("SELECT id,generate_status FROM opening_teaching_activities")) return [{ id: activityId, generate_status: "queued" }];
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
       if (query.includes("UPDATE opening_teaching_activities") && query.includes("generate_status")) {
         return [{ id: activityId }];
       }
@@ -308,7 +310,8 @@ describe("V2-07 enqueueCompileTeachingUnit / setGenerateStatus", () => {
 
 /** Statement writes only; the harness also records SELECT … FOR UPDATE. */
 const mutations = (writes: Array<{ query: string }>) =>
-  writes.filter((w) => w.query.trimStart().startsWith("INSERT") || w.query.trimStart().startsWith("UPDATE"));
+  writes.filter((w) => (w.query.trimStart().startsWith("INSERT") || w.query.trimStart().startsWith("UPDATE"))
+    && !w.query.includes("INSERT INTO opening_workspace_history_revisions"));
 
 function activityRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -464,10 +467,10 @@ describe("requestCompile", () => {
 describe("V2-14 setStatus active↔paused (T15)", () => {
   it("updates status to paused with optional CAS", async () => {
     const { sql, writes } = db((query) => {
-      if (query.includes("FROM workspaces") && query.includes("FOR SHARE")) {
+      if (query.includes("FROM workspaces")) {
         return [{ id: workspaceId }];
       }
-      if (query.includes("FROM opening_teaching_activities") && query.includes("FOR UPDATE")) {
+      if (query.includes("FROM opening_teaching_activities")) {
         return [{
           id: activityId,
           workspace_id: workspaceId,
@@ -511,5 +514,162 @@ describe("V2-14 setStatus active↔paused (T15)", () => {
     const updated = await repo.setStatus(scope, activityId, { status: "paused" });
     expect(updated.status).toBe("paused");
     expect(writes.some((w) => /UPDATE opening_teaching_activities/.test(w.query) && w.query.includes("status"))).toBe(true);
+  });
+});
+
+describe("teaching root history fence", () => {
+  const roots = ["ensure", "status", "generate", "request", "enqueue"] as const;
+  function run(sql: Sql, root: typeof roots[number]) {
+    const repo = createOpeningTeachingActivitiesRepository(sql);
+    switch (root) {
+      case "ensure": return ensureCourseContinueActivity(sql, scope, courseId);
+      case "status": return repo.setStatus(scope, activityId, { status: "paused" });
+      case "generate": return repo.setGenerateStatus(scope, activityId, "generating", { from: ["queued"] });
+      case "request": return repo.requestCompile(scope, activityId, "history-request");
+      case "enqueue": return repo.enqueueCompileTeachingUnit(scope, {
+        activityId, mode: "generate", clientKey: "history-enqueue", expectedContentVersion: 0,
+      });
+    }
+  }
+
+  it.each(roots)("%s propagates the history barrier error before any business lock or mutation", async root => {
+    const queries: string[] = [], barrier = Object.assign(new Error("history lock unavailable"), { code: "55P03" });
+    const { sql } = db(query => {
+      queries.push(query);
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) throw barrier;
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow({ generate_status: root === "generate" ? "queued" : "ready" })];
+      return [];
+    });
+    await expect(run(sql, root)).rejects.toBe(barrier);
+    expect(queries.filter(q => /FOR SHARE|FOR UPDATE/.test(q))).toHaveLength(1);
+    expect(queries.at(-1)).toContain("SELECT revision FROM opening_workspace_history_revisions");
+    expect(queries.filter(q => /^\s*(INSERT|UPDATE|DELETE)/.test(q)))
+      .toEqual([expect.stringContaining("INSERT INTO opening_workspace_history_revisions")]);
+  });
+
+  it.each([
+    ["missing status", "NOT_FOUND", "teaching activity not found"],
+    ["status CAS", "CONFLICT", "teaching activity updated_at mismatch"],
+    ["completed status", "CONFLICT", "completed teaching activity cannot be reopened"],
+    ["missing request", "NOT_FOUND", "teaching activity not found"],
+    ["completed request", "CONFLICT", "completed teaching activity cannot generate new content"],
+    ["queued request", "CONFLICT", "teaching content is already being generated"],
+    ["source request", "VALIDATION", "source unavailable or privacy-excluded"],
+    ["purpose request", "CONFLICT", "课程资料用途已变化，不能作为本次教材；请重新选择材料。"],
+    ["dedup request", "CONFLICT", "compile request clientKey already used"],
+    ["completed enqueue", "CONFLICT", "completed teaching activity cannot generate new content"],
+    ["purpose enqueue", "CONFLICT", "课程资料用途已变化，不能作为本次教材；请重新选择材料。"],
+    ["dedup enqueue", "CONFLICT", "idempotency payload differs for the same key"],
+    ["missing course", "NOT_FOUND", "course not found"],
+    ["stale worker", "CONFLICT", "job execution is no longer current"],
+  ])("%s keeps its original error without history, locks or writes", async (name, code, message) => {
+    const queries: string[] = [];
+    const row = activityRow({ status: name.startsWith("completed") ? "completed" : "active",
+      generate_status: name === "queued request" ? "queued" : "ready",
+      course_id: name.startsWith("purpose") ? courseId : null,
+      source_ids: name.startsWith("source") || name.startsWith("purpose") ? [activityId] : [] });
+    const { sql, writes } = db(query => {
+      queries.push(query);
+      if (query.includes("opening_workspace_history_revisions")) throw new Error("unexpected history");
+      if (query.includes("FROM workspaces w JOIN opening_jobs")) return [];
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return name.startsWith("missing") ? [] : [row];
+      if (query.includes("FROM opening_sources")) return name.startsWith("purpose") ? [{ id: activityId }] : [];
+      if (query.includes("FROM opening_jobs")) return name.startsWith("dedup") ? [{ id: activityId, payload: {} }] : [];
+      return [];
+    });
+    const repo = createOpeningTeachingActivitiesRepository(sql);
+    const result = name.includes("status") ? repo.setStatus(scope, activityId, { status: "active",
+      ...(name === "status CAS" ? { expectedUpdatedAt: "2020-01-01T00:00:00.000Z" } : {}) })
+      : name.includes("request") ? repo.requestCompile(scope, activityId, "precheck-request")
+      : name.includes("enqueue") ? repo.enqueueCompileTeachingUnit(scope, { activityId, mode: "generate", clientKey: "precheck-enqueue", expectedContentVersion: 0 })
+      : name === "missing course" ? ensureCourseContinueActivity(sql, scope, courseId)
+      : repo.setGenerateStatus({ ...scope, jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope, activityId, "failed");
+    await expect(result).rejects.toMatchObject({ code, message });
+    expect(writes).toEqual([]);
+    expect(queries.some(q => /FOR SHARE|FOR UPDATE/.test(q))).toBe(false);
+  });
+
+  it("ordinary generate from-set mismatch returns false without history or writes", async () => {
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow()];
+      throw new Error("unexpected history or owner lock");
+    });
+    expect(await createOpeningTeachingActivitiesRepository(sql).setGenerateStatus(scope, activityId, "failed", { from: ["queued"] })).toBe(false);
+    expect(writes).toEqual([]);
+  });
+
+  it("rechecks status CAS after history instead of treating the probe as an authorization snapshot", async () => {
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow(query.includes("FOR UPDATE")
+        ? { updated_at: "2026-10-13T03:00:00.000Z" } : {})];
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(sql).setStatus(scope, activityId,
+      { status: "paused", expectedUpdatedAt: "2026-10-13T02:00:00.000Z" }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "teaching activity updated_at mismatch" });
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("worker revalidates execution under the original locks after the read-only probe", async () => {
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM workspaces w JOIN opening_jobs")) return [{ id: activityId }];
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow()];
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(sql).setGenerateStatus({ ...scope,
+      jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope, activityId, "failed"))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "job execution is no longer current" });
+    expect(writes.some(w => w.query.includes("INSERT INTO opening_workspace_history_revisions"))).toBe(true);
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("ensure replays the original key without advancing or creating another activity", async () => {
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [{ id: activityId }];
+      return [];
+    });
+    expect(await ensureCourseContinueActivity(sql, scope, courseId)).toBe(activityId);
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("status preserves updated_at CAS precedence and message", async () => {
+    const { sql, writes } = db(query => {
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow({ status: "completed" })];
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(sql).setStatus(scope, activityId,
+      { status: "active", expectedUpdatedAt: "2020-01-01T00:00:00.000Z" }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "teaching activity updated_at mismatch" });
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("generate refuses ownership drift after the ordinary target probe without mutating the target", async () => {
+    const { sql, writes } = db(query => query.includes("FROM opening_teaching_activities") ? [{ id: activityId }] : []);
+    await expect(createOpeningTeachingActivitiesRepository(sql).setGenerateStatus(scope, activityId, "failed"))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: "workspace not found" });
+    expect(writes).toEqual([]);
+  });
+
+  it("generate does not translate PostgreSQL UUID errors from the original target predicates", async () => {
+    const cast = Object.assign(new Error("invalid input syntax for type uuid"), { code: "22P02" });
+    const { sql, writes } = db(() => { throw cast; });
+    await expect(createOpeningTeachingActivitiesRepository(sql).setGenerateStatus(scope, "bad-uuid", "failed")).rejects.toBe(cast);
+    expect(writes).toEqual([]);
+  });
+
+  it("generate keeps false for an unowned workspace and never writes history", async () => {
+    const { sql, writes } = db(() => []);
+    expect(await createOpeningTeachingActivitiesRepository(sql).setGenerateStatus(scope, activityId, "failed")).toBe(false);
+    expect(writes).toEqual([]);
+    await expect(createOpeningTeachingActivitiesRepository(sql).setGenerateStatus({ ...scope,
+      jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope, activityId, "failed"))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "job execution is no longer current" });
+    expect(writes).toEqual([]);
   });
 });

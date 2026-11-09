@@ -15,6 +15,7 @@ import {
   learningError,
   learningIso,
   lockLearningOwner,
+  lockWorkspaceLearningHistory,
 } from "./opening-learning-facts";
 
 /** Teaching admission is course-local even when callers provide explicit sourceIds. */
@@ -83,6 +84,34 @@ export async function assertOwnedActivity(
   return mapTeachingActivity(rows[0] as Record<string, unknown>);
 }
 
+/** Read-only failure probes; never replace the authoritative checks after history. */
+async function precheckTeachingExecution(tx: TransactionSql, scope: OpeningJobScope): Promise<void> {
+  const execution = scope.jobExecution;
+  if (!execution) return;
+  const [job] = await tx`SELECT j.id FROM workspaces w JOIN opening_jobs j ON j.workspace_id=w.id
+    WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
+      AND w.privacy_epoch=${execution.privacyEpoch} AND j.id=${execution.id}
+      AND j.owner_user_id=${scope.ownerUserId} AND j.state='running' AND j.claim_token=${execution.token}`;
+  if (!job) throw learningError("CONFLICT", "job execution is no longer current");
+}
+
+async function precheckTeachingOwner(tx: TransactionSql, scope: Scope): Promise<void> {
+  const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  if (!owner) throw learningError("NOT_FOUND", "workspace not found");
+  await precheckTeachingExecution(tx, scope);
+}
+
+async function precheckTeachingSourcePurposes(
+  tx: TransactionSql, scope: Scope, courseId: string | null, sourceIds: readonly string[],
+): Promise<void> {
+  if (!courseId || !sourceIds.length) return;
+  const ids = [...new Set(sourceIds)];
+  const memberships = await tx`SELECT asset_id FROM course_asset_memberships
+    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
+      AND asset_id=ANY(${ids}::uuid[]) AND (purpose IS NULL OR purpose='teaching')`;
+  if (memberships.length !== ids.length) throw learningError("CONFLICT", "课程资料用途已变化，不能作为本次教材；请重新选择材料。");
+}
+
 /** Resolve or create the synthetic course_continue activity used by v1 course entry. */
 export async function ensureCourseContinueActivity(
   sql: Sql,
@@ -92,6 +121,15 @@ export async function ensureCourseContinueActivity(
   const clientKey = `legacy-course-continue:${courseId}`;
   const createIntent = { intentKind: "course_continue", courseId, legacy: true };
   return sql.begin(async (tx) => {
+    await precheckTeachingOwner(tx, scope);
+    const [replay] = await tx`SELECT id FROM opening_teaching_activities
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}`;
+    if (!replay) {
+      const [course] = await tx`SELECT id FROM courses
+        WHERE id=${courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+      if (!course) throw learningError("NOT_FOUND", "course not found");
+    }
+    await lockWorkspaceLearningHistory(tx, scope);
     await lockLearningOwner(tx, scope);
     const existing = await tx`
       SELECT id FROM opening_teaching_activities
@@ -438,21 +476,10 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       activityId: string,
       input: { status: "active" | "paused" | "completed"; expectedUpdatedAt?: string },
     ): Promise<TeachingActivity> {
-      return sql.begin(async (tx) => {
-        await lockLearningOwner(tx, scope);
-        const rows = await tx`
-          SELECT * FROM opening_teaching_activities
-          WHERE id = ${activityId}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
-        if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
-        const current = rows[0] as Record<string, unknown>;
-        if (input.expectedUpdatedAt) {
-          const currentUpdated = learningIso(current.updated_at);
-          if (currentUpdated !== input.expectedUpdatedAt) {
-            throw learningError("CONFLICT", "teaching activity updated_at mismatch");
-          }
+      const check = (current: Record<string, unknown> | undefined) => {
+        if (!current) throw learningError("NOT_FOUND", "teaching activity not found");
+        if (input.expectedUpdatedAt && learningIso(current.updated_at) !== input.expectedUpdatedAt) {
+          throw learningError("CONFLICT", "teaching activity updated_at mismatch");
         }
         if (input.status !== "active" && input.status !== "paused" && input.status !== "completed") {
           throw learningError("VALIDATION", "status must be active|paused|completed");
@@ -460,6 +487,22 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         if (current.status === "completed" && input.status !== "completed") {
           throw learningError("CONFLICT", "completed teaching activity cannot be reopened");
         }
+      };
+      return sql.begin(async (tx) => {
+        await precheckTeachingOwner(tx, scope);
+        const [probe] = await tx`SELECT * FROM opening_teaching_activities
+          WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        check(probe);
+        await lockWorkspaceLearningHistory(tx, scope);
+        await lockLearningOwner(tx, scope);
+        const rows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        check(rows[0]);
+        const current = rows[0] as Record<string, unknown>;
         if (current.status === input.status) {
           return mapTeachingActivity(current);
         }
@@ -535,8 +578,17 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           RETURNING id`;
         return rows.length > 0;
       };
-      if (!(scope as OpeningJobScope).jobExecution) return write(sql);
       return sql.begin(async (tx) => {
+        const execution = (scope as OpeningJobScope).jobExecution;
+        // Ordinary probes retain false (and PostgreSQL UUID errors) for an
+        // absent target. Worker writes must still validate execution first.
+        if (execution) await precheckTeachingExecution(tx, scope);
+        const [activity] = await tx`SELECT id,generate_status FROM opening_teaching_activities WHERE id=${activityId}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!activity || options?.from?.length && !options.from.includes(activity.generate_status)) return false;
+        // Ownership drift of an existing target now fails with the history
+        // helper's NOT_FOUND; the whole transaction rolls back.
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockOpeningJobExecution(tx, scope);
         return write(tx as unknown as Sql);
       });
@@ -552,16 +604,9 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       activityId: string,
       clientKey: string,
     ): Promise<{ activity: TeachingActivity; jobId: string }> {
-      return sql.begin(async (tx) => {
-        await lockLearningOwner(tx, scope);
-        const rows = await tx`
-          SELECT * FROM opening_teaching_activities
-          WHERE id = ${activityId}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
-        if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
-        const current = mapTeachingActivity(rows[0] as Record<string, unknown>);
+      const check = (row: Record<string, unknown> | undefined) => {
+        if (!row) throw learningError("NOT_FOUND", "teaching activity not found");
+        const current = mapTeachingActivity(row);
         if (current.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot generate new content");
         if (current.generateStatus === "queued" || current.generateStatus === "generating") {
           throw learningError("CONFLICT", "teaching content is already being generated");
@@ -569,6 +614,27 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         if (current.contentVersion > 0 && (current.generateStatus === "ready" || current.generateStatus === "needs_check")) {
           throw learningError("CONFLICT", "teaching content already exists");
         }
+        return current;
+      };
+      return sql.begin(async (tx) => {
+        await precheckTeachingOwner(tx, scope);
+        const [probe] = await tx`SELECT * FROM opening_teaching_activities
+          WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        const candidate = check(probe);
+        await admitLearningSources(tx, scope, candidate.sourceIds, { readOnly: true, recordVersions: false });
+        await precheckTeachingSourcePurposes(tx, scope, candidate.courseId, candidate.sourceIds);
+        const [existing] = await tx`SELECT id FROM opening_jobs WHERE workspace_id=${scope.workspaceId}
+          AND key=${`compile-teaching-unit:${activityId}:generate:${clientKey}`}`;
+        if (existing) throw learningError("CONFLICT", "compile request clientKey already used");
+        await lockWorkspaceLearningHistory(tx, scope);
+        await lockLearningOwner(tx, scope);
+        const rows = await tx`
+          SELECT * FROM opening_teaching_activities
+          WHERE id = ${activityId}
+            AND workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+          FOR UPDATE`;
+        const current = check(rows[0]);
         if (current.sourceIds.length) await admitLearningSources(tx, scope, current.sourceIds);
         await assertOpeningTeachingSourcePurposes(tx, scope, current.courseId, current.sourceIds);
         const jobId = await insertCompileJob(tx, scope, {
@@ -618,6 +684,25 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       const key = `compile-teaching-unit:${input.activityId}:${input.mode}:${input.clientKey}`;
       const payload = compileJobPayload(input);
       return sql.begin(async (tx) => {
+        await precheckTeachingOwner(tx, scope);
+        const [probe] = await tx`SELECT status FROM opening_teaching_activities
+          WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!probe) throw learningError("NOT_FOUND", "teaching activity not found");
+        if (probe.status === "completed") {
+          const [existing] = await tx`SELECT id,payload FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND key=${key}`;
+          if (!existing || !isDeepStrictEqual(existing.payload, payload)) {
+            throw learningError("CONFLICT", "completed teaching activity cannot generate new content");
+          }
+        } else {
+          const current = await assertOwnedActivity(tx as unknown as Sql, scope, input.activityId);
+          await precheckTeachingSourcePurposes(tx, scope, current.courseId,
+            [...new Set([...current.sourceIds, ...(input.sourceIds ?? [])])]);
+          const [existing] = await tx`SELECT id,payload FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND key=${key}`;
+          if (existing && !isDeepStrictEqual(existing.payload, payload)) {
+            throw learningError("CONFLICT", "idempotency payload differs for the same key");
+          }
+        }
+        await lockWorkspaceLearningHistory(tx, scope);
         await lockLearningOwner(tx, scope);
         const activityRows = await tx`SELECT status FROM opening_teaching_activities
           WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
