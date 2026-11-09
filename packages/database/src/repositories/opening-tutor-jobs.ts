@@ -173,13 +173,37 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     staleBefore?: Date;
   }): Promise<boolean> {
     const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
+    // Only this invocation can request the post-rollback, read-only deletion path.
+    const workspaceDeleted = new Error("terminal workspace deleted after history ensure");
     return sql.begin(async (tx) => {
-      // Use the same workspace-first lock order as completeTurn/cancel.
-      await tx`
-        SELECT id FROM workspaces
+      // Recovery supplies an empty owner, and this legacy CAS has no owner
+      // predicate. Canonical ownership coordinates history only, not authorization.
+      const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.scope.workspaceId}`;
+      let historyLocked = false;
+      if (canonical) {
+        try {
+          await lockWorkspaceLearningHistory(tx, { workspaceId: input.scope.workspaceId, ownerUserId: canonical.owner_user_id });
+          historyLocked = true;
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found")) throw error;
+          const remaining = await tx`SELECT id FROM workspaces WHERE id=${input.scope.workspaceId}`;
+          if (remaining.length) throw error;
+          // Deleted before ensure: retain the original workspace/job queries,
+          // including their UUID cast errors, rather than returning early.
+        }
+      }
+      const [workspace] = await tx`
+        SELECT id, owner_user_id FROM workspaces
         WHERE id = ${input.scope.workspaceId}
         FOR UPDATE
       `;
+      if (historyLocked) {
+        if (!workspace) throw workspaceDeleted;
+        if (workspace.owner_user_id !== canonical!.owner_user_id) {
+          throw new Error("terminal history coordination drift: workspace owner changed");
+        }
+      }
       const rows = input.status === "failed"
         ? await tx`
             UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
@@ -225,6 +249,15 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         `;
       }
       return true;
+    }).catch(async (error: unknown) => {
+      if (error !== workspaceDeleted) throw error;
+      // History's lazy insert must be rolled back before this no-write result.
+      // Keep the legacy missing-workspace job/token UUID errors; never retry CAS
+      // against a workspace that might subsequently be recreated.
+      await sql`SELECT id FROM opening_tutor_jobs
+        WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
+          AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid`;
+      return false;
     });
   }
 

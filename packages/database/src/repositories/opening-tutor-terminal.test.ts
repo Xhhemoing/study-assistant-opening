@@ -9,9 +9,12 @@ const scope = { workspaceId: "workspace-1", ownerUserId: "owner-1" };
 
 function fakeSql(handler: (query: string) => unknown[] = () => []) {
   const calls: string[] = [];
+  let terminal = false;
   const sql = (async (strings: TemplateStringsArray) => {
     const query = strings.join(" ");
     calls.push(query);
+    if (query.includes("SELECT owner_user_id FROM workspaces")) terminal = true;
+    if (terminal && query.includes("FROM workspaces")) return [{ id: scope.workspaceId, owner_user_id: scope.ownerUserId }];
     return handler(query);
   }) as unknown as Sql & { calls: string[] };
   sql.calls = calls;
@@ -398,6 +401,106 @@ describe("opening tutor jobs repository", () => {
   });
 });
 
+describe("markTerminal history coordination", () => {
+  function terminalSql(options: {
+    missing?: boolean;
+    helperError?: unknown;
+    remaining?: boolean;
+    lockedOwner?: string | null;
+    jobError?: unknown;
+  } = {}) {
+    const calls: Array<{ query: string; values: unknown[] }> = [];
+    let history = false, rolledBack = false;
+    const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join(" ");
+      calls.push({ query, values });
+      if (query.includes("SELECT owner_user_id FROM workspaces")) return options.missing ? [] : [{ owner_user_id: "canonical-owner" }];
+      if (query.includes("SELECT id, owner_user_id FROM workspaces")) return options.lockedOwner === null ? []
+        : [{ id: scope.workspaceId, owner_user_id: options.lockedOwner ?? "canonical-owner" }];
+      if (query.includes("SELECT id FROM workspaces")) {
+        if (query.includes("owner_user_id") && options.helperError) throw options.helperError;
+        return options.remaining === false ? [] : [{ id: scope.workspaceId }];
+      }
+      if (query.includes("INSERT INTO opening_workspace_history_revisions")) { history = true; return []; }
+      if (query.includes("FROM opening_tutor_jobs") || query.includes("UPDATE opening_tutor_jobs")) {
+        if (options.jobError) throw options.jobError;
+        return [];
+      }
+      return [];
+    }) as unknown as Sql;
+    sql.json = ((value: unknown) => value) as Sql["json"];
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => {
+      const before = history;
+      try { return await callback(sql); }
+      catch (error) { history = before; rolledBack = true; throw error; }
+    }) as Sql["begin"];
+    return { sql, calls, state: () => ({ history, rolledBack }) };
+  }
+
+  it("uses canonical ownership only for history and keeps stable input-owner mismatch as the legacy CAS no-op", async () => {
+    const fake = terminalSql();
+    await expect(createOpeningTutorJobsRepository(fake.sql).fail(scope, "job-1", "message")).resolves.toBeUndefined();
+    const ensure = fake.calls.find(call => call.query.includes("INSERT INTO opening_workspace_history_revisions"));
+    expect(ensure?.values).toEqual([scope.workspaceId, "canonical-owner"]);
+    expect(fake.state()).toEqual({ history: true, rolledBack: false });
+  });
+
+  it.each(["fail", "markUnknown"] as const)("%s rolls back lazy history on deletion and propagates the original job error", async method => {
+    const failure = Object.assign(new Error("invalid input syntax for type uuid"), { code: "22P02" });
+    for (const jobError of [undefined, failure]) {
+      const fake = terminalSql({ lockedOwner: null, jobError });
+      const jobs = createOpeningTutorJobsRepository(fake.sql);
+      const result = method === "fail" ? jobs.fail(scope, "bad-job", "message") : jobs.markUnknown(scope, "bad-job", "message");
+      if (jobError) await expect(result).rejects.toBe(jobError);
+      else await expect(result).resolves.toBeUndefined();
+      expect(fake.state()).toEqual({ history: false, rolledBack: true });
+      expect(fake.calls.some(call => call.query.includes("UPDATE opening_tutor_jobs"))).toBe(false);
+    }
+  });
+
+  it("rejects owner coordination drift after history with rollback rather than false success", async () => {
+    const fake = terminalSql({ lockedOwner: "new-owner" });
+    await expect(createOpeningTutorJobsRepository(fake.sql).markUnknown(scope, "job-1", "message"))
+      .rejects.toThrow("terminal history coordination drift: workspace owner changed");
+    expect(fake.state()).toEqual({ history: false, rolledBack: true });
+  });
+
+  it.each([true, false])("preserves the exact helper not-found unless deletion is confirmed (remaining=%s)", async remaining => {
+    const helperError = Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
+    const fake = terminalSql({ helperError, remaining });
+    const result = createOpeningTutorJobsRepository(fake.sql).fail(scope, "job-1", "message");
+    if (remaining) await expect(result).rejects.toBe(helperError);
+    else await expect(result).resolves.toBeUndefined();
+    expect(fake.state().history).toBe(false);
+  });
+
+  it.each([
+    Object.assign(new Error("workspace not found"), { code: "CONFLICT" }),
+    Object.assign(new Error("other entity not found"), { code: "NOT_FOUND" }),
+    Object.assign(new Error("query failed"), { code: "23503" }),
+    { code: "NOT_FOUND", message: "workspace not found" },
+  ])("does not swallow unrelated helper errors: %s", async helperError => {
+    const fake = terminalSql({ helperError, remaining: false });
+    await expect(createOpeningTutorJobsRepository(fake.sql).fail(scope, "job-1", "message")).rejects.toBe(helperError);
+    expect(fake.state()).toEqual({ history: false, rolledBack: true });
+  });
+
+  it("does not mistake a job error with the rollback signal's message for its private identity", async () => {
+    const jobError = new Error("terminal workspace deleted after history ensure");
+    const fake = terminalSql({ jobError });
+    await expect(createOpeningTutorJobsRepository(fake.sql).fail(scope, "job-1", "message")).rejects.toBe(jobError);
+    expect(fake.state()).toEqual({ history: false, rolledBack: true });
+    expect(fake.calls.some(call => call.query.includes("SELECT id FROM opening_tutor_jobs"))).toBe(false);
+  });
+
+  it("keeps job errors when canonical workspace was already absent", async () => {
+    const jobError = Object.assign(new Error("invalid job uuid"), { code: "22P02" });
+    const fake = terminalSql({ missing: true, lockedOwner: null, jobError });
+    await expect(createOpeningTutorJobsRepository(fake.sql).fail(scope, "invalid", "message")).rejects.toBe(jobError);
+    expect(fake.state().history).toBe(false);
+  });
+});
+
 describe("LAB-U01 clarify terminal turn", () => {
   it("ends a page refusal's assistant turn as clarify while the job stays failed with nextAction clarify", async () => {
     const sql = capturingSql((query) => query.includes("RETURNING assistant_turn_id") ? [{ assistant_turn_id: "assistant-turn-1" }] : []);
@@ -414,6 +517,7 @@ describe("LAB-U01 clarify terminal turn", () => {
     const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join(" ");
       calls.push({ query, values });
+      if (query.includes("FROM workspaces")) return [{ id: scope.workspaceId, owner_user_id: scope.ownerUserId }];
       return handler(query);
     }) as unknown as Sql & { calls: typeof calls };
     sql.calls = calls;
