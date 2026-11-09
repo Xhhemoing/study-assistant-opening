@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -42,6 +43,7 @@ describe("migration registry order and verification", () => {
   const sql = createSqlClient(databaseUrl, { max: 1 });
   const schemas: string[] = [];
   const directories: string[] = [];
+  let recoveryCleanupLog: ((event: "begin" | "end", phase: string) => void) | undefined;
 
   async function createFixture(files: Record<string, string>) {
     const schema = `migration_order_${randomUUID().replaceAll("-", "")}`;
@@ -57,10 +59,18 @@ describe("migration registry order and verification", () => {
   }
 
   afterAll(async () => {
+    recoveryCleanupLog?.("begin", "cleanup.reset-search-path");
     await sql.unsafe("SET search_path TO public");
+    recoveryCleanupLog?.("end", "cleanup.reset-search-path");
+    recoveryCleanupLog?.("begin", "cleanup.drop-schemas");
     for (const schema of schemas) await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    recoveryCleanupLog?.("end", "cleanup.drop-schemas");
+    recoveryCleanupLog?.("begin", "cleanup.rm-directories");
     await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })));
+    recoveryCleanupLog?.("end", "cleanup.rm-directories");
+    recoveryCleanupLog?.("begin", "cleanup.sql-end");
     await sql.end({ timeout: 5 });
+    recoveryCleanupLog?.("end", "cleanup.sql-end");
   });
 
   it("records verified SHA-256 checksums in numeric migration order", async () => {
@@ -242,16 +252,58 @@ describe("migration registry order and verification", () => {
     return root;
   }
 
-  it("checks the actual 108 recovery artifact and strictly rejects the actual 109 artifact", async () => {
+  it("checks the actual 108 recovery artifact and strictly rejects the actual 109 artifact", async (ctx) => {
+    const started = performance.now();
+    let activePhase: string | null = null;
+    let phaseStarted = started;
+    let historicalCall = 0;
+    const log = (event: string, details: Record<string, unknown> = {}) => {
+      // Diagnostics must not replace an assertion, spawn, or cleanup error.
+      try {
+        process.stderr.write(`${JSON.stringify({ diagnostic: "recovery-artifact", event, phase: activePhase,
+          elapsedMs: performance.now() - started, phaseElapsedMs: performance.now() - phaseStarted, ...details })}\n`);
+      } catch { /* Observation only. */ }
+    };
+    const endPhase = () => {
+      if (activePhase !== null) log("end");
+      activePhase = null;
+    };
+    const beginPhase = (phase: string) => {
+      endPhase();
+      activePhase = phase;
+      phaseStarted = performance.now();
+      log("begin");
+    };
+    // spawnSync blocks the event loop: abort notification can arrive late and
+    // does not cancel the child. Never emit the signal reason or child output.
+    const onAbort = () => log("timeout-abort", { historicalCallsStarted: historicalCall });
+    ctx.signal.addEventListener("abort", onAbort, { once: true });
+    ctx.onTestFinished(() => {
+      ctx.signal.removeEventListener("abort", onAbort);
+      log("test-finished", { aborted: ctx.signal.aborted, historicalCallsStarted: historicalCall });
+    });
+    recoveryCleanupLog = (event, phase) => {
+      if (event === "begin") {
+        // A failed/timed-out test phase is not a completed phase.
+        activePhase = phase;
+        phaseStarted = performance.now();
+        log("begin");
+      } else endPhase();
+    };
+    beginPhase("source-artifact108");
     const artifactRoot = await sourceArtifact("108");
+    beginPhase("source-artifact109");
     const newerArtifact = await sourceArtifact("109");
+    beginPhase("db-fixture107");
     const migrations = path.join(artifactRoot, "packages/database/src/migrations");
     const names = (await readdir(migrations)).filter(name => name.endsWith(".sql")).sort();
     expect(names).toHaveLength(108);
     expect((await readdir(path.join(newerArtifact, "packages/database/src/migrations"))).filter(name => name.endsWith(".sql"))).toHaveLength(109);
     const { schema, directory } = await createFixture(Object.fromEntries(await Promise.all(names.filter(name => name !== "0108_opening_knowledge_confirmations.sql")
       .map(async name => [name, await readFile(path.join(migrations, name), "utf8")]))));
+    beginPhase("apply107");
     await applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 });
+    beginPhase("historical-setup");
     const artifactPaths = ["packages/database/src/migrate.ts", "packages/database/src/repositories/opening-knowledge.ts", "infra/deploy/hermes-db.mjs"];
     const hash = createHash("sha256");
     for (const relative of artifactPaths) hash.update(relative).update("\0").update(await readFile(path.join(artifactRoot, relative))).update("\0");
@@ -260,8 +312,19 @@ describe("migration registry order and verification", () => {
     const scopedUrl = new URL(databaseUrl!);
     scopedUrl.searchParams.set("options", `-c search_path=${schema},public`);
     await writeFile(config, `DATABASE_URL=${scopedUrl.href}\n`);
-    const runHistorical = (candidate = artifactRoot, digest = expectedArtifactContentDigest) => spawnSync(process.execPath,
-      [path.join(artifactRoot, "infra/deploy/hermes-db.mjs"), "confirmation-recovery-preflight", config, candidate, digest], { encoding: "utf8" });
+    const runHistorical = (candidate = artifactRoot, digest = expectedArtifactContentDigest) => {
+      const call = ++historicalCall;
+      const callStarted = performance.now();
+      log("begin", { historicalCall: call });
+      // This observes only synchronous return / collected stdio, not an
+      // independent close event or inner validation vs. sql.end timing.
+      const result = spawnSync(process.execPath,
+        [path.join(artifactRoot, "infra/deploy/hermes-db.mjs"), "confirmation-recovery-preflight", config, candidate, digest], { encoding: "utf8" });
+      log("end", { historicalCall: call, callElapsedMs: performance.now() - callStarted,
+        status: result.status, signal: result.signal, errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
+        stdoutBytes: Buffer.byteLength(result.stdout ?? "", "utf8"), stderrBytes: Buffer.byteLength(result.stderr ?? "", "utf8") });
+      return result;
+    };
     const preflight = async (candidate = artifactRoot, digest = expectedArtifactContentDigest) => {
       const result = runHistorical(candidate, digest);
       expect(result.stdout.length, result.stderr || String(result.error)).toBeGreaterThan(0);
@@ -270,22 +333,27 @@ describe("migration registry order and verification", () => {
       return report;
     };
     const ledger = async () => [...await sql`SELECT * FROM schema_migrations ORDER BY id`];
+    beginPhase("historical-preflight107");
     const before107 = await ledger();
     await expect(preflight()).rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
     expect(await ledger()).toEqual(before107);
+    beginPhase("apply108");
     // Apply the real, untouched SQL only in this isolated test database; never fake a ledger row.
     await writeFile(path.join(directory, names[107]!), await readFile(path.join(migrations, names[107]!)));
     expect((await applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 })).applied).toEqual([names[107]]);
+    beginPhase("historical-preflight108");
     const before108 = await ledger();
     const report = await preflight();
     expect(report).toMatchObject({ ledgerThrough: 108, readOnly: true, automaticRecovery: false,
       writerProtocol: "graph-source-revocation-v1", artifactContentDigest: expectedArtifactContentDigest });
     expect(await ledger()).toEqual(before108);
+    beginPhase("historical-helper108");
     const helper = runHistorical();
     expect(helper.status, helper.stderr || helper.stdout).toBe(0);
     expect(JSON.parse(helper.stdout)).toEqual(report);
     expect(await ledger()).toEqual(before108);
 
+    beginPhase("in-process-inventory107");
     // An actual 107 runner inventory still refuses 108; the new report does not loosen applyMigrations.
     await rm(path.join(directory, names[107]!));
     await expect(applyMigrations(sql, { migrationsDir: directory, advisoryLockKey: lockKey + 8 }))
@@ -299,6 +367,7 @@ describe("migration registry order and verification", () => {
       ["missing-table", async () => { await sql.unsafe(`ALTER TABLE ${schema}.opening_knowledge_confirmations RENAME TO hidden_confirmations`); }, "MIGRATION_RECOVERY_INCOMPATIBLE"],
       ["missing-check", async () => { await sql.unsafe(`ALTER TABLE ${schema}.opening_knowledge_confirmations DROP CONSTRAINT opening_knowledge_confirmations_node_kind_check`); }, "MIGRATION_RECOVERY_INCOMPATIBLE"],
     ] as const) {
+      beginPhase(`historical-negative-${label}`);
       await mutate();
       try {
         const observed = await ledger();
@@ -313,7 +382,8 @@ describe("migration registry order and verification", () => {
           ADD CONSTRAINT opening_knowledge_confirmations_node_kind_check ${kindCheck!.definition}`);
       }
     }
-    for (const relative of artifactPaths.slice(0, 2)) {
+    for (const [index, relative] of artifactPaths.slice(0, 2).entries()) {
+      beginPhase(`copy-negative-${index + 1}`);
       const old = await mkdtemp(path.join(os.tmpdir(), "aistudy-old-anchor-"));
       directories.push(old);
       for (const entry of artifactPaths) {
@@ -327,27 +397,35 @@ describe("migration registry order and verification", () => {
         .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
       expect(await ledger()).toEqual(before108);
     }
+    beginPhase("historical-negative-digest");
     await expect(preflight(artifactRoot, "0".repeat(64)))
       .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
     expect(await ledger()).toEqual(before108);
+    beginPhase("historical-negative109");
     await expect(preflight(newerArtifact)).rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+    beginPhase("historical-negative-current");
     await expect(preflight(path.resolve("."))).rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+    beginPhase("in-process-negative109");
     // The CURRENT runner also stays fixed to its 108 recovery protocol; no new
     // profile or inventory truncation makes a 109+ release eligible.
     await expect(preflightConfirmationRecovery(sql, { artifactRoot: newerArtifact, expectedArtifactContentDigest }))
       .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
+    beginPhase("in-process-negative-current");
     await expect(preflightConfirmationRecovery(sql, { artifactRoot: path.resolve("."), expectedArtifactContentDigest }))
       .rejects.toMatchObject({ code: "MIGRATION_RECOVERY_INCOMPATIBLE" });
     expect(await ledger()).toEqual(before108);
+    beginPhase("apply109");
     const actual109Dir = path.join(newerArtifact, "packages/database/src/migrations");
     expect((await applyMigrations(sql, { migrationsDir: actual109Dir, advisoryLockKey: lockKey + 8 })).applied)
       .toEqual(["0109_opening_course_reserved_questions.sql"]);
+    beginPhase("historical-ledger109");
     const before109 = await ledger();
     const denied = runHistorical();
     expect(denied.status).toBe(1);
     expect(JSON.parse(denied.stdout)).toEqual({ eligible: false, code: "MIGRATION_UNKNOWN_HISTORY", automaticRecovery: false });
     expect(denied.stdout).not.toContain(databaseUrl);
     expect(await ledger()).toEqual(before109);
+    endPhase();
   });
 
   it("fails closed for verified checksum drift", async () => {
