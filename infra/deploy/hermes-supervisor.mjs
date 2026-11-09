@@ -97,19 +97,46 @@ export function stopWriters(run = command, empty = cgroupEmpty, report = line =>
   }
   return confirmed;
 }
-async function request(action) {
-  const socket = createConnection(process.env.HERMES_SUPERVISOR_SOCKET);
+async function request(action, environment) {
+  const socket = createConnection(environment.HERMES_SUPERVISOR_SOCKET);
   return new Promise((resolve, reject) => {
     let body = "";
     socket.setTimeout(90_000, () => socket.destroy(new Error("Managed supervisor response timed out")));
-    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: process.env.HERMES_SUPERVISOR_TOKEN, transition: process.env.HERMES_TRANSITION, release: process.env.HERMES_RELEASE, target: process.env.HERMES_TARGET, required: process.env.HERMES_WORKER_REQUIRED })}\n`));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: environment.HERMES_SUPERVISOR_TOKEN, transition: environment.HERMES_TRANSITION, release: environment.HERMES_RELEASE, target: environment.HERMES_TARGET, required: environment.HERMES_WORKER_REQUIRED })}\n`));
     socket.on("data", data => { body += data; if (body.includes("\n")) { socket.end(); try { resolve(JSON.parse(body)); } catch (error) { reject(error); } } });
     socket.on("error", reject);
     socket.on("end", () => { if (!body.includes("\n")) reject(new Error("Managed supervisor disconnected before a complete response")); });
   });
 }
+function canonicalManagedPath(value) {
+  return typeof value === 'string' && value === value.trim()
+    && /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) && resolve(value) === value;
+}
+function durableQueryScope(environment) {
+  const state = environment.HERMES_STATE, transition = environment.HERMES_TRANSITION, target = environment.HERMES_TARGET;
+  if (!canonicalManagedPath(state) || !canonicalManagedPath(transition) || !canonicalManagedPath(target)
+    || !transition.startsWith(`${state}/releases/`)) return undefined;
+  return { transition, target };
+}
+// Shared CLI logic; object injection is available only to module callers.
+export async function requestCommand(action, environment = process.env, dependencies = {}) {
+  const classifyState = dependencies.classify ?? classify;
+  let reply;
+  try { reply = await request(action, environment); }
+  catch (error) {
+    if (action !== 'query-success' || !environment.HERMES_STATE || !environment.HERMES_CURRENT) throw error;
+    const scope = durableQueryScope(environment);
+    const state = scope ? classifyState(environment.HERMES_STATE, environment.HERMES_CURRENT, scope) : 'unknown';
+    reply = { ok: state === 'committed', state };
+  }
+  if (action === 'query-success') {
+    const state = ['committed', 'fenced', 'unknown'].includes(reply.state) ? reply.state : 'unknown';
+    return { output: state, exitCode: state === 'committed' ? 0 : state === 'fenced' ? 3 : 4 };
+  }
+  return { exitCode: reply.ok ? 0 : 1 };
+}
 const production = {
-  command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -119,7 +146,7 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   const state = args[4], systemd = args[6], action = args[0];
   const guard = join(state, "migration-forward-only");
@@ -455,18 +482,9 @@ async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
   if (mode === "request") {
-    let reply;
-    try { reply = await request(script); }
-    catch (error) {
-      if (script !== 'query-success' || !process.env.HERMES_STATE || !process.env.HERMES_CURRENT) throw error;
-      const state = classify(process.env.HERMES_STATE, process.env.HERMES_CURRENT, { transition: process.env.HERMES_TRANSITION, target: process.env.HERMES_TARGET });
-      reply = { ok: state === 'committed', state };
-    }
-    if (script === "query-success") {
-      const state = ["committed", "fenced", "unknown"].includes(reply.state) ? reply.state : "unknown";
-      console.log(state);
-      process.exitCode = state === "committed" ? 0 : state === "fenced" ? 3 : 4;
-    } else process.exitCode = reply.ok ? 0 : 1;
+    const result = await requestCommand(script);
+    if (result.output !== undefined) console.log(result.output);
+    process.exitCode = result.exitCode;
   } else if (mode === "run") {
     validateArguments(args);
     const state = args[4];
