@@ -433,11 +433,62 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         if (!rows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         return mapSource(rows[0] as Record<string, unknown>);
       };
-      if (!scope.jobExecution) return write(sql);
-      return sql.begin(async (tx) => {
-        await lockOpeningJobExecution(tx, scope);
-        return write(tx as unknown as Sql);
-      });
+      // Identity-only sentinel: roll back a lazy history ensure if the workspace
+      // disappears before its business lock, then preserve the source UUID error.
+      const workspaceDeleted = new Error("parse state workspace deleted");
+      try {
+        return await sql.begin(async (tx) => {
+          const execution = scope.jobExecution;
+          let ownerUserId: string;
+          if (execution) {
+            // Same predicates/order as the original gate, but no business lock
+            // before history. Stale execution still wins over missing/bad source.
+            const workspaces = await tx`SELECT id FROM workspaces
+              WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+                AND privacy_epoch = ${execution.privacyEpoch}`;
+            const jobs = workspaces.length ? await tx`SELECT id FROM opening_jobs
+              WHERE id = ${execution.id} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+                AND state = 'running' AND claim_token = ${execution.token}` : [];
+            if (!jobs.length) throw Object.assign(new Error("job execution is no longer current"), { code: "CONFLICT" });
+            ownerUserId = scope.ownerUserId;
+          } else {
+            // Caller owner was never auth input here (including empty legacy
+            // owners). Canonical owner is only the internal history key.
+            const owners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (!owners.length) return write(tx as unknown as Sql);
+            ownerUserId = owners[0]!.owner_user_id as string;
+          }
+          try {
+            await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId });
+          } catch (failure) {
+            if (failure instanceof Error && "code" in failure && failure.code === "NOT_FOUND"
+              && failure.message === "workspace not found") {
+              if (execution) throw Object.assign(new Error("job execution is no longer current"), { code: "CONFLICT" });
+              const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+              if (!current.length) return write(tx as unknown as Sql);
+              throw new OpeningSourceError("CONFLICT", "Parse state history coordination changed");
+            }
+            throw failure;
+          }
+          if (execution) {
+            // Keep the original locked workspace -> job reread after history.
+            await lockOpeningJobExecution(tx, scope);
+          } else {
+            const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
+            if (!current.length) throw workspaceDeleted;
+            if (current[0]!.owner_user_id !== ownerUserId) {
+              throw new OpeningSourceError("CONFLICT", "Parse state history coordination changed");
+            }
+          }
+          return write(tx as unknown as Sql);
+        });
+      } catch (failure) {
+        if (failure !== workspaceDeleted) throw failure;
+        // No UPDATE after rollback: retain invalid UUID cast precedence without
+        // publishing to a recreated workspace or leaving an orphan history row.
+        await sql`SELECT ${id}::uuid, ${scope.workspaceId}::uuid`;
+        throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+      }
     },
 
     async createWithParseJob(scope, input) {

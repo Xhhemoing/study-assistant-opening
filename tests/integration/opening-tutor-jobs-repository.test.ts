@@ -679,6 +679,8 @@ describe("cancel history fence", () => {
 
   it("keeps the old conversation owner's cancellation authority after a static workspace owner move", async () => {
     const input = await cancellation(), replacementOwnerId = randomUUID();
+    const beforeHistory = await history();
+    expect(beforeHistory).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
     await fixture.sql`INSERT INTO users(id,email,display_name,password_hash)
       VALUES (${replacementOwnerId},${`${replacementOwnerId}@example.com`},'Static replacement','test')`;
     try {
@@ -688,7 +690,12 @@ describe("cancel history fence", () => {
       await expect(jobs.cancel({ ...fixture.scope, ownerUserId: replacementOwnerId }, input.jobId)).resolves.toBeNull();
       expect(await graph()).toEqual(original);
       await expect(jobs.cancel(fixture.scope, input.jobId)).resolves.toMatchObject({ status: "cancelled" });
-      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: replacementOwnerId, revision: 0 }]);
+      const afterHistory = await history();
+      expect(afterHistory).toHaveLength(beforeHistory.length + 1);
+      expect(afterHistory).toEqual(expect.arrayContaining([
+        ...beforeHistory,
+        { workspace_id: fixture.scope.workspaceId, owner_user_id: replacementOwnerId, revision: 0 },
+      ]));
     } finally {
       await fixture.sql`UPDATE workspaces SET owner_user_id=${fixture.scope.ownerUserId} WHERE id=${fixture.scope.workspaceId}`;
       await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE owner_user_id=${replacementOwnerId}`;
@@ -708,8 +715,9 @@ describe("cancel history fence", () => {
     const input = await cancellation();
     const completion = { ...input, scope: fixture.scope, text: "winning answer", citations: [],
       candidates: [{ payload: { kind: "memory", text: "winning candidate", temporary: false }, sourceIds: [] }], enqueueMetadata: true };
-    await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-      VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},19)`;
+    expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+    await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=19
+      WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
     const leader = openRaceSession(), follower = openRaceSession(), observer = openRaceSession();
     let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -730,10 +738,10 @@ describe("cancel history fence", () => {
     try {
       await Promise.all([leader.ready, follower.ready, observer.ready]);
       const firstJobs = createOpeningTutorJobsRepository(coordinated), nextJobs = createOpeningTutorJobsRepository(follower.sql);
-      const leading = track(first === "cancel" ? firstJobs.cancel(fixture.scope, input.jobId) : firstJobs.completeTurn(completion));
+      const leading = track<unknown>(first === "cancel" ? firstJobs.cancel(fixture.scope, input.jobId) : firstJobs.completeTurn(completion));
       pending.push(leading);
       await Promise.race([started, leading.then(() => { throw new Error("leader did not reach turn write"); })]);
-      const following = track(first === "cancel" ? nextJobs.completeTurn(completion) : nextJobs.cancel(fixture.scope, input.jobId));
+      const following = track<unknown>(first === "cancel" ? nextJobs.completeTurn(completion) : nextJobs.cancel(fixture.scope, input.jobId));
       pending.push(following);
       await vi.waitFor(async () => {
         const [lock] = await observer.sql`SELECT count(*)::int AS blocked FROM pg_locks
@@ -767,12 +775,14 @@ describe("cancel history fence", () => {
     await createOpeningTutorJobsRepository(fixture.sql).completeTurn({ scope: fixture.scope, ...old,
       text: "old answer", citations: [], candidates: [{ payload: { kind: "memory", text: "old candidate", temporary: false }, sourceIds: [] }],
       enqueueMetadata: true });
-    await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
-    for (const revision of [null, 29]) {
+    for (const revision of [0, 29]) {
       const input = await cancellation();
-      if (revision !== null) await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-        VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${revision})`;
+      // Saved-turn setup has already committed zero; this is existing-row rollback, not lazy-ensure rollback.
+      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+      if (revision !== 0) await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision}
+        WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
       const original = await graph(), beforeHistory = await history();
+      expect(beforeHistory).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision }]);
       const coordinated = new Proxy(fixture.sql, {
         get(target, property, receiver) {
           if (property !== "begin") return Reflect.get(target, property, receiver);
@@ -806,6 +816,8 @@ describe("cancel history fence", () => {
           clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
         const originalJobs = await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${workspaceId}`;
         const originalTurns = await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${workspaceId} ORDER BY id`;
+        const beforeHistory = await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+        expect(beforeHistory).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: "0" }]);
         const mutator = openRaceSession();
         let scheduled = false;
         const coordinated = new Proxy(fixture.sql, {
@@ -835,7 +847,7 @@ describe("cancel history fence", () => {
           } else if (invalid) await expect(result).rejects.toMatchObject({ code: "22P02" });
           else await expect(result).resolves.toBeNull();
           expect(scheduled).toBe(true);
-          expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual([]);
+          expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual(beforeHistory);
           expect(await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${workspaceId}`).toEqual(drift === "owner" ? originalJobs : []);
           expect(await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${workspaceId} ORDER BY id`).toEqual(drift === "owner" ? originalTurns : []);
         } finally {
