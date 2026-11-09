@@ -13,7 +13,9 @@ EnvironmentFile=/opt/aistudy/.env.production
 # Managed by provision-worker.sh; placed last so legacy env paths cannot win.
 EnvironmentFile=/etc/aistudy/worker-runtime.env
 Environment=NEXT_TELEMETRY_DISABLED=1
+# Managed admission is installed by the independent 96 override after verification.
 ExecStart=/usr/bin/node node_modules/tsx/dist/cli.mjs apps/worker/src/index.ts
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 Restart=always
 RestartSec=5
 MemoryMax=1024M

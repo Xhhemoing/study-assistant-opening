@@ -5,6 +5,23 @@ import { parseEnv } from "node:util";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+export function verifyCredentialStatus(kind, status, expectedUid, expectedGid, expectedGroups) {
+  const fields = Object.fromEntries(status.split('\n').filter(line => line.includes(':')).map(line => {
+    const at = line.indexOf(':'); return [line.slice(0, at), line.slice(at + 1).trim()];
+  }));
+  if (fields.Uid?.split(/\s+/).some(value => Number(value) !== expectedUid)
+    || fields.Gid?.split(/\s+/).some(value => Number(value) !== expectedGid)
+    || !fields.Uid || !fields.Gid) throw new Error('Service UID/GID differs from reviewed credentials.');
+  if (kind === 'worker') {
+    const groups = fields.Groups?.split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
+    if (JSON.stringify(groups) !== JSON.stringify([...new Set(expectedGroups)].sort((a, b) => a - b))
+      || fields.NoNewPrivs !== '1' || ['CapEff', 'CapPrm', 'CapAmb'].some(key => !/^0+$/.test(fields[key] ?? ''))) {
+      throw new Error('Worker supplementary groups, NNP or capabilities differ.');
+    }
+  }
+}
+
+
 export const VISIBLE_FLAGS = [
   "OPENING_ADAPTIVE_PLANNING", "OPENING_CHAT_PROSE", "OPENING_ANSWER_STYLE", "OPENING_CHAT_ARTIFACTS",
   "OPENING_TEACHING_LOOP", "OPENING_TEACHING_WORKSPACE", "OPENING_TEACHING_COMPILER_ENABLED",
@@ -87,11 +104,23 @@ function accountUid(user) {
 function argumentPaths(args, cwd) {
   return args.map(arg => { try { return realpathSync(resolve(cwd, arg)); } catch { return null; } });
 }
-function unitLaunch(unit) {
+function unitLaunch(unit, release) {
   const cwd = realpathSync(unit.WorkingDirectory);
   const executable = unit.ExecStart?.match(/(?:^|[ {;])path=([^ ;}]+)/)?.[1];
   const args = unit.ExecStart?.match(/argv\[\]=(.*?) ;/)?.[1];
   if (!executable || !args) throw new Error("Cannot inspect effective ExecStart.");
+  if (args.includes('/writer-controls/hermes-trusted-loader.py ')) {
+    const match = args.match(/^\/usr\/bin\/python3 -I -S -B (\/[A-Za-z0-9_./-]+) exec (\/[A-Za-z0-9_./-]+) (aistudy-(web|worker)\.service)$/);
+    if (!match || match[1] !== `${match[2]}/writer-controls/hermes-trusted-loader.py` || realpathSync(executable) !== realpathSync('/usr/bin/python3')) throw new Error('Cannot inspect trusted wrapper.');
+    const planFile = `${match[2]}/writer-${match[3]}.json`;
+    const checked = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', match[1], 'state', 'check-plan', match[2], release, match[3]], { encoding: 'utf8', timeout: 10_000, env: { PATH: '/usr/bin:/bin' } });
+    if (checked.error || checked.status !== 0) throw new Error('Cannot inspect trusted writer plan.');
+    const plan = JSON.parse(readFileSync(planFile, 'utf8'));
+    if (plan.target !== release) throw new Error('Service plan points to another release.');
+    const app = match[4] === 'web' ? [`${release}/apps/web/.next/standalone/apps/web/server.js`]
+      : [`${release}/node_modules/tsx/dist/cli.mjs`, `${release}/apps/worker/src/index.ts`];
+    return { cwd, executable: realpathSync('/usr/bin/node'), paths: app.map(path => realpathSync(path)), wrapped: true };
+  }
   return { cwd, executable: realpathSync(executable), paths: argumentPaths(args.split(/\s+/), cwd) };
 }
 function inspect(kind, release, configured, restoration) {
@@ -99,7 +128,13 @@ function inspect(kind, release, configured, restoration) {
   if (!/^[1-9][0-9]*$/.test(unit.MainPID ?? "")) throw new Error("Service has no running MainPID.");
   const proc = `/proc/${unit.MainPID}`;
   const cwd = realpathSync(`${proc}/cwd`);
-  const launch = unitLaunch(unit);
+  const launch = unitLaunch(unit, release);
+  if (launch.wrapped) {
+    const uid = accountUid(unit.User), gid = spawnSync('id', ['-g', unit.User || 'root'], { encoding: 'utf8' });
+    const groups = spawnSync('id', ['-G', unit.User || 'root'], { encoding: 'utf8' });
+    if (gid.status !== 0 || groups.status !== 0) throw new Error('Cannot inspect credentials.');
+    verifyCredentialStatus(kind, readFileSync(`${proc}/status`, 'utf8'), uid, Number(gid.stdout.trim()), groups.stdout.trim().split(/\s+/).map(Number));
+  }
   const args = readFileSync(`${proc}/cmdline`, "utf8").split("\0").filter(Boolean);
   const environment = Object.fromEntries(readFileSync(`${proc}/environ`, "utf8").split("\0").filter(Boolean).map(entry => {
     const index = entry.indexOf("="); return [entry.slice(0, index), entry.slice(index + 1)];
@@ -134,7 +169,7 @@ function captureRestoration(target, required, destination) {
   if (required === "1") {
     const unit = readUnit("worker");
     const uid = accountUid(unit.User);
-    const launch = unitLaunch(unit);
+    const launch = unitLaunch(unit, release);
     if (launch.cwd !== release || !launch.paths.includes(`${release}/apps/worker/src/index.ts`)) throw new Error("Worker baseline does not point to the current release.");
     if (/^[1-9][0-9]*$/.test(unit.MainPID ?? "")) {
       if (statSync(`/proc/${unit.MainPID}`).uid !== uid || realpathSync(`/proc/${unit.MainPID}/cwd`) !== release) throw new Error("Worker baseline process identity differs from its unit.");

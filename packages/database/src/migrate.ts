@@ -40,6 +40,9 @@ export type MigrationRegistryErrorCode =
   | "MIGRATION_DUPLICATE_VERSION"
   | "MIGRATION_VERSION_GAP"
   | "MIGRATION_UNKNOWN_HISTORY"
+  | "MIGRATION_HISTORY_GAP"
+  | "MIGRATION_REGISTRY_NOT_READY"
+  | "MIGRATION_QUIESCENCE_UNCONFIRMED"
   | "MIGRATION_INVALID_VERIFICATION_STATE"
   | "MIGRATION_CHECKSUM_DRIFT"
   | "MIGRATION_LEGACY_0003_ATTESTATION_REQUIRED"
@@ -54,6 +57,21 @@ export class MigrationRegistryError extends Error {
 
 export function createSqlClient(databaseUrl: string, options: { max?: number } = {}): Sql {
   return postgres(databaseUrl, { max: options.max ?? 10 });
+}
+
+/** Opt-in adapter; postgres.js sends these settings on EVERY new connection.
+ * General createSqlClient deliberately retains its original behavior.
+ */
+export function createMigrationSqlClient(databaseUrl: string, options: { max?: number } = {}): Sql {
+  const url = new URL(databaseUrl);
+  if (url.searchParams.has("options")) throw new Error("Migration connections do not accept URL options");
+  for (const [key, value] of Object.entries({
+    lock_timeout: "5s", statement_timeout: "120s", idle_in_transaction_session_timeout: "30s",
+    application_name: "aistudy-release-migration",
+  })) url.searchParams.set(key, value);
+  // Notices may contain schema/object names or SQL details; the deployment
+  // adapter emits only its structured, redacted report, never driver notices.
+  return postgres(url.href, { max: options.max ?? 1, onnotice: () => {} });
 }
 
 async function loadMigrationFiles(migrationsDir: string): Promise<MigrationFile[]> {
@@ -119,6 +137,56 @@ function verifyRegistry(files: MigrationFile[], rows: RegistryRow[]): void {
       throw new MigrationRegistryError("MIGRATION_CHECKSUM_DRIFT", `Checksum drift for migration: ${row.id}`);
     }
   }
+  const ordered = [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  if (ordered.some((row, index) => row.id !== files[index]?.id)) {
+    throw new MigrationRegistryError("MIGRATION_HISTORY_GAP", "Migration history must be a contiguous prefix of the inventory");
+  }
+}
+
+export type MigrationPlan = MigrationResult & { pending: string[]; registryReadyWithoutWrites: boolean; readOnly: true };
+
+/** No bootstrap, attestation, advisory lock or DDL. Reuses runner validation. */
+export async function planMigrations(sql: Sql, options: Pick<ApplyMigrationsOptions, "migrationsDir"> = {}): Promise<MigrationPlan> {
+  const files = await loadMigrationFiles(options.migrationsDir ?? defaultMigrationsDir);
+  return sql.begin("isolation level repeatable read read only", async tx => {
+    const [registry] = await tx`SELECT to_regclass('schema_migrations')::text AS name`;
+    if (!registry?.name) return { applied: [], alreadyApplied: [], pending: files.map(file => file.id),
+      registryReadyWithoutWrites: false, readOnly: true };
+    const columns = await tx<{ name: string }[]>`SELECT attname AS name FROM pg_attribute
+      WHERE attrelid=to_regclass('schema_migrations') AND attnum>0 AND NOT attisdropped`;
+    if (["id", "applied_at", "checksum", "verification_state", "recorded_at"].some(name => !columns.some(column => column.name === name))) {
+      throw new MigrationRegistryError("MIGRATION_REGISTRY_NOT_READY", "Registry bootstrap is required; read-only planning cannot prove readiness");
+    }
+    const rows = await tx<RegistryRow[]>`SELECT id, checksum, verification_state FROM schema_migrations ORDER BY id`;
+    verifyRegistry(files, rows);
+    const attestationColumns = await tx<{ name: string }[]>`SELECT attname AS name FROM pg_attribute
+      WHERE attrelid=to_regclass('migration_attestations') AND attnum>0 AND NOT attisdropped`;
+    const ready = ["migration_id", "database_fingerprint", "observed_migration_ids", "operator", "preflight_summary", "backup_evidence", "recorded_at"]
+      .every(name => attestationColumns.some(column => column.name === name));
+    return { applied: [], alreadyApplied: rows.map(row => row.id), pending: files.slice(rows.length).map(file => file.id),
+      registryReadyWithoutWrites: ready, readOnly: true };
+  });
+}
+
+/** Aggregate-only point-in-time diagnostic, NOT a lock against future clients. */
+export async function inspectMigrationQuiescence(sql: Sql): Promise<{ readOnly: true; otherSessions: number }> {
+  return sql.begin("isolation level repeatable read read only", async tx => {
+    const [visibility] = await tx`SELECT rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER') AS allowed
+      FROM pg_roles WHERE rolname=current_user`;
+    if (!visibility?.allowed) throw new MigrationRegistryError("MIGRATION_QUIESCENCE_UNCONFIRMED", "Full activity visibility is required");
+    const [activity] = await tx`SELECT count(*)::int AS sessions,
+      count(*) FILTER (WHERE state IS NULL OR state <> 'idle' OR xact_start IS NOT NULL)::int AS unsafe
+      FROM pg_stat_activity WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND pid<>pg_backend_pid() AND backend_type='client backend'`;
+    const [prepared] = await tx`SELECT count(*)::int AS count FROM pg_prepared_xacts WHERE database=current_database()`;
+    const [locks] = await tx`SELECT count(*)::int AS count FROM pg_locks WHERE pid IS DISTINCT FROM pg_backend_pid()
+      AND (database=(SELECT oid FROM pg_database WHERE datname=current_database()) OR database IS NULL)
+      AND (NOT granted OR locktype='advisory' OR mode='AccessExclusiveLock')`;
+    if (activity?.unsafe || prepared?.count || locks?.count) {
+      throw new MigrationRegistryError("MIGRATION_QUIESCENCE_UNCONFIRMED", "Activity, prepared transactions or locks prevent migration preflight");
+    }
+    return { readOnly: true, otherSessions: Number(activity?.sessions ?? 0) };
+  });
 }
 
 function needsIdentitySafety(file: MigrationFile): boolean {
@@ -197,8 +265,8 @@ export async function applyMigrations(sql: Sql, options: ApplyMigrationsOptions 
   const files = await loadMigrationFiles(options.migrationsDir ?? defaultMigrationsDir);
   const lockKey = options.advisoryLockKey ?? defaultAdvisoryLockKey;
   const lockedSql = await sql.reserve();
-  await lockedSql`SELECT pg_advisory_lock(${lockKey})`;
   try {
+    await lockedSql`SELECT pg_advisory_lock(${lockKey})`;
     await bootstrapRegistry(lockedSql);
     const rows = await lockedSql<RegistryRow[]>`SELECT id, checksum, verification_state FROM schema_migrations ORDER BY id`;
     verifyRegistry(files, rows);
@@ -237,8 +305,8 @@ export async function applyMigrations(sql: Sql, options: ApplyMigrationsOptions 
     }
     return { applied, alreadyApplied };
   } finally {
-    await lockedSql`SELECT pg_advisory_unlock(${lockKey})`;
-    lockedSql.release();
+    try { await lockedSql`SELECT pg_advisory_unlock(${lockKey})`; }
+    finally { lockedSql.release(); }
   }
 }
 

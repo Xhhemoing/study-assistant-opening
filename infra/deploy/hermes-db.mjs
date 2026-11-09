@@ -76,8 +76,37 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     process.stdout.write(result.stdout);
     if (result.status !== 0) process.exitCode = 1;
     // Report only. No migrate, OLD_TARGET change, transition edit, pointer switch or writer resume.
-  } else if (action === "migrate") {
-    run("npx", ["tsx", "./scripts/db-migrate.ts"], { cwd: target });
+  } else if (["plan", "quiescence", "migrate"].includes(action)) {
+    if (!configured.DATABASE_URL) fail("A configured DATABASE_URL is required.");
+    const moduleUrl = pathToFileURL(join(resolve(target), "packages/database/src/migrate.ts")).href;
+    const operation = { plan: "planMigrations", quiescence: "inspectMigrationQuiescence", migrate: "applyMigrations" }[action];
+    const code = `const { createMigrationSqlClient, ${operation} } = await import(${JSON.stringify(moduleUrl)});
+      const sql = createMigrationSqlClient(process.env.DATABASE_URL);
+      try {
+        let legacy0003Attestation;
+        if (${JSON.stringify(action)} === "migrate" && process.env.MIGRATION_LEGACY_0003_ATTESTATION_FILE) {
+          const { readFile } = await import("node:fs/promises");
+          const value = JSON.parse(await readFile(process.env.MIGRATION_LEGACY_0003_ATTESTATION_FILE, "utf8"));
+          if (!value || typeof value !== "object" || !Array.isArray(value.observedMigrationIds)
+            || !value.observedMigrationIds.every(id => typeof id === "string")
+            || !["databaseFingerprint", "operator", "preflightSummary", "backupEvidence"].every(key => typeof value[key] === "string")) {
+            throw new Error("Invalid legacy attestation file");
+          }
+          legacy0003Attestation = value;
+        }
+        console.log(JSON.stringify(await ${operation}(sql, { legacy0003Attestation })));
+      }
+      catch (error) {
+        console.log(JSON.stringify({ outcome: "unknown-or-partial", code: /^MIGRATION_[A-Z0-9_]+$/.test(error.code ?? "") ? error.code : "MIGRATION_EXECUTION_UNCONFIRMED" }));
+        process.exitCode = 1;
+      } finally { await sql.end({ timeout: 5 }); }`;
+    // Fixed adapter, no npx installation, PGOPTIONS fiction or retry. A failed
+    // subprocess is NOT evidence that its PostgreSQL backend has stopped.
+    const result = spawnSync(join(resolve(target), "node_modules/.bin/tsx"), ["--eval", `(async () => { ${code} })()`],
+      { env, cwd: target, stdio: ["ignore", "pipe", "pipe"] });
+    if (result.error || !result.stdout?.length) fail("Migration session outcome is unconfirmed; backend completion must be inspected.");
+    process.stdout.write(result.stdout);
+    if (result.status !== 0) process.exitCode = 1;
   } else if (action === "parser") {
     const cache = configured.HF_HOME || join(legacyDir, ".local/hf-home");
     env = {
