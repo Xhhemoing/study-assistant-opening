@@ -56,7 +56,7 @@ it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict c
 it.each(["normal", "archived", "pending"] as const)("opens each saved handout without a goal or write command when %s", async mode => {
   sessionStorage.clear();
   if (mode === "pending") sessionStorage.setItem(`aistudy:route-command:${courseId}`, JSON.stringify({ kind: "confirm", input: { expectedRevisions: [], requirements: [requirement], confirmScope: true } }));
-  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
+  const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [], reservedSupply: { status: "unknown" as const, available: 0, reason: "资格尚未确认" } };
   const saved = { activityId: id, generateStatus: "needs_check" as const, contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" as const };
   const secondActivity = "22222222-2222-4222-8222-222222222222";
   const compilations: Array<typeof base & { compilation?: CourseRouteSnapshot["requirements"][number]["compilation"] }> = [
@@ -78,6 +78,7 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   expect(links.map(link => link.getAttribute("href"))).toEqual(hrefs);
   expect(links.map(link => link.closest("li")?.querySelector("h3")?.textContent)).toEqual(["要求0 · 必修", "要求1 · 必修"]);
   expect(host.querySelector("select")?.value).toBe("");
+  expect([...host.querySelectorAll<HTMLButtonElement>("button")].filter(node => node.textContent === "学习这一项").every(node => node.disabled)).toBe(true);
   await act(async () => { links.forEach(link => link.click()); });
   expect(clicked).toEqual(hrefs);
   expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
@@ -87,6 +88,50 @@ it.each(["normal", "archived", "pending"] as const)("opens each saved handout wi
   expect(host.textContent).not.toContain("讲义核对通过");
   expect(host.textContent).not.toContain("已掌握");
   sessionStorage.clear();
+});
+it.each([
+  { supply: { status: "unknown", available: 0, reason: "保留题曝光资格暂未接入生产供给" }, label: "保留题：资格尚未确认" },
+  { supply: { status: "missing", available: 0, reason: "服务端报告暂无保留题" }, label: "保留题：暂无保留题" },
+  { supply: { status: "ready", available: 3, reason: null }, label: "服务端报告保留题 3 道（仍非独立资格证明）" },
+  { supply: { status: "ready", available: 0, reason: null }, label: "服务端报告保留题 0 道（仍非独立资格证明）" },
+  { supply: undefined, label: "保留题状态未收集（服务端未提供）" },
+  { supply: { status: "unknown", available: 9, reason: "资格待核对" }, label: "保留题：资格尚未确认" },
+  { supply: { status: "missing", available: 7, reason: null }, label: "保留题：暂无保留题" },
+  { supply: { status: "unknown", available: 0, reason: '<img src=x onerror="alert(1)"><script>alert(2)</script>' }, label: "保留题：资格尚未确认" },
+] satisfies Array<{ supply: CourseRouteSnapshot["requirements"][number]["reservedSupply"]; label: string }>)("renders reserved supply $label ($supply) as read-only server facts without blocking ordinary learning", async ({ supply, label }) => {
+  sessionStorage.clear();
+  const row: CourseRouteSnapshot["requirements"][number] = { ...confirmed.requirements[0]!,
+    ...(supply ? { reservedSupply: supply } : {}),
+    questionCoverage: { savedQuestions: 12, withReferenceAnswers: 4, issuedQuestions: 2, unexposedEligibility: "unknown" },
+    compilation: { activityId: id, generateStatus: "ready", contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" },
+  };
+  const transport = vi.fn(async () => Response.json({ ...confirmed, requirements: [row] }));
+  const api = createCourseRouteClient(transport), start = vi.spyOn(api, "start"), confirm = vi.spyOn(api, "confirm");
+  start.mockResolvedValue({ kind: "choice", reason: "configuration", message: "请核对配置", courseId, href: `/opening/courses/${courseId}?tab=units`, requirementIds: [id] });
+  await render(api, { goals: selectedGoal });
+  const supplyLine = [...host.querySelectorAll("li p")].find(node => node.textContent?.startsWith(label));
+  expect(supplyLine?.textContent).toBe(label + (supply?.reason != null ? ` · 原因：${supply.reason}` : ""));
+  if (!supply || supply.status !== "ready") {
+    expect(supplyLine?.textContent).not.toMatch(/\d+\s*道|服务端报告保留题|可用/);
+  }
+  if (supply?.status === "unknown") expect(supplyLine?.textContent).not.toContain("暂无保留题");
+  if (supply?.status === "ready") expect(supplyLine?.textContent).not.toContain("暂无保留题");
+  if (!supply) expect(supplyLine?.textContent).not.toMatch(/资格尚未确认|暂无保留题/);
+  expect(host.querySelector("img, script, [onerror]")).toBeNull();
+  if (supply?.reason?.startsWith("<img")) {
+    expect(supplyLine?.innerHTML).toContain("&lt;img");
+    expect(supplyLine?.innerHTML).toContain("&lt;script&gt;");
+  }
+  expect(host.textContent).toContain("已保存题目 12 道 · 附参考解答 4 道 · 曾发题 2 道 · 能否作为独立新题尚未确认");
+  expect(supplyLine?.querySelector("a, button")).toBeNull();
+  expect(start).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(transport).toHaveBeenCalledTimes(1);
+  const handout = [...host.querySelectorAll("a")].find(link => link.textContent === "打开已保存讲义");
+  expect(handout?.getAttribute("href")).toBe(`/opening/courses/${courseId}/handouts/${id}`);
+  expect(button("学习这一项").disabled).toBe(false);
+  await act(async () => button("学习这一项").click());
+  expect(start).toHaveBeenCalledExactlyOnceWith(courseId, { goalId, expectedGoalRevision: goal.revision, requirementId: id, expectedRequirementRevision: 1, minutes: 20, clientKey: expect.stringMatching(/^route-start:/) });
+  expect(confirm).not.toHaveBeenCalled(); expect(transport).toHaveBeenCalledTimes(1);
 });
 it("rejects invented compilation states and private bodies at the strict client boundary", async () => {
   const compilation = { activityId: id, generateStatus: "queued", contentVersion: Number.MAX_SAFE_INTEGER, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
