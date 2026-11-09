@@ -344,6 +344,120 @@ export async function createOpeningTeachingActivityInTransaction(
   return mapTeachingActivity(rows[0] as Record<string, unknown>);
 }
 
+function checkTeachingAssociation(
+  current: Record<string, unknown> | undefined, input: TeachingActivityAssociateCourseInput,
+): asserts current is Record<string, unknown> {
+  if (!current) throw learningError("NOT_FOUND", "teaching activity not found");
+  if ("auto" in input) {
+    if (!current.course_id && current.status === "completed") {
+      throw learningError("CONFLICT", "已结束的学习不能自动更换课程");
+    }
+  } else if (input.expectedUpdatedAt && learningIso(current.updated_at) !== input.expectedUpdatedAt) {
+    throw learningError("CONFLICT", "teaching activity updated_at mismatch");
+  }
+}
+
+async function teachingCourseCandidates(tx: TransactionSql, scope: Scope, sourceIds: string[]) {
+  return sourceIds.length ? tx`SELECT DISTINCT c.id FROM courses c
+    JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=c.workspace_id
+    WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
+      AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[])
+      AND (m.purpose IS NULL OR m.purpose='teaching') LIMIT 2` : [];
+}
+
+/** No locks or journal writes: preserve ordinary association failures before history. */
+async function precheckTeachingAssociation(
+  tx: TransactionSql, scope: Scope, activityId: string, input: TeachingActivityAssociateCourseInput,
+) {
+  await precheckTeachingOwner(tx, scope);
+  const [current] = await tx`SELECT * FROM opening_teaching_activities
+    WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  checkTeachingAssociation(current, input);
+  if ("auto" in input) {
+    if (!current.course_id) {
+      const sourceIds = (current.source_ids ?? []) as string[];
+      await admitLearningSources(tx, scope, sourceIds, { readOnly: true, recordVersions: false });
+      const candidates = await teachingCourseCandidates(tx, scope, sourceIds);
+      if (candidates.length === 1) await precheckTeachingSourcePurposes(tx, scope, String(candidates[0]!.id), sourceIds);
+    }
+  } else if (input.courseId) {
+    const [course] = await tx`SELECT id FROM courses
+      WHERE id=${input.courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+    if (!course) throw learningError("NOT_FOUND", "course not found");
+    const sourceIds = current.source_ids as string[];
+    if (sourceIds.length) {
+      await admitLearningSources(tx, scope, sourceIds, { readOnly: true, recordVersions: false });
+      await precheckTeachingSourcePurposes(tx, scope, input.courseId, sourceIds);
+    }
+  }
+  return current;
+}
+
+async function lockTeachingAssociation(
+  tx: TransactionSql, scope: Scope, activityId: string, input: TeachingActivityAssociateCourseInput,
+) {
+  await lockLearningOwner(tx, scope);
+  const [current] = await tx`SELECT * FROM opening_teaching_activities
+    WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+  checkTeachingAssociation(current, input);
+  return current;
+}
+
+/** Shared business implementation; callers have locked and revalidated the activity. */
+async function associateTeachingCourse(
+  tx: TransactionSql, scope: Scope, activityId: string, input: TeachingActivityAssociateCourseInput,
+  current: Record<string, unknown>,
+): Promise<TeachingActivity> {
+  if ("auto" in input) {
+    if (current.course_id) return mapTeachingActivity(current);
+    const sourceIds = (current.source_ids ?? []) as string[];
+    await admitLearningSources(tx, scope, sourceIds);
+    // Infer only an unambiguous material association. Otherwise give this
+    // topic its own course, atomically with the activity binding.
+    const candidates = await teachingCourseCandidates(tx, scope, sourceIds);
+    const courseId = candidates.length === 1 ? String(candidates[0]!.id) : randomUUID();
+    if (candidates.length !== 1) {
+      const title = String(current.intent_summary).split("\n")[0]!.trim().slice(0, 120) || "自主学习";
+      await tx`INSERT INTO courses(id,workspace_id,title,slug,description)
+        VALUES(${courseId},${scope.workspaceId},${title},${`study-${courseId}`},'由本次学习自动整理')`;
+      for (const [index, sourceId] of sourceIds.entries()) await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+        VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
+    }
+    await assertOpeningTeachingSourcePurposes(tx, scope, courseId, sourceIds);
+    const [updated] = await tx`UPDATE opening_teaching_activities SET course_id=${courseId},updated_at=now()
+      WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
+    return mapTeachingActivity(updated!);
+  }
+  if (input.courseId) {
+    const course = await tx`SELECT id FROM courses
+      WHERE id=${input.courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
+    if (!course.length) throw learningError("NOT_FOUND", "course not found");
+    if ((current.source_ids as string[]).length) {
+      await admitLearningSources(tx, scope, current.source_ids as string[]);
+      await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, current.source_ids as string[]);
+    }
+  }
+  const [updated] = await tx`UPDATE opening_teaching_activities
+    SET course_id=${input.courseId},
+      goal_json=CASE WHEN course_id IS DISTINCT FROM ${input.courseId}::uuid
+        THEN goal_json - 'learnerFocus' ELSE goal_json END, updated_at=now()
+    WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
+  return mapTeachingActivity(updated!);
+}
+
+/**
+ * Internal transaction entry for card variants, not a package-index API.
+ * cardContext must acquire workspace history BEFORE card/review/source locks.
+ * This entry does not reacquire history or open a root transaction; owner,
+ * execution and association gates remain authoritative inside the supplied tx.
+ */
+export async function associateOpeningTeachingCourseInTx(
+  tx: TransactionSql, scope: Scope, activityId: string, input: TeachingActivityAssociateCourseInput,
+): Promise<TeachingActivity> {
+  const current = await lockTeachingAssociation(tx, scope, activityId, input);
+  return associateTeachingCourse(tx, scope, activityId, input, current);
+}
+
 export function createOpeningTeachingActivitiesRepository(sql: Sql) {
   return {
     assertOwnedActivity: (scope: Scope, activityId: string) =>
@@ -401,70 +515,13 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       input: TeachingActivityAssociateCourseInput,
     ): Promise<TeachingActivity> {
       return sql.begin(async (tx) => {
-        await lockLearningOwner(tx, scope);
-        const rows = await tx`
-          SELECT * FROM opening_teaching_activities
-          WHERE id = ${activityId}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
-        if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
-        const current = rows[0] as Record<string, unknown>;
-        if ("auto" in input) {
-          if (current.course_id) return mapTeachingActivity(current);
-          if (current.status === "completed") throw learningError("CONFLICT", "已结束的学习不能自动更换课程");
-          const sourceIds = (current.source_ids ?? []) as string[];
-          await admitLearningSources(tx, scope, sourceIds);
-          // Infer only an unambiguous material association. Otherwise give this
-          // topic its own course, atomically with the activity binding.
-          const candidates = sourceIds.length ? await tx`SELECT DISTINCT c.id FROM courses c
-            JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=c.workspace_id
-            WHERE c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
-              AND m.asset_type='source' AND m.asset_id=ANY(${sourceIds}::uuid[])
-              AND (m.purpose IS NULL OR m.purpose='teaching') LIMIT 2` : [];
-          const courseId = candidates.length === 1 ? String(candidates[0]!.id) : randomUUID();
-          if (candidates.length !== 1) {
-            const title = String(current.intent_summary).split("\n")[0]!.trim().slice(0, 120) || "自主学习";
-            await tx`INSERT INTO courses(id,workspace_id,title,slug,description)
-              VALUES(${courseId},${scope.workspaceId},${title},${`study-${courseId}`},'由本次学习自动整理')`;
-            for (const [index, sourceId] of sourceIds.entries()) await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
-              VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'reference',${index},'private')`;
-          }
-          await assertOpeningTeachingSourcePurposes(tx, scope, courseId, sourceIds);
-          const [updated] = await tx`UPDATE opening_teaching_activities SET course_id=${courseId},updated_at=now()
-            WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
-          return mapTeachingActivity(updated!);
-        }
-        if (input.expectedUpdatedAt) {
-          const currentUpdated = learningIso(current.updated_at);
-          if (currentUpdated !== input.expectedUpdatedAt) {
-            throw learningError("CONFLICT", "teaching activity updated_at mismatch");
-          }
-        }
-        if (input.courseId) {
-          const course = await tx`
-            SELECT id FROM courses
-            WHERE id = ${input.courseId}
-              AND workspace_id = ${scope.workspaceId}
-              AND archived_at IS NULL
-            FOR SHARE`;
-          if (!course.length) throw learningError("NOT_FOUND", "course not found");
-          if ((current.source_ids as string[]).length) {
-            await admitLearningSources(tx, scope, current.source_ids as string[]);
-            await assertOpeningTeachingSourcePurposes(tx, scope, input.courseId, current.source_ids as string[]);
-          }
-        }
-        const updated = await tx`
-          UPDATE opening_teaching_activities
-          SET course_id = ${input.courseId},
-            goal_json = CASE WHEN course_id IS DISTINCT FROM ${input.courseId}::uuid
-              THEN goal_json - 'learnerFocus' ELSE goal_json END,
-            updated_at = now()
-          WHERE id = ${activityId}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          RETURNING *`;
-        return mapTeachingActivity(updated[0] as Record<string, unknown>);
+        await precheckTeachingAssociation(tx, scope, activityId, input);
+        await lockWorkspaceLearningHistory(tx, scope);
+        // New safety boundary: owner/target-course drift after the read-only
+        // probe is rejected by authoritative gates, rolling back even lazy
+        // history. Never follow a changed owner to a different history key.
+        const current = await lockTeachingAssociation(tx, scope, activityId, input);
+        return associateTeachingCourse(tx, scope, activityId, input, current);
       });
     },
 
