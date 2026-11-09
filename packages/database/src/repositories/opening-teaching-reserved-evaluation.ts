@@ -11,6 +11,15 @@ import type { TeachingQuestionSpec } from "./opening-teaching-question";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
+/** Check the immutable Markdown, not its whitespace-stripped arithmetic identity.
+ * One literal '*' survives rendering; multiple unprotected stars can become emphasis.
+ */
+function keepsReservedPromptMeaning(body: string) {
+  if (/[\r\n]/.test(body) || /^\s*(?:-+|[+*]|\d{1,9}[.)])(?:\s|$)/.test(body)) return false;
+  const outsideMath = body.replace(/\$\$[^$\r\n]*\$\$|\$[^$\r\n]*\$/g, "");
+  return (outsideMath.match(/\*/g)?.length ?? 0) <= 1;
+}
+
 /** Private keys are selected ONLY by the actual attempt's issued item, never spec JSON.
  * The public pair resolver cannot represent prompt-only private questions. Until its
  * history consumers support that identity, this verdict cannot grant independence.
@@ -49,7 +58,7 @@ export async function evaluateOpeningTeachingReservedAttempt(tx: TransactionSql,
     || Object.keys(prompt.content).some(field => !["text", "interaction"].includes(field))) return null;
   const body = prompt.content.text, interaction = teachingQuestionInteractionSchema.safeParse(prompt.content.interaction);
   if (typeof body !== "string" || !interaction.success || interaction.data.kind !== "numeric" || interaction.data.unit !== undefined
-    || row.stem_snapshot !== body || !reservedArithmeticIdentity(body)) return null;
+    || row.stem_snapshot !== body || !keepsReservedPromptMeaning(body) || !reservedArithmeticIdentity(body)) return null;
   const privateKey = await readOpeningReservedKey(tx, scope, String(attempt.item_version_id));
   if (!privateKey || privateKey.text !== body || !isDeepStrictEqual(privateKey.interaction, interaction.data)
     || !isDeepStrictEqual(privateKey.sourceRefs, row.source_refs) || !isDeepStrictEqual(spec.sourceRefs, row.source_refs)) return null;
@@ -82,10 +91,11 @@ export async function evaluateOpeningTeachingReservedAttempt(tx: TransactionSql,
     expectedRequirementRevision: binding.revision, taskId: receipt.taskId, expectedTaskVersion: receipt.taskVersion,
     minutes, clientKey: "reserved-evaluation",
   });
-  // The existing evaluator checks the private key against the entire arithmetic
-  // expression. Math delimiters preserve literal '*' when evaluating its grammar.
+  // Only after checking the actual published Markdown may we use its arithmetic
+  // identity. Spell multiplication with × for the numeric evaluator; never add
+  // math delimiters as purported evidence that the published body renders safely.
   const exact = reservedArithmeticIdentity(body)!;
-  const outcome = evaluateTeachingAnswer(`$${exact.expression}$`, interaction.data, privateKey.answer, answer);
+  const outcome = evaluateTeachingAnswer(exact.expression.replace(/\*/g, "×"), interaction.data, privateKey.answer, answer);
   if (!outcome || outcome === "unparseable") return null;
   return { evaluatorVersion: "teaching-key-exact-v1" as const, specVersion: "teaching-key-v1" as const,
     decision: outcome, outcome, reasonCodes: [outcome === "correct" ? "teaching_key_match" : "teaching_key_mismatch"],

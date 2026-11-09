@@ -24,7 +24,7 @@ const ready = (result: CourseRouteActionResult) => {
 };
 // Synthetic PG fixture. Only successful eligibility tests replace the exposure
 // reader; no production coverage marker, provider, paid API or model is created.
-async function setup() {
+async function setup(candidate = { text: '137*19', answer: '2603' }) {
   const rows = backupRows(f.sql, f.scope), sourceId = await rows.source("uploaded", 1), chunkId = randomUUID(), courseId = randomUUID();
   await f.sql`UPDATE opening_sources SET mime='text/plain' WHERE id=${sourceId}`;
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES(${chunkId},${sourceId},1,1,'Rational arithmetic.')`;
@@ -55,7 +55,7 @@ async function setup() {
   if (!task.managed) throw new Error('missing managed task');
   const input = { ...base, taskId: task.taskId, expectedTaskVersion: task.expectedTaskVersion, clientKey: randomUUID() };
   const purposes = createOpeningCourseReadySourcesRepository(f.sql), pin = await purposes.readSourcePurposePin(f.scope, { activityId: origin.id, materialUse: 'teaching' });
-  await saveOpeningReservedCandidates(f.sql, f.scope, origin.id, [{ text: '137*19', interaction: { kind: 'numeric' }, answer: '2603' }],
+  await saveOpeningReservedCandidates(f.sql, f.scope, origin.id, [{ ...candidate, interaction: { kind: 'numeric' } }],
     { assertPinnedContext: tx => purposes.assertSourcePurposePin(f.scope, pin, tx) });
   const service = createCourseRouteService(f.sql, { OPENING_TEACHING_COMPILER_ENABLED: '1' });
   const capacityBefore = await readOpeningLearningCapacity(f.sql, f.scope);
@@ -115,6 +115,38 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
   }
   const feedback = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
   expect(JSON.stringify(feedback)).not.toContain('2603');
+});
+it.each([
+  ['1+2*3+3', '10', 'correct'], ['1+2*3+3', '127', 'incorrect'],
+  ['$1*2*3+4$', '10', 'correct'], ['$1*2*3+4$', '127', 'incorrect'],
+  ['$$1*2*3+4$$', '10', 'correct'], ['$$1*2*3+4$$', '127', 'incorrect'],
+  ['1*2*3+4', '10', 'unverified'], ['1*2*3+4', '127', 'unverified'],
+  ['- 3 + 4', '1', 'unverified'], ['(1+\n1)-1', '1', 'unverified'],
+] as const)('real caller respects immutable published Markdown %j for %s → %s', async (text, submitted, expected) => {
+  const key = text.includes('1*2*3') || text === '1+2*3+3' ? '10' : '1';
+  const x = await setup({ text, answer: key });
+  const issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const content = createOpeningTeachingContentRepository(f.sql);
+  const init = await content.getClientInit(f.scope, issued.activity.id);
+  expect(init?.blocks[0]?.content).toMatchObject({ text });
+  expect(init?.blocks).toHaveLength(1);
+  const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
+  const result = await createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+    clientKey: randomUUID(), answer: submitted, outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
+  expect(result.outcome).toBe(expected);
+  if (expected === 'unverified') {
+    expect(result.verdictSource).not.toBe('deterministic');
+    expect(result.serverEvaluation).toBeUndefined();
+  } else {
+    expect(result).toMatchObject({ verdictSource: 'deterministic', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
+    expect(result.serverEvaluation).toMatchObject({ evaluatorVersion: 'teaching-key-exact-v1', specVersion: 'teaching-key-v1',
+      decision: expected, outcome: expected, reasonCodes: [expected === 'correct' ? 'teaching_key_match' : 'teaching_key_mismatch'] });
+    expect(result.serverEvaluation).not.toHaveProperty('answer');
+    expect(result.serverEvaluation).not.toHaveProperty('keyRef');
+  }
+  const feedback = await content.getClientInit(f.scope, issued.activity.id);
+  expect(feedback?.blocks[0]?.content).toMatchObject({ text });
+  expect(feedback?.blocks).toHaveLength(1);
 });
 it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'protocol'] as const)('rejects reserved submission after %s changes without recording an answer', async changed => {
   const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));

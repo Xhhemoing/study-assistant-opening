@@ -37,6 +37,24 @@ describe("private issued arithmetic authority", () => {
       expect.objectContaining({ taskId: id(15), expectedTaskVersion: 1 }));
     expect(JSON.stringify(result)).not.toMatch(/2603|answer|keyRef/);
   });
+  it.each([
+    ["1*2*3+4", "10"], ["1*2*3+4", "127"], ["1 * 2 * 3 + 4", "10"],
+    ["- 3 + 4", "1"], ["+ 3 + 4", "7"], ["1. + 2", "3"],
+    ["3\n-\n2", "1"], ["(1+\n1)-1", "1"], ["$1\n\n*2*3+4$", "10"], ["1+\r\n2", "3"],
+  ])("withholds authority for unsafe original Markdown %j, including answer %s", async (body, answer) => {
+    const f = setup({ stem_snapshot: body,
+      blocks: [{ id: spec.blockId, type: "prompt", content: { text: body, interaction: { kind: "numeric" } } }] });
+    ports.key.mockResolvedValue({ text: body, answer, interaction: { kind: "numeric" }, sourceRefs: sources });
+    expect(await f.run(answer)).toBeNull();
+    expect(ports.replay).not.toHaveBeenCalled();
+  });
+  it.each(["1+2*3+3", " 计算：1 + 2 × 3 + 3 = ? ", "$1*2*3+4$", "$$1*2*3+4$$"])("grades safe original Markdown %j without changing its body", async body => {
+    const f = setup({ stem_snapshot: body,
+      blocks: [{ id: spec.blockId, type: "prompt", content: { text: body, interaction: { kind: "numeric" } } }] });
+    ports.key.mockResolvedValue({ text: body, answer: "10", interaction: { kind: "numeric" }, sourceRefs: sources });
+    expect(await f.run("10")).toMatchObject({ outcome: "correct", priorFeedback: true });
+    expect(await f.run("127")).toMatchObject({ outcome: "incorrect", priorFeedback: true });
+  });
   it.each(["", "2603+0", "2603 m", "not a number"])("withholds authority for nonnumeric answer %j", async answer => {
     expect(await setup().run(answer)).toBeNull();
   });
