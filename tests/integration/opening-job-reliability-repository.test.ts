@@ -17,19 +17,260 @@ beforeEach(async () => {
 });
 afterAll(async () => { await fixture?.close(); });
 
-async function seed() {
+async function seed(scope = fixture.scope) {
   const sourceId = randomUUID();
   await fixture.sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
-    VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'notes.txt', 'text/plain', 5, ${"a".repeat(64)}, 0, 'uploaded', 'queued')`;
+    VALUES (${sourceId}, ${scope.workspaceId}, 'notes.txt', 'text/plain', 5, ${"a".repeat(64)}, 0, 'uploaded', 'queued')`;
   const jobs = createOpeningJobRepository(fixture.sql);
-  const job = await jobs.createOnce(fixture.scope, {
+  const job = await jobs.createOnce(scope, {
     key: randomUUID(), kind: "parse", payload: { sourceId, sourceVersion: 0 }, privacyEpoch: 0,
   });
   const [outbox] = await fixture.sql`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
-    VALUES (${fixture.scope.workspaceId}, ${job.id}, 'opening.job.enqueue',
+    VALUES (${scope.workspaceId}, ${job.id}, 'opening.job.enqueue',
       ${fixture.sql.json({ kind: "parse", jobId: job.id })}) RETURNING id`;
   return { sourceId, jobs, job, outboxId: outbox!.id as string };
 }
+
+describe("claim history-first coordination", () => {
+  beforeEach(async () => {
+    await fixture.sql`DELETE FROM opening_workspace_history_revisions
+      WHERE workspace_id IN (${fixture.scope.workspaceId},${fixture.otherScope.workspaceId})`;
+  });
+  async function blocked(observer: typeof fixture.sql, writer: number, holder: number, pattern: RegExp) {
+    // Leave room for cleanup inside the unchanged default 5000ms test budget.
+    await vi.waitFor(async () => {
+      const [row] = await observer`SELECT a.query,
+        EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND NOT l.granted) AS waiting,
+        ${holder}=ANY(pg_blocking_pids(a.pid)) AS blocked
+        FROM pg_stat_activity a WHERE a.pid=${writer}`;
+      expect(row).toMatchObject({ waiting: true, blocked: true });
+      expect(row!.query).toMatch(pattern);
+    }, { timeout: 1200, interval: 20 });
+  }
+  async function history(revision?: number) {
+    await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+    if (revision !== undefined) await fixture.sql`INSERT INTO opening_workspace_history_revisions
+      (workspace_id,owner_user_id,revision) VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${revision})`;
+  }
+  async function graph(sourceId: string, jobId: string) {
+    const [row] = await fixture.sql`SELECT
+      (SELECT row_to_json(j) FROM opening_jobs j WHERE id=${jobId}) AS job,
+      (SELECT row_to_json(s) FROM opening_sources s WHERE id=${sourceId}) AS source,
+      (SELECT jsonb_agg(c ORDER BY id) FROM opening_source_chunks c WHERE source_id=${sourceId}) AS chunks`;
+    return row;
+  }
+  async function revision() {
+    return fixture.sql`SELECT owner_user_id,revision::int FROM opening_workspace_history_revisions
+      WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY owner_user_id`;
+  }
+  async function oldChunk(sourceId: string) {
+    await fixture.sql`INSERT INTO opening_source_chunks(source_id,source_version,page,text)
+      VALUES (${sourceId},0,1,'nonempty old graph')`;
+  }
+
+  it("waits on history before workspace/job/source locks; other workspace progresses; exactly one token wins", async () => {
+    const { sourceId, job } = await seed();
+    const other = await seed(fixture.otherScope);
+    await oldChunk(sourceId);
+    await history(19);
+    const before = await graph(sourceId, job.id);
+    const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
+    let pending: ReturnType<ReturnType<typeof createOpeningJobRepository>["claim"]> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions
+          WHERE workspace_id=${fixture.scope.workspaceId} FOR UPDATE`;
+        pending = track(createOpeningJobRepository(writer.sql).claim(job.id));
+        await blocked(observer.sql, writer.pid, holder.pid, /opening_workspace_history_revisions/);
+        await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_jobs WHERE id=${job.id} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_sources WHERE id=${sourceId} FOR UPDATE NOWAIT`;
+        expect(await graph(sourceId, job.id)).toEqual(before);
+        expect(await other.jobs.claim(other.job.id)).toMatchObject({ state: "running", workspaceId: fixture.otherScope.workspaceId });
+      });
+      const claimed = await pending;
+      expect(claimed).toMatchObject({ id: job.id, state: "running", claimToken: expect.any(String) });
+      expect(claimed!.claimToken).toMatch(/^[0-9a-f-]{36}$/);
+      expect(await createOpeningJobRepository(fixture.sql).claim(job.id)).toBeNull();
+      const after = await graph(sourceId, job.id);
+      expect(after!.job).toMatchObject({ claim_token: claimed!.claimToken, state: "running" });
+      expect(after!.source).toMatchObject({ parse_state: "running" });
+      expect(after!.chunks).toEqual(before!.chunks);
+      expect(await revision()).toEqual([{ owner_user_id: fixture.scope.ownerUserId, revision: 19 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each([undefined, 23])("ensures lazy zero / preserves revision %s without advancing; static job owner mismatch still claims", async initial => {
+    const { job, jobs } = await seed();
+    await history(initial);
+    await fixture.sql`UPDATE opening_jobs SET owner_user_id=${fixture.otherScope.ownerUserId} WHERE id=${job.id}`;
+    expect(await jobs.claim(job.id)).toMatchObject({ state: "running", ownerUserId: fixture.otherScope.ownerUserId });
+    expect(await revision()).toEqual([{ owner_user_id: fixture.scope.ownerUserId, revision: initial ?? 0 }]);
+  });
+
+  it.each(["owner", "delete", "job workspace"] as const)("rolls back history and returns null for dynamic %s drift after locating", async drift => {
+    const { job, sourceId } = await seed();
+    await oldChunk(sourceId);
+    await history();
+    const newOwner = randomUUID();
+    if (drift === "owner") await fixture.sql`INSERT INTO users(id,email,display_name,password_hash)
+      VALUES (${newOwner},${`${newOwner}@example.com`},'New owner','test')`;
+    const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
+    let pending: ReturnType<ReturnType<typeof createOpeningJobRepository>["claim"]> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      // An uncommitted ensure blocks the writer's lazy INSERT after its ordinary lookup.
+      await holder.sql.begin(async tx => {
+        await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+          VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},31)`;
+        pending = track(createOpeningJobRepository(writer.sql).claim(job.id));
+        await blocked(observer.sql, writer.pid, holder.pid, /INSERT INTO opening_workspace_history_revisions/);
+        if (drift === "owner") await tx`UPDATE workspaces SET owner_user_id=${newOwner} WHERE id=${fixture.scope.workspaceId}`;
+        if (drift === "delete") await tx`DELETE FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
+        if (drift === "job workspace") await tx`UPDATE opening_jobs SET workspace_id=${fixture.otherScope.workspaceId} WHERE id=${job.id}`;
+        // Remove only the holder's ensure: the writer must create its own zero,
+        // then roll it back when the locked identity no longer matches.
+        await tx`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId}`;
+      });
+      expect(await pending).toBeNull();
+      expect(await revision()).toEqual([]);
+      expect(await fixture.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.otherScope.workspaceId}`).toEqual([]);
+      if (drift !== "delete") {
+        expect((await graph(sourceId, job.id))!.job).toMatchObject({ state: "queued", claim_token: null });
+        expect((await graph(sourceId, job.id))!.source).toMatchObject({ parse_state: "queued" });
+        expect((await graph(sourceId, job.id))!.chunks).toHaveLength(1);
+      }
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      // Restore this fixture's workspace, including deletion cascades, for later tests.
+      await fixture.sql`INSERT INTO workspaces(id,owner_user_id) VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId})
+        ON CONFLICT(id) DO UPDATE SET owner_user_id=EXCLUDED.owner_user_id`;
+      await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.otherScope.workspaceId}`;
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it("retains the workspace SHARE fence after history without locking job/source early", async () => {
+    const { job, sourceId } = await seed();
+    await history(7);
+    const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
+    let pending: ReturnType<ReturnType<typeof createOpeningJobRepository>["claim"]> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE`;
+        pending = track(createOpeningJobRepository(writer.sql).claim(job.id));
+        await blocked(observer.sql, writer.pid, holder.pid, /FOR SHARE OF w/);
+        await tx`SELECT id FROM opening_jobs WHERE id=${job.id} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_sources WHERE id=${sourceId} FOR UPDATE NOWAIT`;
+      });
+      expect(await pending).toMatchObject({ state: "running" });
+      expect(await revision()).toEqual([{ owner_user_id: fixture.scope.ownerUserId, revision: 7 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it("propagates a real history lock timeout without retry or marker writes", async () => {
+    const { job, sourceId } = await seed();
+    await history(5);
+    const before = await graph(sourceId, job.id);
+    const holder = openRaceSession(), writer = openRaceSession();
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      await writer.sql`SET lock_timeout='250ms'`;
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${fixture.scope.workspaceId} FOR UPDATE`;
+        await expect(createOpeningJobRepository(writer.sql).claim(job.id)).rejects.toMatchObject({ code: "55P03" });
+        expect(await graph(sourceId, job.id)).toEqual(before);
+      });
+      expect(await revision()).toEqual([{ owner_user_id: fixture.scope.ownerUserId, revision: 5 }]);
+    } finally { await Promise.all([closeRace(holder.sql), closeRace(writer.sql)]); }
+  });
+
+  it("does not take over outcome_unknown and still ensures history coordination", async () => {
+    const { job, sourceId, jobs } = await seed();
+    await history();
+    await fixture.sql`UPDATE opening_jobs SET state='outcome_unknown' WHERE id=${job.id}`;
+    const before = await graph(sourceId, job.id);
+    expect(await jobs.claim(job.id)).toBeNull();
+    expect(await graph(sourceId, job.id)).toEqual(before);
+    expect(await revision()).toEqual([{ owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+  });
+
+  it("rechecks the original workspace CAS after a concurrent job relocation while waiting on the job", async () => {
+    const { job, sourceId } = await seed();
+    await history();
+    const before = await graph(sourceId, job.id);
+    const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
+    let pending: ReturnType<ReturnType<typeof createOpeningJobRepository>["claim"]> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT id FROM opening_jobs WHERE id=${job.id} FOR UPDATE`;
+        pending = track(createOpeningJobRepository(writer.sql).claim(job.id));
+        await blocked(observer.sql, writer.pid, holder.pid, /UPDATE opening_jobs/);
+        await tx`UPDATE opening_jobs SET workspace_id=${fixture.otherScope.workspaceId} WHERE id=${job.id}`;
+      });
+      expect(await pending).toBeNull();
+      expect(await revision()).toEqual([]);
+      const after = await graph(sourceId, job.id);
+      expect(after!.job).toMatchObject({ workspace_id: fixture.otherScope.workspaceId, state: "queued", claim_token: null });
+      expect(after!.source).toEqual(before!.source);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each([undefined, 29])("rolls back history %s, token, and nonempty source graph on a real SQL cast failure", async initial => {
+    const { job, sourceId, jobs } = await seed();
+    await oldChunk(sourceId);
+    await history(initial);
+    await fixture.sql`UPDATE opening_jobs SET payload=${fixture.sql.json({ sourceId, sourceVersion: 2147483648 })} WHERE id=${job.id}`;
+    const before = await graph(sourceId, job.id);
+    await expect(jobs.claim(job.id)).rejects.toMatchObject({ code: "22003" });
+    expect(await graph(sourceId, job.id)).toEqual(before);
+    expect(await revision()).toEqual(initial === undefined ? [] : [{ owner_user_id: fixture.scope.ownerUserId, revision: initial }]);
+  });
+
+  it.each([
+    ["not_started", "uploaded", 0, "running"], ["queued", "uploaded", 0, "running"],
+    ["running", "uploaded", 0, "running"], ["ready", "uploaded", 0, "ready"],
+    ["failed", "uploaded", 0, "failed"], ["unsupported", "uploaded", 0, "unsupported"],
+    ["queued", "pending", 0, "queued"], ["queued", "uploaded", 1, "queued"],
+  ])("preserves marker eligibility: parse=%s upload=%s version=%s -> %s", async (parse, upload, version, expected) => {
+    const { job, sourceId, jobs } = await seed();
+    await fixture.sql`UPDATE opening_sources SET parse_state=${parse},upload_state=${upload},version=${version} WHERE id=${sourceId}`;
+    expect(await jobs.claim(job.id)).toMatchObject({ state: "running" });
+    expect((await fixture.sql`SELECT parse_state FROM opening_sources WHERE id=${sourceId}`)[0]!.parse_state).toBe(expected);
+  });
+
+  it("does not mark a source in another scope and still claims parse-media with an omitted version", async () => {
+    const { job, sourceId, jobs } = await seed();
+    await fixture.sql`UPDATE opening_sources SET workspace_id=${fixture.otherScope.workspaceId} WHERE id=${sourceId}`;
+    expect(await jobs.claim(job.id)).toMatchObject({ state: "running" });
+    expect((await fixture.sql`SELECT parse_state FROM opening_sources WHERE id=${sourceId}`)[0]!.parse_state).toBe("queued");
+    const media = await seed();
+    await fixture.sql`UPDATE opening_jobs SET kind='parse-media',payload=${fixture.sql.json({ sourceId: media.sourceId })} WHERE id=${media.job.id}`;
+    expect(await jobs.claim(media.job.id)).toMatchObject({ kind: "parse-media", state: "running" });
+    expect((await fixture.sql`SELECT parse_state FROM opening_sources WHERE id=${media.sourceId}`)[0]!.parse_state).toBe("running");
+  });
+
+  it("keeps invalid job UUID casts and missing job/workspace null semantics", async () => {
+    const { jobs, job } = await seed();
+    await expect(jobs.claim("not-a-uuid")).rejects.toMatchObject({ code: "22P02" });
+    expect(await jobs.claim(randomUUID())).toBeNull();
+    await fixture.sql`DELETE FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
+    try { expect(await jobs.claim(job.id)).toBeNull(); }
+    finally { await fixture.sql`INSERT INTO workspaces(id,owner_user_id) VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId})`; }
+  });
+});
 
 describe("durable opening job delivery and execution", () => {
   it("replays semantically identical jsonb payloads with reordered keys", async () => {
