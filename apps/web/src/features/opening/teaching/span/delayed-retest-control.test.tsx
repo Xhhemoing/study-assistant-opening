@@ -317,3 +317,14 @@ it("blocks all scheduling when pending storage cannot be read, then explicitly r
   await act(async () => button("重新确认自动安排").click());
   expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
 });
+
+it("dispatches once after explicit reread recovers empty storage with a valid grant", async () => {
+  const storage = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("read unavailable"); });
+  await render();
+  expect(fetch).not.toHaveBeenCalled(); expect(button("安排 3 天后再练习").disabled).toBe(true);
+  storage.mockRestore();
+  await act(async () => button("重新读取安排记录").click());
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe("/api/opening/teaching/span/delayed/automatic");
+  expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body)).expectedGrantRevision).toBe(3);
+});

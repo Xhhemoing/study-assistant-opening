@@ -30,12 +30,13 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   const [blocked, setBlocked] = useState(false);
   const [storageUnreadable, setStorageUnreadable] = useState(false), [reloadToken, setReloadToken] = useState(0);
   const busy = useRef(false), epoch = useRef(0);
+  const storageUnreadableNow = useRef(false);
   const autoGrantRevision = useRef<number | null>(null);
   function triggerIdentity(): DelayedRetestIdentity {
     return { courseId: record.courseId, observationId: record.id, rootId: record.rootObservationId ?? record.id, grantRevision: autoGrantRevision.current! };
   }
   async function schedule(automatic = false) {
-    if (busy.current || storageUnreadable || automatic && autoGrantRevision.current === null) return;
+    if (busy.current || storageUnreadableNow.current || automatic && autoGrantRevision.current === null) return;
     const current = epoch.current;
     const confirmingUnknownAutomatic = automatic && unknownMode === "automatic";
     busy.current = true; setPending(true); setError("");
@@ -96,7 +97,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   // 授权读取不能替代服务器对账号开关、课程、预算与取消历史的事务核对。
   useEffect(() => {
     const current = ++epoch.current;
-    setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); setBlocked(false); setStorageUnreadable(false); autoGrantRevision.current = null;
+    setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); setBlocked(false); storageUnreadableNow.current = false; setStorageUnreadable(false); autoGrantRevision.current = null;
     busy.current = false; setPending(false);
     if (!shouldAutoScheduleRetest(record)) return () => { epoch.current += 1; };
     // Recover an unknown write before preference I/O. Preference failure cannot
@@ -110,7 +111,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
         setUnknownMode("automatic");
       }
     } catch (reason) {
-      setStorageUnreadable(true);
+      storageUnreadableNow.current = true; setStorageUnreadable(true);
       setError(userFacingMessage(reason, "自动安排记录暂时无法读取，请先查看今日任务。"));
       return () => { epoch.current += 1; };
     }
