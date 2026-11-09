@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningSourceRepository } from "./opening-sources";
+import { createOpeningSourceRepository, OpeningSourceError } from "./opening-sources";
 
 const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222" };
 const id = "33333333-3333-4333-8333-333333333333";
@@ -8,15 +8,34 @@ const now = new Date("2026-10-17T12:00:00Z");
 const input = { name: "test.pdf", mime: "application/pdf" as const, bytes: 4, sha256: "a".repeat(64) };
 const pending = { id, workspace_id: scope.workspaceId, ...input, version: 0, upload_state: "pending", parse_state: "not_started", error: null, created_at: now };
 
-function database(usage = { bytes: "0", objects: "0" }, row: Record<string, unknown> = pending) {
-  let transaction = false, locked = false, checked = false, inserts = 0;
+function database(usage = { bytes: "0", objects: "0" }, row: Record<string, unknown> = pending,
+  fault: { missingOwnerAt?: number; ownerError?: Error; historyError?: Error } = {}) {
+  let transaction = false, locked = false, checked = false, inserts = 0, ownerReads = 0, historyLocked = false;
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
     if (query.startsWith("SELECT id FROM workspaces")) {
       expect(transaction).toBe(true);
-      locked = true;
+      ownerReads += 1;
+      if (fault.ownerError) throw fault.ownerError;
+      if (ownerReads === fault.missingOwnerAt) return [];
+      if (query.includes("FOR NO KEY UPDATE")) {
+        // createWithParseJob still uses its original admission path.
+        if (ownerReads > 1) expect(historyLocked).toBe(true);
+        locked = true;
+      }
       return [{ id: scope.workspaceId }];
     }
+    if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) {
+      expect(transaction && !locked).toBe(true);
+      return [];
+    }
+    if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) {
+      expect(transaction && !locked).toBe(true);
+      if (fault.historyError) throw fault.historyError;
+      historyLocked = true;
+      return [{ revision: 0 }];
+    }
+    if (query.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return [];
     if (query.startsWith("WITH quota_objects AS")) {
       expect(transaction && locked).toBe(true);
       checked = true;
@@ -28,6 +47,7 @@ function database(usage = { bytes: "0", objects: "0" }, row: Record<string, unkn
       return [pending];
     }
     if (query.startsWith("SELECT * FROM opening_sources")) {
+      if (query.includes("FOR UPDATE")) return [];
       return values[0] === id && values[1] === scope.workspaceId && values[3] === scope.ownerUserId ? [row] : [];
     }
     if (query.startsWith("INSERT INTO opening_jobs")) return [{ id, state: "queued" }];
@@ -43,6 +63,34 @@ function database(usage = { bytes: "0", objects: "0" }, row: Record<string, unkn
 }
 
 describe("source admission", () => {
+  it.each([
+    { uploadId: id, message: "Upload operation unavailable" },
+    { uploadId: undefined, message: "Workspace not found" },
+  ])("preserves typed owner errors at every owner check (uploadId=$uploadId)", async ({ uploadId, message }) => {
+    for (const missingOwnerAt of [1, 2, 3]) {
+      const db = database(undefined, undefined, { missingOwnerAt });
+      const result = createOpeningSourceRepository(db.sql).create(scope, { ...input, uploadId });
+      await expect(result).rejects.toBeInstanceOf(OpeningSourceError);
+      await expect(result).rejects.toMatchObject({ code: "NOT_FOUND", message });
+      expect(db.inserts()).toBe(0);
+    }
+  });
+
+  it.each([undefined, id])("preserves input SQL errors before history and propagates non-target errors (uploadId=%s)", async uploadId => {
+    const invalidUuid = Object.assign(new Error('invalid input syntax for type uuid: "invalid"'), { code: "22P02" });
+    const db = database(undefined, undefined, { ownerError: invalidUuid });
+    await expect(createOpeningSourceRepository(db.sql).create(scope, { ...input, uploadId })).rejects.toBe(invalidUuid);
+    for (const historyError of [
+      Object.assign(new Error("could not obtain lock on row"), { code: "55P03" }),
+      Object.assign(new Error("another entity not found"), { code: "NOT_FOUND" }),
+      new Error("workspace not found"),
+    ]) {
+      const failed = database(undefined, undefined, { historyError });
+      await expect(createOpeningSourceRepository(failed.sql).create(scope, { ...input, uploadId })).rejects.toBe(historyError);
+      expect(failed.inserts()).toBe(0);
+    }
+  });
+
   it.each(["create", "createWithParseJob"] as const)("holds admission and %s insertion in the same transaction", async method => {
     const db = database({ bytes: "6", objects: "1" });
     const repo = createOpeningSourceRepository(db.sql, { quota: { maxBytes: 10, maxObjects: 2 } });

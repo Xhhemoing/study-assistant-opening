@@ -200,6 +200,23 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   return {
     async create(scope, input) {
       return sql.begin(async tx => {
+        const unavailable = input.uploadId ? "Upload operation unavailable" : "Workspace not found";
+        // Preserve the original owner/UUID boundary before history SQL, without
+        // taking a business row lock ahead of the workspace history fence.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId}`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", unavailable);
+        try {
+          await lockWorkspaceLearningHistory(tx, scope);
+        } catch (error) {
+          // Ownership can change after the plain lookup. Translate only the
+          // helper's exact workspace error; database/lock failures must escape.
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found") {
+            throw new OpeningSourceError("NOT_FOUND", unavailable);
+          }
+          throw error;
+        }
         if (input.uploadId) {
           // A replay must not reserve quota again. The existing workspace lock
           // serializes same-owner requests before consulting the source PK.
@@ -275,10 +292,38 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
 
     async issueUploadTicket(scope, id, sign) {
       return sql.begin(async tx => {
+        // Preserve the original source-only boundary before coordinating history.
+        // The supplied owner is not authorization input for this method.
+        const initial = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId}`;
+        if (!initial.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        if (initial[0]!.upload_state !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        const owners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        const ownerUserId = owners[0]!.owner_user_id as string;
+        try {
+          await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId });
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found") {
+            const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (!current.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+            throw new OpeningSourceError("CONFLICT", "Upload history coordination changed");
+          }
+          throw error;
+        }
+        // FOR SHARE (not KEY SHARE) fences non-key owner updates through sign
+        // and commit. Dynamic owner drift is a coordination conflict, not auth.
+        const currentOwners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
+        if (!currentOwners.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        if (currentOwners[0]!.owner_user_id !== ownerUserId) {
+          throw new OpeningSourceError("CONFLICT", "Upload history coordination changed");
+        }
         const rows = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
         if (!rows.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
         const source = mapSource(rows[0] as Record<string, unknown>);
         if (source.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        // Awaiting the existing signer holds these locks. DB rollback cannot
+        // revoke a ticket if a supplied signer has already issued it externally.
         const ticket = await sign(source);
         await tx`UPDATE opening_sources SET upload_url_expires_at=${new Date(ticket.expiresAt)} WHERE id=${id} AND workspace_id=${scope.workspaceId}`;
         return { source, ...ticket };
@@ -388,11 +433,62 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         if (!rows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         return mapSource(rows[0] as Record<string, unknown>);
       };
-      if (!scope.jobExecution) return write(sql);
-      return sql.begin(async (tx) => {
-        await lockOpeningJobExecution(tx, scope);
-        return write(tx as unknown as Sql);
-      });
+      // Identity-only sentinel: roll back a lazy history ensure if the workspace
+      // disappears before its business lock, then preserve the source UUID error.
+      const workspaceDeleted = new Error("parse state workspace deleted");
+      try {
+        return await sql.begin(async (tx) => {
+          const execution = scope.jobExecution;
+          let ownerUserId: string;
+          if (execution) {
+            // Same predicates/order as the original gate, but no business lock
+            // before history. Stale execution still wins over missing/bad source.
+            const workspaces = await tx`SELECT id FROM workspaces
+              WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+                AND privacy_epoch = ${execution.privacyEpoch}`;
+            const jobs = workspaces.length ? await tx`SELECT id FROM opening_jobs
+              WHERE id = ${execution.id} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+                AND state = 'running' AND claim_token = ${execution.token}` : [];
+            if (!jobs.length) throw Object.assign(new Error("job execution is no longer current"), { code: "CONFLICT" });
+            ownerUserId = scope.ownerUserId;
+          } else {
+            // Caller owner was never auth input here (including empty legacy
+            // owners). Canonical owner is only the internal history key.
+            const owners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (!owners.length) return write(tx as unknown as Sql);
+            ownerUserId = owners[0]!.owner_user_id as string;
+          }
+          try {
+            await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId });
+          } catch (failure) {
+            if (failure instanceof Error && "code" in failure && failure.code === "NOT_FOUND"
+              && failure.message === "workspace not found") {
+              if (execution) throw Object.assign(new Error("job execution is no longer current"), { code: "CONFLICT" });
+              const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+              if (!current.length) return write(tx as unknown as Sql);
+              throw new OpeningSourceError("CONFLICT", "Parse state history coordination changed");
+            }
+            throw failure;
+          }
+          if (execution) {
+            // Keep the original locked workspace -> job reread after history.
+            await lockOpeningJobExecution(tx, scope);
+          } else {
+            const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
+            if (!current.length) throw workspaceDeleted;
+            if (current[0]!.owner_user_id !== ownerUserId) {
+              throw new OpeningSourceError("CONFLICT", "Parse state history coordination changed");
+            }
+          }
+          return write(tx as unknown as Sql);
+        });
+      } catch (failure) {
+        if (failure !== workspaceDeleted) throw failure;
+        // No UPDATE after rollback: retain invalid UUID cast precedence without
+        // publishing to a recreated workspace or leaving an orphan history row.
+        await sql`SELECT ${id}::uuid, ${scope.workspaceId}::uuid`;
+        throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
+      }
     },
 
     async createWithParseJob(scope, input) {

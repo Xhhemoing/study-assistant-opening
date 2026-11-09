@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createOpeningSourceActionsRepository, createOpeningSourceRepository } from "@aistudy/database";
+import { createOpeningSourceActionsRepository, createOpeningSourceRepository, OpeningSourceError } from "@aistudy/database";
 import { createOpeningMediaSegmentsService } from "../../apps/web/src/features/opening/media/media-segments-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
@@ -10,6 +10,49 @@ afterEach(async () => { vi.unstubAllEnvs(); await f?.close(); });
 const upload = (bytes: number) => ({ name: "quota.pdf", mime: "application/pdf" as const, bytes, sha256: "a".repeat(64) });
 
 describe("workspace upload quota with real SQL", () => {
+  it.each([false, true])("rolls back lazy history on quota and insert failures (uploadId=%s)", async withId => {
+    const operation = { ...upload(4), ...(withId ? { uploadId: randomUUID() } : {}) };
+    const history = () => f.sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`;
+    const full = createOpeningSourceRepository(f.sql, { quota: { maxBytes: 3, maxObjects: 1 } });
+    await expect(full.create(f.scope, operation)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await history()).toEqual([]);
+    const repo = createOpeningSourceRepository(f.sql);
+    await expect(repo.create(f.scope, { ...operation, bytes: 0 })).rejects.toMatchObject({ code: "23514" });
+    expect(await history()).toEqual([]);
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+    const created = await repo.create(f.scope, operation);
+    expect(created).toMatchObject({ bytes: 4, uploadState: "pending", parseState: "not_started", version: 0 });
+    expect(await history()).toEqual([{ revision: "0" }]);
+    await f.sql`UPDATE opening_workspace_history_revisions SET revision=23 WHERE workspace_id=${f.scope.workspaceId}`;
+    await expect(full.create(f.scope, { ...operation, uploadId: withId ? randomUUID() : undefined }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await history()).toEqual([{ revision: "23" }]);
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: created.id }]);
+  });
+
+  it.each([false, true])("preserves original owner, missing workspace and UUID error priority (uploadId=%s)", async withId => {
+    const operation = { ...upload(4), ...(withId ? { uploadId: randomUUID() } : {}) };
+    const repo = createOpeningSourceRepository(f.sql);
+    const message = withId ? "Upload operation unavailable" : "Workspace not found";
+    for (const scope of [
+      { ...f.scope, ownerUserId: f.otherScope.ownerUserId },
+      { ...f.scope, workspaceId: randomUUID() },
+    ]) {
+      // Invalid source identity must not precede the original owner failure.
+      const result = repo.create(scope, { ...operation, ...(withId ? { uploadId: "invalid" } : {}) });
+      await expect(result).rejects.toBeInstanceOf(OpeningSourceError);
+      await expect(result).rejects.toMatchObject({ code: "NOT_FOUND", message });
+    }
+    for (const scope of [
+      { ...f.scope, workspaceId: "invalid" }, { ...f.scope, ownerUserId: "invalid" },
+    ]) {
+      await expect(repo.create(scope, operation)).rejects.toMatchObject({ code: "22P02" });
+    }
+    if (withId) await expect(repo.create(f.scope, { ...operation, uploadId: "invalid" })).rejects.toMatchObject({ code: "22P02" });
+    expect(await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+  });
+
   it.each(["create", "createWithParseJob"] as const)("serializes concurrent %s reservations under the byte limit", async method => {
     const repo = createOpeningSourceRepository(f.sql, { quota: { maxBytes: 10, maxObjects: 10 } });
     const create = () => method === "create" ? repo.create(f.scope, upload(6))
@@ -27,8 +70,9 @@ describe("workspace upload quota with real SQL", () => {
     const repo = createOpeningSourceRepository(f.sql, { quota: { maxBytes: 100, maxObjects: 1 } });
     const first = await repo.create(f.scope, upload(4));
     await expect(repo.create(f.scope, upload(4))).rejects.toMatchObject({ code: "CONFLICT" });
-    await expect(repo.create({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, upload(4)))
-      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    const wrongOwner = repo.create({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, upload(4));
+    await expect(wrongOwner).rejects.toBeInstanceOf(OpeningSourceError);
+    await expect(wrongOwner).rejects.toMatchObject({ code: "NOT_FOUND", message: "Workspace not found" });
     await expect(repo.getPendingUpload(f.otherScope, first.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(repo.getPendingUpload({ ...f.scope, ownerUserId: f.otherScope.ownerUserId }, first.id))
       .rejects.toMatchObject({ code: "NOT_FOUND" });
