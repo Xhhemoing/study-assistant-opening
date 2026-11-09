@@ -235,6 +235,45 @@ it.each(["teaching", "validation", "retest"])("restores only reserved %s identit
   expect(mocks.draft!.attemptId).toBe(purpose === "teaching" ? null : restored.id);
   expect(fetch).not.toHaveBeenCalled();
 });
+it.each([false, true])("recovers the exact restored attempt with an existing durable start (sealed=%s)", async sealed => {
+  const input: ComponentProps<typeof SpanPractice> = { ...props, restoredAttempt: attempt,
+    session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-independent", status: "active", revision: 3, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt } };
+  mocks.draft = emptyPracticeDraft(spanPracticeScope(id, undefined, undefined, id, props.problemId), { sourceId: id, spanProblemId: props.problemId, answer: "saved learner answer" });
+  mocks.draft.start = { clientKey: "original-start", sessionId: id, sessionInput: null, createInput: { sessionId: id, clientKey: "original-start", spanExercise: { sourceId: id, problemId: props.problemId, version: 1 } } };
+  mocks.draft.attemptId = id;
+  if (sealed) mocks.draft.submission = { attemptId: id, input: { clientKey: "original-submit", answer: "sealed answer", assistance: "independent", outcome: "unverified", verdictSource: "self_report" } };
+  const original = structuredClone(mocks.draft);
+  render(input); await settle(); const tree = render(input);
+  expect(mocks.readRecord).toHaveBeenCalledExactlyOnceWith(mocks, id, attempt, null);
+  expect(props.onAttempt).toHaveBeenCalledWith(attempt);
+  expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  expect(mocks.draft.fields.answer).toBe(original.fields.answer);
+  expect(mocks.draft.submission).toEqual(original.submission);
+  expect(mocks.draft.start.clientKey).toBe("original-start");
+  expect(find(tree, node => node.type === HintLadder)).toBeDefined();
+});
+it("shows a definite 409 as blocked with explicit reread instead of repeating question creation", async () => {
+  const reload = vi.fn(), input = { ...props, onReload: reload };
+  vi.mocked(fetch).mockResolvedValue(Response.json({ error: { code: "CONFLICT", message: "授权或课程状态已变化，请重新读取。" } }, { status: 409 }));
+  render(input); await settle(); const tree = render(input);
+  expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(fetch).toHaveBeenCalledTimes(1);
+  expect(find(tree, node => node.props.role === "alert")?.props.children).toBe("授权或课程状态已变化，请重新读取。");
+  expect(find(tree, node => node.type === "button" && node.props.children === "重新读取本节")).toBeDefined();
+  render(input); await settle(); expect(fetch).toHaveBeenCalledTimes(1);
+});
+it("blocks a mismatched restored attempt without replacing the original sealed draft", async () => {
+  const other = "22222222-2222-4222-8222-222222222222";
+  const reload = vi.fn();
+  const input: ComponentProps<typeof SpanPractice> = { ...props, onReload: reload, restoredAttempt: attempt,
+    session: { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: props.intent, moveId: "self-independent", status: "active", revision: 3, retestId: null, createdAt: attempt.startedAt, updatedAt: attempt.startedAt } };
+  mocks.draft!.attemptId = other;
+  const original = structuredClone(mocks.draft);
+  render(input); await settle(); const tree = render(input);
+  expect(mocks.readRecord).not.toHaveBeenCalled(); expect(mocks.createAttempt).not.toHaveBeenCalled();
+  expect(mocks.draft).toEqual(original);
+  const recheck = find(tree, node => node.type === "button" && node.props.children === "重新读取本节")!;
+  (recheck.props.onClick as () => void)(); expect(reload).toHaveBeenCalledOnce();
+});
 it("isolates a practice draft by lesson, step and exact new-evidence event", () => {
   const activity = "22222222-2222-4222-8222-222222222222";
   const other = "33333333-3333-4333-8333-333333333333";
