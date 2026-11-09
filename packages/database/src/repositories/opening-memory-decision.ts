@@ -2,6 +2,7 @@ import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { lockOwnedWorkspace } from "./opening-memory-admission";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 
 export function confirmOwnedMemory(
@@ -12,6 +13,19 @@ export function confirmOwnedMemory(
   clientKey: string,
 ): Promise<MemoryItem> {
   return sql.begin(async (tx) => {
+    const owners = await tx`SELECT id FROM workspaces
+      WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+    if (!owners.length) throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+    // Fence before business locks; retain the original locked ownership re-read.
+    try {
+      await lockWorkspaceLearningHistory(tx, scope);
+    } catch (error) {
+      if (error instanceof Error && "code" in error
+        && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+        throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+      }
+      throw error;
+    }
     await lockOwnedWorkspace(tx, scope);
     const rows = await tx`
       SELECT * FROM opening_memories
@@ -52,6 +66,19 @@ export function rejectOwnedMemory(
   clientKey: string,
 ): Promise<MemoryItem> {
   return sql.begin(async (tx) => {
+    const owners = await tx`SELECT id FROM workspaces
+      WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+    if (!owners.length) throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+    // Fence before business locks; retain the original locked ownership re-read.
+    try {
+      await lockWorkspaceLearningHistory(tx, scope);
+    } catch (error) {
+      if (error instanceof Error && "code" in error
+        && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+        throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+      }
+      throw error;
+    }
     await lockOwnedWorkspace(tx, scope);
     const rows = await tx`
       SELECT * FROM opening_memories
