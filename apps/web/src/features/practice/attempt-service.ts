@@ -9,6 +9,7 @@ import {
   createLearningEventRepository,
   createPracticeContentRepository,
   createPracticeSessionRepository,
+  lockWorkspaceLearningHistory,
   PracticeContentRepositoryError,
 } from "@aistudy/database";
 import { gradePracticeAnswer } from "@aistudy/domain";
@@ -53,11 +54,43 @@ export async function submitAttemptForPrincipal(
     const sessions = createPracticeSessionRepository(client);
     const content = createPracticeContentRepository(client);
     const events = createLearningEventRepository(client);
+    // Keep legacy owner/session/item/replay errors ahead of the new history wait,
+    // without acquiring business locks. The original locked reads still run below.
+    const [owner] = await client`SELECT owner_user_id FROM workspaces WHERE id=${principal.workspaceId} LIMIT 1`;
+    if (!owner) throw new PracticeContentRepositoryError("NOT_FOUND", `Workspace not found: ${principal.workspaceId}`);
+    if (owner.owner_user_id !== principal.userId) {
+      throw new PracticeContentRepositoryError("WORKSPACE_MISMATCH", "Practice session owner must match workspace owner");
+    }
+    const [candidate] = await client`SELECT practice_item_id,content_version,submitted_at FROM practice_sessions
+      WHERE workspace_id=${principal.workspaceId} AND owner_user_id=${principal.userId} AND id=${parsed.practiceSessionId} LIMIT 1`;
+    if (!candidate) throw new PracticeContentRepositoryError("NOT_FOUND", `Practice session ${parsed.practiceSessionId} was not found`);
+    const precheckedItem = await content.getGradableVersion({
+      workspaceId: principal.workspaceId, itemId: String(candidate.practice_item_id), version: Number(candidate.content_version),
+    });
+    const replay = await events.findByIdempotency({
+      workspaceId: principal.workspaceId, ownerUserId: principal.userId, idempotencyKey: parsed.idempotencyKey,
+    });
+    if (replay) learningEventToAttempt(replay, precheckedItem.id);
+    else if (candidate.submitted_at) {
+      throw new PracticeContentRepositoryError("CONFLICT", "Submitted session cannot be reused with a different idempotency key");
+    }
+    await lockWorkspaceLearningHistory(tx, { workspaceId: principal.workspaceId, ownerUserId: principal.userId });
+    // Hold the validated owner stable through event + submission. Drift during the
+    // new wait is rejected, never followed to another history key.
+    const [lockedOwner] = await client`SELECT owner_user_id FROM workspaces WHERE id=${principal.workspaceId} FOR SHARE`;
+    if (!lockedOwner) throw new PracticeContentRepositoryError("NOT_FOUND", `Workspace not found: ${principal.workspaceId}`);
+    if (lockedOwner.owner_user_id !== principal.userId) {
+      throw new PracticeContentRepositoryError("CONFLICT", "Practice session owner changed while waiting for history");
+    }
     const session = await sessions.lock({
       workspaceId: principal.workspaceId,
       ownerUserId: principal.userId,
       sessionId: parsed.practiceSessionId,
     });
+    // A changed session binding is a new safe rejection boundary, not a key to retry.
+    if (session.practiceItemId !== candidate.practice_item_id || session.contentVersion !== Number(candidate.content_version)) {
+      throw new PracticeContentRepositoryError("CONFLICT", "Practice session content changed while waiting for history");
+    }
     const item = await content.getGradableVersion({
       workspaceId: principal.workspaceId,
       itemId: session.practiceItemId,

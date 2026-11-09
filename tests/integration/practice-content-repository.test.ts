@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations,
   createIdentityRepository,
+  createLearningEventRepository,
+  lockWorkspaceLearningHistory,
   createPracticeContentRepository,
   createPracticeSessionRepository,
   createSqlClient,
@@ -11,7 +13,12 @@ import {
   type PracticeContentRepository,
   type PracticeSessionRepository,
 } from "@aistudy/database";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
+import { submitAttemptForPrincipal } from "../../apps/web/src/features/practice/attempt-service";
+import type { AuthRuntime } from "../../apps/web/src/features/auth/service";
+import type { Principal } from "../../apps/web/src/lib/authorization";
+import { openRaceSession } from "./opening-race-helpers";
+import { assertHistoryWait, observeTransaction, signal } from "./outer-caller-history-fixture";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -26,6 +33,7 @@ describe("practice content repository", () => {
   let workspaceId: string;
   let ownerUserId: string;
   let otherWorkspaceId: string;
+  let otherOwnerUserId: string;
   let packageId: string;
   let itemId: string;
 
@@ -54,11 +62,160 @@ describe("practice content repository", () => {
     workspaceId = owner.workspace.id;
     ownerUserId = owner.user.id;
     otherWorkspaceId = other.workspace.id;
+    otherOwnerUserId = other.user.id;
     ({ packageId, itemId } = await seedItem(sql, workspaceId));
   });
 
   afterAll(async () => {
     await sql.end({ timeout: 5 });
+  });
+
+  const scope = () => ({ workspaceId, ownerUserId });
+  const principal = () => ({ workspaceId, userId: ownerUserId }) as Principal;
+  const runtime = (client = sql) => ({ sql: client, learningEvents: createLearningEventRepository(sql) }) as AuthRuntime;
+  const body = (sessionId: string, key = "outer-submit-key") => ({
+    practiceSessionId: sessionId, answer: "极限", confidence: 3, errorCause: null, idempotencyKey: key,
+  });
+  const history = () => sql`SELECT owner_user_id,revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+
+  it.each(["lazy", "nonzero", "other-workspace"])("outer submit history barrier %s preserves grading/replay/revision", async mode => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    await sessions.recordHint({ workspaceId, ownerUserId, sessionId: session.id });
+    const courseId = randomUUID();
+    await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${workspaceId},'Nonempty graph',${courseId})`;
+    const snapshot = { nodes: [{ id: randomUUID(), label: "Existing concept" }], edges: [] };
+    await sql`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+      VALUES(${workspaceId},${ownerUserId},${courseId},1,${sql.json(snapshot)},'{}'::jsonb)`;
+    if (mode !== "lazy") {
+      await sql.begin(tx => lockWorkspaceLearningHistory(tx, scope()));
+      await sql`UPDATE opening_workspace_history_revisions SET revision=19 WHERE workspace_id=${workspaceId}`;
+    }
+    const holder = openRaceSession(), writer = openRaceSession();
+    const held = signal(), release = signal();
+    let holderTx!: TransactionSql;
+    let holding: Promise<unknown> | undefined, writing: Promise<unknown> | undefined;
+    try {
+      await Promise.all([holder.ready, writer.ready]);
+      holding = holder.sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, mode === "other-workspace"
+          ? { workspaceId: otherWorkspaceId, ownerUserId: otherOwnerUserId } : scope());
+        holderTx = tx; held.resolve(); await release.ready;
+      });
+      holding.catch(held.resolve);
+      await Promise.race([held.ready, holding]);
+      let finished = false;
+      writing = submitAttemptForPrincipal(runtime(writer.sql), principal(), body(session.id));
+      writing.then(() => { finished = true; }, () => { finished = true; });
+      if (mode !== "other-workspace") {
+        await assertHistoryWait(sql, writer.pid, holder.pid, () => finished);
+        await holderTx`SELECT id FROM workspaces WHERE id=${workspaceId} FOR UPDATE NOWAIT`;
+        await holderTx`SELECT id FROM practice_sessions WHERE id=${session.id} FOR UPDATE NOWAIT`;
+        await holderTx`SELECT id FROM practice_items WHERE id=${itemId} FOR UPDATE NOWAIT`;
+        expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(0);
+        expect(await sql`SELECT submitted_at FROM practice_sessions WHERE id=${session.id}`).toEqual([{ submitted_at: null }]);
+        release.resolve(); await holding;
+      }
+      await expect(writing).resolves.toMatchObject({ event: { correct: true, assisted: true, hintCount: 1, contentVersion: 2 } });
+      const replay = await submitAttemptForPrincipal(runtime(), principal(), body(session.id));
+      expect(replay.event).toMatchObject({ correct: true, assisted: true, hintCount: 1, contentVersion: 2 });
+      await expect(submitAttemptForPrincipal(runtime(), principal(), body(session.id, "different-submit-key")))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(1);
+      expect(await history()).toEqual([{ owner_user_id: ownerUserId, revision: mode === "lazy" ? "0" : "19" }]);
+      expect(await sql`SELECT snapshot FROM opening_course_knowledge WHERE course_id=${courseId}`).toEqual([{ snapshot }]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([holding, writing].filter(Boolean));
+      await Promise.all([holder.sql.end({ timeout: 5 }), writer.sql.end({ timeout: 5 })]);
+    }
+  });
+
+  it("outer submit rolls back event, submitted flag and lazy history after a real SQL failure", async () => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    let updated = false;
+    const client = observeTransaction(sql, async (query, tx) => {
+      if (query.startsWith("UPDATE practice_sessions")) {
+        expect(await tx`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(1);
+        expect((await tx`SELECT submitted_at FROM practice_sessions WHERE id=${session.id}`)[0]!.submitted_at).not.toBeNull();
+        updated = true;
+        await tx`SELECT 1/0`;
+      }
+    });
+    await expect(submitAttemptForPrincipal(runtime(client), principal(), body(session.id))).rejects.toMatchObject({ code: "22012" });
+    expect(updated).toBe(true);
+    expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(0);
+    expect(await sql`SELECT submitted_at FROM practice_sessions WHERE id=${session.id}`).toEqual([{ submitted_at: null }]);
+    expect(await history()).toEqual([]);
+  });
+
+  it("outer submit preserves owner/missing/UUID priority and does not ensure history on invalid input", async () => {
+    const sessionId = randomUUID();
+    await expect(submitAttemptForPrincipal(runtime(), { ...principal(), userId: otherOwnerUserId }, body(sessionId)))
+      .rejects.toMatchObject({ code: "WORKSPACE_MISMATCH", message: "Practice session owner must match workspace owner" });
+    await expect(submitAttemptForPrincipal(runtime(), principal(), body(sessionId)))
+      .rejects.toMatchObject({ code: "NOT_FOUND", message: `Practice session ${sessionId} was not found` });
+    await expect(submitAttemptForPrincipal(runtime(), { ...principal(), workspaceId: "bad-uuid" }, body(sessionId)))
+      .rejects.toMatchObject({ code: "22P02" });
+    expect(await history()).toEqual([]);
+  });
+
+  it("outer submit rejects session content drift after history without event or lazy counter", async () => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    let changed = false;
+    const client = observeTransaction(sql, async query => {
+      if (!changed && query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) {
+        changed = true;
+        await sql`UPDATE practice_sessions SET content_version=1 WHERE id=${session.id}`;
+      }
+    });
+    await expect(submitAttemptForPrincipal(runtime(client), principal(), body(session.id)))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "Practice session content changed while waiting for history" });
+    expect(changed).toBe(true);
+    expect(await history()).toEqual([]);
+    expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(0);
+    expect(await sql`SELECT submitted_at FROM practice_sessions WHERE id=${session.id}`).toEqual([{ submitted_at: null }]);
+  });
+
+  it.each(["owner", "deleted-session"])("outer submit safely rejects %s drift after history", async drift => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    if (drift === "owner") await sql`DELETE FROM workspaces WHERE id=${otherWorkspaceId}`;
+    let changed = false;
+    const client = observeTransaction(sql, async query => {
+      if (!changed && query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) {
+        changed = true;
+        if (drift === "owner") await sql`UPDATE workspaces SET owner_user_id=${otherOwnerUserId} WHERE id=${workspaceId}`;
+        else await sql`DELETE FROM practice_sessions WHERE id=${session.id}`;
+      }
+    });
+    await expect(submitAttemptForPrincipal(runtime(client), principal(), body(session.id)))
+      .rejects.toMatchObject(drift === "owner"
+        ? { code: "CONFLICT", message: "Practice session owner changed while waiting for history" }
+        : { code: "NOT_FOUND", message: `Practice session ${session.id} was not found` });
+    expect(changed).toBe(true);
+    expect(await history()).toEqual([]);
+    expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(0);
+  });
+
+  it("outer submit passes through real 55P03 and rolls back lazy history", async () => {
+    const session = await sessions.start({ workspaceId, ownerUserId, practiceItemId: itemId });
+    const blocker = openRaceSession(), held = signal(), release = signal();
+    let holding: Promise<unknown> | undefined;
+    try {
+      await blocker.ready;
+      holding = blocker.sql.begin(async tx => {
+        await tx`SELECT id FROM practice_sessions WHERE id=${session.id} FOR UPDATE`;
+        held.resolve(); await release.ready;
+      });
+      holding.catch(held.resolve); await Promise.race([held.ready, holding]);
+      const client = observeTransaction(sql, async (query, tx) => {
+        if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) {
+          await tx`SELECT id FROM practice_sessions WHERE id=${session.id} FOR UPDATE NOWAIT`;
+        }
+      });
+      await expect(submitAttemptForPrincipal(runtime(client), principal(), body(session.id))).rejects.toMatchObject({ code: "55P03" });
+      expect(await history()).toEqual([]);
+      expect(await sql`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toHaveLength(0);
+    } finally { release.resolve(); await holding; await blocker.sql.end({ timeout: 5 }); }
   });
 
   it("keeps package and item reads inside the principal workspace", async () => {
