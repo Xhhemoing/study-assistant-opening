@@ -333,6 +333,11 @@ describe("Opening linked note revision proposal privacy", () => {
   it.each(["get", "review", "resolve"] as const)("serializes %s behind in-flight permanent deletion before exposing or changing snapshots", async operation => {
     const fixture = await proposalFixture(operation === "resolve" ? "conflicted" : "pending");
     const before = await proposalState(fixture.documentId);
+    // Review must exercise the first (uncommitted) history INSERT; resolving a
+    // conflict already created history during review and must wait on its row.
+    expect(await sql`SELECT revision FROM opening_workspace_history_revisions
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`)
+      .toHaveLength(operation === "resolve" ? 1 : 0);
     const gate = openRaceSession(), deletion = openRaceSession(), reader = openRaceSession();
     let unlock = () => {};
     const pending: Promise<unknown>[] = [];
@@ -358,7 +363,24 @@ describe("Opening linked note revision proposal privacy", () => {
         : operation === "review" ? repository.review({ ...target, action: "accept", actorUserId: scope.ownerUserId })
           : repository.resolveConflict({ ...target, action: "preserve_both", selectedProposalBlockIds: fixture.proposal.proposedBlocks.map(block => block.id), actorUserId: scope.ownerUserId, expectedCurrentRevisionNumber: 2 }));
       pending.push(read);
-      await waitUntilBlocked(sql, readerSession.pid, deletionSession.pid, `proposal ${operation}`, /FROM workspaces[\s\S]*FOR (UPDATE|SHARE)/i);
+      let settled = false;
+      void read.then(() => { settled = true; }, () => { settled = true; });
+      const statement = operation === "get" ? /FROM workspaces[\s\S]*FOR (UPDATE|SHARE)/i
+        : operation === "review"
+          ? /^\s*INSERT INTO opening_workspace_history_revisions\(workspace_id,\s*owner_user_id,\s*revision\)\s+VALUES\s*\(\$1,\s*\$2,\s*0\)\s+ON CONFLICT DO NOTHING\s*$/i
+          : /^\s*SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id\s*=\s*\$1\s+AND owner_user_id\s*=\s*\$2\s+FOR UPDATE\s*$/i;
+      await waitUntilBlocked(sql, readerSession.pid, deletionSession.pid, `proposal ${operation}`, statement);
+      if (operation !== "get") {
+        // The observed blocker and waiter both hold locks on this database's
+        // history table, not an unrelated relation or another database's PID.
+        expect(await sql`SELECT DISTINCT pid FROM pg_locks
+          WHERE pid IN (${deletionSession.pid},${readerSession.pid}) AND granted
+            AND database = (SELECT oid FROM pg_database WHERE datname=current_database())
+            AND relation = 'opening_workspace_history_revisions'::regclass ORDER BY pid`)
+          .toEqual([deletionSession.pid, readerSession.pid].sort((a, b) => a - b).map(pid => ({ pid })));
+      }
+      expect(settled).toBe(false);
+      expect(await proposalState(fixture.documentId)).toEqual(before);
       unlock();
       await held;
       await deleted;
