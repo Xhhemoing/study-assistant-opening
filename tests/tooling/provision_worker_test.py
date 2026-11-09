@@ -52,12 +52,17 @@ class WorkerProvisionTests(unittest.TestCase):
         self.runtime = self.config / "worker-runtime.env"
         self.unit.write_text("old worker unit\n")
         self.runtime.write_text("OLD_RUNTIME=1\n")
+        self.boundary = self.units / 'aistudy-worker.service.d/96-aistudy-writer-exec.conf'
+        self.boundary.parent.mkdir()
+        self.boundary.write_text('[Service]\nExecStart=\nExecStart=!/usr/bin/python3 -I -S /trusted/wrapper.py /trusted/state aistudy-worker.service\n')
+        self.boundary_before = self.boundary.read_bytes()
         self.calls = []
         self.fail_check = False
         self.fail_reload = False
         self.unsafe_effective_user = False
         self.stack = []
         for target, value in (("os.geteuid", lambda: 0), ("os.chown", lambda *args, **kwargs: None),
+                              ("os.fchown", lambda *args, **kwargs: None),
                               ("ensure_identity", lambda: (os.getuid(), os.getgid())),
                               ("run", self.record_run),
                               ("subprocess.run", lambda *args, **kwargs: SimpleNamespace(returncode=1))):
@@ -82,6 +87,9 @@ class WorkerProvisionTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="\n".join([
                 "User=" + ("root" if self.unsafe_effective_user else "aistudy-worker"),
                 "Group=aistudy-worker", "ProtectSystem=strict", "PrivateTmp=yes",
+                "NoNewPrivileges=yes", "CapabilityBoundingSet=cap_setgid cap_setuid",
+                "ExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B /var/lib/aistudy-deploy/writer-controls/hermes-trusted-loader.py exec /var/lib/aistudy-deploy aistudy-worker.service ; flags=no-setuid ; }",
+                "ExecStartPre=", "ExecStartPost=", "ExecCondition=", "ExecReload=",
                 f"WorkingDirectory={self.current}", f"ReadWritePaths={self.cache}",
                 f"EnvironmentFiles={self.env} (ignore_errors=no) {self.runtime} (ignore_errors=no)",
             ]))
@@ -93,11 +101,41 @@ class WorkerProvisionTests(unittest.TestCase):
                 "--state-dir", str(self.state), "--config-dir", str(self.config),
                 "--systemd-dir", str(self.units), "--cache-dir", str(self.cache), *extra]
 
+    def test_atomic_write_persists_content_and_metadata_before_rename_then_parent(self):
+        events = []
+        fsync, replace = os.fsync, os.replace
+        def sync(fd):
+            path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            events.append(("sync", path))
+            if path != self.runtime.parent:
+                self.assertEqual(path.read_text(), "DURABLE=1\n")
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(self.runtime.read_text(), "OLD_RUNTIME=1\n")
+            fsync(fd)
+        def rename(source, target):
+            events.append(("rename", Path(target)))
+            replace(source, target)
+        with patch.object(worker.os, "fsync", sync), patch.object(worker.os, "replace", rename):
+            worker.atomic_write(self.runtime, "DURABLE=1\n", 0o600)
+        self.assertEqual([event[0] for event in events], ["sync", "rename", "sync"])
+        self.assertEqual(events[-1][1], self.runtime.parent)
+
+    def test_atomic_write_failed_file_fsync_keeps_original(self):
+        with patch.object(worker.os, "fsync", side_effect=OSError("file sync failed")):
+            with self.assertRaises(OSError):
+                worker.atomic_write(self.runtime, "CHANGED=1", 0o600)
+        self.assertEqual(self.runtime.read_text(), "OLD_RUNTIME=1\n")
+        self.assertEqual(list(self.runtime.parent.glob(".worker-runtime.env.*")), [])
+
     def test_provisions_read_only_release_and_checks_real_service_identity_before_reload(self):
         worker.main(self.args())
         unit = self.unit.read_text()
         self.assertIn("User=aistudy-worker\n", unit)
         self.assertIn("ProtectSystem=strict\n", unit)
+        self.assertIn('ExecStart=!/usr/bin/python3 -I -S ', unit)
+        self.assertIn('CapabilityBoundingSet=CAP_SETUID CAP_SETGID', unit)
+        self.assertIn('NoNewPrivileges=true', unit)
+        self.assertEqual(self.boundary.read_bytes(), self.boundary_before)
         self.assertIn(f'WorkingDirectory={self.current}', unit)
         self.assertLess(unit.index(str(self.env)), unit.index(str(self.runtime)))
         runtime = self.runtime.read_text()
