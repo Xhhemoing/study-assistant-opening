@@ -70,6 +70,21 @@ class ReceiptTests(Fixture):
         (self.root / 'writers-fenced').write_text('rearmed')
         self.assertEqual(self.classify(), 'fenced')
 
+    def test_succeeded_health_or_missing_receipt_never_proves_commit(self):
+        for name in ('migration-forward-only', 'writers-fenced'):
+            (self.root / name).unlink()
+        (self.root / 'commit-receipts').mkdir(mode=0o700)
+        (self.root / 'succeeded').write_text('healthy')
+        with self.assertRaises(FileNotFoundError):
+            self.classify()
+
+    def test_production_dac_rejects_unprivileged_owned_state(self):
+        if os.geteuid() == 0:
+            self.skipTest('requires unprivileged fixture owner')
+        with patch.object(state, 'TRUSTED_UID', 0):
+            with self.assertRaises(PermissionError):
+                self.classify()
+
     def test_broker_online_requires_grant_even_after_commit(self):
         self.commit()
         with socket.socket(socket.AF_UNIX) as listener:
@@ -158,7 +173,16 @@ class ReceiptTests(Fixture):
 
     def test_real_process_kill_at_each_persistence_boundary(self):
         # Kill immediately AFTER each real syscall. Parent queries disk state only.
-        for boundary in range(12):
+        calls = []
+        originals = {name: getattr(state.os, name) for name in ('fsync', 'replace', 'unlink')}
+        def counted(name):
+            def invoke(*args, **kwargs):
+                calls.append(name)
+                return originals[name](*args, **kwargs)
+            return invoke
+        with patch.object(state.os, 'fsync', counted('fsync')), patch.object(state.os, 'replace', counted('replace')), patch.object(state.os, 'unlink', counted('unlink')):
+            self.commit()
+        for boundary in range(len(calls)):
             with self.subTest(boundary=boundary):
                 self.setUp()
                 child = os.fork()
@@ -178,6 +202,96 @@ class ReceiptTests(Fixture):
                     os._exit(0)
                 os.waitpid(child, 0)
                 self.assertIn(self.classify(sync=True), ('fenced', 'committed'))
+
+
+class WrapperTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.wrapper = load('hermes-writer-exec')
+        self.plan = {**self.binding, 'unit': peer.UNITS[0], 'state': str(self.root), 'current': str(self.current),
+                     'effective': {'NeedDaemonReload': 'no'}, 'user': '', 'group': ''}
+        state.durable_write(self.root / ('writer-' + peer.UNITS[0] + '.json'), self.plan)
+        # Explicit object injection only, preserving real proc/dirfd/socket IO.
+        patch.object(peer, 'state_api', state).start()
+
+    def test_fenced_boot_and_incomplete_deny_before_manager_or_exec(self):
+        with self.assertRaises(PermissionError):
+            self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+        self.commit()
+        (self.root / 'activation-incomplete').touch()
+        with self.assertRaises(PermissionError):
+            self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+
+    def test_committed_boot_pins_target_fd_and_template(self):
+        self.commit()
+        group = peer.proc_identity(os.getpid())['cgroup'].strip().split('::')[1]
+        fake = type('Adapter', (), {'snapshot': lambda _, pid, unit: {'NeedDaemonReload': 'no', 'ControlGroup': group}})
+        with patch.object(peer, 'SystemdManager', fake):
+            plan, fd = self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+        try:
+            self.assertEqual(os.fstat(fd).st_ino, self.target.stat().st_ino)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.wrapper.application(plan['target'], peer.UNITS[0]), ['/usr/bin/node', str(self.target) + '/apps/web/.next/standalone/apps/web/server.js'])
+        with self.assertRaises(PermissionError):
+            self.wrapper.application(str(self.target), 'untrusted.service')
+
+    def test_production_manager_unavailable_never_falls_back(self):
+        self.commit()
+        with patch.object(peer.subprocess, 'run', side_effect=FileNotFoundError('systemd unavailable')):
+            with self.assertRaises(FileNotFoundError):
+                self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+
+    def test_real_same_pid_exec_preserves_starttime_and_directory(self):
+        child = os.fork()
+        if child == 0:
+            # Real exec with harmless Python target in place of Node. Production
+            # application templates remain fixed; only this test module is patched.
+            plan = self.plan
+            self.wrapper.application = lambda target, unit: ['/usr/bin/python3', '-I', '-S', '-c',
+                'import os,pathlib;pathlib.Path("exec-proof").write_text(str(os.getpid())+"\\n"+pathlib.Path("/proc/self/stat").read_text().split(") ")[1].split()[19])']
+            self.wrapper.os.execve = lambda exe, argv, env: os.execv('/usr/bin/python3', argv)
+            fd = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+            self.wrapper.execute(plan, fd)
+            os._exit(1)
+        started = peer.proc_identity(child)['start']
+        _, result = os.waitpid(child, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(result), 0)
+        proof = (self.target / 'exec-proof').read_text().splitlines()
+        self.assertEqual(proof, [str(child), started])
+
+    def test_same_pid_fchdir_and_exact_exec_scrubs_control_environment(self):
+        fd = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+        pid = os.getpid()
+        previous = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+        captured = []
+        def execute(exe, argv, env):
+            captured.append((os.getpid(), os.stat('.').st_ino, exe, argv, env))
+        try:
+            with patch.object(self.wrapper.os, 'execve', execute), patch.dict(os.environ, {'HERMES_SUPERVISOR_TOKEN': 'private', 'NODE_OPTIONS': '--require=bad', 'DATABASE_URL': 'needed'}):
+                self.wrapper.execute(self.plan, fd)
+        finally:
+            os.fchdir(previous)
+            os.close(previous)
+        self.assertEqual(captured[0][:3], (pid, self.target.stat().st_ino, '/usr/bin/node'))
+        self.assertNotIn('HERMES_SUPERVISOR_TOKEN', captured[0][4])
+        self.assertNotIn('NODE_OPTIONS', captured[0][4])
+        self.assertEqual(captured[0][4]['DATABASE_URL'], 'needed')
+
+    def test_worker_initgroups_then_gid_uid_before_exec(self):
+        fd = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+        previous = os.open('.', os.O_RDONLY | os.O_DIRECTORY)
+        plan = {**self.plan, 'unit': peer.UNITS[1], 'user': 'aistudy-worker', 'group': 'aistudy-worker'}
+        events = []
+        account = type('Account', (), {'pw_name': 'aistudy-worker', 'pw_uid': 1234, 'pw_gid': 1235})
+        try:
+            with patch.object(self.wrapper.pwd, 'getpwnam', return_value=account), patch.object(self.wrapper.os, 'initgroups', lambda *args: events.append(('groups', args))), patch.object(self.wrapper.os, 'setgid', lambda gid: events.append(('gid', gid))), patch.object(self.wrapper.os, 'setuid', lambda uid: events.append(('uid', uid))), patch.object(self.wrapper.os, 'execve', lambda *args: events.append(('exec', args[1]))):
+                self.wrapper.execute(plan, fd)
+        finally:
+            os.fchdir(previous)
+            os.close(previous)
+        self.assertEqual([e[0] for e in events], ['groups', 'gid', 'uid', 'exec'])
+        self.assertEqual(events[-1][1][-1], str(self.target) + '/apps/worker/src/index.ts')
 
 
 class FakeManager:
@@ -205,7 +319,11 @@ class KernelBrokerTests(Fixture):
         self.broker = peer.Broker(self.manager, os.getpid(), peer.proc_identity(os.getpid())['start'],
                                   str(self.wrapper), '/usr/bin/python3', str(self.current), (os.geteuid(), os.getegid()))
         self.addCleanup(os.close, self.broker.owner_fd)
-        self.plan = {**self.binding, 'unit': peer.UNITS[0], 'state': str(self.root), 'effective': self.manager.value}
+        expected = f'/usr/bin/python3 -I -S {self.wrapper} {self.root} {peer.UNITS[0]}'
+        self.manager.value.update({'ExecStartEx': '{ path=/usr/bin/python3 ; argv[]=' + expected + ' ; flags= ; }',
+                                   'FragmentPath': str(self.root / peer.UNITS[0]), 'DropInPaths': '', 'User': '', 'Group': ''})
+        self.plan = {**self.binding, 'unit': peer.UNITS[0], 'state': str(self.root), 'systemd': str(self.root),
+                     'effective': {key: value for key, value in self.manager.value.items() if key != 'ControlGroup'}}
         self.broker.prepare(self.plan)
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(self.broker_path))
@@ -217,6 +335,7 @@ class KernelBrokerTests(Fixture):
         child = subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(script or self.wrapper), str(self.root), unit or peer.UNITS[0]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(lambda: child.poll() is None and child.kill())
         conn, _ = self.listener.accept()
+        conn.settimeout(5)  # Match production accepted sockets, not blocking-only test sockets.
         with conn:
             credentials = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             self.assertEqual(credentials[0], child.pid)

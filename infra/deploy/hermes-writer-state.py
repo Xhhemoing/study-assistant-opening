@@ -17,8 +17,8 @@ TRUSTED_UID = 0
 
 
 def identity(st):
-    return [st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
-            st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_nlink]
+    return [str(value) for value in (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
+                                    st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_nlink)]
 
 
 def safe_open(path, private=False, directory=False):
@@ -98,6 +98,17 @@ def validate_config(config, sync=False):
     if sync:
         for directory in sorted({str(Path(e['path']).parent) for e in config['files']}):
             sync_dir(directory)
+    if 'effective' in config:
+        # One implementation for boot/query and online admission; no permissive
+        # production adapter fallback when systemd is unavailable.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('trusted_manager', Path(__file__).with_name('hermes-peer-broker.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        manager = module.SystemdManager()
+        for unit, expected in config['effective'].items():
+            if manager.configuration(unit) != expected:
+                raise ValueError('Effective manager configuration changed')
 
 
 def classify(state, current, broker, scope=None, sync=False):
@@ -111,14 +122,16 @@ def classify(state, current, broker, scope=None, sync=False):
     marker = Path(state) / 'protocol2-transition.json'
     if not present(marker):
         return 'legacy'
-    binding = json.loads(read_trusted(marker, private=True)[0])
+    binding = json.loads(read_trusted(marker, private=True, sync=sync)[0])
     if binding['protocol'] != 2:
         raise ValueError('Unknown protocol')
     if scope is not None and any(binding.get(k) != v for k, v in scope.items()):
         return 'unknown'
-    receipt_path = Path(state) / 'commit-receipts' / (binding['owner'] + '.json')
+    receipts_fd = safe_open(Path(state) / 'commit-receipts', private=True, directory=True)
+    os.close(receipts_fd)
     if not isinstance(binding['owner'], str) or len(binding['owner']) != 32 or any(c not in '0123456789abcdef' for c in binding['owner']):
         raise ValueError('Invalid receipt scope')
+    receipt_path = Path(state) / 'commit-receipts' / (binding['owner'] + '.json')
     receipt = json.loads(read_trusted(receipt_path, private=True, sync=sync)[0])
     if receipt != {**binding, 'phase': 'terminal'} or os.path.realpath(current) != receipt['target']:
         return 'unknown'
@@ -143,7 +156,12 @@ def durable_write(path, value):
     fd, temporary = tempfile.mkstemp(prefix='.receipt-', dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
-        os.write(fd, (json.dumps(value, sort_keys=True) + '\n').encode())
+        data = memoryview((json.dumps(value, sort_keys=True) + '\n').encode())
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError('Receipt write incomplete')
+            data = data[written:]
         os.fsync(fd)
         os.close(fd)
         fd = -1
@@ -162,6 +180,9 @@ def commit(state, current, broker, binding):
     Receipt -> G unlink+dirfsync -> F unlink+dirfsync LAST. Faults leave refusal;
     the owner must refence and independently stop both, never restore old code.
     """
+    marker = json.loads(read_trusted(Path(state) / 'protocol2-transition.json', private=True, sync=True)[0])
+    if marker != binding:
+        raise ValueError('Terminal binding changed')
     if present(broker) or os.path.realpath(current) != binding['target']:
         raise ValueError('Commit scope changed or broker still open')
     validate_config(binding['config'], sync=True)
@@ -180,6 +201,12 @@ def commit(state, current, broker, binding):
 
 def main():
     mode, state, current, broker = sys.argv[1:5]
+    if mode == 'check-plan':
+        plan = json.loads(read_trusted(Path(state) / ('writer-' + broker + '.json'), private=True)[0])
+        if plan['unit'] != broker or plan['target'] != current:
+            raise ValueError('Plan scope mismatch')
+        validate_config(plan['config'])
+        return
     payload = json.load(sys.stdin) if mode in ('commit', 'query') else None
     if mode == 'commit':
         commit(state, current, broker, payload)

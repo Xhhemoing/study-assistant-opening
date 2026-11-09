@@ -7,8 +7,9 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { postgresBackupEnvironment } from "../../infra/deploy/hermes-db.mjs";
 import { boundedQuiescence, cgroupEmpty, protectCleanupStreams, signalVerifiedGroup, stopWriters } from "../../infra/deploy/hermes-supervisor.mjs";
+import { installWriterBoundary } from "../../infra/deploy/hermes-writer-control.mjs";
 import { Writable } from "node:stream";
-import { VISIBLE_FLAGS, verifyProcessSnapshot } from "../../infra/deploy/hermes-health.mjs";
+import { VISIBLE_FLAGS, verifyCredentialStatus, verifyProcessSnapshot } from "../../infra/deploy/hermes-health.mjs";
 
 const release = "/opt/aistudy-releases/new-sha";
 const configured = { OPENING_ADAPTIVE_PLANNING: "0", OPENING_TEACHING_LOOP: "1", OPENING_MODEL_DAILY_CAP_CENTS: "0", DATABASE_URL: "never-print-secret" };
@@ -26,6 +27,46 @@ const worker = {
   unitArgumentPaths: ["/usr/bin/node", `${release}/node_modules/tsx/dist/cli.mjs`, `${release}/apps/worker/src/index.ts`],
   environment: { ...configured },
 };
+
+test('persistent 96 survives failed reload and 95 is neutralized only after both effective wrappers', t => {
+  const root = mkdtempSync(join(tmpdir(), 'hermes-boundary-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const state = join(root, 'state'), systemd = join(root, 'units');
+  mkdirSync(state); mkdirSync(systemd);
+  const units = ['aistudy-web.service', 'aistudy-worker.service'];
+  for (const unit of units) {
+    mkdirSync(join(systemd, `${unit}.d`));
+    writeFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), '[Unit]\nConditionPathExists=!fence\n');
+    writeFileSync(join(systemd, `${unit}.d/90-unrelated.conf`), '[Unit]\nConditionPathExists=!pause\n');
+  }
+  const source = fileURLToPath(new URL('../../infra/deploy', import.meta.url));
+  assert.throws(() => installWriterBoundary(state, systemd, source, () => ({ ok: false })), /reload/);
+  for (const unit of units) assert.match(readFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'), /ConditionPathExists/);
+  let observed = 0;
+  installWriterBoundary(state, systemd, source, args => {
+    if (args[0] === 'daemon-reload') return { ok: true };
+    observed++;
+    for (const unit of units) assert.match(readFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'), /ConditionPathExists/);
+    const unit = args.at(-1);
+    return { ok: true, stdout: `NeedDaemonReload=no\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S ${state}/writer-controls/hermes-writer-exec.py ${state} ${unit} ; flags=${unit.includes('worker') ? 'no-setuid' : ''} ; }\n` };
+  });
+  assert.equal(observed, 2);
+  for (const unit of units) {
+    assert.doesNotMatch(readFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'), /ConditionPathExists/);
+    assert.match(readFileSync(join(systemd, `${unit}.d/90-unrelated.conf`), 'utf8'), /ConditionPathExists/);
+    const wrapper = readFileSync(join(systemd, `${unit}.d/96-aistudy-writer-exec.conf`), 'utf8');
+    assert.match(wrapper, /ExecStart=\nExecStart=/);
+    if (unit.includes('worker')) assert.match(wrapper, /ExecStart=!\/usr\/bin\/python3/);
+  }
+});
+
+test('wrapped worker requires exact groups, UID/GID, NNP and empty exec capabilities', () => {
+  const status = 'Uid:\t1001 1001 1001 1001\nGid:\t1002 1002 1002 1002\nGroups:\t1002 1003\nNoNewPrivs:\t1\nCapEff:\t0000000000000000\nCapPrm:\t0000000000000000\nCapAmb:\t0000000000000000\n';
+  assert.doesNotThrow(() => verifyCredentialStatus('worker', status, 1001, 1002, [1003, 1002]));
+  for (const changed of [status.replace('NoNewPrivs:\t1', 'NoNewPrivs:\t0'), status.replace('CapEff:\t0000000000000000', 'CapEff:\t0000000000000001'), status.replace('1002 1003', '1002'), status.replace('1001 1001 1001 1001', '0 0 0 0')]) {
+    assert.throws(() => verifyCredentialStatus('worker', changed, 1001, 1002, [1002, 1003]));
+  }
+});
 
 test('cgroup proof visits nested groups and rejects unreadable or populated groups', t => {
   const root = mkdtempSync(join(tmpdir(), 'hermes-cgroup-'));

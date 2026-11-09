@@ -70,7 +70,7 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {

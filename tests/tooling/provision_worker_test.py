@@ -52,6 +52,10 @@ class WorkerProvisionTests(unittest.TestCase):
         self.runtime = self.config / "worker-runtime.env"
         self.unit.write_text("old worker unit\n")
         self.runtime.write_text("OLD_RUNTIME=1\n")
+        self.boundary = self.units / 'aistudy-worker.service.d/96-aistudy-writer-exec.conf'
+        self.boundary.parent.mkdir()
+        self.boundary.write_text('[Service]\nExecStart=\nExecStart=!/usr/bin/python3 -I -S /trusted/wrapper.py /trusted/state aistudy-worker.service\n')
+        self.boundary_before = self.boundary.read_bytes()
         self.calls = []
         self.fail_check = False
         self.fail_reload = False
@@ -83,6 +87,9 @@ class WorkerProvisionTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="\n".join([
                 "User=" + ("root" if self.unsafe_effective_user else "aistudy-worker"),
                 "Group=aistudy-worker", "ProtectSystem=strict", "PrivateTmp=yes",
+                "NoNewPrivileges=yes", "CapabilityBoundingSet=cap_setgid cap_setuid",
+                "ExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /var/lib/aistudy-deploy/writer-controls/hermes-writer-exec.py /var/lib/aistudy-deploy aistudy-worker.service ; flags=no-setuid ; }",
+                "ExecStartPre=", "ExecStartPost=", "ExecCondition=", "ExecReload=",
                 f"WorkingDirectory={self.current}", f"ReadWritePaths={self.cache}",
                 f"EnvironmentFiles={self.env} (ignore_errors=no) {self.runtime} (ignore_errors=no)",
             ]))
@@ -125,6 +132,10 @@ class WorkerProvisionTests(unittest.TestCase):
         unit = self.unit.read_text()
         self.assertIn("User=aistudy-worker\n", unit)
         self.assertIn("ProtectSystem=strict\n", unit)
+        self.assertIn('ExecStart=!/usr/bin/python3 -I -S ', unit)
+        self.assertIn('CapabilityBoundingSet=CAP_SETUID CAP_SETGID', unit)
+        self.assertIn('NoNewPrivileges=true', unit)
+        self.assertEqual(self.boundary.read_bytes(), self.boundary_before)
         self.assertIn(f'WorkingDirectory={self.current}', unit)
         self.assertLess(unit.index(str(self.env)), unit.index(str(self.runtime)))
         runtime = self.runtime.read_text()

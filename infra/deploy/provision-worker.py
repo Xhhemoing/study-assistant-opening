@@ -216,13 +216,22 @@ def quoted(value):
 
 
 def verify_effective_unit(args):
-    keys = ("User", "Group", "ProtectSystem", "PrivateTmp", "WorkingDirectory", "ReadWritePaths", "EnvironmentFiles")
+    keys = ("User", "Group", "ProtectSystem", "PrivateTmp", "WorkingDirectory", "ReadWritePaths", "EnvironmentFiles",
+            "NoNewPrivileges", "CapabilityBoundingSet", "ExecStartEx", "ExecStartPre", "ExecStartPost", "ExecCondition", "ExecReload")
     result = run(["systemctl", "show", "aistudy-worker.service", *[f"--property={key}" for key in keys]], capture_output=True, text=True)
     actual = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
     expected = {"User": USER, "Group": USER, "ProtectSystem": "strict", "PrivateTmp": "yes",
                 "WorkingDirectory": str(args.app_dir), "ReadWritePaths": str(args.cache_dir)}
     if any(actual.get(key) != value for key, value in expected.items()):
         raise ValueError("effective worker isolation differs from the managed unit; inspect existing systemd drop-ins")
+    helper = str(args.writer_state_dir / 'writer-controls/hermes-writer-exec.py')
+    launch = actual.get('ExecStartEx', '')
+    if (actual.get('NoNewPrivileges') != 'yes'
+            or set(actual.get('CapabilityBoundingSet', '').lower().split()) != {'cap_setuid', 'cap_setgid'}
+            or launch.count('path=') != 1 or f'/usr/bin/python3 -I -S {helper} {args.writer_state_dir} aistudy-worker.service' not in launch
+            or 'no-setuid' not in launch or 'privileged' in launch
+            or any(actual.get(key) for key in ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload'))):
+        raise ValueError('effective worker trusted execution boundary differs')
     last_env = str(args.config_dir / "worker-runtime.env") + " (ignore_errors=no)"
     if not actual.get("EnvironmentFiles", "").endswith(last_env):
         raise ValueError("worker runtime env must be the last effective EnvironmentFile; inspect systemd drop-ins")
@@ -274,7 +283,10 @@ def configure(args):
     template = args.unit_file.read_text()
     # Single-path directives retain surrounding quotes literally; path lists
     # such as ReadWritePaths use systemd's quoted-word parser instead.
-    replacements = {"WorkingDirectory=": str(args.app_dir), "ReadWritePaths=": quoted(cache)}
+    writer_state = args.writer_state_dir
+    helper = writer_state / 'writer-controls/hermes-writer-exec.py'
+    replacements = {"WorkingDirectory=": str(args.app_dir), "ReadWritePaths=": quoted(cache),
+                    "ExecStart=": f'!/usr/bin/python3 -I -S {helper} {writer_state} aistudy-worker.service'}
     lines = []
     for line in template.splitlines():
         if line == "EnvironmentFile=/opt/aistudy/.env.production":
@@ -313,7 +325,8 @@ def main(argv=None):
     mode.add_argument("--restore", action="store_true")
     for name, default in (("app-dir", "/opt/aistudy"), ("legacy-app-dir", "/opt/aistudy"),
                           ("state-dir", "/var/lib/aistudy-deploy"), ("config-dir", "/etc/aistudy"),
-                          ("systemd-dir", "/etc/systemd/system"), ("cache-dir", "/var/cache/aistudy-worker")):
+                          ("systemd-dir", "/etc/systemd/system"), ("cache-dir", "/var/cache/aistudy-worker"),
+                          ("writer-state-dir", "/var/lib/aistudy-deploy")):
         parser.add_argument(f"--{name}", type=absolute, default=absolute(default))
     for name in ("release-dir", "config-file", "parser-python"):
         parser.add_argument(f"--{name}", type=absolute)

@@ -43,10 +43,14 @@ def connected(sock):
 
 
 def still_connected(sock):
+    timeout = sock.gettimeout()
     try:
+        sock.setblocking(False)
         return connected(sock)
     except BlockingIOError:
         return True
+    finally:
+        sock.settimeout(timeout)
 
 
 class SystemdManager:
@@ -59,12 +63,30 @@ class SystemdManager:
         expected = '/org/freedesktop/systemd1/unit/' + unit.replace('-', '_2d').replace('.', '_2e')
         if object_path != expected:
             raise PermissionError('Manager unit mismatch')
-        keys = ('Id', 'ControlGroup', 'MainPID', 'ExecStartEx', 'ExecStartPre', 'ExecStartPost',
+        return self._properties(unit)
+
+    def configuration(self, unit):
+        values = self._properties(unit)
+        del values['ControlGroup']
+        return values
+
+    def _properties(self, unit):
+        if unit not in UNITS:
+            raise PermissionError('Unknown unit')
+        keys = ('Id', 'ControlGroup', 'ExecStartEx', 'ExecStartPre', 'ExecStartPost',
                 'ExecCondition', 'ExecReload', 'NeedDaemonReload', 'WorkingDirectory', 'User', 'Group',
-                'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NoNewPrivileges', 'CapabilityBoundingSet')
+                'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NoNewPrivileges', 'CapabilityBoundingSet',
+                'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart')
         result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=' + ','.join(keys)],
                                 check=True, capture_output=True, text=True, timeout=5)
         values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        # ExecStartEx includes runtime timestamps/PIDs/status after launch. Pin only
+        # executable/argv/flags, recapturing those at grant and before receipt.
+        import re
+        launch = re.fullmatch(r'\{ path=([^;]+) ; argv\[\]=(.*?) ; flags=([^;]*?) ;.*\}', values.get('ExecStartEx', ''))
+        if not launch:
+            raise PermissionError('Cannot parse sole ExecStartEx')
+        values['ExecStartEx'] = '{ path=' + launch[1].strip() + ' ; argv[]=' + launch[2] + ' ; flags=' + launch[3].strip() + ' ; }'
         if set(values) != set(keys) or values['Id'] != unit or values['NeedDaemonReload'] != 'no':
             raise PermissionError('Incomplete or stale manager configuration')
         if any(values[key] for key in ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')):
@@ -79,7 +101,7 @@ class Broker:
         self.owner_pid, self.owner_start = owner_pid, owner_start
         self.wrapper, self.python, self.current = wrapper, python, current
         self.grants = {}
-        self.used = set()
+        self.used = {}
         self.lock = threading.Lock()
         self.owner_fd = os.pidfd_open(owner_pid)
 
@@ -92,6 +114,27 @@ class Broker:
         with self.lock:
             self.grants.clear()
 
+    def validate_plan(self, plan):
+        values = plan['effective']
+        expected = f'/usr/bin/python3 -I -S {self.wrapper} {plan["state"]} {plan["unit"]}'
+        launch = values['ExecStartEx']
+        if launch.count('path=') != 1 or 'path=/usr/bin/python3 ;' not in launch or f'argv[]={expected} ;' not in launch:
+            raise PermissionError('Not sole trusted ExecStart')
+        allowed = {str(Path(plan['systemd']) / plan['unit']),
+                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '50-aistudy-release.conf'),
+                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '90-aistudy-protocol-guard.conf'),
+                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '95-aistudy-migration-fence.conf'),
+                   str(Path(plan['systemd']) / (plan['unit'] + '.d') / '96-aistudy-writer-exec.conf')}
+        if values['FragmentPath'] not in allowed or any(path not in allowed for path in values['DropInPaths'].split()):
+            raise PermissionError('Unknown effective unit input')
+        if plan['unit'] == UNITS[1]:
+            if (values['User'], values['Group'], values['NoNewPrivileges'], values['ProtectSystem'], values['PrivateTmp']) != ('aistudy-worker', 'aistudy-worker', 'yes', 'strict', 'yes'):
+                raise PermissionError('Worker sandbox mismatch')
+            if set(values['CapabilityBoundingSet'].lower().split()) != {'cap_setuid', 'cap_setgid'} or 'no-setuid' not in launch or 'privileged' in launch:
+                raise PermissionError('Worker credential-only prefix/capabilities mismatch')
+        elif values['User'] or values['Group']:
+            raise PermissionError('Unreviewed web credentials')
+
     def prepare(self, plan):
         with self.lock:
             self.owner_alive()
@@ -99,6 +142,7 @@ class Broker:
                 raise PermissionError('Owner generation already prepared')
             if plan['unit'] not in UNITS or os.path.realpath(self.current) != plan['target']:
                 raise PermissionError('Invalid grant target/unit')
+            self.validate_plan(plan)
             state_api.validate_config(plan['config'], sync=True)
             self.grants[plan['unit']] = plan
 
@@ -119,7 +163,8 @@ class Broker:
                 raise PermissionError('No generation for this helper')
             observed = self.manager.snapshot(pid, unit)
             group = observed['ControlGroup']
-            if not group or f'0::{group}\n' != before['cgroup'] or observed != plan['effective']:
+            configuration = {key: value for key, value in observed.items() if key != 'ControlGroup'}
+            if not group or f'0::{group}\n' != before['cgroup'] or configuration != plan['effective']:
                 raise PermissionError('Unit/cgroup/config mismatch')
             if os.path.realpath(self.current) != plan['target']:
                 raise PermissionError('CURRENT changed')
@@ -139,7 +184,7 @@ class Broker:
             if not still_connected(sock):
                 raise PermissionError('Peer disconnected')
             del self.grants[unit]  # Consume BEFORE ALLOW; a failed send does not refund.
-            self.used.add(unit)
+            self.used[unit] = {'pid': pid, 'start': before['start']}
             return {**plan, 'peerPid': pid, 'peerStart': before['start']}
 
 
@@ -200,9 +245,12 @@ def serve(directory, broker, stdin):
                             message = receive(conn)
                             if message['action'] == 'prepare':
                                 broker.prepare(message['plan'])
-                            elif message['action'] == 'observe':
-                                reply = {'ok': True, 'effective': broker.manager.snapshot(message['pid'], message['unit'])}
+                            elif message['action'] == 'configuration':
+                                reply = {'ok': True, 'effective': broker.manager.configuration(message['unit'])}
                                 conn.sendall(json.dumps(reply).encode() + b'\n')
+                                continue
+                            elif message['action'] == 'status':
+                                conn.sendall(json.dumps({'ok': True, 'executions': broker.used}).encode() + b'\n')
                                 continue
                             elif message['action'] == 'revoke':
                                 broker.revoke()

@@ -70,17 +70,21 @@ function effective(args, run) {
       const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)];
     }));
     const fragment = join(systemd, unit);
-    const allowedDrops = [join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`),
+    const allowedDrops = [join(systemd, `${unit}.d/96-aistudy-writer-exec.conf`), join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`),
       join(systemd, `${unit}.d/${index === 0 ? "50-aistudy-release.conf" : "90-aistudy-protocol-guard.conf"}`)];
     const drops = values.DropInPaths ? values.DropInPaths.split(" ") : [];
     const expectedEnv = `${config} (ignore_errors=no)${index === 1 ? ` ${runtime} (ignore_errors=no)` : ""}`;
     if (values.NeedDaemonReload !== "no" || values.FragmentPath !== fragment
       || drops.some(path => !allowedDrops.includes(path)) || new Set(drops).size !== drops.length
-      || !drops.includes(allowedDrops[1]) || values.EnvironmentFiles !== expectedEnv) {
+      || !drops.includes(allowedDrops[2]) || values.EnvironmentFiles !== expectedEnv) {
       throw new Error("Unknown or stale effective configuration; success refused");
     }
     snapshot.push({ unit, ...values });
     for (const path of [fragment, ...drops, config, ...(index === 1 ? [runtime] : [])]) files.add(safePath(path));
+  }
+  for (const name of ['hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py']) {
+    const path = join(args[4], 'writer-controls', name);
+    if (snapshot.some(row => row.DropInPaths.includes('96-aistudy-writer-exec.conf'))) files.add(path);
   }
   return { snapshot, files: [...files].sort() };
 }
