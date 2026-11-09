@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { BRANCH, REPOSITORY, extract, pack, platform, tree, verifySource, verifyTree } from '../../infra/deploy/verify-release-artifact.mjs';
+import { BRANCH, REPOSITORY, extract, pack, platform, tree, verifyRunBinding, verifySource, verifyTree } from '../../infra/deploy/verify-release-artifact.mjs';
 
 const sha = 'a'.repeat(40);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -117,6 +117,49 @@ for (const [name, type, link, mode] of [
     assert.throws(() => extract(f.archive, f.destination, sha, hash(readFileSync(f.archive)), f.manifest.platform));
     assert(!existsSync(f.destination));
     assert(!readdirSync(f.root).some(name => name.startsWith('.artifact-staging-')));
+  });
+}
+const invocation = `https://github.com/${REPOSITORY}/actions/runs/12/attempts/1`;
+const certificateResult = certificate => ({ verificationResult: { signature: { certificate } } });
+for (const [shape, certificate] of [
+  ['direct gh certificate field', { runInvocationURI: invocation }],
+  ['legacy certificate extension', { extensions: { runInvocationURI: invocation } }],
+  ['matching direct and legacy fields', { runInvocationURI: invocation, extensions: { runInvocationURI: invocation } }],
+]) {
+  test(`run binding accepts ${shape}`, () => verifyRunBinding([certificateResult(certificate)], 12, 1));
+}
+for (const [name, value] of [
+  ['wrong run', invocation.replace('/runs/12/', '/runs/13/')],
+  ['wrong attempt', invocation.replace('/attempts/1', '/attempts/2')],
+  ['wrong repository', invocation.replace(REPOSITORY, 'attacker/fork')],
+  ['empty', ''], ['null', null], ['number', 12], ['array', [invocation]], ['object', { uri: invocation }],
+]) {
+  for (const shape of ['direct', 'legacy']) {
+    test(`run binding rejects ${shape} ${name}, despite matching predicate metadata`, () => {
+      const certificate = shape === 'direct' ? { runInvocationURI: value } : { extensions: { runInvocationURI: value } };
+      const result = certificateResult(certificate);
+      result.verificationResult.statement = { predicate: { runDetails: { metadata: { invocationId: invocation } } } };
+      assert.throws(() => verifyRunBinding([result], 12, 1), /not bound/);
+    });
+  }
+}
+for (const [name, verified] of [
+  ['missing verification results', {}], ['empty verification results', []], ['null result', [null]],
+  ['missing certificate', [{ verificationResult: { signature: {} } }]],
+  ['missing invocation', [certificateResult({})]],
+  ['predicate only', [{ verificationResult: { statement: { predicate: { runDetails: { metadata: { invocationId: invocation } } } } } }]],
+]) {
+  test(`run binding rejects ${name}`, () => assert.throws(() => verifyRunBinding(verified, 12, 1), /not bound/));
+}
+for (const directMatches of [true, false]) {
+  test(`run binding rejects conflicting certificate fields (direct matches: ${directMatches})`, () => {
+    const wrong = invocation.replace('/attempts/1', '/attempts/2');
+    const conflicting = certificateResult({ runInvocationURI: directMatches ? invocation : wrong,
+      extensions: { runInvocationURI: directMatches ? wrong : invocation } });
+    const valid = certificateResult({ runInvocationURI: invocation });
+    assert.throws(() => verifyRunBinding([conflicting], 12, 1), /Conflicting/);
+    assert.throws(() => verifyRunBinding([valid, conflicting], 12, 1), /Conflicting/);
+    assert.throws(() => verifyRunBinding([conflicting, valid], 12, 1), /Conflicting/);
   });
 }
 function provenance() {
