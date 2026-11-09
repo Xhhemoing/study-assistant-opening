@@ -228,63 +228,98 @@ export function createOpeningJobRepository(sql: Sql): OpeningJobRepository {
       return rows.length > 0;
     },
     async cancel(scope, id) {
-      return sql.begin(async (tx) => {
-        await tx`
-          SELECT id FROM workspaces
-          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE
-        `;
-        const rows = await tx`
-          UPDATE opening_jobs
-          SET state = 'cancelled',
-            result = ${tx.json({ message: "cancelled by user" } as never)},
-            updated_at = now()
-          WHERE id = ${id}
-            AND workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-            AND state IN ('queued', 'running')
-          RETURNING *
-        `;
-        if (!rows.length) return null;
-        const job = mapJob(rows[0] as Record<string, unknown>);
-        if (job.kind === "parse" || job.kind === "parse-media") {
-          await releaseOpeningParseClaim(tx, job.payload);
-          const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
-          const sourceId = payload?.sourceId;
-          const sourceVersion = payload?.sourceVersion;
-          // A cancelled retry may never have been claimed: its source is still
-          // queued, so the running-claim cleanup above cannot release it.
-          if (typeof sourceId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)
-            && typeof sourceVersion === "number" && Number.isSafeInteger(sourceVersion) && sourceVersion >= 0) {
-            await tx`UPDATE opening_sources s SET parse_state='not_started', updated_at=now()
-              WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.version=${sourceVersion}
-                AND s.upload_state='uploaded' AND s.parse_state='queued'
-                AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId})
-                AND NOT EXISTS (SELECT 1 FROM opening_jobs active WHERE active.workspace_id=s.workspace_id
-                  AND active.kind IN ('parse','parse-media') AND active.state IN ('queued','running')
-                  AND active.payload->>'sourceId'=${sourceId})`;
+      const identityChanged = new Error("cancel history coordination changed");
+      try {
+        return await sql.begin(async (tx) => {
+          // Preserve the input workspace/owner casts before the job UUID cast,
+          // without locking workspace ahead of its learning history.
+          await tx`SELECT id FROM workspaces
+            WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+          const [candidate] = await tx`SELECT w.id, w.owner_user_id FROM opening_jobs j
+            JOIN workspaces w ON w.id=j.workspace_id
+            WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND j.owner_user_id=${scope.ownerUserId}`;
+          if (!candidate) return null;
+          const canonical = { workspaceId: String(candidate.id), ownerUserId: String(candidate.owner_user_id) };
+          try {
+            await lockWorkspaceLearningHistory(tx, canonical);
+          } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+              const [current] = await tx`SELECT w.owner_user_id FROM opening_jobs j
+                JOIN workspaces w ON w.id=j.workspace_id
+                WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND j.owner_user_id=${scope.ownerUserId}`;
+              if (!current || current.owner_user_id !== candidate.owner_user_id) throw identityChanged;
+            }
+            throw error;
           }
-        }
-        if (job.kind === "compile-teaching-unit") {
-          const payload =
-            job.payload && typeof job.payload === "object"
-              ? (job.payload as Record<string, unknown>)
-              : null;
-          const activityId =
-            payload && typeof payload.activityId === "string" ? payload.activityId : null;
-          if (activityId) {
-            await tx`
-              UPDATE opening_teaching_activities
-              SET generate_status = 'cancelled', updated_at = now()
-              WHERE id = ${activityId}
-                AND workspace_id = ${scope.workspaceId}
-                AND owner_user_id = ${scope.ownerUserId}
-                AND generate_status IN ('queued', 'generating')
-            `;
+          // Canonical owner selects only the coordination key, not API authority.
+          const [locked] = await tx`SELECT id FROM workspaces
+            WHERE id=${canonical.workspaceId} AND owner_user_id=${canonical.ownerUserId} FOR UPDATE`;
+          if (!locked) throw identityChanged;
+          const rows = await tx`
+            UPDATE opening_jobs
+            SET state = 'cancelled',
+              result = ${tx.json({ message: "cancelled by user" } as never)},
+              updated_at = now()
+            WHERE id = ${id}
+              AND workspace_id = ${scope.workspaceId}
+              AND owner_user_id = ${scope.ownerUserId}
+              AND state IN ('queued', 'running')
+            RETURNING *
+          `;
+          if (!rows.length) {
+            const [current] = await tx`SELECT workspace_id, owner_user_id FROM opening_jobs WHERE id=${id}`;
+            if (!current || current.workspace_id !== canonical.workspaceId || current.owner_user_id !== scope.ownerUserId) throw identityChanged;
+            return null;
           }
-        }
-        return job;
-      });
+          const job = mapJob(rows[0] as Record<string, unknown>);
+          if (job.kind === "parse" || job.kind === "parse-media") {
+            const payload = job.payload && typeof job.payload === "object" ? job.payload as Record<string, unknown> : null;
+            const sourceId = payload?.sourceId;
+            const sourceVersion = payload?.sourceVersion;
+            if (typeof sourceId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)) {
+              // The shared release is source-id-only. Hold the scoped row until
+              // commit so relocation/deletion cannot escape this history fence.
+              const [source] = await tx`SELECT id FROM opening_sources
+                WHERE id=${sourceId} AND workspace_id=${canonical.workspaceId} FOR UPDATE`;
+              if (source) await releaseOpeningParseClaim(tx, job.payload);
+            }
+            // A cancelled retry may never have been claimed: its source is still
+            // queued, so the running-claim cleanup above cannot release it.
+            if (typeof sourceId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sourceId)
+              && typeof sourceVersion === "number" && Number.isSafeInteger(sourceVersion) && sourceVersion >= 0) {
+              await tx`UPDATE opening_sources s SET parse_state='not_started', updated_at=now()
+                WHERE s.id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.version=${sourceVersion}
+                  AND s.upload_state='uploaded' AND s.parse_state='queued'
+                  AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId})
+                  AND NOT EXISTS (SELECT 1 FROM opening_jobs active WHERE active.workspace_id=s.workspace_id
+                    AND active.kind IN ('parse','parse-media') AND active.state IN ('queued','running')
+                    AND active.payload->>'sourceId'=${sourceId})`;
+            }
+          }
+          if (job.kind === "compile-teaching-unit") {
+            const payload =
+              job.payload && typeof job.payload === "object"
+                ? (job.payload as Record<string, unknown>)
+                : null;
+            const activityId =
+              payload && typeof payload.activityId === "string" ? payload.activityId : null;
+            if (activityId) {
+              await tx`
+                UPDATE opening_teaching_activities
+                SET generate_status = 'cancelled', updated_at = now()
+                WHERE id = ${activityId}
+                  AND workspace_id = ${scope.workspaceId}
+                  AND owner_user_id = ${scope.ownerUserId}
+                  AND generate_status IN ('queued', 'generating')
+              `;
+            }
+          }
+          return job;
+        });
+      } catch (error) {
+        if (error === identityChanged) return null;
+        throw error;
+      }
     },
   };
 }

@@ -102,23 +102,49 @@ export function createCardRepository(sql: Sql): CardRepository {
     },
 
     async updateControls(input) {
-      await loadCard(sql, input.workspaceId, input.cardId);
-      const keepPause = input.pausedUntil === undefined;
-      const keepMaintain = input.maintainUntil === undefined;
-      const rows = await sql`
-        UPDATE cards SET
-          archived = COALESCE(${input.archived ?? null}, archived),
-          paused_until = CASE WHEN ${keepPause} THEN paused_until ELSE ${input.pausedUntil ?? null} END,
-          maintain_until = CASE WHEN ${keepMaintain} THEN maintain_until ELSE ${input.maintainUntil ?? null} END,
-          exclude_from_assessment = COALESCE(
-            ${input.excludeFromAssessment ?? null},
-            exclude_from_assessment
-          ),
-          updated_at = now()
-        WHERE id = ${input.cardId} AND workspace_id = ${input.workspaceId}
-        RETURNING *
-      `;
-      return mapCard(rows[0] as Row);
+      // Preserve the original lookup/readability/mapping error before history ensure.
+      const observed = await loadCard(sql, input.workspaceId, input.cardId);
+      const notFound = () => new CardRepositoryError("NOT_FOUND", `Card not found: ${input.cardId}`);
+      // This is an internal lock key, not a caller-supplied ownership assertion.
+      const [canonical] = await sql`SELECT owner_user_id FROM workspaces WHERE id=${input.workspaceId} LIMIT 1`;
+      if (!canonical) throw notFound();
+      return sql.begin(async tx => {
+        const client = tx as Sql;
+        try {
+          await lockWorkspaceLearningHistory(tx, { workspaceId: input.workspaceId, ownerUserId: canonical.owner_user_id as string });
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+            const [current] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.workspaceId} LIMIT 1`;
+            if (!current || current.owner_user_id !== canonical.owner_user_id) throw notFound();
+          }
+          throw error;
+        }
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.workspaceId} FOR SHARE`;
+        if (!workspace || workspace.owner_user_id !== canonical.owner_user_id) throw notFound();
+        const current = await loadCard(client, input.workspaceId, input.cardId);
+        // Compare with the observed card, not the canonical workspace owner: a
+        // static mismatch must still reach the existing SQL ownership guard.
+        if (current.id !== observed.id || current.ownerUserId !== observed.ownerUserId) throw notFound();
+        const keepPause = input.pausedUntil === undefined;
+        const keepMaintain = input.maintainUntil === undefined;
+        const rows = await tx`
+          UPDATE cards SET
+            archived = COALESCE(${input.archived ?? null}, archived),
+            paused_until = CASE WHEN ${keepPause} THEN paused_until ELSE ${input.pausedUntil ?? null} END,
+            maintain_until = CASE WHEN ${keepMaintain} THEN maintain_until ELSE ${input.maintainUntil ?? null} END,
+            exclude_from_assessment = COALESCE(
+              ${input.excludeFromAssessment ?? null},
+              exclude_from_assessment
+            ),
+            updated_at = now()
+          WHERE id = ${input.cardId} AND workspace_id = ${input.workspaceId}
+          RETURNING *
+        `;
+        // UPDATE itself locks the card. A move/delete since reread, or an owner
+        // change in the same scope, must roll back rather than map undefined.
+        if (!rows[0] || rows[0].owner_user_id !== observed.ownerUserId) throw notFound();
+        return mapCard(rows[0] as Row);
+      });
     },
 
     async getState(input) {
