@@ -14,7 +14,8 @@ function fakeSql(jobs: Job[]) {
     created_at: new Date(), updated_at: new Date() });
   const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
+    if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, owner_user_id: scope.ownerUserId }]);
+    if (query.includes("opening_workspace_history_revisions")) { writes.push({ query, values }); return Promise.resolve([]); }
     if (/UPDATE opening_tutor_jobs SET status = 'failed'/.test(query)) {
       writes.push({ query, values });
       const job = jobs.find(item => item.id === values[1] && item.stale && ["queued", "running"].includes(item.status));
@@ -71,8 +72,11 @@ describe("tutor job stale reconciliation", () => {
       { id: jobId, workspace_id: scope.workspaceId, status: "running", error: null, stale: true },
       { id: "00000000-0000-4000-8000-000000000004", workspace_id: scope.workspaceId, status: "queued", error: null, stale: true },
     ];
-    const { sql } = fakeSql(jobs);
+    const { sql, writes } = fakeSql(jobs);
     expect(await createOpeningTutorJobsRepository(sql).expireStale({ staleMs: 600_000 })).toBe(2);
     expect(jobs.map(job => job.status)).toEqual(["outcome_unknown", "failed"]);
+    const ensures = writes.filter(write => write.query.includes("INSERT INTO opening_workspace_history_revisions"));
+    expect(ensures).toHaveLength(2);
+    for (const ensure of ensures) expect(ensure.values).toEqual([scope.workspaceId, scope.ownerUserId]);
   });
 });
