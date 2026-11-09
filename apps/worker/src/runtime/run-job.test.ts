@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BudgetReplayError, OpeningProviderError } from "@aistudy/ai";
 import { canClaimJob, isUnknownOutcome, runJob } from "./run-job";
 import type { OpeningJobRecord } from "@aistudy/database";
@@ -76,6 +76,61 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
     expect(finished).toEqual([
       { state: "failed", value: { error: "workspace privacy epoch changed before writeback" } },
     ]);
+  });
+
+  describe.each([
+    Object.assign(new Error("could not obtain lock"), { code: "55P03" }),
+    new Error("writeback connection reset"),
+  ])("finish rejection: %s", finishError => {
+    it.each([
+      { path: "pre-dispatch epoch drift", state: "failed", value: { error: "workspace privacy epoch changed; job discarded" } },
+      { path: "post-handler epoch drift", state: "failed", value: { error: "workspace privacy epoch changed before writeback" } },
+      { path: "success", state: "succeeded", value: { ok: true } },
+      { path: "handler error", state: "failed", value: { error: "conversion interrupted", retryable: true } },
+      { path: "unknown outcome", state: "outcome_unknown", value: { error: "timed out", retryable: false } },
+    ])("propagates $path rejection unchanged with one finish call", async ({ path, state, value }) => {
+      const workspacePrivacyEpoch = vi.fn()
+        .mockResolvedValueOnce(path === "pre-dispatch epoch drift" ? 2 : 1)
+        .mockResolvedValueOnce(path === "post-handler epoch drift" ? 2 : 1);
+      const finish = vi.fn().mockRejectedValue(finishError);
+      const handler = vi.fn(async () => {
+        if (path === "handler error") throw new Error("conversion interrupted");
+        if (path === "unknown outcome") throw new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true);
+        return { ok: true };
+      });
+      await expect(runJob({
+        claim: async () => baseJob({ kind: "parse-media", claimToken: "claim-1" }),
+        workspacePrivacyEpoch,
+        finish,
+      }, "job-1", handler)).rejects.toBe(finishError);
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledWith("job-1", state, value, "claim-1");
+      expect(handler).toHaveBeenCalledTimes(path === "pre-dispatch epoch drift" ? 0 : 1);
+    });
+  });
+
+  it.each(["handler", "post-handler epoch lookup"])("preserves %s exception classification and finishes once", async source => {
+    const finish = vi.fn().mockResolvedValue(false);
+    const error = new OpeningProviderError("PROVIDER_TIMEOUT", "timed out", true);
+    const workspacePrivacyEpoch = vi.fn().mockResolvedValueOnce(1).mockRejectedValueOnce(error);
+    await expect(runJob({
+      claim: async () => baseJob({ kind: "parse-media", claimToken: "claim-1" }),
+      workspacePrivacyEpoch,
+      finish,
+    }, "job-1", async () => {
+      if (source === "handler") throw error;
+      return { ok: true };
+    })).resolves.toBe(false);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith("job-1", "outcome_unknown", { error: "timed out", retryable: false }, "claim-1");
+  });
+
+  it("returns an unsuccessful success writeback unchanged", async () => {
+    const result = { ok: true };
+    const finish = vi.fn().mockResolvedValue(false);
+    await expect(runJob({ claim: async () => baseJob(), finish }, "job-1", async () => result)).resolves.toBe(false);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledWith("job-1", "succeeded", result, undefined);
   });
 
   it("succeeds when epoch stays current", async () => {
