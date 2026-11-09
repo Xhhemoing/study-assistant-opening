@@ -2,6 +2,7 @@ import { controlledLearningTools, type SourceChunk } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
@@ -20,6 +21,9 @@ function chunkContent(chunks: NewSourceChunk[]): string[] {
 export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository { return {
   async replaceChunks(scope, input) {
     await sql.begin(async tx => {
+      // Privacy takes history before workspace; do not hold the job gate's workspace
+      // lock while waiting for history. A rejected execution rolls back the ensure too.
+      await lockWorkspaceLearningHistory(tx, scope);
       await lockOpeningJobExecution(tx, scope);
       await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId);
       const [row] = await tx`SELECT version,upload_state FROM opening_sources
