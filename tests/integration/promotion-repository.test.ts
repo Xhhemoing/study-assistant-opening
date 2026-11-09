@@ -117,8 +117,11 @@ describe("promotion repository", () => {
   it.each(["note", "card"] as const)("accept %s waits on history before business locks and double accept creates one atomic graph", async (kind) => {
     const promotion = await candidate(kind);
     const input = { workspaceId, promotionId: promotion.id };
-    await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
-      VALUES (${workspaceId}, ${ownerId}, 23)`;
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 0 }]);
+    expect(await sql`UPDATE opening_workspace_history_revisions SET revision = 23
+      WHERE workspace_id = ${workspaceId} AND owner_user_id = ${ownerId} AND revision = 0
+      RETURNING workspace_id, owner_user_id, revision::int`)
+      .toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 23 }]);
     const original = await graph();
     const holder = openRaceSession();
     const writer = openRaceSession();
@@ -179,8 +182,11 @@ describe("promotion repository", () => {
   it.each(["note", "card"] as const)("accept %s rechecks a concurrent rejection after history is released", async (kind) => {
     const promotion = await candidate(kind);
     const input = { workspaceId, promotionId: promotion.id };
-    await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
-      VALUES (${workspaceId}, ${ownerId}, 19)`;
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 0 }]);
+    expect(await sql`UPDATE opening_workspace_history_revisions SET revision = 19
+      WHERE workspace_id = ${workspaceId} AND owner_user_id = ${ownerId} AND revision = 0
+      RETURNING workspace_id, owner_user_id, revision::int`)
+      .toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 19 }]);
     const holder = openRaceSession();
     const writer = openRaceSession();
     const observer = openRaceSession();
@@ -207,6 +213,8 @@ describe("promotion repository", () => {
 
   it.each(["note", "card"] as const)("accept %s retains UUID, missing and foreign lookup error precedence without ensuring history", async (kind) => {
     const promotion = await candidate(kind);
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 0 }]);
+    const originalHistory = await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`;
     const missing = randomUUID();
     const missingWorkspace = randomUUID();
     const cases = [
@@ -219,8 +227,8 @@ describe("promotion repository", () => {
     ];
     for (const { code, message, ...input } of cases) {
       await expect(repository.accept(input)).rejects.toMatchObject({ name: "PromotionRepositoryError", code, message });
+      expect(await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`).toEqual(originalHistory);
     }
-    expect(await historyRows()).toEqual([]);
     expect(await repository.get({ workspaceId, promotionId: promotion.id })).toEqual(promotion);
     expect(await graph()).toMatchObject({ targets: [], documents: [], blocks: [], revisions: [] });
   });
@@ -229,12 +237,20 @@ describe("promotion repository", () => {
     const promotion = await candidate(kind);
     const input = { workspaceId, promotionId: promotion.id };
     const original = await graph();
-    for (const revision of [null, 43]) {
+    let previousHistory = [{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 0 }];
+    expect(await historyRows()).toEqual(previousHistory);
+    for (const revision of [null, 0, 43]) {
+      // Test-only reset after legal source creation: exercise a truly missing counter too.
+      expect(await sql`DELETE FROM opening_workspace_history_revisions
+        WHERE workspace_id = ${workspaceId} AND owner_user_id = ${ownerId}
+        RETURNING workspace_id, owner_user_id, revision::int`).toEqual(previousHistory);
       if (revision !== null) {
         await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
           VALUES (${workspaceId}, ${ownerId}, ${revision})`;
       }
-      const originalHistory = await historyRows();
+      previousHistory = revision === null ? [] : [{ workspace_id: workspaceId, owner_user_id: ownerId, revision }];
+      expect(await historyRows()).toEqual(previousHistory);
+      const originalHistory = await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`;
       const failure = new Error("injected after actual promotion graph before commit");
       let injected = false;
       const failing = new Proxy(sql, {
@@ -243,8 +259,10 @@ describe("promotion repository", () => {
           return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(async tx => {
             await execute(tx);
             await expectAcceptedGraph(promotion, tx);
-            const [history] = await tx`SELECT revision::int FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceId}`;
-            expect(history!.revision).toBe(revision ?? 0);
+            expect(await tx`SELECT workspace_id, owner_user_id, revision::int FROM opening_workspace_history_revisions
+              WHERE workspace_id = ${workspaceId}`)
+              .toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: revision ?? 0 }]);
+            expect(await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`).toEqual(originalHistory);
             expect(await graph()).toEqual(original);
             injected = true;
             throw failure;
@@ -254,12 +272,14 @@ describe("promotion repository", () => {
       await expect(createPromotionRepository(failing).accept(input)).rejects.toBe(failure);
       expect(injected).toBe(true);
       expect(await graph()).toEqual(original);
-      expect(await historyRows()).toEqual(originalHistory);
+      expect(await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`).toEqual(originalHistory);
     }
   });
 
   it("reports the promotion missing when workspace deletion commits between the preliminary reads", async () => {
     const promotion = await candidate("note");
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerId, revision: 0 }]);
+    const originalHistory = await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`;
     let deleted = false;
     const racing = new Proxy(sql, {
       get(target, property, receiver) {
@@ -279,7 +299,7 @@ describe("promotion repository", () => {
     await expect(createPromotionRepository(racing).accept({ workspaceId, promotionId: promotion.id }))
       .rejects.toMatchObject({ name: "PromotionRepositoryError", code: "NOT_FOUND", message: `Promotion not found: ${promotion.id}` });
     expect(deleted).toBe(true);
-    expect(await historyRows()).toEqual([]);
+    expect(await sql`SELECT * FROM opening_workspace_history_revisions ORDER BY workspace_id`).toEqual(originalHistory);
     expect(await graph()).toMatchObject({ records: [], targets: [], documents: [], blocks: [], revisions: [] });
   });
 
