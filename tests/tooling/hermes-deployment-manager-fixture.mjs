@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { verifySources } from './hermes-entry-fixture.mjs';
 const [supervisor, mode, script, ...args] = process.argv.slice(2);
 if (mode !== 'run') throw new Error('Fixture requires managed run');
 const { supervise, processStarttime, stopWriters } = await import(pathToFileURL(supervisor));
@@ -41,6 +42,7 @@ const python = (mode, record, scope) => {
 const { EventEmitter } = await import('node:events');
 const { PassThrough } = await import('node:stream');
 const dependencies = {
+  verifyEntrySources: () => verifySources(dirname(supervisor)),
   command,
   stopWriters: () => stopWriters(command),
   // Fake migration fixture owns DB calls; no real database is touched.

@@ -75,7 +75,7 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py", "hermes-trusted-loader.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-entry.py", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py", "hermes-trusted-loader.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {
@@ -164,7 +164,7 @@ case "$2" in
  */actions/runs/12) cat "$MOCK_RUN";;
  *) cat "$MOCK_CI_FILE";;
 esac`,
-    ssh: `printf 'ssh %s\\n' "$*" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != ssh ]] || exit 255; bash -c "\${!#}"`,
+    ssh: `printf 'ssh %s\\n' "$*" >> "$MOCK_LOG"; [[ "\${MOCK_FAIL:-}" != ssh ]] || exit 255; "$REAL_NODE" "$MOCK_ENTRY_FIXTURE" "\${!#}"`,
     scp: `printf 'scp\\n' >> "$MOCK_LOG"; arguments=("$@"); source=\${arguments[\${#arguments[@]}-2]}; destination=\${arguments[\${#arguments[@]}-1]}; cp "$source" "\${destination#*:}"`,
     npm: `
 printf 'npm %s\\n' "$*" >> "$MOCK_LOG"
@@ -278,6 +278,7 @@ printf '{"status":"ok"}'`,
     RELEASES_DIR: releases, CURRENT_LINK: current, DEPLOY_STATE: state, BACKUP_DIR: backups,
     SYSTEMD_DIR: systemd, WORKER_CONFIG_DIR: workerConfig, MIN_FREE_KB: "10", DEPLOY_REMOTE: "",
     MOCK_NPM_VERSION: platform().npm,
+    MOCK_ENTRY_FIXTURE: fileURLToPath(new URL('./hermes-entry-fixture.mjs', import.meta.url)),
     MOCK_MANAGER_FIXTURE: fileURLToPath(new URL('./hermes-deployment-manager-fixture.mjs', import.meta.url)),
     REAL_GIT: realGit, REAL_NODE: process.execPath, MOCK_RELEASE_SHA: sha, MOCK_LOG: log, MOCK_CI_FILE: ciFile,
     MOCK_MV_FAILED: join(root, "mv-failed"), MOCK_WORKER: "active", MOCK_CRASHED: join(root, "worker-crashed"), MOCK_STOPPED: join(root, "worker-stopped"), MOCK_RESTARTED: join(root, "worker-restarted"), ...overrides,
@@ -302,6 +303,17 @@ printf '{"status":"ok"}'`,
     },
   };
 }
+
+for (const action of ['status', 'logs']) test(`${action} retains its existing direct release path without entry preflight`, t => {
+  const f = fixture(t);
+  // These read-only actions do not stage/start the managed entry.
+  rmSync(join(f.repo, 'infra/deploy/hermes-entry.py'));
+  const result = f.run(action);
+  assert.equal(result.status, action === 'status' ? 1 : 0, result.stderr);
+  if (action === 'status') assert.match(result.stderr, /Current release pointer is missing/);
+  assert.doesNotMatch(result.deltaLog, /aistudy-entry|hermes-supervisor|systemctl stop|migrate|pg_dump|worker provision/);
+  assert.deepEqual(readdirSync(f.state), []);
+});
 
 function prebuiltFixture(t) {
   const f = fixture(t, { MOCK_PREBUILT: "pending" });

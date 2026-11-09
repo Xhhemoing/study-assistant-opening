@@ -8,7 +8,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, open
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
-import { binding, brokerControl, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit } from './hermes-writer-control.mjs';
+import { binding, brokerControl, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources } from './hermes-writer-control.mjs';
 export { durableWrite, syncDirectory, installWriterBoundary } from './hermes-writer-control.mjs';
 
 // A disconnected SSH pipe is not permission to abandon independent cleanup.
@@ -136,7 +136,7 @@ export async function requestCommand(action, environment = process.env, dependen
   return { exitCode: reply.ok ? 0 : 1 };
 }
 const production = {
-  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -146,8 +146,10 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
+  // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
+  verifyEntrySources();
   const state = args[4], systemd = args[6], action = args[0];
   const guard = join(state, "migration-forward-only");
   const fence = join(state, "writers-fenced");
@@ -487,6 +489,7 @@ async function main() {
     process.exitCode = result.exitCode;
   } else if (mode === "run") {
     validateArguments(args);
+    verifyEntrySources(); // Before mkdir/chmod/lock, including existing guard recovery.
     const state = args[4];
     mkdirSync(state, { recursive: true, mode: 0o700 });
     chmodSync(state, 0o700);

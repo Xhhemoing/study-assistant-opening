@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { verifySources } from './hermes-entry-fixture.mjs';
 import { processStarttime, supervise } from '../../infra/deploy/hermes-supervisor.mjs';
 
 export const units = ['aistudy-web.service', 'aistudy-worker.service'];
@@ -66,6 +67,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     return result.stdout.trim();
   };
   const dependencies = {
+    verifyEntrySources: () => verifySources(resolve('infra/deploy')),
     // Real server and sockets. Intercept end only at the actual reply boundary,
     // after synchronous terminalCommit, before any success response byte is sent.
     createServer: listener => createServer(socket => {

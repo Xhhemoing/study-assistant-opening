@@ -20,6 +20,14 @@ export function durableWrite(file, contents, mode = 0o600) {
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const controls = dirname(fileURLToPath(import.meta.url));
 const sourceNames = ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'];
+export function verifyEntrySources() {
+  // Check the source entry, not the not-yet-installed state/writer-controls.
+  // This mode reads the complete Python inventory without executing siblings.
+  const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), 'verify'], {
+    encoding: 'utf8', timeout: 30_000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+  });
+  if (result.error || result.status !== 0) throw new Error('Trusted entry source preflight refused');
+}
 export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
 export function python(file, args, payload) {

@@ -2,6 +2,7 @@
 import copy
 import errno
 import importlib.util
+import io
 import json
 import multiprocessing
 import py_compile
@@ -13,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import unittest
 from unittest.mock import patch
@@ -188,12 +190,151 @@ class TrustedSourceTests(unittest.TestCase):
                 api.validate_config({'files': [], 'effective': {}})
         self.assertFalse(self.marker.exists())
 
+    def test_verify_is_strict_inventory_only_and_never_dispatches_sibling(self):
+        self.malicious()
+        with patch.object(bootstrap, '__file__', str(self.root / 'hermes-trusted-loader.py')):
+            with patch.object(sys, 'argv', ['loader', 'verify']), patch.object(bootstrap.SourceLoader, 'load', side_effect=AssertionError('sibling dispatched')):
+                bootstrap.main()
+            self.assertFalse(self.marker.exists())
+            with patch.object(sys, 'argv', ['loader', 'verify', 'state']):
+                with self.assertRaisesRegex(ValueError, 'no arguments'):
+                    bootstrap.main()
+            with patch.object(sys, 'argv', ['loader', 'unknown']):
+                with self.assertRaises(KeyError):
+                    bootstrap.main()
+
     def test_state_and_wrapper_share_verified_loader_not_importlib(self):
         actual = bootstrap.SourceLoader(ROOT)
         wrapper = actual.load('hermes-writer-exec.py')
         broker = wrapper.controls()
         self.assertIs(broker.state_api, actual.load('hermes-writer-state.py'))
         self.assertIs(broker.trusted_loader, wrapper.trusted_loader)
+
+
+class EntryTransportTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('entry_transport', ROOT / 'hermes-entry.py')
+        self.entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.entry)
+        self.temp = tempfile.TemporaryDirectory(prefix='hermes-entry-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'source'
+        self.source.mkdir(mode=0o770)
+        self.source.chmod(0o770)
+        self.contents = {}
+        for index, name in enumerate(self.entry.FILES):
+            data = (ROOT / name).read_bytes()
+            self.contents[name] = data
+            (self.source / name).write_bytes(data)
+            (self.source / name).chmod(0o775 if index % 2 else 0o664)
+        self.destination = self.root / 'destination'
+        self.destination.mkdir(mode=0o700)
+
+    def archive(self):
+        result = subprocess.run(['/usr/bin/python3', '-I', '-S', '-B', str(ROOT / 'hermes-entry.py'),
+                                 'pack', str(self.source)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_real_tar_normalizes_nonroot_group_writable_source_preserving_bytes_and_exec(self):
+        self.assertEqual(self.source.stat().st_uid, os.geteuid())
+        self.assertTrue(self.source.stat().st_mode & 0o020)
+        archive = self.archive()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as opened:
+            self.assertEqual(tuple(m.name for m in opened), self.entry.FILES)
+            for member in opened:
+                self.assertEqual((member.uid, member.gid), (0, 0))
+                self.assertFalse(member.mode & 0o022)
+                self.assertTrue(member.isreg())
+                self.assertEqual(member.mode, (self.source / member.name).stat().st_mode & 0o7777 & ~0o022)
+                self.assertEqual(opened.extractfile(member).read(), self.contents[member.name])
+        self.entry.extract(io.BytesIO(archive), self.destination, uid=os.geteuid())
+        for name in self.entry.FILES:
+            self.assertEqual((self.destination / name).read_bytes(), self.contents[name])
+            self.assertEqual((self.destination / name).stat().st_nlink, 1)
+        # Pure verify validates all sources, not state, manager or sibling code.
+        checked = bootstrap.SourceLoader(self.destination)
+        checked.verify()
+        self.assertEqual(checked.modules, {})
+        self.assertEqual(set(bootstrap.SOURCES), {name for name in self.entry.FILES if name.endswith('.py')})
+
+    def test_real_pipe_input_supports_complete_validation_before_extraction(self):
+        driver = """import importlib.util,os,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('entry',sys.argv[1]);entry=importlib.util.module_from_spec(spec);spec.loader.exec_module(entry)
+entry.extract(sys.stdin.buffer,Path(sys.argv[2]),uid=os.geteuid())
+"""
+        result = subprocess.run(['/usr/bin/python3', '-I', '-S', '-B', '-c', driver,
+                                 str(ROOT / 'hermes-entry.py'), str(self.destination)],
+                                input=self.archive(), capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in self.entry.FILES:
+            self.assertEqual((self.destination / name).read_bytes(), self.contents[name])
+
+    def test_sender_refuses_missing_symlink_and_hardlink_for_every_transport_file(self):
+        for name in self.entry.FILES:
+            for defect in ('missing', 'symlink', 'hardlink'):
+                with self.subTest(name=name, defect=defect):
+                    path = self.source / name
+                    data = path.read_bytes()
+                    path.unlink()
+                    anchor = self.root / 'anchor'
+                    anchor.write_bytes(data)
+                    if defect == 'symlink':
+                        path.symlink_to(anchor)
+                    elif defect == 'hardlink':
+                        os.link(anchor, path)
+                    try:
+                        with self.assertRaises((OSError, ValueError)):
+                            self.entry.check_files(self.source)
+                    finally:
+                        if path.exists() or path.is_symlink():
+                            path.unlink()
+                        path.write_bytes(data)
+                        anchor.unlink()
+
+    def test_typed_extraction_rejects_whole_bad_inventory_before_any_file_write(self):
+        good = self.archive()
+        for defect in ('missing', 'duplicate', 'symlink', 'hardlink', 'directory', 'fifo',
+                       'owner', 'group', 'writable', 'path', 'extra'):
+            with self.subTest(defect=defect):
+                output = io.BytesIO()
+                with tarfile.open(fileobj=io.BytesIO(good), mode='r:gz') as original, tarfile.open(fileobj=output, mode='w:gz') as changed:
+                    members = original.getmembers()
+                    if defect == 'missing':
+                        members.pop()
+                    if defect == 'duplicate':
+                        members[-1] = copy.copy(members[0])
+                    if defect == 'extra':
+                        extra = copy.copy(members[0]); extra.name = 'extra'; extra.size = 0; members.append(extra)
+                    for index, member in enumerate(members):
+                        data = self.contents[member.name] if member.name in self.contents else b''
+                        if index == 0:
+                            if defect in ('symlink', 'hardlink', 'directory', 'fifo'):
+                                member.type = {'symlink': tarfile.SYMTYPE, 'hardlink': tarfile.LNKTYPE,
+                                               'directory': tarfile.DIRTYPE, 'fifo': tarfile.FIFOTYPE}[defect]
+                                member.linkname = 'hermes-release.sh' if 'link' in defect else ''
+                                member.size = 0
+                            elif defect == 'owner': member.uid = 1000
+                            elif defect == 'group': member.gid = 1000
+                            elif defect == 'writable': member.mode |= 0o020
+                            elif defect == 'path': member.name = '../escaped'
+                        changed.addfile(member, io.BytesIO(data) if member.isreg() else None)
+                with self.assertRaises((OSError, ValueError)):
+                    self.entry.extract(io.BytesIO(output.getvalue()), self.destination, uid=os.geteuid())
+                self.assertEqual(list(self.destination.iterdir()), [])
+                self.assertFalse((self.root / 'escaped').exists())
+
+    def test_production_extract_and_verify_reject_nonroot_entry_without_bypass(self):
+        if os.geteuid() == 0:
+            self.skipTest('requires unprivileged fixture owner')
+        with self.assertRaises(PermissionError):
+            self.entry.extract(io.BytesIO(self.archive()), self.destination)
+        for key in ('TRUSTED_UID', 'HERMES_TRUSTED_UID'):
+            result = subprocess.run(['/usr/bin/python3', '-I', '-S', '-B', str(ROOT / 'hermes-trusted-loader.py'), 'verify'],
+                                    env={key: str(os.geteuid())}, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
 
 
 class RawManagerTests(unittest.TestCase):

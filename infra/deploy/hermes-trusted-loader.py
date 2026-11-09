@@ -118,6 +118,11 @@ def main():
              'broker': 'hermes-peer-broker.py'}
     mode = sys.argv[1]
     loader = SourceLoader(Path(__file__).parent)
+    if mode == 'verify':
+        if len(sys.argv) != 2:
+            raise ValueError('Verify accepts no arguments')
+        loader.verify()
+        return
     module = loader.load(modes[mode])
     sys.argv = [module.__file__, *sys.argv[2:]]
     module.main()
