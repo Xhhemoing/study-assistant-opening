@@ -44,6 +44,7 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningLearningDecisionsRepository: () => ({ list: recovery.list }),
   createOpeningLearningAttemptRepository: () => ({ listByActivity: async () => [], assertAccess: recovery.assertAccess }),
   createOpeningStudyExposureRepository: () => ({ deliver: recovery.deliver }),
+  readOpeningSpanRepair: async () => null,
   readOpeningCourseObservationHeads: async () => [],
   createOpeningStudyIntentRepository: () => ({ latest: async () => null }),
   readOpeningSpanTutorOriginChange: async () => undefined,

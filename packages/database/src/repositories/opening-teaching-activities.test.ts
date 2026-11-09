@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningTeachingActivitiesRepository, ensureCourseContinueActivity } from "./opening-teaching-activities";
+import { associateOpeningTeachingCourseInTx, createOpeningTeachingActivitiesRepository, ensureCourseContinueActivity } from "./opening-teaching-activities";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
 import {
   nextLearningActivityHistoryRevision,
@@ -168,9 +168,7 @@ describe("opening teaching activities repository (unit)", () => {
     };
     const { sql, writes } = db((query, values) => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
-      if (query.includes("FROM opening_teaching_activities") && query.includes("FOR UPDATE")) {
-        return [activityRow];
-      }
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow];
       if (query.includes("FROM courses")) return [{ id: courseId }];
       if (query.includes("UPDATE opening_teaching_activities")) {
         return [{ ...activityRow, course_id: values[0] ?? null, updated_at: "2026-10-11T03:00:00.000Z" }];
@@ -182,7 +180,7 @@ describe("opening teaching activities repository (unit)", () => {
     expect(associated.courseId).toBe(courseId);
     const unassociated = await repo.associateCourse(scope, activityId, { courseId: null });
     expect(unassociated.courseId).toBeNull();
-    const mutationWrites = writes.filter((w) => /\b(INSERT|UPDATE|DELETE)\b/i.test(w.query) && !/FOR UPDATE/i.test(w.query));
+    const mutationWrites = mutations(writes);
     expect(mutationWrites.length).toBeGreaterThan(0);
     expect(mutationWrites.every((w) => w.query.includes("UPDATE opening_teaching_activities"))).toBe(true);
     expect(mutationWrites.every((w) => !w.query.includes("opening_learning_observations"))).toBe(true);
@@ -514,6 +512,95 @@ describe("V2-14 setStatus active↔paused (T15)", () => {
     const updated = await repo.setStatus(scope, activityId, { status: "paused" });
     expect(updated.status).toBe("paused");
     expect(writes.some((w) => /UPDATE opening_teaching_activities/.test(w.query) && w.query.includes("status"))).toBe(true);
+  });
+});
+
+describe("associateCourse history boundary", () => {
+  it.each([{ courseId }, { courseId: null }, { auto: true as const }])("blocks %j before any business lock or write", async input => {
+    const queries: string[] = [], barrier = Object.assign(new Error("history unavailable"), { code: "55P03" });
+    const { sql } = db(query => {
+      queries.push(query);
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) throw barrier;
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow()];
+      if (query.includes("FROM courses")) return [{ id: courseId }];
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(sql).associateCourse(scope, activityId, input)).rejects.toBe(barrier);
+    expect(queries.filter(q => /FOR SHARE|FOR UPDATE/.test(q))).toEqual([
+      expect.stringContaining("SELECT revision FROM opening_workspace_history_revisions"),
+    ]);
+    expect(queries.filter(q => /^\s*(INSERT|UPDATE|DELETE)/.test(q))).toEqual([
+      expect.stringContaining("INSERT INTO opening_workspace_history_revisions"),
+    ]);
+  });
+
+  it.each(["owner", "execution", "missing", "uuid", "cas", "course", "completed", "source", "purpose", "auto-purpose"])(
+    "preserves %s failure without history, locks or source journal", async failure => {
+      const queries: string[] = [], cast = Object.assign(new Error("bad uuid"), { code: "22P02" });
+      const { sql, writes } = db(query => {
+        queries.push(query);
+        if (query.includes("opening_workspace_history_revisions")) throw new Error("unexpected history");
+        if (query.includes("FROM workspaces w JOIN opening_jobs")) return [];
+        if (query.includes("FROM workspaces")) return failure === "owner" ? [] : [{ id: workspaceId }];
+        if (query.includes("FROM opening_teaching_activities")) {
+          if (failure === "uuid") throw cast;
+          return failure === "missing" ? [] : [activityRow({ course_id: null,
+            status: failure === "completed" ? "completed" : "active",
+            source_ids: ["source", "purpose", "auto-purpose"].includes(failure) ? [activityId] : [] })];
+        }
+        if (query.includes("FROM opening_sources")) return failure === "source" ? [] : [{ id: activityId }];
+        if (query.includes("FROM courses")) return failure === "course" ? [] : [{ id: courseId }];
+        return [];
+      });
+      const input = ["completed", "auto-purpose"].includes(failure) ? { auto: true as const }
+        : { courseId, ...(failure === "cas" ? { expectedUpdatedAt: "2020-01-01T00:00:00.000Z" } : {}) };
+      const codes: Record<string, string> = { owner: "NOT_FOUND", execution: "CONFLICT", missing: "NOT_FOUND", uuid: "22P02",
+        cas: "CONFLICT", course: "NOT_FOUND", completed: "CONFLICT", source: "VALIDATION", purpose: "CONFLICT", "auto-purpose": "CONFLICT" };
+      await expect(createOpeningTeachingActivitiesRepository(sql).associateCourse(failure === "execution"
+        ? { ...scope, jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope : scope,
+      activityId, input)).rejects.toMatchObject({ code: codes[failure] });
+      expect(writes).toEqual([]);
+      expect(queries.some(q => /FOR SHARE|FOR UPDATE/.test(q))).toBe(false);
+    });
+
+  it.each(["owner", "execution", "cas", "course"])("authoritatively rejects %s drift after history", async drift => {
+    let history = false;
+    const { sql, writes } = db(query => {
+      if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) history = true;
+      if (query.includes("FROM workspaces w JOIN opening_jobs")) return [{ id: activityId }];
+      if (query.includes("FROM workspaces")) return history && drift === "owner" ? [] : [{ id: workspaceId }];
+      if (query.includes("FROM opening_jobs")) return [];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow(history && drift === "cas"
+        ? { updated_at: "2026-10-14T00:00:00.000Z" } : {})];
+      if (query.includes("FROM courses")) return history && drift === "course" ? [] : [{ id: courseId }];
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(sql).associateCourse(drift === "execution"
+      ? { ...scope, jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope : scope,
+    activityId, { courseId, ...(drift === "cas" ? { expectedUpdatedAt: "2026-10-13T02:00:00.000Z" } : {}) }))
+      .rejects.toMatchObject({ code: ["owner", "course"].includes(drift) ? "NOT_FOUND" : "CONFLICT" });
+    expect(history).toBe(true);
+    expect(mutations(writes)).toEqual([]);
+  });
+
+  it("transaction entry skips history/root begin but retains owner, execution and association gates", async () => {
+    const queries: string[] = [];
+    const { sql } = db(query => {
+      queries.push(query);
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("FROM opening_teaching_activities")) return [activityRow({ course_id: courseId })];
+      return [];
+    });
+    sql.begin = (() => { throw new Error("nested root begin"); }) as Sql["begin"];
+    expect((await associateOpeningTeachingCourseInTx(sql as unknown as TransactionSql, scope, activityId, { auto: true })).courseId).toBe(courseId);
+    expect(queries.some(q => q.includes("opening_workspace_history_revisions"))).toBe(false);
+    expect(queries.filter(q => /FOR SHARE|FOR UPDATE/.test(q))).toHaveLength(2);
+    await expect(associateOpeningTeachingCourseInTx(sql as unknown as TransactionSql, { ...scope,
+      jobExecution: { id: activityId, token: activityId, privacyEpoch: 0 } } as typeof scope, activityId, { auto: true }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "job execution is no longer current" });
+    await expect(associateOpeningTeachingCourseInTx(sql as unknown as TransactionSql, scope, activityId,
+      { courseId: null, expectedUpdatedAt: "2020-01-01T00:00:00.000Z" })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
 

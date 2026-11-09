@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createOpeningPrivacyRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
+import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { getTutorService } from "../../apps/web/src/features/opening/runtime";
@@ -465,7 +466,7 @@ it.each(["correct", "unlabelled_incorrect"] as const)("limits a real same-origin
     const answer = correct && followupKind === "unlabelled_incorrect" ? { membership: "not_in_span" }
       : correct && solution.kind === "unique" ? { membership: "in_span", coefficients: solution.coefficients,
         equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target }
-        : { membership: "in_span", coefficients: ["999", "999"] };
+        : { membership: "in_span", coefficients: ["999", "999"], equation: { vectors: problem.vectors, target: problem.target } };
     const observed = await learning.insertObservation(scope, { sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL,
       sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId, clientKey: randomUUID(),
       answer: JSON.stringify(answer), outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
@@ -477,13 +478,39 @@ it.each(["correct", "unlabelled_incorrect"] as const)("limits a real same-origin
   const firstInput = { activityId: a.activityId, expectedRevision: a.revision, observationId: failureA.id, clientKey: "cycle-first" };
   const first = await f.next.next(scope, firstInput);
   if (first.kind !== "ready") throw new Error("expected first correction");
-  await submit(first.session.sessionId, "span-reserved-20261021-q02", true, true);
-  const failureB = await submit(first.session.sessionId, "span-reserved-20261021-q03", false, false);
-  const second = await f.next.next(scope, { activityId: first.session.activityId, expectedRevision: first.session.revision,
+  // New activities must use the real bound stages; arbitrary attempts would bypass repair admission.
+  const repairRound = async (initial: typeof first.session, final: "failure" | "correct" | "unlabelled_incorrect") => {
+    let session = initial;
+    await createSpanPresentationService(sql).read(scope, { activityId: session.activityId, repairVersion: 1, stage: "example", clientKey: randomUUID() });
+    session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self-faded", status: "active" });
+    const issuer = createSpanReservedService(sql);
+    const variant = await issuer.issue(scope, { activityId: session.activityId, repairVersion: 1, expectedRevision: session.revision, stage: "variant", clientKey: randomUUID() });
+    const answerAttempt = async (attempt: typeof variant, kind: "failure" | "correct" | "unlabelled_incorrect", helped: boolean) => {
+      if (helped) await createSpanHintService(sql).read(scope, { attemptId: attempt.id, level: 1 });
+      const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+      if (solution.kind !== "unique") throw new Error("fixture requires a unique span solution");
+      const answer = kind === "unlabelled_incorrect" ? { membership: "not_in_span" } : {
+        membership: "in_span", coefficients: kind === "failure" ? ["999", "999"] : solution.coefficients,
+        equation: { vectors: problem.vectors, target: problem.target }, coordinateChecks: problem.target };
+      return learning.insertObservation(scope, { sessionId: session.sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL,
+        sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId, clientKey: randomUUID(), answer: JSON.stringify(answer),
+        outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+    };
+    const variantObserved = await answerAttempt(variant, final === "failure" ? "correct" : final, true);
+    if (final !== "failure") return { session, observation: variantObserved };
+    session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self_study-reserved", status: "active" });
+    const confirmation = await issuer.issue(scope, { activityId: session.activityId, repairVersion: 1, expectedRevision: session.revision, stage: "confirmation", clientKey: randomUUID() });
+    const observation = await answerAttempt(confirmation, final, final !== "failure");
+    expect(observation.outcome).toBe(final === "correct" ? "correct" : "incorrect");
+    if (final === "unlabelled_incorrect") expect(Object.values(observation.serverEvaluation?.skills ?? {})).not.toContain("incorrect");
+    return { session, observation };
+  };
+  const roundOne = await repairRound(first.session, "failure"), failureB = roundOne.observation;
+  const second = await f.next.next(scope, { activityId: first.session.activityId, expectedRevision: roundOne.session.revision,
     observationId: failureB.id, clientKey: "cycle-second" });
   if (second.kind !== "ready") throw new Error("expected second correction");
-  const followup = await submit(second.session.sessionId, "span-reserved-20261021-q05", true, true);
-  const reference = { activityId: second.session.activityId, expectedRevision: second.session.revision, observationId: followup.id };
+  const roundTwo = await repairRound(second.session, followupKind), followup = roundTwo.observation;
+  const reference = { activityId: second.session.activityId, expectedRevision: roundTwo.session.revision, observationId: followup.id };
   const repository = createOpeningSpanTutorContextRepository(sql);
   const request = { courseId: f.courseId, sourceIds: [f.sourceId], sourceVersions: { [f.sourceId]: 1 }, question: "继续学习", originReference: reference };
   const context = (await repository.read(scope, request))!;

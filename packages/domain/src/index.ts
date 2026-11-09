@@ -506,6 +506,7 @@ export * from "./opening/evaluation/exam-choice-evaluator";
 export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition } from "./opening/knowledge-node-identity";
 
 export * from "./opening/span-verifier";
+export * from "./opening/span-repair";
 
 export * from "./opening/span-teaching";
 

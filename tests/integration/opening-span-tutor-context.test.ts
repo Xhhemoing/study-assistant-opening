@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository } from "@aistudy/database";
+import { createOpeningLearningRepository, createOpeningSpanSessionRepository, createWorkspacePreferencesRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { captureNextLearningStep, DEFAULT_STUDY_SESSION_INTENT, nextLearningStep, SPAN_SKILL_LABEL, solveSpanProblem } from "@aistudy/domain";
 import { createSpanTutorNextAction } from "../../apps/worker/src/runtime/span-tutor-next-action";
 import { prepareTutorNextAction } from "../../apps/worker/src/jobs/tutor-next-action";
-import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptRepository } from "@aistudy/database";
+import { createOpeningLearningDecisionsRepository, createOpeningLearningAttemptRepository, readOpeningSpanRepair, spanRepairAttemptKey } from "@aistudy/database";
+import { getSpanItemIdentity } from "@aistudy/domain/span-heldout-catalog";
+import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision, spanTutorQuestionInScope } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -514,4 +516,243 @@ it("returns a paused reserved lesson without issuing an attempt or overriding th
   expect(context.needsReservedIssue).not.toBe(true);
   expect(await f.repo.execute(fixture.scope, { context, decision: nextLearningStep(context.decisionInput), operationId: `tutor-next:${randomUUID()}` })).toEqual(paused);
   expect(await fixture.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${paused.activityId}`).toHaveLength(0);
+});
+
+async function repairCandidate(target: "equation" | "coefficients" | "allCoordinates" | "unobserved") {
+  const f = await seed(), { sql, scope } = fixture, lessons = createOpeningSpanSessionRepository(sql);
+  const intent = { ...DEFAULT_STUDY_SESSION_INTENT, purpose: "self_study" as const };
+  const lesson = await lessons.create(scope, { courseId: f.courseId, sourceIds: [f.sourceId], intent, clientKey: randomUUID() });
+  const attempt = await createSpanReservedService(sql).issue(scope, { sessionId: lesson.sessionId, sourceId: f.sourceId, clientKey: randomUUID(), mode: "self_study" });
+  const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+  if (solution.kind !== "unique") throw new Error("fixture needs unique coefficients");
+  const observation = await createOpeningLearningRepository(sql).insertObservation(scope, {
+    sessionId: lesson.sessionId, courseId: f.courseId, skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId],
+    attemptId: attempt.id, problemId: attempt.problemId, clientKey: randomUUID(), assistance: "independent", outcome: "unverified", verdictSource: "self_report",
+    answer: JSON.stringify({ membership: "in_span", coefficients: target === "coefficients" || target === "unobserved" ? ["0", "0"] : solution.coefficients,
+      ...(target === "unobserved" ? {} : { equation: { vectors: problem.vectors, target: target === "equation" ? ["0", "0", "0"] : problem.target } }),
+      coordinateChecks: target === "allCoordinates" ? [problem.target[0], problem.target[1], "0"] : problem.target }),
+  });
+  await lessons.save(scope, lesson.activityId, { expectedRevision: lesson.revision, intent, moveId: lesson.moveId, status: "completed" });
+  const context = (await f.repo.read(scope, f.request))!, decision = nextLearningStep(context.decisionInput), operationId = `tutor-next:${randomUUID()}`;
+  expect(decision.activityKind).toBe("targeted_explain");
+  return { ...f, lessons, observation, context, decision, operationId, execute: () => f.repo.execute(scope, { context, decision, operationId }) };
+}
+
+it.each(["equation", "coefficients", "allCoordinates"] as const)("atomically persists the %s repair plan and runs bound example, variant and fresh confirmation", async target => {
+  const f = await repairCandidate(target), { sql, scope } = fixture;
+  let session = await f.execute();
+  const plan = await readOpeningSpanRepair(sql, scope, session.activityId);
+  expect(plan).toMatchObject({ version: 1, status: "ready", targetSkill: target, prerequisite: { status: "unknown" },
+    basis: { observationId: f.observation.id, attemptId: f.observation.attemptId } });
+  if (plan?.status !== "ready") throw new Error("expected a qualified plan");
+  const [receipt] = await createOpeningLearningDecisionsRepository(sql).list(scope, { layer: "activity", targetId: session.activityId });
+  expect(JSON.parse(receipt!.intentVersion).spanRepair).toEqual(plan);
+  expect("confirmation" in plan).toBe(false);
+  expect(await f.execute()).toEqual(session);
+  await expect(f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self_study-reserved", status: "active" })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(createSpanPresentationService(sql).read(scope, { sessionId: session.sessionId, courseId: f.courseId, sourceId: f.sourceId, kind: "worked", clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: session.sessionId, clientKey: randomUUID(), spanExercise: { sourceId: f.sourceId, problemId: plan.practiceVariant.problemId, version: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+  const presentation = { activityId: session.activityId, repairVersion: 1, stage: "example", clientKey: randomUUID() };
+  const shown = await createSpanPresentationService(sql).read(scope, presentation);
+  expect(shown).toMatchObject({ targetedExplanation: { targetSkill: target } });
+  expect(shown.problem.id).toBe(plan.teachingExample.problemId);
+  const [exposure] = await sql`SELECT delivered,released_at,acknowledged_at FROM opening_help_exposures WHERE id=${shown.exposureReceipt.id}`;
+  expect(exposure).toMatchObject({ delivered: true, acknowledged_at: null });
+  expect(exposure!.released_at).not.toBeNull();
+  expect(await createSpanPresentationService(sql).read(scope, { ...presentation, clientKey: randomUUID() })).toEqual(shown);
+  session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self-faded", status: "active" });
+  const issuer = createSpanReservedService(sql);
+  await expect(issuer.issue(scope, { activityId: session.activityId, repairVersion: 1, expectedRevision: session.revision, stage: "confirmation", clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  const request = { activityId: session.activityId, repairVersion: 1, expectedRevision: session.revision, stage: "variant", clientKey: randomUUID() };
+  const variant = await issuer.issue(scope, request);
+  expect(variant.spanExercise!.id).toBe(plan.practiceVariant.problemId);
+  expect(variant.spanExercise!.id).not.toBe(shown.problem.id);
+  expect(await issuer.issue(scope, { ...request, clientKey: randomUUID() })).toEqual(variant);
+  await expect(f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self_study-reserved", status: "active" })).rejects.toMatchObject({ code: "CONFLICT" });
+  const submit = async (attempt: typeof variant) => {
+    const p = attempt.spanExercise!, solved = solveSpanProblem(p);
+    if (solved.kind !== "unique") throw new Error("fixture requires unique span answer");
+    return createOpeningLearningRepository(sql).insertObservation(scope, { sessionId: session.sessionId, courseId: f.courseId,
+      skillLabel: SPAN_SKILL_LABEL, sourceIds: [f.sourceId], attemptId: attempt.id, problemId: attempt.problemId, clientKey: randomUUID(),
+      answer: JSON.stringify({ membership: "in_span", coefficients: solved.coefficients, equation: { vectors: p.vectors, target: p.target }, coordinateChecks: p.target }),
+      assistance: "independent", outcome: "unverified", verdictSource: "self_report" });
+  };
+  await submit(variant);
+  session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self_study-reserved", status: "active" });
+  const confirmation = await issuer.issue(scope, { ...request, stage: "confirmation", expectedRevision: session.revision });
+  expect(getSpanItemIdentity(confirmation.spanExercise!.id, confirmation.spanExercise!.version)?.purpose).toBe("validation");
+  expect(confirmation.spanExercise!.familyId).toBe(variant.spanExercise!.familyId);
+  expect(confirmation.spanExercise!.id).not.toBe(variant.spanExercise!.id);
+  const observed = await submit(confirmation);
+  expect(observed.serverEvaluation).toMatchObject({ decision: "correct", coreEvidenceComplete: true });
+  expect(observed.eligibility?.usableForDelayedCheck).not.toBe("yes"); // same-family immediate confirmation is not mastery/delayed evidence.
+  session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "completed" });
+  expect(session.status).toBe("completed");
+  const issued = await sql`SELECT client_key FROM opening_learning_attempts WHERE activity_id=${session.activityId} ORDER BY client_key`;
+  expect(issued.map(row => row.client_key).sort()).toEqual(["example", "variant", "confirmation"].map(stage => spanRepairAttemptKey(session.activityId, stage as "example" | "variant" | "confirmation")).sort());
+});
+
+async function retryVariantFixture() {
+  const f = await repairCandidate("coefficients"), { sql, scope } = fixture;
+  let session = await f.execute();
+  await createSpanPresentationService(sql).read(scope, { activityId: session.activityId, repairVersion: 1, stage: "example", clientKey: randomUUID() });
+  session = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: "self-faded", status: "active" });
+  const issuer = createSpanReservedService(sql);
+  const request = { activityId: session.activityId, repairVersion: 1, expectedRevision: session.revision, stage: "variant", clientKey: randomUUID() };
+  const variant = await issuer.issue(scope, request);
+  const submit = (attempt: typeof variant, answer: string) => createOpeningAttemptService(sql).submit(scope, attempt.id, {
+    clientKey: randomUUID(), answer, assistance: "independent", outcome: "unverified", verdictSource: "self_report" });
+  const right = () => {
+    const p = variant.spanExercise!, solved = solveSpanProblem(p);
+    if (solved.kind !== "unique") throw new Error("unique variant required");
+    return JSON.stringify({ membership: "in_span", coefficients: solved.coefficients, equation: { vectors: p.vectors, target: p.target }, coordinateChecks: p.target });
+  };
+  const advance = (expectedRevision = session.revision) => f.lessons.save(scope, session.activityId, {
+    expectedRevision, intent: session.intent, moveId: "self_study-reserved", status: "active" });
+  return { ...f, session, issuer, request, variant, submit, right, advance };
+}
+
+it("keeps the first incorrect answer and explicitly retries the bound variant before fresh confirmation", async () => {
+  const f = await retryVariantFixture(), { sql, scope } = fixture;
+  const wrong = await f.submit(f.variant, JSON.stringify({ membership: "in_span", coefficients: ["0", "0"] }));
+  expect(wrong.serverEvaluation?.decision).toBe("incorrect");
+  await expect(f.advance()).rejects.toMatchObject({ code: "CONFLICT" });
+  const retryRequest = { ...f.request, retryAfterAttemptId: f.variant.id };
+  await expect(createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: f.session.sessionId,
+    clientKey: `${spanRepairAttemptKey(f.session.activityId, "variant")}:retry:${f.variant.id}`,
+    spanExercise: { sourceId: f.sourceId, problemId: f.variant.spanExercise!.id, version: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+  const [retry, concurrent] = await Promise.all([f.issuer.issue(scope, retryRequest), f.issuer.issue(scope, { ...retryRequest, clientKey: randomUUID() })]);
+  expect(concurrent).toEqual(retry);
+  expect(retry.id).not.toBe(f.variant.id);
+  expect(retry.itemVersionId).toBe(f.variant.itemVersionId);
+  expect(retry.spanValidation?.eligible).toBe(false);
+  expect(await f.issuer.issue(scope, { ...retryRequest, clientKey: randomUUID() })).toEqual(retry);
+  expect(await f.issuer.issue(scope, f.request)).toEqual(retry);
+  await expect(f.advance()).rejects.toMatchObject({ code: "CONFLICT" }); // latest retry must have its own exact head
+  const corrected = await f.submit(retry, f.right());
+  expect(corrected.serverEvaluation).toMatchObject({ decision: "correct", coreEvidenceComplete: true });
+  expect(corrected.assistance).not.toBe("independent");
+  const session = await f.advance();
+  const confirmation = await f.issuer.issue(scope, { ...f.request, stage: "confirmation", expectedRevision: session.revision });
+  expect(confirmation.spanExercise!.id).not.toBe(retry.spanExercise!.id);
+  expect(getSpanItemIdentity(confirmation.spanExercise!.id, confirmation.spanExercise!.version)?.purpose).toBe("validation");
+  const [original] = await sql`SELECT answer,server_evaluation FROM opening_learning_observations WHERE id=${wrong.id}`;
+  expect(original).toEqual({ answer: wrong.answer, server_evaluation: wrong.serverEvaluation });
+  expect(await sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${session.activityId}`).toHaveLength(4);
+});
+
+it("rejects unsubmitted, foreign, stale-parent and stale-CAS retries and cannot mint children with random keys", async () => {
+  const f = await retryVariantFixture(), { sql, scope } = fixture;
+  const retryRequest = { ...f.request, retryAfterAttemptId: f.variant.id };
+  await expect(f.issuer.issue(scope, retryRequest)).rejects.toMatchObject({ code: "CONFLICT" });
+  await f.submit(f.variant, "unparseable answer");
+  await expect(f.advance()).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(f.issuer.issue({ ...scope, ownerUserId: randomUUID() }, retryRequest)).rejects.toBeDefined();
+  await expect(f.issuer.issue(scope, { ...retryRequest, retryAfterAttemptId: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(f.issuer.issue(scope, { ...retryRequest, expectedRevision: f.session.revision + 1 })).rejects.toMatchObject({ code: "CONFLICT" });
+  const retry = await f.issuer.issue(scope, retryRequest);
+  await f.submit(retry, "still unknown");
+  await expect(f.advance()).rejects.toMatchObject({ code: "CONFLICT" });
+  const second = await f.issuer.issue(scope, { ...retryRequest, retryAfterAttemptId: retry.id });
+  expect(second.id).not.toBe(retry.id);
+  await expect(f.issuer.issue(scope, retryRequest)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(createOpeningLearningAttemptRepository(sql).create(scope, { sessionId: f.session.sessionId, clientKey: randomUUID(),
+    spanExercise: { sourceId: f.sourceId, problemId: second.spanExercise!.id, version: 1 } })).rejects.toMatchObject({ code: "CONFLICT" });
+  await f.submit(second, f.right());
+  const advanced = await f.advance();
+  // Exact previous transition replay remains idempotent; a contradictory old-revision write does not.
+  expect(await f.advance()).toEqual(advanced);
+  await expect(f.lessons.save(scope, advanced.activityId, { expectedRevision: f.session.revision, intent: advanced.intent,
+    moveId: "self-faded", status: "paused" })).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
+it("does not use a self-reported correct revision as exact variant authority", async () => {
+  const f = await retryVariantFixture(), { sql, scope } = fixture;
+  const wrong = await f.submit(f.variant, "unknown answer");
+  await createOpeningLearningRepository(sql).reviseObservation(scope, { rootObservationId: wrong.id, revisesObservationId: wrong.id,
+    expectedHead: wrong.id, revisionKind: "replace", reason: "student correction", clientKey: randomUUID(),
+    replacement: { answer: f.right(), outcome: "correct", assistance: "independent" } });
+  await expect(f.advance()).rejects.toMatchObject({ code: "CONFLICT" });
+  const retry = await f.issuer.issue(scope, { ...f.request, retryAfterAttemptId: f.variant.id });
+  const result = await f.submit(retry, f.right());
+  expect(result.serverEvaluation).toMatchObject({ decision: "correct", coreEvidenceComplete: true });
+  await f.advance();
+});
+
+it("retains revealed same-item help through a controlled retry even when the caller claims independence", async () => {
+  const f = await retryVariantFixture(), { sql, scope } = fixture;
+  const receipt = await createOpeningStudyExposureRepository(sql).deliver(scope, { releaseKey: randomUUID(),
+    contextAnchor: { courseId: f.courseId, attemptId: f.variant.id, itemVersionId: f.variant.itemVersionId!, purpose: "learning_help" },
+    sessionId: f.session.sessionId, origin: "assistant", kind: "solution", level: "revealed" });
+  expect(receipt.releasedAt).not.toBeNull();
+  await f.submit(f.variant, "unknown");
+  const retry = await f.issuer.issue(scope, { ...f.request, retryAfterAttemptId: f.variant.id });
+  const corrected = await f.submit(retry, f.right());
+  expect(corrected.assistance).toBe("revealed");
+  expect(corrected.serverEvaluation).toMatchObject({ decision: "correct", coreEvidenceComplete: true });
+  await expect(f.issuer.issue(scope, { ...f.request, retryAfterAttemptId: retry.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  await f.advance();
+});
+
+it("persists unobserved predecessor clarification without backfilling an old activity", async () => {
+  const f = await repairCandidate("unobserved"), { sql, scope } = fixture;
+  const session = await f.execute();
+  expect(await readOpeningSpanRepair(sql, scope, session.activityId)).toMatchObject({ status: "needs_clarification", reasonCode: "predecessor_unobserved" });
+  await expect(createSpanPresentationService(sql).read(scope, { activityId: session.activityId, repairVersion: 1, stage: "example", clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  const paused = await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" });
+  expect(paused.status).toBe("paused");
+  await sql`UPDATE opening_teaching_activities SET goal_json=goal_json-'spanRepair' WHERE id=${session.activityId}`;
+  await expect(readOpeningSpanRepair(sql, scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  // An actually old activity has neither persisted plan nor captured plan, not a deleted new plan.
+  const [receipt] = await createOpeningLearningDecisionsRepository(sql).list(scope, { layer: "activity", targetId: session.activityId });
+  const legacy = JSON.parse(receipt!.intentVersion); delete legacy.spanRepair;
+  await sql`UPDATE opening_learning_decisions SET receipt=jsonb_set(receipt,'{intentVersion}',${sql.json(JSON.stringify(legacy))}::jsonb) WHERE id=${receipt!.id}`;
+  expect((await f.execute()).activityId).toBe(session.activityId);
+  expect(await readOpeningSpanRepair(sql, scope, session.activityId)).toBeNull();
+});
+
+it("rejects corrupt/unknown/mismatched plans and source drift without replacing the saved plan", async () => {
+  const f = await repairCandidate("coefficients"), { sql, scope } = fixture, session = await f.execute();
+  const [original] = await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${session.activityId}`;
+  for (const patch of [{ version: 2 }, { targetSkill: "equation" }, { teachingExample: { problemId: "missing", version: "1" } }]) {
+    const goal = { ...original!.goal_json, spanRepair: { ...original!.goal_json.spanRepair, ...patch } };
+    await sql`UPDATE opening_teaching_activities SET goal_json=${sql.json(goal)} WHERE id=${session.activityId}`;
+    await expect(readOpeningSpanRepair(sql, scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "SPAN_REPAIR_CHANGED" });
+  }
+  await sql`UPDATE opening_teaching_activities SET goal_json=${sql.json(original!.goal_json)} WHERE id=${session.activityId}`;
+  await sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
+  await expect(readOpeningSpanRepair(sql, scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${session.activityId}`)[0]!.goal_json).toEqual(original!.goal_json);
+  expect((await f.lessons.save(scope, session.activityId, { expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" })).status).toBe("paused");
+});
+
+it.each(["replace", "retract"] as const)("rejects %s of the consumed current head without rewriting the repair plan", async revisionKind => {
+  const f = await repairCandidate("coefficients"), { sql, scope } = fixture, session = await f.execute();
+  const original = await readOpeningSpanRepair(sql, scope, session.activityId);
+  const operation = { rootObservationId: f.observation.id, revisesObservationId: f.observation.id, expectedHead: f.observation.id,
+    reason: "核对原评价", clientKey: randomUUID() };
+  await createOpeningLearningRepository(sql).reviseObservation(scope, revisionKind === "retract"
+    ? { ...operation, revisionKind } : { ...operation, revisionKind, replacement: { answer: f.observation.answer, outcome: "unverified", assistance: "independent" } });
+  await expect(readOpeningSpanRepair(sql, scope, session.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${session.activityId}`)[0]!.goal_json.spanRepair).toEqual(original);
+});
+
+it("rolls back the new repair plan, activity and budget together when receipt persistence fails", async () => {
+  const f = await repairCandidate("coefficients"), { sql, scope } = fixture;
+  const before = await sql`SELECT id,goal_json FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`;
+  const failing = new Proxy(sql, { get(target, key, receiver) {
+    if (key === "begin") return (run: (tx: import("postgres").TransactionSql) => Promise<unknown>) => target.begin(async tx => {
+      const wrapped = new Proxy(tx, { apply(query, thisArg, args: unknown[]) {
+        if ((args[0] as TemplateStringsArray).join("?").includes("INSERT INTO opening_learning_decisions")) throw new Error("repair receipt write failed");
+        return Reflect.apply(query, thisArg, args);
+      } });
+      return run(wrapped);
+    });
+    return Reflect.get(target, key, receiver);
+  } });
+  await expect(createOpeningSpanTutorContextRepository(failing).execute(scope, { context: f.context, decision: f.decision, operationId: f.operationId })).rejects.toThrow("repair receipt write failed");
+  expect(await sql`SELECT id,goal_json FROM opening_teaching_activities WHERE course_id=${f.courseId} ORDER BY id`).toEqual(before);
+  const session = await f.execute();
+  const [written] = await sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${session.activityId}`;
+  expect(written!.goal_json).toMatchObject({ spanRepair: { status: "ready" }, tutorBudget: expect.anything() });
 });

@@ -5,7 +5,7 @@ import { cardReviewKind, cardVariantProposalSchema, type CardVariantReview, type
 import { checkArithmeticAnswer } from "@aistudy/domain";
 import { admitLearningSources, learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { loadCard, loadReviewStateForUpdate, lockCardForUpdate } from "./cards-ops";
-import { createOpeningTeachingActivitiesRepository, mapTeachingActivity } from "./opening-teaching-activities";
+import { associateOpeningTeachingCourseInTx, createOpeningTeachingActivitiesRepository, mapTeachingActivity } from "./opening-teaching-activities";
 import { createOpeningTeachingContentRepository } from "./opening-teaching-content";
 import { proposalTransactionClient } from "./opening-assistant-proposal-effects";
 
@@ -96,7 +96,7 @@ export function createOpeningCardVariantRepository(sql: Sql) {
           createIntent: { kind: "card_review_variant", cardId, cardContentVersion: ctx.card.contentVersion, reviewReps: ctx.reps,
             privacyEpoch: ctx.privacyEpoch, sourceVersions: ctx.sourceVersions } });
         if (!activity.courseId) {
-          activity = await repo.associateCourse(scope, activity.id, { auto: true });
+          activity = await associateOpeningTeachingCourseInTx(tx, scope, activity.id, { auto: true });
           await tx`UPDATE cards SET course_id=${activity.courseId},updated_at=now() WHERE id=${cardId}`;
         }
         await tx`UPDATE opening_teaching_activities SET generate_status='generating' WHERE id=${activity.id}`;
