@@ -295,13 +295,26 @@ describe("teaching inline attempts and answer gates", () => {
       await waitUntilBlocked(f.sql, writer.pid, holder.pid, "answer waits at barrier", order === "end-first" ? /opening_teaching_activities/ : /INSERT INTO opening_learning_observations/);
       if (order === "submit-first") {
         completing = track(createOpeningTeachingActivitiesRepository(completer.sql).setStatus(f.scope, seeded.activity.id, { status: "completed" }));
-        // Automatic admission holds the workspace row before the activity row;
-        // completion must wait on that earlier owner lock until submission commits.
-        await waitUntilBlocked(f.sql, completer.pid, writer.pid, "completion waits for saved answer", /SELECT id FROM workspaces WHERE id\s*=\s*\$1 AND owner_user_id\s*=\s*\$2 FOR SHARE/);
+        // Submission holds and has advanced workspace history before this barrier.
+        // Completion can wait on the conflicting history INSERT or the row lock,
+        // before reaching workspace and activity locks.
+        await waitUntilBlocked(f.sql, completer.pid, writer.pid, "completion waits for saved answer",
+          /^\s*(?:INSERT INTO opening_workspace_history_revisions\(workspace_id,owner_user_id,revision\)\s+VALUES \(\$1,\$2,0\) ON CONFLICT DO NOTHING|SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id\s*=\s*\$1\s+AND owner_user_id\s*=\s*\$2 FOR UPDATE)\s*$/);
       }
       release();
       if (order === "end-first") await expect(writing).rejects.toMatchObject({ code: "CONFLICT" });
-      else { await writing; await completing; }
+      else {
+        const observation = await writing;
+        expect(observation).toMatchObject({ attemptId: attempt.id,
+          answer: submission.answer, outcome: submission.outcome, assistance: submission.assistance });
+        expect(await completing).toMatchObject({ id: seeded.activity.id, status: "completed" });
+        const [stored] = await f.sql`SELECT a.observation_id, a.submitted_at, o.id, o.answer, o.outcome, o.assistance
+          FROM opening_learning_attempts a JOIN opening_learning_observations o ON o.id=a.observation_id
+          WHERE a.id=${attempt.id} AND o.attempt_id=a.id AND o.activity_id=${seeded.activity.id}`;
+        expect(stored).toMatchObject({ observation_id: observation!.id, id: observation!.id,
+          answer: submission.answer, outcome: submission.outcome, assistance: submission.assistance });
+        expect(stored!.submitted_at).not.toBeNull();
+      }
       const summary = await (await getSummary(req("GET"), context(seeded.activity.id))).json();
       expect(summary.attempts.total).toBe(order === "end-first" ? 0 : 1);
       if (order === "submit-first") await expect(createOpeningAttemptService(writer.sql).submit(f.scope, attempt.id, submission)).resolves.toBeTruthy();
