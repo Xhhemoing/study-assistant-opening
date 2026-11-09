@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { CourseRequirement, CourseRouteStart, OpeningMaterialPurposePin, Scope } from "@aistudy/contracts";
+import { courseRouteActivityContextSchema, type CourseRequirement, type CourseRouteNext, type CourseRouteStart, type OpeningMaterialPurposePin, type Scope } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { assertCourseRouteCourse, readCourseRequirements } from "./opening-course-route-read";
@@ -62,6 +62,26 @@ export async function startCourseReservedQuestion(sql: Sql, tx: TransactionSql, 
   await reserveOpeningCourseQuestion(tx, scope, requirement, activityId, { kind: "new_family", excludedFamilyIds: [] });
   await assertCourseReservedStartPin(sql, tx, scope, receipt, requirement);
   await issueOpeningReservedQuestion(tx, scope, activityId);
+}
+
+/** Both recovery entrances must recognize pre-receipt arithmetic delayed activities
+ * from server bindings. A missing original pin can never be reconstructed safely. */
+export async function assertCourseReservedRecovery(sql: Sql, tx: TransactionSql, scope: Scope, courseId: string,
+  row: Record<string, unknown>, input: CourseRouteStart | CourseRouteNext, requirements: CourseRequirement[]) {
+  const goal = row.goal_json as { reservedStart?: unknown; courseRoute?: unknown };
+  let required = goal.reservedStart !== undefined;
+  const context = courseRouteActivityContextSchema.parse(goal.courseRoute);
+  const requirement = requirements.find(item => item.id === context.requirementId);
+  const taskId = (row.create_intent as { taskId?: string } | undefined)?.taskId;
+  if (!required && taskId && requirement?.requirementKey === "arithmetic" && requirement.verification.kind === "exact") {
+    const [retest] = await tx`SELECT id FROM opening_retest_activities WHERE task_id=${taskId}
+      AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+      AND learning_protocol->>'protocolId'='course-route-delayed-v1'`;
+    required = !!retest || context.retestId !== undefined;
+  }
+  if (!required) return;
+  if (!("requirementId" in input)) throw learningError("CONFLICT", "保留复测必须沿原任务恢复。");
+  await assertCourseReservedReplay(sql, tx, scope, courseId, row, input);
 }
 
 export async function assertCourseReservedReplay(sql: Sql, tx: TransactionSql, scope: Scope, courseId: string,

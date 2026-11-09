@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createOpeningLearningGoalRepository, createOpeningLearningRepository, createOpeningTeachingContentRepository,
-  createOpeningLearningAttemptRepository, createWorkspacePreferencesRepository, createOpeningCourseReadySourcesRepository } from "@aistudy/database";
+  createOpeningLearningAttemptRepository, createWorkspacePreferencesRepository, createOpeningCourseReadySourcesRepository, createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import { createCourseRouteService } from "../../apps/web/src/features/opening/teaching/course-route-service";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
@@ -148,6 +148,36 @@ it.each(['empty', 'exposed_family', 'task_version'] as const)('refuses %s before
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE course_id=${x.courseId}`).toHaveLength(1);
   expect(await f.sql`SELECT id FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
   expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(x.capacityBefore.usedMinutes);
+});
+it.each(['receipt', 'existing'] as const)('rejects a pre-private delayed activity without an original pin at the %s recovery entrance', async entrance => {
+  const x = await setup();
+  const [retest] = await f.sql`SELECT id FROM opening_retest_activities WHERE task_id=${x.input.taskId}`;
+  const [origin] = await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${x.origin.id}`;
+  // Historical shape: a task-linked compiled activity, never a private reservation,
+  // receipt or issued item. Do not manufacture this by stripping a new issued row.
+  const legacy = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+    clientKey: entrance === 'receipt' ? `course-route-task:${x.input.taskId}` : randomUUID(),
+    intentKind: 'goal', intentSummary: 'Legacy delayed arithmetic', courseId: x.courseId, sourceIds: [x.sourceId],
+    createIntent: { kind: 'course_route', source: 'task', taskId: x.input.taskId, goalId: x.input.goalId, requirementId: x.requirement.id },
+    goalJson: { courseRoute: { ...origin!.goal_json.courseRoute, action: 'transfer_check', retestId: retest!.id },
+      learningBudget: origin!.goal_json.learningBudget },
+  });
+  await publishBaseline(legacy, x.sourceId);
+  const facts = async () => ({
+    activities: await f.sql`SELECT id,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`,
+    privateRows: await f.sql`SELECT * FROM opening_course_reserved_questions WHERE course_id=${x.courseId}`,
+    bodies: await f.sql`SELECT id,blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    attempts: await f.sql`SELECT id FROM opening_learning_attempts WHERE course_id=${x.courseId} ORDER BY id`,
+    exposures: await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    jobs: await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    capacity: await readOpeningLearningCapacity(f.sql, f.scope),
+  });
+  const before = await facts();
+  await expect(x.service.start(f.scope, x.courseId, x.input)).rejects.toMatchObject({ code: 'CONFLICT' });
+  await expect(x.service.start(f.scope, x.courseId, { ...x.input, expectedTaskVersion: x.input.expectedTaskVersion + 1 })).rejects.toMatchObject({ code: 'CONFLICT' });
+  await f.sql`UPDATE course_asset_memberships SET updated_at=updated_at+interval '1 microsecond' WHERE course_id=${x.courseId}`;
+  await expect(x.service.start(f.scope, x.courseId, x.input)).rejects.toMatchObject({ code: 'CONFLICT' });
+  expect(await facts()).toEqual(before);
 });
 it('rolls back a stale original purpose CAS after capture', async () => {
   const x = await setup(); qualifyTestOnly();

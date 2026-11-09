@@ -11,7 +11,7 @@ import { readOpeningCourseRoute,readCourseRouteObservations,readCourseRouteSourc
 import { readOpeningAiGradingStatusInTx } from "./opening-ai-grading-jobs";
 import { captureOpeningCourseRouteDecision } from "./opening-course-route-decision";
 import { recordOpeningLearningDecision } from "./opening-learning-decisions";
-import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedReplay, type CourseReservedStart } from "./opening-course-route-reserved-start";
+import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedRecovery, type CourseReservedStart } from "./opening-course-route-reserved-start";
 
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
 const messages={scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
@@ -31,10 +31,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
-      if((receipt.goal_json as {reservedStart?:unknown}).reservedStart!==undefined){
-        if(!("requirementId" in input))throw learningError("CONFLICT","保留复测必须沿原任务恢复。");
-        await assertCourseReservedReplay(sql,tx,scope,courseId,receipt,input);
-      }
+      await assertCourseReservedRecovery(sql,tx,scope,courseId,receipt,input,snapshot.requirements.map(row=>row.requirement));
       const context=courseRouteActivityContextSchema.parse((receipt.goal_json as {courseRoute:unknown}).courseRoute);
       if(context.goalId!==input.goalId)throw learningError("CONFLICT","原请求属于不同目标。");
       if((receipt.goal_json as {learningBudget?:{minutes?:number}}).learningBudget?.minutes!==input.minutes
@@ -165,10 +162,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       AND (${origin?.input.activityId??null}::uuid IS NULL OR id<>${origin?.input.activityId??null}::uuid)
       ORDER BY updated_at DESC,id DESC LIMIT 1`;
     if(existing[0]){
-      if((existing[0].goal_json as {reservedStart?:unknown}).reservedStart!==undefined){
-        if(!("requirementId" in input))throw learningError("CONFLICT","保留复测必须沿原任务恢复。");
-        await assertCourseReservedReplay(sql,tx,scope,courseId,existing[0],input);
-      }
+      await assertCourseReservedRecovery(sql,tx,scope,courseId,existing[0],input,snapshot.requirements.map(row=>row.requirement));
       const context=courseRouteActivityContextSchema.parse((existing[0].goal_json as {courseRoute:unknown}).courseRoute);
       return {kind:"ready",activity:mapTeachingActivity(existing[0]),href:href(courseId,String(existing[0].id)),resumed:true,requirementId:context.requirementId,action:context.action};}
     // A comprehensive run issues a real check per requirement, never one item for the whole course.
