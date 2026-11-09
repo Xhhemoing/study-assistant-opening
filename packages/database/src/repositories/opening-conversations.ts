@@ -125,14 +125,35 @@ export function createOpeningConversationRepository(sql: Sql) {
       input: ConversationCreateInput,
     ): Promise<{ id: string; title: string; courseId: string | null }> {
       const id = randomUUID();
-      await sql`
-        INSERT INTO opening_conversations (
-          id, workspace_id, owner_user_id, title, course_id
-        ) VALUES (
-          ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.courseId}
-        )
-      `;
-      return { id, title: input.title, courseId: input.courseId };
+      return sql.begin(async tx => {
+        // Coordination uses the canonical owner, not INSERT's caller-supplied
+        // owner. An ordinary lookup must precede history, never a business lock.
+        const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+        if (workspace) {
+          try {
+            await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId: String(workspace.owner_user_id) });
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND" && error.message === "workspace not found")) throw error;
+            // The workspace existed above: owner drift or deletion is a new
+            // coordination conflict, not authorization or an INSERT retry.
+            throw new OpeningConversationError("CONFLICT", "Conversation history coordination changed");
+          }
+          const [locked] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
+          if (!locked || locked.owner_user_id !== workspace.owner_user_id) {
+            throw new OpeningConversationError("CONFLICT", "Conversation history coordination changed");
+          }
+        }
+        // Static absence still reaches the original INSERT (PG FK/CHECK/UUID
+        // precedence); no history ensure can be committed by a failed INSERT.
+        await tx`
+          INSERT INTO opening_conversations (
+            id, workspace_id, owner_user_id, title, course_id
+          ) VALUES (
+            ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.title}, ${input.courseId}
+          )
+        `;
+        return { id, title: input.title, courseId: input.courseId };
+      });
     },
 
     async getOwned(
