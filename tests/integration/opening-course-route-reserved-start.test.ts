@@ -240,6 +240,8 @@ it.each([
   expect(feedback?.blocks).toHaveLength(1);
 });
 it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'protocol'] as const)('rejects reserved submission after %s changes without recording an answer', async changed => {
+  // Cover setup and issuance too: the reported 55P03 precedes the rejection assertion.
+  if (changed === 'purpose') f.sql = routeLockDiagnosedSql(f.sql, 'purpose');
   const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
   const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
   if (changed === 'requirement') await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
@@ -253,15 +255,15 @@ it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'pro
   })).rejects.toMatchObject({ code: changed === 'source' ? 'VALIDATION' : 'CONFLICT' });
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(0);
 });
-// Local to the other_key case's fixture/call chain. Like the producer diagnostic,
-// preserve lazy query execution and sample only after the original NOWAIT 55P03.
-function routeLockDiagnosedSql(db: Sql | TransactionSql, requester?: { pid: number; began_at: string }): Sql {
+// Local to the named case's fixture/call chain. Preserve lazy query execution
+// and sample only after the original NOWAIT 55P03, never instead of the lock.
+function routeLockDiagnosedSql(db: Sql | TransactionSql, context = 'other-key', requester?: { pid: number; began_at: string }): Sql {
   return new Proxy(db, {
     get(target, key, receiver) {
       if (key === 'begin') return (...args: unknown[]) => Reflect.apply((target as Sql).begin, target, [
         ...args.slice(0, -1), async (tx: TransactionSql) => {
           const [backend] = await tx<{ pid: number; began_at: string }[]>`SELECT pg_backend_pid() AS pid, clock_timestamp()::text AS began_at`;
-          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(routeLockDiagnosedSql(tx, backend!) as unknown as TransactionSql);
+          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(routeLockDiagnosedSql(tx, context, backend!) as unknown as TransactionSql);
           return Array.isArray(result) ? Promise.all(result) : result;
         },
       ]);
@@ -298,7 +300,7 @@ function routeLockDiagnosedSql(db: Sql | TransactionSql, requester?: { pid: numb
                 candidate: row.pid !== requester.pid && row.granted && !['AccessShareLock', 'RowShareLock'].includes(row.mode),
                 backend_type: row.backend_type, state: row.state, xact_start: row.xact_start,
                 wait_event_type: row.wait_event_type, wait_event: row.wait_event, query: row.query }));
-              console.error('[route-other-key-lock-diagnostic]', JSON.stringify({ requester, failed_at: failedAt,
+              console.error(`[route-${context}-lock-diagnostic]`, JSON.stringify({ requester, failed_at: failedAt,
                 error: { code: error.code, failed_relation: /could not obtain lock on relation "([a-z_]+)"/.exec(error.message ?? '')?.[1] ?? null },
                 requested_query: text, requested_mode: 'ShareRowExclusiveLock', sampled_at: rows[0]?.sampled_at,
                 observer_pid: rows[0]?.observer_pid, blocking_pids: rows[0]?.blocking_pids, elapsed_ms: Date.now() - started, locks,
@@ -309,7 +311,7 @@ function routeLockDiagnosedSql(db: Sql | TransactionSql, requester?: { pid: numb
               }));
             } finally { await observer.end({ timeout: 2 }); }
           } catch (diagnosticError) {
-            console.error('[route-other-key-lock-diagnostic-failed]', JSON.stringify({ requester, failed_at: failedAt,
+            console.error(`[route-${context}-lock-diagnostic-failed]`, JSON.stringify({ requester, failed_at: failedAt,
               code: (diagnosticError as { code?: string } | null)?.code ?? 'unknown', elapsed_ms: Date.now() - started }));
           }
         }
@@ -326,6 +328,48 @@ function routeLockDiagnosedSql(db: Sql | TransactionSql, requester?: { pid: numb
     },
   }) as Sql;
 }
+it('samples a controlled NOWAIT conflict after failure without treating candidates as historical holders', async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? '', process.env.OPENING_TEST_DB);
+  const holder = postgres(url.toString(), { max: 1 });
+  const output = vi.spyOn(console, 'error').mockImplementation(() => {});
+  // Keep the synthetic holder alive through the late sample; no sleep or retry.
+  try {
+    await holder.begin(async tx => {
+      const [backend] = await tx`SELECT pg_backend_pid() AS pid`;
+      await tx`LOCK TABLE opening_learning_observations IN ROW EXCLUSIVE MODE`;
+      let queryError: unknown;
+      try {
+        await routeLockDiagnosedSql(f.sql, 'controlled').begin(async requester => {
+          const query = requester`LOCK TABLE opening_learning_observations IN SHARE ROW EXCLUSIVE MODE NOWAIT`;
+          // The transaction must propagate the diagnosed query's rejection unchanged.
+          await query.catch(error => { queryError = error; throw error; });
+        });
+        throw new Error('expected the controlled NOWAIT conflict');
+      } catch (error) {
+        expect(error).toBe(queryError);
+        expect(error).toBeInstanceOf(postgres.PostgresError);
+        expect(error).toMatchObject({ code: '55P03' });
+      }
+      expect(output).toHaveBeenCalledTimes(1);
+      const [label, raw] = output.mock.calls[0]!;
+      expect(label).toBe('[route-controlled-lock-diagnostic]');
+      const sample = JSON.parse(String(raw));
+      expect(sample.error).toEqual({ code: '55P03', failed_relation: 'opening_learning_observations' });
+      expect(sample.requested_mode).toBe('ShareRowExclusiveLock');
+      expect(sample.observer_pid).not.toBe(sample.requester.pid);
+      expect(sample.observer_pid).not.toBe(backend!.pid);
+      expect(sample.locks).toEqual(expect.arrayContaining([expect.objectContaining({
+        pid: backend!.pid, relation: 'public.opening_learning_observations',
+        mode: 'RowExclusiveLock', granted: true, candidate: true, query: 'LOCK [redacted]',
+      })]));
+      expect(sample.blocking_pids).toEqual(expect.any(Array));
+      expect(sample.holder_assessment).toContain('failure-time natural holder UNKNOWN');
+    });
+  } finally {
+    await holder.end({ timeout: 2 });
+    output.mockRestore();
+  }
+});
 it.each(['unsupported', 'interaction', 'spec', 'other_key', 'bad_key', 'stale_issued', 'shadow_body'] as const)('withholds deterministic authority for %s private content', async changed => {
   if (changed === 'other_key') f.sql = routeLockDiagnosedSql(f.sql);
   const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
