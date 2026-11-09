@@ -10,6 +10,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { RevisionBlockSnapshot } from "../schema/library";
 import { wrapLikePattern } from "../search-pattern";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 function normalizeSearchText(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase();
@@ -625,6 +626,16 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       assertUuid(documentId, "documentId");
 
       await sql.begin(async (tx) => {
+        const [workspace] = await tx<{ owner_user_id: string }[]>`
+          SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId} LIMIT 1
+        `;
+        if (!workspace) {
+          throw new LibraryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+        }
+        await lockWorkspaceLearningHistory(tx, {
+          workspaceId: input.workspaceId,
+          ownerUserId: workspace.owner_user_id,
+        });
         if (input.jobScope) await lockOpeningJobExecution(tx, input.jobScope);
         await tx`
           INSERT INTO library_documents (

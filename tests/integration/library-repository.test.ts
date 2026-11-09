@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { TransactionSql } from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   applyMigrations,
@@ -8,7 +9,9 @@ import {
   LibraryError,
   type IdentityRepository,
   type LibraryRepository,
+  type OpeningJobScope,
 } from "@aistudy/database";
+import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -30,6 +33,7 @@ describe("library repository foundation", () => {
 
   beforeEach(async () => {
     await sql`TRUNCATE
+      opening_workspace_history_revisions,
       course_asset_memberships,
       courses,
       library_properties,
@@ -113,6 +117,197 @@ describe("library repository foundation", () => {
     expect(revisions[0]?.title).toBe("Linear algebra notes");
     expect(revisions[0]?.blocks).toHaveLength(2);
     expect(revisions[0]?.blocks[0]?.id).toBe(blockA);
+  });
+
+  async function ownerScope(workspaceId = workspaceA) {
+    const [workspace] = await sql`SELECT owner_user_id FROM workspaces WHERE id = ${workspaceId}`;
+    return { workspaceId, ownerUserId: workspace!.owner_user_id as string };
+  }
+
+  async function runningJob(): Promise<OpeningJobScope> {
+    const scope = await ownerScope();
+    const id = randomUUID();
+    const token = randomUUID();
+    await sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, state, claim_token)
+      VALUES (${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${id}, 'parse', '{}', 'running', ${token})`;
+    return { ...scope, jobExecution: { id, token, privacyEpoch: 0 } };
+  }
+
+  async function documentGraph(documentId: string) {
+    const [counts] = await sql`
+      SELECT (SELECT count(*)::int FROM library_documents WHERE id = ${documentId}) AS documents,
+        (SELECT count(*)::int FROM library_blocks WHERE document_id = ${documentId}) AS blocks,
+        (SELECT count(*)::int FROM library_revisions WHERE document_id = ${documentId}) AS revisions`;
+    return counts;
+  }
+
+  async function historyRows() {
+    return sql`SELECT workspace_id, owner_user_id, revision::int FROM opening_workspace_history_revisions
+      ORDER BY workspace_id, owner_user_id`;
+  }
+
+  it.each(["generic", "legacy"] as const)("ensures history at zero without advancing it for %s creates", async (kind) => {
+    const scope = await ownerScope();
+    // A legacy scope without execution keeps its original no-op job gate,
+    // even when its owner differs. History still uses the DB canonical owner.
+    const jobScope = kind === "legacy" ? { ...scope, ownerUserId: (await ownerScope(workspaceB)).ownerUserId } : undefined;
+    const input = { workspaceId: workspaceA, jobScope, title: "History fence", blocks: [
+      { id: randomUUID(), type: "paragraph", content: { text: "draft" } },
+    ] };
+    expect(await historyRows()).toEqual([]);
+    await repo.createDocument(input);
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: 0 }]);
+    await sql`UPDATE opening_workspace_history_revisions SET revision = 17 WHERE workspace_id = ${workspaceA}`;
+    await repo.createDocument({ ...input, blocks: [{ ...input.blocks[0]!, id: randomUUID() }] });
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: 17 }]);
+  });
+
+  it.each(["generic", "job"] as const)("waits on history before graph writes or workspace/job locks for %s creates", async (kind) => {
+    const scope = await runningJob();
+    await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+      VALUES (${workspaceA}, ${scope.ownerUserId}, 11)`;
+    const holder = openRaceSession();
+    const writer = openRaceSession();
+    const observer = openRaceSession();
+    const documentId = randomUUID();
+    let pending: ReturnType<LibraryRepository["createDocument"]> | undefined;
+    let started = 0;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async (tx) => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}
+          AND owner_user_id = ${scope.ownerUserId} FOR UPDATE`;
+        started = performance.now();
+        pending = track(createLibraryRepository(writer.sql).createDocument({
+          workspaceId: workspaceA, documentId, jobScope: kind === "job" ? scope : undefined,
+          title: "Wait for history", blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "after release" } }],
+        }));
+        await waitUntilBlocked(observer.sql, writer.pid, holder.pid, "library create history", /opening_workspace_history_revisions[\s\S]*FOR UPDATE/);
+        expect(await documentGraph(documentId)).toEqual({ documents: 0, blocks: 0, revisions: 0 });
+        // A workspace lock taken before history would conflict here, as would
+        // the execution gate's job lock. Neither may be held by the waiter.
+        await tx`SELECT id FROM workspaces WHERE id = ${workspaceA} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_jobs WHERE id = ${scope.jobExecution!.id} FOR UPDATE NOWAIT`;
+      });
+      console.info(`[library history barrier:${kind}] observed hold ${Math.round(performance.now() - started)}ms`);
+      expect(await pending).toMatchObject({ id: documentId, currentRevisionNumber: 1 });
+      expect(await documentGraph(documentId)).toEqual({ documents: 1, blocks: 1, revisions: 1 });
+      expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: scope.ownerUserId, revision: 11 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each(["owner", "token", "state", "epoch", "job workspace"] as const)("rolls back history and graph when the execution %s is stale", async (invalid) => {
+    const scope = await runningJob();
+    if (invalid === "owner") scope.ownerUserId = (await ownerScope(workspaceB)).ownerUserId;
+    if (invalid === "token") scope.jobExecution!.token = randomUUID();
+    if (invalid === "state") await sql`UPDATE opening_jobs SET state = 'cancelled' WHERE id = ${scope.jobExecution!.id}`;
+    if (invalid === "epoch") await sql`UPDATE workspaces SET privacy_epoch = 1 WHERE id = ${workspaceA}`;
+    if (invalid === "job workspace") await sql`UPDATE opening_jobs SET workspace_id = ${workspaceB} WHERE id = ${scope.jobExecution!.id}`;
+    const documentId = randomUUID();
+    const input = { workspaceId: workspaceA, documentId, jobScope: scope, title: "Stale create", blocks: [
+      { id: randomUUID(), type: "paragraph", content: { text: "must roll back" } },
+    ] };
+    await expect(repo.createDocument(input)).rejects.toMatchObject({ code: "CONFLICT", message: "job execution is no longer current" });
+    expect(await documentGraph(documentId)).toEqual({ documents: 0, blocks: 0, revisions: 0 });
+    expect(await historyRows()).toEqual([]);
+    const canonical = await ownerScope();
+    await sql`INSERT INTO opening_workspace_history_revisions (workspace_id, owner_user_id, revision)
+      VALUES (${workspaceA}, ${canonical.ownerUserId}, 23)`;
+    await expect(repo.createDocument(input)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await documentGraph(documentId)).toEqual({ documents: 0, blocks: 0, revisions: 0 });
+    expect(await historyRows()).toEqual([{ workspace_id: workspaceA, owner_user_id: canonical.ownerUserId, revision: 23 }]);
+  });
+
+  it.each(["delete before lookup", "delete after lookup", "change owner after lookup"] as const)("records the actual error for %s without graph/history writes", async (race) => {
+    const mutator = openRaceSession();
+    const documentId = randomUUID();
+    const otherOwner = (await ownerScope(workspaceB)).ownerUserId;
+    if (race === "change owner after lookup") {
+      // The replacement owner must not already own another workspace.
+      await sql`DELETE FROM workspaces WHERE id = ${workspaceB}`;
+    }
+    const mutate = async () => {
+      if (race === "change owner after lookup") {
+        await mutator.sql`UPDATE workspaces SET owner_user_id = ${otherOwner} WHERE id = ${workspaceA}`;
+      } else {
+        await mutator.sql`DELETE FROM workspaces WHERE id = ${workspaceA}`;
+      }
+    };
+    // Keep every read/write on real PG; intercept only to place the independent
+    // session's committed mutation exactly around the canonical-owner lookup.
+    const coordinated = new Proxy(sql, {
+      get(target, property, receiver) {
+        if (property !== "begin") return Reflect.get(target, property, receiver);
+        return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(async (tx) => {
+          if (race === "delete before lookup") await mutate();
+          return execute(new Proxy(tx, {
+            apply(query, thisArg, args) {
+              const result = Reflect.apply(query, thisArg, args) as Promise<unknown>;
+              const [strings] = args as [TemplateStringsArray];
+              return race !== "delete before lookup" && strings.join(" ").includes("SELECT owner_user_id FROM workspaces")
+                ? result.then(async (rows) => { await mutate(); return rows; }) : result;
+            },
+          }));
+        });
+      },
+    });
+    try {
+      await mutator.ready;
+      const error = await createLibraryRepository(coordinated).createDocument({
+        workspaceId: workspaceA, documentId, title: "Owner race", blocks: [
+          { id: randomUUID(), type: "paragraph", content: { text: "must not persist" } },
+        ],
+      }).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ code: "NOT_FOUND", message: race === "delete before lookup"
+        ? `Workspace not found: ${workspaceA}` : "workspace not found" });
+      expect(error instanceof LibraryError).toBe(race === "delete before lookup");
+      expect(await documentGraph(documentId)).toEqual({ documents: 0, blocks: 0, revisions: 0 });
+      expect(await historyRows()).toEqual([]);
+    } finally {
+      await closeRace(mutator.sql);
+    }
+  });
+
+  it("retains create validation precedence and does not ensure history for rejected inputs", async () => {
+    const input = { workspaceId: workspaceA, title: "Valid", blocks: [
+      { id: randomUUID(), type: "paragraph", content: { text: "valid" } },
+    ] };
+    const cases = [
+      { input: { ...input, workspaceId: "invalid", title: "", blocks: [] }, code: "VALIDATION", message: "Invalid UUID for workspaceId" },
+      { input: { ...input, workspaceId: randomUUID(), title: "", blocks: [] }, code: "NOT_FOUND", message: "Workspace not found:" },
+      { input: { ...input, title: "", blocks: [] }, code: "VALIDATION", message: "Document title is required" },
+      { input: { ...input, blocks: [] }, code: "VALIDATION", message: "at least one block" },
+      { input: { ...input, documentId: "invalid" }, code: "VALIDATION", message: "Invalid UUID for documentId" },
+      { input: { ...input, workspaceId: "invalid", title: "", blocks: [], jobScope: await ownerScope(workspaceB) },
+        code: "CONFLICT", message: "job execution workspace differs from document workspace" },
+    ];
+    for (const testCase of cases) {
+      const error = await repo.createDocument(testCase.input).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(LibraryError);
+      expect(error).toMatchObject({ code: testCase.code, message: expect.stringContaining(testCase.message) });
+    }
+    expect(await historyRows()).toEqual([]);
+  });
+
+  it("retains the document ID unique conflict and rolls back a newly ensured history row", async () => {
+    const documentId = randomUUID();
+    const blockId = randomUUID();
+    const input = { workspaceId: workspaceA, documentId, title: "Original", blocks: [
+      { id: blockId, type: "paragraph", content: { text: "original" } },
+    ] };
+    const original = await repo.createDocument(input);
+    // Model a pre-history legacy document without changing its graph.
+    await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${workspaceA}`;
+    await expect(repo.createDocument({ ...input, title: "Duplicate", blocks: [
+      { id: randomUUID(), type: "paragraph", content: { text: "duplicate" } },
+    ] })).rejects.toMatchObject({ code: "23505" });
+    expect(await repo.getDocument({ workspaceId: workspaceA, documentId })).toEqual(original);
+    expect(await documentGraph(documentId)).toEqual({ documents: 1, blocks: 1, revisions: 1 });
+    expect(await historyRows()).toEqual([]);
   });
 
   it("lists active workspace documents newest first with their blocks", async () => {
