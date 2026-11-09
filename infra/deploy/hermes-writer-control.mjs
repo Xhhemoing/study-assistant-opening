@@ -34,7 +34,11 @@ export async function startBroker(current, ownerPid, starttime, installedControl
     const timer = setTimeout(() => { broker.stdin.destroy(); reject(new Error('Broker readiness timed out')); }, 10_000);
     broker.once('error', error => { clearTimeout(timer); reject(error); });
     broker.once('exit', () => { clearTimeout(timer); reject(new Error('Broker exited before readiness')); });
-    broker.stdout.once('data', data => { clearTimeout(timer); data.toString() === 'READY\n' ? resolve() : reject(new Error('Invalid broker readiness')); });
+    broker.stdout.once('data', data => {
+      clearTimeout(timer);
+      if (data.toString() === 'READY\n') resolve();
+      else reject(new Error('Invalid broker readiness'));
+    });
   });
   broker.stdout.resume();
   return broker;

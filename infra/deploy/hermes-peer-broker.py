@@ -5,6 +5,7 @@ The production adapter is mandatory in the CLI. Tests inject adapters through
 Python objects only; there is no environment variable or CLI fake-manager mode.
 """
 import ctypes
+import errno
 import importlib.util
 import json
 import os
@@ -230,11 +231,18 @@ def serve(directory, broker, stdin):
                     broker.revoke()
                     return
                 conn, _ = key.fileobj.accept()
-                peer = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                # Pin at accept, before parsing any untrusted bytes.
-                peer_fd = os.pidfd_open(peer[0])
                 with conn:
-                    conn.settimeout(5)
+                    try:
+                        conn.settimeout(5)
+                        peer = struct.unpack('3i', conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                        # Pin before parsing untrusted bytes; a queued peer may
+                        # already be reaped, which rejects only this connection.
+                        peer_fd = os.pidfd_open(peer[0])
+                    except OSError as error:
+                        if error.errno in (errno.ESRCH, errno.EPERM, errno.EACCES,
+                                           errno.ECONNRESET, errno.ENOTCONN, errno.EPIPE):
+                            continue  # with closes the rejected peer; no grant consumed.
+                        raise  # Resource/kernel/server failures remain visible.
                     try:
                         if key.data == 'exec.sock':
                             # No JSON claims at all from the execution peer.

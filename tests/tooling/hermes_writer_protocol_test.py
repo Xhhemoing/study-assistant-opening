@@ -1,5 +1,6 @@
 """Local kernel/process/filesystem tests; no systemd, DB, VM or paid API."""
 import copy
+import errno
 import importlib.util
 import json
 import multiprocessing
@@ -27,6 +28,30 @@ def load(name):
 
 state = load('hermes-writer-state')
 peer = load('hermes-peer-broker')
+
+
+def setUpModule():
+    if sys.platform != 'linux' or not all((hasattr(os, 'pidfd_open'),
+            hasattr(signal, 'pidfd_send_signal'), hasattr(socket, 'SO_PEERCRED'))):
+        raise unittest.SkipTest('Linux SO_PEERCRED and pidfd APIs required')
+    # Probe actual kernel support, not just Python API availability. Unexpected
+    # errors and all subsequent test failures remain failures, never skips.
+    unavailable = {errno.ENOSYS, errno.EOPNOTSUPP, errno.EPERM, errno.EACCES}
+    try:
+        fd = os.pidfd_open(os.getpid())
+        try:
+            signal.pidfd_send_signal(fd, 0)
+        finally:
+            os.close(fd)
+        left, right = socket.socketpair(socket.AF_UNIX)
+        with left, right:
+            credentials = struct.unpack('3i', left.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if credentials != (os.getpid(), os.geteuid(), os.getegid()):
+                raise AssertionError('SO_PEERCRED did not report actual process credentials')
+    except OSError as error:
+        if error.errno in unavailable:
+            raise unittest.SkipTest(f'Kernel peercred/pidfd unavailable: {error}') from error
+        raise
 
 
 class Fixture(unittest.TestCase):
@@ -309,7 +334,6 @@ class FakeManager:
         return value
 
 
-@unittest.skipUnless(hasattr(os, 'pidfd_open'), 'Linux peercred/pidfd required')
 class KernelBrokerTests(Fixture):
     def setUp(self):
         super().setUp()
@@ -394,6 +418,82 @@ class KernelBrokerTests(Fixture):
             child.kill()
             child.wait(timeout=5)
         self.assertFalse(self.attempt(before=die)[0]['ok'])
+
+    def test_reaped_queued_peer_cannot_terminate_serve_or_consume_generation(self):
+        self.listener.close()
+        self.broker_path.unlink()
+        reader, writer = os.pipe()
+        parent_barrier, server_barrier = multiprocessing.Pipe()
+        original_select = peer.selectors.DefaultSelector.select
+        original_open = os.pidfd_open
+
+        def run():
+            os.close(writer)
+            parent_barrier.close()
+            first = True
+            def select(selector, *args, **kwargs):
+                nonlocal first
+                if first:
+                    first = False
+                    server_barrier.send('listening-before-accept')
+                    if server_barrier.recv() != 'peer-reaped':
+                        raise AssertionError('Missing reap barrier')
+                return original_select(selector, *args, **kwargs)
+            def pin(pid, *args, **kwargs):
+                try:
+                    return original_open(pid, *args, **kwargs)
+                except ProcessLookupError:
+                    server_barrier.send(('reaped-before-pin', pid, self.manager.calls,
+                                         peer.UNITS[0] in self.broker.grants, dict(self.broker.used)))
+                    raise
+            with os.fdopen(reader, 'rb') as source, server_barrier:
+                with patch.object(peer.selectors.DefaultSelector, 'select', select), patch.object(peer.os, 'pidfd_open', pin):
+                    peer.serve(self.root, self.broker, source)
+
+        process = multiprocessing.get_context('fork').Process(target=run)
+        process.start()
+        os.close(reader)
+        server_barrier.close()
+        try:
+            self.assertTrue(parent_barrier.poll(5), 'server never reached pre-accept barrier')
+            self.assertEqual(parent_barrier.recv(), 'listening-before-accept')
+            child = os.fork()
+            if child == 0:
+                try:
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.connect(str(self.broker_path))
+                    os._exit(0)
+                except BaseException:
+                    os._exit(1)
+            _, status = os.waitpid(child, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0, 'peer did not connect and exit')
+            # No accept or peer pidfd_open is possible until waitpid has reaped
+            # the connected child; no sleep/race or pre-opened pidfd substitute.
+            parent_barrier.send('peer-reaped')
+            self.assertTrue(parent_barrier.poll(5), 'queued peer never reached real pidfd_open')
+            self.assertEqual(parent_barrier.recv(), ('reaped-before-pin', child, 0, True, {}))
+            command = ['/usr/bin/python3', '-I', '-S', str(self.wrapper), str(self.root), peer.UNITS[0]]
+            allowed = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
+            reply = json.loads(allowed.stdout)
+            self.assertTrue(reply['ok'], allowed.stdout + allowed.stderr)
+            self.assertEqual(reply['plan']['owner'], self.plan['owner'])
+            self.assertEqual(reply['plan']['transition'], self.plan['transition'])
+            replay = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
+            self.assertEqual(json.loads(replay.stdout), {'ok': False})
+            os.close(writer)
+            writer = None
+            process.join(5)
+            self.assertEqual(process.exitcode, 0)
+            self.assertFalse(self.broker_path.exists())
+            self.assertFalse((self.root / 'control.sock').exists())
+        finally:
+            if writer is not None:
+                os.close(writer)
+            parent_barrier.close()
+            if process.is_alive():
+                process.terminate()
+            process.join(5)
+            process.close()
 
     def test_parallel_helpers_only_one_allow(self):
         # Two actual processes are accepted against a single owner generation.
