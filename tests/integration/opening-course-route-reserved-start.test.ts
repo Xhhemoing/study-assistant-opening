@@ -6,6 +6,8 @@ import { createOpeningLearningGoalRepository, createOpeningLearningRepository, c
   createOpeningLearningAttemptRepository, createWorkspacePreferencesRepository, createOpeningCourseReadySourcesRepository, createOpeningTeachingActivitiesRepository } from "@aistudy/database";
 import { createCourseRouteService } from "../../apps/web/src/features/opening/teaching/course-route-service";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
+import { createInlineAttemptPreparation } from "../../apps/web/src/features/opening/teaching/inline-attempt-prepare";
+import { createInlineAttemptSubmission } from "../../apps/web/src/features/opening/teaching/inline-attempt-submission";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
 import { saveOpeningReservedCandidates } from "../../packages/database/src/repositories/opening-course-reserved-selection";
@@ -132,6 +134,11 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
     JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${result.activity.id}`;
   expect(attempt).toMatchObject({ requirement_key: 'arithmetic', evaluation_spec: { courseRequirement: {
     id: x.requirement.id, revision: 1, stableSkillId: x.requirement.stableSkillId, requirementKey: 'arithmetic' } } });
+  const canonical = await createOpeningLearningAttemptRepository(f.sql).get(f.scope, String(attempt!.id));
+  expect(canonical?.reservedRetestQualification).toMatchObject({ eligible: false,
+    reasons: expect.arrayContaining([{ code: 'independent_blind_solve_missing', message: expect.any(String) },
+      { code: 'stable_identity_missing', message: expect.any(String) }]) });
+  assertNoPrivateKey(canonical?.reservedRetestQualification, '2603');
   expect(await f.sql`SELECT id FROM opening_learning_observations WHERE course_id=${x.courseId}`).toHaveLength(1); // issuance alone is no mastery evidence
   const answer = await createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
     clientKey: randomUUID(), answer: submitted, outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
@@ -144,6 +151,39 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
   }
   const feedback = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
   assertPrivatePromptOnly(result, feedback, '2603');
+});
+it('real inline preparation and submission resume the sole issued attempt with an explained unavailable qualification', async () => {
+  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const content = (await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, issued.activity.id))!;
+  const service = createOpeningAttemptService(f.sql);
+  const client = {
+    createSession: (input: Parameters<ReturnType<typeof createOpeningLearningRepository>['createSession']>[1]) =>
+      createOpeningLearningRepository(f.sql).createSession(f.scope, input),
+    createAttempt: (input: unknown) => service.create(f.scope, input),
+    submitAttempt: (id: string, input: unknown) => service.submit(f.scope, id, input),
+  };
+  const input = { activityId: issued.activity.id, courseId: x.courseId, blockId: content.blockOrder[0]!.blockId,
+    contentVersion: 1, sourceIds: [x.sourceId], prompt: '137*19', skillLabel: 'Arithmetic' };
+  let checkpoint: import('../../apps/web/src/features/opening/teaching/inline-attempt-prepare').InlineAttemptPreparationCheckpoint | undefined;
+  const prepared = await createInlineAttemptPreparation(input, client, { onCheckpoint: value => { checkpoint = value; } }).prepare();
+  expect(prepared.reservedRetestQualification).toMatchObject({ eligible: false });
+  const submitted = await createInlineAttemptSubmission({ ...input, answer: '2603' }, client, { preparation: checkpoint }).submit();
+  expect(submitted.attemptId).toBe(prepared.id);
+  expect(submitted.observation).toMatchObject({ outcome: 'correct', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
+  expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`).toHaveLength(1);
+});
+it.each(['hinted', 'revealed'] as const)('never upgrades a reserved submission after %s assistance', async assistance => {
+  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+  const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
+  const observation = await createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+    clientKey: randomUUID(), answer: '2603', outcome: 'correct', assistance, verdictSource: 'self_report',
+  });
+  expect(observation.eligibility?.independentAttempt).toBe('no');
+  // Existing reserved verdicts carry the conservative hinted marker even for
+  // declared reveal; neither marker may become independent evidence.
+  expect(observation.assistance).not.toBe('independent');
+  const restored = await createOpeningLearningAttemptRepository(f.sql).get(f.scope, String(attempt!.id));
+  expect(restored?.reservedRetestQualification?.eligible).toBe(false);
 });
 it('accepts UUID metadata containing answer digits but detects private fields and visible-body leaks', async () => {
   const x = await setup(), result = ready(await x.service.start(f.scope, x.courseId, x.input));
@@ -327,6 +367,8 @@ it('replays one verdict without jobs or budget changes and never upgrades a late
   expect((await service.submit(f.scope, String(attempt!.id), input)).id).toBe(first.id);
   await expect(service.submit(f.otherScope, String(attempt!.id), input)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   expect(first).toMatchObject({ outcome: 'correct', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
+  // A completed retest still refuses NEW preparation; only the acknowledged
+  // submit key replays. The live inline caller resumes before submission above.
   await expect(service.create(f.scope, { sessionId: attempt!.session_id, clientKey: randomUUID(),
     teachingBlock: attempt!.create_intent.teachingBlock })).rejects.toMatchObject({ code: 'CONFLICT' });
   await expect(service.submit(f.scope, String(attempt!.id), { ...input, clientKey: randomUUID() })).rejects.toMatchObject({ code: 'CONFLICT' });

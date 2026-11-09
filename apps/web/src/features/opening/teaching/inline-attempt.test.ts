@@ -132,6 +132,17 @@ describe("inline teaching attempt", () => {
     expect(client.submitAttempt).not.toHaveBeenCalled();
   });
 
+  it.each(['activityId', 'blockId', 'contentVersion', 'attemptId'] as const)("refuses mismatched reserved %s before submission", async field => {
+    const reserved = { ...canonicalAttempt, requirementKey: 'arithmetic',
+      courseRequirement: { id, revision: 1, stableSkillId: id, requirementKey: 'arithmetic' },
+      reservedRetestQualification: { eligible: false, reasons: [{ code: 'independent_blind_solve_missing', message: '缺少独立盲解证据。' }] },
+      contextAnchor: { activityId: id, blockId: id, contentVersion: 3, attemptId: id,
+        [field]: field === 'contentVersion' ? 4 : '22222222-2222-4222-8222-222222222222' },
+    };
+    const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(reserved), submitAttempt: vi.fn() };
+    await expect(createInlineAttemptSubmission(identity, client).submit()).rejects.toThrow('不一致');
+    expect(client.submitAttempt).not.toHaveBeenCalled();
+  });
   it("does not unlock tutoring from a different attempt's save receipt", async () => {
     const client = { createSession: vi.fn().mockResolvedValue({ id }), createAttempt: vi.fn().mockResolvedValue(canonicalAttempt),
       submitAttempt: vi.fn().mockResolvedValue({ ...savedObservation, attemptId: "22222222-2222-4222-8222-222222222222" }) };

@@ -20,9 +20,16 @@ type Preparation = { checkpoint: InlineAttemptPreparationCheckpoint; attempt: Le
 const preparations = new Map<string, Preparation>();
 
 export function assertInlinePreparedAttempt(captured: InlineAttemptPreparationCheckpoint, canonical: LearningAttempt) {
+  const reserved = canonical.reservedRetestQualification;
+  const reservedBinding = reserved && canonical.courseRequirement
+    && canonical.requirementKey === canonical.courseRequirement.requirementKey
+    && canonical.contextAnchor?.activityId === captured.input.activityId
+    && canonical.contextAnchor?.attemptId === canonical.id
+    && canonical.contextAnchor?.blockId === captured.input.blockId
+    && canonical.contextAnchor?.contentVersion === captured.input.contentVersion;
   if ((captured.attemptId && canonical.id !== captured.attemptId)
-    || canonical.courseId !== captured.input.courseId || canonical.sessionId !== captured.sessionId
-    || canonical.requirementKey !== `teaching:${captured.input.blockId}:v${captured.input.contentVersion}`) {
+    || canonical.courseId !== captured.input.courseId || (!reservedBinding && canonical.sessionId !== captured.sessionId)
+    || (!reservedBinding && canonical.requirementKey !== `teaching:${captured.input.blockId}:v${captured.input.contentVersion}`)) {
     throw new Error("作答记录与当前课程或题目不一致，原答案和请求已保留，请重新读取活动。");
   }
 }
@@ -48,7 +55,7 @@ export function createInlineAttemptPreparation(input: InlineAttemptPreparationIn
       ...(sourceId ? { problem: { sourceId, stemSnapshot: identity.prompt.slice(0, 2000), artifactKind: "reference_item" as const } } : {}),
     });
     assertInlinePreparedAttempt(captured, canonical);
-    state.attempt = canonical; captured.attemptId = canonical.id; publish();
+    state.attempt = canonical; captured.sessionId = canonical.sessionId; captured.attemptId = canonical.id; publish();
     return canonical;
   }
   let consumerPending: Promise<LearningAttempt> | null = null;

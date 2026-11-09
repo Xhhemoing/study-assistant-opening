@@ -12,7 +12,7 @@ it.each([0, 0.8, "low", "", true])("rejects non-category confidence %s", preAnsw
 it("allows an unlinked server-issued attempt without inventing a problem", () => {
   expect(learningAttemptCreateInputSchema.parse({ sessionId, clientKey: "start-001" })).toEqual({ sessionId, clientKey: "start-001" });
 });
-it.each(["attemptId", "startedAt", "itemVersionId", "sourceVersions", "eligibility"])("rejects client-owned derived or identity field %s", (key) => {
+it.each(["attemptId", "startedAt", "itemVersionId", "sourceVersions", "eligibility", "reservedRetestQualification"])("rejects client-owned derived or identity field %s", (key) => {
   expect(learningAttemptCreateInputSchema.safeParse({ sessionId, clientKey: "start-001", [key]: "forged" }).success).toBe(false);
 });
 it("rejects client submitted server time and qualification", () => {
@@ -20,6 +20,7 @@ it("rejects client submitted server time and qualification", () => {
   expect(learningAttemptSubmitInputSchema.safeParse(input).success).toBe(true);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, submittedAt: "2026-09-28T00:00:00Z" }).success).toBe(false);
   expect(learningAttemptSubmitInputSchema.safeParse({ ...input, eligibility: { verifiedCorrect: "yes" } }).success).toBe(false);
+  expect(learningAttemptSubmitInputSchema.safeParse({ ...input, reservedRetestQualification: { eligible: true, reasons: [] } }).success).toBe(false);
 });
 it("allows learner comparison metadata while rejecting claimed review authority", () => {
   const input = { clientKey: "compare-001", answer: "1", outcome: "correct", assistance: "independent", verdictSource: "self_report",

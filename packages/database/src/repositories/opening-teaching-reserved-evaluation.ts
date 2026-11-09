@@ -3,7 +3,7 @@ import type { Scope, TeachingBlockRef } from "@aistudy/contracts";
 import { courseRouteActivityContextSchema, teachingQuestionInteractionSchema } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
-import { readOpeningReservedKey } from "./opening-course-reserved-selection";
+import { readOpeningReservedKey, reservedRetestUnavailable } from "./opening-course-reserved-selection";
 import { assertCourseReservedReplay } from "./opening-course-route-reserved-start";
 import { reservedArithmeticIdentity } from "./opening-reserved-arithmetic-identity";
 import { learningError } from "./opening-learning-facts";
@@ -97,7 +97,10 @@ export async function evaluateOpeningTeachingReservedAttempt(tx: TransactionSql,
   const exact = reservedArithmeticIdentity(body)!;
   const outcome = evaluateTeachingAnswer(exact.expression.replace(/\*/g, "×"), interaction.data, privateKey.answer, answer);
   if (!outcome || outcome === "unparseable") return null;
+  const qualification = reservedRetestUnavailable();
   return { evaluatorVersion: "teaching-key-exact-v1" as const, specVersion: "teaching-key-v1" as const,
     decision: outcome, outcome, reasonCodes: [outcome === "correct" ? "teaching_key_match" : "teaching_key_mismatch"],
-    priorFeedback: true };
+    // The observation caller already treats priorFeedback as hinted. Keep that
+    // conservative marker: neither a verdict nor issuance proves blind solving.
+    priorFeedback: !qualification.eligible };
 }
