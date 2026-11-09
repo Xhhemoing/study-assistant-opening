@@ -109,11 +109,11 @@ function unitLaunch(unit, release) {
   const executable = unit.ExecStart?.match(/(?:^|[ {;])path=([^ ;}]+)/)?.[1];
   const args = unit.ExecStart?.match(/argv\[\]=(.*?) ;/)?.[1];
   if (!executable || !args) throw new Error("Cannot inspect effective ExecStart.");
-  if (args.includes('/writer-controls/hermes-writer-exec.py ')) {
-    const match = args.match(/^\/usr\/bin\/python3 -I -S (\/[A-Za-z0-9_./-]+) (\/[A-Za-z0-9_./-]+) (aistudy-(web|worker)\.service)$/);
-    if (!match || realpathSync(executable) !== realpathSync('/usr/bin/python3')) throw new Error('Cannot inspect trusted wrapper.');
+  if (args.includes('/writer-controls/hermes-trusted-loader.py ')) {
+    const match = args.match(/^\/usr\/bin\/python3 -I -S -B (\/[A-Za-z0-9_./-]+) exec (\/[A-Za-z0-9_./-]+) (aistudy-(web|worker)\.service)$/);
+    if (!match || match[1] !== `${match[2]}/writer-controls/hermes-trusted-loader.py` || realpathSync(executable) !== realpathSync('/usr/bin/python3')) throw new Error('Cannot inspect trusted wrapper.');
     const planFile = `${match[2]}/writer-${match[3]}.json`;
-    const checked = spawnSync('/usr/bin/python3', ['-I', '-S', `${match[2]}/writer-controls/hermes-writer-state.py`, 'check-plan', match[2], release, match[3]], { encoding: 'utf8', timeout: 10_000, env: { PATH: '/usr/bin:/bin' } });
+    const checked = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', match[1], 'state', 'check-plan', match[2], release, match[3]], { encoding: 'utf8', timeout: 10_000, env: { PATH: '/usr/bin:/bin' } });
     if (checked.error || checked.status !== 0) throw new Error('Cannot inspect trusted writer plan.');
     const plan = JSON.parse(readFileSync(planFile, 'utf8'));
     if (plan.target !== release) throw new Error('Service plan points to another release.');

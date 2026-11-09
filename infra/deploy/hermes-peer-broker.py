@@ -6,7 +6,7 @@ Python objects only; there is no environment variable or CLI fake-manager mode.
 """
 import ctypes
 import errno
-import importlib.util
+import re
 import json
 import os
 from pathlib import Path
@@ -20,10 +20,7 @@ import threading
 
 
 def load_state():
-    spec = importlib.util.spec_from_file_location('writer_state', Path(__file__).with_name('hermes-writer-state.py'))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return trusted_loader.load('hermes-writer-state.py')
 
 
 state_api = load_state()
@@ -80,11 +77,22 @@ class SystemdManager:
                 'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart')
         result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=' + ','.join(keys)],
                                 check=True, capture_output=True, text=True, timeout=5)
-        values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-        # ExecStartEx includes runtime timestamps/PIDs/status after launch. Pin only
-        # executable/argv/flags, recapturing those at grant and before receipt.
-        import re
-        launch = re.fullmatch(r'\{ path=([^;]+) ; argv\[\]=(.*?) ; flags=([^;]*?) ;.*\}', values.get('ExecStartEx', ''))
+        values = {}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition('=')
+            if not separator or key in values:
+                raise PermissionError('Malformed or duplicate manager property')
+            values[key] = value
+        # Count and parse ORIGINAL bytes before normalization. A second record,
+        # path/argv/flags field or unknown tail must never disappear into .*. The
+        # optional runtime fields are synthetic-format tested, not manager proof.
+        raw = values.get('ExecStartEx', '')
+        if any(raw.count(token) != 1 for token in ('path=', 'argv[]=', 'flags=', '{', '}')):
+            raise PermissionError('Not sole raw ExecStartEx')
+        launch = re.fullmatch(
+            r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; flags=([^;{}]*?) ; '
+            r'(?:start_time=[^;{}]* ; stop_time=[^;{}]* ; pid=[0-9]+ ; '
+            r'code=[^;{}]* ; status=[^;{}]+?(?: ;)? )?\}', raw)
         if not launch:
             raise PermissionError('Cannot parse sole ExecStartEx')
         values['ExecStartEx'] = '{ path=' + launch[1].strip() + ' ; argv[]=' + launch[2] + ' ; flags=' + launch[3].strip() + ' ; }'
@@ -119,7 +127,7 @@ class Broker:
 
     def validate_plan(self, plan):
         values = plan['effective']
-        expected = f'/usr/bin/python3 -I -S {self.wrapper} {plan["state"]} {plan["unit"]}'
+        expected = f'/usr/bin/python3 -I -S -B {self.wrapper} exec {plan["state"]} {plan["unit"]}'
         launch = values['ExecStartEx']
         if launch.count('path=') != 1 or 'path=/usr/bin/python3 ;' not in launch or f'argv[]={expected} ;' not in launch:
             raise PermissionError('Not sole trusted ExecStart')
@@ -157,12 +165,12 @@ class Broker:
                 raise PermissionError('Helper must arrive with root credentials')
             before = proc_identity(pid)
             # Exact interpreter/script/arguments. Never accept peer claims.
-            prefix = [os.fsencode(self.python), b'-I', b'-S', os.fsencode(self.wrapper)]
-            if before['exe'] != os.path.realpath(self.python) or before['argv'][:4] != prefix or len(before['argv']) != 6:
+            prefix = [os.fsencode(self.python), b'-I', b'-S', b'-B', os.fsencode(self.wrapper), b'exec']
+            if before['exe'] != os.path.realpath(self.python) or before['argv'][:6] != prefix or len(before['argv']) != 8:
                 raise PermissionError('Not the trusted wrapper')
-            unit = os.fsdecode(before['argv'][5])
+            unit = os.fsdecode(before['argv'][7])
             plan = self.grants.get(unit)
-            if not plan or before['argv'][4] != os.fsencode(plan['state']):
+            if not plan or before['argv'][6] != os.fsencode(plan['state']):
                 raise PermissionError('No generation for this helper')
             observed = self.manager.snapshot(pid, unit)
             group = observed['ControlGroup']

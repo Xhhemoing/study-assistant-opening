@@ -27,6 +27,37 @@ function fixture(t) {
   const run = command => ({ ok: true, stdout: effective[units.indexOf(command.at(-1))] });
   return { root, args, target, files, effective, run };
 }
+test('installed loader and every sibling are required durable identity inputs', t => {
+  const f = fixture(t);
+  const names = ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'];
+  const directory = join(f.args[4], 'writer-controls');
+  fs.mkdirSync(directory, { mode: 0o700 });
+  for (const name of names) fs.writeFileSync(join(directory, name), 'trusted source', { mode: 0o600 });
+  for (let index = 0; index < f.effective.length; index++) {
+    const drop = join(f.args[6], `${['aistudy-web.service', 'aistudy-worker.service'][index]}.d/96-aistudy-writer-exec.conf`);
+    fs.writeFileSync(drop, 'fixed wrapper', { mode: 0o600 });
+    f.effective[index] = f.effective[index].replace('DropInPaths=', `DropInPaths=${drop} `);
+  }
+  const captured = captureConfiguration(f.args, f.run), synced = [];
+  const original = fs.fsyncSync;
+  fs.fsyncSync = fd => { synced.push(fs.readlinkSync(`/proc/self/fd/${fd}`)); original(fd); }; syncBuiltinESMExports();
+  try { persistConfiguration(captured, f.args, f.run); }
+  finally { fs.fsyncSync = original; syncBuiltinESMExports(); }
+  for (const name of names) {
+    const path = join(directory, name);
+    assert(captured.files.some(entry => entry.file === path));
+    assert(synced.includes(path));
+    const bytes = fs.readFileSync(path);
+    fs.unlinkSync(path);
+    assert.throws(() => captureConfiguration(f.args, f.run));
+    fs.writeFileSync(path, bytes, { mode: 0o600 });
+  }
+  assert(synced.includes(directory)); assert(synced.includes(f.args[4]));
+  // Replacing control bytes must invalidate a previous capture/receipt identity;
+  // no compatibility fallback removes the guard or accepts the older inventory.
+  assert.throws(() => persistConfiguration(captured, f.args, f.run));
+});
+
 test("persists every actual input and release marker with ancestors and secret-free identities", t => {
   const f = fixture(t), captured = captureConfiguration(f.args, f.run), synced = [];
   const original = fs.fsyncSync;

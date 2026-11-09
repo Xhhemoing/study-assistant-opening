@@ -82,7 +82,7 @@ function effective(args, run) {
     snapshot.push({ unit, ...values });
     for (const path of [fragment, ...drops, config, ...(index === 1 ? [runtime] : [])]) files.add(safePath(path));
   }
-  for (const name of ['hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py']) {
+  for (const name of ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py']) {
     const path = join(args[4], 'writer-controls', name);
     if (snapshot.some(row => row.DropInPaths.includes('96-aistudy-writer-exec.conf'))) files.add(path);
   }

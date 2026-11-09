@@ -484,7 +484,7 @@ else
 WorkingDirectory=$CURRENT
 EnvironmentFile=$CONFIG
 ExecStart=
-ExecStart=/usr/bin/python3 -I -S $STATE/writer-controls/hermes-writer-exec.py $STATE aistudy-web.service
+ExecStart=/usr/bin/python3 -I -S -B $STATE/writer-controls/hermes-trusted-loader.py exec $STATE aistudy-web.service
 UNIT
   chmod 644 -- "$WEB_OVERRIDE"
   systemctl daemon-reload

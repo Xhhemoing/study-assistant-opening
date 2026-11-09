@@ -17,7 +17,9 @@ const command = argv => {
 // Python object injection only in this fixture. Keep the root-private state,
 // receipt, actual config identities and real fsync/rename/unlink implementation.
 const driver = `import importlib.util,json,os,sys
-spec=importlib.util.spec_from_file_location('state',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('bootstrap',Path(sys.argv[1]).with_name('hermes-trusted-loader.py'));b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+b.TRUSTED_UID=os.geteuid();m=b.SourceLoader(Path(sys.argv[1]).parent).load('hermes-writer-state.py')
 p=json.load(sys.stdin);m.TRUSTED_UID=os.geteuid();original=m.validate_config
 m.validate_config=lambda config,sync=False: original({'files':config['files']},sync)
 if p.get('fault'):
@@ -30,7 +32,7 @@ if p['mode']=='commit':m.commit(p['state'],p['current'],p['broker'],p['record'])
 else:print(m.classify(p['state'],p['current'],p['broker'],p.get('scope'),sync=True))
 `;
 const python = (mode, record, scope) => {
-  const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-c', driver, join(dirname(supervisor), 'hermes-writer-state.py')], {
+  const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', driver, join(dirname(supervisor), 'hermes-writer-state.py')], {
     input: JSON.stringify({ mode, state, current: args[3], broker: brokerPath, record, scope, fault: mode === 'commit' && process.env.MOCK_RECEIPT_FAULT === '1' }), encoding: 'utf8',
   });
   if (result.status !== 0) throw new Error(result.stderr);

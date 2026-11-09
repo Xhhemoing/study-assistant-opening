@@ -4,6 +4,7 @@ import errno
 import importlib.util
 import json
 import multiprocessing
+import py_compile
 import os
 from pathlib import Path
 import signal
@@ -19,11 +20,17 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2] / 'infra/deploy'
 
 
+# Bootstrap is the trusted entry in production; only tests explicitly replace
+# its UID object. Siblings are never imported using Python's bytecode loader.
+bootstrap_spec = importlib.util.spec_from_file_location('trusted_bootstrap', ROOT / 'hermes-trusted-loader.py')
+bootstrap = importlib.util.module_from_spec(bootstrap_spec)
+bootstrap_spec.loader.exec_module(bootstrap)
+bootstrap.TRUSTED_UID = os.geteuid()
+loader = bootstrap.SourceLoader(ROOT)
+
+
 def load(name):
-    spec = importlib.util.spec_from_file_location(name.replace('-', '_'), ROOT / (name + '.py'))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return loader.load(name + '.py')
 
 
 state = load('hermes-writer-state')
@@ -86,6 +93,161 @@ class Fixture(unittest.TestCase):
         state.commit(self.root, self.current, self.broker_path, self.binding)
 
 
+class TrustedSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='hermes-sources-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        for name in bootstrap.SOURCES:
+            (self.root / name).write_text('loaded = True\n')
+        self.loader = bootstrap.SourceLoader(self.root)
+        self.marker = self.root / 'executed'
+
+    def malicious(self, name='hermes-peer-broker.py'):
+        path = self.root / name
+        path.write_text('from pathlib import Path\nPath(' + repr(str(self.marker)) + ').touch()\n')
+        return path
+
+    def test_complete_inventory_checked_before_top_level_effect(self):
+        source = self.malicious()
+        for defect in ('missing', 'symlink', 'hardlink', 'writable', 'parent', 'owner'):
+            with self.subTest(defect=defect):
+                other = self.root / 'hermes-writer-state.py'
+                original = other.read_bytes()
+                if defect == 'missing':
+                    other.unlink()
+                elif defect == 'symlink':
+                    other.unlink(); other.symlink_to(source)
+                elif defect == 'hardlink':
+                    other.unlink(); os.link(source, other)
+                elif defect == 'writable':
+                    other.chmod(0o666)
+                elif defect == 'parent':
+                    self.root.chmod(0o777)
+                try:
+                    uid = 0 if os.geteuid() != 0 else 12345
+                    with patch.object(bootstrap, 'TRUSTED_UID', uid if defect == 'owner' else os.geteuid()):
+                        with self.assertRaises((OSError, ValueError)):
+                            self.loader.load(source.name)
+                    self.assertFalse(self.marker.exists())
+                finally:
+                    self.root.chmod(0o700)
+                    if other.exists() or other.is_symlink():
+                        other.unlink()
+                    other.write_bytes(original)
+
+    def test_valid_source_cache_and_identity_change_refusal(self):
+        source = self.root / 'hermes-peer-broker.py'
+        module = self.loader.load(source.name)
+        self.assertTrue(module.loaded)
+        self.assertIs(self.loader.load(source.name), module)
+        self.malicious()
+        with self.assertRaisesRegex(ValueError, 'identity changed'):
+            self.loader.load(source.name)
+        self.assertFalse(self.marker.exists())
+
+    def test_matching_timestamp_and_size_malicious_pyc_never_read_or_written(self):
+        source = self.malicious()
+        bad = source.read_bytes()
+        py_compile.compile(str(source), doraise=True)
+        cached = Path(importlib.util.cache_from_source(str(source)))
+        before = cached.read_bytes()
+        timestamp = source.stat().st_mtime_ns
+        source.write_bytes(b'loaded = True\n' + b'#' * (len(bad) - len(b'loaded = True\n')))
+        os.utime(source, ns=(timestamp, timestamp))
+        self.assertTrue(self.loader.load(source.name).loaded)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(cached.read_bytes(), before)
+        self.assertEqual(list((self.root / '__pycache__').iterdir()), [cached])
+        source.unlink()
+        with self.assertRaises(FileNotFoundError):
+            bootstrap.SourceLoader(self.root).load(source.name)
+        self.assertFalse(self.marker.exists())
+
+    def test_production_source_dac_rejects_uid1000_without_object_injection(self):
+        if os.geteuid() == 0:
+            self.skipTest('requires unprivileged fixture owner')
+        with patch.object(bootstrap, 'TRUSTED_UID', 0):
+            with self.assertRaises(PermissionError):
+                self.loader.load('hermes-writer-state.py')
+
+    def test_config_identity_and_source_dac_checked_before_manager_module_effect(self):
+        (self.root / 'hermes-writer-state.py').write_bytes((ROOT / 'hermes-writer-state.py').read_bytes())
+        broker = self.malicious()
+        api = self.loader.load('hermes-writer-state.py')
+        config = self.root / 'config'
+        config.write_text('trusted')
+        identity = bootstrap.identity(config.stat())
+        config.write_text('changed configuration bytes')
+        with patch.object(api, 'TRUSTED_UID', os.geteuid()):
+            with self.assertRaisesRegex(ValueError, 'Configuration identity changed'):
+                api.validate_config({'files': [{'path': str(config), 'identity': identity}], 'effective': {}})
+            broker.chmod(0o666)
+            with self.assertRaises(PermissionError):
+                api.validate_config({'files': [], 'effective': {}})
+        self.assertFalse(self.marker.exists())
+
+    def test_state_and_wrapper_share_verified_loader_not_importlib(self):
+        actual = bootstrap.SourceLoader(ROOT)
+        wrapper = actual.load('hermes-writer-exec.py')
+        broker = wrapper.controls()
+        self.assertIs(broker.state_api, actual.load('hermes-writer-state.py'))
+        self.assertIs(broker.trusted_loader, wrapper.trusted_loader)
+
+
+class RawManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.unit = peer.UNITS[0]
+        self.values = dict.fromkeys(('Id', 'ControlGroup', 'ExecStartEx', 'ExecStartPre', 'ExecStartPost',
+            'ExecCondition', 'ExecReload', 'NeedDaemonReload', 'WorkingDirectory', 'User', 'Group',
+            'FragmentPath', 'DropInPaths', 'EnvironmentFiles', 'NoNewPrivileges', 'CapabilityBoundingSet',
+            'ProtectSystem', 'PrivateTmp', 'ProtectHome', 'ReadWritePaths', 'Restart'), '')
+        self.single = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B /controls/hermes-trusted-loader.py exec /state aistudy-web.service ; flags=no-setuid ; }'
+        self.values.update(Id=self.unit, NeedDaemonReload='no', ExecStartEx=self.single)
+
+    def properties(self, extra=''):
+        raw = '\n'.join(key + '=' + value for key, value in self.values.items()) + extra
+        response = type('Response', (), {'stdout': raw})()
+        with patch.object(peer.subprocess, 'run', return_value=response):
+            return peer.SystemdManager()._properties(self.unit)
+
+    def test_raw_multi_path_record_duplicate_flags_and_unparseable_refused(self):
+        for raw in (self.single + ' ' + self.single,
+                    self.single[:-1] + 'path=/evil ; }',
+                    self.single[:-1] + 'flags=privileged ; }',
+                    self.single.replace('flags=no-setuid', 'flags=no-setuid ; path=/evil'),
+                    self.single[:-1] + 'garbage }', ''):
+            with self.subTest(raw=raw):
+                self.values['ExecStartEx'] = raw
+                with self.assertRaises(PermissionError):
+                    self.properties()
+        self.values['ExecStartEx'] = self.single
+        with self.assertRaises(PermissionError):
+            self.properties('\nExecStartEx=' + self.single)
+        with self.assertRaises(PermissionError):
+            self.properties('\nnot-a-property')
+        for key in ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload'):
+            self.values[key] = '/evil'
+            with self.assertRaises(PermissionError):
+                self.properties()
+            self.values[key] = ''
+
+    def test_synthetic_runtime_fields_normalize_stably_without_relaxing_21_keys(self):
+        expected = self.properties()
+        self.values['ExecStartEx'] = self.single[:-1] + 'start_time=[Sun 2026-11-08 01:00:00 UTC] ; stop_time=[n/a] ; pid=42 ; code=(null) ; status=0 ; }'
+        self.assertEqual(self.properties(), expected)
+        self.values['ExecStartEx'] = self.values['ExecStartEx'].replace('status=0 ; }', 'status=0 }')
+        self.assertEqual(self.properties(), expected)
+        self.values['NeedDaemonReload'] = 'yes'
+        with self.assertRaises(PermissionError):
+            self.properties()
+        self.values['NeedDaemonReload'] = 'no'
+        del self.values['ExecStartPre']
+        with self.assertRaises(PermissionError):
+            self.properties()
+
+
 class ReceiptTests(Fixture):
     def test_committed_boot_without_owner_token_and_lost_ack_query(self):
         self.commit()  # No acknowledgement consumed by caller.
@@ -94,6 +256,21 @@ class ReceiptTests(Fixture):
         self.assertEqual(self.classify(scope={'transition': '/wrong'}), 'unknown')
         (self.root / 'writers-fenced').write_text('rearmed')
         self.assertEqual(self.classify(), 'fenced')
+
+    def test_old_receipt_control_source_identity_is_not_compatible_after_reinstall(self):
+        helper = self.root / 'hermes-trusted-loader.py'
+        helper.write_bytes((ROOT / helper.name).read_bytes())
+        self.binding['config']['files'].append({'path': str(helper), 'identity': state.identity(helper.stat())})
+        state.durable_write(self.root / 'protocol2-transition.json', self.binding)
+        self.commit()
+        replacement = helper.with_suffix('.next')
+        replacement.write_bytes(helper.read_bytes())
+        os.replace(replacement, helper)
+        with self.assertRaisesRegex(ValueError, 'Configuration identity changed'):
+            self.classify()
+        # The guard/receipt protocol is not downgraded or silently reissued.
+        self.assertTrue((self.root / 'protocol2-transition.json').exists())
+        self.assertTrue((self.root / 'commit-receipts' / ('a' * 32 + '.json')).exists())
 
     def test_succeeded_health_or_missing_receipt_never_proves_commit(self):
         for name in ('activation-incomplete', 'migration-forward-only', 'writers-fenced'):
@@ -352,12 +529,12 @@ class KernelBrokerTests(Fixture):
     def setUp(self):
         super().setUp()
         self.wrapper = self.root / 'wrapper.py'
-        self.wrapper.write_text('import socket,sys\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1]+"/exec.sock");print(s.recv(65536).decode(),flush=True)\n')
+        self.wrapper.write_text('import socket,sys\ns=socket.socket(socket.AF_UNIX);s.connect(sys.argv[2]+"/exec.sock");print(s.recv(65536).decode(),flush=True)\n')
         self.manager = FakeManager()
         self.broker = peer.Broker(self.manager, os.getpid(), peer.proc_identity(os.getpid())['start'],
                                   str(self.wrapper), '/usr/bin/python3', str(self.current), (os.geteuid(), os.getegid()))
         self.addCleanup(os.close, self.broker.owner_fd)
-        expected = f'/usr/bin/python3 -I -S {self.wrapper} {self.root} {peer.UNITS[0]}'
+        expected = f'/usr/bin/python3 -I -S -B {self.wrapper} exec {self.root} {peer.UNITS[0]}'
         self.manager.value.update({'ExecStartEx': '{ path=/usr/bin/python3 ; argv[]=' + expected + ' ; flags= ; }',
                                    'FragmentPath': str(self.root / peer.UNITS[0]), 'DropInPaths': '', 'User': '', 'Group': ''})
         self.plan = {**self.binding, 'unit': peer.UNITS[0], 'state': str(self.root), 'systemd': str(self.root),
@@ -370,7 +547,7 @@ class KernelBrokerTests(Fixture):
         self.addCleanup(self.listener.close)
 
     def attempt(self, script=None, unit=None, before=None):
-        child = subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(script or self.wrapper), str(self.root), unit or peer.UNITS[0]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = subprocess.Popen(['/usr/bin/python3', '-I', '-S', '-B', str(script or self.wrapper), 'exec', str(self.root), unit or peer.UNITS[0]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(lambda: child.poll() is None and child.kill())
         conn, _ = self.listener.accept()
         conn.settimeout(5)  # Match production accepted sockets, not blocking-only test sockets.
@@ -486,7 +663,7 @@ class KernelBrokerTests(Fixture):
             parent_barrier.send('peer-reaped')
             self.assertTrue(parent_barrier.poll(5), 'queued peer never reached real pidfd_open')
             self.assertEqual(parent_barrier.recv(), ('reaped-before-pin', child, 0, True, {}))
-            command = ['/usr/bin/python3', '-I', '-S', str(self.wrapper), str(self.root), peer.UNITS[0]]
+            command = ['/usr/bin/python3', '-I', '-S', '-B', str(self.wrapper), 'exec', str(self.root), peer.UNITS[0]]
             allowed = subprocess.run(command, capture_output=True, text=True, timeout=5, check=True)
             reply = json.loads(allowed.stdout)
             self.assertTrue(reply['ok'], allowed.stdout + allowed.stderr)
@@ -511,7 +688,7 @@ class KernelBrokerTests(Fixture):
 
     def test_parallel_helpers_only_one_allow(self):
         # Two actual processes are accepted against a single owner generation.
-        children = [subprocess.Popen(['/usr/bin/python3', '-I', '-S', str(self.wrapper), str(self.root), peer.UNITS[0]], stdout=subprocess.PIPE) for _ in range(2)]
+        children = [subprocess.Popen(['/usr/bin/python3', '-I', '-S', '-B', str(self.wrapper), 'exec', str(self.root), peer.UNITS[0]], stdout=subprocess.PIPE) for _ in range(2)]
         connections = [self.listener.accept()[0] for _ in children]
         outcomes = []
         def handle(conn):

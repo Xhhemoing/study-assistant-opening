@@ -1,10 +1,9 @@
 #!/usr/bin/python3
-"""Sole systemd ExecStart, invoked with Python -I -S, never candidate imports.
+"""Sole systemd ExecStart, invoked via the fixed Python -I -S -B loader, never candidate imports.
 
 This gates manager jobs, not hostile host root/release code. No fork before
 admission: SO_PEERCRED PID/starttime remains the final application's identity.
 """
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,12 +15,7 @@ BROKER = '/run/aistudy-writer-broker/exec.sock'
 
 
 def controls():
-    # -I excludes cwd/PYTHONPATH; dependencies are explicit installed siblings.
-    path = Path(__file__).with_name('hermes-peer-broker.py')
-    spec = importlib.util.spec_from_file_location('trusted_peer', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return trusted_loader.load('hermes-peer-broker.py')
 
 
 def application(target, unit):
@@ -104,8 +98,6 @@ def main():
         raise PermissionError('Root helper arguments required')
     peer = controls()
     state, unit = sys.argv[1:]
-    for name in ('hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'):
-        peer.state_api.read_trusted(Path(__file__).with_name(name))
     plan, target_fd = admit(peer, state, unit)
     execute(plan, target_fd)
 

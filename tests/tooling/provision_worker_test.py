@@ -88,7 +88,7 @@ class WorkerProvisionTests(unittest.TestCase):
                 "User=" + ("root" if self.unsafe_effective_user else "aistudy-worker"),
                 "Group=aistudy-worker", "ProtectSystem=strict", "PrivateTmp=yes",
                 "NoNewPrivileges=yes", "CapabilityBoundingSet=cap_setgid cap_setuid",
-                "ExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S /var/lib/aistudy-deploy/writer-controls/hermes-writer-exec.py /var/lib/aistudy-deploy aistudy-worker.service ; flags=no-setuid ; }",
+                "ExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B /var/lib/aistudy-deploy/writer-controls/hermes-trusted-loader.py exec /var/lib/aistudy-deploy aistudy-worker.service ; flags=no-setuid ; }",
                 "ExecStartPre=", "ExecStartPost=", "ExecCondition=", "ExecReload=",
                 f"WorkingDirectory={self.current}", f"ReadWritePaths={self.cache}",
                 f"EnvironmentFiles={self.env} (ignore_errors=no) {self.runtime} (ignore_errors=no)",

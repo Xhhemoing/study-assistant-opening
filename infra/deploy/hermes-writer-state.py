@@ -8,7 +8,6 @@ import errno
 import json
 import os
 from pathlib import Path
-import stat
 import sys
 import tempfile
 
@@ -16,56 +15,16 @@ import tempfile
 TRUSTED_UID = 0
 
 
-def identity(st):
-    return [str(value) for value in (st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid,
-                                    st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_nlink)]
+# Injected only by the fixed stdlib entry after complete source verification.
+identity = bootstrap.identity
 
 
 def safe_open(path, private=False, directory=False):
-    """Walk from / using dirfds; no symlink, writable parent or hardlink input."""
-    path = os.fspath(path)
-    if not path.startswith('/') or os.path.normpath(path) != path:
-        raise ValueError('Noncanonical trusted path')
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        parts = path.split('/')[1:]
-        for index, part in enumerate(parts):
-            final = index == len(parts) - 1
-            child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
-                            (os.O_DIRECTORY if not final or directory else 0), dir_fd=fd)
-            os.close(fd)
-            fd = child
-            st = os.fstat(fd)
-            # /tmp is allowed only as a root-owned sticky *ancestor* in local tests.
-            sticky = not final and stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX
-            trusted_owner = st.st_uid == TRUSTED_UID if final else st.st_uid in (0, TRUSTED_UID)
-            if not trusted_owner or (st.st_mode & 0o022 and not sticky):
-                raise PermissionError('Untrusted path owner/mode')
-            if final:
-                if private and st.st_mode & 0o077:
-                    raise PermissionError('Private state is not private')
-                if not directory and (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1):
-                    raise PermissionError('Trusted file must be regular and single-link')
-        result, fd = fd, -1
-        return result
-    finally:
-        if fd >= 0:
-            os.close(fd)
+    return bootstrap.safe_open(path, private, directory, uid=TRUSTED_UID)
 
 
 def read_trusted(path, private=False, sync=False):
-    fd = safe_open(path, private)
-    try:
-        before = identity(os.fstat(fd))
-        with os.fdopen(os.dup(fd), 'rb') as source:
-            data = source.read()
-        if sync:
-            os.fsync(fd)
-        if before != identity(os.fstat(fd)) or before != identity(os.lstat(path)):
-            raise ValueError('Trusted file changed')
-        return data, before
-    finally:
-        os.close(fd)
+    return bootstrap.read_trusted(path, private, sync, uid=TRUSTED_UID)
 
 
 def sync_dir(path):
@@ -101,10 +60,7 @@ def validate_config(config, sync=False):
     if 'effective' in config:
         # One implementation for boot/query and online admission; no permissive
         # production adapter fallback when systemd is unavailable.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('trusted_manager', Path(__file__).with_name('hermes-peer-broker.py'))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = trusted_loader.load('hermes-peer-broker.py')
         manager = module.SystemdManager()
         for unit, expected in config['effective'].items():
             if manager.configuration(unit) != expected:

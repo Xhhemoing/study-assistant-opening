@@ -75,7 +75,7 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py", "hermes-trusted-loader.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
   const git = (...args) => {
@@ -198,7 +198,7 @@ case "$1" in
   unit=\${!#}
   if [[ "$*" == *ExecStartEx* ]]; then
    flags=''; [[ "$unit" != aistudy-worker.service ]] || flags=no-setuid
-   printf 'NeedDaemonReload=no\\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S %s/writer-controls/hermes-writer-exec.py %s %s ; flags=%s ; }\\n' "$DEPLOY_STATE" "$DEPLOY_STATE" "$unit" "$flags"
+   printf 'NeedDaemonReload=no\\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B %s/writer-controls/hermes-trusted-loader.py exec %s %s ; flags=%s ; }\\n' "$DEPLOY_STATE" "$DEPLOY_STATE" "$unit" "$flags"
    exit
   fi
   if [[ "$*" == *FragmentPath* ]]; then
@@ -978,7 +978,7 @@ test("an activation rename failure cleans only its temporary pointer and refuses
   assert.equal(readlinkSync(f.current), f.server);
   assertForwardRefusal(f, result);
   assert.match(result.stderr, /FORWARD FIX REQUIRED/);
-  assert.match(readFileSync(join(f.systemd, 'aistudy-web.service.d/50-aistudy-release.conf'), 'utf8'), /writer-controls\/hermes-writer-exec.py/);
+  assert.match(readFileSync(join(f.systemd, 'aistudy-web.service.d/50-aistudy-release.conf'), 'utf8'), /writer-controls\/hermes-trusted-loader.py exec/);
   assert(!readdirSync(f.root).some(name => name.startsWith("current.next.")));
 });
 

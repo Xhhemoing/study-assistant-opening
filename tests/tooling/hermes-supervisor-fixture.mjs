@@ -14,7 +14,9 @@ import { processStarttime, supervise } from '../../infra/deploy/hermes-superviso
 export const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const stateModule = resolve('infra/deploy/hermes-writer-state.py');
 const receiptDriver = `import importlib.util,json,os,sys
-spec=importlib.util.spec_from_file_location('state',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('bootstrap',Path(sys.argv[1]).with_name('hermes-trusted-loader.py'));b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+b.TRUSTED_UID=os.geteuid();m=b.SourceLoader(Path(sys.argv[1]).parent).load('hermes-writer-state.py')
 p=json.load(sys.stdin);m.TRUSTED_UID=os.geteuid();original=m.validate_config
 def validate(config,sync=False):
  original({'files':config['files']},sync)
@@ -47,7 +49,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
   const broker = new EventEmitter(); broker.stdin = new PassThrough();
   const command = argv => {
     const unit = argv.at(-1);
-    if (argv[0] === 'show' && argv[1].includes('ExecStartEx')) return { ok: true, stdout: `NeedDaemonReload=no\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S ${args[4]}/writer-controls/hermes-writer-exec.py ${args[4]} ${unit} ; flags=${unit === units[1] ? 'no-setuid' : ''} ; }\n` };
+    if (argv[0] === 'show' && argv[1].includes('ExecStartEx')) return { ok: true, stdout: `NeedDaemonReload=no\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B ${args[4]}/writer-controls/hermes-trusted-loader.py exec ${args[4]} ${unit} ; flags=${unit === units[1] ? 'no-setuid' : ''} ; }\n` };
     if (argv[0] === 'show') return { ok: true, stdout: `MainPID=${process.pid}` };
     if (argv[0] === 'start') {
       events.push(`start:${unit}`);
@@ -57,7 +59,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     return { ok: true, stdout: '' };
   };
   const python = (mode, record, scope) => {
-    const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-c', receiptDriver, stateModule], {
+    const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', '-c', receiptDriver, stateModule], {
       input: JSON.stringify({ mode, state: args[4], current: args[3], broker: brokerPath, record, scope, effective, fault: mode === 'commit' ? fault : undefined, guard }), encoding: 'utf8',
     });
     if (result.status !== 0) throw new Error(result.stderr.trim());
