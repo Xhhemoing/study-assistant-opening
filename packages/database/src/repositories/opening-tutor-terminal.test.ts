@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { TUTOR_UNKNOWN_MESSAGE } from "@aistudy/domain";
+import { TUTOR_CANCELLED_MESSAGE, TUTOR_UNKNOWN_MESSAGE } from "@aistudy/domain";
 import { createOpeningConversationRepository, type StoredTurn } from "./opening-conversations";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 
@@ -509,6 +509,114 @@ describe("markTerminal history coordination", () => {
     const fake = terminalSql({ missing: true, lockedOwner: null, jobError });
     await expect(createOpeningTutorJobsRepository(fake.sql).fail(scope, "invalid", "message")).rejects.toBe(jobError);
     expect(fake.state().history).toBe(false);
+  });
+});
+
+describe("cancel history coordination", () => {
+  function cancelSql(options: {
+    missing?: boolean;
+    helperError?: unknown;
+    remaining?: boolean;
+    lockedOwner?: string | null;
+    jobError?: unknown;
+    readError?: unknown;
+    turnError?: unknown;
+    job?: boolean;
+  } = {}) {
+    let history = false, job = false, turn = false, rolledBack = false, readbacks = 0;
+    const sql = (async (strings: TemplateStringsArray) => {
+      const query = strings.join(" ");
+      if (query.includes("SELECT owner_user_id FROM workspaces")) return options.missing ? [] : [{ owner_user_id: "canonical-owner" }];
+      if (query.includes("SELECT id, owner_user_id FROM workspaces")) return options.lockedOwner === null ? []
+        : [{ id: scope.workspaceId, owner_user_id: options.lockedOwner ?? "canonical-owner" }];
+      if (query.includes("SELECT id FROM workspaces")) {
+        if (query.includes("owner_user_id") && options.helperError) throw options.helperError;
+        return options.remaining === false ? [] : [{ id: scope.workspaceId }];
+      }
+      if (query.includes("INSERT INTO opening_workspace_history_revisions")) { history = true; return []; }
+      if (query.includes("SELECT j.id FROM opening_tutor_jobs")) {
+        readbacks++;
+        if (options.readError) throw options.readError;
+        return [];
+      }
+      if (query.includes("UPDATE opening_tutor_jobs")) {
+        if (options.jobError) throw options.jobError;
+        if (!options.job) return [];
+        job = true;
+        return [{ id: "job-1", workspace_id: scope.workspaceId, conversation_id: "conversation-1", user_turn_id: "user-turn-1",
+          assistant_turn_id: "assistant-turn-1", status: "cancelled", mode: "explain", error: { message: "cancelled by user" },
+          created_at: "2026-11-09T00:00:00Z", updated_at: "2026-11-09T00:00:01Z" }];
+      }
+      if (query.includes("UPDATE opening_turns")) {
+        turn = true;
+        if (options.turnError) throw options.turnError;
+      }
+      return [];
+    }) as unknown as Sql;
+    sql.json = ((value: unknown) => value) as Sql["json"];
+    sql.begin = (async (callback: (tx: Sql) => Promise<unknown>) => {
+      try { return await callback(sql); }
+      catch (error) { history = job = turn = false; rolledBack = true; throw error; }
+    }) as Sql["begin"];
+    return { sql, state: () => ({ history, job, turn, rolledBack, readbacks }) };
+  }
+
+  it("maps successful cancellation and returns null without a target", async () => {
+    const success = cancelSql({ job: true });
+    await expect(createOpeningTutorJobsRepository(success.sql).cancel(scope, "job-1")).resolves.toMatchObject({
+      id: "job-1", workspaceId: scope.workspaceId, status: "cancelled", assistantTurnId: "assistant-turn-1",
+      createdAt: "2026-11-09T00:00:00.000Z", error: { message: TUTOR_CANCELLED_MESSAGE },
+    });
+    expect(success.state()).toEqual({ history: true, job: true, turn: true, rolledBack: false, readbacks: 0 });
+    const absent = cancelSql();
+    await expect(createOpeningTutorJobsRepository(absent.sql).cancel(scope, "job-1")).resolves.toBeNull();
+    expect(absent.state()).toEqual({ history: true, job: false, turn: false, rolledBack: false, readbacks: 0 });
+  });
+
+  it.each([null, "new-owner"])("rolls back history on locked workspace drift (%s), preserving read-only UUID errors", async lockedOwner => {
+    const failure = Object.assign(new Error("invalid input syntax for type uuid"), { code: "22P02" });
+    for (const readError of [undefined, failure]) {
+      const fake = cancelSql({ lockedOwner, readError, job: true });
+      const result = createOpeningTutorJobsRepository(fake.sql).cancel(scope, "job-1");
+      if (readError) await expect(result).rejects.toBe(readError);
+      else await expect(result).resolves.toBeNull();
+      expect(fake.state()).toEqual({ history: false, job: false, turn: false, rolledBack: true, readbacks: 1 });
+    }
+  });
+
+  it.each([true, false])("only follows the original null path for exact helper not-found with confirmed deletion (remaining=%s)", async remaining => {
+    const helperError = Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
+    const fake = cancelSql({ helperError, remaining, lockedOwner: null });
+    const result = createOpeningTutorJobsRepository(fake.sql).cancel(scope, "job-1");
+    if (remaining) await expect(result).rejects.toBe(helperError);
+    else await expect(result).resolves.toBeNull();
+    expect(fake.state().history).toBe(false);
+    expect(fake.state().readbacks).toBe(0);
+  });
+
+  it.each([
+    Object.assign(new Error("workspace not found"), { code: "CONFLICT" }),
+    Object.assign(new Error("other entity not found"), { code: "NOT_FOUND" }),
+    Object.assign(new Error("query failed"), { code: "23503" }),
+    { code: "NOT_FOUND", message: "workspace not found" },
+  ])("propagates unrelated helper errors by identity: %s", async helperError => {
+    const fake = cancelSql({ helperError, remaining: false });
+    await expect(createOpeningTutorJobsRepository(fake.sql).cancel(scope, "job-1")).rejects.toBe(helperError);
+    expect(fake.state()).toEqual({ history: false, job: false, turn: false, rolledBack: true, readbacks: 0 });
+  });
+
+  it.each(["job", "turn"] as const)("propagates %s errors without mistaking a matching message for the private rollback signal", async stage => {
+    const failure = new Error("cancel workspace changed after history ensure");
+    const fake = cancelSql({ job: true, ...(stage === "job" ? { jobError: failure } : { turnError: failure }) });
+    await expect(createOpeningTutorJobsRepository(fake.sql).cancel(scope, "job-1")).rejects.toBe(failure);
+    expect(fake.state()).toEqual({ history: false, job: false, turn: false, rolledBack: true, readbacks: 0 });
+  });
+
+  it("does not swallow invalid job UUIDs on the original missing-workspace path", async () => {
+    const failure = Object.assign(new Error("invalid job UUID"), { code: "22P02" });
+    const fake = cancelSql({ missing: true, lockedOwner: null, jobError: failure });
+    await expect(createOpeningTutorJobsRepository(fake.sql).cancel(scope, "invalid")).rejects.toBe(failure);
+    expect(fake.state()).toEqual({ history: false, job: false, turn: false, rolledBack: true, readbacks: 0 });
   });
 });
 

@@ -566,6 +566,310 @@ describe("markTerminal history fence", () => {
   });
 });
 
+describe("cancel history fence", () => {
+  async function cancellation(running = true) {
+    const { append } = await seedConversation();
+    const saved = await append();
+    const claimed = running ? await createOpeningTutorJobsRepository(fixture.sql).claim(saved.jobId) : null;
+    return { ...saved, claimToken: claimed?.claimToken };
+  }
+
+  async function history() {
+    return fixture.sql`SELECT workspace_id, owner_user_id, revision::int FROM opening_workspace_history_revisions
+      WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId}) ORDER BY workspace_id`;
+  }
+
+  async function graph() {
+    const jobs = await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    const turns = await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    const candidates = await fixture.sql`SELECT * FROM opening_assistant_candidates WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    const metadata = await fixture.sql`SELECT * FROM opening_jobs WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    const outbox = await fixture.sql`SELECT * FROM opening_outbox WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    const exposures = await fixture.sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    return { jobs, turns, candidates, metadata, outbox, exposures };
+  }
+
+  beforeEach(async () => {
+    await fixture.sql`DELETE FROM opening_workspace_history_revisions
+      WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+  });
+
+  it("waits on history before workspace/job/turn locks and preserves a nonempty old graph", async () => {
+    const old = await cancellation();
+    await createOpeningTutorJobsRepository(fixture.sql).completeTurn({ scope: fixture.scope, ...old,
+      text: "old answer", citations: [], candidates: [{ payload: { kind: "memory", text: "old candidate", temporary: false }, sourceIds: [] }],
+      enqueueMetadata: true });
+    const input = await cancellation();
+    const original = await graph();
+    expect(original.candidates).toHaveLength(1);
+    expect(original.metadata).toHaveLength(1);
+    expect(original.outbox).toHaveLength(1);
+    await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=17 WHERE workspace_id=${fixture.scope.workspaceId}`;
+    const holder = openRaceSession(), writer = openRaceSession(), observer = openRaceSession();
+    let pending: ReturnType<ReturnType<typeof createOpeningTutorJobsRepository>["cancel"]> | undefined;
+    let settled = false;
+    try {
+      await Promise.all([holder.ready, writer.ready, observer.ready]);
+      await holder.sql.begin(async tx => {
+        await tx`SELECT revision FROM opening_workspace_history_revisions
+          WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId} FOR UPDATE`;
+        pending = track(createOpeningTutorJobsRepository(writer.sql).cancel(fixture.scope, input.jobId));
+        pending.then(() => { settled = true; }, () => { settled = true; });
+        await vi.waitFor(async () => {
+          expect(settled, "cancel must wait for history").toBe(false);
+          const [lock] = await observer.sql`SELECT count(*)::int AS blocked FROM pg_locks
+            WHERE pid=${writer.pid} AND NOT granted AND ${holder.pid}=ANY(pg_blocking_pids(pid))`;
+          expect(lock!.blocked).toBeGreaterThan(0);
+          const [activity] = await observer.sql`SELECT query FROM pg_stat_activity WHERE pid=${writer.pid}`;
+          expect(activity!.query).toMatch(/opening_workspace_history_revisions/);
+        }, { timeout: 1000, interval: 20 });
+        await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_tutor_jobs WHERE id=${input.jobId} FOR UPDATE NOWAIT`;
+        await tx`SELECT id FROM opening_turns WHERE id=${input.assistantTurnId} FOR UPDATE NOWAIT`;
+        expect(await graph()).toEqual(original);
+      });
+      await expect(pending).resolves.toMatchObject({ id: input.jobId, workspaceId: fixture.scope.workspaceId, status: "cancelled",
+        error: { message: TUTOR_CANCELLED_MESSAGE } });
+      const result = await graph();
+      expect(result.jobs.find(job => job.id === input.jobId)).toMatchObject({ status: "cancelled", error: { message: "cancelled by user" } });
+      expect(result.turns.find(turn => turn.id === input.assistantTurnId)).toMatchObject({ status: "failed", text: "回答任务已取消" });
+      expect({ ...result, jobs: original.jobs, turns: original.turns }).toEqual(original);
+      expect(result.jobs.filter(job => job.id !== input.jobId)).toEqual(original.jobs.filter(job => job.id !== input.jobId));
+      expect(result.turns.filter(turn => turn.id !== input.assistantTurnId)).toEqual(original.turns.filter(turn => turn.id !== input.assistantTurnId));
+      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 17 }]);
+    } finally {
+      await Promise.allSettled(pending ? [pending] : []);
+      await Promise.all([closeRace(holder.sql), closeRace(writer.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it.each([null, 0, 23])("ensures canonical history at %s without advancing it or another workspace", async revision => {
+    await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+      VALUES (${fixture.otherScope.workspaceId},${fixture.otherScope.ownerUserId},41)`;
+    if (revision !== null) await fixture.sql`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+      VALUES (${fixture.scope.workspaceId},${fixture.scope.ownerUserId},${revision})`;
+    for (const running of [false, true]) {
+      const input = await cancellation(running);
+      await expect(createOpeningTutorJobsRepository(fixture.sql).cancel(fixture.scope, input.jobId))
+        .resolves.toMatchObject({ id: input.jobId, status: "cancelled", assistantTurnId: input.assistantTurnId });
+    }
+    expect(await history()).toHaveLength(2);
+    expect(await history()).toEqual(expect.arrayContaining([
+      { workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: revision ?? 0 },
+      { workspace_id: fixture.otherScope.workspaceId, owner_user_id: fixture.otherScope.ownerUserId, revision: 41 },
+    ]));
+  });
+
+  it("keeps missing/terminal/cross-workspace and wrong conversation-owner cancellations as null", async () => {
+    const jobs = createOpeningTutorJobsRepository(fixture.sql);
+    for (const state of ["missing", "succeeded", "failed", "cancelled", "outcome_unknown", "other workspace", "wrong owner"]) {
+      const input = await cancellation();
+      if (["succeeded", "failed", "cancelled", "outcome_unknown"].includes(state)) {
+        await fixture.sql`UPDATE opening_tutor_jobs SET status=${state} WHERE id=${input.jobId}`;
+      }
+      const original = await graph();
+      const scope = state === "other workspace" ? fixture.otherScope : state === "wrong owner"
+        ? { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId } : fixture.scope;
+      await expect(jobs.cancel(scope, state === "missing" ? randomUUID() : input.jobId)).resolves.toBeNull();
+      expect(await graph()).toEqual(original);
+    }
+    expect(await history()).toHaveLength(2);
+    expect((await history()).every(row => row.revision === 0)).toBe(true);
+  });
+
+  it("keeps the old conversation owner's cancellation authority after a static workspace owner move", async () => {
+    const input = await cancellation(), replacementOwnerId = randomUUID();
+    const beforeHistory = await history();
+    expect(beforeHistory).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+    await fixture.sql`INSERT INTO users(id,email,display_name,password_hash)
+      VALUES (${replacementOwnerId},${`${replacementOwnerId}@example.com`},'Static replacement','test')`;
+    try {
+      await fixture.sql`UPDATE workspaces SET owner_user_id=${replacementOwnerId} WHERE id=${fixture.scope.workspaceId}`;
+      const original = await graph();
+      const jobs = createOpeningTutorJobsRepository(fixture.sql);
+      await expect(jobs.cancel({ ...fixture.scope, ownerUserId: replacementOwnerId }, input.jobId)).resolves.toBeNull();
+      expect(await graph()).toEqual(original);
+      await expect(jobs.cancel(fixture.scope, input.jobId)).resolves.toMatchObject({ status: "cancelled" });
+      const afterHistory = await history();
+      expect(afterHistory).toHaveLength(beforeHistory.length + 1);
+      expect(afterHistory).toEqual(expect.arrayContaining([
+        ...beforeHistory,
+        { workspace_id: fixture.scope.workspaceId, owner_user_id: replacementOwnerId, revision: 0 },
+      ]));
+    } finally {
+      await fixture.sql`UPDATE workspaces SET owner_user_id=${fixture.scope.ownerUserId} WHERE id=${fixture.scope.workspaceId}`;
+      await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE owner_user_id=${replacementOwnerId}`;
+      await fixture.sql`DELETE FROM users WHERE id=${replacementOwnerId}`;
+    }
+  });
+
+  it.each(["complete", "failed", "clarify", "outcome_unknown"])("never overwrites a terminal %s assistant turn", async status => {
+    const input = await cancellation();
+    await fixture.sql`UPDATE opening_turns SET status=${status},text='protected text' WHERE id=${input.assistantTurnId}`;
+    const [original] = await fixture.sql`SELECT * FROM opening_turns WHERE id=${input.assistantTurnId}`;
+    await expect(createOpeningTutorJobsRepository(fixture.sql).cancel(fixture.scope, input.jobId)).resolves.toMatchObject({ status: "cancelled" });
+    expect((await fixture.sql`SELECT * FROM opening_turns WHERE id=${input.assistantTurnId}`)[0]).toEqual(original);
+  });
+
+  it.each(["cancel", "completion"] as const)("%s commits first and prevents the opposing writer from reviving or cancelling its terminal result", async first => {
+    const input = await cancellation();
+    const completion = { ...input, scope: fixture.scope, text: "winning answer", citations: [],
+      candidates: [{ payload: { kind: "memory", text: "winning candidate", temporary: false }, sourceIds: [] }], enqueueMetadata: true };
+    expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+    await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=19
+      WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
+    const leader = openRaceSession(), follower = openRaceSession(), observer = openRaceSession();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending: Promise<unknown>[] = [];
+    const coordinated = new Proxy(leader.sql, {
+      get(target, property, receiver) {
+        if (property !== "begin") return Reflect.get(target, property, receiver);
+        return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => execute(new Proxy(tx, {
+          apply(query, thisArg, args) {
+            const result = Reflect.apply(query, thisArg, args) as Promise<unknown>;
+            if (!(args[0] as TemplateStringsArray).join(" ").includes("UPDATE opening_turns")) return result;
+            return result.then(async rows => { entered(); await gate; return rows; });
+          },
+        })));
+      },
+    });
+    try {
+      await Promise.all([leader.ready, follower.ready, observer.ready]);
+      const firstJobs = createOpeningTutorJobsRepository(coordinated), nextJobs = createOpeningTutorJobsRepository(follower.sql);
+      const leading = track<unknown>(first === "cancel" ? firstJobs.cancel(fixture.scope, input.jobId) : firstJobs.completeTurn(completion));
+      pending.push(leading);
+      await Promise.race([started, leading.then(() => { throw new Error("leader did not reach turn write"); })]);
+      const following = track<unknown>(first === "cancel" ? nextJobs.completeTurn(completion) : nextJobs.cancel(fixture.scope, input.jobId));
+      pending.push(following);
+      await vi.waitFor(async () => {
+        const [lock] = await observer.sql`SELECT count(*)::int AS blocked FROM pg_locks
+          WHERE pid=${follower.pid} AND NOT granted AND ${leader.pid}=ANY(pg_blocking_pids(pid))`;
+        expect(lock!.blocked).toBeGreaterThan(0);
+        const [activity] = await observer.sql`SELECT query FROM pg_stat_activity WHERE pid=${follower.pid}`;
+        expect(activity!.query).toMatch(/opening_workspace_history_revisions/);
+      }, { timeout: 1000, interval: 20 });
+      release();
+      await leading;
+      const committed = await graph();
+      if (first === "completion") await expect(following).resolves.toBeNull();
+      else await expect(following).resolves.toBeUndefined();
+      expect(await graph()).toEqual(committed);
+      expect(committed.jobs.find(job => job.id === input.jobId)?.status).toBe(first === "cancel" ? "cancelled" : "succeeded");
+      expect(committed.turns.find(turn => turn.id === input.assistantTurnId)).toMatchObject(first === "cancel"
+        ? { status: "failed", text: "回答任务已取消" } : { status: "complete", text: "winning answer" });
+      expect(committed.candidates).toHaveLength(first === "cancel" ? 0 : 1);
+      expect(committed.metadata).toHaveLength(first === "cancel" ? 0 : 1);
+      expect(committed.outbox).toHaveLength(first === "cancel" ? 0 : 1);
+      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 19 }]);
+    } finally {
+      release();
+      await Promise.allSettled(pending);
+      await Promise.all([closeRace(leader.sql), closeRace(follower.sql), closeRace(observer.sql)]);
+    }
+  });
+
+  it("rolls back actual job/turn SQL and the full graph on failure, preserving SQL errors", async () => {
+    const old = await cancellation();
+    await createOpeningTutorJobsRepository(fixture.sql).completeTurn({ scope: fixture.scope, ...old,
+      text: "old answer", citations: [], candidates: [{ payload: { kind: "memory", text: "old candidate", temporary: false }, sourceIds: [] }],
+      enqueueMetadata: true });
+    for (const revision of [0, 29]) {
+      const input = await cancellation();
+      // Saved-turn setup has already committed zero; this is existing-row rollback, not lazy-ensure rollback.
+      expect(await history()).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision: 0 }]);
+      if (revision !== 0) await fixture.sql`UPDATE opening_workspace_history_revisions SET revision=${revision}
+        WHERE workspace_id=${fixture.scope.workspaceId} AND owner_user_id=${fixture.scope.ownerUserId}`;
+      const original = await graph(), beforeHistory = await history();
+      expect(beforeHistory).toEqual([{ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, revision }]);
+      const coordinated = new Proxy(fixture.sql, {
+        get(target, property, receiver) {
+          if (property !== "begin") return Reflect.get(target, property, receiver);
+          return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => execute(new Proxy(tx, {
+            apply(query, thisArg, args) {
+              const result = Reflect.apply(query, thisArg, args) as Promise<unknown>;
+              if (!(args[0] as TemplateStringsArray).join(" ").includes("UPDATE opening_turns")) return result;
+              return result.then(async rows => { await tx`SELECT 1/0`; return rows; });
+            },
+          })));
+        },
+      });
+      await expect(createOpeningTutorJobsRepository(coordinated).cancel(fixture.scope, input.jobId)).rejects.toMatchObject({ code: "22012" });
+      expect(await graph()).toEqual(original);
+      expect(await history()).toEqual(beforeHistory);
+    }
+  });
+
+  it.each(["before helper", "after helper"] as const)("owner/deletion races %s preserve errors or roll back ensure before null", async window => {
+    for (const drift of ["owner", "delete"] as const) {
+      for (const invalid of [false, true]) {
+        const workspaceId = randomUUID(), ownerUserId = randomUUID(), replacementOwnerId = randomUUID();
+        await fixture.sql`INSERT INTO users(id,email,display_name,password_hash) VALUES
+          (${ownerUserId},${`${ownerUserId}@example.com`},'Cancel race','test'),
+          (${replacementOwnerId},${`${replacementOwnerId}@example.com`},'Replacement','test')`;
+        await fixture.sql`INSERT INTO workspaces(id,owner_user_id) VALUES (${workspaceId},${ownerUserId})`;
+        const scope = { workspaceId, ownerUserId };
+        const conversations = createOpeningConversationRepository(fixture.sql);
+        const conversation = await conversations.create(scope, { title: "Cancel race", courseId: null });
+        const saved = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, text: "race question", mode: "explain",
+          clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+        const originalJobs = await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${workspaceId}`;
+        const originalTurns = await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${workspaceId} ORDER BY id`;
+        const beforeHistory = await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+        expect(beforeHistory).toEqual([{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: "0" }]);
+        const mutator = openRaceSession();
+        let scheduled = false;
+        const coordinated = new Proxy(fixture.sql, {
+          get(target, property, receiver) {
+            if (property !== "begin") return Reflect.get(target, property, receiver);
+            return (execute: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => execute(new Proxy(tx, {
+              apply(query, thisArg, args) {
+                const result = Reflect.apply(query, thisArg, args) as Promise<unknown>;
+                const text = (args[0] as TemplateStringsArray).join(" ");
+                const boundary = window === "before helper" ? "SELECT owner_user_id FROM workspaces" : "SELECT revision FROM opening_workspace_history_revisions";
+                if (scheduled || !text.includes(boundary)) return result;
+                scheduled = true;
+                return result.then(async rows => {
+                  if (drift === "owner") await mutator.sql`UPDATE workspaces SET owner_user_id=${replacementOwnerId} WHERE id=${workspaceId}`;
+                  else await mutator.sql`DELETE FROM workspaces WHERE id=${workspaceId}`;
+                  return rows;
+                });
+              },
+            })));
+          },
+        });
+        try {
+          await mutator.ready;
+          const result = createOpeningTutorJobsRepository(coordinated).cancel(scope, invalid ? "invalid-job-uuid" : saved.jobId);
+          if (window === "before helper" && drift === "owner") {
+            await expect(result).rejects.toMatchObject({ code: "NOT_FOUND", message: "workspace not found" });
+          } else if (invalid) await expect(result).rejects.toMatchObject({ code: "22P02" });
+          else await expect(result).resolves.toBeNull();
+          expect(scheduled).toBe(true);
+          expect(await fixture.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`).toEqual(beforeHistory);
+          expect(await fixture.sql`SELECT * FROM opening_tutor_jobs WHERE workspace_id=${workspaceId}`).toEqual(drift === "owner" ? originalJobs : []);
+          expect(await fixture.sql`SELECT * FROM opening_turns WHERE workspace_id=${workspaceId} ORDER BY id`).toEqual(drift === "owner" ? originalTurns : []);
+        } finally {
+          await closeRace(mutator.sql);
+          await fixture.sql`DELETE FROM workspaces WHERE id=${workspaceId}`;
+          await fixture.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+          await fixture.sql`DELETE FROM users WHERE id IN (${ownerUserId},${replacementOwnerId})`;
+        }
+      }
+    }
+  });
+
+  it("retains the original invalid job UUID error even with no workspace or no matching conversation owner", async () => {
+    const jobs = createOpeningTutorJobsRepository(fixture.sql);
+    for (const scope of [{ workspaceId: randomUUID(), ownerUserId: fixture.scope.ownerUserId },
+      { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId }]) {
+      await expect(jobs.cancel(scope, randomUUID())).resolves.toBeNull();
+      await expect(jobs.cancel(scope, "invalid-job-uuid")).rejects.toMatchObject({ code: "22P02" });
+    }
+  });
+});
+
 describe("tutor job recovery repository", () => {
   it("releases tutor work while a separately claimed metadata job is waiting, and attaches late suggestions to the original answer", async () => {
     const { conversationId, append } = await seedConversation();
