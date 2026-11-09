@@ -13,6 +13,7 @@ const receipt = { taskId: id, activityId: id, courseId, candidateId: id, notBefo
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  sessionStorage.clear();
   mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: { [courseId]: { enabled: true, revision: 3 } } } });
   vi.stubGlobal("fetch", vi.fn(async () => Response.json(receipt)));
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
@@ -47,6 +48,96 @@ it("keeps an automatic budget refusal visible and leaves a separate explicit man
   expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe("/api/opening/teaching/span/delayed");
   expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))).not.toHaveProperty("expectedGrantRevision");
 });
+it("preserves a deterministic conflict across passive remounts without another POST", async () => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ error: { code: "CONFLICT", message: "已有另一条 span 复测任务，未将它改成这次的 3 天保持检查。" } }, { status: 409 }));
+  await render();
+  expect(host.textContent).toContain("已有另一条 span 复测任务");
+  for (let mount = 0; mount < 5; mount += 1) {
+    await act(async () => root.render(null));
+    await render();
+  }
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(mocks.getPrefs).toHaveBeenCalledTimes(6);
+  expect(host.textContent).toContain("页面重读不会自动重试");
+  expect(host.querySelector('a[href="/opening/today"]')).not.toBeNull();
+  await act(async () => button("安排 3 天后再练习").click());
+  expect(vi.mocked(fetch).mock.calls[1]?.[0]).toBe("/api/opening/teaching/span/delayed");
+});
+
+it("does not reuse a blocked trigger for another observation or grant revision", async () => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ error: { code: "CONFLICT", message: "原任务保留" } }, { status: 409 }));
+  await render();
+  await act(async () => root.render(<SpanDelayedRetestControl record={{ ...record, id: courseId }} />));
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => root.render(null));
+  mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: { [courseId]: { enabled: true, revision: 4 } } } });
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(3);
+});
+
+it("requires explicit same-request confirmation after a remount of an unknown automatic write", async () => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(Response.json(receipt));
+  await render();
+  await act(async () => root.render(null));
+  mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: { [courseId]: { enabled: true, revision: 4 } } } });
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(host.textContent).toContain("保存结果未确认");
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+});
+
+it("rechecks permission before reading a prior blocked identity", async () => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ error: { code: "CONFLICT", message: "原任务保留" } }, { status: 409 }));
+  await render();
+  await act(async () => root.render(null));
+  mocks.getPrefs.mockResolvedValue({ invalidStoredPrefs: false, prefs: { spanTutorGrants: {} } });
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(host.textContent).not.toContain("已被服务器拒绝");
+});
+
+it("treats malformed persisted trigger data as a read error, not permission to POST", async () => {
+  sessionStorage.setItem(`aistudy:span-delayed-attempt:v1:${courseId}:${id}:${id}`, "invalid JSON");
+  await render();
+  expect(fetch).not.toHaveBeenCalled();
+  expect(host.querySelector('[role="alert"]')).not.toBeNull();
+});
+
+it("does not repeat a still-pending POST after unmounting its original control", async () => {
+  let settle: (response: Response) => void = () => undefined;
+  vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>(resolve => { settle = resolve; })).mockResolvedValueOnce(Response.json(receipt));
+  await render();
+  await act(async () => root.render(null));
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(button("重新确认自动安排")).not.toBeNull();
+  await act(async () => settle(Response.json(receipt)));
+  expect(host.textContent).not.toContain("已自动排进复习");
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+});
+
+it("does not dispatch an automatic write when durable trigger storage is unavailable", async () => {
+  const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("storage unavailable"); });
+  try {
+    await render();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("本次未发送安排请求");
+    expect(button("安排 3 天后再练习")).not.toBeNull();
+  } finally { storage.mockRestore(); }
+});
+
+it("does not convert a driver failure into a deterministic conflict on remount", async () => {
+  vi.mocked(fetch).mockResolvedValue(Response.json({ error: { code: "INTERNAL_ERROR", message: "服务暂时无法处理请求" } }, { status: 500 }));
+  await render();
+  await act(async () => root.render(null));
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(button("重新确认自动安排")).not.toBeNull();
+  expect(host.textContent).not.toContain("已被服务器拒绝");
+});
+
 it("shows a cancelled replay as preserved history instead of newly scheduled work", async () => {
   vi.mocked(fetch).mockResolvedValue(Response.json({ ...receipt, taskStatus: "skipped", activityStatus: "cancelled" }));
   await render();

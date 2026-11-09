@@ -6,12 +6,13 @@ import { controlledLearningTools, retestActivityStatusSchema, type LearningObser
 import { createOpeningApi } from "../../client/api";
 import { ui } from "../../design/ui";
 import { userFacingMessage } from "../../../../lib/user-facing-error";
+import { clearDelayedRetestAttempt, readDelayedRetestAttempt, saveDelayedRetestAttempt, type DelayedRetestIdentity } from "./delayed-retest-attempt";
 const receiptFields = z.object({ taskId: z.string().uuid(), activityId: z.string().uuid(), courseId: z.string().uuid(), notBeforeAt: z.string().datetime(), href: z.string() });
 const receiptSchema = receiptFields.extend({ taskStatus: z.enum(["pending", "done", "skipped"]).optional(), activityStatus: retestActivityStatusSchema.optional() })
   .refine(value => value.href === `/opening/courses/${value.courseId}/study/span?retest=${value.activityId}`);
 const automaticReceiptSchema = receiptFields.extend({ taskStatus: z.enum(["pending", "done", "skipped"]), activityStatus: retestActivityStatusSchema })
   .refine(value => value.href === `/opening/courses/${value.courseId}/study/span?retest=${value.activityId}`);
-const problemSchema = z.object({ error: z.object({ message: z.string() }) });
+const problemSchema = z.object({ error: z.object({ code: z.string().optional(), message: z.string() }) });
 type Receipt = z.infer<typeof receiptFields> & { taskStatus?: "pending" | "done" | "skipped"; activityStatus?: z.infer<typeof retestActivityStatusSchema>; automatic: boolean };
 type Undo = "confirm" | "unknown" | "undone" | "kept" | "unavailable";
 /** 已核对的 span 结果仅在本课程已有明确授权时尝试自动安排。 */
@@ -26,23 +27,41 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [unknownMode, setUnknownMode] = useState<"automatic" | "manual" | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
+  const [blocked, setBlocked] = useState(false);
   const busy = useRef(false), epoch = useRef(0);
   const autoGrantRevision = useRef<number | null>(null);
+  function triggerIdentity(): DelayedRetestIdentity {
+    return { courseId: record.courseId, observationId: record.id, rootId: record.rootObservationId ?? record.id, grantRevision: autoGrantRevision.current! };
+  }
   async function schedule(automatic = false) {
     if (busy.current || automatic && autoGrantRevision.current === null) return;
     const current = epoch.current;
     busy.current = true; setPending(true); setError(""); setUnknownMode(null);
     let definitiveFailure = false;
+    const identity = automatic ? triggerIdentity() : null;
     try {
+      // Persist the exact trigger before dispatch; a remount must not retry an unknown write.
+      if (identity) {
+        try { saveDelayedRetestAttempt(identity, "pending"); }
+        catch { definitiveFailure = true; throw new Error("无法保存自动复测触发身份，本次未发送安排请求；请查看今日任务，或手动安排。"); }
+      }
       const response = await fetch(`/api/opening/teaching/span/delayed${automatic ? "/automatic" : ""}`, { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ observationId: record.id, clientKey: `span-delayed:${record.rootObservationId ?? record.id}`, ...(automatic ? { expectedGrantRevision: autoGrantRevision.current } : {}) }) });
       definitiveFailure = !response.ok && response.status < 500;
       const body: unknown = await response.json();
       if (current !== epoch.current) return;
-      if (!response.ok) { const problem = problemSchema.safeParse(body); throw new Error(problem.success ? problem.data.error.message : "复测任务保存未确认，请用同一按钮重新确认。"); }
+      if (!response.ok) {
+        const problem = problemSchema.safeParse(body);
+        if (identity && response.status === 409 && problem.success && problem.data.error.code === "CONFLICT") {
+          saveDelayedRetestAttempt(identity, "conflict"); setBlocked(true);
+        } else if (identity && definitiveFailure) clearDelayedRetestAttempt(identity);
+        throw new Error(problem.success ? problem.data.error.message : "复测任务保存未确认，请用同一按钮重新确认。");
+      }
       const saved = automatic ? automaticReceiptSchema.parse(body) : receiptSchema.parse(body);
       if (saved.courseId !== record.courseId) throw new Error("这条复测安排不属于当前课程。");
-      setReceipt({ ...saved, automatic });
+      setReceipt({ ...saved, automatic }); setBlocked(false);
+      // A storage failure cannot invalidate the server's successful receipt.
+      if (identity) { try { clearDelayedRetestAttempt(identity); } catch { /* The pending identity still prevents a passive retry. */ } }
     } catch (reason) {
       if (current !== epoch.current) return;
       if (!definitiveFailure) setUnknownMode(automatic ? "automatic" : "manual");
@@ -74,7 +93,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   // 授权读取不能替代服务器对账号开关、课程、预算与取消历史的事务核对。
   useEffect(() => {
     const current = ++epoch.current;
-    setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); autoGrantRevision.current = null;
+    setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); setBlocked(false); autoGrantRevision.current = null;
     busy.current = false; setPending(false);
     if (!shouldAutoScheduleRetest(record)) return () => { epoch.current += 1; };
     busy.current = true; setPending(true);
@@ -83,7 +102,21 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       if (preferences.invalidStoredPrefs) throw new Error("导师授权暂时无法读取，请先核对授权；仍可手动安排复测。");
       const grant = preferences.prefs.spanTutorGrants?.[record.courseId];
       busy.current = false; setPending(false);
-      if (grant?.enabled) { autoGrantRevision.current = grant.revision; void schedule(true); }
+      autoGrantRevision.current = grant?.revision ?? 0;
+      const prior = readDelayedRetestAttempt(triggerIdentity());
+      if (prior?.phase === "pending") {
+        // Even revoking a grant must not change the identity of an unconfirmed write.
+        autoGrantRevision.current = prior.grantRevision;
+        setUnknownMode("automatic"); setError("上次自动安排的保存结果未确认，请查看今日任务，或用原请求明确重新确认。");
+        return;
+      }
+      if (grant?.enabled) {
+        if (prior?.phase === "conflict") {
+          setBlocked(true); setError("这次自动安排已被服务器拒绝，未创建新的 3 天保持检查；原任务保留，页面重读不会自动重试。请先查看今日任务。");
+          return;
+        }
+        void schedule(true);
+      } else autoGrantRevision.current = null;
     }).catch(reason => {
       if (current === epoch.current) { busy.current = false; setPending(false); setError(userFacingMessage(reason, "自动复测授权暂时无法读取；仍可手动安排。")); }
     });
@@ -115,7 +148,8 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       <button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule(unknownMode === "automatic")}>
         {pending ? "正在核对复测安排…" : unknownMode === "automatic" ? "重新确认自动安排" : unknownMode === "manual" ? "重新确认复测安排" : "安排 3 天后再练习"}
       </button>
-      <p className="text-xs leading-6 text-text-3">{unknownMode ? "先确认这次安排是否已保存，暂不更换安排方式。" : "隔 3 天再做一道新题，看看哪些内容还记得。"}</p>
+      <p className="text-xs leading-6 text-text-3">{unknownMode ? "先确认这次安排是否已保存，暂不更换安排方式。" : blocked ? "自动安排已停止。原复测任务未取消或改题；如需手动安排，服务器仍会重新核对资格。" : "隔 3 天再做一道新题，看看哪些内容还记得。"}</p>
+      {blocked || unknownMode ? <Link className={ui.quiet} href="/opening/today">查看今日任务</Link> : null}
     </>}
     {error ? <p role="alert" className="text-xs leading-6 text-danger">{error}</p> : null}
   </div>;
