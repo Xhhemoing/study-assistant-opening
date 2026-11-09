@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertOpeningSpanRepairTransition } from "./opening-span-repair";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, spanLessonSnapshotSchema,
@@ -161,7 +162,10 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         }
         if (unchanged) return current;
         if (current.status === "completed") throw learningError("CONFLICT", "已结束的学习保留为小结，请开始新会话。");
-        await admitCourseSources(tx, scope, current.courseId, current.sourceIds);
+        await assertOpeningSpanRepairTransition(tx, scope, current, input);
+        const preservingRepairPause = Object.hasOwn((row.goal_json ?? {}) as object, "spanRepair")
+          && input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
+        if (!preservingRepairPause) await admitCourseSources(tx, scope, current.courseId, current.sourceIds);
         const previous = row.checkpoint_json as Record<string, unknown>;
         const checkpoint = { ...previous, spanLesson: { sessionId: current.sessionId, intent: input.intent, moveId: input.moveId, retestId: current.retestId } };
         await tx`UPDATE opening_teaching_activities SET checkpoint_json=${tx.json(checkpoint)},

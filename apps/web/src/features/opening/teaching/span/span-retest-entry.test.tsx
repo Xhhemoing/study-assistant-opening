@@ -32,6 +32,7 @@ vi.mock("@aistudy/database", async original => ({ ...await original<typeof impor
   createOpeningStudyIntentRepository: () => ({ latest: async () => null }),
   createOpeningLearningAgendaRepository: () => ({ get: async () => null }),
   createOpeningLearningDecisionsRepository: () => ({ list: async () => [] }),
+  readOpeningSpanRepair: async () => null,
   readOpeningCourseObservationHeads: mocks.heads, readOpeningSpanTutorOriginChange: async () => undefined,
   lockWorkspaceLearningHistory: mocks.lock, readOpeningLearningDecisionByClientKey: mocks.prior,
   appendOpeningStudyIntentInTx: mocks.append, readOpeningLearnerState: mocks.state, recordOpeningLearningDecision: mocks.record,

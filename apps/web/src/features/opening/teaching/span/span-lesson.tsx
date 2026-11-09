@@ -22,7 +22,9 @@ import { useDiagnosticsEnabled } from "../../settings/appearance-preferences";
 import { SpanTutorControl } from "./span-tutor-control";
 import { SpanNextActionControl, currentSpanObservationId } from "./span-next-action-control";
 import { isSpanReservedProblemId } from "./span-answer";
-import type { SpanExecutionPhase } from "./span-session-client";
+import type { SpanExecutionPhase, SpanLessonDetails } from "./span-session-client";
+import { createSpanStudySession } from "../../study-session/adapters/span";
+import { StudySession } from "../../study-session/study-session-shell";
 import { SpanTargetedFocus } from "./targeted-focus";
 import { spanLessonMoves, spanLessonProblemId } from "./span-lesson-moves";
 
@@ -44,6 +46,14 @@ type SpanLessonProps = { originalConversationId?: string | null; courseId: strin
 export function stepLabels(moves: readonly { presentation: { kind: string } }[]): string[] {
   const base = moves.map(move => move.presentation.kind === "worked_example" ? "逐步看例题" : move.presentation.kind === "faded_example" ? "补全步骤" : move.presentation.kind === "contrast" ? "结构对比" : move.presentation.kind === "predict_then_explore" ? "预测与探索" : "独立新题");
   return base.map((label, index) => label === "独立新题" && base.indexOf(label) < index ? "迁移新题" : label);
+}
+
+/** Legacy repair reuses V2's adapter/renderer instead of mounting the generic lesson tree. */
+export function SpanRepairLesson({ details, save }: { details: SpanLessonDetails; save: Parameters<typeof createSpanStudySession>[1] }) {
+  const progress = useRef(save);
+  progress.current = save;
+  const port = useMemo(() => createSpanStudySession(details, (...args) => progress.current(...args)), [details]);
+  return <StudySession port={port} />;
 }
 
 export function SpanLesson({ courseId, sourceIds, sourceLoadError, delayedRetestId, initialIntent, initialMoveId, initialNewEvidenceEventId, session, targetedFocus, executionPhase, restoredAttempts = [], restoredObservations = [], restoredHintLevels = {}, onProgress, savingProgress, onSummary, onReload, originalConversationId }: SpanLessonProps) {

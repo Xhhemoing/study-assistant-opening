@@ -1,7 +1,7 @@
 import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository, createOpeningLearningDecisionsRepository, spanTutorReceiptDecision } from "@aistudy/database";
+import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository, createOpeningLearningDecisionsRepository, spanTutorReceiptDecision, readOpeningSpanRepair } from "@aistudy/database";
 import type { Sql } from "postgres";
-import { SPAN_REQUIREMENT_KEY, verifySpanAnswer } from "@aistudy/domain";
+import { SPAN_REQUIREMENT_KEY, verifySpanAnswer, spanRepairPublicContext } from "@aistudy/domain";
 import { z } from "zod";
 import type { LearningObservation } from "@aistudy/contracts";
 import { createOpeningPlanService } from "../../planning/plan-service";
@@ -57,7 +57,11 @@ export function createSpanLessonSessionService(sql: Sql) {
       const decision = spanTutorReceiptDecision(receipt ?? null);
       const focus = !originChange && decision?.activityKind === "targeted_explain" ? heads.find(row => row.id === decision.focusObservationId
         && row.revisionKind !== "retract" && (!row.effectiveHeadId || row.effectiveHeadId === row.id)) : undefined;
-      const targetedFocus = focus && receipt ? await readTargetedFocus(sql, scope, focus, receipt.intentVersion) : undefined;
+      // Superseded activities return read-only history with originChange; do not try to
+      // qualify their obsolete plan as runnable content (nor replace it with generic content).
+      const repairPlan = originChange ? null : await readOpeningSpanRepair(sql, scope, session.activityId);
+      const repair = repairPlan ? spanRepairPublicContext(repairPlan) : undefined;
+      const targetedFocus = repairPlan ? undefined : focus && receipt ? await readTargetedFocus(sql, scope, focus, receipt.intentVersion) : undefined;
       const executionPhase = decision?.phase && decision.phaseSource ? { phase: decision.phase, source: decision.phaseSource } : null;
       const attempts = rows.filter(row => row.sessionId === session.sessionId && (row.spanExercise || row.requirementKey === SPAN_REQUIREMENT_KEY)).map(({ outcome: _outcome, assistance: _assistance, ...attempt }) => attempt);
       const learning = createOpeningLearningRepository(sql);
@@ -70,7 +74,7 @@ export function createSpanLessonSessionService(sql: Sql) {
       const task = tasks.find(task => task.courseId === courseId && task.teachingTarget?.courseId === courseId && task.teachingTarget.activityId === session.activityId);
       // The estimate describes the bound task, not a per-question time prediction.
       const estimateMinutes = task?.estimateMinutes ?? null;
-      return { session, estimateMinutes, agenda, executionPhase, targetedFocus, attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
+      return { session, estimateMinutes, agenda, executionPhase, targetedFocus, ...(repair ? { repair } : {}), attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
         ...(originChange ? { originChange } : {}) };
     },
   };

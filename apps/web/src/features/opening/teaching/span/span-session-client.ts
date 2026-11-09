@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { spanLessonSnapshotSchema, spanHintLevelSchema, studyIntentEventSchema, learningAttemptSchema, learningObservationSchema } from "@aistudy/contracts";
+import { spanRepairContextSchema, spanLessonSnapshotSchema, spanHintLevelSchema, studyIntentEventSchema, learningAttemptSchema, learningObservationSchema } from "@aistudy/contracts";
 import { createSessionFetch } from "../../../auth/session-expiry";
 const originChangeSchema = z.object({
   reason: z.enum(["evidence_changed", "source_unavailable"]),
@@ -8,7 +8,7 @@ const originChangeSchema = z.object({
 }).strict();
 export const spanExecutionPhaseSchema = z.object({ phase: z.enum(["explore", "new_learning", "consolidate", "maintain"]), source: z.enum(["automatic", "explicit"]) });
 export type SpanExecutionPhase = z.infer<typeof spanExecutionPhaseSchema>;
-export const spanLessonDetailsSchema = z.object({ targetedFocus: z.string().min(1).max(100).optional(), estimateMinutes: z.number().int().positive().max(1440).nullable().optional(), session: spanLessonSnapshotSchema.nullable(), executionPhase: spanExecutionPhaseSchema.nullish(), attempts: z.array(learningAttemptSchema), observations: z.array(learningObservationSchema), assistance: z.record(z.string(), z.enum(["none", "hinted", "revealed"])), hintLevels: z.record(z.string(), z.array(spanHintLevelSchema)).default({}), intentEvent: studyIntentEventSchema.nullable().default(null), originChange: originChangeSchema.nullish() });
+export const spanLessonDetailsSchema = z.object({ repair: spanRepairContextSchema.optional(), targetedFocus: z.string().min(1).max(100).optional(), estimateMinutes: z.number().int().positive().max(1440).nullable().optional(), session: spanLessonSnapshotSchema.nullable(), executionPhase: spanExecutionPhaseSchema.nullish(), attempts: z.array(learningAttemptSchema), observations: z.array(learningObservationSchema), assistance: z.record(z.string(), z.enum(["none", "hinted", "revealed"])), hintLevels: z.record(z.string(), z.array(spanHintLevelSchema)).default({}), intentEvent: studyIntentEventSchema.nullable().default(null), originChange: originChangeSchema.nullish() });
 // Bound locally only after a successful lesson read/create confirms the route reference.
 export type SpanLessonDetails = z.infer<typeof spanLessonDetailsSchema> & { continuityRetestId?: string };
 export async function spanLessonRequest<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {

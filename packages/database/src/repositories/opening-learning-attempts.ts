@@ -1,4 +1,5 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
+import { assertOpeningSpanRepairAttempt, readOpeningSpanRepair, isOpeningSpanRepairAttemptKey, inheritOpeningSpanRepairRetryHelp } from "./opening-span-repair";
 import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
@@ -48,7 +49,8 @@ export function mapLearningAttempt(row: Record<string, unknown>): LearningAttemp
 }
 
 /** Canonical attempt creation, also used by the atomic held-out issuer. Caller owns the transaction. */
-export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope: Scope, input: LearningAttemptCreateInput): Promise<LearningAttempt> {
+export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope: Scope, input: LearningAttemptCreateInput,
+  issued?: { spanRepairRetryParentId: string }): Promise<LearningAttempt> {
   await lockWorkspaceLearningHistory(tx, scope);
   const session = await lockLearningSession(tx, scope, input.sessionId);
   const courseId = String(session.course_id);
@@ -81,6 +83,10 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
     ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}) };
+  const repair = session.activity_id ? await readOpeningSpanRepair(tx, scope, String(session.activity_id)) : null;
+  if (repair && !isOpeningSpanRepairAttemptKey(String(session.activity_id), input.clientKey)) {
+    throw learningError("CONFLICT", "本活动只接受服务端绑定的本题步骤题目请求。");
+  }
   const replay = await tx`SELECT a.*,v.evaluation_spec,v.stem_snapshot AS item_stem_snapshot,v.source_id AS item_source_id FROM opening_learning_attempts a
     LEFT JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.client_key=${input.clientKey}`;
@@ -90,6 +96,13 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     delete replayIntent.reservedRetestQualification;
     if (!isDeepStrictEqual(replayIntent, intent)) throw learningError("CONFLICT", "attempt clientKey payload conflict");
     return mapLearningAttempt(replay[0]);
+  }
+  if (repair) {
+    const prefix = `span-repair:${String(session.activity_id)}:v1:variant:retry:`;
+    if (input.clientKey.startsWith(prefix) && input.clientKey !== `${prefix}${issued?.spanRepairRetryParentId}`) {
+      throw learningError("CONFLICT", "同题重答只能由当前版本的阶段发题入口授权，不能通过普通作答入口创建。");
+    }
+    await assertOpeningSpanRepairAttempt(tx, scope, String(session.activity_id), input);
   }
   await assertOpeningSpanTutorOriginCurrent(tx, scope, String(session.activity_id));
   await assertOpeningCourseRouteCurrent(tx, scope, String(session.activity_id));
@@ -243,6 +256,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     courseId, sessionId: input.sessionId, sourceIds: session.source_ids as string[],
   });
   await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json(savedAnchor)} WHERE id=${String(rows[0].id)}`;
+  if (repair) await inheritOpeningSpanRepairRetryHelp(tx, scope, String(session.activity_id), input.clientKey, String(rows[0].id));
   await captureOpeningLearnerShadowPredictions(tx, scope, String(rows[0].id));
   return mapLearningAttempt({ ...rows[0], context_anchor: savedAnchor, evaluation_spec: teachingQuestion?.spec ?? spanSpec ?? matrixExercise, item_stem_snapshot: itemStem });
 
