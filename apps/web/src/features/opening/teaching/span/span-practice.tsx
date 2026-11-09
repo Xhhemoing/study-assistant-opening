@@ -30,20 +30,20 @@ import { SpanNoSolutionProof } from "./span-no-solution-proof";
 import { isSpanReservedProblemId, readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, spanVectorInput, updateSpanDraftAnswer } from "./span-answer";
 import { studentCopy } from "../student-copy";
 import { userFacingMessage } from "../../../../lib/user-facing-error";
-import type { SpanExecutionPhase } from "./span-session-client";
+import { SpanLessonRequestError, spanLessonRequest, type SpanExecutionPhase } from "./span-session-client";
 
 /** Faded examples start with the first hint unless the learner is consolidating. Shared with the v2 session. */
 export function spanStartsWithHint(problemId: string, intent: StudySessionIntent, executionPhase?: SpanExecutionPhase) {
   return problemId === "span-faded-3d" && (executionPhase?.phase ?? intent.learningPhase) !== "consolidate";
 }
-export function SpanPractice(props: { executionPhase?: SpanExecutionPhase; session?: SpanLessonSnapshot; restoredAttempt?: LearningAttempt; restoredHintLevels?: SpanHintLevel[]; courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void }) {
+export function SpanPractice(props: { onReload?: () => void; executionPhase?: SpanExecutionPhase; session?: SpanLessonSnapshot; restoredAttempt?: LearningAttempt; restoredHintLevels?: SpanHintLevel[]; courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void }) {
   const scope = spanPracticeScope(props.courseId, props.retestId, props.newEvidenceEventId, props.session?.activityId, props.problemId);
   const continuity = usePracticeDraft(scope, { spanProblemId: props.problemId, sourceId: props.sourceIds[0] ?? "", skillLabel: "线性组合与 span", assistance: spanStartsWithHint(props.problemId, props.intent, props.executionPhase) ? "hinted" : "independent" });
   useEffect(() => { props.onAttempt?.(null); return () => props.onAttempt?.(null); }, [continuity.draft.id, props.onAttempt]);
   return <div className="space-y-4"><SpanPracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} /></div>;
 }
-function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPhase, onRecorded, continuity, retestId, onAttempt, intentRevision, newEvidenceEventId, session, restoredAttempt, restoredHintLevels }: {
-  executionPhase?: SpanExecutionPhase; session?: SpanLessonSnapshot; restoredAttempt?: LearningAttempt; restoredHintLevels?: SpanHintLevel[]; courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; continuity: PracticeContinuity; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void;
+function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPhase, onRecorded, continuity, retestId, onAttempt, intentRevision, newEvidenceEventId, session, restoredAttempt, restoredHintLevels, onReload }: {
+  onReload?: () => void; executionPhase?: SpanExecutionPhase; session?: SpanLessonSnapshot; restoredAttempt?: LearningAttempt; restoredHintLevels?: SpanHintLevel[]; courseId: string; sourceIds: string[]; problemId: string; intent: StudySessionIntent; intentRevision?: number; newEvidenceEventId?: string; onRecorded: (record: LearningObservation) => void; continuity: PracticeContinuity; retestId?: string; onAttempt?: (attempt: LearningAttempt | null) => void; onIntentApplied?: (intent: StudySessionIntent, action: StudyIntentEvent["action"]) => void;
 }) {
   const diagnostics = useDiagnosticsEnabled();
   const client = useMemo(() => createOpeningLearningClient(), []);
@@ -57,6 +57,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
   const [hintPending, setHintPending] = useState(false);
   const [hintRestoring, setHintRestoring] = useState(false);
   const [pending, setPending] = useState(false), [error, setError] = useState("");
+  const [blocked, setBlocked] = useState(false);
   const [why, setWhy] = useState<{ id: string; reasonCodes: string[]; dataAsOf: string } | null>(null);
   const locked = useRef(false);
   const autoStarted = useRef(false);
@@ -81,7 +82,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
   }
   function edit(change: Parameters<typeof updateSpanDraftAnswer>[1]) { patch({ fields: { answer: updateSpanDraftAnswer(fields.answer, change) } }); }
   async function start() {
-    if (!ready || locked.current) return;
+    if (!ready || locked.current || blocked) return;
     locked.current = true; setPending(true); setError("");
     try {
       const request = patch(current => ({ fields: { stem: current.fields.stem || JSON.stringify(intent) }, start: current.start ?? { sessionId: session?.sessionId ?? null, clientKey: `span-start:${crypto.randomUUID()}`, createInput: null,
@@ -94,16 +95,11 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
           request.sessionId = (await client.createSession(request.sessionInput!)).id;
           patch({ start: request }); requireSaved();
         }
-        const response = await fetch("/api/opening/teaching/span/session", { method: "POST", headers: { "content-type": "application/json" },
+        const plan = await spanLessonRequest("/api/opening/teaching/span/session", z.object({ activityDecision: z.object({ id: z.string().uuid(), reasonCodes: z.array(z.string()), dataAsOf: z.string().datetime() }) }), { method: "POST",
           body: JSON.stringify({ sessionId: request.sessionId, intent: JSON.parse((readPracticeDraft(scope, null, draft.id) ?? draft).fields.stem) as StudySessionIntent, clientKey: request.clientKey, ...(retestId ? { retestId } : {}), moveId: spanPracticeMoveId(intent.purpose, fields.spanProblemId) }) });
-        const planBody: unknown = await response.json();
-        if (!response.ok) { const problem = z.object({ error: z.object({ message: z.string() }) }).safeParse(planBody); throw new Error(problem.success ? problem.data.error.message : `学习安排未能保存 (${response.status})；原答案保留。`); }
-        const plan = z.object({ activityDecision: z.object({ id: z.string().uuid(), reasonCodes: z.array(z.string()), dataAsOf: z.string().datetime() }) }).parse(planBody);
         setWhy(plan.activityDecision);
         if (fields.spanProblemId === "reserved:auto" || isSpanReservedProblemId(request.createInput?.spanExercise?.problemId)) {
-          const selected = await fetch("/api/opening/teaching/span/reserved", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: request.sessionId, sourceId: fields.sourceId, clientKey: request.clientKey, mode: intent.purpose === "overview" ? "overview" : intent.purpose === "challenge" ? "challenge" : "self_study" }) });
-          if (!selected.ok) throw new Error("这道题还没准备好，请再试一次。");
-          const issued = learningAttemptSchema.parse(await selected.json());
+          const issued = await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({ sessionId: request.sessionId, sourceId: fields.sourceId, clientKey: request.clientKey, mode: intent.purpose === "overview" ? "overview" : intent.purpose === "challenge" ? "challenge" : "self_study" }) });
           if (!issued.spanExercise) throw new Error("这道题暂时没准备好，请再试一次。");
           request.createInput = { sessionId: request.sessionId, clientKey: request.clientKey, spanExercise: { sourceId: fields.sourceId, problemId: issued.spanExercise.id, version: Number(issued.spanExercise.version) } };
           patch({ start: request, fields: { spanProblemId: issued.spanExercise.id, spanVersion: Number(issued.spanExercise.version) } }); requireSaved();
@@ -125,7 +121,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
       setAttempt(result); onAttempt?.(result); setRecord(state.observation); setSealedAnswer(state.originalObservation?.answer ?? state.observation?.answer ?? null);
       patch(current => ({ observationId: state.observation?.id ?? null, fields: restoredPracticeAssistance(current.fields, state.deliveredAssistance) }));
       if (state.observation && belongsToRequested(result)) onRecorded(state.observation);
-    } catch (reason) { setError(userFacingMessage(reason, "练习暂时没打开，请再试一次。")); }
+    } catch (reason) { setBlocked(reason instanceof SpanLessonRequestError && reason.status === 409); setError(userFacingMessage(reason, "练习暂时没打开，请再试一次。")); }
     finally { locked.current = false; setPending(false); }
   }
   async function submit() {
@@ -158,7 +154,7 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
     // Only a newly applied intent refreshes trust; setting the fetched record must not loop.
   }, [intentIdentity, intentRevision]);
   useEffect(() => {
-    if (!ready || !session || !restoredAttempt || attempt || draft.start || draft.attemptId) return;
+    if (!ready || !session || !restoredAttempt || attempt) return;
     if (restoredAttempt.courseId !== courseId || restoredAttempt.sessionId !== session.sessionId || !belongsToRequested(restoredAttempt)) return;
     let active = true;
     const problem = restoredAttempt.spanExercise!;
@@ -166,14 +162,18 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
     if (!sourceId || !restoredAttempt.sourceIds.includes(sourceId)) {
       setError("原题关联材料暂不可核实，已停止恢复；请保留原答并到课程记录核对。"); return;
     }
-    const clientKey = `span-restored:${restoredAttempt.id}`;
+    const clientKey = draft.start?.clientKey ?? `span-restored:${restoredAttempt.id}`;
     try {
-      patch({ fields: { spanProblemId: problem.id, spanVersion: Number(problem.version), sourceId, stem: JSON.stringify(intent) },
-        start: { clientKey, sessionId: session.sessionId, sessionInput: { courseId, activityId: session.activityId, skillLabel: "线性组合与 span", sourceIds: [sourceId] },
-          createInput: { sessionId: session.sessionId, clientKey, spanExercise: { sourceId, problemId: problem.id, version: Number(problem.version) } } },
-        attemptId: restoredAttempt.id, observationId: restoredAttempt.observationId });
+      // A durable draft must rejoin its exact issued attempt, not wait forever or
+      // transplant a sealed answer onto a different server-selected question.
+      const start = { ...draft.start, clientKey, sessionId: draft.start?.sessionId ?? session.sessionId,
+        sessionInput: draft.start?.sessionInput ?? { courseId, activityId: session.activityId, skillLabel: "线性组合与 span", sourceIds: [sourceId] },
+        createInput: draft.start?.createInput ?? { sessionId: session.sessionId, clientKey, spanExercise: { sourceId, problemId: problem.id, version: Number(problem.version) } } };
+      assertPracticeAttempt({ ...draft, start }, restoredAttempt);
+      patch({ fields: { spanProblemId: problem.id, spanVersion: Number(problem.version), sourceId, stem: fields.stem || JSON.stringify(intent) },
+        start, attemptId: restoredAttempt.id, observationId: draft.observationId ?? restoredAttempt.observationId });
       requireSaved();
-      void readPracticeRecord(client, courseId, restoredAttempt).then(state => {
+      void readPracticeRecord(client, courseId, restoredAttempt, draft.observationId).then(state => {
         if (!active) return;
         setAttempt(restoredAttempt); onAttempt?.(restoredAttempt); setRecord(state.observation); setSealedAnswer(state.originalObservation?.answer ?? state.observation?.answer ?? null);
         patch(current => ({ observationId: state.observation?.id ?? null, fields: restoredPracticeAssistance(current.fields, state.deliveredAssistance) }));
@@ -208,11 +208,11 @@ function SpanPracticeForm({ courseId, sourceIds, problemId, intent, executionPha
   const problemText = problem ? spanProblemText(problem) : null;
   const restoredUnverified = attempt?.spanValidation?.reasonCode === "restored_identity_unverified";
   return <section className="space-y-4 rounded-xl border border-line p-4" aria-label="span 真实作答">
-    {!ready ? <p role="status" className="text-sm text-text-3">正在准备题目…</p> : null}
+    {!ready && !continuity.loadError ? <p role="status" className="text-sm text-text-3">正在准备题目…</p> : null}
     {continuity.loadError ? <p role="alert" className="text-sm text-danger">{continuity.loadError}</p> : null}
     {continuity.storageWarning ? <p role="alert" className="text-xs text-warn">浏览器尚未保存当前答案，已暂停提交；请先复制答案，再恢复浏览器存储。</p> : null}
     {differentEntry ? <div className="space-y-2 text-xs leading-6 text-warn"><p>已恢复另一道题未完成的答案。切换教学步骤时会为你保留。</p><button className={ui.secondary} disabled={pending || !ready} onClick={() => continuity.startAnother({ spanProblemId: problemId, sourceId: sourceIds[0] ?? "", skillLabel: "线性组合与 span", assistance: spanStartsWithHint(problemId, intent, executionPhase) ? "hinted" : "independent" })} type="button">保留原答案，开始本步骤的新题</button></div> : null}
-    {!attempt ? <div className="space-y-3"><p role="status" className="text-sm text-text-2">{error ? "题目还没准备好，请再试一次。" : studentCopy.prepare}</p>{error ? <button type="button" className={ui.secondary} disabled={!ready || pending || !fields.sourceId} onClick={() => void start()}>{studentCopy.retry}</button> : null}</div> : null}
+    {!attempt ? <div className="space-y-3"><p role="status" className="text-sm text-text-2">{error ? "本题暂不可继续，原草稿保留。" : studentCopy.prepare}</p>{error ? blocked || restoredAttempt ? onReload ? <button type="button" className={ui.secondary} disabled={pending} onClick={onReload}>重新读取本节</button> : null : <button type="button" className={ui.secondary} disabled={!ready || pending || !fields.sourceId} onClick={() => void start()}>{studentCopy.retry}</button> : null}</div> : null}
     {problem && problemText ? <ProblemCard language={intent.language} prompt={problemText.english} translation={problemText.chinese}>
       <LessonFlow phase={hintPending ? "hint" : record ? "feedback" : pending ? "submit" : hints.length ? "hint" : "attempt"}>
       {diagnostics && attempt.spanValidation ? <p className="text-xs leading-6 text-text-3">{restoredUnverified ? "已恢复这道题和你的作答；从备份恢复的题目不自动评分，可以自己对照答案。" : attempt.spanValidation.eligible ? "发题时未见本工作区此前发放同题族的记录；实际帮助与提交时是否可计入仍会核对。" : "本题族已有发放记录，继续作为练习；不称作新的未曝光题族检查。"}</p> : null}{problem.transfer ? <p className="text-xs leading-6 text-text-2">这道题的变化：{problem.transfer.changes.join("；")}</p> : null}

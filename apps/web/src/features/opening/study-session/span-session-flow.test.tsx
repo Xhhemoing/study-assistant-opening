@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { buildSpanTargetedExplanation, getSpanProblem, solveSpanProblem, verifySpanAnswer } from "@aistudy/domain";
 import { learningAttemptSchema, type LearningAttempt, type LearningObservation } from "@aistudy/contracts";
 import { listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
-import type { SpanLessonDetails } from "../teaching/span/span-session-client";
+import { SpanLessonRequestError, type SpanLessonDetails } from "../teaching/span/span-session-client";
 import { SpanLessonSession } from "../teaching/span/span-lesson-session";
 import { createSpanStudySession } from "./adapters/span";
 import { StudySession, StudySessionShell } from "./study-session-shell";
@@ -117,6 +117,73 @@ it("submits a gradable self-study answer and saves the next lesson move without 
     expect(save).toHaveBeenCalledExactlyOnceWith((details as { session: { intent: unknown } }).session.intent, "self-independent", "active");
     expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
     expect(mocks.push).not.toHaveBeenCalled();
+  } finally { await ui.unmount(); }
+});
+
+it("uses existing tutor admission for an explicitly selected next step after an exact coefficient error", async () => {
+  const { attempt, details, courseId, activityId } = fixture();
+  const answer = { membership: "in_span" as const, equation: { vectors: attempt.spanExercise!.vectors, target: attempt.spanExercise!.target },
+    coefficients: ["9", "9"] as [string, string], coordinateChecks: ["9", "9", "18"], representations: { system: "unique" as const, geometry: "plane" as const } };
+  const verified = verifySpanAnswer(attempt.spanExercise!, answer);
+  expect(verified.skills).toMatchObject({ equation: "correct", coefficients: "incorrect", allCoordinates: "correct" });
+  const record = { id: uuid(), attemptId: attempt.id, sessionId: attempt.sessionId, courseId, assistance: "hinted", answer: JSON.stringify(answer),
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: verified.outcome, attemptId: attempt.id, itemVersionId: attempt.itemVersionId,
+      problemId: attempt.problemId, skills: verified.skills, reasonCodes: [verified.reason] } } as unknown as LearningObservation;
+  details.attempts = [attempt]; details.observations = [record];
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "hinted" });
+  const nextId = uuid(), href = `/opening/courses/${courseId}/study/span?lesson=${nextId}`;
+  mocks.request.mockResolvedValue({ kind: "ready", href, courseId, activityId: nextId, sessionId: uuid(), label: "开始针对性讲解", resumed: false });
+  const save = vi.fn(async () => true);
+  const ui = await mount(createSpanStudySession(details, save));
+  try {
+    expect(mocks.request).not.toHaveBeenCalled();
+    await ui.click("看下一步安排");
+    expect(mocks.request).toHaveBeenCalledExactlyOnceWith("/api/opening/teaching/span/next", expect.anything(), { method: "POST", body: JSON.stringify({
+      activityId, expectedRevision: details.session!.revision, observationId: record.id, clientKey: `span-next:${activityId}:${details.session!.revision}:${record.id}` }) });
+    expect(save).not.toHaveBeenCalled();
+    expect(ui.host.textContent).toContain("开始针对性讲解");
+    await ui.click("开始针对性讲解");
+    expect(mocks.push).toHaveBeenCalledWith(href);
+  } finally { await ui.unmount(); }
+});
+
+it("allows a normal grant update and explicit lesson reread to recheck tutor admission without a generic move", async () => {
+  const { attempt, details, courseId, activityId } = fixture();
+  const record = { id: uuid(), attemptId: attempt.id, sessionId: attempt.sessionId, courseId, assistance: "hinted", answer: "saved answer",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect", attemptId: attempt.id, itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } } as unknown as LearningObservation;
+  details.attempts = [attempt]; details.observations = [record];
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "none" });
+  mocks.request.mockResolvedValueOnce({ kind: "choice", reason: "authorization_required", message: "请先确认本课程导师授权。", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${activityId}`, label: "核对导师授权" } });
+  const save = vi.fn(async () => true), ui = await mount(createSpanStudySession(details, save));
+  try {
+    await ui.click("看下一步安排");
+    expect(ui.host.textContent).toContain("请先确认本课程导师授权"); expect(save).not.toHaveBeenCalled();
+    // The lesson owner's explicit reread rebuilds the port with current server facts.
+    const nextId = uuid();
+    mocks.request.mockResolvedValue({ kind: "ready", href: `/opening/courses/${courseId}/study/span?lesson=${nextId}`, courseId, activityId: nextId, sessionId: uuid(), label: "开始针对性讲解", resumed: false });
+    mocks.getAttemptContext.mockResolvedValue({ attempt });
+    await act(async () => ui.root.render(<StudySession port={createSpanStudySession(details, save)} />));
+    await ui.click("看下一步安排");
+    expect(mocks.request).toHaveBeenCalledTimes(2);
+    expect(mocks.request.mock.calls[1]![0]).toBe(mocks.request.mock.calls[0]![0]);
+    expect(mocks.request.mock.calls[1]![2]).toEqual(mocks.request.mock.calls[0]![2]); expect(save).not.toHaveBeenCalled();
+    expect(ui.host.textContent).toContain("开始针对性讲解");
+  } finally { await ui.unmount(); }
+});
+
+it("keeps a source/permission 409 blocked with pause available instead of retrying or issuing a generic question", async () => {
+  const { details } = fixture();
+  mocks.request.mockRejectedValue(new SpanLessonRequestError(409, "CONFLICT", "导师试用授权或课程状态已变化，请重新读取。"));
+  const save = vi.fn(async () => true);
+  const ui = await mount(createSpanStudySession(details, save));
+  try {
+    expect(ui.host.textContent).toContain("导师试用授权或课程状态已变化");
+    expect(ui.host.textContent).not.toContain("正在准备这一步");
+    expect(ui.button("暂时不能继续")?.disabled).toBe(true);
+    expect(mocks.request).toHaveBeenCalledTimes(1); expect(mocks.createAttempt).not.toHaveBeenCalled();
+    await act(async () => (ui.host.querySelector('button[aria-label="更多"]') as HTMLButtonElement).click()); await ui.click("暂停并保存");
+    expect(save).toHaveBeenCalledWith(details.session!.intent, details.session!.moveId, "paused");
+    expect(mocks.request).toHaveBeenCalledTimes(1);
   } finally { await ui.unmount(); }
 });
 
