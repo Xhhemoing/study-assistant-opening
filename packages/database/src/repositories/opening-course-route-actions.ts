@@ -11,6 +11,7 @@ import { readOpeningCourseRoute,readCourseRouteObservations,readCourseRouteSourc
 import { readOpeningAiGradingStatusInTx } from "./opening-ai-grading-jobs";
 import { captureOpeningCourseRouteDecision } from "./opening-course-route-decision";
 import { recordOpeningLearningDecision } from "./opening-learning-decisions";
+import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedReplay, type CourseReservedStart } from "./opening-course-route-reserved-start";
 
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
 const messages={scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
@@ -24,12 +25,16 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
 export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
-  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin):Promise<CourseRouteActionResult>{
+  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart):Promise<CourseRouteActionResult>{
     const key=origin?`course-route-next:${origin.input.activityId}:${origin.input.observationId??"none"}`
-      :"taskId" in input&&input.taskId?`course-route-task:${input.taskId}`:`course-route-start:${courseId}:${input.clientKey}`;
+      :"taskId" in input&&input.taskId?`course-route-task:${input.taskId.toLowerCase()}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
+      if((receipt.goal_json as {reservedStart?:unknown}).reservedStart!==undefined){
+        if(!("requirementId" in input))throw learningError("CONFLICT","保留复测必须沿原任务恢复。");
+        await assertCourseReservedReplay(sql,tx,scope,courseId,receipt,input);
+      }
       const context=courseRouteActivityContextSchema.parse((receipt.goal_json as {courseRoute:unknown}).courseRoute);
       if(context.goalId!==input.goalId)throw learningError("CONFLICT","原请求属于不同目标。");
       if((receipt.goal_json as {learningBudget?:{minutes?:number}}).learningBudget?.minutes!==input.minutes
@@ -136,6 +141,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     if(comprehensiveIds)step={requirementId:requestedId||step.requirementId,action:"comprehensive",focusObservationId:currentObservation?.verifiedCorrect==="no"?currentObservation.id:null};
     const selectedStep=step;
     const selected=progress.find(row=>row.requirement.id===selectedStep.requirementId)!;
+    if(boundRetestId&&selected.requirement.requirementKey==="arithmetic"&&selected.requirement.verification.kind==="exact"&&!reservedStart)
+      throw learningError("CONFLICT","保留复测缺少原始用途快照，请重新开始当前任务。");
     if(!selected.sourcesAvailable)return choice(courseId,"source_unavailable",[selected.requirement.id]);
     const all=await readCourseRouteObservations(tx,scope,courseId);
     const decisionInput=courseRouteDecisionInput(selected.requirement,all.projected.map(row=>currentObservation&&row.id===currentObservation.id?currentObservation:row),{dueRetest:Boolean(boundRetestId),origin:currentObservation});
@@ -157,7 +164,12 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       AND lower(create_intent->>'taskId') IS NOT DISTINCT FROM ${"taskId" in input?input.taskId?.toLowerCase()??null:null}
       AND (${origin?.input.activityId??null}::uuid IS NULL OR id<>${origin?.input.activityId??null}::uuid)
       ORDER BY updated_at DESC,id DESC LIMIT 1`;
-    if(existing[0]){const context=courseRouteActivityContextSchema.parse((existing[0].goal_json as {courseRoute:unknown}).courseRoute);
+    if(existing[0]){
+      if((existing[0].goal_json as {reservedStart?:unknown}).reservedStart!==undefined){
+        if(!("requirementId" in input))throw learningError("CONFLICT","保留复测必须沿原任务恢复。");
+        await assertCourseReservedReplay(sql,tx,scope,courseId,existing[0],input);
+      }
+      const context=courseRouteActivityContextSchema.parse((existing[0].goal_json as {courseRoute:unknown}).courseRoute);
       return {kind:"ready",activity:mapTeachingActivity(existing[0]),href:href(courseId,String(existing[0].id)),resumed:true,requirementId:context.requirementId,action:context.action};}
     // A comprehensive run issues a real check per requirement, never one item for the whole course.
     const covering=[selected];
@@ -179,15 +191,22 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const activity=await createOpeningTeachingActivityInTransaction(tx,scope,{clientKey:key,intentKind:"goal",intentSummary:summary.slice(0,2000),courseId,sourceIds,
       createIntent:{kind:"course_route",goalId:goal.id,requirementId:selected.requirement.id,...("taskId" in input&&input.taskId?{source:"task",taskId:input.taskId}:{}),
         ...(origin?{originActivityId:origin.input.activityId,observationId:origin.input.observationId}:{clientKey:input.clientKey})},
-      goalJson:{courseRoute:context,learnerFocus:{skillLabel:selected.requirement.title,requirementKey:selected.requirement.requirementKey,
+      goalJson:{courseRoute:context,...(reservedStart?{reservedStart}:{}),learnerFocus:{skillLabel:selected.requirement.title,requirementKey:selected.requirement.requirementKey,
         activityKind:decision.activityKind,reasonCode:decision.reasonCode,
-        focusObservationId:decision.focusObservationId,...(focusedPart?{examPartFocus:focusedPart}:{}),recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:true});
+        focusObservationId:decision.focusObservationId,...(focusedPart?{examPartFocus:focusedPart}:{}),recentAssistance:observations.slice(0,3).map(row=>row.assistance),strategyVersion:"course-route-1"}}},{enqueueCompile:!reservedStart});
     await reserveOpeningLearningActivityBudget(tx,scope,{activityId:activity.id,minutes:input.minutes,goalId:goal.id,expectedGoalRevision:goal.revision});
+    if(reservedStart){
+      if(!boundRetestId||action!=="transfer_check")throw learningError("CONFLICT","保留复测必须绑定当前延迟复测任务。");
+      await startCourseReservedQuestion(sql,tx,scope,selected.requirement,activity.id,reservedStart);
+    }
     if(origin)await tx`UPDATE opening_teaching_activities SET status='completed',path_version=path_version+1,updated_at=now() WHERE id=${origin.input.activityId} AND workspace_id=${scope.workspaceId}`;
     await recordOpeningLearningDecision(tx,scope,{...receiptInput,targetId:activity.id},`course-route-activity:${activity.id}`);
-    return {kind:"ready",activity,href:href(courseId,activity.id),resumed:false,requirementId:selected.requirement.id,action};
+    const [issuedActivity]=reservedStart?await tx`SELECT * FROM opening_teaching_activities WHERE id=${activity.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`:[];
+    return {kind:"ready",activity:issuedActivity?mapTeachingActivity(issuedActivity):activity,href:href(courseId,activity.id),resumed:false,requirementId:selected.requirement.id,action};
   }
-  return {async start(scope:Scope,courseId:string,input:CourseRouteStart){return sql.begin(async tx=>{await lockWorkspaceLearningHistory(tx,scope);return act(tx,scope,courseId,input);});},
+  return {async start(scope:Scope,courseId:string,input:CourseRouteStart){
+    const reservedStart=await prepareCourseReservedStart(sql,scope,courseId,input);
+    return sql.begin(async tx=>{await lockWorkspaceLearningHistory(tx,scope);return act(tx,scope,courseId,input,undefined,reservedStart);});},
     async next(scope:Scope,courseId:string,input:CourseRouteNext){return sql.begin(async tx=>{
       await lockWorkspaceLearningHistory(tx,scope);
       const [row]=await tx`SELECT * FROM opening_teaching_activities WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
