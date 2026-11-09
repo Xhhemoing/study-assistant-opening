@@ -75,7 +75,7 @@ class Fixture(unittest.TestCase):
                         'action': 'deploy', 'target': str(self.target), 'targetIdentity': [st.st_dev, st.st_ino],
                         'config': {'files': [{'path': str(self.config), 'identity': state.identity(self.config.stat())}]}}
         state.durable_write(self.root / 'protocol2-transition.json', self.binding)
-        for name in ('migration-forward-only', 'writers-fenced'):
+        for name in ('activation-incomplete', 'migration-forward-only', 'writers-fenced'):
             (self.root / name).write_text('fenced')
         self.addCleanup(self.temporary.cleanup)
 
@@ -96,7 +96,7 @@ class ReceiptTests(Fixture):
         self.assertEqual(self.classify(), 'fenced')
 
     def test_succeeded_health_or_missing_receipt_never_proves_commit(self):
-        for name in ('migration-forward-only', 'writers-fenced'):
+        for name in ('activation-incomplete', 'migration-forward-only', 'writers-fenced'):
             (self.root / name).unlink()
         (self.root / 'commit-receipts').mkdir(mode=0o700)
         (self.root / 'succeeded').write_text('healthy')
@@ -246,6 +246,20 @@ class WrapperTests(Fixture):
         (self.root / 'activation-incomplete').touch()
         with self.assertRaises(PermissionError):
             self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+
+    def test_missing_protocol_marker_never_downgrades_plan_to_legacy(self):
+        self.commit()
+        (self.root / 'protocol2-transition.json').unlink()
+        self.assertEqual(self.classify(), 'legacy')
+        with self.assertRaises(PermissionError):
+            self.wrapper.admit(peer, str(self.root), peer.UNITS[0], str(self.broker_path))
+
+    def test_disabled_worker_cannot_boot_even_with_terminal_receipt(self):
+        plan = {**self.plan, 'unit': peer.UNITS[1], 'required': '0'}
+        state.durable_write(self.root / ('writer-' + peer.UNITS[1] + '.json'), plan)
+        self.commit()
+        with self.assertRaisesRegex(PermissionError, 'Worker disabled'):
+            self.wrapper.admit(peer, str(self.root), peer.UNITS[1], str(self.broker_path))
 
     def test_committed_boot_pins_target_fd_and_template(self):
         self.commit()
@@ -521,6 +535,19 @@ class KernelBrokerTests(Fixture):
         for child in children:
             child.communicate(timeout=5)
         self.assertEqual(sorted(outcomes), [False, True])
+
+    def test_unreaped_owner_cannot_authorize_control(self):
+        owner = subprocess.Popen(['/usr/bin/python3', '-c', 'import time;time.sleep(30)'])
+        broker = peer.Broker(self.manager, owner.pid, peer.proc_identity(owner.pid)['start'], str(self.wrapper), '/usr/bin/python3', str(self.current))
+        try:
+            owner.kill()
+            # waitid WNOWAIT observes exit without reaping the real zombie PID.
+            os.waitid(os.P_PID, owner.pid, os.WEXITED | os.WNOWAIT)
+            with self.assertRaises((ProcessLookupError, PermissionError)):
+                broker.owner_alive()
+        finally:
+            owner.wait(timeout=5)
+            os.close(broker.owner_fd)
 
     def test_owner_dead_cannot_prepare_or_allow(self):
         owner = subprocess.Popen(['/usr/bin/python3', '-c', 'import time;time.sleep(30)'])

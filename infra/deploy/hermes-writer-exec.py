@@ -39,6 +39,8 @@ def load_plan(api, state, unit):
 def admit(peer, state, unit, broker=BROKER):
     api = peer.state_api
     plan = load_plan(api, state, unit)
+    if unit == 'aistudy-worker.service' and plan.get('required') == '0':
+        raise PermissionError('Worker disabled for this transition')
     status = api.classify(state, plan['current'], broker, sync=True)
     if status == 'grant-required':
         with socket.socket(socket.AF_UNIX) as conn:
@@ -52,7 +54,9 @@ def admit(peer, state, unit, broker=BROKER):
                 raise PermissionError('Grant snapshot mismatch')
             if allowed['peerPid'] != os.getpid() or allowed['peerStart'] != peer.proc_identity(os.getpid())['start']:
                 raise PermissionError('Grant process mismatch')
-    elif status not in ('legacy', 'committed'):
+    elif status != 'committed':
+        # A protocol-2 plan never downgrades to legacy admission when a marker
+        # is missing. Historical recovery requires the separate approved profile.
         raise PermissionError('Writer fenced or commit unknown')
     # Broker could have disappeared or appeared while reading classifier state.
     # Adjacent classify must agree; no fallback from failed online authorization.

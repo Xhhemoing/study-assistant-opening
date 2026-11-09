@@ -38,7 +38,7 @@ managed() {
   local session_target='' exact_target=''
   if [[ "$ACTION" == deploy ]]; then session_target=$RELEASE; fi
   case "$1" in activate|success|query-success) exact_target=$(current_target) || return 1;; esac
-  HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" node "$HERMES_SUPERVISOR_HELPER" request "$1"
+  HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" HERMES_WORKER_REQUIRED="$WORKER_REQUIRED" HERMES_STATE="$STATE" HERMES_CURRENT="$CURRENT" node "$HERMES_SUPERVISOR_HELPER" request "$1"
 }
 if [[ "$ACTION" != status && "$ACTION" != logs ]]; then
   [[ -n "${HERMES_SUPERVISOR_SOCKET:-}" && -f "${HERMES_SUPERVISOR_HELPER:-}" ]] || fail 'Managed supervisor entry is required.'
@@ -193,19 +193,17 @@ restart_services() {
   local required=$1 target=$2
   [[ "$required" == 0 || "$required" == 1 ]] || return 1
   install_worker_guard "$target" || return 1
-  if [[ "${3:-}" == activate ]]; then managed activate || return 1; fi
   # Web can persist Study answer conditions even when the worker is disabled.
   if study_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-app-start-attempted" || return 1; fi
   # 0091 pasted questions and 0092 recognition jobs are unreadable by Study v1.
   # Persist before either process can run, including a failed startup command.
   if study_v2_release "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/study-v2-app-start-attempted" || return 1; fi
-  systemctl restart aistudy-web.service || return 1
   if [[ "$required" == 1 ]]; then
     if worker_paused "$target"; then report_worker_pause "$target"; return 1; fi
     # A failed restart may already have executed work. Persist before the call.
     if lease_worker "$target" && [[ -n "$TRANSITION" ]]; then touch "$TRANSITION/lease-worker-start-attempted" || return 1; fi
-    systemctl restart aistudy-worker.service || return 1
   fi
+  managed activate || return 1
   return 0
 }
 health() {
@@ -242,7 +240,7 @@ finish() {
       echo "Commit fenced or unprovable; forward repair required (health is not commit proof)." >&2
     fi
   fi
-  if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" ) ]]; then
+  if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ) ]]; then
     echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
     managed refence || echo 'UNCONFIRMED: refence persistence failed; old writers must not be restored.' >&2
     managed stop || echo 'UNCONFIRMED: one or both writers may still exist.' >&2
@@ -259,6 +257,10 @@ finish() {
     stop_worker || { rollback_result=1; can_restore=0; }
     if [[ "$can_restore" == 1 ]]; then
       restored_required=$(restoration_worker_requirement "$RECOVERY_TARGET" "$(cat "$RECOVERY_STATE/worker-required")" "$RECOVERY_STATE") || { rollback_result=1; can_restore=0; }
+    fi
+    if [[ "$can_restore" == 1 ]]; then
+      echo 'Old-target restoration requires an independently approved compatibility profile and retained trusted inventory anchor; unavailable.' >&2
+      can_restore=0; rollback_result=1
     fi
     if [[ "$can_restore" == 1 ]]; then
       atomic_link "$RECOVERY_TARGET" "$CURRENT" || { echo 'Rollback pointer restoration failed.' >&2; rollback_result=1; can_restore=0; }
@@ -344,6 +346,8 @@ if [[ "$ACTION" == restart ]]; then
   SUCCESS_REQUESTED=1
   managed success
   SUCCESS_REQUESTED=0
+  FORWARD_ONLY=0
+  RECOVERY_REQUIRED=0
   echo 'Current release restarted and healthy.'
   exit
 fi
@@ -364,6 +368,7 @@ if [[ "$ACTION" == rollback ]]; then
     fail 'Refusing rollback to a pre-Study application; use a release that preserves Study answer conditions.'
   fi
   [[ "$RELEASE" != "$OLD_TARGET" ]] || fail 'Rollback target equals the current release.'
+  fail 'Old-target rollback requires an approved compatibility profile and retained trusted inventory anchor; unavailable.'
   WORKER_HELPER="$OLD_TARGET/infra/deploy/provision-worker.sh"
   if [[ ! -f "$WORKER_HELPER" ]]; then WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"; fi
   [[ -f "$WORKER_HELPER" ]] || fail 'Current release has no worker configuration recovery helper.'
@@ -433,7 +438,7 @@ else
   fi
   validate_target "$RELEASE"
   [[ -n "$(find apps/web/.next/standalone/apps/web/.next/static -type f -print -quit)" ]] || fail 'Standalone static assets are missing.'
-  cp -- "$CONTROL_DIR/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
+  cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
   node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   BACKUP="$BACKUPS/$(basename -- "$RELEASE").dump"
@@ -468,16 +473,18 @@ else
   fi
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   printf '%s\n' "$release_protocol" > "$RELEASE/.worker-protocol"
+  # Provision validates the effective wrapper too, including no-pending deploys.
+  managed prepare || fail 'Trusted writer boundary preparation failed.'
   bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
-    --parser-python "$DIR/.local/docling-venv/bin/python"
+    --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
   mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"
   cat > "$WEB_OVERRIDE" <<UNIT
 [Service]
 WorkingDirectory=$CURRENT
 EnvironmentFile=$CONFIG
 ExecStart=
-ExecStart=/usr/bin/node $CURRENT/apps/web/.next/standalone/apps/web/server.js
+ExecStart=/usr/bin/python3 -I -S $STATE/writer-controls/hermes-writer-exec.py $STATE aistudy-web.service
 UNIT
   chmod 644 -- "$WEB_OVERRIDE"
   systemctl daemon-reload
@@ -493,10 +500,11 @@ else
   rm -f -- "$STATE/current-identity"
 fi
 atomic_link "$TRANSITION" "$STATE/last-transition"
-rm -f -- "$INCOMPLETE"
+# The trusted terminal commit retires activation-incomplete after receipt fsync.
 SUCCESS_REQUESTED=1
 managed success
 SUCCESS_REQUESTED=0
+FORWARD_ONLY=0
 RECOVERY_REQUIRED=0
 if [[ "$DEGRADED" == 1 ]]; then report_worker_pause "$RELEASE"; exit 3; fi
 printf '部署完成: %s (%s)\n' "$RELEASE" "$ACTION"

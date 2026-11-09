@@ -1,9 +1,22 @@
 // Trusted supervisor bridge. All calls are synchronous across the final commit.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { durableWrite, syncDirectory } from './hermes-supervisor.mjs';
+// Shared by the installer and supervisor; never import the supervisor here.
+export function syncDirectory(directory) {
+  const fd = openSync(directory, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+export function durableWrite(file, contents, mode = 0o600) {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.next-${process.pid}-${randomBytes(6).toString('hex')}`;
+  const fd = openSync(temporary, 'wx', mode);
+  try { writeFileSync(fd, contents); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(temporary, file);
+  syncDirectory(dirname(file));
+}
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const controls = dirname(fileURLToPath(import.meta.url));
 export const brokerDirectory = '/run/aistudy-writer-broker';
@@ -24,12 +37,16 @@ export function classify(state, current, scope) {
 export function brokerControl(payload) {
   return JSON.parse(python('hermes-peer-broker.py', ['control', join(brokerDirectory, 'control.sock')], payload));
 }
-export async function startBroker(current, ownerPid, starttime, installedControls) {
+export async function startBroker(current, ownerPid, starttime, installedControls, signal, created = () => {}) {
   mkdirSync(brokerDirectory, { mode: 0o700 }); // Existing/stale owner requires explicit repair; never steal.
   const broker = spawn('/usr/bin/python3', ['-I', '-S', join(controls, 'hermes-peer-broker.py'), 'serve',
     brokerDirectory, current, join(installedControls, 'hermes-writer-exec.py'), String(ownerPid), starttime], {
     stdio: ['pipe', 'pipe', 'inherit'], env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
   });
+  const abort = () => broker.stdin.destroy();
+  signal?.addEventListener('abort', abort, { once: true });
+  created(broker);
+  broker.once('exit', () => signal?.removeEventListener('abort', abort));
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => { broker.stdin.destroy(); reject(new Error('Broker readiness timed out')); }, 10_000);
     broker.once('error', error => { clearTimeout(timer); reject(error); });
@@ -37,11 +54,50 @@ export async function startBroker(current, ownerPid, starttime, installedControl
     broker.stdout.once('data', data => {
       clearTimeout(timer);
       if (data.toString() === 'READY\n') resolve();
-      else reject(new Error('Invalid broker readiness'));
+      else { broker.stdin.destroy(); reject(new Error('Invalid broker readiness')); }
     });
+    if (signal?.aborted) abort();
+  }).catch(async error => {
+    broker.stdin.destroy();
+    if (broker.exitCode === null && broker.signalCode === null) {
+      await new Promise(resolve => {
+        const timer = setTimeout(() => broker.kill('SIGKILL'), 1000);
+        broker.once('exit', () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    // Only retire our own mkdir after the child has exited and unlinked. A
+    // residual listener/name is an explicit failed cleanup, never stolen.
+    try { rmdirSync(brokerDirectory); } catch (cleanup) {
+      if (cleanup.code !== 'ENOENT') throw new Error('Broker readiness failed; private directory cleanup unconfirmed');
+    }
+    throw error;
   });
   broker.stdout.resume();
   return broker;
+}
+export async function retireBroker(broker) {
+  // Failure cleanup only, after fencing/stopping. Never unlink unknown names.
+  broker.stdin.destroy();
+  if (broker.exitCode === null && broker.signalCode === null) {
+    await new Promise(resolve => {
+      const timer = setTimeout(() => broker.kill('SIGKILL'), 1000);
+      broker.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  try { rmdirSync(brokerDirectory); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+export function closeBroker(broker) {
+  // ACK means both listeners are closed and both names unlinked, not merely EOF
+  // requested. Verify absence before removing this generation's private directory.
+  brokerControl({ action: 'close' });
+  for (const name of ['exec.sock', 'control.sock']) {
+    try { lstatSync(join(brokerDirectory, name)); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    throw new Error('Broker listener remains after close acknowledgement');
+  }
+  rmdirSync(brokerDirectory);
+  broker.stdin.end();
 }
 export function configIdentity(captured) {
   return { files: captured.files.map(file => {
@@ -79,6 +135,9 @@ export function installWriterBoundary(state, systemd, source, run) {
     if (!shown.ok || !shown.stdout.includes('NeedDaemonReload=no') || (shown.stdout.match(/path=/g) ?? []).length !== 1
       || !shown.stdout.includes('path=/usr/bin/python3 ;') || !shown.stdout.includes(exact)
       || (unit === units[1] && (!shown.stdout.includes('no-setuid') || shown.stdout.includes('privileged')))) throw new Error('Sole trusted ExecStart unconfirmed');
+    const fd = openSync(join(systemd, `${unit}.d`, '96-aistudy-writer-exec.conf'), 'r');
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    syncDirectory(join(systemd, `${unit}.d`));
   }
   for (const unit of units) durableWrite(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), '# Admission is enforced by persistent 96 trusted wrapper.\n', 0o644);
   if (!run(['daemon-reload']).ok) throw new Error('Fence neutralization reload failed');

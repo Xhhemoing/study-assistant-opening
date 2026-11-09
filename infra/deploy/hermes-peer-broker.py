@@ -108,8 +108,10 @@ class Broker:
 
     def owner_alive(self):
         signal.pidfd_send_signal(self.owner_fd, 0)
-        if proc_identity(self.owner_pid)['start'] != self.owner_start:
-            raise PermissionError('Owner changed')
+        raw = (Path('/proc') / str(self.owner_pid) / 'stat').read_text()
+        fields = raw[raw.rfind(')') + 2:].split()
+        if fields[0] in ('Z', 'X') or fields[19] != self.owner_start:
+            raise PermissionError('Owner changed or exited')
 
     def revoke(self):
         with self.lock:
@@ -212,11 +214,13 @@ def control(path, payload):
 
 def serve(directory, broker, stdin):
     sockets = []
+    bound_paths = set()
     selector = selectors.DefaultSelector()
     try:
         for name in ('exec.sock', 'control.sock'):
             sock = socket.socket(socket.AF_UNIX)
             sock.bind(str(Path(directory) / name))
+            bound_paths.add(name)
             os.chmod(Path(directory) / name, 0o600)
             sock.listen(8)
             selector.register(sock, selectors.EVENT_READ, name)
@@ -225,11 +229,13 @@ def serve(directory, broker, stdin):
         selector.register(broker.owner_fd, selectors.EVENT_READ, 'owner-dead')
         print('READY', flush=True)
         while True:
-            for key, _ in selector.select():
-                if key.data in ('owner-pipe', 'owner-dead'):
-                    # Pipe carries no commands. EOF/data both revoke and terminate.
-                    broker.revoke()
-                    return
+            ready = selector.select()
+            # EOF/death wins over every queued control/admission event in the
+            # same readiness batch, irrespective of selector ordering.
+            if any(key.data in ('owner-pipe', 'owner-dead') for key, _ in ready):
+                broker.revoke()
+                return
+            for key, _ in ready:
                 conn, _ = key.fileobj.accept()
                 with conn:
                     try:
@@ -251,6 +257,7 @@ def serve(directory, broker, stdin):
                             if peer[1:] != (0, 0):
                                 raise PermissionError('Not root control')
                             message = receive(conn)
+                            broker.owner_alive()
                             if message['action'] == 'prepare':
                                 broker.prepare(message['plan'])
                             elif message['action'] == 'configuration':
@@ -269,6 +276,7 @@ def serve(directory, broker, stdin):
                                     listener.close()
                                 for name in ('exec.sock', 'control.sock'):
                                     os.unlink(Path(directory) / name)
+                                    bound_paths.remove(name)
                                 conn.sendall(b'{"ok":true}\n')
                                 return
                             else:
@@ -287,7 +295,9 @@ def serve(directory, broker, stdin):
         selector.close()
         for sock in sockets:
             sock.close()
-        for name in ('exec.sock', 'control.sock'):
+        # After close ACK the parent may retire the directory. Never let this
+        # old child exit handler unlink sockets belonging to a later generation.
+        for name in bound_paths:
             path = Path(directory) / name
             if os.path.lexists(path):
                 os.unlink(path)

@@ -42,6 +42,13 @@ test('persistent 96 survives failed reload and 95 is neutralized only after both
   const source = fileURLToPath(new URL('../../infra/deploy', import.meta.url));
   assert.throws(() => installWriterBoundary(state, systemd, source, () => ({ ok: false })), /reload/);
   for (const unit of units) assert.match(readFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'), /ConditionPathExists/);
+  // A good web wrapper alone must never retire either old 95 barrier.
+  assert.throws(() => installWriterBoundary(state, systemd, source, args => {
+    if (args[0] === 'daemon-reload') return { ok: true };
+    const unit = args.at(-1);
+    return { ok: true, stdout: `NeedDaemonReload=${unit.includes('worker') ? 'yes' : 'no'}\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S ${state}/writer-controls/hermes-writer-exec.py ${state} ${unit} ; flags=no-setuid ; }\n` };
+  }), /Sole trusted/);
+  for (const unit of units) assert.match(readFileSync(join(systemd, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'), /ConditionPathExists/);
   let observed = 0;
   installWriterBoundary(state, systemd, source, args => {
     if (args[0] === 'daemon-reload') return { ok: true };

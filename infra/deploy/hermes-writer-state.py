@@ -190,7 +190,9 @@ def commit(state, current, broker, binding):
     receipts.mkdir(mode=0o700, exist_ok=True)
     sync_dir(state)
     durable_write(receipts / (binding['owner'] + '.json'), {**binding, 'phase': 'terminal'})
-    for name in ('migration-forward-only', 'writers-fenced'):
+    # Incomplete is itself a boot barrier. Retire it only after the terminal
+    # receipt is durable, before G and the final F removal.
+    for name in ('activation-incomplete', 'migration-forward-only', 'writers-fenced'):
         path = Path(state) / name
         if present(path):
             os.unlink(path)

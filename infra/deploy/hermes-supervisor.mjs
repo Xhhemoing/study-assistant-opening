@@ -4,10 +4,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, createConnection } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
+import { binding, brokerControl, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit } from './hermes-writer-control.mjs';
+export { durableWrite, syncDirectory, installWriterBoundary } from './hermes-writer-control.mjs';
 
 // A disconnected SSH pipe is not permission to abandon independent cleanup.
 export function protectCleanupStreams(streams = [process.stdout, process.stderr]) {
@@ -29,23 +31,15 @@ export function signalVerifiedGroup(pid, expectedStart, signal, identity = proce
 
 const units = ["aistudy-web.service", "aistudy-worker.service"];
 const filename = fileURLToPath(import.meta.url);
+function present(path) {
+  try { lstatSync(path); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
 function validateArguments(args) {
   if (![11, 13].includes(args.length) || !["deploy", "restart", "rollback"].includes(args[0])) throw new Error("Invalid managed arguments");
   for (const value of args.slice(1, 8)) {
     if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) || value.includes('/..') || value.endsWith('/.')) throw new Error("Managed paths must be normalized safe absolute paths");
   }
-}
-export function syncDirectory(directory) {
-  const fd = openSync(directory, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-export function durableWrite(file, contents, mode = 0o600) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.next-${process.pid}-${randomBytes(6).toString("hex")}`;
-  const fd = openSync(temporary, "wx", mode);
-  try { writeFileSync(fd, contents); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, file);
-  syncDirectory(dirname(file));
 }
 export function boundedQuiescence(helper, config, release) {
   // GNU timeout owns a process group and kills the whole probe tree, including
@@ -108,36 +102,65 @@ async function request(action) {
   return new Promise((resolve, reject) => {
     let body = "";
     socket.setTimeout(90_000, () => socket.destroy(new Error("Managed supervisor response timed out")));
-    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: process.env.HERMES_SUPERVISOR_TOKEN, transition: process.env.HERMES_TRANSITION, release: process.env.HERMES_RELEASE, target: process.env.HERMES_TARGET })}\n`));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: process.env.HERMES_SUPERVISOR_TOKEN, transition: process.env.HERMES_TRANSITION, release: process.env.HERMES_RELEASE, target: process.env.HERMES_TARGET, required: process.env.HERMES_WORKER_REQUIRED })}\n`));
     socket.on("data", data => { body += data; if (body.includes("\n")) { socket.end(); try { resolve(JSON.parse(body)); } catch (error) { reject(error); } } });
     socket.on("error", reject);
     socket.on("end", () => { if (!body.includes("\n")) reject(new Error("Managed supervisor disconnected before a complete response")); });
   });
 }
-async function supervise(script, args) {
+const production = {
+  command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+  startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
+  health: (state, args, target, required) => {
+    const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
+    if (result.error || result.status !== 0) throw new Error('Candidate process identity/health unconfirmed');
+  },
+};
+// Object injection is restricted to module callers in tests. CLI always uses
+// production dependencies; no environment, HTTP or command-line adapter switch.
+export async function supervise(script, args, dependencies = {}) {
+  const { command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration,
+    startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   const state = args[4], systemd = args[6], action = args[0];
   const guard = join(state, "migration-forward-only");
   const fence = join(state, "writers-fenced");
   const socketPath = join(state, `owner-${process.pid}.sock`);
   const token = randomBytes(32).toString("hex");
   const ownerIdentity = randomBytes(16).toString("hex"); // Non-secret commit scope, never the bearer token.
-  let activationTarget, committed;
+  let activationTarget, committed, broker, record, ownerFinished = false, brokerClosing = false, migrationArmed = false;
+  let phase = 'idle', generation = 0, queue = Promise.resolve(), wrapperConfirmed = false;
+  const lifetime = new AbortController();
+  const installedControls = join(state, 'writer-controls');
+  function revoke(close = false) {
+    if (!broker) return;
+    if (close) {
+      brokerClosing = true;
+      try { closeBroker(broker); }
+      catch (error) { brokerClosing = false; throw error; }
+      broker = undefined;
+    } else brokerControl({ action: 'revoke' });
+  }
   function successState(message) {
     if (!transition || message.transition !== transition || message.target !== activationTarget
       || (message.release || "") !== (release || "")) return "unknown";
     try {
       if (realpathSync(args[3]) !== activationTarget) return "unknown";
-      if (armed || existsSync(guard) || existsSync(fence)) return "fenced";
+      if (armed || present(guard) || present(fence)) return "fenced";
       // Existence alone is insufficient: rename may have succeeded before directory fsync failed.
-      if (!committed || readFileSync(join(transition, "success-record"), "utf8") !== committed) return "unknown";
-      return "committed";
+      if (!committed) return "unknown";
+      return classify(state, args[3], { owner: ownerIdentity, transition, target: activationTarget });
     } catch { return "unknown"; }
   }
-  let armed = existsSync(guard) || existsSync(fence), settled = false, owner, transition, ownerStart, ownerPid, release, configuration;
+  let armed = present(guard) || present(fence) || present(join(state, 'activation-incomplete'));
+  let settled = false, owner, transition, ownerStart, ownerPid, ownerPidStart, release, configuration;
   function signalOwnerGroup(signal) {
     if (!signalVerifiedGroup(owner?.pid, ownerStart, signal)) {
       console.error("Owner identity no longer observable; descendant termination UNCONFIRMED (no unrelated PID signalled); backend outcome unknown.");
     }
+  }
+  function installWrapper() {
+    installWriterBoundary(state, systemd, dirname(filename), command);
+    wrapperConfirmed = true;
   }
   function installFence() {
     let failed = false;
@@ -147,17 +170,26 @@ async function supervise(script, args) {
         const directory = join(systemd, `${unit}.d`);
         mkdirSync(directory, { recursive: true, mode: 0o755 });
         syncDirectory(systemd);
-        durableWrite(join(directory, "95-aistudy-migration-fence.conf"), `[Unit]\nConditionPathExists=!${fence}\n`, 0o644);
+        // Keep 96 installed across older recovery paths which may rewrite 95.
+        if (!wrapperConfirmed) {
+          // Bootstrap/failed installation retains the original boot barrier.
+          durableWrite(join(directory, '95-aistudy-migration-fence.conf'), `[Unit]\nConditionPathExists=!${fence}\n`, 0o644);
+        }
       } catch { failed = true; } // Still attempt the other persistent condition.
     }
     if (!command(["daemon-reload"]).ok) failed = true;
     if (failed) throw new Error("Fence persistence/reload unconfirmed");
   }
   function arm(at, reason) {
+    if (committed) throw new Error('Committed owner refuses refence');
+    phase = 'fenced';
+    generation++;
+    let revoked = true;
+    try { revoke(); } catch { broker?.stdin.destroy(); revoked = false; }
     armed = true; // Memory first: failure in ANY persistence step cannot permit recovery.
-    let failed = false;
+    let failed = !revoked;
     try {
-      if (!existsSync(guard)) durableWrite(guard, `${JSON.stringify({ transition: at ?? null, reason, ownerPid: ownerPid ?? null })}\n`);
+      if (!present(guard)) durableWrite(guard, `${JSON.stringify({ transition: at ?? null, reason, ownerPid: ownerPid ?? null })}\n`);
       if (at) durableWrite(join(at, "forward-armed"), "Unknown/partial migration outcome requires forward repair.\n");
     } catch { failed = true; }
     // Still attempt the boot/start fence when guard storage itself fails.
@@ -165,6 +197,9 @@ async function supervise(script, args) {
     if (failed) throw new Error("Guard/fence persistence or reload UNCONFIRMED");
   }
   function crashFence() {
+    if (committed || (record && classify(state, args[3], { owner: ownerIdentity, transition, target: activationTarget }) === 'committed')) {
+      committed = true; settled = true; armed = false; return;
+    }
     let persisted = true;
     try { arm(transition, "owner exited without durable success"); }
     catch { persisted = false; console.error("UNCONFIRMED: crash fence persistence/reload failed; guard remains armed in memory."); }
@@ -189,6 +224,7 @@ async function supervise(script, args) {
       if (body.length > 4096) { socket.destroy(); return; }
       if (!body.includes("\n")) return;
       handled = true;
+      queue = queue.then(async () => {
       let message, successStarted = false;
       try {
         message = JSON.parse(body.slice(0, body.indexOf("\n")));
@@ -199,6 +235,8 @@ async function supervise(script, args) {
           socket.end(`${JSON.stringify({ ok: state === "committed", state })}\n`);
           return;
         }
+        if (ownerFinished || lifetime.signal.aborted) throw new Error('Owner generation ended');
+        if (committed && !['ping', 'success', 'settled'].includes(message.action)) throw new Error('Committed generation is immutable');
         if (message.transition) {
           if (transition && message.transition !== transition) throw new Error("Transition identity mismatch");
           if (resolve(message.transition) !== message.transition) throw new Error("Noncanonical transition");
@@ -219,27 +257,98 @@ async function supervise(script, args) {
         }
         switch (message.action) {
           case "ping": break;
-          case "arm": arm(transition, "migration runner may execute"); break;
-          case "refence": arm(transition, "activation failed; writer permission revoked"); break;
-          case "stop": if (!stopWriters()) throw new Error("Writer stop UNCONFIRMED"); break;
-          case "activate":
-            if (armed && (!transition || !existsSync(join(transition, "migration-succeeded")))) throw new Error("Migration success is unconfirmed");
-            // No temporary path-wide bypass: StartUnit(mode=fail) may merge a
-            // pre-existing start job. Until creation provenance is established,
-            // candidate startup behind this fence is deliberately unavailable.
-            if (armed) throw new Error("Exact-job creation provenance unavailable; writers remain fenced");
-            configuration = captureConfiguration(args, command);
+          case "arm":
+            if (phase !== 'idle') throw new Error('Repeated or out-of-phase arm');
+            migrationArmed = true;
+            arm(transition, 'migration runner may execute');
+            installWrapper();
             break;
-          case "success":
+          case 'prepare':
+            if (record || !transition || !['idle', 'fenced'].includes(phase)) throw new Error('Out-of-phase boundary preparation');
+            if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
+            arm(transition, 'candidate configuration preparation');
+            installWrapper();
+            if (!stopWriters()) throw new Error('Writers not quiescent before configuration');
+            break;
+          case "refence": arm(transition, "activation failed; writer permission revoked"); break;
+          case "stop":
+            if (phase === 'active' || phase === 'preparing') arm(transition, 'explicit stop revoked activation');
+            if (!stopWriters()) throw new Error('Writer stop UNCONFIRMED');
+            break;
+          case "activate": {
+            if (!transition || !['0', '1'].includes(message.required) || !['idle', 'fenced'].includes(phase) || record || ownerFinished) throw new Error('Missing or repeated activation scope');
+            if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
+            arm(transition, 'execution authorization pending');
+            installWrapper();
+            if (!stopWriters()) throw new Error('Writers not quiescent');
+            durableWrite(join(state, 'activation-incomplete'), `${transition}\n`);
+            configuration = captureConfiguration(args, command);
+            persistConfiguration(configuration, args, command);
+            phase = 'preparing';
+            const preparingGeneration = generation;
+            if (!ownerPid || !ownerPidStart || processStarttime(ownerPid) !== ownerPidStart) throw new Error('Owner kernel identity unavailable');
+            broker = await startBroker(args[3], ownerPid, ownerPidStart, installedControls, lifetime.signal, child => {
+              broker = child;
+              child.once('exit', () => {
+                if (!brokerClosing && !committed) {
+                  lifetime.abort(); generation++;
+                  queue = queue.then(() => { if (!committed) { crashFence(); signalOwnerGroup('SIGKILL'); } });
+                }
+              });
+            });
+            if (settled || ownerFinished || !owner?.connected || lifetime.signal.aborted || generation !== preparingGeneration || phase !== 'preparing') throw new Error('Owner exited while broker started');
+            persistConfiguration(configuration, args, command);
+            const config = configIdentity(configuration);
+            config.effective = Object.fromEntries(units.map(unit => [unit, brokerControl({ action: 'configuration', unit }).effective]));
+            record = { ...binding(ownerIdentity, action, transition, activationTarget, config), required: message.required };
+            durableWrite(join(state, 'protocol2-transition.json'), JSON.stringify(record));
+            for (const unit of units) {
+              const effective = config.effective[unit];
+              const plan = { ...record, unit, state, systemd, current: args[3], effective, user: effective.User, group: effective.Group };
+              durableWrite(join(state, `writer-${unit}.json`), JSON.stringify(plan));
+              if (unit === units[0] || message.required === '1') brokerControl({ action: 'prepare', plan });
+            }
+            persistConfiguration(configuration, args, command);
+            // Markers are persisted by owner before this action; starts are solely here.
+            for (const unit of units.filter(unit => unit === units[0] || message.required === '1')) {
+              if (!command(['start', unit]).ok) throw new Error('Authorized candidate start failed');
+            }
+            phase = 'active';
+            break;
+          }
+          case "success": {
             if (!transition || message.transition !== transition || (message.release || "") !== (release || "")) throw new Error("Missing or mismatched success scope");
             if (committed) {
               if (successState(message) !== "committed") throw new Error("Committed identity is no longer provable");
               break; // Idempotent; no repeated configuration write, fsync, or start.
             }
             successStarted = true;
-            if (armed) throw new Error("Fenced activation has no verified candidate startup");
-            if (action === "deploy") {
-              if (!configuration) throw new Error("Missing activation configuration identity");
+            if (phase !== 'active' || !record || message.required !== record.required) throw new Error('Missing or mismatched execution authorization record');
+            phase = 'committing';
+            // Health inspector and config proof precede the synchronous commit block.
+            for (const unit of units) {
+              const plan = JSON.parse(readFileSync(join(state, `writer-${unit}.json`), 'utf8'));
+              if (JSON.stringify(brokerControl({ action: 'configuration', unit }).effective) !== JSON.stringify(plan.effective)) throw new Error('Effective execution configuration changed before receipt');
+            }
+            const executions = brokerControl({ action: 'status' }).executions;
+            durableWrite(join(transition, 'writer-executions.json'), JSON.stringify(executions));
+            for (const unit of units.filter(unit => unit === units[0] || message.required === '1')) {
+              const started = executions[unit];
+              const observed = command(['show', '--property=MainPID', unit]);
+              if (!started || !observed.ok || observed.stdout.trim() !== `MainPID=${started.pid}`
+                || processStarttime(started.pid) !== started.start) throw new Error('Authorized MainPID/starttime changed');
+            }
+            health(state, args, activationTarget, message.required);
+            // Health may perform slow IO. Re-pin MainPID/starttime afterwards;
+            // a replacement or restart during inspection is not execution proof.
+            for (const unit of units.filter(unit => unit === units[0] || message.required === '1')) {
+              const observed = command(['show', '--property=MainPID', unit]);
+              const started = executions[unit];
+              if (!observed.ok || observed.stdout.trim() !== `MainPID=${started.pid}`
+                || processStarttime(started.pid) !== started.start) throw new Error('Authorized process changed during health');
+            }
+            if (!ownerPidStart || processStarttime(ownerPid) !== ownerPidStart) throw new Error('Owner ended before terminal commit');
+            if (configuration) {
               const identity = persistConfiguration(configuration, args, command);
               durableWrite(join(transition, "configuration-identity"), `${JSON.stringify(identity)}\n`);
             }
@@ -254,15 +363,17 @@ async function supervise(script, args) {
               syncDirectory(dirname(transition));
               syncDirectory(state);
               syncDirectory(dirname(args[3])); // Persist CURRENT rename, possibly on another disk.
-              const record = `${JSON.stringify({ version: 1, owner: ownerIdentity, action, transition, target: activationTarget })}\n`;
-              durableWrite(join(transition, "success-record"), record);
-              committed = record; // Set ONLY after file + rename + parent fsync all return.
+              // No await or event-loop yield from revoke through final fence fsync.
+              revoke(true);
+              terminalCommit(state, args[3], record);
+              committed = true;
+              phase = 'committed';
+              armed = false;
             }
-            // Clearing a forward fence is unavailable until exact-job startup
-            // can be proven. Never weaken the guard for a nominal success ACK.
             settled = true;
             successStarted = false; // Transport failure after commit is not persistence failure.
             break;
+          }
           case "settled": if (armed) throw new Error("Forward-only owner cannot restore old writers"); settled = true; break;
           default: throw new Error("Unknown managed request");
         }
@@ -270,16 +381,27 @@ async function supervise(script, args) {
       } catch (error) {
         // Success is a commit boundary. A failed fsync or lost persistence proof
         // cannot fall through to the owner's pre-migration restoration branch.
+        if (!committed && message?.token === token && ['arm', 'prepare', 'activate'].includes(message.action)) {
+          try { arm(transition, 'activation failed'); } catch { console.error('UNCONFIRMED: activation refence'); }
+          stopWriters();
+        }
         if (successStarted) {
           settled = false;
-          try { arm(transition, "success persistence failed"); }
-          catch { console.error("UNCONFIRMED: success failure refence persistence failed"); }
+          if (record && classify(state, args[3], { owner: ownerIdentity, transition, target: activationTarget }) === 'committed') {
+            committed = true; armed = false; settled = true;
+          } else {
+            try { arm(transition, "success persistence failed"); }
+            catch { console.error("UNCONFIRMED: success failure refence persistence failed"); }
+            stopWriters();
+          }
         }
         console.error(error.message); socket.end('{"ok":false}\n');
       }
+      }).catch(error => { console.error(error.message); socket.destroy(); });
     });
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+  const signalHandlers = new Map();
   const result = await new Promise(resolve => {
     // A group anchor remains alive after Bash dies, so its observable starttime
     // still authorizes killing ONLY this owned group, including orphan children.
@@ -287,30 +409,59 @@ async function supervise(script, args) {
       env: { ...process.env, HERMES_SUPERVISOR_SOCKET: socketPath, HERMES_SUPERVISOR_TOKEN: token, HERMES_SUPERVISOR_HELPER: filename } });
     try { ownerStart = processStarttime(owner.pid); } catch { /* spawn failure is handled below */ }
     // Direct child identity, no PID-file lookup, no signalling unrelated PIDs.
-    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => signalOwnerGroup(signal));
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      const handler = () => signalOwnerGroup(signal);
+      signalHandlers.set(signal, handler);
+      process.on(signal, handler);
+    }
     owner.on("message", message => {
-      if (message.ownerPid) ownerPid = message.ownerPid;
-      if (Number.isInteger(message.result)) resolve(message.result);
+      if (message.ownerPid && !ownerPid) {
+        ownerPid = message.ownerPid;
+        try { ownerPidStart = processStarttime(ownerPid); } catch { lifetime.abort(); }
+      }
+      if (Number.isInteger(message.result)) { ownerFinished = true; generation++; lifetime.abort(); resolve(message.result); }
     });
-    owner.once("error", () => resolve(1));
-    owner.once("exit", () => resolve(1));
+    const ended = () => { ownerFinished = true; generation++; lifetime.abort(); resolve(1); };
+    owner.once('error', ended);
+    owner.once('exit', ended);
   });
+  await queue;
   if (!settled) {
     // The group was created for this direct child; descendants must not keep
     // provisioning or starting writers after their owner is dead.
     signalOwnerGroup("SIGKILL");
     crashFence();
   }
-  if (settled && owner.connected) owner.send({ done: true });
+  if (broker) {
+    try { revoke(true); }
+    catch {
+      console.error('UNCONFIRMED: broker close; retiring failed child behind retained guards.');
+      try { await retireBroker(broker); } catch { console.error('UNCONFIRMED: private broker directory cleanup'); }
+    }
+  }
+  if (settled && owner.connected) {
+    try {
+      owner.send({ done: true }, error => {
+        if (error) console.error('Owner acknowledgement unavailable; durable commit state is unchanged.');
+      });
+    } catch { console.error('Owner acknowledgement unavailable; durable commit state is unchanged.'); }
+  }
   await new Promise(resolve => server.close(resolve));
   if (existsSync(socketPath)) unlinkSync(socketPath);
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler);
   return settled ? result : result || 1;
 }
 async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
   if (mode === "request") {
-    const reply = await request(script);
+    let reply;
+    try { reply = await request(script); }
+    catch (error) {
+      if (script !== 'query-success' || !process.env.HERMES_STATE || !process.env.HERMES_CURRENT) throw error;
+      const state = classify(process.env.HERMES_STATE, process.env.HERMES_CURRENT, { transition: process.env.HERMES_TRANSITION, target: process.env.HERMES_TARGET });
+      reply = { ok: state === 'committed', state };
+    }
     if (script === "query-success") {
       const state = ["committed", "fenced", "unknown"].includes(reply.state) ? reply.state : "unknown";
       console.log(state);
