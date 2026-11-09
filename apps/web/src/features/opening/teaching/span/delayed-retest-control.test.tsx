@@ -263,3 +263,30 @@ it.each([
   expect(host.querySelector('[role="status"]')).not.toBeNull();
   expect(hasButton("撤销这次安排")).toBe(false);
 });
+
+
+it("keeps an unknown automatic identity when explicit confirmation cannot persist it", async () => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(Response.json(receipt));
+  await render();
+  const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("storage unavailable"); });
+  await act(async () => button("重新确认自动安排").click());
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(button("重新确认自动安排")).not.toBeNull();
+  expect(host.textContent).not.toContain("安排 3 天后再练习");
+  storage.mockRestore();
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+});
+it.each(["network", "invalid"])("retains unknown automatic identity across a %s preference failure", async failure => {
+  vi.mocked(fetch).mockRejectedValueOnce(new Error("connection lost")).mockResolvedValueOnce(Response.json(receipt));
+  await render();
+  await act(async () => root.render(null));
+  if (failure === "network") mocks.getPrefs.mockRejectedValueOnce(new Error("preferences unavailable"));
+  else mocks.getPrefs.mockResolvedValueOnce({ invalidStoredPrefs: true, prefs: {} });
+  await render();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(button("重新确认自动安排")).not.toBeNull();
+  expect(host.textContent).not.toContain("安排 3 天后再练习");
+  await act(async () => button("重新确认自动安排").click());
+  expect(vi.mocked(fetch).mock.calls[1]).toEqual(vi.mocked(fetch).mock.calls[0]);
+});

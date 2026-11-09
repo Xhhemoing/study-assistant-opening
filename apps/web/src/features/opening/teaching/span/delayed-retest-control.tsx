@@ -36,14 +36,16 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
   async function schedule(automatic = false) {
     if (busy.current || automatic && autoGrantRevision.current === null) return;
     const current = epoch.current;
-    busy.current = true; setPending(true); setError(""); setUnknownMode(null);
+    const confirmingUnknownAutomatic = automatic && unknownMode === "automatic";
+    busy.current = true; setPending(true); setError("");
+    if (!confirmingUnknownAutomatic) setUnknownMode(null);
     let definitiveFailure = false;
     const identity = automatic ? triggerIdentity() : null;
     try {
       // Persist the exact trigger before dispatch; a remount must not retry an unknown write.
       if (identity) {
         try { saveDelayedRetestAttempt(identity, "pending"); }
-        catch { definitiveFailure = true; throw new Error("无法保存自动复测触发身份，本次未发送安排请求；请查看今日任务，或手动安排。"); }
+        catch { definitiveFailure = !confirmingUnknownAutomatic; throw new Error(confirmingUnknownAutomatic ? "这次确认未能发出，上次安排的保存结果仍未确认；请查看今日任务，或稍后再次确认。" : "无法保存自动复测触发身份，本次未发送安排请求；请查看今日任务，或手动安排。"); }
       }
       const response = await fetch(`/api/opening/teaching/span/delayed${automatic ? "/automatic" : ""}`, { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ observationId: record.id, clientKey: `span-delayed:${record.rootObservationId ?? record.id}`, ...(automatic ? { expectedGrantRevision: autoGrantRevision.current } : {}) }) });
@@ -96,6 +98,19 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
     setReceipt(null); setUnknownMode(null); setUndo(null); setError(""); setBlocked(false); autoGrantRevision.current = null;
     busy.current = false; setPending(false);
     if (!shouldAutoScheduleRetest(record)) return () => { epoch.current += 1; };
+    // Recover an unknown write before preference I/O. Preference failure cannot
+    // prove that the earlier write failed or permit switching it to manual.
+    try {
+      const prior = readDelayedRetestAttempt({ courseId: record.courseId, observationId: record.id,
+        rootId: record.rootObservationId ?? record.id, grantRevision: 0 });
+      if (prior?.phase === "pending") {
+        autoGrantRevision.current = prior.grantRevision;
+        setUnknownMode("automatic");
+      }
+    } catch (reason) {
+      setError(userFacingMessage(reason, "自动安排记录暂时无法读取，请先查看今日任务。"));
+      return () => { epoch.current += 1; };
+    }
     busy.current = true; setPending(true);
     void api.getAdaptivePrefs().then(preferences => {
       if (current !== epoch.current) return;
@@ -107,7 +122,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       if (prior?.phase === "pending") {
         // Even revoking a grant must not change the identity of an unconfirmed write.
         autoGrantRevision.current = prior.grantRevision;
-        setUnknownMode("automatic"); setError("上次自动安排的保存结果未确认，请查看今日任务，或用原请求明确重新确认。");
+        setUnknownMode("automatic"); setError("上次自动安排的保存结果未确认，请查看今日任务，或点击按钮再次确认这次安排。");
         return;
       }
       if (grant?.enabled) {
@@ -148,7 +163,7 @@ export function SpanDelayedRetestControl({ record }: { record: LearningObservati
       <button type="button" className={ui.secondary} disabled={pending || record.serverEvaluation?.decision === "abstain"} onClick={() => void schedule(unknownMode === "automatic")}>
         {pending ? "正在核对复测安排…" : unknownMode === "automatic" ? "重新确认自动安排" : unknownMode === "manual" ? "重新确认复测安排" : "安排 3 天后再练习"}
       </button>
-      <p className="text-xs leading-6 text-text-3">{unknownMode ? "先确认这次安排是否已保存，暂不更换安排方式。" : blocked ? "自动安排已停止。原复测任务未取消或改题；如需手动安排，服务器仍会重新核对资格。" : "隔 3 天再做一道新题，看看哪些内容还记得。"}</p>
+      <p className="text-xs leading-6 text-text-3">{unknownMode ? "先确认这次安排是否已保存，暂不更换安排方式。" : blocked ? "自动安排已停止。原复测任务未取消或改题；如需手动安排，系统仍会核对现在能否安排。" : "隔 3 天再做一道新题，看看哪些内容还记得。"}</p>
       {blocked || unknownMode ? <Link className={ui.quiet} href="/opening/today">查看今日任务</Link> : null}
     </>}
     {error ? <p role="alert" className="text-xs leading-6 text-danger">{error}</p> : null}
