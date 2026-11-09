@@ -200,6 +200,23 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   return {
     async create(scope, input) {
       return sql.begin(async tx => {
+        const unavailable = input.uploadId ? "Upload operation unavailable" : "Workspace not found";
+        // Preserve the original owner/UUID boundary before history SQL, without
+        // taking a business row lock ahead of the workspace history fence.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId}`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", unavailable);
+        try {
+          await lockWorkspaceLearningHistory(tx, scope);
+        } catch (error) {
+          // Ownership can change after the plain lookup. Translate only the
+          // helper's exact workspace error; database/lock failures must escape.
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found") {
+            throw new OpeningSourceError("NOT_FOUND", unavailable);
+          }
+          throw error;
+        }
         if (input.uploadId) {
           // A replay must not reserve quota again. The existing workspace lock
           // serializes same-owner requests before consulting the source PK.
@@ -275,10 +292,38 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
 
     async issueUploadTicket(scope, id, sign) {
       return sql.begin(async tx => {
+        // Preserve the original source-only boundary before coordinating history.
+        // The supplied owner is not authorization input for this method.
+        const initial = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId}`;
+        if (!initial.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        if (initial[0]!.upload_state !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        const owners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        const ownerUserId = owners[0]!.owner_user_id as string;
+        try {
+          await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId });
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found") {
+            const current = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (!current.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+            throw new OpeningSourceError("CONFLICT", "Upload history coordination changed");
+          }
+          throw error;
+        }
+        // FOR SHARE (not KEY SHARE) fences non-key owner updates through sign
+        // and commit. Dynamic owner drift is a coordination conflict, not auth.
+        const currentOwners = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
+        if (!currentOwners.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
+        if (currentOwners[0]!.owner_user_id !== ownerUserId) {
+          throw new OpeningSourceError("CONFLICT", "Upload history coordination changed");
+        }
         const rows = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
         if (!rows.length) throw new OpeningSourceError("NOT_FOUND", "Source not found");
         const source = mapSource(rows[0] as Record<string, unknown>);
         if (source.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        // Awaiting the existing signer holds these locks. DB rollback cannot
+        // revoke a ticket if a supplied signer has already issued it externally.
         const ticket = await sign(source);
         await tx`UPDATE opening_sources SET upload_url_expires_at=${new Date(ticket.expiresAt)} WHERE id=${id} AND workspace_id=${scope.workspaceId}`;
         return { source, ...ticket };

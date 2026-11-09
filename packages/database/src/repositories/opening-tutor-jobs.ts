@@ -173,13 +173,37 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     staleBefore?: Date;
   }): Promise<boolean> {
     const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
+    // Only this invocation can request the post-rollback, read-only deletion path.
+    const workspaceDeleted = new Error("terminal workspace deleted after history ensure");
     return sql.begin(async (tx) => {
-      // Use the same workspace-first lock order as completeTurn/cancel.
-      await tx`
-        SELECT id FROM workspaces
+      // Recovery supplies an empty owner, and this legacy CAS has no owner
+      // predicate. Canonical ownership coordinates history only, not authorization.
+      const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.scope.workspaceId}`;
+      let historyLocked = false;
+      if (canonical) {
+        try {
+          await lockWorkspaceLearningHistory(tx, { workspaceId: input.scope.workspaceId, ownerUserId: canonical.owner_user_id });
+          historyLocked = true;
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found")) throw error;
+          const remaining = await tx`SELECT id FROM workspaces WHERE id=${input.scope.workspaceId}`;
+          if (remaining.length) throw error;
+          // Deleted before ensure: retain the original workspace/job queries,
+          // including their UUID cast errors, rather than returning early.
+        }
+      }
+      const [workspace] = await tx`
+        SELECT id, owner_user_id FROM workspaces
         WHERE id = ${input.scope.workspaceId}
         FOR UPDATE
       `;
+      if (historyLocked) {
+        if (!workspace) throw workspaceDeleted;
+        if (workspace.owner_user_id !== canonical!.owner_user_id) {
+          throw new Error("terminal history coordination drift: workspace owner changed");
+        }
+      }
       const rows = input.status === "failed"
         ? await tx`
             UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
@@ -225,6 +249,15 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         `;
       }
       return true;
+    }).catch(async (error: unknown) => {
+      if (error !== workspaceDeleted) throw error;
+      // History's lazy insert must be rolled back before this no-write result.
+      // Keep the legacy missing-workspace job/token UUID errors; never retry CAS
+      // against a workspace that might subsequently be recreated.
+      await sql`SELECT id FROM opening_tutor_jobs
+        WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
+          AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid`;
+      return false;
     });
   }
 
@@ -378,13 +411,32 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     },
 
     async cancel(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
+      const coordinationChanged = new Error("cancel workspace changed after history ensure");
       return sql.begin(async (tx) => {
-        // Keep cancellation in the workspace-first order used by writeback.
-        await tx`
-          SELECT id FROM workspaces
+        // Canonical ownership selects the history key only. Cancellation still
+        // authorizes against the conversation owner, including after a static workspace move.
+        const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
+        let historyLocked = false;
+        if (canonical) {
+          try {
+            await lockWorkspaceLearningHistory(tx, { workspaceId: scope.workspaceId, ownerUserId: canonical.owner_user_id });
+            historyLocked = true;
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+              && error.message === "workspace not found")) throw error;
+            const remaining = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}`;
+            if (remaining.length) throw error;
+            // Confirmed deletion retains the original queries and UUID errors.
+          }
+        }
+        const [workspace] = await tx`
+          SELECT id, owner_user_id FROM workspaces
           WHERE id = ${scope.workspaceId}
           FOR UPDATE
         `;
+        // New coordination refusal: roll back lazy history before returning null.
+        // Never relock a new owner or retry a write against a recreated workspace.
+        if (historyLocked && (!workspace || workspace.owner_user_id !== canonical!.owner_user_id)) throw coordinationChanged;
         const rows = await tx`
           UPDATE opening_tutor_jobs j
           SET status = 'cancelled', updated_at = now(), error = ${tx.json({ message: "cancelled by user" } as never)}
@@ -406,6 +458,18 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
         return mapJob(rows[0] as Record<string, unknown>);
+      }).catch(async (error: unknown) => {
+        if (error !== coordinationChanged) throw error;
+        // Preserve the original CAS's filtering/casts (notably invalid job UUIDs)
+        // after rollback, without retrying cancellation or exposing any row.
+        await sql`SELECT j.id FROM opening_tutor_jobs j, opening_conversations c
+          WHERE j.id = ${id}
+            AND j.workspace_id = ${scope.workspaceId}
+            AND c.id = j.conversation_id
+            AND c.workspace_id = ${scope.workspaceId}
+            AND c.owner_user_id = ${scope.ownerUserId}
+            AND j.status IN ('queued', 'running')`;
+        return null;
       });
     },
 
@@ -494,7 +558,22 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       enqueueMetadata?: boolean;
     }, options?: { materialPurposePin?: OpeningMaterialPurposePin }): Promise<void> {
       await sql.begin(async (tx) => {
-        if (input.helpExposure || input.generatedExposure) await lockWorkspaceLearningHistory(tx, input.scope);
+        if (input.helpExposure || input.generatedExposure) {
+          await lockWorkspaceLearningHistory(tx, input.scope);
+        } else {
+          // Preserve completion's permission error before history's lazy ensure,
+          // without taking a business-row lock ahead of the history fence.
+          const owner = await tx`SELECT id FROM workspaces
+            WHERE id=${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId}`;
+          if (!owner.length) throw new Error("workspace permission changed");
+          try {
+            await lockWorkspaceLearningHistory(tx, input.scope);
+          } catch (error) {
+            if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+              && error.message === "workspace not found") throw new Error("workspace permission changed");
+            throw error;
+          }
+        }
         const workspace = await tx`
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
