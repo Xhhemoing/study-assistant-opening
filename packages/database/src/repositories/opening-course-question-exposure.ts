@@ -9,7 +9,7 @@ import { reservedArithmeticIdentity, reservedArithmeticExposureText } from "./op
 
 type Db = Sql | TransactionSql;
 const protocol = "course-question-exposure-1";
-const grammar = "reserved-arithmetic-2";
+const grammar = "reserved-arithmetic-3";
 const descriptorSchema = z.object({ grammar: z.literal(grammar), complete: z.literal(true), expressions: z.array(z.string()), families: z.array(z.string()) }).strict();
 export type CourseQuestionExposureInput = {
   surfaceKey: string; kind: "teaching" | "example" | "hint" | "presented";

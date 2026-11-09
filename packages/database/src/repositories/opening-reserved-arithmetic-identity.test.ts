@@ -1,17 +1,31 @@
 import { expect, it } from "vitest";
 import { reservedArithmeticIdentity, reservedArithmeticExposureText } from "./opening-reserved-arithmetic-identity";
 import { extractCourseQuestionExposure } from "./opening-course-question-exposure";
+import { evaluateArithmeticQuestion } from "../../../domain/src/opening/arithmetic-check";
 
 it.each(["137 · 19", "137 × 19", "137\\times19", "$137*19$", "$$137*19$$", "\\(137*19\\)", "\\[137*19\\]", "计算： $137*19$ = ?", "$137*19 = ?$", "$$137*19 = ?$$", "\\(137*19 = ?\\)", "\\[137*19 = ?\\]"])("canonicalizes the complete supported rendering %s", text => {
   expect(reservedArithmeticIdentity(text)).toEqual(reservedArithmeticIdentity("137*19"));
   expect(reservedArithmeticExposureText(`Example: ${text}`)).toMatchObject({ complete: true, identity: { expression: "137*19" } });
+});
+it.each([["137*19", "+137*19"], ["1*2", "1*+2"], ["137*19", " + +137 * +19 "],
+  ["1+2", "1++2"], ["1-2", "1-+2"], ["1*-2", "1*+-+2"], ["1/2", "1/+2"],
+  ["(1+2)*3", "+(+1++2)*+3"], [".50*2", "+.50*+2"], ["(1/2)+3", "(+1/+2)++3"]])("identifies validated unary-plus aliases %s and %s", (plain, alias) => {
+  const value = evaluateArithmeticQuestion(plain);
+  expect(value).not.toBeNull();
+  expect(evaluateArithmeticQuestion(alias)).toEqual(value);
+  expect(reservedArithmeticIdentity(alias)).toEqual(reservedArithmeticIdentity(plain));
 });
 it("keeps exact rational grammar and different expressions with the same answer distinct", () => {
   expect(reservedArithmeticIdentity("$\\frac{1}{2}+3$" )).toEqual(reservedArithmeticIdentity("(1/2)+3"));
   expect(reservedArithmeticIdentity("2+3")?.value).toBe(reservedArithmeticIdentity("1+4")?.value);
   expect(reservedArithmeticIdentity("2+3")?.expression).not.toBe(reservedArithmeticIdentity("1+4")?.expression);
 });
-it.each(["137*", "$137*19", "137^19", "x+1", "1/0", "1 1/2 + 3", "137*19 if x>0", "137*19, truncated",
+it.each([["1+2", "1*2"], ["1*-2", "1*2"], ["1--2", "1-2"], ["(1+2)*3", "1+2*3"],
+  [".50*2", "0.5*2"], ["(1/2)+3", "1/2+3"], ["1*2", "2"]])("does not broaden identity from %s to %s", (one, two) => {
+  expect(reservedArithmeticIdentity(one)).not.toBeNull();
+  expect(reservedArithmeticIdentity(one)?.expression).not.toBe(reservedArithmeticIdentity(two)?.expression);
+});
+it.each(["+137*19 kg", "+137*19 if x>0", "+137*19 in figure", "+137*19 truncated", "1 + +", "1*+", "1 + + 2 3", "+$137*19", "+1/0", "1 +".repeat(130), "1+" + " ".repeat(401) + "2", "137*", "$137*19", "137^19", "x+1", "1/0", "1 1/2 + 3", "137*19 if x>0", "137*19, truncated",
   "$137*19 = ? = ?$", "$137*19 if x>0 = ?$", "$137*19 = ?$ = ? = ?", "137*19 (unsolved)", "Example: 137 · 19 +", "Example: 137*19 then x+1", "See 137*19 in figure", "137*19 and $unknown$", "Example: 137 -", "137 -", "x-y", "137 ·"])("does not certify a partial/unsupported surface %s", text => {
   expect(reservedArithmeticIdentity(text)).toBeNull();
   expect(extractCourseQuestionExposure(text).complete).toBe(false);
