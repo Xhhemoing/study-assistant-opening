@@ -277,12 +277,18 @@ export function createExplorationRepository(sql: Sql): ExplorationRepository {
       const branchId = input.branchId ?? randomUUID();
       assertUuid(branchId, "branchId");
       try {
-        const rows = await sql`
-          INSERT INTO exploration_branches (id, workspace_id, exploration_id, parent_branch_id, title)
-          VALUES (${branchId}, ${input.workspaceId}, ${input.explorationId}, ${input.parentBranchId}, ${title})
-          RETURNING *
-        `;
-        await sql`UPDATE explorations SET updated_at = now() WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId}`;
+        const rows = await sql.begin(async (tx) => {
+          const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId}`;
+          if (!workspace) throw new ExplorationRepositoryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+          await lockWorkspaceLearningHistory(tx, { workspaceId: input.workspaceId, ownerUserId: workspace.owner_user_id as string });
+          const rows = await tx`
+            INSERT INTO exploration_branches (id, workspace_id, exploration_id, parent_branch_id, title)
+            VALUES (${branchId}, ${input.workspaceId}, ${input.explorationId}, ${input.parentBranchId!}, ${title})
+            RETURNING *
+          `;
+          await tx`UPDATE explorations SET updated_at = now() WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId}`;
+          return rows;
+        });
         return mapBranch(rows[0] as Row);
       } catch (error) {
         if ((error as { code?: string }).code === "23505") throw new ExplorationRepositoryError("CONFLICT", "Branch already exists");
@@ -304,12 +310,18 @@ export function createExplorationRepository(sql: Sql): ExplorationRepository {
       assertUuid(blockId, "blockId");
       const position = input.position ?? Number((await sql`SELECT COALESCE(MAX(position) + 1, 0) AS position FROM exploration_blocks WHERE branch_id = ${input.branchId}`)[0]!.position);
       try {
-        const rows = await sql`
-          INSERT INTO exploration_blocks (id, workspace_id, exploration_id, branch_id, kind, content, position)
-          VALUES (${blockId}, ${input.workspaceId}, ${input.explorationId}, ${input.branchId}, ${kind.data}, ${content}, ${position})
-          RETURNING *
-        `;
-        await sql`UPDATE explorations SET updated_at = now() WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId}`;
+        const rows = await sql.begin(async (tx) => {
+          const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id = ${input.workspaceId}`;
+          if (!workspace) throw new ExplorationRepositoryError("NOT_FOUND", `Workspace not found: ${input.workspaceId}`);
+          await lockWorkspaceLearningHistory(tx, { workspaceId: input.workspaceId, ownerUserId: workspace.owner_user_id as string });
+          const rows = await tx`
+            INSERT INTO exploration_blocks (id, workspace_id, exploration_id, branch_id, kind, content, position)
+            VALUES (${blockId}, ${input.workspaceId}, ${input.explorationId}, ${input.branchId}, ${kind.data}, ${content}, ${position})
+            RETURNING *
+          `;
+          await tx`UPDATE explorations SET updated_at = now() WHERE id = ${input.explorationId} AND workspace_id = ${input.workspaceId}`;
+          return rows;
+        });
         return mapBlock(rows[0] as Row);
       } catch (error) {
         if ((error as { code?: string }).code === "23505") throw new ExplorationRepositoryError("CONFLICT", "Block position already exists");
