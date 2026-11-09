@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { courseRouteDelayedProtocolSchema,readOpeningCourseRouteRetestOutcome } from "./opening-course-route-retest-state";
 import type { CourseRouteSourceChunk } from "@aistudy/domain";
-import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
+import { decideCourseRouteVerification, readCourseSpanBindingOptions } from "./opening-course-route-verification-policy";
 import { readCourseRouteCompilation } from "./opening-course-route-compilation";
 import { readSharedCourseEvidence } from "./opening-course-shared-skill-projection";
 import type { ExamCourseRouteObservation } from "./opening-course-exam-evidence-projection";
@@ -135,6 +135,7 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
   const currentHead=current?observations.raw.filter(row=>row.activityId===String(current.id))
     .sort((a,b)=>Date.parse(b.submittedAt??b.occurredAt)-Date.parse(a.submittedAt??a.occurredAt)||b.id.localeCompare(a.id))[0]:null;
   return {courseId,scopeState:!requirements.length?"missing":requirements.every(row=>row.approvedAt!==null)?"confirmed":"unconfirmed",requirements:progress,
+    ...(exactVerificationEnabled ? { spanBindingOptions: readCourseSpanBindingOptions() } : {}),
     suggestions:await suggestions(db,scope,courseId,requirements,exactVerificationEnabled),materials,currentActivity:current?mapTeachingActivity(current):null,currentRoute,observationId:currentHead?.id??null,
     summary:{total:progress.length,mandatory:progress.filter(row=>row.requirement.mandatory).length,
       verified:progress.filter(row=>row.status==="verified").length,blocked:progress.filter(row=>row.status==="blocked").length}};

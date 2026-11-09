@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
-import { nextLearningStep } from "@aistudy/domain";
+import { nextLearningStep, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { resolveCourseSpanExerciseKeys } from "../../packages/database/src/repositories/opening-course-route-verification-policy";
 import { createOpeningSpanTutorContextRepository } from "../../packages/database/src/repositories/opening-span-tutor-context";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
 import { readOpeningLearningCapacity } from "../../packages/database/src/repositories/opening-learning-capacity";
@@ -19,6 +20,7 @@ import { validateBackupRetestProtocols } from "../../packages/domain/src/opening
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
+import { createCourseRouteService } from "../../apps/web/src/features/opening/teaching/course-route-service";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
@@ -152,6 +154,53 @@ it("rolls back course activity, compile, budget and origin completion when its d
   expect(await f.sql`SELECT id,status,path_version,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
   expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toEqual(jobs);
   expect(await f.sql`SELECT id FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual(receipts);
+});
+async function confirmSpanContent() {
+  const x = await seed(), repo = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true, exactVerificationEnabled: true });
+  const requirement: CourseRouteRequirementInput = { ...x.requirements[0]!, id: randomUUID(), stableSkillId: randomUUID(),
+    requirementKey: SPAN_REQUIREMENT_KEY, title: "明确确认的二维线性组合", verification: { kind: "exact", status: "missing", exerciseKeys: ["forged"], rubric: null, missingReasons: ["client"] } };
+  const request = { expectedRevisions: [{ id: x.requirements[0]!.id, revision: 1 }], requirements: [requirement], confirmScope: true as const,
+    spanBindings: [{ requirementId: requirement.id, exerciseKeys: ["span-example-2d"], confirmContent: true as const }] };
+  return { ...x, repo, requirement, request };
+}
+it("confirms public span content through the normal manifest API without trusting submitted verification", async () => {
+  const x = await confirmSpanContent(), service = createCourseRouteService(f.sql), snapshot = await service.confirm(f.scope, x.courseId, x.request);
+  const keys = resolveCourseSpanExerciseKeys(["span-example-2d"]);
+  expect(snapshot.requirements[0]!.requirement.verification).toEqual({ kind: "exact", status: "ready", exerciseKeys: keys, rubric: null, missingReasons: [] });
+  expect(snapshot.spanBindingOptions?.find(option => option.id === "span-example-2d")).toMatchObject({ version: "1", dimension: 2, familyId: "span:independent-2d" });
+  expect(snapshot.spanBindingOptions?.some(option => option.id.includes("validation"))).toBe(false);
+  const stored = snapshot.requirements[0]!.requirement;
+  expect((await x.repo.confirm(f.scope, x.courseId, x.request)).requirements[0]!.requirement).toEqual(stored);
+  expect((await x.repo.confirm(f.scope, x.courseId, { expectedRevisions: [], requirements: [x.requirement], confirmScope: true })).requirements[0]!.requirement).toEqual(stored);
+  const before = await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`;
+  const budget = await readOpeningLearningCapacity(f.sql, f.scope);
+  expect(await service.start(f.scope, x.courseId, { goalId: x.goal.id, expectedGoalRevision: 1, requirementId: stored.id,
+    expectedRequirementRevision: stored.revision, clientKey: randomUUID(), minutes: 20 })).toMatchObject({ kind: "choice", reason: "binding_unavailable" });
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
+  expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(budget.usedMinutes);
+});
+it("rejects hidden span identities, disabled features, changed skill identities and missing source fragments atomically", async () => {
+  const x = await confirmSpanContent();
+  const before = await x.repo.read(f.scope, x.courseId);
+  for (const exerciseKeys of [["span-reserved-20261021-q01"], ["teaching-item:forged"], ["span-example-2d:v2"]])
+    await expect(x.repo.confirm(f.scope, x.courseId, { ...x.request, spanBindings: [{ ...x.request.spanBindings[0]!, exerciseKeys }] })).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true }).confirm(f.scope, x.courseId, x.request)).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(x.repo.confirm(f.scope, x.courseId, { ...x.request, requirements: [{ ...x.requirement, sourceRefs: [{ sourceId: x.sourceId, sourceVersion: 1, chunkId: randomUUID() }] }] })).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_SOURCE_UNAVAILABLE" });
+  await expect(x.repo.confirm(f.scope, x.courseId, { ...x.request, requirements: [{ ...x.requirement, id: x.requirements[0]!.id }],
+    spanBindings: [{ ...x.request.spanBindings[0]!, requirementId: x.requirements[0]!.id }] })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await x.repo.read(f.scope, x.courseId)).requirements).toEqual(before.requirements);
+});
+it("does not backfill old exact keys and requires explicit reconfirmation after a definition change", async () => {
+  const x = await confirmSpanContent();
+  const unbound = await x.repo.confirm(f.scope, x.courseId, { ...x.request, spanBindings: undefined });
+  expect(unbound.requirements[0]!.requirement.verification.exerciseKeys).toEqual([]);
+  const request = { ...x.request, expectedRevisions: [{ id: x.requirement.id, revision: 1 }] };
+  const bound = await x.repo.confirm(f.scope, x.courseId, request);
+  expect(bound.requirements[0]!.requirement.revision).toBe(2);
+  const changed = await x.repo.confirm(f.scope, x.courseId, { requirements: [{ ...x.requirement, title: "重新定义后的要求" }], confirmScope: true,
+    expectedRevisions: [{ id: x.requirement.id, revision: 2 }] });
+  expect(changed.requirements[0]!.requirement.verification.exerciseKeys).toEqual([]);
+  expect(changed.requirements[0]!.requirement.revision).toBe(3);
 });
 it("reads all 45 confirmed requirements including material gaps and replays confirmation without revision churn",async()=>{
   const x=await seed(45),snapshot=await x.repo.read(f.scope,x.courseId);expect(snapshot.summary.total).toBe(45);

@@ -17,11 +17,32 @@ const requirementDefinition = {id:uuidSchema,stableSkillId:uuidSchema,knowledgeN
 export const courseRouteRequirementInputSchema = z.object(requirementDefinition).strict();
 export const courseRequirementSchema = z.object({...requirementDefinition,courseId:uuidSchema,revision:z.number().int().positive(),
   lifecycle:z.enum(["active","archived"]),approvedAt:isoDateTimeSchema.nullable()}).strict();
+/** The current public teaching catalogue has six entries. Hidden banks are not confirmation inputs. */
+export const COURSE_SPAN_PUBLIC_TEACHING_LIMIT = 6;
+export const courseSpanBindingInputSchema = z.object({
+  requirementId: uuidSchema,
+  exerciseKeys: z.array(z.string().trim().min(1).max(200)).min(1).max(COURSE_SPAN_PUBLIC_TEACHING_LIMIT),
+  confirmContent: z.literal(true),
+}).strict().superRefine((value, ctx) => {
+  if (new Set(value.exerciseKeys).size !== value.exerciseKeys.length)
+    ctx.addIssue({ code: "custom", path: ["exerciseKeys"], message: "Duplicate teaching identities" });
+});
+export const courseSpanBindingOptionSchema = z.object({
+  id: z.string().min(1).max(200), version: z.literal("1"), familyId: z.string().min(1).max(200),
+  dimension: z.union([z.literal(2), z.literal(3)]), supportedScope: z.string().min(1).max(500),
+}).strict();
 export const courseRouteConfirmSchema = z.object({expectedRevisions:z.array(z.object({id:uuidSchema,revision:z.number().int().positive()}).strict()),
-  requirements:z.array(courseRouteRequirementInputSchema).min(1),confirmScope:z.literal(true)}).strict().superRefine((value,ctx)=>{
+  requirements:z.array(courseRouteRequirementInputSchema).min(1),confirmScope:z.literal(true),
+  spanBindings:z.array(courseSpanBindingInputSchema).optional()}).strict().superRefine((value,ctx)=>{
   for(const key of ["id","requirementKey","stableSkillId"] as const) if(new Set(value.requirements.map(row=>row[key])).size!==value.requirements.length)
     ctx.addIssue({code:"custom",message:`Duplicate ${key}`});
   const ids=new Set(value.requirements.map(row=>row.id));
+  if (value.spanBindings) {
+    if (value.spanBindings.length > value.requirements.length || new Set(value.spanBindings.map(row => row.requirementId)).size !== value.spanBindings.length)
+      ctx.addIssue({ code: "custom", path: ["spanBindings"], message: "One binding per requirement" });
+    for (const binding of value.spanBindings) if (!ids.has(binding.requirementId))
+      ctx.addIssue({ code: "custom", path: ["spanBindings"], message: "Binding must reference this manifest" });
+  }
   for(const row of value.requirements) if(row.prerequisiteIds.some(id=>id===row.id||!ids.has(id)))
     ctx.addIssue({code:"custom",message:"Prerequisites must reference another requirement in this course"});
 });
@@ -72,13 +93,14 @@ export const courseRouteActivityContextSchema=z.object({goalId:uuidSchema,goalRe
   coveredRequirementIds:z.array(uuidSchema).optional(),comprehensiveRunKey:z.string().min(8).max(200).optional(),retestId:uuidSchema.optional()}).strict();
 export const courseRouteSnapshotSchema=z.object({courseId:uuidSchema,scopeState:z.enum(["missing","unconfirmed","confirmed"]),
   requirements:z.array(courseRequirementProgressSchema),suggestions:z.array(courseRouteRequirementInputSchema),
+  spanBindingOptions:z.array(courseSpanBindingOptionSchema).max(COURSE_SPAN_PUBLIC_TEACHING_LIMIT).optional(),
   summary:z.object({total:z.number().int(),mandatory:z.number().int(),verified:z.number().int(),blocked:z.number().int()}).strict(),
   materials:z.array(z.object({sourceId:uuidSchema,sourceVersion:z.number().int(),title:z.string(),available:z.boolean()}).strict()),
   currentActivity:teachingActivitySchema.nullable(),currentRoute:courseRouteActivityContextSchema.nullable(),observationId:uuidSchema.nullable()}).strict();
 export const courseRouteActionResultSchema=z.discriminatedUnion("kind",[
   z.object({kind:z.literal("ready"),activity:teachingActivitySchema,href:z.string(),resumed:z.boolean(),
     requirementId:uuidSchema,action:z.enum(["diagnose","targeted_explain","reduced_help_practice","transfer_check","full_explain","prerequisite","return","comprehensive"])}).strict(),
-  z.object({kind:z.literal("choice"),reason:z.enum(["scope_unconfirmed","source_unavailable","verification_unavailable","evidence_unknown","evidence_changed","configuration","course_complete","retest_waiting","retest_expired","retest_cancelled"]),
+  z.object({kind:z.literal("choice"),reason:z.enum(["scope_unconfirmed","source_unavailable","verification_unavailable","evidence_unknown","evidence_changed","configuration","course_complete","retest_waiting","retest_expired","retest_cancelled","authorization_required","binding_unavailable"]),
     message:z.string(),courseId:uuidSchema,href:z.string(),requirementIds:z.array(uuidSchema)}).strict(),
 ]);
 export type CourseRequirement=z.infer<typeof courseRequirementSchema>;

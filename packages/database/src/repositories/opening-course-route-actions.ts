@@ -13,8 +13,10 @@ import { captureOpeningCourseRouteDecision } from "./opening-course-route-decisi
 import { recordOpeningLearningDecision } from "./opening-learning-decisions";
 import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedRecovery, type CourseReservedStart } from "./opening-course-route-reserved-start";
 
+import { readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
+
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
-const messages={scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
+const messages={binding_unavailable:"已确认 span 内容归属，但课程静态 span 执行桥尚不可用；未创建通用教学活动或消耗预算。",scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
   verification_unavailable:"本要求尚缺可用习题或判定标准；保留已有学习与答案，请补充验证材料。",evidence_unknown:"当前答案尚无可靠判定，请先核对评价；不会把缺少证据当作不会。",
   evidence_changed:"原活动的要求、材料或评价已变化，请读取当前课程路线再选择；已有活动和答案保留。",configuration:"教学内容生成尚未开启，未创建空白活动。",
   course_complete:"已完成当前确认范围的当前检查与逐项综合收尾；延迟验证单独记录。可回看课程记录，或明确安排延迟复测与维护。",
@@ -61,6 +63,9 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const current=progress.find(row=>row.requirement.id===requestedId);
     if(!current)throw learningError("CONFLICT","要求已移出当前目标范围，请重新读取课程路线。");
     if("requirementId" in input&&current.requirement.revision!==input.expectedRequirementRevision)throw learningError("CONFLICT","课程要求已更新，请重新读取。");
+    // Safe checkpoint: confirmed canonical scope must never fall through to compiler/generic execution.
+    if (readConfirmedCourseSpanExerciseKeys(current.requirement.requirementKey, current.requirement.verification))
+      return choice(courseId, "binding_unavailable", [current.requirement.id]);
     let boundRetestId:string|undefined;
     if("requirementId" in input&&input.taskId){
       const [task]=await tx`SELECT * FROM opening_tasks WHERE id=${input.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -141,6 +146,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     if(boundRetestId&&selected.requirement.requirementKey==="arithmetic"&&selected.requirement.verification.kind==="exact"&&!reservedStart)
       throw learningError("CONFLICT","保留复测缺少原始用途快照，请重新开始当前任务。");
     if(!selected.sourcesAvailable)return choice(courseId,"source_unavailable",[selected.requirement.id]);
+    if (readConfirmedCourseSpanExerciseKeys(selected.requirement.requirementKey, selected.requirement.verification))
+      return choice(courseId, "binding_unavailable", [selected.requirement.id]);
     const all=await readCourseRouteObservations(tx,scope,courseId);
     const decisionInput=courseRouteDecisionInput(selected.requirement,all.projected.map(row=>currentObservation&&row.id===currentObservation.id?currentObservation:row),{dueRetest:Boolean(boundRetestId),origin:currentObservation});
     const observations=decisionInput.observations;
