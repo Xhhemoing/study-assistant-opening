@@ -200,6 +200,23 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   return {
     async create(scope, input) {
       return sql.begin(async tx => {
+        const unavailable = input.uploadId ? "Upload operation unavailable" : "Workspace not found";
+        // Preserve the original owner/UUID boundary before history SQL, without
+        // taking a business row lock ahead of the workspace history fence.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId}`;
+        if (!owners.length) throw new OpeningSourceError("NOT_FOUND", unavailable);
+        try {
+          await lockWorkspaceLearningHistory(tx, scope);
+        } catch (error) {
+          // Ownership can change after the plain lookup. Translate only the
+          // helper's exact workspace error; database/lock failures must escape.
+          if (error instanceof Error && "code" in error && error.code === "NOT_FOUND"
+            && error.message === "workspace not found") {
+            throw new OpeningSourceError("NOT_FOUND", unavailable);
+          }
+          throw error;
+        }
         if (input.uploadId) {
           // A replay must not reserve quota again. The existing workspace lock
           // serializes same-owner requests before consulting the source PK.
