@@ -161,7 +161,22 @@ test("every job in every workflow pins a runner image that the pinned Playwright
     for (const { name, block } of jobs) {
       if (/^[ ]{4}uses:/m.test(block)) continue; // reusable workflow call: the callee pins its own runner
       const runner = block.match(/^[ ]{4}runs-on:[ \t]*["']?([^"'\s#]+)["']?/m)?.[1];
-      assert.equal(runner, "ubuntu-24.04", `${file} job ${name} must pin runs-on: ubuntu-24.04`);
+      const releaseBuild = file === "ci.yml" && name === "build";
+      assert.equal(runner, releaseBuild ? "ubuntu-22.04" : "ubuntu-24.04",
+        `${file} job ${name} must pin its supported quality or exact production image`);
+      if (releaseBuild) {
+        const job = parsedJobs.build;
+        assert.equal(job.name, "production-build");
+        assert.equal(job.steps.find(step => step.uses === "actions/setup-node@v4").with["node-version"], "24.19.0");
+        const pin = job.steps.findIndex(step => step.name === "Pin release npm");
+        const platform = job.steps.findIndex(step => step.name === "Verify exact release platform");
+        const install = job.steps.findIndex(step => step.name === "Install dependencies");
+        assert.ok(pin >= 0 && pin < platform && platform < install, "exact platform check precedes dependency installation");
+        assert.match(job.steps[pin].run, /npm install --global npm@11\.17\.0/);
+        assert.match(job.steps[platform].run, /assert\.deepEqual\(platform,/);
+        for (const field of ["node: '24.19.0'", "npm: '11.17.0'", "os: 'linux'", "arch: 'x64'", "libc: 'glibc-2.35'"])
+          assert.ok(job.steps[platform].run.includes(field), `exact release platform requires ${field}`);
+      }
     }
   }
   assert.ok(jobBlocks(workflow).length >= 9);

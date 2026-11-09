@@ -393,7 +393,8 @@ jobs:
     name: production-build
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-24.04
+    # Match the deployment verifier's exact runtime; verify the hosted image below.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -404,8 +405,39 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24.19.0"
           cache: npm
+      - name: Pin release npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(npm --version)" != "11.17.0" ]; then
+            npm install --global npm@11.17.0
+          fi
+      - name: Verify exact release platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          const header = process.report.getReport().header;
+          const platform = {
+            node: process.versions.node,
+            npm: execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim(),
+            os: process.platform,
+            arch: process.arch,
+            libc: header.glibcVersionRuntime ? `glibc-${header.glibcVersionRuntime}` : 'unknown',
+          };
+          console.log(JSON.stringify(platform, null, 2));
+          assert.deepEqual(platform, {
+            node: '24.19.0',
+            npm: '11.17.0',
+            os: 'linux',
+            arch: 'x64',
+            libc: 'glibc-2.35',
+          }, 'Release runner Node/npm/OS/arch/libc must match production exactly');
+          NODE
       - name: Install dependencies
         run: npm ci
       - name: Build
