@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { courseRequirementSchema, questionSourceRefSchema, teachingQuestionInteractionSchema, type CourseRequirement, type Scope } from "@aistudy/contracts";
+import { courseRequirementSchema, questionSourceRefSchema, teachingQuestionInteractionSchema, type CourseRequirement, type ReservedRetestQualification, type Scope } from "@aistudy/contracts";
 import { checkArithmeticAnswer } from "@aistudy/domain";
 import { reservedArithmeticIdentity } from "./opening-reserved-arithmetic-identity";
 export { reservedArithmeticIdentity } from "./opening-reserved-arithmetic-identity";
@@ -226,6 +226,12 @@ export async function issueOpeningReservedQuestion(tx: TransactionSql, scope: Sc
     teachingBlock: { blockId, contentVersion: 1 } });
   await tx`UPDATE opening_course_reserved_questions SET state='issued',issued_item_version_id=${attempt.itemVersionId!},issued_at=clock_timestamp()
     WHERE id=${String(reserved.id)} AND state='reserved'`;
+  // Capture the conservative diagnostic in the same transaction, before the
+  // public presentation receipt. This is NOT an independence/exposure claim.
+  const qualification = reservedRetestUnavailable();
+  await tx`UPDATE opening_learning_attempts SET create_intent=create_intent ||
+    ${tx.json({ reservedRetestQualification: qualification })}::jsonb WHERE id=${attempt.id}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   await recordCourseQuestionExposure(tx, scope, { surfaceKey: `issued:${reserved.id}`, kind: "presented",
     text: trusted.question.text, identityRefId: String(reserved.identity_ref_id), itemVersionId: attempt.itemVersionId!,
     sourceVersions: reserved.source_versions as Record<string, number> });
@@ -244,9 +250,48 @@ export async function readOpeningReservedKey(db: Db, scope: Scope, itemVersionId
 
 /** Reuse the issued immutable item for retries/new sessions, never create a second owner. */
 export async function readOpeningReservedIssuedItem(db: Db, scope: Scope, activityId: string, blockId: string) {
-  const [row] = await db`SELECT v.* FROM opening_course_reserved_questions q JOIN opening_learning_item_versions v
+  const [row] = await db`SELECT v.*,q.id AS reserved_question_id FROM opening_course_reserved_questions q JOIN opening_learning_item_versions v
     ON v.id=q.issued_item_version_id AND v.workspace_id=q.workspace_id AND v.owner_user_id=q.owner_user_id
     WHERE q.workspace_id=${scope.workspaceId} AND q.owner_user_id=${scope.ownerUserId} AND q.reserved_activity_id=${activityId}
       AND q.state='issued' AND v.teaching_block_id=${blockId}`;
   return row ?? null;
+}
+
+/** Server evidence only, never HTTP/model/self-report flags. Each true must be
+ * established by its fact owner, not inferred from a deterministic verdict.
+ * Content, purpose, sources and identity are distinct; history is BEFORE issue,
+ * whereas help/reveal must remain excluded through answer submission.
+ */
+type Evidence = Partial<Record<"contentCurrent" | "purposeCurrent" | "sourcesCurrent" | "stableIdentity"
+  | "preIssueHistoryComplete" | "previouslyUnseen" | "noHelp" | "noAnswerReveal" | "independentBlindSolve", boolean | null>>;
+const checks = [
+  ["contentCurrent", "content_version_unconfirmed", "题目内容版本尚未核实。"],
+  ["purposeCurrent", "purpose_pin_unconfirmed", "原始材料用途回执尚未核实。"],
+  ["sourcesCurrent", "source_version_unconfirmed", "来源材料版本尚未核实。"],
+  ["stableIdentity", "stable_identity_missing", "保留题身份尚未接入独立作答证据规则。"],
+  ["preIssueHistoryComplete", "pre_issue_history_missing", "缺少可供独立复测使用的发题前历史凭据，不能用发题后的曝光反推。"],
+  ["previouslyUnseen", "unseen_evidence_missing", "缺少与本次题目绑定的未见保留题凭据。"],
+  ["noHelp", "help_not_excluded", "尚不能确认本次独立作答全程未使用帮助。"],
+  ["noAnswerReveal", "answer_reveal_not_excluded", "尚不能确认本次独立作答前未查看答案。"],
+  ["independentBlindSolve", "independent_blind_solve_missing", "缺少独立盲解核验证据；确定性判分不等于独立复测。"],
+] as const;
+
+export function evaluateReservedRetestQualification(evidence: Evidence): ReservedRetestQualification {
+  const reasons = checks.filter(([field]) => evidence[field] !== true).map(([, code, message]) => ({ code, message }));
+  return { eligible: reasons.length === 0, reasons };
+}
+
+/** Current reserved-arithmetic path validates these three pins before issuing
+ * and again before grading. It has NO independent identity/blind-solve bridge.
+ * Do not invent one from answer correctness, a request flag or current exposure.
+ * The returned diagnostic is always unavailable and grants no evidence rights.
+ */
+export function reservedRetestUnavailable(): ReservedRetestQualification {
+  return evaluateReservedRetestQualification({ contentCurrent: true, purposeCurrent: true, sourcesCurrent: true });
+}
+
+/** Safe fallback for old hinted receipts and pure attempt mappers, which cannot
+ * revalidate live pins. Never trust persisted eligible=true as a capability. */
+export function unconfirmedReservedRetestQualification(): ReservedRetestQualification {
+  return evaluateReservedRetestQualification({});
 }

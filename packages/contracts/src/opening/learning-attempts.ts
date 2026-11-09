@@ -42,11 +42,22 @@ export const learningAttemptSubmitInputSchema = z.object({
 }).strict();
 export const courseRequirementBindingSchema = z.object({ id: uuidSchema, revision: z.number().int().positive(),
   stableSkillId: uuidSchema, requirementKey: z.string().trim().min(1).max(200) }).strict();
+/** Diagnostic only: never accepted by attempt creation/submission or used as mastery evidence. */
+export const reservedRetestQualificationSchema = z.object({
+  eligible: z.boolean(),
+  reasons: z.array(z.object({ code: z.enum([
+    "content_version_unconfirmed", "purpose_pin_unconfirmed", "source_version_unconfirmed", "stable_identity_missing",
+    "pre_issue_history_missing", "unseen_evidence_missing", "help_not_excluded", "answer_reveal_not_excluded",
+    "independent_blind_solve_missing",
+  ]), message: z.string().min(1) }).strict()),
+}).strict().refine(value => value.eligible ? value.reasons.length === 0 : value.reasons.length > 0);
+export type ReservedRetestQualification = z.infer<typeof reservedRetestQualificationSchema>;
 export const learningAttemptSchema = z.object({
   id: uuidSchema, workspaceId: uuidSchema, sessionId: uuidSchema, courseId: uuidSchema,
   skillLabel: z.string(), requirementKey: z.string().nullable(),
   problemId: uuidSchema.nullable(), itemVersionId: uuidSchema.nullable(),
   courseRequirement: courseRequirementBindingSchema.optional(),
+  reservedRetestQualification: reservedRetestQualificationSchema.optional(),
   stemSnapshot: z.string().min(1).refine(value => Array.from(value).length <= 2000, "question snapshot exceeds 2000 characters").optional(),
   sourceIds: z.array(uuidSchema), sourceVersions: sourceVersionsSchema,
   startedAt: isoDateTimeSchema, submittedAt: isoDateTimeSchema.nullable(),

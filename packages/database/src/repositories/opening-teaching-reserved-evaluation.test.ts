@@ -4,7 +4,9 @@ import { evaluateOpeningTeachingReservedAttempt } from "./opening-teaching-reser
 import type { TeachingQuestionSpec } from "./opening-teaching-question";
 
 const ports = vi.hoisted(() => ({ key: vi.fn(), replay: vi.fn() }));
-vi.mock("./opening-course-reserved-selection", () => ({ readOpeningReservedKey: ports.key }));
+vi.mock("./opening-course-reserved-selection", async importOriginal => ({
+  ...await importOriginal<typeof import("./opening-course-reserved-selection")>(), readOpeningReservedKey: ports.key,
+}));
 vi.mock("./opening-course-route-reserved-start", () => ({ assertCourseReservedReplay: ports.replay }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const scope = { workspaceId: id(1), ownerUserId: id(2) };
