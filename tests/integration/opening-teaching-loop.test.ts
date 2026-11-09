@@ -374,7 +374,7 @@ describe("teaching command history and rewrite atomicity (PG)", () => {
       release(); await Promise.allSettled(pending);
       await Promise.all([holder.sql.end(), writer.sql.end(), probe.sql.end()]);
     }
-  }, 25_000);
+  });
 
   it.each([false, true])("keeps the old complete graph outside the rewrite transaction; injected failure=%s", async fail => {
     const x = await ready(), old = await graph(), history = await watermark();
@@ -427,7 +427,7 @@ describe("teaching command history and rewrite atomicity (PG)", () => {
       release(); await Promise.allSettled(pending);
       await Promise.all([writer.sql.end(), observer.sql.end()]);
     }
-  }, 25_000);
+  });
 
   it("maps a document advanced before rewrite to stale_revision with no partial command writes", async () => {
     const x = await ready();
