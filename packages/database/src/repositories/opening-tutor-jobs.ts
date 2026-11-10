@@ -2,6 +2,8 @@ import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readO
 import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay, TUTOR_STALE_MESSAGE, localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
+import { readTutorAttemptContext, assertTutorAttemptContext, type TutorAttemptContext, type TutorAttemptContextTarget } from "./opening-tutor-attempt-context";
+export type { TutorAttemptContext } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
@@ -522,10 +524,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       return rows.map((row) => mapJob(row as Record<string, unknown>));
     },
 
-    /**
-     * One transaction: assistant turn completes, validated candidates are
-     * stored pending with program-assigned provenance, job succeeds.
-     */
+    /** One statement-consistent read of the bound attempt, with no grading side effects. */
+    readAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget) =>
+      sql.begin("isolation level repeatable read", tx => readTutorAttemptContext(tx, scope, target)) as Promise<TutorAttemptContext | null>,
+
+    assertAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) =>
+      sql.begin("isolation level repeatable read", tx => assertTutorAttemptContext(tx, scope, target, expected)) as Promise<void>,
+
+    /** Complete the answer, lineage and inert help receipt in one transaction. */
     async completeTurn(input: {
       scope: OpeningScope;
       jobId: string;
@@ -556,7 +562,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       expectedPrivacyEpoch?: number;
       claimToken?: string;
       enqueueMetadata?: boolean;
-    }, options?: { materialPurposePin?: OpeningMaterialPurposePin }): Promise<void> {
+    }, options?: { materialPurposePin?: OpeningMaterialPurposePin; attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext } }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure || input.generatedExposure) {
           await lockWorkspaceLearningHistory(tx, input.scope);
@@ -580,6 +586,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!workspace.length) throw new Error("workspace permission changed");
         if (options?.materialPurposePin) {
           await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(input.scope, options.materialPurposePin, tx);
+        }
+        if (options?.attemptContext) {
+          if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
+          await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
         }
         const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
         if (receipt) {

@@ -36,6 +36,10 @@ describe("tutor turn handler", () => {
       get: vi.fn(async () => claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
+      readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId },
+        originalQuestion: "saved question", originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null,
+        workSource: null, effectiveGrading: null, sourceRefs: [] })),
+      assertAttemptContext: vi.fn(async () => {}),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
       canAppendCompletedTurnCandidates: vi.fn(async () => true),
@@ -71,6 +75,55 @@ describe("tutor turn handler", () => {
     const jobs = { ...tutorJobs, freezeHelpInputSnapshot };
     return { deps: { ...deps, tutorJobs: jobs }, tutorJobs: jobs, chunks, budget, provider };
   }
+
+  it("sm95 binds saved question, original/current answer and effective grade without pasting them into the request", async () => {
+    const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
+    const snapshot = { privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId },
+      originalQuestion: "sm95 original integral question", originalAnswer: { observationId: "root", answer: "sm95 original wrong answer", answerRevision: 1 },
+      currentAnswer: { observationId: "grade", answer: "sm95 original wrong answer", answerRevision: 1 },
+      rootObservationId: "root", headObservationId: "grade", workSource: null,
+      effectiveGrading: { observationId: "grade", answerRevision: 1, outcome: "incorrect", verdictSource: "ai_graded", aiEvaluation: null, serverEvaluation: null }, sourceRefs: [] };
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, text: "请讲解本次作答", sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
+    const readAttemptContext = vi.fn(async () => snapshot), assertAttemptContext = vi.fn(async () => {});
+    await createTutorTurnHandler({ ...deps, tutorJobs: { ...tutorJobs, readAttemptContext, assertAttemptContext } })(claimedJob.id);
+    const input = provider.complete.mock.calls[0][0];
+    expect(input.text).toContain(snapshot.originalQuestion);
+    expect(input.text).toContain(snapshot.originalAnswer.answer);
+    expect(input.text).toContain('"effectiveGrading"');
+    expect(input.text).toContain('"outcome":"incorrect"');
+    expect(input.instruction).toContain("不可信数据");
+    expect(assertAttemptContext).toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ attemptContext: { snapshot, target: expect.objectContaining({ jobId: claimedJob.id }) } }));
+  });
+
+  it.each(["before send", "after send"])("sm95 fails closed on attempt drift %s without duplicate send or completion", async phase => {
+    const { deps, tutorJobs, provider, budget } = setup({ sourceIds: [], chunks: [] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
+    const drift = Object.assign(new Error("bound attempt context is unavailable or changed"), { code: "CONFLICT" });
+    if (phase === "before send") tutorJobs.assertAttemptContext.mockRejectedValueOnce(drift);
+    else tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined).mockRejectedValueOnce(drift);
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toBe(drift);
+    expect(provider.complete).toHaveBeenCalledTimes(phase === "before send" ? 0 : 1);
+    expect(budget.release).toHaveBeenCalledTimes(phase === "before send" ? 1 : 0);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("sm95 blocks a stale stream delta before append without logging the saved context", async () => {
+    const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
+    const drift = Object.assign(new Error("bound attempt context is unavailable or changed"), { code: "CONFLICT" });
+    tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined).mockRejectedValueOnce(drift);
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta("must not be released");
+      return { text: "must not be released", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 };
+    });
+    await expect(createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id)).rejects.toBe(drift);
+    expect(stream.append).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
+  });
 
   it("passes the persisted course and server-selected use, retaining the original pre-send assertion", async () => {
     const { deps, tutorJobs, provider } = setup();
