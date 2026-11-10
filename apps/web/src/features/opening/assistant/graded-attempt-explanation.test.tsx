@@ -41,6 +41,7 @@ beforeEach(() => {
     if (url === "/api/opening/turns") { bodies.push(JSON.parse(String(init?.body))); throw Error("lost response"); }
     return Response.json({ error: { message: "not found" } }, { status: 404 });
   });
+  Object.defineProperty(navigator, "locks", { configurable: true, value: { request: vi.fn(async (_name, _options, action) => action({ name: _name })) } });
   vi.stubGlobal("fetch", transport);
   vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   api = { ...createOpeningApi(transport), listSources: vi.fn(async () => []), listTutorActions: vi.fn(async () => []),
@@ -61,9 +62,122 @@ it("sends the complete native client body from a fresh empty session, once per c
     clientKey: expect.any(String), sourceSelection: "auto", sourceIds: [], learningSessionId: sessionId, attemptId: id, contextAnchor: attempt.contextAnchor });
   expect(bodies[0]!.text).toBe("请讲解我这次作答：先说我最早错在哪一步和正确答案，只补这一步缺的知识，再给一道同类题让我自己做。");
   expect(host.querySelector("textarea")?.value).toBe("保留推导");
-  await act(async () => action()!.click()); expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]);
-  await act(async () => root.render(null)); await render(); expect(bodies).toHaveLength(2);
-  expect(action()!.disabled).toBe(true); await act(async () => action()!.click()); expect(bodies).toHaveLength(2);
+  await act(async () => action()!.click()); expect(bodies).toHaveLength(1);
+  const receipt = JSON.parse(localStorage.getItem(Object.keys(localStorage).find(key => key.startsWith("opening:graded-attempt-explain:"))!)!);
+  expect(receipt).toMatchObject({ clientKey: bodies[0]!.clientKey, conversationId, phase: "submitted", snapshot: initial });
+  expect(Object.keys(receipt).sort()).toEqual(["binding", "clientKey", "conversationId", "owner", "phase", "snapshot", "version"]);
+  await act(async () => root.render(null)); await render(); expect(bodies).toHaveLength(1);
+  expect(action()!.disabled).toBe(true); await act(async () => action()!.click()); expect(bodies).toHaveLength(1);
+});
+it("recovers an accepted lost-response turn by GET after remount without another POST", async () => {
+  const normal = transport.getMockImplementation()!;
+  transport.mockImplementation(async (path, init) => {
+    const url = String(path);
+    if (url.endsWith("/resume")) return Response.json({ conversationId, courseId: attempt.courseId, sourceIds: [], boundedHistory: [], historyTruncated: false });
+    if (url.endsWith("/turns") && init?.method === "GET") return Response.json([
+      { id: sessionId, conversationId, role: "user", text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", status: "complete", contextAnchor: attempt.contextAnchor, citations: [], createdAt: "2026-11-10T12:01:00Z" },
+      { id: item, conversationId, role: "assistant", text: "完整原始讲解结果，不截断", mode: "explain", status: "complete", contextAnchor: attempt.contextAnchor, citations: [], createdAt: "2026-11-10T12:02:00Z" },
+    ]);
+    if (url.endsWith("/pending-job")) return Response.json(null);
+    return normal(path, init);
+  });
+  await render(); await act(async () => action()!.click()); expect(bodies).toHaveLength(1);
+  await act(async () => root.render(null)); await render();
+  expect(host.textContent).toContain("完整原始讲解结果，不截断");
+  const recover = [...host.querySelectorAll("button")].find(button => button.textContent === "重新读取原讲解（不调用 AI）")!;
+  await act(async () => recover.click());
+  expect(host.textContent).toContain("完整原始讲解结果，不截断");
+  expect(bodies).toHaveLength(1); expect(api.createConversation).toHaveBeenCalledOnce();
+  snapshot.privacyEpoch += 1;
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  expect(host.textContent).not.toContain("完整原始讲解结果，不截断"); expect(action()).toBeUndefined();
+});
+it("recovers a pending original job and then its complete turns using only real GET routes", async () => {
+  const normal = transport.getMockImplementation()!;
+  let complete = false;
+  transport.mockImplementation(async (path, init) => {
+    const url = String(path);
+    if (url.endsWith("/resume")) return Response.json({ conversationId, courseId: attempt.courseId, sourceIds: [], boundedHistory: [], historyTruncated: false });
+    if (url.endsWith("/turns") && init?.method === "GET") return Response.json([
+      { id: sessionId, conversationId, role: "user", text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", status: "complete", contextAnchor: attempt.contextAnchor, citations: [], createdAt: "2026-11-10T12:01:00Z" },
+      { id: item, conversationId, role: "assistant", text: complete ? "原任务完成后的全部结果" : "", mode: "explain", status: complete ? "complete" : "pending", contextAnchor: attempt.contextAnchor, citations: [], createdAt: "2026-11-10T12:02:00Z" },
+    ]);
+    if (url.endsWith("/pending-job")) return Response.json(complete ? null : { id: item, status: "running", error: null, updatedAt: "2026-11-10T12:02:00Z" });
+    if (url === `/api/opening/jobs/${item}`) { complete = true; return Response.json({ id: item, status: "succeeded", error: null, updatedAt: "2026-11-10T12:03:00Z" }); }
+    return normal(path, init);
+  });
+  await render(); await act(async () => action()!.click());
+  await act(async () => root.render(null)); await render();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  expect(transport.mock.calls.some(([path]) => String(path) === `/api/opening/jobs/${item}`)).toBe(true);
+  expect(host.textContent).toContain("原任务完成后的全部结果"); expect(bodies).toHaveLength(1);
+});
+it("does not blindly recreate a conversation after its create response is lost", async () => {
+  api.createConversation = vi.fn(async () => { throw Error("lost create response"); });
+  await render(); await act(async () => action()!.click());
+  await act(async () => action()!.click());
+  await act(async () => root.render(null)); await render();
+  expect(api.createConversation).toHaveBeenCalledOnce(); expect(bodies).toHaveLength(0);
+  expect(host.textContent).toContain("会话创建结果尚未确认");
+});
+it.each(["owner", "cookie", "epoch", "head"])("revokes recovered result on %s drift without POST or cross-owner receipt reads", async kind => {
+  await render(); await act(async () => action()!.click());
+  await act(async () => root.render(null));
+  if (kind === "owner") { clearIdentity(); clearIdentity = publishVerifiedSessionIdentity({ ...identity, id: "other" }); }
+  if (kind === "cookie") cookieOwner = { ...identity, id: "other" };
+  if (kind === "epoch") snapshot.privacyEpoch += 1;
+  if (kind === "head") snapshot.expectedHead = item;
+  const storageRead = vi.spyOn(Storage.prototype, "getItem");
+  await render();
+  expect(action()).toBeUndefined(); expect(bodies).toHaveLength(1);
+  if (kind === "owner" || kind === "cookie") expect(storageRead.mock.calls.some(([key]) => key.includes("graded-attempt-explain"))).toBe(false);
+  storageRead.mockRestore();
+});
+it.each(["started", "partial", "malformed", "wrong-owner"])("rejects %s receipt without writes", async kind => {
+  const key = `opening:graded-attempt-explain:${JSON.stringify([identity.id, identity.workspaceId])}:${attempt.courseId}:${attempt.id}`;
+  if (kind === "started") sessionStorage.setItem(key, "started");
+  else localStorage.setItem(key, kind === "partial" ? JSON.stringify({ version: 1, clientKey: "original-key" }) : kind === "malformed" ? "{broken" : JSON.stringify({ owner: "other" }));
+  await render(); expect(action()).toBeUndefined(); expect(posts()).toHaveLength(0); expect(api.createConversation).not.toHaveBeenCalled();
+});
+it("a second mounted tab surface reads the same receipt and never allocates another key or conversation", async () => {
+  await render(); await act(async () => action()!.click());
+  const saved = localStorage.getItem(Object.keys(localStorage).find(key => key.includes("graded-attempt-explain"))!);
+  const second = document.createElement("div"); document.body.append(second); const other = createRoot(second);
+  try {
+    await act(async () => other.render(<AssistantView api={api} embedded startFresh learningAttempt={attempt} />));
+    const button = [...second.querySelectorAll("button")].find(button => button.textContent === "讲解这次作答")!;
+    expect(button.disabled).toBe(true); await act(async () => button.click());
+    expect(bodies).toHaveLength(1); expect(api.createConversation).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(Object.keys(localStorage).find(key => key.includes("graded-attempt-explain"))!)).toBe(saved);
+  } finally { await act(async () => other.unmount()); second.remove(); }
+});
+it("serializes simultaneous first clicks from two surfaces using the shared browser lock", async () => {
+  const active = new Set<string>();
+  Object.defineProperty(navigator, "locks", { configurable: true, value: { request: vi.fn(async (name: string, _options: unknown, callback: (lock: object | null) => Promise<void>) => {
+    if (active.has(name)) return callback(null);
+    active.add(name); try { return await callback({ name }); } finally { active.delete(name); }
+  }) } });
+  await render();
+  const second = document.createElement("div"); document.body.append(second); const other = createRoot(second);
+  try {
+    await act(async () => other.render(<AssistantView api={api} embedded startFresh learningAttempt={attempt} />));
+    const button = [...second.querySelectorAll("button")].find(button => button.textContent === "讲解这次作答")!;
+    await act(async () => { action()!.click(); button.click(); });
+    expect(bodies).toHaveLength(1); expect(api.createConversation).toHaveBeenCalledOnce();
+  } finally { await act(async () => other.unmount()); second.remove(); }
+});
+it.each(["locks", "storage"])("does not send if %s cannot preserve safe ownership", async kind => {
+  await render();
+  const spy = kind === "storage" ? vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("storage denied"); }) : null;
+  if (kind === "locks") Object.defineProperty(navigator, "locks", { configurable: true, value: undefined });
+  try { await act(async () => action()!.click()); expect(api.createConversation).not.toHaveBeenCalled(); expect(bodies).toHaveLength(0); }
+  finally { spy?.mockRestore(); }
+});
+it("revokes the current surface when a different tab updates its operation", async () => {
+  await render();
+  const key = `opening:graded-attempt-explain:${JSON.stringify([identity.id, identity.workspaceId])}:${attempt.courseId}:${attempt.id}`;
+  await act(async () => window.dispatchEvent(new StorageEvent("storage", { key })));
+  expect(action()).toBeUndefined(); expect(posts()).toHaveLength(0);
 });
 it.each(["correct", "manual", "ungraded", "missing", "mismatch"])("has no executable action for %s", async kind => {
   if (kind === "correct") { head.outcome = "correct"; head.aiEvaluation.outcome = "correct"; }

@@ -310,6 +310,9 @@ export function AssistantView(props: Props) {
 function AssistantWorkspace({ api: apiProp, initialConversationId = null, implicitResumeVersion, resumeBoundConversation = false, initialCourseId: courseIdProp = null, learningAttempt, task, initialTitle,
   startFresh = false, initialSourceIds: sourceIdsProp = [], initialPage: pageProp = null, initialDraft = "", promptRequest, embedded = false, agent = false, onConversationChange,
   start, onConversationReady, companion = false, objectHref: providedObjectHref, onStartNew, onConversationCreateStateChange, onRetainStateChange, isActiveConversation, interactionDisabled = false, studyContext, studyContextError, onNew }: Props & { onNew: () => void }) {
+  const gradedExplanation = useGradedAttemptExplanation(learningAttempt);
+  const gradedGuard = useRef(gradedExplanation);
+  gradedGuard.current = gradedExplanation;
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const capabilities = useOpeningCapabilities();
@@ -556,8 +559,20 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
 
   const refreshConversation = useCallback(
     async (id: string, signal?: AbortSignal, retryOnUnavailable = false, implicitLastActivityAt?: string) => {
+      const guard = gradedGuard.current;
+      if (guard.receipt) await guard.authorize();
       const snapshot = await conversationReader.read(id, signal);
       if (!snapshot) return false;
+      if (guard.receipt) {
+        await guard.authorize();
+        // The existing GET exposes conversation turns, not a clientKey lookup. Never
+        // substitute a different attempt's history for the saved operation.
+        if (snapshot.resume.conversationId !== id || snapshot.turns.some(turn => turn.conversationId !== id
+          || turn.contextAnchor?.attemptId !== learningAttempt?.id
+          || turn.contextAnchor?.itemVersionId !== learningAttempt?.itemVersionId)) {
+          throw new Error("原讲解的题目绑定无法验证，已停止恢复。");
+        }
+      }
       const { resume: nextResume, turns: nextTurns, pending: discovery } = snapshot;
       if (resumeBoundConversation) {
         const prepared = boundResumeContext.current;
@@ -570,6 +585,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         }
       }
       const last = nextTurns.at(-1);
+      if (guard.receipt && !last) {
+        setPendingHint("原会话暂未读到这次请求。现有 API 无请求键 GET 查询，不能确认未发送；不会换键重发。");
+      }
       const previous = observedTurns.current.at(-1);
       if (last?.status === "failed" && last.id === previous?.id && previous.status === "pending") {
         observedFailure.current = { id: last.id, at: Date.now() };
@@ -637,7 +655,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       } else {
         setActiveJobId(null);
         setPending(false);
-        setPendingHint("");
+        if (!guard.receipt || nextTurns.length) setPendingHint("");
       }
       return true;
     },
@@ -697,6 +715,24 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       controller.abort();
     };
   }, [api, initialConversationId, implicitResumeVersion, resumeBoundConversation, initialCourseId, learningAttempt, refreshConversation, refreshOrganization, refreshSources, refreshTutorActions, reload, setConversationId, startFresh, studyContext?.activityId, studyContext?.attemptId, initialSourceIds.length]);
+
+  useEffect(() => {
+    const guard = gradedGuard.current;
+    const id = guard.receipt?.conversationId;
+    if (!id || !guard.available) {
+      if (guard.receipt && !guard.available) {
+        setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false);
+      }
+      return;
+    }
+    let active = true;
+    void refreshConversation(id).then(ok => {
+      if (active && ok) setConversationId(id);
+    }).catch(() => {
+      if (active) { setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false); }
+    });
+    return () => { active = false; conversationReader.cancel(); };
+  }, [gradedExplanation.receipt?.conversationId, gradedExplanation.available, reload, refreshConversation, setConversationId, conversationReader]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -969,9 +1005,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         abortRef.current = null;
         return { accepted: true };
       }
-      if (options?.gradedAttempt) await gradedExplanation.authorize();
+      if (options?.gradedAttempt) { await gradedExplanation.authorize(); gradedExplanation.begin(input.clientKey); }
       const id = await ensureConversation();
-      if (options?.gradedAttempt) { await gradedExplanation.authorize(); gradedExplanation.markStarted(); }
+      if (options?.gradedAttempt) {
+        await gradedExplanation.authorize(); gradedExplanation.bindConversation(id); gradedExplanation.markStarted();
+      }
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.querySystem ? { querySystem: true } : {}),
@@ -1071,20 +1109,23 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     setPurposePrefill({ purpose: starter.purpose, nonce });
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
   }
-  const gradedExplanation = useGradedAttemptExplanation(learningAttempt);
   const gradedExplainKey = useRef<string | null>(null);
   const gradedExplainBusy = useRef(false);
   const [gradedExplainSubmitted, setGradedExplainSubmitted] = useState(false);
   async function explainGradedAttempt() {
     if (!gradedExplanation.available || pending || loading || recoveryRequired || interactionDisabled
-      || waitingForUnknown || unknownJob || gradedExplanation.reloadedOperation || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
+      || waitingForUnknown || unknownJob || gradedExplanation.receipt || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
     gradedExplainBusy.current = true;
     // Keep the original key after every uncertain response; terminal retries use the existing reply controls.
     gradedExplainKey.current ??= nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
     try {
-      const result = await handleSubmit({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
-        privacy: "saved", clientKey: gradedExplainKey.current }, { preserveDraft: true, gradedAttempt: true });
-      if (result.accepted) setGradedExplainSubmitted(true);
+      await gradedExplanation.withOperationLock(async () => {
+        const result = await handleSubmit({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
+          privacy: "saved", clientKey: gradedExplainKey.current! }, { preserveDraft: true, gradedAttempt: true });
+        if (result.accepted) setGradedExplainSubmitted(true);
+      });
+    } catch (error) {
+      setError(userFacingMessage(error, "原请求暂时无法恢复，未新建讲解。"));
     } finally { gradedExplainBusy.current = false; }
   }
   const directExplainKey = useRef<{ clientKey: string; fingerprint: string } | null>(null);
@@ -1204,8 +1245,12 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       ) : null}
 
       {gradedExplanation.available ? <div className="mx-5 mb-2"><button type="button" className={secondaryButtonClass}
-        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || gradedExplanation.reloadedOperation || gradedExplainSubmitted}
-        onClick={() => void explainGradedAttempt()}>讲解这次作答</button></div> : null}
+        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || Boolean(gradedExplanation.receipt) || gradedExplainSubmitted}
+        onClick={() => void explainGradedAttempt()}>讲解这次作答</button>
+        {gradedExplanation.receipt?.conversationId ? <button type="button" className={secondaryButtonClass}
+          disabled={pending || loading || interactionDisabled} onClick={() => setReload(value => value + 1)}>重新读取原讲解（不调用 AI）</button> : null}
+      </div> : null}
+      {gradedExplanation.recoveryMessage ? <p role="status" className="mx-5 mb-2 text-xs text-warn">{gradedExplanation.recoveryMessage}</p> : null}
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
       {agent && proposalsEnabled && proposalState.error && !showProposalRail ? <div role="alert" className="mx-5 mb-2 space-y-2 text-sm text-warn"><p>{proposalState.error}</p><button type="button" className={secondaryButtonClass} disabled={proposalState.loading} onClick={() => void proposalState.refresh()}>重新读取建议</button></div> : null}
       {!agent && proposalsEnabled ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel state={proposalState} /></details> : null}
