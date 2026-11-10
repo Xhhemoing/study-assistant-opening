@@ -28,11 +28,16 @@ export function durableWrite(file, contents, mode = 0o600) {
 // provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
 //   configure reload60 + effective show15 + failure restore reload60 = 300.
 // Nine leaves each add <=2s owned-tree TERM/KILL/drain (18s maximum).
-// Helper outer480 > leaves300+drain18+IO162; node outer485 must not kill restore.
+// Helper execution480 > leaves300+drain18+IO162; top owner drain <=2 more.
+// Parser execution90 + owned drain2. Neither Node nor GNU timeout kills owner.
+// Unsupported pidfd/subreaper refuses before spawn. Unconfirmed kill remains
+// UNKNOWN with owner retained (no clean refusal, no configuration continuation).
 // Full signed payload observation is synchronous BEFORE socket creation/claim:
 // Python2400 + ledger50 + claim-admission300 + claim30 + entry/service45 = 2825.
-// service7200: admission2825 + prepare270 + parser/provision570 + owner reloads120
-//   + activate670 + health1001 + success300 = 5756; IO/failure margin1444.
+// service7200: admission2825 + prepare270 + parser/provision574 + owner reloads120
+//   + activate670 + health1001 + success300 = 5760; IO/failure margin1440.
+// Service/cgroup hard death is UNKNOWN, not an owned-cancellation receipt;
+// StopPost retains guards and scopes cleanup, and never invents a consumed claim.
 // Health uses SECONDS deadline1000, remaining-time leaf caps; <=1s clock rounding.
 // StopPost240 > cleanup180; no-claim StopPost NEVER performs payload observation.
 // Readonly formal precheck: shell timeout2700 > full-check2400+ledger55+report IO.
@@ -55,9 +60,16 @@ export function systemctlCommand(args, execute = spawnSync) {
     timeout: args[0] === 'daemon-reload' ? RELOAD_TIMEOUT_MS : SYSTEMCTL_TIMEOUT_MS, killSignal: 'SIGKILL' });
   return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? '' };
 }
-export function provisionCompletion(helper, args, execute = spawnSync) {
-  const code = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
+const ownershipProgram = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
 original=subprocess.run
+
+def prepare_owner():
+    if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
+        raise OSError('Subreaper unavailable')
+    probe=os.pidfd_open(os.getpid())
+    try: signal.pidfd_send_signal(probe,0)
+    finally: os.close(probe)
+    children()
 
 def owned_run(argv,*args,**kwargs):
     # One dedicated subreaper per leaf. Only its direct/adopted children are
@@ -66,12 +78,7 @@ def owned_run(argv,*args,**kwargs):
         controller=os.fork()
         if controller == 0:
             try:
-                if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
-                    raise OSError('Leaf subreaper unavailable')
-                probe=os.pidfd_open(os.getpid())
-                try: signal.pidfd_send_signal(probe,0)
-                finally: os.close(probe)
-                children()  # Refuse unsupported proc/pidfd before spawning anything.
+                prepare_owner()  # Refuse unsupported proc/pidfd before spawning anything.
                 result=leaf(argv,*args,**kwargs)
                 value=(True,result)
             except BaseException as error:
@@ -116,7 +123,13 @@ def drain():
                 except ProcessLookupError: pass
             if time.monotonic()>=deadline: break
             time.sleep(.005)
-    raise RuntimeError('Leaf descendants termination UNCONFIRMED')
+    # An unkillable child must NOT release the helper to restore/continue.
+    # Retain this controller and ownership until external service inspection.
+    print('UNKNOWN: owned descendants termination unconfirmed; owner retained',file=sys.stderr,flush=True)
+    while children():
+        try: os.waitpid(-1,0)
+        except ChildProcessError: break
+    raise RuntimeError('Owned descendants termination was UNKNOWN')
 
 def leaf(argv,*args,**kwargs):
     timeout=kwargs.pop('timeout',None)
@@ -142,7 +155,35 @@ def leaf(argv,*args,**kwargs):
     result=subprocess.CompletedProcess(argv,proc.returncode,out,err)
     if check: result.check_returncode()
     return result
+`;
 
+// The top-level owner is outside the helper's cancellation scope. Its deadline
+// kills/drains the helper AND nested leaf controllers, even across setsid.
+// No Node/GNU timeout kills this owner before its cleanup confirmation. If the
+// host/service kills it, outcome is UNKNOWN, never a clean cancellation receipt.
+export function runCompletionOwned(command, args, seconds, options = {}, execute = spawnSync) {
+  const code = ownershipProgram + `
+def cancelled(signum,frame):
+    raise RuntimeError('Ownership cancellation requested')
+prepare_owner()
+signal.signal(signal.SIGTERM,cancelled)
+signal.signal(signal.SIGINT,cancelled)
+signal.signal(signal.SIGHUP,cancelled)
+try:
+    result=leaf(sys.argv[2:],timeout=float(sys.argv[1]))
+except BaseException:
+    # leaf already drained on timeout. Recheck after cancellation/failed spawn.
+    # Disable interrupting this final cleanup with another cooperative signal.
+    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP): signal.signal(sig,signal.SIG_IGN)
+    drain()
+    sys.exit(1)
+sys.exit(result.returncode)
+`;
+  return execute('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, String(seconds), command, ...args],
+    { stdio: 'inherit', ...options });
+}
+export function provisionCompletion(helper, args, execute = spawnSync) {
+  const code = ownershipProgram + `
 def bounded(argv,*args,**kwargs):
     if isinstance(argv,(list,tuple)) and argv and argv[0] in ('systemctl','/usr/bin/systemctl','/bin/systemctl'):
         limit=${SYSTEMCTL_TIMEOUT_MS / 1000}
@@ -159,8 +200,8 @@ try:
     runpy.run_path(sys.argv[0],run_name="__main__")
 finally:
     subprocess.run=original`;
-  const result = execute('timeout', ['--signal=KILL', '480s', '/usr/bin/python3', '-I', '-S', '-B', '-c', code, helper, ...args],
-    { stdio: 'inherit', timeout: 485_000, killSignal: 'SIGKILL', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
+  const result = runCompletionOwned('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, helper, ...args], 480,
+    { env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }, execute);
   if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
 }
 export function completionLaunchAdmission(args, unit, phase = 'launch') {

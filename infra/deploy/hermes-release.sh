@@ -363,8 +363,8 @@ if [[ "$ACTION" == complete-postmigration ]]; then
   [[ "$WORKER_REQUIRED" == 1 ]] || fail 'Incident requires both writers.'
   # This helper remains payload-owned e5 bytes already verified in full.
   WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
-  # New reviewed control helper, not the immutable payload-owned e5 helper.
-  node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  # New reviewed control helper owns parser deadline AND escaped descendants.
+  node "$CONTROL_DIR/hermes-db.mjs" parser-owned "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   managed prepare || fail 'Completion trusted boundary preparation failed.'
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   # Run the verified immutable e5 Python helper without rewriting its bytes.

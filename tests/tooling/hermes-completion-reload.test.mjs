@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { systemctlCommand, RELOAD_TIMEOUT_MS, SYSTEMCTL_TIMEOUT_MS, SUPERVISOR_REQUEST_TIMEOUT_MS } from '../../infra/deploy/hermes-writer-control.mjs';
 import { fixture } from './hermes-supervisor-fixture.mjs';
 import { provisionCompletion, python, checkCompletion, COMPLETION_CHECK_TIMEOUT_MS } from '../../infra/deploy/hermes-writer-control.mjs';
+import { parserPreflightOwned } from '../../infra/deploy/hermes-db.mjs';
 import { supervise, cleanupCompletion } from '../../infra/deploy/hermes-supervisor.mjs';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { spawn, spawnSync } from 'node:child_process';
 
 for (const overLimit of [false, true]) test(`scaled real completion-check child ${overLimit ? 'exceeds new hard limit: clean refusal, no claim/StopPost consumption' : 'exceeds old 150s equivalent and reaches first claim only after check'}`, async t => {
@@ -80,15 +82,58 @@ for (const ignoreTerm of [false, true]) test(`double-fork setsid leaf and inheri
   t.after(() => adjacent.kill('SIGKILL'));
   const pidfile = join(root, 'descendants');
   const marker = join(root, 'marker');
+  const barrier = join(root, 'release-after-return');
   const helper = join(root, 'helper.py');
-  const child = `import os,time,signal\n${ignoreTerm ? 'signal.signal(signal.SIGTERM,signal.SIG_IGN)' : ''}\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nos.setsid()\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\ntime.sleep(.4)\nopen(${JSON.stringify(marker)},'w').write('escaped')\n`;
+  const child = `import os,time,signal\n${ignoreTerm ? 'signal.signal(signal.SIGTERM,signal.SIG_IGN)' : ''}\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nos.setsid()\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\nwhile not os.path.exists(${JSON.stringify(barrier)}): time.sleep(.005)\nopen(${JSON.stringify(marker)},'w').write('escaped')\n`;
   writeFileSync(helper, `import subprocess\nsubprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=.15,capture_output=True)\n`);
   assert.throws(() => provisionCompletion(helper, []), /immutable provision helper failed/);
+  writeFileSync(barrier, 'released after refusal');
   const pids = readFileSync(pidfile, 'utf8').trim().split('\n');
   assert.equal(pids.length, 3);
   for (const pid of pids) assert(!existsSync('/proc/' + pid), `owned descendant ${pid} still exists after refusal`);
   assert.doesNotThrow(() => process.kill(adjacent.pid, 0));
   spawnSync('/usr/bin/python3', ['-c','import time; time.sleep(.5)']);
+  assert(!existsSync(marker));
+});
+
+test('parser-owned hard deadline kills ignored TERM and escaped descendants before return', t => {
+  const root=mkdtempSync(join(tmpdir(),'sm95-owned-parser-'));t.after(()=>rmSync(root,{recursive:true}));
+  const pidfile=join(root,'pids'),barrier=join(root,'release'),marker=join(root,'marker');
+  const child=`import os,time,signal\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nos.setsid()\nopen(${JSON.stringify(pidfile)},'a').write(str(os.getpid())+'\\n')\nwhile not os.path.exists(${JSON.stringify(barrier)}): time.sleep(.005)\nopen(${JSON.stringify(marker)},'w').write('after')`;
+  const parser=`import subprocess,signal,time,os\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nopen(${JSON.stringify(pidfile)},'a').write(str(os.getpid())+'\\n')\nsubprocess.Popen(['/usr/bin/python3','-c',${JSON.stringify(child)}])\ntime.sleep(10)`;
+  const start=performance.now();
+  const result=parserPreflightOwned('/usr/bin/python3',['-c',parser],{stdio:'pipe'},(file,args,options)=>{
+    assert(args.includes('90'));assert.equal(options.timeout,undefined);
+    const scaled=[...args];scaled[scaled.indexOf('90')]='.1';
+    return spawnSync(file,scaled,options);
+  });
+  assert.equal(result.status,1);
+  assert(performance.now()-start<1000,'parser cancellation was not hard bounded');
+  writeFileSync(barrier,'after wrapper returned');
+  for(const pid of readFileSync(pidfile,'utf8').trim().split('\n')) assert(!existsSync('/proc/'+pid));
+  assert(!existsSync(marker));
+});
+
+test('real scaled OUTER deadline owns escaped helper descendants until drained', t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-outer-escape-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const adjacent=spawn('/usr/bin/python3',['-c','import time; time.sleep(10)'],{stdio:'ignore',detached:true});
+  t.after(()=>adjacent.kill('SIGKILL'));
+  const barrier=join(root,'release'), marker=join(root,'marker'), pidfile=join(root,'pid');
+  const child=`import os,time,signal\nos.setsid()\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nopen(${JSON.stringify(pidfile)},'a').write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid: os._exit(0)\nopen(${JSON.stringify(pidfile)},'a').write(str(os.getpid())+'\\n')\nwhile not os.path.exists(${JSON.stringify(barrier)}): time.sleep(.005)\nopen(${JSON.stringify(marker)},'w').write('after-return')`;
+  const helper=join(root,'helper.py');
+  writeFileSync(helper,`import subprocess\nsubprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=10,capture_output=True)\n`);
+  assert.throws(()=>provisionCompletion(helper,[],(file,args,options)=>{
+    const scaled=[...args];
+    if(file==='timeout') scaled[1]='.25s';
+    else scaled[scaled.indexOf('480')]='.25';
+    return spawnSync(file,scaled,{...options,stdio:'pipe'});
+  }));
+  writeFileSync(barrier,'released only AFTER wrapper refusal');
+  const pids=readFileSync(pidfile,'utf8').trim().split('\n');
+  assert.equal(pids.length,2);
+  for(const pid of pids) assert(!existsSync('/proc/'+pid),'outer returned while escaped descendant alive');
+  assert.doesNotThrow(()=>process.kill(adjacent.pid,0));
   assert(!existsSync(marker));
 });
 
@@ -107,11 +152,11 @@ test('review verify and identity commands have bounded leaves and restore fits t
   const helper = join(root, 'helper.py');
   writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor name in ['systemd-analyze','groupadd','useradd']:\n    for supplied in [None,1,100]:\n        subprocess.run([name,'fixture'],timeout=supplied)\n`);
   provisionCompletion(helper, [], (file, args) => {
-    const code = args[args.indexOf('-c') + 1];
+    const code = args[args.lastIndexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw.get('timeout'))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert seen == [15,1,15,15,1,15,15,1,15],repr(seen)\n`;
     const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
-    assert(Number.parseInt(args[1]) >= 300 + 120); // 300 leaf sum + IO/restore margin.
+    assert(args.includes('480')); // 300 leaf sum + IO/restore margin.
     return { status: 0 };
   });
 });
@@ -122,12 +167,12 @@ test('synthetic immutable helper failure completes configure and restore reload 
   const helper = join(root, 'helper.py');
   writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor cmd in [['systemctl','is-active'],['systemctl','is-enabled'],['groupadd'],['useradd']]:\n    subprocess.run(cmd)\nsubprocess.run(['runuser','parser'],timeout=90)\nsubprocess.run(['systemd-analyze','verify'])\ntry:\n    subprocess.run(['systemctl','daemon-reload'])\n    subprocess.run(['systemctl','show'])\n    raise ValueError('effective verification failed')\nexcept ValueError:\n    subprocess.run(['systemctl','daemon-reload'])\n`);
   provisionCompletion(helper, [], (file, args, options) => {
-    const code = args[args.indexOf('-c') + 1];
+    const code = args[args.lastIndexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append((argv,kw['timeout']))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert [v[1] for v in seen] == [15,15,15,15,90,15,60,15,60],repr(seen)\nassert seen[-1][0] == ['systemctl','daemon-reload']\nassert sum(v[1] for v in seen) == 300\nassert subprocess.run is observe\n`;
     const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(args[1], '480s');
-    assert.equal(options.timeout, 485_000);
+    assert(args.includes('480'));
+    assert.equal(options.timeout, undefined);
     return { status: 0 };
   });
 });
@@ -138,10 +183,10 @@ for (const failure of [false, true]) test(`provision wrapper budgets every syste
   const helper = join(root, 'helper.py');
   writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor command in ['is-active','is-enabled','show','daemon-reload']:\n    for supplied in [None,1,100]:\n        subprocess.run(['systemctl',command,'fixture'],timeout=supplied)\n${failure ? "raise RuntimeError('synthetic helper failure')" : ''}\n`);
   provisionCompletion(helper, [], (file, args, options) => {
-    assert.equal(file, 'timeout');
-    assert.deepEqual(args.slice(0, 2), ['--signal=KILL', '480s']);
-    assert.equal(options.timeout, 485_000);
-    const code = args[args.indexOf('-c') + 1];
+    assert.equal(file, '/usr/bin/python3');
+    assert(args.includes('480'));
+    assert.equal(options.timeout, undefined);
+    const code = args[args.lastIndexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw['timeout'])\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\ntry:\n    exec(${JSON.stringify(code)})\nexcept RuntimeError:\n    assert ${failure ? 'True' : 'False'}\nassert subprocess.run is observe\nassert seen == [15,1,15,15,1,15,15,1,15,60,1,60],repr(seen)\n`;
     const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
@@ -149,7 +194,7 @@ for (const failure of [false, true]) test(`provision wrapper budgets every syste
   });
 });
 
-test('synthetic delayed child is leaf-killed and provision outer deadline kills its process group', t => {
+test('synthetic delayed child is leaf-killed and provision owned outer deadline drains its tree', t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-outer-budget-'));
   t.after(() => rmSync(root, { recursive: true }));
   let observed;
@@ -163,10 +208,10 @@ test('synthetic delayed child is leaf-killed and provision outer deadline kills 
   const helper = join(root, 'slow.py');
   writeFileSync(helper, 'import time\ntime.sleep(10)\n');
   assert.throws(() => provisionCompletion(helper, [], (file, args, options) => {
-    assert.equal(args[1], '480s');
-    assert.equal(options.timeout, 485_000);
-    // Scale only the deadline, not the actual timeout/process-group mechanism.
-    return spawnSync(file, [args[0], '0.05s', ...args.slice(2)], { ...options, timeout: 1_000 });
+    assert(args.includes('480'));
+    assert.equal(options.timeout, undefined);
+    const scaled=[...args]; scaled[scaled.indexOf('480')]='.05';
+    return spawnSync(file, scaled, options);
   }), /immutable provision helper failed/);
 });
 
