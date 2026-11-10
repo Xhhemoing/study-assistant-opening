@@ -33,10 +33,11 @@ DEGRADED=0
 FORWARD_ONLY=0
 ACTIVATION_BEGUN=0
 SUCCESS_REQUESTED=0
+REPAIR_ADOPTED=0
 FORWARD_GUARD="$STATE/migration-forward-only"
 managed() {
   local session_target='' exact_target=''
-  if [[ "$ACTION" == deploy ]]; then session_target=$RELEASE; fi
+  if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration ]]; then session_target=$RELEASE; fi
   case "$1" in activate|success|query-success) exact_target=$(current_target) || return 1;; esac
   HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" HERMES_WORKER_REQUIRED="$WORKER_REQUIRED" HERMES_STATE="$STATE" HERMES_CURRENT="$CURRENT" node "$HERMES_SUPERVISOR_HELPER" request "$1"
 }
@@ -240,7 +241,7 @@ finish() {
       echo "Commit fenced or unprovable; forward repair required (health is not commit proof)." >&2
     fi
   fi
-  if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ) ]]; then
+  if [[ "$ACTION" != status && "$ACTION" != logs && ( "$ACTION" != repair-pre-migration || "$REPAIR_ADOPTED" == 1 ) && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ) ]]; then
     echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
     managed refence || echo 'UNCONFIRMED: refence persistence failed; old writers must not be restored.' >&2
     managed stop || echo 'UNCONFIRMED: one or both writers may still exist.' >&2
@@ -297,7 +298,7 @@ trap 'finish $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-case "$ACTION" in deploy|restart|rollback) ;;
+case "$ACTION" in deploy|restart|rollback|repair-pre-migration) ;;
   status)
     if [[ -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ]]; then echo 'FORWARD FIX REQUIRED: active migration guard; writer state must be inspected.' >&2; exit 3; fi
     target=$(current_target); validate_target "$target"
@@ -321,7 +322,15 @@ esac
 mkdir -p -- "$STATE"
 chmod 700 -- "$STATE"
 # The managed supervisor holds deploy.lock through owner exit and crash fencing.
-[[ ! -e "$FORWARD_GUARD" && ! -e "$STATE/writers-fenced" ]] || { echo 'FORWARD FIX REQUIRED: active migration guard.' >&2; exit 3; }
+if [[ "$ACTION" == repair-pre-migration ]]; then
+  # The supervisor already checked the exact incident under deploy.lock. No
+  # deletion/replacement of its guards or activation marker is authorized here.
+  [[ -e "$FORWARD_GUARD" && -e "$STATE/writers-fenced" && -L "$CURRENT" ]] || fail 'Repair requires the retained fenced incident.'
+  [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ && -n "$CONTROL_ARCHIVE" ]] || fail 'Repair requires same-commit attested artifact and controls.'
+  FORWARD_ONLY=1
+else
+  [[ ! -e "$FORWARD_GUARD" && ! -e "$STATE/writers-fenced" ]] || { echo 'FORWARD FIX REQUIRED: active migration guard.' >&2; exit 3; }
+fi
 if [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]]; then
   validate_target "$DIR"
   atomic_link "$DIR" "$CURRENT"
@@ -440,6 +449,10 @@ else
   [[ -n "$(find apps/web/.next/standalone/apps/web/.next/static -type f -print -quit)" ]] || fail 'Standalone static assets are missing.'
   cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    managed adopt-repair || fail 'One-shot repair adoption failed; no automatic retry is permitted.'
+    REPAIR_ADOPTED=1
+  fi
   node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   BACKUP="$BACKUPS/$(basename -- "$RELEASE").dump"
   if [[ -n "$ARTIFACT_DIGEST" ]]; then
@@ -473,6 +486,21 @@ PREFLIGHT
   stop_worker
   node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/quiescence.json"
   node "$CONTROL_DIR/hermes-db.mjs" plan "$CONFIG" "$RELEASE" > "$TRANSITION/migration-plan.json"
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    node --input-type=module - "$CONTROL_DIR/hermes-writer-control.mjs" "$TRANSITION/migration-plan.json" "$RELEASE/packages/database/src/migrations" <<'REPAIRPLAN'
+import { readFileSync, readdirSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [module, plan, directory] = process.argv.slice(2);
+const { validateRepairPlan } = await import(pathToFileURL(module));
+validateRepairPlan(JSON.parse(readFileSync(plan)), readdirSync(directory).filter(id => /^\d{4}_.+\.sql$/.test(id)).sort());
+REPAIRPLAN
+    node --input-type=module - "$CONTROL_DIR/hermes-writer-control.mjs" "$CONFIG" "$RELEASE" <<'REPAIRLEDGER'
+import { pathToFileURL } from 'node:url';
+const [module, config, release] = process.argv.slice(2);
+const { verifyRepairLedger } = await import(pathToFileURL(module));
+verifyRepairLedger(config, release);
+REPAIRLEDGER
+  fi
   if node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1])); process.exit(p.readOnly===true && p.registryReadyWithoutWrites===true && Array.isArray(p.pending) && p.pending.length===0 ? 0 : 1)' "$TRANSITION/migration-plan.json"; then
     echo 'Registry ready and no pending migrations proven; write runner skipped.'
   else

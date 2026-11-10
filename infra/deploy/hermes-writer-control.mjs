@@ -3,7 +3,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseEnv } from 'node:util';
 // Shared by the installer and supervisor; never import the supervisor here.
 export function syncDirectory(directory) {
   const fd = openSync(directory, 'r');
@@ -128,6 +129,38 @@ export function controlPaths() {
   return sourceNames.map(name => join(controls, name));
 }
 export function brokerPresent() { return existsSync(brokerSocket); }
+export function checkRepair(args) {
+  return JSON.parse(python('hermes-writer-state.py', ['repair-check', args[4], args[3], args[6]]));
+}
+export function validateRepairPlan(plan, inventory) {
+  const expected = inventory.slice(0, 107), pending = inventory.slice(107);
+  if (inventory.length !== 110 || !inventory[106].startsWith('0107_')
+    || pending.map(id => id.slice(0, 4)).join(',') !== '0108,0109,0110'
+    || plan.readOnly !== true || plan.registryReadyWithoutWrites !== true
+    || JSON.stringify(plan.applied) !== '[]'
+    || JSON.stringify(plan.alreadyApplied) !== JSON.stringify(expected)
+    || JSON.stringify(plan.pending) !== JSON.stringify(pending)) throw new Error('Repair requires exact ledger 107 and pending 108/109/110');
+}
+
+// The existing planner verifies contiguous IDs and checksums, but intentionally
+// accepts legacy-unverified history. Repair has a narrower, all-verified profile.
+// Separate read-only observation, no registry/bootstrap/SQL changes and no grants.
+export function verifyRepairLedger(config, release) {
+  const configured = parseEnv(readFileSync(config, 'utf8'));
+  if (!configured.DATABASE_URL) throw new Error('Configured repair database required');
+  const module = pathToFileURL(join(release, 'packages/database/src/migrate.ts')).href;
+  const code = `const { createMigrationSqlClient } = await import(${JSON.stringify(module)});
+    const sql = createMigrationSqlClient(process.env.DATABASE_URL);
+    try { await sql.begin('isolation level repeatable read read only', async tx => {
+      const rows = await tx\`SELECT id, verification_state FROM schema_migrations ORDER BY id\`;
+      if (rows.length !== 107 || !rows[106].id.startsWith('0107_') || rows.some(row => row.verification_state !== 'verified'))
+        throw new Error('Repair ledger is not fully verified through 107');
+    }); } finally { await sql.end({ timeout: 5 }); }`;
+  const result = spawnSync(join(release, 'node_modules/.bin/tsx'), ['--eval', `(async () => { ${code} })()`], {
+    cwd: release, env: { ...process.env, ...configured }, stdio: 'ignore',
+  });
+  if (result.error || result.status !== 0) throw new Error('Read-only verified ledger 107 observation failed');
+}
 
 export function installWriterBoundary(state, systemd, source, run) {
   const installed = join(state, 'writer-controls');

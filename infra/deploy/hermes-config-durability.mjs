@@ -162,7 +162,7 @@ export function captureConfiguration(args, run, options = {}) {
   const sha = files.find(file => file.file === markers[0]).bytes.toString("utf8");
   const protocol = files.find(file => file.file === markers[1]).bytes.toString("utf8");
   if (!/^[a-f0-9]{40}\n$/.test(sha) || !/^delivery-leases(?:-study-v[12]|-v1)\n$/.test(protocol)
-    || (args[0] === "deploy" && sha.trim() !== args[9])) throw new Error("Release marker identity mismatch");
+    || (['deploy', 'repair-pre-migration'].includes(args[0]) && sha.trim() !== args[9])) throw new Error("Release marker identity mismatch");
   return { target, observed, files, resourceBinding };
 }
 export function persistConfiguration(captured, args, run, options = {}) {

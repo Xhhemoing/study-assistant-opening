@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createConnection, createServer } from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -36,7 +36,7 @@ if p['mode']=='commit': m.commit(p['state'],p['current'],p['broker'],p['record']
 elif p['mode']=='validate': m.validate_config(p['record'],sync=True)
 else: print(m.classify(p['state'],p['current'],p['broker'],p.get('scope'),sync=True))
 `;
-export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply } = {}) {
+export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply, repair = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hermes-supervisor-'));
   const sockets = new Set();
   const trackSocket = socket => {
@@ -124,6 +124,16 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
       return owner;
     },
   };
+  if (repair) {
+    args[0] = 'repair-pre-migration';
+    writeFileSync(join(args[4], 'migration-forward-only'), 'original incident');
+    writeFileSync(join(args[4], 'writers-fenced'), 'original fence');
+    dependencies.checkRepair = () => {
+      events.push('repair:check');
+      if (existsSync(join(args[4], 'repair-adopted'))) throw new Error('One-shot adoption consumed');
+      return { eligible: true, incident: 'synthetic-pre-migration', automaticRetry: false };
+    };
+  }
   writeFileSync(join(transition, 'expected-target'), target);
   function request(action, extra = {}) {
     return new Promise((resolve, reject) => {
