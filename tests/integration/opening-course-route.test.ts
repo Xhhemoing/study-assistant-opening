@@ -7,6 +7,7 @@ import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, solveSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { readOpeningSpanPrerequisiteRepair } from "../../packages/database/src/repositories/opening-span-prerequisite-runtime";
+import { createOpeningAdaptivePrefsRepository } from "../../packages/database/src/repositories/opening-adaptive-prefs";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { createSpanNextActionService } from "../../apps/web/src/features/opening/teaching/span/next-action-service";
 import * as prerequisiteDomain from "@aistudy/domain";
@@ -542,6 +543,46 @@ it.each([
   const receipt = await activityDecision(next);
   expect(JSON.parse(receipt.intentVersion).progress.find((row: { requirement: { id: string } }) => row.requirement.id === x.requirement.id))
     .toMatchObject({ requirement: progress.requirement, status: progress.status, observationId: progress.observationId, sourcesAvailable: progress.sourcesAvailable });
+});
+it("Hf03 fails closed on T start and next after a completed B return and a legitimate course grant stop without replay writes", async () => {
+  const x = await finishPrerequisiteBlock("incorrect");
+  const returned = await createSpanNextActionService(f.sql).next(f.scope, x.returnRequest);
+  if (returned.kind !== "ready") throw new Error("return must be ready before stopping authorization");
+  const target = (await createOpeningTeachingActivitiesRepository(f.sql).get(f.scope, returned.activityId))!;
+  await compile(target);
+  const answered = await answer(target, 0, "incorrect");
+  const progress = (await x.repo.read(f.scope, x.courseId)).requirements.find(row => row.requirement.id === x.requirement.id)!;
+  expect(progress.status).toBe("needs_correction");
+  expect(x.observation).toMatchObject({ outcome: "incorrect", verdictSource: "deterministic" });
+  const prefs = createOpeningAdaptivePrefsRepository(f.sql), current = await prefs.get(f.scope);
+  const grant = current.prefs.spanTutorGrants![x.courseId]!;
+  expect(grant.enabled).toBe(true);
+  const stopped = await prefs.patch(f.scope, { spanTutorGrant: { courseId: x.courseId, enabled: false,
+    dailyMinutes: grant.dailyMinutes, expiresOn: grant.expiresOn, expectedRevision: grant.revision } });
+  expect(stopped.prefs.spanTutorGrants?.[x.courseId]).toMatchObject({ enabled: false, revision: grant.revision + 1 });
+  // The legitimate preference write precedes the zero-write boundary; keep its new revision.
+  const snapshot = async () => ({
+    runtime: await runtimeSnapshot(x.courseId),
+    observations: await f.sql`SELECT * FROM opening_learning_observations WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    help: await f.sql`SELECT * FROM opening_help_exposures WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    tasks: await f.sql`SELECT * FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    jobs: await f.sql`SELECT * FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    budget: await f.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
+  });
+  const before = await snapshot();
+  const startRequest = { ...x.targetRequest, clientKey: randomUUID() };
+  const nextRequest = { goalId: x.goal.id, expectedGoalRevision: 1, activityId: target.id, expectedPathVersion: target.pathVersion,
+    observationId: answered.observation.id, clientKey: randomUUID(), minutes: 20 };
+  for (let replay = 0; replay < 2; replay++) {
+    await expect(x.service.start(f.scope, x.courseId, startRequest)).rejects.toMatchObject({
+      code: "CONFLICT", message: "导师授权已停止，原位置保留。" });
+    expect(await snapshot()).toEqual(before);
+    await expect(x.service.next(f.scope, x.courseId, nextRequest)).rejects.toMatchObject({
+      code: "CONFLICT", message: "导师授权已停止，原位置保留。" });
+    expect(await snapshot()).toEqual(before);
+    expect((await x.repo.read(f.scope, x.courseId)).requirements.find(row => row.requirement.id === x.requirement.id)).toEqual(progress);
+  }
 });
 it.each(["operation", "activity", "outcome", "assistance", "refs", "marker", "target", "plan_receipt", "confirmation_retract", "basis_retract"] as const)("refuses completed B detour exemption on %s without writes", async drift => {
   const x = await finishPrerequisiteBlock("incorrect");

@@ -5,13 +5,19 @@ import { buildStartLearningCreateInput } from "../teaching/today-activity";
 import { assertCourseStudyActivity, buildCourseStudyInput, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 
 export type CompletedRetestTask = TaskItem & { retest: NonNullable<TaskItem["retest"]> };
-export type CourseStudyEntry = { kind: "continuation-choice"; task: TaskItem; tailActivityId: string } | { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
+export type CourseStudyEntry = { kind: "continuation-choice"; task: TaskItem; tailActivityId: string } | { kind: "static-lesson"; activity: TeachingActivity; href: string } | { kind: "exam-sprint"; activity: TeachingActivity; href: string } | { kind: "activity"; activity: TeachingActivity } | { kind: "practice"; task?: TaskItem } | { kind: "cards"; task: TaskItem } | { kind: "retest-review"; task: CompletedRetestTask } | { kind: "route-choice"; choice: Extract<CourseRouteActionResult, { kind: "choice" }> };
 
 function assertStaticLessonAvailable(activity: TeachingActivity): void {
   if (activity.staticLessonUnavailable) throw new Error("原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
 }
 function activityEntry(activity: TeachingActivity): CourseStudyEntry {
   assertStaticLessonAvailable(activity);
+  // Dispatch hint from the admitted server activity, not proof of sprint ownership.
+  // The course-scoped sprint page must still check its actual binding before use.
+  if (activity.courseId && !activity.staticLesson && activity.intentKind === "question"
+    && /^exam-activity:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(?:attempt|source)-[1-9]\d*-.+$/i.test(activity.clientKey)) {
+    return { kind: "exam-sprint", activity, href: `/opening/sprint?${new URLSearchParams({ courseId: activity.courseId })}` };
+  }
   return activity.staticLesson && activity.courseId
     ? { kind: "static-lesson", activity, href: `/opening/courses/${encodeURIComponent(activity.courseId)}/study/span?${new URLSearchParams({ lesson: activity.id,
       ...(activity.staticLesson.retestId ? { retest: activity.staticLesson.retestId } : {}) })}` }
