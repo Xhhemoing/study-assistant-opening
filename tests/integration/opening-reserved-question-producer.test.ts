@@ -178,7 +178,7 @@ function lockDiagnosedSql(db: Sql | TransactionSql, snapshots: LockSnapshot[] = 
           try {
             const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? "", process.env.OPENING_TEST_DB);
             const observer = postgres(url.toString(), { max: 1, connect_timeout: 2,
-              connection: { default_transaction_read_only: "on", statement_timeout: 2000 } });
+              connection: { default_transaction_read_only: true, statement_timeout: 2000 } });
             try {
               const relations = lock[1]!.split(",").map(name => name.trim());
               const rows = await observer`SELECT clock_timestamp()::text AS sampled_at, pg_backend_pid() AS observer_pid, locks.*
