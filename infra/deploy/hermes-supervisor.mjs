@@ -8,7 +8,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, open
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
-import { binding, brokerControl, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources } from './hermes-writer-control.mjs';
+import { binding, brokerControl, checkRepair, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources } from './hermes-writer-control.mjs';
 export { durableWrite, syncDirectory, installWriterBoundary } from './hermes-writer-control.mjs';
 
 // A disconnected SSH pipe is not permission to abandon independent cleanup.
@@ -36,7 +36,7 @@ function present(path) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 function validateArguments(args) {
-  if (![11, 13].includes(args.length) || !["deploy", "restart", "rollback"].includes(args[0])) throw new Error("Invalid managed arguments");
+  if (![11, 13].includes(args.length) || !["deploy", "restart", "rollback", "repair-pre-migration"].includes(args[0])) throw new Error("Invalid managed arguments");
   for (const value of args.slice(1, 8)) {
     if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) || value.includes('/..') || value.endsWith('/.')) throw new Error("Managed paths must be normalized safe absolute paths");
   }
@@ -136,7 +136,7 @@ export async function requestCommand(action, environment = process.env, dependen
   return { exitCode: reply.ok ? 0 : 1 };
 }
 const production = {
-  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -146,11 +146,16 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
   verifyEntrySources();
   const state = args[4], systemd = args[6], action = args[0];
+  const repair = action === 'repair-pre-migration';
+  // Called only with the managed exclusive lock held. Rejection is read-only,
+  // never an owner crash and never a rewrite of the original incident.
+  const repairScope = repair ? checkRepair(args) : undefined;
+  let repairAdopted = false;
   const guard = join(state, "migration-forward-only");
   const fence = join(state, "writers-fenced");
   const socketPath = join(state, `owner-${process.pid}.sock`);
@@ -241,7 +246,7 @@ export async function supervise(script, args, dependencies = {}) {
     } else console.error("UNCONFIRMED: no trusted migration session target available for backend probe; writers remain fenced.");
   }
   if (armed && ["deploy", "restart", "rollback"].includes(action)) {
-    crashFence(); return 3;
+    console.error('FORWARD FIX REQUIRED: active migration guard; managed action refused.'); return 3;
   }
   const server = createServer(socket => {
     let body = "", handled = false;
@@ -278,22 +283,35 @@ export async function supervise(script, args, dependencies = {}) {
           if (!resolve(message.release).startsWith(`${resolve(args[2])}/`)) throw new Error("Invalid migration session target");
           release = message.release;
         }
+        if (repair && !repairAdopted && !['ping', 'adopt-repair'].includes(message.action)) throw new Error('Repair adoption required');
         if (["activate", "success"].includes(message.action)) {
           const target = realpathSync(args[3]);
           if (!message.target || message.target !== target || (activationTarget && target !== activationTarget)
-            || (action === "deploy" && target !== release)) throw new Error("Activation target mismatch");
+            || (['deploy', 'repair-pre-migration'].includes(action) && target !== release)) throw new Error("Activation target mismatch");
           activationTarget = target;
         }
         switch (message.action) {
           case "ping": break;
+          case 'adopt-repair':
+            if (!repair || repairAdopted || !transition || !release || phase !== 'idle') throw new Error('Invalid repair adoption');
+            checkRepair(args); // Recheck immediately before the one-shot durable claim.
+            // Memory first: a persistence/ACK failure is consumed, never retryable.
+            repairAdopted = true;
+            durableWrite(join(state, 'repair-adopted'), JSON.stringify({ ...repairScope, transition, release, owner: ownerIdentity }));
+            durableWrite(join(transition, 'repair-adopted'), JSON.stringify(repairScope));
+            break;
           case "arm":
             if (phase !== 'idle') throw new Error('Repeated or out-of-phase arm');
             migrationArmed = true;
+            // Durable independent boundary BEFORE ACK/runner, never inferred from
+            // generic crash reasons. Even a lost arm ACK permanently refuses adoption.
+            durableWrite(join(transition, 'migration-armed'), 'Migration execution authorized; outcome must be inspected.\n');
             arm(transition, 'migration runner may execute');
-            installWrapper();
+            if (!repair) installWrapper(); // Historical 95 stays intact until post-migration prepare.
             break;
           case 'prepare':
-            if (record || !transition || !['idle', 'fenced'].includes(phase)) throw new Error('Out-of-phase boundary preparation');
+            if (record || !transition || !['idle', 'fenced'].includes(phase)
+              || (repair && !migrationArmed)) throw new Error('Out-of-phase boundary preparation');
             if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
             arm(transition, 'candidate configuration preparation');
             installWrapper();
@@ -305,7 +323,8 @@ export async function supervise(script, args, dependencies = {}) {
             if (!stopWriters()) throw new Error('Writer stop UNCONFIRMED');
             break;
           case "activate": {
-            if (!transition || !['0', '1'].includes(message.required) || !['idle', 'fenced'].includes(phase) || record || ownerFinished) throw new Error('Missing or repeated activation scope');
+            if (!transition || !['0', '1'].includes(message.required) || !['idle', 'fenced'].includes(phase) || record || ownerFinished
+              || (repair && !migrationArmed)) throw new Error('Missing or repeated activation scope');
             if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
             arm(transition, 'execution authorization pending');
             installWrapper();
@@ -410,11 +429,11 @@ export async function supervise(script, args, dependencies = {}) {
       } catch (error) {
         // Success is a commit boundary. A failed fsync or lost persistence proof
         // cannot fall through to the owner's pre-migration restoration branch.
-        if (!committed && message?.token === token && ['arm', 'prepare', 'activate'].includes(message.action)) {
+        if (!committed && (!repair || repairAdopted) && message?.token === token && ['arm', 'prepare', 'activate'].includes(message.action)) {
           try { arm(transition, 'activation failed'); } catch { console.error('UNCONFIRMED: activation refence'); }
           stopWriters();
         }
-        if (successStarted) {
+        if (successStarted && (!repair || repairAdopted)) {
           settled = false;
           if (record && classify(state, args[3], { owner: ownerIdentity, transition, target: activationTarget }) === 'committed') {
             committed = true; armed = false; settled = true;
@@ -459,7 +478,7 @@ export async function supervise(script, args, dependencies = {}) {
     // The group was created for this direct child; descendants must not keep
     // provisioning or starting writers after their owner is dead.
     signalOwnerGroup("SIGKILL");
-    crashFence();
+    if (!repair || repairAdopted) crashFence();
   }
   if (broker) {
     try { revoke(true); }
@@ -491,9 +510,15 @@ async function main() {
     validateArguments(args);
     verifyEntrySources(); // Before mkdir/chmod/lock, including existing guard recovery.
     const state = args[4];
-    mkdirSync(state, { recursive: true, mode: 0o700 });
-    chmodSync(state, 0o700);
-    syncDirectory(dirname(state));
+    if (args[0] === 'repair-pre-migration') {
+      checkRepair(args); // Before any mkdir/chmod/flock creation.
+      const lock = lstatSync(join(state, 'deploy.lock'));
+      if (!lock.isFile() || lock.uid !== 0 || (lock.mode & 0o077) || lock.nlink !== 1) throw new Error('Existing private managed lock required');
+    } else {
+      mkdirSync(state, { recursive: true, mode: 0o700 });
+      chmodSync(state, 0o700);
+      syncDirectory(dirname(state));
+    }
     const child = spawn("flock", ["--nonblock", "--no-fork", join(state, "deploy.lock"), process.execPath, ...process.execArgv, filename, "owned", script, ...args], { stdio: "inherit" });
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => child.kill(signal));
     process.exitCode = await new Promise(resolve => { child.once("error", () => resolve(1)); child.once("exit", (code, signal) => resolve(signal ? 1 : code ?? 1)); });

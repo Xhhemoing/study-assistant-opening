@@ -17,7 +17,7 @@ TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
-case "$ACTION" in deploy|status|logs|restart|rollback) ;; *) echo "Usage: $0 [deploy|status|logs|restart|rollback]" >&2; exit 2 ;; esac
+case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration) ;; *) echo "Usage: $0 [deploy|status|logs|restart|rollback|repair-check|repair-pre-migration]" >&2; exit 2 ;; esac
 
 fail() { echo "[!] $*" >&2; exit 1; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
@@ -52,6 +52,44 @@ verify_release() {
   printf 'Verified release %s\nCI: %s\n' "$COMMIT" "$ci_url"
 }
 
+verify_repair_git() {
+  local baseline=6afaaa70d3467da4f17daaad44a99e2d36b9f991 path history
+  [[ "$SCRIPT_DIR" == "$(git rev-parse --show-toplevel)/infra/deploy" ]] || fail 'Repair entry must come from this exact clean checkout.'
+  [[ "$repository" == Xhhemoing/study-assistant-opening ]] || fail 'Repair requires the formal repository.'
+  git merge-base --is-ancestor "$baseline" "$COMMIT" || fail 'Repair baseline is not an ancestor.'
+  [[ "$baseline" != "$COMMIT" ]] || fail 'Repair requires new controls and an artifact at the same new commit.'
+  # The independently fetched exact main and reviewed local Git graph, not an
+  # artifact manifest or private operator note, establish control-only ancestry.
+  # Check EVERY parent edge too: application changes reverted at tip are refused.
+  history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
+  while IFS= read -r path; do
+    case "$path" in
+      infra/deploy/deploy-hermes.sh|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
+      *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
+    esac
+  done < <(printf '%s\n' "$history" | sort -u | grep -v '^$')
+  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' || fail 'Repair application/migration bytes differ from baseline.'
+}
+
+# Execute reviewed Python bytes in memory over strict SSH: no remote entry
+# extraction, temporary directory, chmod, transition, fsync or crash handler.
+# This is eligibility scope only; it does not claim DB visibility or readiness.
+if [[ "$ACTION" == repair-check ]]; then
+  verify_release
+  verify_repair_git
+  [[ -n "$EXPLICIT_HOST" ]] || fail 'Explicit HOST is required for repair check.'
+  check_code="import fcntl,types,sys
+bootstrap=types.ModuleType('bootstrap')
+exec($(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$SCRIPT_DIR/hermes-trusted-loader.py"), bootstrap.__dict__)
+m=types.ModuleType('repair'); m.bootstrap=bootstrap
+exec($(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$SCRIPT_DIR/hermes-writer-state.py"), m.__dict__)
+fd=bootstrap.safe_open(sys.argv[1]+'/deploy.lock',private=True)
+fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+print(m.json.dumps(m.repair_check(*sys.argv[1:])))"
+  ssh_run "/usr/bin/python3 -I -S -B -c $(quote "$check_code") $(quote "$DEPLOY_STATE") $(quote "$CURRENT_LINK") $(quote "$SYSTEMD_DIR")"
+  exit
+fi
+
 remote_archive=''
 local_archive=''
 artifact_directory=''
@@ -64,8 +102,12 @@ cleanup() {
   [[ -z "$artifact_directory" ]] || rm -rf -- "$artifact_directory"
 }
 trap cleanup EXIT
-if [[ "$ACTION" == deploy ]]; then
+if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration ]]; then
   verify_release
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    verify_repair_git
+    [[ -n "$ARTIFACT_RUN_ID" ]] || fail 'Repair requires the attested new-commit artifact; source fallback is forbidden.'
+  fi
   if [[ -n "$ARTIFACT_RUN_ID" ]]; then
     [[ "$ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ && "$TARGET_SHA" == "$COMMIT" ]] || fail 'Artifact deployment requires explicit run ID and matching TARGET_SHA.'
     [[ "$repository" == Xhhemoing/study-assistant-opening ]] || fail 'Artifact source must be the formal repository.'
@@ -76,7 +118,7 @@ if [[ "$ACTION" == deploy ]]; then
     local_archive="$artifact_directory/payload/release.tar.gz"
     # Control-plane scripts come from reviewed Git, NOT from the downloaded blob.
     control_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-control.XXXXXXXX.tar.gz")"
-    git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$control_archive" "$COMMIT" infra/deploy
+    git -c core.autocrlf=false -c core.eol=lf -c tar.umask=0022 archive --format=tar.gz --output="$control_archive" "$COMMIT" infra/deploy
     [[ "$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)" == "$COMMIT" ]] || fail 'Release tip changed while verifying artifact.'
   else
     [[ -z "$TARGET_SHA" || "$TARGET_SHA" == "$COMMIT" ]] || fail 'TARGET_SHA differs from HEAD.'

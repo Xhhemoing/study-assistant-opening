@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -362,6 +363,96 @@ def commit(state, current, broker, binding):
         raise ValueError('Commit not provable')
 
 
+# Deliberately one incident, one pre-migration adoption. This is NOT a resume
+# protocol. A future incident needs independent review, not another caller flag.
+REPAIR_BASELINE = '6afaaa70d3467da4f17daaad44a99e2d36b9f991'
+REPAIR_INCIDENT = '20261110T024515-679352'
+
+
+def repair_check(state, current, systemd):
+    """Read-only filesystem/manager admission; no fsync, mkdir, stop or DB claim.
+
+    The database is checked again after a NEW full backup by the adopted owner.
+    A generic forward-armed/crash reason is not a durable migration boundary.
+    This historical incident is allowed only because it predates runner entry;
+    new owners persist migration-armed BEFORE acknowledging arm.
+    """
+    state = Path(state)
+    fd = safe_open(state, private=True, directory=True)
+    os.close(fd)
+    guard = json.loads(read_trusted(state / 'migration-forward-only', private=True)[0])
+    transition = state / 'releases' / REPAIR_INCIDENT
+    if guard != {'transition': str(transition), 'reason': 'owner exited without durable success', 'ownerPid': 679352}:
+        raise ValueError('Not the reviewed pre-migration incident')
+    # Refuse even PID reuse: absence, not signalling or guessed start identity.
+    if present('/proc/679352'):
+        raise ValueError('Incident owner death not proven')
+    fd = safe_open(transition, private=True, directory=True)
+    os.close(fd)
+    read_trusted(state / 'writers-fenced', private=True)
+    if read_trusted(state / 'activation-incomplete', private=True)[0] != (str(transition) + '\n').encode():
+        raise ValueError('Incident activation binding changed')
+    old = read_trusted(transition / 'from-target', private=True)[0].decode().strip()
+    if os.path.realpath(current) != old:
+        raise ValueError('Incident current target changed')
+    old_sha = read_trusted(Path(old) / '.release-sha')[0].decode().strip()
+    if not re.fullmatch(r'1e511[0-9a-f]{35}', old_sha):
+        raise ValueError('Incident old release identity changed')
+    previous = state / 'releases' / '20261108T160832-39068'
+    if os.path.realpath(state / 'last-transition') != str(previous):
+        raise ValueError('Incident last transition changed')
+    backup = read_trusted(transition / 'database-backup', private=True)[0].decode().strip()
+    if not Path(backup).name.startswith(REPAIR_BASELINE + '-'):
+        raise ValueError('Original baseline backup binding missing')
+    fd = safe_open(backup, private=True)
+    try:
+        if os.fstat(fd).st_size == 0:
+            raise ValueError('Original backup empty')
+    finally:
+        os.close(fd)
+    for path in [state / 'repair-adopted', state / 'protocol2-transition.json', state / 'writer-controls',
+                 state / 'commit-receipts', Path('/run/aistudy-writer-broker'),
+                 *[transition / name for name in ('migration-plan.json', 'migration-armed', 'migration-succeeded',
+                                                  'repair-adopted', 'succeeded', 'degraded', 'to-target')]]:
+        if present(path):
+            raise ValueError('Incident crossed a boundary or adoption already consumed')
+    for unit in ('aistudy-web.service', WORKER):
+        directory = Path(systemd) / (unit + '.d')
+        fence = directory / '95-aistudy-migration-fence.conf'
+        expected = ('[Unit]\nConditionPathExists=!' + str(state / 'writers-fenced') + '\n').encode()
+        if read_trusted(fence)[0] != expected or present(directory / '96-aistudy-writer-exec.conf'):
+            raise ValueError('Historical fence configuration changed')
+        result = subprocess.run(['systemctl', 'show', '--all',
+                                 '--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job,ControlGroup,NeedDaemonReload,DropInPaths', unit],
+                                check=True, capture_output=True, text=True, timeout=5)
+        pairs = [line.split('=', 1) for line in result.stdout.splitlines()]
+        values = dict(pairs)
+        required = {'LoadState': 'loaded', 'MainPID': '0', 'ControlPID': '0', 'Job': '', 'NeedDaemonReload': 'no'}
+        if (len(pairs) != len(values) or any(values.get(key) != value for key, value in required.items())
+                or values.get('ActiveState') not in ('inactive', 'failed')
+                or values.get('SubState') not in ('dead', 'failed')
+                or str(fence) not in values.get('DropInPaths', '').split(' ')):
+            raise ValueError('Historical fence/stopped manager state unconfirmed')
+        group = values.get('ControlGroup')
+        if group is None or not present('/sys/fs/cgroup/cgroup.controllers'):
+            raise ValueError('Unknown cgroup layout')
+        if group:
+            if not re.fullmatch(r'/[A-Za-z0-9_.@:/-]+', group) or '..' in group:
+                raise ValueError('Unknown cgroup path')
+            root = Path('/sys/fs/cgroup' + group)
+            def walk_error(error):
+                raise error
+            for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+                if any(Path(directory, name).is_symlink() for name in dirs + files):
+                    raise ValueError('Unknown cgroup link')
+                if Path(directory, 'cgroup.procs').read_text().strip():
+                    raise ValueError('Writer cgroup not empty')
+            if not (root / 'cgroup.procs').is_file():
+                raise ValueError('Writer cgroup unavailable')
+    return {'eligible': True, 'scope': 'pre-migration-filesystem-manager-only',
+            'baseline': REPAIR_BASELINE, 'incident': str(transition), 'automaticRetry': False}
+
+
 def main():
     if sys.argv[1:] == ['resource-policy']:
         payload = json.load(sys.stdin)
@@ -369,6 +460,9 @@ def main():
         print(json.dumps(resource_binding(payload['systemd'], payload['effective'], contents)))
         return
     mode, state, current, broker = sys.argv[1:5]
+    if mode == 'repair-check':
+        print(json.dumps(repair_check(state, current, broker)))
+        return
     if mode == 'check-plan':
         plan = json.loads(read_trusted(Path(state) / ('writer-' + broker + '.json'), private=True)[0])
         if plan['unit'] != broker or plan['target'] != current:
