@@ -83,7 +83,7 @@ export function unchangedTeachingQuestionHelpMatches(db: LearningSql) {
         AND h.context_anchor->>'activityId'=prior.activity_id::text
         AND h.context_anchor->>'blockId'=prior.teaching_block_id::text
         AND h.context_anchor->>'contentVersion'=prior.evaluation_spec->>'contentVersion'))
-      AND (SELECT jsonb_agg(CASE
+      AND ((SELECT jsonb_agg(CASE
           WHEN b->>'id'=v.teaching_block_id::text THEN jsonb_set(b,'{content}',(b->'content')-'rewriteOf')
           WHEN b->>'id'=ANY(bound_answers.ids) AND b->>'type' IN ('answer_key','solution')
             THEN jsonb_set(b,'{content}',(b->'content')-ARRAY['text','markdown','answer','solution'])
@@ -94,5 +94,34 @@ export function unchangedTeachingQuestionHelpMatches(db: LearningSql) {
           WHEN b->>'id'=ANY(bound_answers.ids) AND b->>'type' IN ('answer_key','solution')
             THEN jsonb_set(b,'{content}',(b->'content')-ARRAY['text','markdown','answer','solution'])
           ELSE b END ORDER BY ord)
-        FROM jsonb_array_elements(old_revision.blocks) WITH ORDINALITY AS block(b,ord)))`;
+        FROM jsonb_array_elements(old_revision.blocks) WITH ORDINALITY AS block(b,ord))
+      OR EXISTS (
+        -- Only durable example publications may extend an EXACT immutable prefix.
+        -- No arbitrary prose equivalence, changed prompt/options/key or dropped block.
+        WITH RECURSIVE example_appends AS (
+          SELECT first.id,first.revision_number,first.blocks FROM library_revisions first
+          WHERE first.id=CASE WHEN old_revision.revision_number<now_revision.revision_number THEN old_revision.id ELSE now_revision.id END
+          UNION ALL
+          SELECT next.id,next.revision_number,next.blocks FROM example_appends previous
+          JOIN library_revisions next ON next.workspace_id=v.workspace_id AND next.document_id=now_revision.document_id
+            AND next.parent_revision_number=previous.revision_number AND next.revision_number=previous.revision_number+1
+            AND next.revision_number<=GREATEST(now_revision.revision_number,old_revision.revision_number)
+          JOIN opening_jobs generated ON generated.workspace_id=v.workspace_id AND generated.owner_user_id=v.owner_user_id
+            AND generated.kind='compile-teaching-unit' AND generated.payload->>'mode'='example'
+            AND next.reason='teaching-example:' || generated.id::text
+          WHERE generated.payload->'blocks'=previous.blocks
+            AND generated.payload->'sourceRefs'=v.evaluation_spec->'sourceRefs'
+            AND generated.payload->'request'->'target'->>'activityId'=v.activity_id::text
+            AND generated.payload->'request'->'target'->>'documentId'=now_revision.document_id::text
+            AND generated.payload->'request'->'target'->>'revisionNumber'=previous.revision_number::text
+            AND jsonb_array_length(next.blocks)=jsonb_array_length(previous.blocks)+2
+            AND (SELECT jsonb_agg(b ORDER BY ord) FROM jsonb_array_elements(next.blocks) WITH ORDINALITY AS prefix(b,ord)
+              WHERE ord<=jsonb_array_length(previous.blocks))=previous.blocks
+            AND next.blocks->-2->>'type'='example' AND next.blocks->-1->>'type'='steps'
+            AND next.blocks->-2->'content'->'generatedExample'->>'operationId'=generated.id::text
+            AND next.blocks->-1->'content'->'generatedExample'->>'operationId'=generated.id::text
+        ) SELECT 1 FROM example_appends
+          WHERE id=CASE WHEN old_revision.revision_number>now_revision.revision_number THEN old_revision.id ELSE now_revision.id END
+            AND old_revision.id<>now_revision.id
+      )))`;
 }
