@@ -63,6 +63,7 @@ export type StudySessionView = {
   result: StepResult | null;
   canRedo?: boolean;
   canPracticeVariant?: boolean;
+  primaryActionLabel?: string;
   next: NextAction | null;
   photo: PhotoState | null;
   /** Optional choice beside the submit action; activities that omit it render no control. */
@@ -128,7 +129,7 @@ export function primaryAction(view: StudySessionView, pending: boolean): Primary
   if (view.result?.outcome === "incorrect" && view.canRedo) return { kind: "redo", label: "改这道题", disabled: pending };
   if (view.next) return { kind: "next", label: view.next.label, disabled: pending };
   if (view.canPracticeVariant) return { kind: "next", label: "同族新题，独立做一次", disabled: pending };
-  if (view.result) return { kind: "next", label: "看下一步安排", disabled: pending };
+  if (view.result) return { kind: "next", label: view.primaryActionLabel ?? "看下一步安排", disabled: pending };
   if (view.sealed) return { kind: "submit", label: "重新确认提交", disabled: pending };
   const photoBusy = view.photo && ["uploading", "preparing"].includes(view.photo.status);
   // Same rule as the legacy form: the membership judgement is required; a photo only attaches the work.
