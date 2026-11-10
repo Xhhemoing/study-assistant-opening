@@ -216,7 +216,7 @@ health() {
   local required=$1 expected=$2 profile=${3:-}
   local body attempt attempts=120
   # Completion has a separately budgeted 20*(curl5 + active15 + identity30 + sleep2)
-  # <=1040s readiness window inside its independent 4200s service lifetime.
+  # <=1040s readiness window inside its independent 7200s service lifetime.
   if [[ "$ACTION" == complete-postmigration ]]; then attempts=20; fi
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi

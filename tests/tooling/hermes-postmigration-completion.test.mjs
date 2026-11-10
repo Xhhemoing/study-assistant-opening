@@ -78,7 +78,7 @@ test('completion queued cleanup after broker failure cannot admit another genera
 test('independent service bounds, identity and cgroup fail closed', () => {
   const group = '/system.slice/aistudy-postmigration-completion.service';
   const good = { Id: 'aistudy-postmigration-completion.service', LoadState:'loaded', Restart:'no', KillMode:'control-group',
-    RuntimeMaxUSec:'1h 10min',TimeoutStopUSec:'4min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',ExecMainPID:'1234',
+    RuntimeMaxUSec:'2h',TimeoutStopUSec:'4min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',ExecMainPID:'1234',
     ExecStopPost:`{ path=/usr/bin/env ; argv[]=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${process.execPath} ${resolve('infra/deploy/hermes-supervisor.mjs')} completion-stop-post ${resolve('infra/deploy/hermes-release.sh')} complete-postmigration /legacy ; }` };
   const run = values => () => ({ok:true,stdout:Object.entries(values).map(([k,v])=>`${k}=${v}`).join('\n')});
   assert.equal(completionService(run(good),()=>`0::${group}`).InvocationID,good.InvocationID);
@@ -87,7 +87,7 @@ test('independent service bounds, identity and cgroup fail closed', () => {
   assert.throws(()=>completionService(run(good),()=> '0::/other'));
   const args=['complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/config','6291456','a'.repeat(40),'/release','b'.repeat(64),'/archive'];
   const unit = completionServiceUnit(args,'/trusted-controls','/usr/bin/node');
-  assert.match(unit,/Restart=no\nKillMode=control-group\nRuntimeMaxSec=4200\nTimeoutStopSec=240/);
+  assert.match(unit,/Restart=no\nKillMode=control-group\nRuntimeMaxSec=7200\nTimeoutStopSec=240/);
   assert.match(unit,/ExecStopPost=.*completion-stop-post/);
   assert.throws(()=>completionServiceUnit([...args.slice(0,-1),'/archive;evil']));
 });
@@ -271,6 +271,7 @@ test('actual caller check and launch transport carry exact independent arguments
     assert(!events.includes('download')&&!events.includes('scp '));
     assert.match(events,/StrictHostKeyChecking=yes/);
     if(action.endsWith('-check')) {
+      assert.match(events,/timeout --signal=KILL 2700s \/usr\/bin\/python3/);
       assert.match(events,/'\/opt\/aistudy-deployment' '\/opt\/aistudy-current' '\/etc\/systemd\/system'/);
       assert.match(readFileSync(stdin,'utf8'),/readonlyProbe/);
     } else {

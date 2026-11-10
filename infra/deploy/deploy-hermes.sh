@@ -118,7 +118,9 @@ if [[ "$ACTION" == complete-postmigration* ]]; then
   verify_repair_git
   if [[ "$ACTION" == complete-postmigration-check ]]; then
     check_code="$(node "$SCRIPT_DIR/../../tests/tooling/hermes-completion-precheck.mjs")"
-    command='/usr/bin/python3 -I -S -B -'
+    # Full signed gzip/payload comparison may be cold IO; do not retain a
+    # hidden short shell deadline around the reviewed readonly Python program.
+    command='timeout --signal=KILL 2700s /usr/bin/python3 -I -S -B -'
     for value in "$DEPLOY_STATE" "$CURRENT_LINK" "$SYSTEMD_DIR" "$COMPLETION_RELEASE" "$DIR/.env.production" "$COMPLETION_ARCHIVE" "$WORKER_CONFIG_DIR"; do command+=" $(quote "$value")"; done
     ssh_run "$command" <<< "$check_code"
   else

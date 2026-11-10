@@ -28,9 +28,12 @@ export function durableWrite(file, contents, mode = 0o600) {
 // provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
 //   configure reload60 + effective show15 + failure restore reload60 = 300.
 // Helper outer480 adds 180 for IO/restore; node outer485 must not kill restore.
-// service4200: admission/claim530 + prepare270 + parser/provision570 +
-//   owner reloads120 + activate670 + health1040 + success300 = 3500,
-//   leaving 700 for IO/failure cleanup. StopPost240 > bounded cleanup180.
+// Full signed payload observation is synchronous BEFORE socket creation/claim:
+// Python2400 + ledger50 + claim-admission300 + claim30 + entry/service45 = 2825.
+// service7200: admission2825 + prepare270 + parser/provision570 + owner reloads120
+//   + activate670 + health1040 + success300 = 5795; IO/failure margin1405.
+// StopPost240 > cleanup180; no-claim StopPost NEVER performs payload observation.
+// Readonly formal precheck: shell timeout2700 > full-check2400+ledger55+report IO.
 // Provision runs in owner shell, NOT inside socket requests: socket1200 unchanged.
 // Historical checker <=120 (two units, optional typed-hook queries included).
 // PM samples: python1500 > scope270 + 3*(reload60+2*historical120+2*manager15)=1260.
@@ -43,6 +46,7 @@ export function durableWrite(file, contents, mode = 0o600) {
 export const RELOAD_TIMEOUT_MS = 60_000;
 export const SYSTEMCTL_TIMEOUT_MS = 15_000;
 export const SUPERVISOR_REQUEST_TIMEOUT_MS = 1_200_000;
+export const COMPLETION_CHECK_TIMEOUT_MS = 2_400_000;
 export function systemctlCommand(args, execute = spawnSync) {
   const result = execute('systemctl', args, { encoding: 'utf8',
     timeout: args[0] === 'daemon-reload' ? RELOAD_TIMEOUT_MS : SYSTEMCTL_TIMEOUT_MS, killSignal: 'SIGKILL' });
@@ -73,7 +77,7 @@ finally:
 }
 export function completionLaunchAdmission(args, unit, phase = 'launch') {
   const retainedUnit = unit.split(controls).join('/tmp/aistudy-entry.Pz65J76D')
-    .replace('RuntimeMaxSec=4200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+    .replace('RuntimeMaxSec=7200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
   return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit }));
 }
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
@@ -89,13 +93,13 @@ export function verifyEntrySources() {
 }
 export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
-export function python(file, args, payload) {
-  const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
+export function python(file, args, payload, execute = spawnSync) {
+  const result = execute('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
     input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 1_500_000
       : args[0] === 'completion-retained-archive' ? 650_000
       : args[0] === 'completion-launch-check' ? 300_000
-      : args[0] === 'completion-check' ? 150_000 : 30_000,
-    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+      : args[0] === 'completion-check' ? COMPLETION_CHECK_TIMEOUT_MS : 30_000,
+    killSignal: 'SIGKILL', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
   });
   if (result.error || result.status !== 0) throw new Error('Trusted writer control unavailable');
   return result.stdout.trim();
@@ -193,12 +197,13 @@ export function brokerPresent() { return existsSync(brokerSocket); }
 export function checkRepair(args) {
   return JSON.parse(python('hermes-writer-state.py', ['repair-check', args[4], args[3], args[6]]));
 }
-export function checkCompletion(args) {
+export function checkCompletion(args, dependencies = {}) {
+  const observe = dependencies.python ?? python, ledger = dependencies.ledger ?? verifyCompletionLedger;
   const [, dir, , current, state, , systemd, workerConfig, , sha, release, digest, archive] = args;
   if (sha !== 'e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf'
     || digest !== '4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0') throw new Error('Wrong completion payload scope');
-  const observation = JSON.parse(python('hermes-writer-state.py', ['completion-check', state, current, systemd, release, join(dir, '.env.production'), archive, workerConfig]));
-  verifyCompletionLedger(join(dir, '.env.production'), release);
+  const observation = JSON.parse(observe('hermes-writer-state.py', ['completion-check', state, current, systemd, release, join(dir, '.env.production'), archive, workerConfig]));
+  ledger(join(dir, '.env.production'), release);
   return observation;
 }
 

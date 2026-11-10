@@ -947,7 +947,9 @@ COMPLETION_RETAINED_ENTRY = '/tmp/aistudy-entry.Pz65J76D'
 COMPLETION_ADMISSION = '/run/aistudy-completion-admission'
 COMPLETION_QUARANTINE = '/run/systemd/system/aistudy-completion-retained-205'
 RELOAD_BOUND_NS = 60_000_000_000
-RELOAD_EVIDENCE_AGE_NS = 3_600_000_000_000
+# Covers three samples, archive/launch admission and the cold full payload check.
+# Current scope/boot/fences are still rechecked; this is not permission to retry.
+RELOAD_EVIDENCE_AGE_NS = 7_200_000_000_000
 # Immutable reviewed 205 controls, NOT a new signed-controls producer. Required
 # because the exceptional existing-unit path must not adopt arbitrary root code.
 COMPLETION_205 = {

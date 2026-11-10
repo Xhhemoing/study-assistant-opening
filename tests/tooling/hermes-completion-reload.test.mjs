@@ -2,11 +2,63 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { systemctlCommand, RELOAD_TIMEOUT_MS, SYSTEMCTL_TIMEOUT_MS, SUPERVISOR_REQUEST_TIMEOUT_MS } from '../../infra/deploy/hermes-writer-control.mjs';
 import { fixture } from './hermes-supervisor-fixture.mjs';
-import { provisionCompletion } from '../../infra/deploy/hermes-writer-control.mjs';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { provisionCompletion, python, checkCompletion, COMPLETION_CHECK_TIMEOUT_MS } from '../../infra/deploy/hermes-writer-control.mjs';
+import { supervise, cleanupCompletion } from '../../infra/deploy/hermes-supervisor.mjs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+
+for (const overLimit of [false, true]) test(`scaled real completion-check child ${overLimit ? 'exceeds new hard limit: clean refusal, no claim/StopPost consumption' : 'exceeds old 150s equivalent and reaches first claim only after check'}`, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-full-check-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const args = ['complete-postmigration','/legacy','/releases','/current',root,'/backups','/systemd','/config','6291456',
+    'e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf','/release',
+    '4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0','/archive'];
+  const events = [];
+  const claim = join(root, 'postmigration-completion-claimed');
+  const observedCheck = () => checkCompletion(args, {
+    python: (file, argv, payload) => python(file, argv, payload, (_command, _argv, options) => {
+      assert.equal(options.timeout, COMPLETION_CHECK_TIMEOUT_MS);
+      assert(options.timeout >= 1_800_000);
+      assert.equal(options.killSignal, 'SIGKILL');
+      // Scale 5000:1: old150s=30ms, full2400s=480ms. Actual isolated child,
+      // not a fabricated successful spawn result, never systemd or payload IO.
+      const delay = overLimit ? 1 : 0.09;
+      const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',
+        `import time,json; time.sleep(${delay}); print(json.dumps({'release':'/release'}))`],
+        { ...options, timeout: options.timeout / 5000 });
+      if (overLimit) {
+        assert.equal(result.error?.code, 'ETIMEDOUT');
+        assert.equal(result.signal, 'SIGKILL');
+      } else {
+        assert.equal(result.status, 0, result.stderr);
+        assert(delay * 1000 > 150_000 / 5000);
+      }
+      events.push(result.error ? 'check-timeout' : 'check-complete');
+      return result;
+    }),
+    ledger: () => events.push('ledger-quiet'),
+  });
+  await assert.rejects(supervise('unused', args, {
+    verifyEntrySources: () => {}, completionService: () => ({ InvocationID: 'a'.repeat(32), ExecMainPID: '1234' }),
+    checkCompletion: observedCheck,
+    claimCompletion: () => { events.push('claim'); writeFileSync(claim, 'exclusive claim', { flag: 'wx' }); throw Error('test stops after first claim'); },
+    createServer: () => { throw Error('must not create socket'); },
+    stopWriters: () => { events.push('stop'); return true; },
+  }), overLimit ? /Trusted writer control unavailable/ : /test stops after first claim/);
+  assert.equal(existsSync(claim), !overLimit);
+  assert.deepEqual(events, overLimit ? ['check-timeout'] : ['check-complete','ledger-quiet','claim']);
+  if (overLimit) {
+    cleanupCompletion(args, {
+      service: () => ({}), hasClaim: () => existsSync(claim),
+      readOrigin: () => { throw Error('no origin may be consumed'); },
+      readClaim: () => { throw Error('no claim may be consumed'); },
+      fence: () => { throw Error('no mutation'); }, stop: () => { throw Error('no stop'); },
+    });
+    assert(!existsSync(claim));
+  }
+});
 
 test('review immutable helper ordinary systemctl receives bounded timeout', t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-provision-budget-'));
