@@ -4,10 +4,10 @@ import { systemctlCommand, RELOAD_TIMEOUT_MS, SYSTEMCTL_TIMEOUT_MS, SUPERVISOR_R
 import { fixture } from './hermes-supervisor-fixture.mjs';
 import { provisionCompletion, python, checkCompletion, COMPLETION_CHECK_TIMEOUT_MS } from '../../infra/deploy/hermes-writer-control.mjs';
 import { supervise, cleanupCompletion } from '../../infra/deploy/hermes-supervisor.mjs';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 for (const overLimit of [false, true]) test(`scaled real completion-check child ${overLimit ? 'exceeds new hard limit: clean refusal, no claim/StopPost consumption' : 'exceeds old 150s equivalent and reaches first claim only after check'}`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-full-check-'));
@@ -42,7 +42,7 @@ for (const overLimit of [false, true]) test(`scaled real completion-check child 
   });
   await assert.rejects(supervise('unused', args, {
     verifyEntrySources: () => {}, completionService: () => ({ InvocationID: 'a'.repeat(32), ExecMainPID: '1234' }),
-    checkCompletion: observedCheck,
+    checkCompletion: observedCheck, completionLaunchAdmission: () => {},
     claimCompletion: () => { events.push('claim'); writeFileSync(claim, 'exclusive claim', { flag: 'wx' }); throw Error('test stops after first claim'); },
     createServer: () => { throw Error('must not create socket'); },
     stopWriters: () => { events.push('stop'); return true; },
@@ -60,12 +60,44 @@ for (const overLimit of [false, true]) test(`scaled real completion-check child 
   }
 });
 
+test('review timed-out leaf cannot leave setsid grandchild or inherited pipes alive', t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-leaf-tree-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const marker = join(root, 'escaped-marker');
+  const helper = join(root, 'helper.py');
+  const grandchild = `import os,time; os.setsid(); time.sleep(.4); open(${JSON.stringify(marker)},'w').write('escaped')`;
+  const child = `import subprocess,time; subprocess.Popen(['/usr/bin/python3','-c',${JSON.stringify(grandchild)}]); time.sleep(10)`;
+  writeFileSync(helper, `import subprocess\nsubprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=.15,capture_output=True)\n`);
+  assert.throws(() => provisionCompletion(helper, []), /immutable provision helper failed/);
+  spawnSync('/usr/bin/python3', ['-c','import time; time.sleep(.5)']);
+  assert(!existsSync(marker), 'escaped grandchild wrote after rejected leaf returned');
+});
+
+for (const ignoreTerm of [false, true]) test(`double-fork setsid leaf and inherited pipe drained; ignore TERM=${ignoreTerm}; adjacent session safe`, t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-adopted-leaf-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const adjacent = spawn('/usr/bin/python3', ['-c','import time; time.sleep(10)'], { stdio: 'ignore', detached: true });
+  t.after(() => adjacent.kill('SIGKILL'));
+  const pidfile = join(root, 'descendants');
+  const marker = join(root, 'marker');
+  const helper = join(root, 'helper.py');
+  const child = `import os,time,signal\n${ignoreTerm ? 'signal.signal(signal.SIGTERM,signal.SIG_IGN)' : ''}\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nos.setsid()\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\npid=os.fork()\nif pid:\n    os._exit(0)\nwith open(${JSON.stringify(pidfile)},'a') as f: f.write(str(os.getpid())+'\\n')\ntime.sleep(.4)\nopen(${JSON.stringify(marker)},'w').write('escaped')\n`;
+  writeFileSync(helper, `import subprocess\nsubprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=.15,capture_output=True)\n`);
+  assert.throws(() => provisionCompletion(helper, []), /immutable provision helper failed/);
+  const pids = readFileSync(pidfile, 'utf8').trim().split('\n');
+  assert.equal(pids.length, 3);
+  for (const pid of pids) assert(!existsSync('/proc/' + pid), `owned descendant ${pid} still exists after refusal`);
+  assert.doesNotThrow(() => process.kill(adjacent.pid, 0));
+  spawnSync('/usr/bin/python3', ['-c','import time; time.sleep(.5)']);
+  assert(!existsSync(marker));
+});
+
 test('review immutable helper ordinary systemctl receives bounded timeout', t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-provision-budget-'));
   t.after(() => rmSync(root, { recursive: true }));
   const helper = join(root, 'helper.py');
   // Replace only the wrapper's subprocess sink: never execute systemctl.
-  writeFileSync(helper, `import subprocess\ndef observe(argv,*args,**kwargs):\n    assert kwargs.get('timeout') == 15, repr(kwargs)\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run.__globals__['original']=observe\nsubprocess.run(['systemctl','show','fixture'])\n`);
+  writeFileSync(helper, `import subprocess\ndef observe(argv,*args,**kwargs):\n    assert kwargs.get('timeout') == 15, repr(kwargs)\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run.__globals__['owned_run']=observe\nsubprocess.run(['systemctl','show','fixture'])\n`);
   provisionCompletion(helper, []);
 });
 
@@ -73,8 +105,8 @@ test('review verify and identity commands have bounded leaves and restore fits t
   const root = mkdtempSync(join(tmpdir(), 'sm95-restore-budget-'));
   t.after(() => rmSync(root, { recursive: true }));
   const helper = join(root, 'helper.py');
-  writeFileSync(helper, `import subprocess\nfor name in ['systemd-analyze','groupadd','useradd']:\n    for supplied in [None,1,100]:\n        subprocess.run([name,'fixture'],timeout=supplied)\n`);
-  provisionCompletion(helper, [], (file, args, options) => {
+  writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor name in ['systemd-analyze','groupadd','useradd']:\n    for supplied in [None,1,100]:\n        subprocess.run([name,'fixture'],timeout=supplied)\n`);
+  provisionCompletion(helper, [], (file, args) => {
     const code = args[args.indexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw.get('timeout'))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert seen == [15,1,15,15,1,15,15,1,15],repr(seen)\n`;
     const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
@@ -88,7 +120,7 @@ test('synthetic immutable helper failure completes configure and restore reload 
   const root = mkdtempSync(join(tmpdir(), 'sm95-full-restore-'));
   t.after(() => rmSync(root, { recursive: true }));
   const helper = join(root, 'helper.py');
-  writeFileSync(helper, `import subprocess\nfor cmd in [['systemctl','is-active'],['systemctl','is-enabled'],['groupadd'],['useradd']]:\n    subprocess.run(cmd)\nsubprocess.run(['runuser','parser'],timeout=90)\nsubprocess.run(['systemd-analyze','verify'])\ntry:\n    subprocess.run(['systemctl','daemon-reload'])\n    subprocess.run(['systemctl','show'])\n    raise ValueError('effective verification failed')\nexcept ValueError:\n    subprocess.run(['systemctl','daemon-reload'])\n`);
+  writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor cmd in [['systemctl','is-active'],['systemctl','is-enabled'],['groupadd'],['useradd']]:\n    subprocess.run(cmd)\nsubprocess.run(['runuser','parser'],timeout=90)\nsubprocess.run(['systemd-analyze','verify'])\ntry:\n    subprocess.run(['systemctl','daemon-reload'])\n    subprocess.run(['systemctl','show'])\n    raise ValueError('effective verification failed')\nexcept ValueError:\n    subprocess.run(['systemctl','daemon-reload'])\n`);
   provisionCompletion(helper, [], (file, args, options) => {
     const code = args[args.indexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append((argv,kw['timeout']))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert [v[1] for v in seen] == [15,15,15,15,90,15,60,15,60],repr(seen)\nassert seen[-1][0] == ['systemctl','daemon-reload']\nassert sum(v[1] for v in seen) == 300\nassert subprocess.run is observe\n`;
@@ -104,7 +136,7 @@ for (const failure of [false, true]) test(`provision wrapper budgets every syste
   const root = mkdtempSync(join(tmpdir(), 'sm95-provision-wrapper-'));
   t.after(() => rmSync(root, { recursive: true }));
   const helper = join(root, 'helper.py');
-  writeFileSync(helper, `import subprocess\nfor command in ['is-active','is-enabled','show','daemon-reload']:\n    for supplied in [None,1,100]:\n        subprocess.run(['systemctl',command,'fixture'],timeout=supplied)\n${failure ? "raise RuntimeError('synthetic helper failure')" : ''}\n`);
+  writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor command in ['is-active','is-enabled','show','daemon-reload']:\n    for supplied in [None,1,100]:\n        subprocess.run(['systemctl',command,'fixture'],timeout=supplied)\n${failure ? "raise RuntimeError('synthetic helper failure')" : ''}\n`);
   provisionCompletion(helper, [], (file, args, options) => {
     assert.equal(file, 'timeout');
     assert.deepEqual(args.slice(0, 2), ['--signal=KILL', '480s']);

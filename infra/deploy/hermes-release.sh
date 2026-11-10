@@ -212,12 +212,36 @@ restart_services() {
   managed activate || return 1
   return 0
 }
+completion_health() {
+  local required=$1 expected=$2 body remaining limit
+  local deadline=$((SECONDS + 1000))
+  # A time window, not an attempt count: fast connection/identity failures must
+  # leave cold parser/OCR its full startup opportunity. Each leaf uses only the
+  # remaining window, so no final 30s probe runs past the readiness deadline.
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    limit=$((remaining < 5 ? remaining : 5))
+    body=$(timeout --signal=KILL "${limit}s" curl -fsS --max-time "$limit" http://127.0.0.1:18090/api/health 2>/dev/null || true)
+    if [[ "$body" == *'"status":"ok"'* ]]; then
+      remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+      limit=$((remaining < 15 ? remaining : 15))
+      if [[ "$required" == 0 ]] || timeout --signal=KILL "${limit}s" systemctl is-active --quiet aistudy-worker.service; then
+        [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is missing.' >&2; return 1; }
+        remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+        limit=$((remaining < 30 ? remaining : 30))
+        if timeout --signal=KILL "${limit}s" node "$STATE/runtime-identity.mjs" "$CONFIG" "$expected" "$required"; then return 0; fi
+      fi
+    fi
+    remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+    limit=$((remaining < 2 ? remaining : 2))
+    sleep "$limit"
+  done
+  echo 'Completion readiness deadline expired; no automatic completion reentry.' >&2
+  return 1
+}
 health() {
   local required=$1 expected=$2 profile=${3:-}
+  if [[ "$ACTION" == complete-postmigration ]]; then completion_health "$required" "$expected"; return; fi
   local body attempt attempts=120
-  # Completion has a separately budgeted 20*(curl5 + active15 + identity30 + sleep2)
-  # <=1040s readiness window inside its independent 7200s service lifetime.
-  if [[ "$ACTION" == complete-postmigration ]]; then attempts=20; fi
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
   # Cold parser imports + OCR probe can exceed two minutes. Readiness, not
@@ -225,15 +249,9 @@ health() {
   for ((attempt=1; attempt<=attempts; attempt++)); do
     body=$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
     if [[ "$body" == *'"status":"ok"'* ]]; then
-      if [[ "$required" == 1 ]]; then
-        if [[ "$ACTION" == complete-postmigration ]]; then
-          timeout --signal=KILL 15s systemctl is-active --quiet aistudy-worker.service || return 1
-        elif ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
-      fi
+      if [[ "$required" == 1 ]] && ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
       [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is not installed; first complete a managed deployment.' >&2; return 1; }
-      if [[ "$ACTION" == complete-postmigration ]]; then
-        if timeout --signal=KILL 30s node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
-      elif node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
+      if node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
     fi
     sleep 2
   done

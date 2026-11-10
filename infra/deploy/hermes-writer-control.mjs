@@ -27,16 +27,19 @@ export function durableWrite(file, contents, mode = 0o600) {
 // request: both socket ends1200 > max(prepare270, activate670, success300)+150.
 // provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
 //   configure reload60 + effective show15 + failure restore reload60 = 300.
-// Helper outer480 adds 180 for IO/restore; node outer485 must not kill restore.
+// Nine leaves each add <=2s owned-tree TERM/KILL/drain (18s maximum).
+// Helper outer480 > leaves300+drain18+IO162; node outer485 must not kill restore.
 // Full signed payload observation is synchronous BEFORE socket creation/claim:
 // Python2400 + ledger50 + claim-admission300 + claim30 + entry/service45 = 2825.
 // service7200: admission2825 + prepare270 + parser/provision570 + owner reloads120
-//   + activate670 + health1040 + success300 = 5795; IO/failure margin1405.
+//   + activate670 + health1001 + success300 = 5756; IO/failure margin1444.
+// Health uses SECONDS deadline1000, remaining-time leaf caps; <=1s clock rounding.
 // StopPost240 > cleanup180; no-claim StopPost NEVER performs payload observation.
 // Readonly formal precheck: shell timeout2700 > full-check2400+ledger55+report IO.
 // Provision runs in owner shell, NOT inside socket requests: socket1200 unchanged.
 // Historical checker <=120 (two units, optional typed-hook queries included).
-// PM samples: python1500 > scope270 + 3*(reload60+2*historical120+2*manager15)=1260.
+// PM samples: seven full incident scopes270 + 3*(reload60+2*manager15)=2160;
+// Python3000 leaves 840 for IO. Scope repeats backup/current/guard, NOT payload.
 // Archive python650 > 2*scope270+2*manager15+IO; launch-check300 > scope270+manager15.
 // Socket timers cannot preempt synchronous work: bounded subprocesses and the
 // independent system service, not timer callbacks, own hard termination.
@@ -53,8 +56,93 @@ export function systemctlCommand(args, execute = spawnSync) {
   return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? '' };
 }
 export function provisionCompletion(helper, args, execute = spawnSync) {
-  const code = `import runpy,subprocess,sys
+  const code = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
 original=subprocess.run
+
+def owned_run(argv,*args,**kwargs):
+    # One dedicated subreaper per leaf. Only its direct/adopted children are
+    # enumerated, never arbitrary host PIDs or another deployment's session.
+    with tempfile.TemporaryFile() as result_file:
+        controller=os.fork()
+        if controller == 0:
+            try:
+                if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
+                    raise OSError('Leaf subreaper unavailable')
+                probe=os.pidfd_open(os.getpid())
+                try: signal.pidfd_send_signal(probe,0)
+                finally: os.close(probe)
+                children()  # Refuse unsupported proc/pidfd before spawning anything.
+                result=leaf(argv,*args,**kwargs)
+                value=(True,result)
+            except BaseException as error:
+                value=(False,error)
+            try:
+                pickle.dump(value,result_file); result_file.flush()
+            finally:
+                os._exit(0)
+        # The controller owns timeout + at most 2s TERM/KILL/drain work.
+        # Parent never restores/configures while this owned leaf is still live.
+        os.waitpid(controller,0)
+        result_file.seek(0)
+        success,value=pickle.load(result_file)
+        if not success: raise value
+        return value
+
+def children():
+    with open('/proc/self/task/'+str(os.getpid())+'/children') as source:
+        return [int(pid) for pid in source.read().split()]
+
+def drain():
+    # Killing a parent adopts its children even after runuser/setsid. pidfds
+    # pin the observed direct child; no numeric PID signalling/reuse race.
+    had_children=False
+    for sig,grace in ((signal.SIGTERM,.25),(signal.SIGKILL,1.5)):
+        deadline=time.monotonic()+grace
+        while True:
+            while True:
+                try:
+                    pid,_=os.waitpid(-1,os.WNOHANG)
+                    if pid == 0: break
+                except ChildProcessError: break
+            owned=children()
+            if not owned: return had_children
+            had_children=True
+            for pid in owned:
+                try:
+                    fd=os.pidfd_open(pid)
+                    try:
+                        if pid in children(): signal.pidfd_send_signal(fd,sig)
+                    finally: os.close(fd)
+                except ProcessLookupError: pass
+            if time.monotonic()>=deadline: break
+            time.sleep(.005)
+    raise RuntimeError('Leaf descendants termination UNCONFIRMED')
+
+def leaf(argv,*args,**kwargs):
+    timeout=kwargs.pop('timeout',None)
+    check=kwargs.pop('check',False)
+    data=kwargs.pop('input',None)
+    capture=kwargs.pop('capture_output',False)
+    if data is not None: kwargs['stdin']=subprocess.PIPE
+    if capture:
+        if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+            raise ValueError('capture_output conflicts with pipes')
+        kwargs['stdout']=kwargs['stderr']=subprocess.PIPE
+    proc=subprocess.Popen(argv,*args,**kwargs)
+    try:
+        out,err=proc.communicate(data,timeout=timeout)
+    except BaseException:
+        # Do not communicate/reap just the parent and leave inherited pipes or
+        # escaped grandchildren alive. Drain the whole adopted tree first.
+        drain()
+        proc.communicate(timeout=.25)
+        raise
+    orphaned=drain()
+    if orphaned: raise RuntimeError('Leaf left descendants after return')
+    result=subprocess.CompletedProcess(argv,proc.returncode,out,err)
+    if check: result.check_returncode()
+    return result
+
 def bounded(argv,*args,**kwargs):
     if isinstance(argv,(list,tuple)) and argv and argv[0] in ('systemctl','/usr/bin/systemctl','/bin/systemctl'):
         limit=${SYSTEMCTL_TIMEOUT_MS / 1000}
@@ -64,7 +152,7 @@ def bounded(argv,*args,**kwargs):
     elif isinstance(argv,(list,tuple)) and argv and argv[0].rsplit('/',1)[-1] in ('systemd-analyze','groupadd','useradd'):
         prior=kwargs.get('timeout')
         kwargs['timeout']=${SYSTEMCTL_TIMEOUT_MS / 1000} if prior is None else min(prior,${SYSTEMCTL_TIMEOUT_MS / 1000})
-    return original(argv,*args,**kwargs)
+    return owned_run(argv,*args,**kwargs)
 subprocess.run=bounded
 try:
     sys.argv=sys.argv[1:]
@@ -95,7 +183,7 @@ export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
 export function python(file, args, payload, execute = spawnSync) {
   const result = execute('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
-    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 1_500_000
+    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 3_000_000
       : args[0] === 'completion-retained-archive' ? 650_000
       : args[0] === 'completion-launch-check' ? 300_000
       : args[0] === 'completion-check' ? COMPLETION_CHECK_TIMEOUT_MS : 30_000,

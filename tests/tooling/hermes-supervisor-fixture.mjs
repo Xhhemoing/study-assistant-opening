@@ -144,6 +144,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
     writeFileSync(join(args[4], 'migration-forward-only'), 'original incident');
     writeFileSync(join(args[4], 'writers-fenced'), 'original fence');
     dependencies.completionService = () => ({ InvocationID: 'a'.repeat(32), ExecMainPID: '1234' });
+    dependencies.completionLaunchAdmission = () => { events.push('completion:claim-admission'); };
     // Supervisor protocol tests use a synthetic manager; inode-origin creation
     // and faults run separately against the real Python implementation.
     dependencies.claimCompletion = (state, scope) => writeFileSync(join(state, 'postmigration-completion-claimed'), JSON.stringify(scope), { flag: 'wx', mode: 0o600 });

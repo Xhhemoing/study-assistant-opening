@@ -224,7 +224,7 @@ export async function requestCommand(action, environment = process.env, dependen
   return { exitCode: reply.ok ? 0 : 1 };
 }
 const production = {
-  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService, completionLaunchAdmission,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -234,7 +234,7 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService, completionLaunchAdmission,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
   verifyEntrySources();
@@ -259,7 +259,9 @@ export async function supervise(script, args, dependencies = {}) {
   if (completion) {
     const service = completionService();
     const observation = checkCompletion(args);
-    if (!Object.keys(dependencies).length) completionLaunchAdmission(args, completionServiceUnit(args), 'claim');
+    // Always traverse this boundary, including object-injected manager fixtures.
+    // Production uses the real admission; tests must explicitly own their seam.
+    completionLaunchAdmission(args, Object.keys(dependencies).length ? undefined : completionServiceUnit(args), 'claim');
     try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID, mainPid: service.ExecMainPID }); }
     catch (error) {
       if (error.completionClaimConsumed) {

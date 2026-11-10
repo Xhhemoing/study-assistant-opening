@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hermes_pre_migration_repair_test import Repair, state
 COMPLETION_MANAGER = state.completion_manager
 COMPLETION_SCOPE = state.completion_scope
+import subprocess
+REAL_SUBPROCESS_RUN = subprocess.run
 GENERATED = sys.stdin.read() if '--generated-check' in sys.argv else None
 
 
@@ -818,6 +820,94 @@ class Completion(Repair):
             self.write(self.state / 'postmigration-completion-claimed', '{partial')
             with patch.object(state, 'completion_manager', return_value=unloaded), self.assertRaises(ValueError):
                 state.completion_launch_check(payload)
+
+    def test_completion_review_loop_deleted_incident_fence_stops_before_next_reload(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        calls = []
+        def command(argv, **kwargs):
+            if argv == ['/usr/bin/systemctl', 'daemon-reload']:
+                import subprocess
+                calls.append(argv)
+                (self.state / 'writers-fenced').unlink()
+                return subprocess.CompletedProcess(argv, 0)
+            return self.reload_external(argv, **kwargs)
+        with patch.object(state.subprocess, 'run', command), self.assertRaises((ValueError, OSError)):
+            state.completion_reload_samples(payload)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue((directory / 'sample-0.json').exists())
+        self.assertFalse((directory / 'sample-1-started.json').exists())
+
+    def test_completion_review_loop_incident_changes_preserve_partial_stop_mutation(self):
+        for changed in ('guard', 'current', 'adoption', 'activation', 'backup', 'query'):
+            with self.subTest(changed=changed):
+                # Each variant runs under a fresh real incident fixture, never a
+                # stubbed scope. Restore its inputs before the next variant.
+                payload, manager, directory, quarantine, unit = self.reload_fixture()
+                calls = []
+                originals = {}
+                for path in (self.state / 'migration-forward-only', self.state / 'repair-adopted',
+                             self.state / 'activation-incomplete', self.new / 'database-backup'):
+                    originals[path] = path.read_bytes()
+                old_current = os.readlink(self.current)
+                def command(argv, **kwargs):
+                    if argv == ['/usr/bin/systemctl', 'daemon-reload']:
+                        import subprocess
+                        calls.append(argv)
+                        targets = {'guard': self.state / 'migration-forward-only',
+                                   'adoption': self.state / 'repair-adopted',
+                                   'activation': self.state / 'activation-incomplete',
+                                   'backup': self.new / 'database-backup'}
+                        if changed in targets: self.write(targets[changed], 'changed binding')
+                        if changed == 'current':
+                            self.current.unlink(); self.current.symlink_to(self.release)
+                        return subprocess.CompletedProcess(argv, 0)
+                    if calls and changed == 'query': raise OSError('manager unavailable')
+                    return self.reload_external(argv, **kwargs)
+                try:
+                    with patch.object(state.subprocess, 'run', command), self.assertRaises((ValueError, OSError)):
+                        state.completion_reload_samples(payload)
+                    self.assertEqual(len(calls), 1)
+                    self.assertTrue((directory / 'sample-0.json').exists())
+                    self.assertFalse((directory / 'sample-1-started.json').exists())
+                    self.assertTrue(unit.exists())
+                    self.assertFalse(quarantine.exists())
+                finally:
+                    for path, contents in originals.items(): path.write_bytes(contents)
+                    self.current.unlink(); self.current.symlink_to(old_current)
+                    # Only synthetic files; all object patches unwind in tearDown.
+                    import shutil
+                    shutil.rmtree(directory)
+                    unit.unlink()
+                    shutil.rmtree(self.root / 'retained-entry')
+
+    def test_completion_review_real_claim_admission_fresh_expired_boot_controls_and_lock_race(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        ticks = iter([100, 200, 201, 300, 301, 400])
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), patch.object(state.subprocess, 'run', self.reload_result):
+            state.completion_reload_samples(payload)
+        with patch.object(state.time, 'monotonic_ns', return_value=401):
+            state.completion_retained_archive(payload)
+            self.write(unit, payload['unit'])
+            claim_payload = {**payload, 'phase': 'claim'}
+            # Real admission on the claim branch, with the same exclusive lock
+            # held as production; no bypass through a no-op scope adapter.
+            with (self.state / 'deploy.lock').open('rb') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertTrue(state.completion_launch_check(claim_payload)['admitted'])
+                contender = REAL_SUBPROCESS_RUN([sys.executable, '-I', '-S', '-B', '-c',
+                    'import fcntl,sys; f=open(sys.argv[1],"rb"); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)',
+                    str(self.state / 'deploy.lock')], capture_output=True)
+                self.assertNotEqual(contender.returncode, 0)
+            header = directory / 'scope.json'
+            original = header.read_text()
+            for changed in ({'boot': 'different-boot'}, {'controls': {'other-head': 'changed'}}):
+                header.write_text(json.dumps({**json.loads(original), **changed}))
+                with self.assertRaises(ValueError): state.completion_launch_check(claim_payload)
+            header.write_text(original)
+            with patch.object(state.time, 'monotonic_ns', return_value=state.RELOAD_EVIDENCE_AGE_NS + 401), self.assertRaises(ValueError):
+                state.completion_launch_check(claim_payload)
+            self.write(self.state / 'postmigration-completion-claimed', '{race')
+            with self.assertRaises(ValueError): state.completion_launch_check(claim_payload)
 
     def test_completion_new_wrapper_or_unknown_broker_refuse(self):
         original = state.present

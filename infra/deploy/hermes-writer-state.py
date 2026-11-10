@@ -1046,8 +1046,7 @@ def completion_reload_samples(payload):
               'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'boundNs': RELOAD_BOUND_NS}
     completion_private_write(Path(COMPLETION_ADMISSION) / 'scope.json', header)
     for index in range(3):
-        completion_no_claim(args[4])
-        check_historical_manager(Path(args[4]), args[6])  # Before EVERY reload.
+        completion_scope(payload)  # Full incident + effective fence/stopped proof before EVERY reload.
         before = completion_manager()
         completion_never_started(before)
         started = time.monotonic_ns()
@@ -1063,8 +1062,7 @@ def completion_reload_samples(payload):
             error = type(failure).__name__
         ended = time.monotonic_ns()
         try:
-            completion_no_claim(args[4])
-            check_historical_manager(Path(args[4]), args[6])  # Effective 95, stopped writers and empty cgroups.
+            completion_scope(payload)  # Includes guard/adoption/backup/current, not the full payload.
             after = completion_manager()
         except Exception as failure:
             after = {'observationError': type(failure).__name__}

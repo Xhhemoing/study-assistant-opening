@@ -130,12 +130,27 @@ test('immediate claim fault fences only independently proven creation', async t 
     const events=[];
     await assert.rejects(supervise('unused',args,{
       verifyEntrySources:()=>{},completionService:()=>({InvocationID:'a'.repeat(32),ExecMainPID:'1234'}),
-      checkCompletion:()=>({release:'/release'}),claimCompletion:()=>{throw Object.assign(Error('claim fault'),{completionClaimConsumed:consumed});},
+      completionLaunchAdmission:()=>{},checkCompletion:()=>({release:'/release'}),claimCompletion:()=>{throw Object.assign(Error('claim fault'),{completionClaimConsumed:consumed});},
       stopWriters:()=>{events.push('stop:both');return true;},createServer:()=>{throw Error('must not start');},
     }),/claim fault/);
     assert.deepEqual(events,consumed?['stop:both']:[]);
     assert.equal(existsSync(join(root,'writers-fenced')),consumed);
   }
+});
+
+test('injected manager still traverses claim admission before any first write', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'completion-admission-order-')); t.after(() => rmSync(root, { recursive: true }));
+  const args=['complete-postmigration','','','/current',root,'','','','','','/release'];
+  const events=[];
+  await assert.rejects(supervise('unused',args,{
+    verifyEntrySources:()=>{}, completionService:()=>({InvocationID:'a'.repeat(32),ExecMainPID:'1234'}),
+    checkCompletion:()=>{events.push('full-check');return {release:'/release'};},
+    completionLaunchAdmission:(_args,_unit,phase)=>{events.push(`admission:${phase}`);throw Error('expired admission');},
+    claimCompletion:()=>{events.push('claim');writeFileSync(join(root,'postmigration-completion-claimed'),'forbidden');},
+    stopWriters:()=>{events.push('stop');return true;}, createServer:()=>{throw Error('no socket');},
+  }),/expired admission/);
+  assert.deepEqual(events,['full-check','admission:claim']);
+  assert(!existsSync(join(root,'postmigration-completion-claimed')));
 });
 
 test('claim refuses an untrusted production entry without writing fixture state', t => {
