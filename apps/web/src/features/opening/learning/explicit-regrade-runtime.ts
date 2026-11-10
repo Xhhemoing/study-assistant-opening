@@ -47,7 +47,7 @@ export function getExplicitRegradeService(sql: Sql) {
     if (result.request.state !== "prepared") return progress(result);
     return { kind: "prepared" as const, request: result.request, snapshot: result.snapshot, estimateCents: result.estimateCents,
       estimate: result.estimateCents === null ? null
-        : `本次批改预算上限 ¥${(result.estimateCents / 100).toFixed(2)}（实际费用以账单为准；旧请求仍可能收费）` };
+        : `当前预估预留 ¥${(result.estimateCents / 100).toFixed(2)}（不是费用上限；备用模型可能改变费用，实际费用按实际用量及配置价格计入账单；旧请求仍可能另行收费）` };
   }
   return {
     snapshot: repository.snapshot,

@@ -101,7 +101,7 @@ export type TeachingWorkspaceProps = {
   timeZone?: string;
   /** Optional OpeningApi inject (tests). */
   api?: OpeningApi;
-  /** Optional HTTP-owner boundary; absent until the real regrade adapter is delivered. */
+  /** Optional owner override; inline attempts otherwise use the authenticated tab HTTP owner. */
   explicitRegrade?: ExplicitRegradeOwner;
   onActivityUpdated?: (activity: TeachingActivity) => void;
   /**

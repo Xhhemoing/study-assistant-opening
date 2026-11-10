@@ -21,7 +21,8 @@ const messages: Record<ExplicitRegradeState["phase"], string> = {
 
 /** Owner injection is required: no invented route, automatic prepare, confirm or retry. */
 export function ExplicitRegradeControl({ owner, disabled = false }: { owner: ExplicitRegradeOwner; disabled?: boolean }) {
-  const { session, snapshot } = owner;
+  const { session } = owner;
+  const snapshot = owner.operationSnapshot ?? owner.snapshot;
   const state = useSyncExternalStore(session.subscribe, () => session.get(snapshot), () => session.get(snapshot));
   if (snapshot.oldStatus !== "unknown_cost" && state.phase === "idle") return null;
   const busy = state.reading || state.phase === "preparing" || state.phase === "confirming";
@@ -34,7 +35,7 @@ export function ExplicitRegradeControl({ owner, disabled = false }: { owner: Exp
     </div> : null}
     {state.phase === "prepared" ? <div className="space-y-3">
       <p className="text-sm font-medium leading-6 text-warn">{EXPLICIT_REGRADE_CONFIRMATION_TEXT}</p>
-      <p className="text-sm leading-6 text-text-2">本次价格估算：{state.estimate?.trim() || "暂不可用；不能确认收费，请重新读取。"}。估算不代表最终费用。</p>
+      <p className="text-sm leading-6 text-text-2">本次价格估算：{state.estimate?.trim() || "暂不可用；不能确认收费，请重新读取。"}。此预估不是费用上限；备用模型可能改变费用，实际费用按实际用量及配置价格计入账单。</p>
       <p className="text-sm leading-6 text-text-2">旧未知费用不会因新建评改而释放。沿用已保存的同一答案与照片；两次都可能收费。</p>
       <button type="button" className={`${ui.primary} h-auto min-h-11 whitespace-normal text-left`} disabled={disabled || busy || snapshot.oldStatus !== "unknown_cost" || !state.estimate?.trim()}
         onClick={() => { void session.confirm(snapshot); }}>确认新建 AI 评改（这次另收费，旧未知费用不释放）</button>

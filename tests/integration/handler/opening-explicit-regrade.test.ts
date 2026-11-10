@@ -5,6 +5,7 @@ import { EXPLICIT_REGRADE_CONFIRMATION_VERSION, type ExplicitRegradeRequest } fr
 import { createOpeningAiGradingRepository, createOpeningBudgetRepository, createOpeningExplicitRegradeRequestRepository,
   createOpeningJobRepository, reviseOpeningLearningObservation } from "@aistudy/database";
 import { createModelGateway } from "../../../packages/ai/src/opening/model-gateway";
+import { OpeningProviderError } from "../../../packages/ai/src/opening/provider";
 import { createGradeObservationHandler } from "../../../apps/worker/src/jobs/grade-observation";
 import { runJob } from "../../../apps/worker/src/runtime/run-job";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -146,6 +147,51 @@ it.each(["correct", "unverified"] as const)("real authenticated POST/GET → bud
   expect((await createOpeningExplicitRegradeRequestRepository(f.sql).read(f.scope, row.requestId)).status).toBe("unknown_cost");
   expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE request_id=${row.operationId}`).toHaveLength(1);
   expect([...await f.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${x.operation}`]).toEqual(before.fees);
+});
+
+it.each([false, true])("treats the primary estimate as non-cap while a not-sent fallback still obeys the worker budget (capped %s)", async capped => {
+  const x = await seed(), before = await persisted();
+  const catalog = JSON.parse(process.env.OPENING_MODEL_CATALOG!);
+  vi.stubEnv("OPENING_MODEL_CATALOG", JSON.stringify([...catalog, { ...catalog[0], id: "expensive-backup", modelName: "expensive-backup",
+    inputCentsPerMillion: 1000000, outputCentsPerMillion: 1000000 }]));
+  await f.sql`UPDATE workspace_preferences SET ai_settings=jsonb_set(COALESCE(ai_settings,'{}'::jsonb),'{taskRoutes}',
+    ${f.sql.json({ "practice.grade-text": { primary: "handler-model", fallback: "expensive-backup" } })}) WHERE workspace_id=${f.scope.workspaceId}`;
+  const prepared = await (await post(x.input)).json();
+  expect(prepared.estimateCents).toBeGreaterThan(0);
+  expect(prepared.estimate).toContain("当前预估预留");
+  expect(prepared.estimate).toContain("不是费用上限");
+  expect(prepared.estimate).toContain("备用模型可能改变费用");
+  expect(prepared.estimate).toContain("旧请求仍可能另行收费");
+  expect(prepared.request.confirmationText).toContain("两次都可能收费");
+  const confirmed = await (await confirm(prepared.request)).json(), row = confirmed.progress.request as ExplicitRegradeRequest;
+  const primary = vi.fn(async () => { throw new OpeningProviderError("PROVIDER_AUTH", "synthetic not sent", false, false); });
+  const backup = vi.fn(async () => ({ text: JSON.stringify({ outcome: "correct", confidence: .95, questionMatch: true, feedback: "synthetic backup",
+    criteria: [{ label: "sum", verdict: "correct", feedback: "checked" }] }), inputTokens: 10, outputTokens: 10,
+    citedChunkIds: [], requestId: null, candidates: [] }));
+  const gateway = createModelGateway({ resolve: async () => ({ provider: { complete: primary }, modelSnapshot: { id: "handler-model",
+    providerId: "fixture", modelName: "handler-model", inputCentsPerMillion: 100, outputCentsPerMillion: 100 },
+    inputCentsPerMillion: 100, outputCentsPerMillion: 100 }),
+  resolveFallback: async () => ({ provider: { complete: backup }, modelSnapshot: { id: "expensive-backup", providerId: "fixture",
+    modelName: "expensive-backup", inputCentsPerMillion: 1000000, outputCentsPerMillion: 1000000 }, inputCentsPerMillion: 1000000, outputCentsPerMillion: 1000000 }) });
+  const budget = createOpeningBudgetRepository(f.sql, { envCapCents: capped ? 20 : 100000 }), queue = createOpeningJobRepository(f.sql);
+  const handler = createGradeObservationHandler({ repository: createOpeningAiGradingRepository(f.sql), gateway,
+    budget: scope => ({ reserve: input => budget.reserve(scope, input), release: (...args) => budget.release(scope, ...args),
+      claimExecution: id => budget.claimExecution(scope, id), settle: (...args) => budget.settle(scope, ...args), markUnknown: id => budget.markUnknown(scope, id) }), images: async () => [] });
+  expect(await runJob(queue, row.jobId!, handler)).toBe(true);
+  expect(primary).toHaveBeenCalledOnce();
+  expect((await queue.get(f.scope, row.jobId!)).state).toBe(capped ? "failed" : "succeeded");
+  expect(backup).toHaveBeenCalledTimes(capped ? 0 : 1);
+  const [released] = await f.sql`SELECT state,release_reason FROM opening_budget_reservations WHERE request_id=${row.operationId}`;
+  expect(released).toMatchObject({ state: "released", release_reason: "not_sent" });
+  const fallback = await f.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${`${row.operationId}:fallback`}`;
+  if (capped) expect(fallback).toHaveLength(0);
+  else {
+    expect(fallback).toHaveLength(1); expect(fallback[0]!.state).toBe("completed");
+    expect(Number(fallback[0]!.amount_cents)).toBeGreaterThan(prepared.estimateCents);
+    expect(Number(fallback[0]!.reserved_amount_cents)).toBeGreaterThan(prepared.estimateCents);
+  }
+  expect([...await f.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${x.operation}`]).toEqual(before.fees);
+  expect(await runJob(queue, row.jobId!, handler)).toBe(false); expect(primary).toHaveBeenCalledOnce();
 });
 
 it("cross-tab confirmation consumes one successor and GET/confirm never retries its unknown operation", async () => {

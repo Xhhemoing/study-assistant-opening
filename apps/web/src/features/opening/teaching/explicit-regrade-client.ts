@@ -35,7 +35,7 @@ export type ExplicitRegradeRead = { kind: "progress"; progress: ExplicitRegradeP
  * prepare's response was lost. It must not reserve, enqueue, confirm or invoke a model.
  */
 export type ExplicitRegradeAdapter = {
-  prepare(input: ExplicitRegradePrepare): Promise<ExplicitRegradePrepared | Conflict>;
+  prepare(input: ExplicitRegradePrepare): Promise<ExplicitRegradePrepared | ExplicitRegradeRead | Conflict>;
   confirm(input: ExplicitRegradeConfirm): Promise<ExplicitRegradeRead | Conflict>;
   read(input: { observationId: string; clientKey: string; requestId: string | null }): Promise<ExplicitRegradeRead | ExplicitRegradePrepared | Conflict>;
 };
@@ -162,6 +162,9 @@ export function createExplicitRegradeSession(adapter: ExplicitRegradeAdapter, is
 }
 
 export type ExplicitRegradeOwner = {
+  /** Latest server head/version/status; a result status must never overwrite this head. */
   snapshot: ExplicitRegradeSnapshot;
+  /** Captured paid-input identity for the operation being displayed/recovered. */
+  operationSnapshot?: ExplicitRegradeSnapshot;
   session: ReturnType<typeof createExplicitRegradeSession>;
 };
