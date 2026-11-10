@@ -62,6 +62,7 @@ export function systemctlCommand(args, execute = spawnSync) {
 }
 const ownershipProgram = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
 original=subprocess.run
+owner_spawned=False
 
 def prepare_owner():
     if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
@@ -72,6 +73,9 @@ def prepare_owner():
     children()
 
 def owned_run(argv,*args,**kwargs):
+    global owner_spawned
+    # Parent must also adopt if its leaf controller exits before an ACK.
+    prepare_owner()
     # One dedicated subreaper per leaf. Only its direct/adopted children are
     # enumerated, never arbitrary host PIDs or another deployment's session.
     with tempfile.TemporaryFile() as result_file:
@@ -82,6 +86,9 @@ def owned_run(argv,*args,**kwargs):
                 result=leaf(argv,*args,**kwargs)
                 value=(True,result)
             except BaseException as error:
+                # Includes controller observation errors after a leaf was spawned.
+                # drain cannot release a live owned scope on syscall failure.
+                if owner_spawned: drain()
                 value=(False,error)
             try:
                 pickle.dump(value,result_file); result_file.flush()
@@ -89,9 +96,16 @@ def owned_run(argv,*args,**kwargs):
                 os._exit(0)
         # The controller owns timeout + at most 2s TERM/KILL/drain work.
         # Parent never restores/configures while this owned leaf is still live.
-        os.waitpid(controller,0)
-        result_file.seek(0)
-        success,value=pickle.load(result_file)
+        owner_spawned=True
+        try:
+            os.waitpid(controller,0)
+            result_file.seek(0)
+            success,value=pickle.load(result_file)
+        except BaseException:
+            # wait/seek/ACK failures cannot allow restore while the controller or
+            # its newly adopted descendants still exist.
+            drain()
+            raise
         if not success: raise value
         return value
 
@@ -99,7 +113,36 @@ def children():
     with open('/proc/self/task/'+str(os.getpid())+'/children') as source:
         return [int(pid) for pid in source.read().split()]
 
+def retain_unknown():
+    # Cleanup/observation itself failed. Never pickle an ordinary error back to
+    # the helper or let the outer owner exit while descendants may be live.
+    # Signals cannot interrupt retention; service hard death remains UNKNOWN.
+    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):
+        try: signal.signal(sig,signal.SIG_IGN)
+        except BaseException: pass
+    try: print('UNKNOWN: owned cleanup unconfirmed; owner retained',file=sys.stderr,flush=True)
+    except BaseException: pass
+    while True:
+        try:
+            while True:
+                try:
+                    pid,_=os.waitpid(-1,os.WNOHANG)
+                    if pid == 0: break
+                except ChildProcessError: break
+            if not children(): break
+        except BaseException:
+            pass # Observation failure is NOT evidence of absence.
+        try: time.sleep(.02)
+        except BaseException: pass
+    raise RuntimeError('Owned cleanup was UNKNOWN; descendants now confirmed absent')
+
 def drain():
+    try:
+        return drain_confirmed()
+    except BaseException:
+        retain_unknown()
+
+def drain_confirmed():
     # Killing a parent adopts its children even after runuser/setsid. pidfds
     # pin the observed direct child; no numeric PID signalling/reuse race.
     had_children=False
@@ -123,15 +166,10 @@ def drain():
                 except ProcessLookupError: pass
             if time.monotonic()>=deadline: break
             time.sleep(.005)
-    # An unkillable child must NOT release the helper to restore/continue.
-    # Retain this controller and ownership until external service inspection.
-    print('UNKNOWN: owned descendants termination unconfirmed; owner retained',file=sys.stderr,flush=True)
-    while children():
-        try: os.waitpid(-1,0)
-        except ChildProcessError: break
-    raise RuntimeError('Owned descendants termination was UNKNOWN')
+    raise RuntimeError('Owned descendants termination UNCONFIRMED')
 
 def leaf(argv,*args,**kwargs):
+    global owner_spawned
     timeout=kwargs.pop('timeout',None)
     check=kwargs.pop('check',False)
     data=kwargs.pop('input',None)
@@ -142,6 +180,7 @@ def leaf(argv,*args,**kwargs):
             raise ValueError('capture_output conflicts with pipes')
         kwargs['stdout']=kwargs['stderr']=subprocess.PIPE
     proc=subprocess.Popen(argv,*args,**kwargs)
+    owner_spawned=True
     try:
         out,err=proc.communicate(data,timeout=timeout)
     except BaseException:
@@ -174,8 +213,12 @@ try:
 except BaseException:
     # leaf already drained on timeout. Recheck after cancellation/failed spawn.
     # Disable interrupting this final cleanup with another cooperative signal.
-    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP): signal.signal(sig,signal.SIG_IGN)
-    drain()
+    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):
+        try: signal.signal(sig,signal.SIG_IGN)
+        except BaseException:
+            if owner_spawned: retain_unknown()
+            raise
+    if owner_spawned: drain()
     sys.exit(1)
 sys.exit(result.returncode)
 `;
