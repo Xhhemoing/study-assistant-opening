@@ -947,7 +947,7 @@ COMPLETION_RETAINED_ENTRY = '/tmp/aistudy-entry.Pz65J76D'
 COMPLETION_ADMISSION = '/run/aistudy-completion-admission'
 COMPLETION_QUARANTINE = '/run/systemd/system/aistudy-completion-retained-205'
 RELOAD_BOUND_NS = 60_000_000_000
-RELOAD_EVIDENCE_AGE_NS = 1_200_000_000_000
+RELOAD_EVIDENCE_AGE_NS = 3_600_000_000_000
 # Immutable reviewed 205 controls, NOT a new signed-controls producer. Required
 # because the exceptional existing-unit path must not adopt arbitrary root code.
 COMPLETION_205 = {
@@ -1022,6 +1022,7 @@ def completion_scope(payload):
         raise ValueError('Wrong completion admission arguments')
     completion_no_claim(args[4])
     completion_incident_check(args[4], args[3], args[6], args[10], str(Path(args[1]) / '.env.production'), args[12], args[7])
+    check_historical_manager(Path(args[4]), args[6])
     return args
 
 
@@ -1042,6 +1043,7 @@ def completion_reload_samples(payload):
     completion_private_write(Path(COMPLETION_ADMISSION) / 'scope.json', header)
     for index in range(3):
         completion_no_claim(args[4])
+        check_historical_manager(Path(args[4]), args[6])  # Before EVERY reload.
         before = completion_manager()
         completion_never_started(before)
         started = time.monotonic_ns()
@@ -1057,6 +1059,8 @@ def completion_reload_samples(payload):
             error = type(failure).__name__
         ended = time.monotonic_ns()
         try:
+            completion_no_claim(args[4])
+            check_historical_manager(Path(args[4]), args[6])  # Effective 95, stopped writers and empty cgroups.
             after = completion_manager()
         except Exception as failure:
             after = {'observationError': type(failure).__name__}
@@ -1123,6 +1127,14 @@ def completion_retained_archive(payload):
     os.rename(COMPLETION_UNIT_PATH, Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
     sync_dir(COMPLETION_QUARANTINE)
     sync_dir(Path(COMPLETION_UNIT_PATH).parent)
+    archived_unit, archived_identity = read_trusted(Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
+    # Rename may change ctime (index 7), but not source dev/inode, mode, DAC,
+    # size, mtime or single-link identity. Never certify a substituted inode.
+    if archived_unit != unit or any(archived_identity[i] != unit_identity[i] for i in (0, 1, 2, 3, 4, 5, 6, 8)):
+        raise ValueError('Retained unit changed during archive')
+    completion_private_write(Path(COMPLETION_QUARANTINE) / 'archive-identity.json',
+                             {'sourceIdentity': unit_identity, 'archiveIdentity': archived_identity,
+                              'parentIdentity': identity(os.lstat(COMPLETION_QUARANTINE))})
     # No reload/start/unload here. Old manager state deliberately remains visible.
     return {'archived': True, 'automaticRetry': False}
 
@@ -1132,7 +1144,19 @@ def completion_launch_check(payload):
     completion_reload_admission(args)
     completion_retained_sources()
     archived = strict_json(read_trusted(Path(COMPLETION_QUARANTINE) / 'manifest.json', private=True)[0])
-    old, _ = read_trusted(Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
+    old, archived_identity = read_trusted(Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
+    proof = strict_json(read_trusted(Path(COMPLETION_QUARANTINE) / 'archive-identity.json', private=True)[0])
+    parent_fd = safe_open(COMPLETION_QUARANTINE, private=True, directory=True)
+    try:
+        parent_identity = identity(os.fstat(parent_fd))
+    finally:
+        os.close(parent_fd)
+    # Adding the proof file changes parent mtime/ctime/size; bind its dev/inode
+    # and DAC, while archived file identity remains exact in all fields.
+    if (proof.get('sourceIdentity') != archived.get('unitIdentity')
+            or proof.get('archiveIdentity') != archived_identity
+            or any(proof['parentIdentity'][i] != parent_identity[i] for i in (0, 1, 2, 3, 4, 8))):
+        raise ValueError('Retained archive inode/parent identity changed')
     if (old != payload['retainedUnit'].encode()
             or archived.get('args') != args or archived.get('controls205') != COMPLETION_205
             or archived.get('entry') != COMPLETION_RETAINED_ENTRY
@@ -1149,6 +1173,9 @@ def completion_launch_check(payload):
         if manager.get('NeedDaemonReload') not in ('yes', 'no'):
             raise ValueError('Unknown retained manager reload state')
         completion_never_started({**manager, 'NeedDaemonReload': 'no'})
+    elif phase == 'unloaded':
+        if present(COMPLETION_UNIT_PATH):
+            raise ValueError('Completion fragment appeared before install')
     elif phase in ('ready', 'claim'):
         if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['unit'].encode():
             raise ValueError('New completion unit bytes changed')

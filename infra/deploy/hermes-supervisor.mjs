@@ -119,6 +119,7 @@ export function launchCompletion(script, args, dependencies = {}) {
   // Never overwrite/restart an existing service or an earlier retained attempt.
   const before = run(['show', '--all', '--property=LoadState', completionUnit]);
   if ((!before.ok && before.status !== 1) || before.stdout.trim() !== 'LoadState=not-found' || present(path)) throw new Error('Completion service already present or unconfirmed');
+  admission(args, unit, 'unloaded'); // Historical writer proof again before creating new unit.
   write(path, unit);
   if (!run(['daemon-reload']).ok) throw new Error('Completion unit reload unconfirmed');
   admission(args, unit, 'ready'); // Recheck evidence, guards and claim race before submission.
