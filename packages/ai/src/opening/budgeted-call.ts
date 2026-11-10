@@ -1,5 +1,5 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
-import { OpeningProviderError, type ProviderTextDelta } from "./provider";
+import { OpeningProviderError, copyGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic, type GradingDiagnosticPhase, type ProviderTextDelta } from "./provider";
 import { assertParentInteractionBudget, hasMediaInput, mediaInputCostBound, mediaInputBytes, type ParentInteractionBudget } from "./parent-interaction-budget";
 
 export type BudgetedProvider = {
@@ -242,59 +242,75 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     await options.budget.release(ledgerRequestId, "not_sent");
     throw error;
   }
-  let output: ProviderOutput;
+  let phase: GradingDiagnosticPhase = "provider";
+  let transport: { attemptedFetch: boolean; httpStatus?: number } | undefined;
   try {
-    output = options.onTextDelta
-      ? await options.provider.complete(options.input, options.signal, options.onTextDelta)
-      : await options.provider.complete(options.input, options.signal);
-  } catch (error) {
-    if (error instanceof OpeningProviderError) {
-      const action = ledgerActionForProviderError(error.code, { requestSent: error.requestSent });
-      if (action === "release") {
-        await options.budget.release(ledgerRequestId, "not_sent");
+    let output: ProviderOutput;
+    try {
+      output = options.onTextDelta
+        ? await options.provider.complete(options.input, options.signal, options.onTextDelta)
+        : await options.provider.complete(options.input, options.signal);
+    } catch (error) {
+      if (error instanceof OpeningProviderError) {
+        const action = ledgerActionForProviderError(error.code, { requestSent: error.requestSent });
+        if (action === "release") {
+          await options.budget.release(ledgerRequestId, "not_sent");
+        } else {
+          await options.budget.markUnknown(reservation.id);
+        }
       } else {
         await options.budget.markUnknown(reservation.id);
       }
-    } else {
+      throw error;
+    }
+    const receipt = readGradingDiagnostic(output);
+    if (receipt?.attemptedFetch !== null && receipt?.attemptedFetch !== undefined) transport = { attemptedFetch: receipt.attemptedFetch, httpStatus: receipt.httpStatus };
+    phase = "usage";
+    const actual = output.inputTokens === null || output.outputTokens === null ? null : options.actualCents(output);
+    if (actual !== null && (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier))) {
       await options.budget.markUnknown(reservation.id);
+      throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
     }
-    throw error;
-  }
-  const actual = output.inputTokens === null || output.outputTokens === null ? null : options.actualCents(output);
-  if (actual !== null && (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier))) {
-    await options.budget.markUnknown(reservation.id);
-    throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
-  }
-  const settlement = actual === null ? null : settleCentsForActual(options.reservedCents, actual);
-  try {
-    await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
-  } catch (error) {
-    // The provider already ran. Never release or retry it when durable storage failed.
-    await options.budget.markUnknown(reservation.id);
-    throw error;
-  }
-  // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
-  if (output.inputTokens === null || output.outputTokens === null) {
-    await options.budget.markUnknown(reservation.id);
-  } else {
-    const { settledCents, overage } = settlement!;
-    // Settlement failures must leave the reservation intact, never release it.
-    await options.budget.settle(
-      reservation.id,
-      settledCents,
-      ...(options.resultRef || hasMediaInput(options.input) ? [{
-        ...(options.resultRef ? { resultRef: options.resultRef } : {}),
-        ...(hasMediaInput(options.input) ? { costBasis: "media_usage_upper_bound" as const } : {}),
-      }] : []),
-    );
-    if (overage) {
-      await options.budget.noteOverage?.({
-        reservationId: reservation.id,
-        reservedCents: options.reservedCents,
-        actualCents: actual!,
+    const settlement = actual === null ? null : settleCentsForActual(options.reservedCents, actual);
+    phase = "persist";
+    try {
+      await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
+    } catch (error) {
+      // The provider already ran. Never release or retry it when durable storage failed.
+      await options.budget.markUnknown(reservation.id);
+      throw error;
+    }
+    // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
+    if (output.inputTokens === null || output.outputTokens === null) {
+      phase = "usage";
+      await options.budget.markUnknown(reservation.id);
+      const missingUsage = new BudgetedCallError("USAGE_MISSING", "provider usage missing");
+      recordGradingDiagnostic(missingUsage, phase, transport, "USAGE_MISSING");
+      copyGradingDiagnostic(missingUsage, output);
+    } else {
+      phase = "settle";
+      const { settledCents, overage } = settlement!;
+      // Settlement failures must leave the reservation intact, never release it.
+      await options.budget.settle(
+        reservation.id,
         settledCents,
-      });
+        ...(options.resultRef || hasMediaInput(options.input) ? [{
+          ...(options.resultRef ? { resultRef: options.resultRef } : {}),
+          ...(hasMediaInput(options.input) ? { costBasis: "media_usage_upper_bound" as const } : {}),
+        }] : []),
+      );
+      if (overage) {
+        await options.budget.noteOverage?.({
+          reservationId: reservation.id,
+          reservedCents: options.reservedCents,
+          actualCents: actual!,
+          settledCents,
+        });
+      }
     }
+    return output;
+  } catch (error) {
+    recordGradingDiagnostic(error, phase, transport);
+    throw error;
   }
-  return output;
 }

@@ -4,6 +4,7 @@ import { OpeningModelRoutingError } from "./model-routing";
 import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
+import { copyGradingDiagnostic, logGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic } from "./provider";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
 /** Structural boundary: AI must not import database (database already uses AI). */
@@ -31,7 +32,11 @@ export type OpeningAiGradingServiceDeps = {
 };
 
 const conflict = (message: string, code = "CONFLICT") => Object.assign(new Error(message), { code });
-const unknownCost = () => conflict("这次批改费用或发送结果尚未确认，原答案已保存。请手动改评，不会再次发送模型请求。", "GRADING_UNKNOWN_COST");
+const unknownCost = (cause?: unknown) => {
+  const error = conflict("这次批改费用或发送结果尚未确认，原答案已保存。请手动改评，不会再次发送模型请求。", "GRADING_UNKNOWN_COST");
+  copyGradingDiagnostic(cause, error);
+  return error;
+};
 const unverifiedNullOutputFeedback = "批改输出包含无法保存的字符，本次无法可靠判定；原答案已保存，请核对后手动改评。";
 
 function containsNul(value: unknown): boolean {
@@ -116,7 +121,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
       let result: LearningObservation | null = null;
       let modelLabel: string | null = null;
       try {
-        await callGrader(deps, scope, imageParts.length ? "practice.grade-photo" : "practice.grade-text", {
+        const output = await callGrader(deps, scope, imageParts.length ? "practice.grade-photo" : "practice.grade-text", {
           budget: deps.budget(scope), operationId: context.operationId,
           resultRef: `ai-grade:${input.observationId}`, signal,
           beforeSend: async () => { await deps.repository.context(scope, input); },
@@ -128,24 +133,38 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
             try {
               proposal = aiGradingProposalSchema.parse(parseModelJson(output.text));
             } catch {
-              throw conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。");
+              const error = conflict("这次批改未返回完整的评分结果。原答案已保存，可以手动改评。");
+              const receipt = readGradingDiagnostic(output);
+              recordGradingDiagnostic(error, "parse", receipt?.attemptedFetch === true
+                ? { attemptedFetch: true, httpStatus: receipt.httpStatus } : undefined, "GRADING_PARSE");
+              throw error;
             }
             result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },
         });
+        if (readGradingDiagnostic(output)?.code === "USAGE_MISSING") logGradingDiagnostic(output, context.operationId);
       } catch (error) {
+        recordGradingDiagnostic(error, "admission");
         // Publication is fenced inside apply; an interrupted settlement does not
         // erase an already durable result. The status reader still reports unknown cost.
         const saved = await deps.repository.context(scope, input);
-        if (saved.existing) return saved.existing;
-        if (["unknown", "in_flight"].includes(await deps.repository.ledger(scope, context.operationId))) throw unknownCost();
-        if (isBudgetReplayError(error)) {
-          if (["in_flight", "unknown"].includes(error.disposition.kind)) throw unknownCost();
-          throw conflict("这次批改尚未完成，原答案已保存，可以手动改评。");
+        if (saved.existing) {
+          logGradingDiagnostic(error, context.operationId);
+          return saved.existing;
         }
-        if (error instanceof OpeningModelRoutingError) throw conflict("请先在设置中配置可用的批改模型。原答案已保存。");
+        if (["unknown", "in_flight"].includes(await deps.repository.ledger(scope, context.operationId))) throw unknownCost(error);
+        if (isBudgetReplayError(error)) {
+          if (["in_flight", "unknown"].includes(error.disposition.kind)) throw unknownCost(error);
+          const failure = conflict("这次批改尚未完成，原答案已保存，可以手动改评。");
+          copyGradingDiagnostic(error, failure); throw failure;
+        }
+        if (error instanceof OpeningModelRoutingError) {
+          const failure = conflict("请先在设置中配置可用的批改模型。原答案已保存。");
+          copyGradingDiagnostic(error, failure); throw failure;
+        }
         if (error instanceof Error && "code" in error && ["NOT_FOUND", "VALIDATION", "CONFLICT", "GRADING_UNKNOWN_COST"].includes(String(error.code))) throw error;
-        throw conflict("AI 批改暂时未完成。原答案已保存，请稍后查看或手动改评。");
+        const failure = conflict("AI 批改暂时未完成。原答案已保存，请稍后查看或手动改评。");
+        copyGradingDiagnostic(error, failure); throw failure;
       }
       if (!result) throw conflict("批改结果尚未保存，请稍后查看。原答案仍然保留。");
       return result;

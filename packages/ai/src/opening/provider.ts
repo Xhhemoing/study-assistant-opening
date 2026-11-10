@@ -81,15 +81,68 @@ export type OpeningProviderOptions = Partial<MediaInputCostBound> & {
 export class OpeningProviderError extends Error {
   readonly code: string;
   readonly retryable: boolean;
+  /** Attempted fetch only; this does not establish upstream receipt or execution. */
   readonly requestSent: boolean;
+  readonly httpStatus?: number;
 
-  constructor(code: string, message: string, retryable = false, requestSent = false) {
+  constructor(code: string, message: string, retryable = false, requestSent = false, httpStatus?: number) {
     super(message);
     this.name = "OpeningProviderError";
     this.code = code;
     this.retryable = retryable;
     this.requestSent = requestSent;
+    if (Number.isInteger(httpStatus) && httpStatus! >= 100 && httpStatus! <= 599) this.httpStatus = httpStatus;
   }
+}
+
+export type GradingDiagnosticPhase = "admission" | "provider" | "parse" | "persist" | "usage" | "settle";
+const diagnosticCodes = [
+  "PROVIDER_AUTH", "PROVIDER_RATE_LIMIT", "PROVIDER_MEDIA_UNSUPPORTED", "PROVIDER_PAYLOAD_TOO_LARGE",
+  "PROVIDER_REQUEST", "PROVIDER_UNAVAILABLE", "PROVIDER_TIMEOUT", "PROVIDER_NETWORK", "PROVIDER_RESPONSE",
+  "PROVIDER_REFUSAL", "PROVIDER_ABORTED", "PROVIDER_ENDPOINT", "PROVIDER_DISABLED",
+  "BUDGET_INVALID_ACTUAL", "BUDGET_OUTCOME_UNKNOWN", "BUDGET_EXECUTION_CLAIMED",
+  "BUDGET_REPLAY_COMPLETED", "BUDGET_REPLAY_RELEASED", "GRADING_PARSE", "USAGE_MISSING", "CONFLICT",
+] as const;
+export type SafeGradingDiagnostic = {
+  phase: GradingDiagnosticPhase;
+  errorClass: "OpeningProviderError" | "TypeError" | "RangeError" | "Error" | "UNKNOWN";
+  code: typeof diagnosticCodes[number] | "UNKNOWN";
+  /** null means no transport evidence; true means attempted fetch, never upstream receipt. */
+  attemptedFetch: boolean | null;
+  httpStatus?: number;
+};
+// Provenance stays process-local. Arbitrary error properties/diagnostic objects are never trusted.
+const gradingDiagnostics = new WeakMap<object, SafeGradingDiagnostic>();
+export function readGradingDiagnostic(value: unknown): SafeGradingDiagnostic | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const diagnostic = gradingDiagnostics.get(value);
+  return diagnostic ? { phase: diagnostic.phase, errorClass: diagnostic.errorClass, code: diagnostic.code,
+    attemptedFetch: diagnostic.attemptedFetch, ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }) } : undefined;
+}
+export function recordGradingDiagnostic(value: unknown, phase: GradingDiagnosticPhase,
+  evidence?: { attemptedFetch: boolean; httpStatus?: number }, code?: "GRADING_PARSE" | "USAGE_MISSING"): void {
+  if (!value || typeof value !== "object" || gradingDiagnostics.has(value)) return;
+  const rawCode = code ?? ("code" in value ? value.code : undefined);
+  const status = evidence?.httpStatus;
+  gradingDiagnostics.set(value, {
+    phase: (["admission", "provider", "parse", "persist", "usage", "settle"] as const).find(candidate => candidate === phase) ?? "admission",
+    errorClass: value instanceof OpeningProviderError ? "OpeningProviderError" : value instanceof TypeError ? "TypeError"
+      : value instanceof RangeError ? "RangeError" : value instanceof Error ? "Error" : "UNKNOWN",
+    code: diagnosticCodes.find(candidate => candidate === rawCode) ?? "UNKNOWN",
+    attemptedFetch: typeof evidence?.attemptedFetch === "boolean" ? evidence.attemptedFetch : null,
+    ...(Number.isInteger(status) && status! >= 100 && status! <= 599 ? { httpStatus: status } : {}),
+  });
+}
+export function copyGradingDiagnostic(source: unknown, target: object): void {
+  const diagnostic = readGradingDiagnostic(source);
+  if (diagnostic) gradingDiagnostics.set(target, diagnostic);
+}
+/** Internal structured event for failures hidden by a durable successful result. */
+export function logGradingDiagnostic(value: unknown, operationId: string): void {
+  const diagnostic = readGradingDiagnostic(value);
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  const operation = new RegExp(`^ai-grade:${uuid}:${uuid}(?::[1-9][0-9]{0,8})?$`);
+  if (diagnostic && operation.test(operationId)) console.warn({ event: "grading_diagnostic", operationId, ...diagnostic });
 }
 
 /** Strip optional markdown code fences (```json ... ``` / ``` ... ```). */
@@ -263,24 +316,31 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
       else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
       const signal = timeout.signal;
       let requestSent = false;
+      let httpStatus: number | undefined;
+      let phase: GradingDiagnosticPhase = "provider";
       try {
         signal.throwIfAborted();
+        const requestBody = JSON.stringify(openingProviderRequestBody(input, options));
         requestSent = true;
         const response = await fetchImpl(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${options.apiKey}` },
-          body: JSON.stringify(openingProviderRequestBody(input, options)),
+          body: requestBody,
           signal,
           redirect: "error",
         });
+        httpStatus = response.status;
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
           const failure = classifyProviderFailure(response.status);
-          throw new OpeningProviderError(failure.code, "provider request failed", failure.retryable, true);
+          throw new OpeningProviderError(failure.code, "provider request failed", failure.retryable, true, response.status);
         }
+        phase = "parse";
         if (streaming) {
           if (!response.body) throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned no stream", false, true);
-          return await readOpeningProviderStream(response.body, { signal, onChunk: resetDeadline, onTextDelta });
+          const output = await readOpeningProviderStream(response.body, { signal, onChunk: resetDeadline, onTextDelta });
+          recordGradingDiagnostic(output, phase, { attemptedFetch: requestSent, httpStatus });
+          return output;
         }
         let body: unknown;
         try {
@@ -289,16 +349,18 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
           if (signal.aborted || error instanceof OpeningProviderEndpointError) throw error;
           throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed JSON", false, true);
         }
-        return parseOutput(body, format, input.tools?.map(tool => tool.name));
+        const output = parseOutput(body, format, input.tools?.map(tool => tool.name));
+        recordGradingDiagnostic(output, phase, { attemptedFetch: requestSent, httpStatus });
+        return output;
       } catch (error) {
-        if (error instanceof OpeningProviderError) throw error;
-        if (error instanceof OpeningProviderStreamError) throw new OpeningProviderError(error.code, error.message, false, true);
-        if (error instanceof OpeningProviderEndpointError) throw new OpeningProviderError("PROVIDER_ENDPOINT", error.message, false, requestSent);
-        if (callerSignal?.aborted) {
-          throw new OpeningProviderError("PROVIDER_ABORTED", "provider request aborted", false, requestSent);
-        }
-        if (signal.aborted) throw new OpeningProviderError("PROVIDER_TIMEOUT", "provider request aborted", true, requestSent);
-        throw new OpeningProviderError("PROVIDER_NETWORK", "provider request failed", true, requestSent);
+        const failure = error instanceof OpeningProviderError ? error
+          : error instanceof OpeningProviderStreamError ? new OpeningProviderError(error.code, error.message, false, true, httpStatus)
+          : error instanceof OpeningProviderEndpointError ? new OpeningProviderError("PROVIDER_ENDPOINT", error.message, false, requestSent)
+          : callerSignal?.aborted ? new OpeningProviderError("PROVIDER_ABORTED", "provider request aborted", false, requestSent, httpStatus)
+          : signal.aborted ? new OpeningProviderError("PROVIDER_TIMEOUT", "provider request aborted", true, requestSent, httpStatus)
+          : new OpeningProviderError("PROVIDER_NETWORK", "provider request failed", true, requestSent, httpStatus);
+        recordGradingDiagnostic(failure, phase, { attemptedFetch: requestSent, httpStatus });
+        throw failure;
       } finally {
         clearTimeout(timer);
         callerSignal?.removeEventListener("abort", onCallerAbort);

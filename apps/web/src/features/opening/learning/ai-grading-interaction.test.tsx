@@ -80,6 +80,7 @@ it("unknown cost exposes manual correction, never a retry that could resend", as
 
 it.each([
   ["disabled", "工作区已关闭", "手动批改"],
+  ["auto_disabled", "当前已停用自动批改", "手动批改"],
   ["no_model", "尚无可用的批改模型", "手动批改"],
   ["daily_cap", "今日自动批改额度已用完", "手动批改"],
   ["budget", "预算不足以覆盖本次预估", "手动批改"],
@@ -89,6 +90,7 @@ it.each([
   const revision = reason === "answer_changed" ? 2 : 1;
   api.getGradingStatus.mockResolvedValue(status({ jobId: null, answerRevision: revision, autoGradeSkipped: reason }));
   await renderCard(); expect(container.textContent).toContain(message);
+  if (reason === "auto_disabled") expect(container.textContent).not.toContain("额度已用完");
   expect(api.gradeObservation).not.toHaveBeenCalled();
   api.gradeObservation.mockResolvedValue(status({ status: "queued", retryable: false }));
   await click(label); expect(api.gradeObservation).toHaveBeenCalledExactlyOnceWith({ observationId: record.id });

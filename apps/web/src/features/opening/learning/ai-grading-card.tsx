@@ -119,6 +119,7 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
   const unknown = status?.status === "unknown_cost";
   const skippedMessages = {
     disabled: "答案已保存，工作区已关闭首次提交自动批改。可手动批改。",
+    auto_disabled: "答案已保存，当前已停用自动批改。仍可手动批改，费用受每日 AI 预算约束。",
     no_model: "答案已保存，尚无可用的批改模型。请先在设置中配置模型，再手动批改。",
     daily_cap: "答案已保存，今日自动批改额度已用完。仍可手动批改，费用受每日 AI 预算约束。",
     budget: "答案已保存，当前 AI 预算不足以覆盖本次预估。调整预算或模型后可手动批改。",
