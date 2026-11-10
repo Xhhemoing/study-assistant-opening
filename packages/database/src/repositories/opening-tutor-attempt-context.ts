@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import type { Sql, TransactionSql } from "postgres";
 import { aiEvaluationSchema, serverEvaluationSchema, aiGradingWorkSourceSchema, type StudyContextAnchor } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
@@ -22,6 +23,17 @@ export type TutorAttemptContext = {
     serverEvaluation: ReturnType<typeof serverEvaluationSchema.parse> | null } | null;
   sourceRefs: ContextSourceRef[];
 };
+export const tutorAttemptFenceSchema = z.object({
+  attemptId: z.string().uuid(), itemVersionId: z.string().uuid(),
+  rootObservationId: z.string().uuid().nullable(), headObservationId: z.string().uuid().nullable(),
+  answerRevision: z.number().int().positive().nullable(),
+}).strict();
+export type TutorAttemptFence = z.infer<typeof tutorAttemptFenceSchema>;
+export function tutorAttemptFence(snapshot: TutorAttemptContext): TutorAttemptFence {
+  return tutorAttemptFenceSchema.parse({ attemptId: snapshot.anchor.attemptId, itemVersionId: snapshot.anchor.itemVersionId,
+    rootObservationId: snapshot.rootObservationId, headObservationId: snapshot.headObservationId,
+    answerRevision: snapshot.currentAnswer?.answerRevision ?? null });
+}
 const conflict = () => learningError("CONFLICT", "bound attempt context is unavailable or changed");
 
 /** Resolve saved identities, never client-supplied answer/grade JSON. No ledger or grading writes. */
@@ -103,6 +115,10 @@ export async function readTutorAttemptContext(db: Db, scope: OpeningScope, targe
     // Never search an ancestor for feedback: a changed answer must not inherit an old grade.
     if (ai || server) effectiveGrading = { observationId: String(head.id), answerRevision: Number(head.answer_revision),
       outcome: String(head.outcome), verdictSource: String(head.verdict_source), aiEvaluation: ai, serverEvaluation: server };
+  }
+  if (head && !String(head.answer ?? "").trim()
+    && !(workSource && effectiveGrading?.aiEvaluation?.transcription?.trim())) {
+    throw Object.assign(conflict(), { reasonCode: "ATTEMPT_ANSWER_TEXT_UNAVAILABLE" });
   }
   const answer = (row: Record<string, unknown> | undefined) => row ? { observationId: String(row.id),
     answer: String(row.answer), answerRevision: Number(row.answer_revision) } : null;

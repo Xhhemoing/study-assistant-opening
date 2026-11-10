@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { Redis } from "ioredis";
+import { createTutorStreamReader, createTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
+import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
+import { createTutorService } from "../../apps/web/src/features/opening/tutor/tutor-service";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOpeningAiGradingRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
+  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, tutorAttemptFence,
 } from "@aistudy/database";
 import type { ProviderInput } from "@aistudy/contracts";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
@@ -58,7 +62,8 @@ function handler(f: Awaited<ReturnType<typeof seed>>, hook?: () => Promise<void>
     return { text: "sm95 explanation", citedChunkIds: [], candidates: [], inputTokens: 10, outputTokens: 5, requestId: null };
   }) };
   const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100000 });
-  return { inputs, provider, run: createTutorTurnHandler({ tutorJobs: f.jobs, chunks: createOpeningSourceChunksRepository(fixture.sql),
+  const reserve = vi.spyOn(budget, "reserve"), claimExecution = vi.spyOn(budget, "claimExecution");
+  return { inputs, provider, reserve, claimExecution, run: createTutorTurnHandler({ tutorJobs: f.jobs, chunks: createOpeningSourceChunksRepository(fixture.sql),
     budget, provider, privacy: createOpeningPrivacyRepository(fixture.sql), retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } }) };
 }
@@ -69,6 +74,73 @@ const completion = (f: Awaited<ReturnType<typeof seed>>, target: Awaited<ReturnT
 });
 
 describe("sm95 same-attempt explain context", () => {
+  it.each(["no grade", "unverified without transcription"])("sm95 P1a rejects photo-only %s before reserve/claim/send", async state => {
+    const f = await seed(true);
+    await fixture.sql`UPDATE opening_learning_observations SET answer='' WHERE id IN (${f.original.id},${f.graded.id})`;
+    if (state === "no grade") await fixture.sql`UPDATE opening_learning_observations SET ai_evaluation=NULL,verdict_source='self_report' WHERE id=${f.graded.id}`;
+    else await fixture.sql`UPDATE opening_learning_observations SET outcome='unverified',ai_evaluation=(ai_evaluation-'transcription') || '{"outcome":"unverified"}'::jsonb WHERE id=${f.graded.id}`;
+    const h = handler(f);
+    const before = await fixture.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`;
+    await expect(h.run(f.saved.jobId)).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "ATTEMPT_ANSWER_TEXT_UNAVAILABLE" });
+    expect(h.provider.complete).not.toHaveBeenCalled();
+    expect(h.reserve).not.toHaveBeenCalled();
+    expect(h.claimExecution).not.toHaveBeenCalled();
+    expect(await fixture.sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId} ORDER BY id`).toEqual(before);
+  });
+
+  it("sm95 P1a accepts only the corresponding photo transcription as content when saved answer is empty", async () => {
+    const f = await seed(true);
+    await fixture.sql`UPDATE opening_learning_observations SET answer='' WHERE id IN (${f.original.id},${f.graded.id})`;
+    const h = handler(f);
+    await h.run(f.saved.jobId);
+    expect(h.inputs[0]!.text).toContain("sm95 model transcription, not the question");
+    expect(h.provider.complete).toHaveBeenCalledOnce();
+  });
+
+  it("sm95 P1b denies H1 cached bytes after H2 edit on reconnect and delayed flush", async () => {
+    const f = await seed(), target = await f.claim();
+    const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null, claimToken: target.claimToken,
+      attemptFence: tutorAttemptFence(snapshot) };
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const key = `opening:tutor-stream:${fixture.scope.workspaceId}:${f.saved.jobId}`;
+    try {
+      const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+      await writer.begin(fixture.scope.workspaceId, f.saved.jobId, context);
+      await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes");
+      const cached = (await reader.read(fixture.scope.workspaceId, f.saved.jobId))!;
+      expect(cached.attemptFence).toEqual(context.attemptFence);
+      const job = (await f.jobs.readStream(fixture.scope, f.saved.jobId, cached))!;
+      await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, { ...cached, attemptFence: undefined })).rejects.toThrow("fence missing");
+      let release!: () => void, entered!: () => void;
+      const waiting = new Promise<void>(resolve => { entered = resolve; });
+      const unblock = new Promise<void>(resolve => { release = resolve; });
+      const delayed = await createJobStreamResponse({ job, signal: new AbortController().signal,
+        reader: { read: async () => { entered(); await unblock; return cached; }, subscribe: async () => async () => {} },
+        getJob: () => f.jobs.get(fixture.scope, f.saved.jobId),
+        authorizeSnapshot: snapshot => f.jobs.readStream(fixture.scope, f.saved.jobId, snapshot), close: () => {} });
+      await waiting;
+      await f.correct();
+      release();
+      expect(await delayed.text()).toBe("");
+      // Reconnect authorizes the actual cached snapshot against H2, without waiting for another model delta.
+      for (const read of [async () => reader.read(fixture.scope.workspaceId, f.saved.jobId)]) {
+        const response = await createJobStreamResponse({ job, signal: new AbortController().signal,
+          reader: { read, subscribe: async () => async () => {} }, getJob: () => f.jobs.get(fixture.scope, f.saved.jobId),
+          authorizeSnapshot: snapshot => f.jobs.readStream(fixture.scope, f.saved.jobId, snapshot), close: () => {} });
+        expect(await response.text()).toBe("");
+      }
+      await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, cached)).rejects.toThrow();
+    } finally { await redis.del(key); redis.disconnect(); }
+    const turns = await f.conversations.listTurns(fixture.scope, f.conversation.id);
+    expect(turns.find(turn => turn.id===f.saved.assistantTurnId)?.text).not.toContain("sm95 H1 cached secret bytes");
+    const continuity = await f.conversations.loadContinuityTurns(fixture.scope, f.conversation.id);
+    expect(JSON.stringify(continuity)).not.toContain("sm95 H1 cached secret bytes");
+    const resume = await createTutorService({ conversations: f.conversations, sourceChunks: createOpeningSourceChunksRepository(fixture.sql),
+      readSelection: async () => ({ sourceIds: [], currentPage: null, chunkId: null }) }).resumeConversation(fixture.scope, f.conversation.id);
+    expect(JSON.stringify(resume)).not.toContain("sm95 H1 cached secret bytes");
+    expect(JSON.stringify(await f.jobs.get(fixture.scope, f.saved.jobId))).not.toContain("sm95 H1 cached secret bytes");
+  });
   it.each([false, true])("captures original question/answer/effective grade and provenance, sealed photo=%s; redelivery is inert", async photo => {
     const f = await seed(photo), h = handler(f);
     expect(await h.run(f.saved.jobId)).toEqual({ skipped: false });
@@ -76,7 +148,7 @@ describe("sm95 same-attempt explain context", () => {
     expect(payload.request).toBe("请讲解本次作答");
     expect(payload.attemptContext).toMatchObject({ originalQuestion: "1/2 + 1/2?", rootObservationId: f.original.id,
       headObservationId: f.graded.id, originalAnswer: { answer: "sm95 wrong saved answer", answerRevision: 1 },
-      currentAnswer: { answer: "sm95 wrong saved answer", observationId: f.graded.id, answerRevision: 1 },
+      currentAnswer: { answerFrom: "originalAnswer", observationId: f.graded.id, answerRevision: 1 },
       effectiveGrading: { observationId: f.graded.id, answerRevision: 1, aiEvaluation: { feedback: "sm95 feedback: the answer is wrong" } },
       workSource: f.workSource ?? null });
     const [turn] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id=${f.saved.assistantTurnId}`;

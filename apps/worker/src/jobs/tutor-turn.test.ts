@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
+import { createOpeningProvider, OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
 import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
-import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
+import { providerInputSchema, type ConversationPlanningContext, type HelpInputSnapshot, type SourceChunk, type StudyIntentEvent, type TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
@@ -36,7 +36,7 @@ describe("tutor turn handler", () => {
       get: vi.fn(async () => claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
-      readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId },
+      readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId },
         originalQuestion: "saved question", originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null,
         workSource: null, effectiveGrading: null, sourceRefs: [] })),
       assertAttemptContext: vi.fn(async () => {}),
@@ -59,7 +59,7 @@ describe("tutor turn handler", () => {
       reserve: vi.fn(async (): Promise<{ id: string; state?: string; resultRef?: string | null }> => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
+      claimExecution: vi.fn(async () => true), markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
     // Unit adapter only; real admission and pin persistence are covered by purpose PG.
@@ -94,6 +94,49 @@ describe("tutor turn handler", () => {
     expect(input.instruction).toContain("不可信数据");
     expect(assertAttemptContext).toHaveBeenCalled();
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ attemptContext: { snapshot, target: expect.objectContaining({ jobId: claimedJob.id }) } }));
+  });
+
+  it("sm95 P2 rejects an over-limit complete envelope before reserve/claim/provider contract", async () => {
+    const { deps, tutorJobs, provider, budget } = setup({ sourceIds: [], chunks: [] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
+    const answer = "a".repeat(20000);
+    tutorJobs.readAttemptContext.mockResolvedValueOnce({ privacyEpoch: 0, anchor: { purpose: "learning_help", attemptId: claimedJob.userTurnId },
+      originalQuestion: "q".repeat(2000), originalAnswer: { observationId: "root", answer: "b".repeat(20000), answerRevision: 1 },
+      currentAnswer: { observationId: "grade", answer, answerRevision: 2 }, rootObservationId: "root", headObservationId: "grade", workSource: null,
+      effectiveGrading: { observationId: "grade", answerRevision: 2, outcome: "incorrect", verdictSource: "ai_graded",
+        aiEvaluation: { criteria: Array.from({ length: 10 }, () => ({ label: "criterion", verdict: "incorrect", feedback: "f".repeat(2000) })) }, serverEvaluation: null }, sourceRefs: [] });
+    provider.complete.mockImplementationOnce(async input => { providerInputSchema.parse(input); return { text: "ok", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 1, outputTokens: 1 }; });
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "TUTOR_INPUT_TOO_LARGE" });
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(budget.claimExecution).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("sm95 P2 deduplicates a 20k answer while preserving full provider-contract text and both identities", async () => {
+    const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
+    const answer = "a".repeat(20000);
+    tutorJobs.readAttemptContext.mockResolvedValueOnce({ privacyEpoch: 0, anchor: { purpose: "learning_help", attemptId: claimedJob.userTurnId },
+      originalQuestion: "original question", originalAnswer: { observationId: "root", answer, answerRevision: 1 },
+      currentAnswer: { observationId: "grade", answer, answerRevision: 1 }, rootObservationId: "root", headObservationId: "grade", workSource: null,
+      effectiveGrading: { observationId: "grade", answerRevision: 1, outcome: "incorrect", verdictSource: "ai_graded",
+        aiEvaluation: { criteria: Array.from({ length: 10 }, () => ({ label: "criterion", verdict: "incorrect", feedback: "f".repeat(2000) })) }, serverEvaluation: null }, sourceRefs: [] });
+    provider.complete.mockImplementationOnce(async input => {
+      const parsed = providerInputSchema.parse(input), context = JSON.parse(parsed.text).attemptContext;
+      expect(context.originalAnswer.answer).toBe(answer);
+      const legacyEnvelope = JSON.stringify({ request: turn.text, attemptContext: { ...context,
+        currentAnswer: { observationId: "grade", answerRevision: 1, answer } } });
+      expect(legacyEnvelope.length).toBeGreaterThan(50000);
+      expect(providerInputSchema.safeParse({ ...input, text: legacyEnvelope }).success).toBe(false);
+      expect(context.currentAnswer).toEqual({ observationId: "grade", answerRevision: 1, answerFrom: "originalAnswer" });
+      expect(context.effectiveGrading.aiEvaluation.criteria).toHaveLength(10);
+      expect(context.effectiveGrading.aiEvaluation.criteria[9].feedback).toHaveLength(2000);
+      return createOpeningProvider({ baseUrl: "https://offline.invalid", apiKey: "fake", model: "sm95-fake",
+        fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ text: "ok", citedChunkIds: [], candidates: [] }) } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 } })) }).complete(input);
+    });
+    await createTutorTurnHandler(deps)(claimedJob.id);
+    expect(provider.complete).toHaveBeenCalledOnce();
   });
 
   it.each(["before send", "after send"])("sm95 fails closed on attempt drift %s without duplicate send or completion", async phase => {
