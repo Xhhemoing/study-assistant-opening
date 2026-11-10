@@ -3,6 +3,10 @@ export const AI_CANDIDATE_ONLY = true as const;
 export {
   createOpeningProvider,
   OpeningProviderError,
+  readGradingDiagnostic,
+  recordGradingDiagnostic,
+  copyGradingDiagnostic,
+  type SafeGradingDiagnostic,
   type OpeningProviderOptions,
   type ProviderTextDelta,
 } from "./opening/provider";

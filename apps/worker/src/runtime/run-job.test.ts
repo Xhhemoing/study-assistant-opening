@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BudgetReplayError, OpeningProviderError } from "@aistudy/ai";
+import { BudgetReplayError, OpeningProviderError, createOpeningProvider, copyGradingDiagnostic } from "@aistudy/ai";
 import { canClaimJob, isUnknownOutcome, runJob } from "./run-job";
 import type { OpeningJobRecord } from "@aistudy/database";
 import { jobQueueId } from "./queue";
@@ -55,6 +55,25 @@ describe("runJob workspace privacy epoch (M02-wire)", () => {
       ...over,
     };
   }
+
+  it.each([false, true])("stores only allowlisted grading diagnostics and fixed copy (trusted=%s)", async trusted => {
+    const sensitive = "sk-secret https://private.example prompt answer rawresponse message stack";
+    const error: Error = Object.assign(new Error(sensitive), { code: "GRADING_UNKNOWN_COST", diagnostic: { phase: sensitive, httpStatus: 502 }, endpoint: sensitive, key: sensitive });
+    if (trusted) {
+      const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture",
+        fetchImpl: vi.fn(async () => new Response(sensitive, { status: 503 })) });
+      const cause = await provider.complete({ instruction: "fixture", text: "fixture", mode: "explain", chunks: [], imageParts: [], mediaCapability: "text_only", maxOutputTokens: 64 }).catch(error => error);
+      copyGradingDiagnostic(cause, error);
+    }
+    const finish = vi.fn(async () => true);
+    await runJob({ claim: async () => baseJob({ kind: "grade-observation" }), finish }, "job-1", async () => { throw error; });
+    expect(finish).toHaveBeenCalledExactlyOnceWith("job-1", "outcome_unknown", {
+      error: "批改费用或发送结果尚未确认，原答案已保存，不会重复发送。",
+      diagnostic: trusted ? { phase: "provider", errorClass: "OpeningProviderError", code: "PROVIDER_UNAVAILABLE", httpStatus: 503, attemptedFetch: true }
+        : { phase: "admission", errorClass: "Error", code: "UNKNOWN", attemptedFetch: null },
+    }, undefined);
+    expect(JSON.stringify(finish.mock.calls)).not.toContain(sensitive);
+  });
 
   it("rejects final writeback when workspace epoch bumped mid-job", async () => {
     let epoch = 1;

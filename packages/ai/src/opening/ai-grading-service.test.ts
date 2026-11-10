@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import type { LearningObservation, ProviderOutput, Scope } from "@aistudy/contracts";
 import { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "./ai-grading-service";
 import { createModelGateway, type ResolvedTaskModel } from "./model-gateway";
+import { createOpeningProvider, readGradingDiagnostic } from "./provider";
 
 const scope: Scope = { workspaceId: "00000000-0000-4000-8000-000000000001", ownerUserId: "00000000-0000-4000-8000-000000000002" };
 const input = { observationId: "00000000-0000-4000-8000-000000000003" };
@@ -34,6 +35,29 @@ function setup() {
   const service = createOpeningAiGradingService({ repository, gateway, budget: () => budget, images: async () => [] });
   return { repository, budget, complete, service, gateway };
 }
+
+it.each(["provider", "parse", "persist"] as const)("preserves safe %s diagnosis when the ledger requires unknown cost", async phase => {
+  const f = setup();
+  const sensitive = "sk-secret https://private.example prompt answer rawresponse stack";
+  const fetchImpl = vi.fn(async () => new Response(phase === "provider" ? sensitive : JSON.stringify({
+    choices: [{ message: { content: phase === "parse" ? '{"invalid":true}' : JSON.stringify(proposal) } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  }), { status: phase === "provider" ? 503 : 200 }));
+  const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture", fetchImpl });
+  const gateway = createModelGateway({ resolve: async () => ({ provider, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+    modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture" } }) });
+  f.budget.markUnknown.mockImplementation(async () => { f.repository.ledger.mockResolvedValue("unknown"); });
+  if (phase === "persist") f.repository.apply.mockRejectedValue(Object.assign(new Error(sensitive), { code: sensitive }));
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway, budget: () => f.budget, images: async () => [] });
+  const error = await service.grade(scope, input).catch(error => error);
+  expect(error).toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  expect(readGradingDiagnostic(error)).toEqual({ phase, errorClass: phase === "provider" ? "OpeningProviderError" : "Error",
+    code: phase === "provider" ? "PROVIDER_UNAVAILABLE" : phase === "parse" ? "GRADING_PARSE" : "UNKNOWN",
+    attemptedFetch: true, httpStatus: phase === "provider" ? 503 : 200 });
+  expect(JSON.stringify(readGradingDiagnostic(error))).not.toContain(sensitive);
+  await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  expect(fetchImpl).toHaveBeenCalledTimes(1); expect(f.budget.release).not.toHaveBeenCalled();
+});
 
 it("grades the original work alongside pinned reference images with distinct roles and preserves correction metadata", async () => {
   const f = setup();

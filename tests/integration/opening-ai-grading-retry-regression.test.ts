@@ -5,7 +5,7 @@ import { createOpeningAiGradingRepository, createOpeningBudgetRepository, create
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "../../packages/ai/src/opening/ai-grading-service";
 import { createModelGateway, type ResolvedTaskModel } from "../../packages/ai/src/opening/model-gateway";
-import { OpeningProviderError } from "../../packages/ai/src/opening/provider";
+import { createOpeningProvider, OpeningProviderError } from "../../packages/ai/src/opening/provider";
 import { createGradeObservationHandler } from "../../apps/worker/src/jobs/grade-observation";
 import { runJob } from "../../apps/worker/src/runtime/run-job";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -43,6 +43,45 @@ async function setup() {
   return { original, repository, jobs, queue, budget, api, deps, operationId, jobId: status.jobId!,
     service: createOpeningAiGradingService(deps), setModel: (next: ResolvedTaskModel) => { current = next; } };
 }
+
+it.each(["success", "provider", "parse", "persist", "settle", "usage"] as const)("persists safe %s diagnosis through the real grading job and PG ledger", async phase => {
+  const f = await setup();
+  const sensitive = "sk-secret https://private.example prompt answer rawresponse message stack";
+  const fetchImpl = vi.fn(async () => new Response(phase === "provider" ? sensitive : JSON.stringify({
+    choices: [{ message: { content: phase === "parse" ? '{"invalid":true}' : JSON.stringify(proposal) } }],
+    ...(phase === "usage" ? {} : { usage: { prompt_tokens: 10, completion_tokens: 10 } }),
+  }), { status: phase === "provider" ? 503 : 200 }));
+  const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture", fetchImpl });
+  const gateway = createModelGateway({ resolve: async () => ({ ...model("fixture", 1), provider }) });
+  const deps: OpeningAiGradingServiceDeps = { ...f.deps, gateway,
+    repository: phase === "persist" ? { ...f.repository, apply: async () => { throw Object.assign(new Error(sensitive), { code: sensitive, diagnostic: sensitive }); } } : f.repository,
+    budget: () => phase === "settle" ? { ...f.api, settle: async () => { throw new Error(sensitive); } } : f.api,
+  };
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    await runJob(f.queue, f.jobId, createGradeObservationHandler(deps));
+    const job = await f.queue.get(fixture.scope, f.jobId);
+    expect(job.state).toBe(phase === "success" || phase === "settle" || phase === "usage" ? "succeeded" : "outcome_unknown");
+    const diagnostic = { phase, errorClass: phase === "provider" ? "OpeningProviderError" : "Error",
+      code: phase === "provider" ? "PROVIDER_UNAVAILABLE" : phase === "parse" ? "GRADING_PARSE" : phase === "usage" ? "USAGE_MISSING" : "UNKNOWN",
+      attemptedFetch: true, httpStatus: phase === "provider" ? 503 : 200 };
+    if (phase !== "success" && phase !== "settle" && phase !== "usage") expect(job.result).toMatchObject({ diagnostic });
+    if (phase === "settle" || phase === "usage") expect(warning).toHaveBeenCalledExactlyOnceWith({ event: "grading_diagnostic", operationId: f.operationId, ...diagnostic });
+    if (phase === "success") expect(warning).not.toHaveBeenCalled();
+    expect(JSON.stringify(job.result)).not.toContain(sensitive);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(sensitive);
+    const [before] = await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${f.operationId}`;
+    expect(before).toMatchObject({ state: phase === "success" ? "completed" : "reserved", release_reason: null });
+    if (["provider", "parse", "persist", "usage"].includes(phase)) expect(before!.outcome_unknown_at).not.toBeNull();
+    const current = await f.jobs.read(fixture.scope, { observationId: f.original.id });
+    const status = await f.jobs.enqueue(fixture.scope, { observationId: current.headObservationId });
+    expect(status).toMatchObject({ status: phase === "success" ? "graded" : "unknown_cost", retryable: false });
+    expect(await runJob(f.queue, f.jobId, createGradeObservationHandler(deps))).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${f.operationId}`).toEqual([before]);
+    expect((await f.repository.context(fixture.scope, { observationId: f.original.id })).observation.answer).toBe(f.original.answer);
+  } finally { warning.mockRestore(); }
+});
 
 it.each(["not_sent", "cancelled"] as const)("retries a confirmed %s release after switching models through the real gateway and budget repository", async reason => {
   const f = await setup(), oldCalls = vi.fn(async (): Promise<ProviderOutput> => { throw new OpeningProviderError("PROVIDER_AUTH", "bad old credentials"); });
