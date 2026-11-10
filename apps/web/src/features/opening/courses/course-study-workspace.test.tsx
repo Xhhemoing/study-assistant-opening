@@ -63,6 +63,43 @@ it.each([undefined, "55555555-5555-4555-8555-555555555555"])("mounts static less
   expect(api.getTeachingResume).not.toHaveBeenCalled(); expect(api.createTeachingActivity).not.toHaveBeenCalled();
   expect(data.teachingMount).not.toHaveBeenCalled(); expect(data.practiceMount).not.toHaveBeenCalled();
 });
+it.each([
+  { explicit: false, conversation: undefined, identity: "attempt-1-continue" },
+  { explicit: true, conversation: "55555555-5555-4555-8555-555555555555", identity: "source-2-register" },
+])("returns exam evidence to its course-scoped sprint without ordinary teaching: %j", async ({ explicit, conversation, identity }) => {
+  const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
+  vi.mocked(openCourseStudy).mockImplementationOnce(real.openCourseStudy);
+  const evidence: TeachingActivity = { ...data.activity, intentKind: "question", contentVersion: 0,
+    clientKey: `exam-activity:66666666-6666-4666-8666-666666666666:${identity}` };
+  const api = { listTeachingActivities: vi.fn(async () => [evidence]), getTeachingActivity: vi.fn(async () => evidence),
+    getTeachingResume: vi.fn(), getTeachingClientInit: vi.fn(), createTeachingActivity: vi.fn(), requestTeachingCompile: vi.fn() } as unknown as OpeningApi;
+  const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={explicit ? evidence.id : undefined}
+    originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  const href = `/opening/sprint?courseId=${data.course.id}${conversation ? `&conversation=${conversation}` : ""}`;
+  expect(data.router.replace).toHaveBeenCalledExactlyOnceWith(href);
+  expect(host.querySelector('a[href^="/opening/sprint"]')?.getAttribute("href")).toBe(href);
+  expect(api.getTeachingResume).not.toHaveBeenCalled(); expect(api.getTeachingClientInit).not.toHaveBeenCalled();
+  expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+  expect(data.teachingMount).not.toHaveBeenCalled(); expect(data.practiceMount).not.toHaveBeenCalled();
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(host.querySelector("[data-study-alternatives]")).toBeNull();
+});
+it("does not navigate or enter ordinary teaching for a foreign exam activity", async () => {
+  const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
+  vi.mocked(openCourseStudy).mockImplementationOnce(real.openCourseStudy);
+  const evidence: TeachingActivity = { ...data.activity, courseId: "55555555-5555-4555-8555-555555555555", intentKind: "question",
+    clientKey: "exam-activity:66666666-6666-4666-8666-666666666666:attempt-1-continue" };
+  const api = { getTeachingActivity: vi.fn(async () => evidence), getTeachingResume: vi.fn(), getTeachingClientInit: vi.fn(),
+    createTeachingActivity: vi.fn(), requestTeachingCompile: vi.fn() } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={evidence.id}
+    teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(host.textContent).toContain("不属于本课程");
+  expect(data.router.replace).not.toHaveBeenCalled();
+  expect(api.getTeachingResume).not.toHaveBeenCalled(); expect(api.getTeachingClientInit).not.toHaveBeenCalled();
+  expect(api.createTeachingActivity).not.toHaveBeenCalled(); expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+  expect(data.teachingMount).not.toHaveBeenCalled(); expect(data.practiceMount).not.toHaveBeenCalled();
+});
 it("does not create on mount for a completed chain and explicitly confirms once before restoring teaching", async () => {
   const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
   vi.mocked(openCourseStudy).mockImplementation(real.openCourseStudy);
