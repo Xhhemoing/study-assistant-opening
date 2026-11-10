@@ -58,6 +58,7 @@ import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
 import { unitProgress } from "./unit-progress";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import type { ExplicitRegradeOwner } from "./explicit-regrade-client";
 
 export type TeachingToolsContext = {
   activity: TeachingActivity;
@@ -100,6 +101,8 @@ export type TeachingWorkspaceProps = {
   timeZone?: string;
   /** Optional OpeningApi inject (tests). */
   api?: OpeningApi;
+  /** Optional owner override; inline attempts otherwise use the authenticated tab HTTP owner. */
+  explicitRegrade?: ExplicitRegradeOwner;
   onActivityUpdated?: (activity: TeachingActivity) => void;
   /**
    * Optional sourceId → display name map (tests / parent inject).
@@ -170,6 +173,7 @@ export function TeachingWorkspace({
 
 
   api: apiProp,
+  explicitRegrade,
   onActivityUpdated,
   sourceNameById: sourceNameByIdProp = null,
   contextualTools,
@@ -443,13 +447,14 @@ export function TeachingWorkspace({
       },
       onAttemptReady,
       onObservationReady,
+      explicitRegrade,
       completionAction: units[currentIndex + 1] ? {
         label: units[currentIndex + 1]?.questionBlockId ? "下一题" : "下一单元",
         disabled: positionBusy,
         onClick: () => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); },
       } : { label: "结束练习", href: conversationObjectHref(liveActivity.courseId ? `/opening/courses/${liveActivity.courseId}` : "/opening/today", originalConversationId) },
     }),
-    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady, units, currentIndex, positionBusy, navigateUnit, originalConversationId],
+    [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady, explicitRegrade, units, currentIndex, positionBusy, navigateUnit, originalConversationId],
   );
 
   const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
@@ -611,6 +616,7 @@ export type TeachingContinueEntryProps = {
   assistantHref?: string | null;
   timeZone?: string;
   api?: OpeningApi;
+  explicitRegrade?: ExplicitRegradeOwner;
   /** When true, skip card and open workspace immediately if usable clientInit given. */
   startInWorkspace?: boolean;
   initialClientInit?: ActivitySpecClientInit | null;
@@ -635,6 +641,7 @@ export function TeachingContinueEntry({
   assistantHref,
   timeZone = "Asia/Shanghai",
   api: apiProp,
+  explicitRegrade,
   startInWorkspace = false,
   initialClientInit = null,
   onActivityUpdated,
@@ -814,6 +821,7 @@ export function TeachingContinueEntry({
           assistantHref={assistantHref}
           timeZone={timeZone}
           api={api}
+          explicitRegrade={explicitRegrade}
           contextualTools={contextualTools}
           headerLeading={headerLeading}
           previousToolsAction={previousToolsAction}

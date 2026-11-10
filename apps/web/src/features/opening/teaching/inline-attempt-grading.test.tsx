@@ -16,6 +16,7 @@ vi.mock("../client/api", async original => ({ ...await original<typeof import(".
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("../design/haptics", () => ({ successfulInteractionHaptic() {} }));
 import { InlineAttemptForm, type InlineAttemptContext } from "./inline-attempt";
+import { createExplicitRegradeSession, type ExplicitRegradeOwner } from "./explicit-regrade-client";
 
 const blockId = "11111111-1111-4111-8111-111111111111";
 const attemptId = "22222222-2222-4222-8222-222222222222";
@@ -88,6 +89,33 @@ it("reads a newly saved lesson's background grade without enqueueing on render a
   expect(container.querySelector('[data-feedback-verdict="correct"]')).not.toBeNull();
   expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, graded);
   expect(api.getObservationHistory).toHaveBeenCalledExactlyOnceWith(record.id);
+});
+
+it("exposes the separate explicit AI action only for an injected current unknown-cost owner without replacing manual correction", async () => {
+  api.getSubmittedAttempt.mockResolvedValue({ attempt, observation: record });
+  api.getGradingStatus.mockResolvedValue(gradingStatus({ status: "unknown_cost", retryable: false }));
+  const prepare = vi.fn(), confirm = vi.fn(), read = vi.fn();
+  const owner: ExplicitRegradeOwner = {
+    snapshot: { rootObservationId: record.id, expectedHead: record.id, answerRevision: 1, privacyEpoch: 0,
+      previousGradingVersion: 0, epoch: 1, oldStatus: "unknown_cost" },
+    session: createExplicitRegradeSession({ prepare, confirm, read }, () => true),
+  };
+  async function renderOwner(injected: ExplicitRegradeOwner | undefined, status: InlineAttemptContext["status"] = "active") {
+    await act(async () => root.render(<InlineAttemptForm blockId={blockId} prompt={initialDraft.prompt}
+      context={{ ...context, status, explicitRegrade: injected }} ready initialDraft={initialDraft} onDraftChange={() => undefined} />));
+  }
+  await renderOwner(undefined);
+  expect(container.textContent).not.toContain("新建一次AI评改版本");
+  await renderOwner(owner);
+  expect(container.textContent).toContain("新建一次AI评改版本");
+  expect(container.textContent).toContain("人工更正结果（不调用 AI）");
+  expect(container.textContent).toContain(record.answer);
+  expect(prepare).not.toHaveBeenCalled(); expect(confirm).not.toHaveBeenCalled();
+  expect(api.gradeObservation).not.toHaveBeenCalled(); expect(api.submitAttempt).not.toHaveBeenCalled();
+  await renderOwner({ ...owner, snapshot: { ...owner.snapshot, expectedHead: gradedId } });
+  expect(container.textContent).not.toContain("新建一次AI评改版本");
+  await renderOwner(owner, "completed");
+  expect(container.textContent).not.toContain("新建一次AI评改版本");
 });
 
 it("automatically assigns a course once without asking the learner to choose one", async () => {
