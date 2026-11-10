@@ -115,6 +115,11 @@ worker_paused() {
   marker=$(worker_pause_file "$1") || return 1
   [[ -f "$marker" ]]
 }
+reload_manager() {
+  if [[ "$ACTION" == complete-postmigration ]]; then
+    node --input-type=module -e 'const {systemctlCommand}=await import(process.argv[1]); if(!systemctlCommand(["daemon-reload"]).ok) process.exit(1)' "file://$CONTROL_DIR/hermes-writer-control.mjs"
+  else systemctl daemon-reload; fi
+}
 install_worker_guard() {
   local marker temporary="$WORKER_GUARD.next.$$"
   marker=$(worker_pause_file "$1") || return 1
@@ -124,7 +129,7 @@ install_worker_guard() {
   printf '[Unit]\nConditionPathExists=!%s\n' "$marker" > "$temporary" || return 1
   chmod 644 -- "$temporary" || return 1
   mv -Tf -- "$temporary" "$WORKER_GUARD" || return 1
-  systemctl daemon-reload || return 1
+  reload_manager || return 1
 }
 pause_worker() {
   local marker temporary
@@ -209,17 +214,26 @@ restart_services() {
 }
 health() {
   local required=$1 expected=$2 profile=${3:-}
-  local body attempt
+  local body attempt attempts=120
+  # Completion has a separately budgeted 20*(curl5 + active15 + identity30 + sleep2)
+  # <=1040s readiness window inside its independent 3600s service lifetime.
+  if [[ "$ACTION" == complete-postmigration ]]; then attempts=20; fi
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
   # Cold parser imports + OCR probe can exceed two minutes. Readiness, not
   # systemd active, controls success; a bounded retry also covers startup backoff.
-  for attempt in {1..120}; do
+  for ((attempt=1; attempt<=attempts; attempt++)); do
     body=$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
     if [[ "$body" == *'"status":"ok"'* ]]; then
-      if [[ "$required" == 1 ]] && ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
+      if [[ "$required" == 1 ]]; then
+        if [[ "$ACTION" == complete-postmigration ]]; then
+          timeout --signal=KILL 15s systemctl is-active --quiet aistudy-worker.service || return 1
+        elif ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
+      fi
       [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is not installed; first complete a managed deployment.' >&2; return 1; }
-      if node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
+      if [[ "$ACTION" == complete-postmigration ]]; then
+        if timeout --signal=KILL 30s node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
+      elif node "$STATE/runtime-identity.mjs" "${identity_args[@]}"; then return 0; fi
     fi
     sleep 2
   done
@@ -335,14 +349,17 @@ if [[ "$ACTION" == complete-postmigration ]]; then
   node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   managed prepare || fail 'Completion trusted boundary preparation failed.'
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
-  PYTHONDONTWRITEBYTECODE=1 bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
+  # Run the verified immutable e5 Python helper without rewriting its bytes.
+  # Its internal reload receives the same 60s leaf budget, and the whole helper
+  # tree stays bounded (parser90 + reload60 + provisioning/IO margin90).
+  node --input-type=module -e 'const {provisionCompletion}=await import(process.argv[1]); provisionCompletion(process.argv[2],process.argv.slice(3))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
   mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"
   printf '[Service]\nWorkingDirectory=%s\nEnvironmentFile=%s\nExecStart=\nExecStart=/usr/bin/python3 -I -S -B %s/writer-controls/hermes-trusted-loader.py exec %s aistudy-web.service\n' \
     "$CURRENT" "$CONFIG" "$STATE" "$STATE" > "$WEB_OVERRIDE"
   chmod 644 -- "$WEB_OVERRIDE"
-  systemctl daemon-reload
+  reload_manager
   cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
   atomic_link "$RELEASE" "$CURRENT"

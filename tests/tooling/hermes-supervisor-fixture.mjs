@@ -36,7 +36,7 @@ if p['mode']=='commit': m.commit(p['state'],p['current'],p['broker'],p['record']
 elif p['mode']=='validate': m.validate_config(p['record'],sync=True)
 else: print(m.classify(p['state'],p['current'],p['broker'],p.get('scope'),sync=True))
 `;
-export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply, repair = false, completion = false } = {}) {
+export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply, repair = false, completion = false, reloadFailure } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hermes-supervisor-'));
   const sockets = new Set();
   const trackSocket = socket => {
@@ -54,7 +54,12 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
   const brokerReady = new Promise(resolve => { readyBroker = resolve; });
   const ownerReady = new Promise(resolve => { readyOwner = resolve; });
   const broker = new EventEmitter(); broker.stdin = new PassThrough();
+  let reloads = 0;
   const command = argv => {
+    if (argv[0] === 'daemon-reload') {
+      events.push('manager:reload');
+      return { ok: ++reloads !== reloadFailure, stdout: '' };
+    }
     const unit = argv.at(-1);
     if (argv[0] === 'show' && argv[1].includes('ExecStartEx')) return { ok: true, stdout: `NeedDaemonReload=no\nExecStartEx={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B ${args[4]}/writer-controls/hermes-trusted-loader.py exec ${args[4]} ${unit} ; flags=${unit === units[1] ? 'no-setuid' : ''} ; }\n` };
     if (argv[0] === 'show') return { ok: true, stdout: `MainPID=${process.pid}` };

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hermes_pre_migration_repair_test import Repair, state
+COMPLETION_MANAGER = state.completion_manager
 GENERATED = sys.stdin.read() if '--generated-check' in sys.argv else None
 
 
@@ -483,6 +484,170 @@ class Completion(Repair):
         (self.release / '.env.production').symlink_to(self.old)
         with self.assertRaises(ValueError):
             self.check()
+
+    def reload_fixture(self):
+        directory = self.root / 'reload-evidence'
+        quarantine = self.root / 'quarantine'
+        entry = self.root / 'retained-entry'
+        entry.mkdir(mode=0o700)
+        unit = self.root / 'completion.service'
+        self.write(unit, 'exact retained unit')
+        self.write(entry / 'control', 'exact 205 bytes')
+        manager = {'Id': state.COMPLETION_UNIT, 'LoadState': 'loaded', 'ActiveState': 'inactive', 'SubState': 'dead',
+                   'MainPID': '0', 'ControlPID': '0', 'ExecMainPID': '0', 'ExecMainStartTimestampMonotonic': '0',
+                   'ExecMainExitTimestampMonotonic': '0', 'ActiveEnterTimestampMonotonic': '0', 'InactiveExitTimestampMonotonic': '0',
+                   'ExecMainCode': '0', 'ExecMainStatus': '0', 'InvocationID': '', 'NRestarts': '0', 'Job': '',
+                   'Result': 'success', 'FragmentPath': str(unit), 'DropInPaths': '', 'NeedDaemonReload': 'no'}
+        args = ['complete-postmigration', str(self.root), '/releases', str(self.current), str(self.state),
+                '/backups', str(self.systemd), str(self.root), '6291456', state.COMPLETION_SHA,
+                str(self.release), state.COMPLETION_ARCHIVE_SHA, str(self.archive)]
+        payload = {'args': args, 'unit': 'new reviewed unit', 'retainedUnit': 'exact retained unit', 'phase': 'absent'}
+        for key, value in {'COMPLETION_ADMISSION': str(directory), 'COMPLETION_QUARANTINE': str(quarantine),
+                           'COMPLETION_RETAINED_ENTRY': str(entry), 'COMPLETION_UNIT_PATH': str(unit),
+                           'COMPLETION_205': {'control': hashlib.sha256(b'exact 205 bytes').hexdigest()}}.items():
+            patch.object(state, key, value).start()
+        patch.object(state, 'completion_controls', return_value={'reviewed': 'new-controls'}).start()
+        patch.object(state, 'completion_manager', return_value=manager).start()
+        patch.object(state, 'completion_scope', side_effect=lambda value: (state.completion_no_claim(args[4]), args)[1]).start()
+        return payload, manager, directory, quarantine, unit
+
+    def test_completion_reload_three_samples_half_bound_and_retained_archive(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        import subprocess
+        ticks = iter([100, 30_000_000_100, 30_000_000_101, 60_000_000_101, 60_000_000_102, 90_000_000_102])
+        calls = []
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), patch.object(state.subprocess, 'run', run):
+            state.completion_reload_samples(payload)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(argv == ['/usr/bin/systemctl', 'daemon-reload'] and kw['timeout'] == 60 for argv, kw in calls))
+        with patch.object(state.time, 'monotonic_ns', return_value=90_000_000_103):
+            state.completion_reload_admission(payload['args'])
+            for index in range(3):
+                sample = directory / ('sample-' + str(index) + '.json')
+                self.assertEqual(sample.stat().st_mode & 0o777, 0o600)
+            # Any claimed/partial attempt prevents archive, without unit mutation.
+            self.write(self.state / 'postmigration-completion-claimed', '{partial')
+            with self.assertRaises(ValueError):
+                state.completion_retained_archive(payload)
+            (self.state / 'postmigration-completion-claimed').unlink()
+            for key, value in [('ExecMainStartTimestampMonotonic', '1'), ('InvocationID', 'a'*32), ('ExecMainPID', '123'), ('NRestarts', '1')]:
+                with patch.object(state, 'completion_manager', return_value={**manager, key: value}):
+                    with self.assertRaises(ValueError):
+                        state.completion_retained_archive(payload)
+                self.assertTrue(unit.exists())
+                self.assertFalse(quarantine.exists())
+            self.assertTrue(state.completion_retained_archive(payload)['archived'])
+            self.assertFalse(unit.exists())
+            self.assertEqual((quarantine / state.COMPLETION_UNIT).read_bytes(), b'exact retained unit')
+            self.assertEqual((quarantine / 'manifest.json').stat().st_mode & 0o777, 0o600)
+            state.completion_launch_check(payload)
+            with self.assertRaises(ValueError):
+                state.completion_reload_samples(payload)  # Never overwrite prior attempt evidence.
+
+    def test_completion_reload_missing_slow_failed_stale_evidence_never_admits(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        before = unit.read_bytes()
+        with self.assertRaises(FileNotFoundError):
+            state.completion_reload_admission(payload['args'])
+        import subprocess
+        ticks = iter([100, 30_000_000_101])
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), \
+                patch.object(state.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(ValueError, 'Reload admission failed'):
+                state.completion_reload_samples(payload)
+        self.assertEqual(unit.read_bytes(), before)
+        row = json.loads((directory / 'sample-0.json').read_text())
+        self.assertEqual(row['elapsedNs'], 30_000_000_001)
+        with self.assertRaises(ValueError):
+            state.completion_reload_admission(payload['args'])
+        self.assertFalse(quarantine.exists())
+
+    def test_completion_reload_evidence_status_age_scope_and_three_samples(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        import subprocess
+        ticks = iter([100, 200, 201, 300, 301, 400])
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), \
+                patch.object(state.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            state.completion_reload_samples(payload)
+        sample = directory / 'sample-1.json'
+        original = sample.read_text()
+        variants = [{'exit': 1}, {'elapsedNs': 30000000001}, {'boundNs': 20000000000},
+                    {'index': 0}, {'boot': 'other-boot'}, {'after': {**manager, 'InvocationID': 'a'*32}}]
+        for variant in variants:
+            sample.write_text(json.dumps({**json.loads(original), **variant}))
+            with patch.object(state.time, 'monotonic_ns', return_value=401), self.assertRaises(ValueError):
+                state.completion_reload_admission(payload['args'])
+        sample.write_text(original)
+        with patch.object(state.time, 'monotonic_ns', return_value=state.RELOAD_EVIDENCE_AGE_NS + 401), self.assertRaises(ValueError):
+            state.completion_reload_admission(payload['args'])
+        sample.unlink()
+        with patch.object(state.time, 'monotonic_ns', return_value=401), self.assertRaises(FileNotFoundError):
+            state.completion_reload_admission(payload['args'])
+        self.assertTrue(unit.exists())
+        self.assertFalse(quarantine.exists())
+
+    def test_completion_retained_wrong_bytes_archive_failure_and_claim_race(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        with patch.object(state, 'completion_reload_admission'):
+            self.write(unit, 'arbitrary unit')
+            with self.assertRaisesRegex(ValueError, 'Retained unit differs'):
+                state.completion_retained_archive(payload)
+            self.assertFalse(quarantine.exists())
+            self.write(unit, 'exact retained unit')
+            original_scope = state.completion_scope
+            calls = [0]
+            def race(value):
+                calls[0] += 1
+                if calls[0] == 2:
+                    self.write(self.state / 'postmigration-completion-claimed', '{partial')
+                return original_scope(value)
+            with patch.object(state, 'completion_scope', side_effect=race), self.assertRaises(ValueError):
+                state.completion_retained_archive(payload)
+            self.assertTrue(unit.exists())
+            self.assertFalse(quarantine.exists())
+            (self.state / 'postmigration-completion-claimed').unlink()
+            with patch.object(state.os, 'rename', side_effect=OSError('archive failed')), self.assertRaises(OSError):
+                state.completion_retained_archive(payload)
+            self.assertTrue(unit.exists())
+            self.assertTrue((quarantine / 'manifest.json').exists())
+            with self.assertRaises(FileNotFoundError):
+                state.completion_launch_check(payload)
+
+    def test_completion_reload_nonzero_timeout_and_postquery_failure_retain_partial(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        import subprocess
+        def fail(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 60)
+        ticks = iter([100, 60_000_000_100])
+        # Failed post-query must not lose the actual reload timeout evidence.
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), \
+                patch.object(state.subprocess, 'run', fail), \
+                patch.object(state, 'completion_manager', side_effect=[manager, manager, OSError('query failed')]):
+            with self.assertRaises(ValueError):
+                state.completion_reload_samples(payload)
+        self.assertTrue((directory / 'sample-0-started.json').exists())
+        sample = json.loads((directory / 'sample-0.json').read_text())
+        self.assertEqual(sample['error'], 'TimeoutExpired')
+        self.assertIsNone(sample['exit'])
+        self.assertEqual(sample['after'], {'observationError': 'OSError'})
+        self.assertFalse((directory / 'sample-1-started.json').exists())
+        self.assertTrue(unit.exists())
+        self.assertFalse(quarantine.exists())
+
+    def test_completion_manager_requires_complete_unambiguous_actual_observation(self):
+        import subprocess
+        # The fixture manager mock is NOT used here: exercise real parser, fake subprocess only.
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        raw = '\n'.join(k + '=' + v for k, v in manager.items()) + '\n'
+        actual = COMPLETION_MANAGER
+        with patch.object(state.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, raw, '')):
+            self.assertEqual(actual(), manager)
+        for invalid in (raw + 'MainPID=0\n', raw.replace('MainPID=0\n', ''), raw + 'garbage\n'):
+            with patch.object(state.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, invalid, '')), self.assertRaises(ValueError):
+                actual()
 
     def test_completion_new_wrapper_or_unknown_broker_refuse(self):
         original = state.present

@@ -15,6 +15,7 @@ import pwd
 from pathlib import Path
 import sys
 import tempfile
+import time
 
 # Fixed in production. Tests may replace the module object, never environment/CLI.
 TRUSTED_UID = 0
@@ -940,7 +941,231 @@ def completion_claim(state):
     return claim
 
 
+COMPLETION_UNIT = 'aistudy-postmigration-completion.service'
+COMPLETION_UNIT_PATH = '/run/systemd/system/' + COMPLETION_UNIT
+COMPLETION_RETAINED_ENTRY = '/tmp/aistudy-entry.Pz65J76D'
+COMPLETION_ADMISSION = '/run/aistudy-completion-admission'
+COMPLETION_QUARANTINE = '/run/systemd/system/aistudy-completion-retained-205'
+RELOAD_BOUND_NS = 60_000_000_000
+RELOAD_EVIDENCE_AGE_NS = 1_200_000_000_000
+# Immutable reviewed 205 controls, NOT a new signed-controls producer. Required
+# because the exceptional existing-unit path must not adopt arbitrary root code.
+COMPLETION_205 = {
+    'hermes-release.sh': '0039c3551063d23974ee4801231926277dbbb74c243cbc9d61d237bebe67d37c',
+    'hermes-supervisor.mjs': '7966ccd061d8b8b16778c69d826c29f8f6e10cb96cf2e3e2ace6b12c65657619',
+    'hermes-config-durability.mjs': '8f2e6046a714d9e4e26201c755fafe661864ee89f4cef85806a56b0e71fd25d0',
+    'hermes-db.mjs': 'beb8809f8f59ada4b13174f955fc63d52a44638ac4607075bae413b6bc8100f8',
+    'hermes-health.mjs': 'c61c6084a6addf1e4a81a25de6095a61500b375574b8f633adacbab350da49ce',
+    'hermes-writer-control.mjs': 'df3cd9ea5bacce96a49e29fc5b8b8dcf5092e5e2b610a21f25b88b025df4976b',
+    'hermes-trusted-loader.py': '9ee130b596c3938a1ec9161f7f89358e95a59c8f994980ae661ff09cb9cfa524',
+    'hermes-writer-state.py': 'c3ecf5b7f9abfb312d4565edb71ba32062a03f408685610514dff3a773cff696',
+    'hermes-writer-exec.py': '59a4f9cf0e9a90db9f2959517b58572873a9e7ce32b7902eed8af3fbc14d3b72',
+    'hermes-peer-broker.py': 'e7448d4979ce89fdd0fec9b198148136be2fd47d3de27542af5530c3cce66092',
+}
+
+
+def completion_no_claim(state):
+    for path in (Path(state) / 'postmigration-completion-claimed',
+                 Path(COMPLETION_CONTEXT) / 'claim-origin.json'):
+        if present(path):
+            raise ValueError('Completion claim/origin present; no reentry')
+
+
+def completion_controls():
+    return {name: hashlib.sha256(read_trusted(trusted_loader.directory / name)[0]).hexdigest()
+            for name in COMPLETION_ENTRY_FILES}
+
+
+def completion_manager():
+    keys = ('Id', 'LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlPID', 'ExecMainPID',
+            'ExecMainStartTimestampMonotonic', 'ExecMainExitTimestampMonotonic',
+            'ActiveEnterTimestampMonotonic', 'InactiveExitTimestampMonotonic', 'ExecMainCode', 'ExecMainStatus', 'InvocationID',
+            'NRestarts', 'Job', 'Result', 'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
+    result = subprocess.run(['/usr/bin/systemctl', 'show', '--all', '--property=' + ','.join(keys), COMPLETION_UNIT],
+                            check=True, capture_output=True, text=True, timeout=15)
+    pairs = [line.split('=', 1) for line in result.stdout.strip().splitlines()]
+    if len(pairs) != len(keys) or any(len(row) != 2 for row in pairs):
+        raise ValueError('Incomplete completion manager observation')
+    values = dict(pairs)
+    if set(values) != set(keys):
+        raise ValueError('Duplicate/unknown completion manager observation')
+    return values
+
+
+def completion_never_started(manager):
+    expected = {'Id': COMPLETION_UNIT, 'LoadState': 'loaded', 'ActiveState': 'inactive', 'SubState': 'dead',
+                'MainPID': '0', 'ControlPID': '0', 'ExecMainPID': '0', 'ExecMainStartTimestampMonotonic': '0',
+                'ExecMainExitTimestampMonotonic': '0', 'ActiveEnterTimestampMonotonic': '0', 'InactiveExitTimestampMonotonic': '0',
+                'ExecMainCode': '0', 'ExecMainStatus': '0', 'InvocationID': '', 'NRestarts': '0',
+                'Result': 'success', 'FragmentPath': COMPLETION_UNIT_PATH, 'DropInPaths': '', 'NeedDaemonReload': 'no'}
+    if any(manager.get(k) != v for k, v in expected.items()) or manager.get('Job') not in ('', '0'):
+        raise ValueError('Completion manager is not exact never-started unit')
+
+
+def completion_private_write(path, value):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(os.dup(fd), 'w') as output:
+            json.dump(value, output, sort_keys=True)
+            output.flush()
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    sync_dir(Path(path).parent)
+
+
+def completion_scope(payload):
+    args = payload['args']
+    if (len(args) != 13 or args[0] != 'complete-postmigration' or args[9] != COMPLETION_SHA
+            or args[11] != COMPLETION_ARCHIVE_SHA):
+        raise ValueError('Wrong completion admission arguments')
+    completion_no_claim(args[4])
+    completion_incident_check(args[4], args[3], args[6], args[10], str(Path(args[1]) / '.env.production'), args[12], args[7])
+    return args
+
+
+def completion_reload_samples(payload):
+    # Explicit PM operation ONLY. No production caller executes this implicitly.
+    args = completion_scope(payload)
+    completion_never_started(completion_manager())
+    if present(COMPLETION_QUARANTINE):
+        raise ValueError('Retained archive already consumed; no repeated sampling')
+    completion_retained_sources()
+    if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['retainedUnit'].encode():
+        raise ValueError('Retained unit differs before measured manager operations')
+    os.mkdir(COMPLETION_ADMISSION, 0o700)  # Existing attempt is not retry permission.
+    sync_dir(Path(COMPLETION_ADMISSION).parent)
+    header = {'synthetic': False, 'deploymentReceipt': False, 'automaticRetry': False,
+              'args': args, 'controls': completion_controls(),
+              'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'boundNs': RELOAD_BOUND_NS}
+    completion_private_write(Path(COMPLETION_ADMISSION) / 'scope.json', header)
+    for index in range(3):
+        completion_no_claim(args[4])
+        before = completion_manager()
+        completion_never_started(before)
+        started = time.monotonic_ns()
+        completion_private_write(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '-started.json'),
+                                 {**header, 'index': index, 'startNs': started, 'before': before})
+        code, error = None, None
+        try:
+            result = subprocess.run(['/usr/bin/systemctl', 'daemon-reload'], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=RELOAD_BOUND_NS / 1_000_000_000)
+            code = result.returncode
+        except (subprocess.TimeoutExpired, OSError) as failure:
+            error = type(failure).__name__
+        ended = time.monotonic_ns()
+        try:
+            after = completion_manager()
+        except Exception as failure:
+            after = {'observationError': type(failure).__name__}
+        record = {**header, 'index': index, 'startNs': started, 'endNs': ended, 'elapsedNs': ended - started,
+                  'exit': code, 'error': error, 'before': before, 'after': after}
+        completion_private_write(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '.json'), record)
+        completion_never_started(after)
+        if code != 0 or error is not None or not 0 <= ended - started <= RELOAD_BOUND_NS // 2:
+            raise ValueError('Reload admission failed; evidence/unit/claim retained')
+    return {'samples': 3, 'boundNs': RELOAD_BOUND_NS, 'maximumNs': RELOAD_BOUND_NS // 2}
+
+
+def completion_reload_admission(args):
+    header = strict_json(read_trusted(Path(COMPLETION_ADMISSION) / 'scope.json', private=True)[0])
+    expected = {'synthetic': False, 'deploymentReceipt': False, 'automaticRetry': False,
+                'args': args, 'controls': completion_controls(),
+                'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'boundNs': RELOAD_BOUND_NS}
+    if header != expected:
+        raise ValueError('Reload evidence controls/scope/boot changed')
+    previous = None
+    for index in range(3):
+        row = strict_json(read_trusted(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '.json'), private=True)[0])
+        if (any(row.get(k) != v for k, v in header.items()) or row.get('index') != index
+                or any(type(row.get(k)) is not int for k in ('startNs', 'endNs', 'elapsedNs', 'exit'))
+                or row['exit'] != 0 or row.get('error') is not None
+                or not 0 <= row['elapsedNs'] == row['endNs'] - row['startNs'] <= RELOAD_BOUND_NS // 2
+                or not 0 <= time.monotonic_ns() - row['endNs'] <= RELOAD_EVIDENCE_AGE_NS
+                or previous is not None and row['startNs'] < previous):
+            raise ValueError('Three consecutive timely successful actual reload samples required')
+        completion_never_started(row['before'])
+        completion_never_started(row['after'])
+        previous = row['endNs']
+
+
+def completion_retained_sources():
+    entry_fd = safe_open(COMPLETION_RETAINED_ENTRY, private=True, directory=True)
+    os.close(entry_fd)
+    if {p.name for p in Path(COMPLETION_RETAINED_ENTRY).iterdir()} != set(COMPLETION_205):
+        raise ValueError('Retained entry inventory changed')
+    for name, digest in COMPLETION_205.items():
+        if hashlib.sha256(read_trusted(Path(COMPLETION_RETAINED_ENTRY) / name)[0]).hexdigest() != digest:
+            raise ValueError('Retained entry not exact reviewed 205')
+
+
+def completion_retained_archive(payload):
+    args = completion_scope(payload)
+    completion_reload_admission(args)
+    before = completion_manager()
+    completion_never_started(before)
+    completion_retained_sources()
+    unit, unit_identity = read_trusted(COMPLETION_UNIT_PATH)
+    if unit != payload['retainedUnit'].encode():
+        raise ValueError('Retained unit differs from exact incident arguments/205 controls')
+    # Full incident/claim checks repeated directly before the archival mutation.
+    completion_scope(payload)
+    completion_never_started(completion_manager())
+    if read_trusted(COMPLETION_UNIT_PATH) != (unit, unit_identity):
+        raise ValueError('Retained unit changed before quarantine')
+    os.mkdir(COMPLETION_QUARANTINE, 0o700)  # Same-filesystem exclusive destination.
+    sync_dir(Path(COMPLETION_QUARANTINE).parent)
+    completion_private_write(Path(COMPLETION_QUARANTINE) / 'manifest.json',
+                             {'args': args, 'unitIdentity': unit_identity, 'unitSha256': hashlib.sha256(unit).hexdigest(),
+                              'manager': before, 'entry': COMPLETION_RETAINED_ENTRY, 'controls205': COMPLETION_205})
+    os.rename(COMPLETION_UNIT_PATH, Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
+    sync_dir(COMPLETION_QUARANTINE)
+    sync_dir(Path(COMPLETION_UNIT_PATH).parent)
+    # No reload/start/unload here. Old manager state deliberately remains visible.
+    return {'archived': True, 'automaticRetry': False}
+
+
+def completion_launch_check(payload):
+    args = completion_scope(payload)
+    completion_reload_admission(args)
+    completion_retained_sources()
+    archived = strict_json(read_trusted(Path(COMPLETION_QUARANTINE) / 'manifest.json', private=True)[0])
+    old, _ = read_trusted(Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
+    if (old != payload['retainedUnit'].encode()
+            or archived.get('args') != args or archived.get('controls205') != COMPLETION_205
+            or archived.get('entry') != COMPLETION_RETAINED_ENTRY
+            or archived.get('unitSha256') != hashlib.sha256(old).hexdigest()):
+        raise ValueError('Retained unit archive unconfirmed')
+    completion_never_started(archived['manager'])
+    phase = payload['phase']
+    if phase == 'absent':
+        if present(COMPLETION_UNIT_PATH):
+            raise ValueError('Existing completion unit is not replaceable')
+        manager = completion_manager()
+        # Removing the fragment marks the retained never-started record stale.
+        # Only this single expected field may differ before explicit unload.
+        if manager.get('NeedDaemonReload') not in ('yes', 'no'):
+            raise ValueError('Unknown retained manager reload state')
+        completion_never_started({**manager, 'NeedDaemonReload': 'no'})
+    elif phase in ('ready', 'claim'):
+        if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['unit'].encode():
+            raise ValueError('New completion unit bytes changed')
+        if phase == 'ready':
+            completion_never_started(completion_manager())
+    else:
+        raise ValueError('Unknown completion admission phase')
+    return {'admitted': True}
+
+
 def main():
+    if sys.argv[1] in ('completion-reload-samples', 'completion-retained-archive', 'completion-launch-check'):
+        operations = {'completion-reload-samples': completion_reload_samples,
+                      'completion-retained-archive': completion_retained_archive,
+                      'completion-launch-check': completion_launch_check}
+        print(json.dumps(operations[sys.argv[1]](json.load(sys.stdin))))
+        return
     if sys.argv[1] == 'completion-create':
         create_completion_claim(sys.argv[2], json.load(sys.stdin))
         return

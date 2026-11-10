@@ -18,6 +18,46 @@ export function durableWrite(file, contents, mode = 0o600) {
   renameSync(temporary, file);
   syncDirectory(dirname(file));
 }
+// Completion budget (seconds; reload=R60, ordinary systemctl=S15):
+// prepare: 3R + 2S wrapper proof + 4S stop/show = 270.
+// activate: prepare270 + capture60 + 3*persist60 + broker-ready10 +
+//   4*broker-control30 + 2S starts = 670. Failure refence/revoke/stop <=150.
+// success: broker90 + identity shows60 + health30 + persist60 + close30 +
+//   terminal30 = 300; failure refence/stop <=150. No blind retry.
+// request: both socket ends1200 > max(prepare270, activate670, success300)+150.
+// service3600: admission/claim380 + prepare270 + parser/provision330 +
+//   owner reloads120 + activate670 + health1040 + success300 = 3110,
+//   leaving 490 for IO/failure cleanup. StopPost240 > bounded cleanup180.
+// PM samples: python480 > 3*(reload60+before15+after15)+incident150+margin60.
+// SSH ConnectTimeout15 bounds CONNECT only; no command/pipe deadline kills
+// these requests. The independent service, not SSH, owns execution lifetime.
+// Reload has measured 19s latency; do not apply the ordinary command budget.
+export const RELOAD_TIMEOUT_MS = 60_000;
+export const SYSTEMCTL_TIMEOUT_MS = 15_000;
+export const SUPERVISOR_REQUEST_TIMEOUT_MS = 1_200_000;
+export function systemctlCommand(args, execute = spawnSync) {
+  const result = execute('systemctl', args, { encoding: 'utf8',
+    timeout: args[0] === 'daemon-reload' ? RELOAD_TIMEOUT_MS : SYSTEMCTL_TIMEOUT_MS, killSignal: 'SIGKILL' });
+  return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? '' };
+}
+export function provisionCompletion(helper, args) {
+  const code = `import runpy,subprocess,sys
+original=subprocess.run
+def bounded(argv,*args,**kwargs):
+    if argv == ["systemctl","daemon-reload"]: kwargs["timeout"]=${RELOAD_TIMEOUT_MS / 1000}
+    return original(argv,*args,**kwargs)
+subprocess.run=bounded
+sys.argv=sys.argv[1:]
+runpy.run_path(sys.argv[0],run_name="__main__")`;
+  const result = spawnSync('timeout', ['--signal=KILL', '240s', '/usr/bin/python3', '-I', '-S', '-B', '-c', code, helper, ...args],
+    { stdio: 'inherit', timeout: 245_000, killSignal: 'SIGKILL', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
+  if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
+}
+export function completionLaunchAdmission(args, unit, phase = 'launch') {
+  const retainedUnit = unit.split(controls).join('/tmp/aistudy-entry.Pz65J76D')
+    .replace('RuntimeMaxSec=3600\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+  return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit }));
+}
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const controls = dirname(fileURLToPath(import.meta.url));
 const sourceNames = ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'];
@@ -33,7 +73,8 @@ export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
 export function python(file, args, payload) {
   const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
-    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-check' ? 150_000 : 30_000,
+    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 480_000
+      : ['completion-check', 'completion-retained-archive', 'completion-launch-check'].includes(args[0]) ? 150_000 : 30_000,
     env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
   });
   if (result.error || result.status !== 0) throw new Error('Trusted writer control unavailable');

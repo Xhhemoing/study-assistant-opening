@@ -78,7 +78,7 @@ test('completion queued cleanup after broker failure cannot admit another genera
 test('independent service bounds, identity and cgroup fail closed', () => {
   const group = '/system.slice/aistudy-postmigration-completion.service';
   const good = { Id: 'aistudy-postmigration-completion.service', LoadState:'loaded', Restart:'no', KillMode:'control-group',
-    RuntimeMaxUSec:'30min',TimeoutStopUSec:'2min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',ExecMainPID:'1234',
+    RuntimeMaxUSec:'1h',TimeoutStopUSec:'4min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',ExecMainPID:'1234',
     ExecStopPost:`{ path=/usr/bin/env ; argv[]=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${process.execPath} ${resolve('infra/deploy/hermes-supervisor.mjs')} completion-stop-post ${resolve('infra/deploy/hermes-release.sh')} complete-postmigration /legacy ; }` };
   const run = values => () => ({ok:true,stdout:Object.entries(values).map(([k,v])=>`${k}=${v}`).join('\n')});
   assert.equal(completionService(run(good),()=>`0::${group}`).InvocationID,good.InvocationID);
@@ -87,7 +87,7 @@ test('independent service bounds, identity and cgroup fail closed', () => {
   assert.throws(()=>completionService(run(good),()=> '0::/other'));
   const args=['complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/config','6291456','a'.repeat(40),'/release','b'.repeat(64),'/archive'];
   const unit = completionServiceUnit(args,'/trusted-controls','/usr/bin/node');
-  assert.match(unit,/Restart=no\nKillMode=control-group\nRuntimeMaxSec=1800\nTimeoutStopSec=120/);
+  assert.match(unit,/Restart=no\nKillMode=control-group\nRuntimeMaxSec=3600\nTimeoutStopSec=240/);
   assert.match(unit,/ExecStopPost=.*completion-stop-post/);
   assert.throws(()=>completionServiceUnit([...args.slice(0,-1),'/archive;evil']));
 });
@@ -188,11 +188,12 @@ for (const fail of ['', 'provision']) test(`actual completion shell ${fail || 's
   writeFileSync(join(state,'migration-forward-only'),'original guard');writeFileSync(join(state,'writers-fenced'),'original fence');
   const current=join(root,'current');symlinkSync(legacy,current);
   const helper=join(controls,'hermes-supervisor.mjs');writeFileSync(helper,'');writeFileSync(join(controls,'hermes-health.mjs'),'fixture');
+  writeFileSync(join(controls,'hermes-writer-control.mjs'),readFileSync(resolve('infra/deploy/hermes-writer-control.mjs')));
   const log=join(root,'commands');writeFileSync(log,'');
-  writeFileSync(join(bin,'node'),`#!/bin/bash\nprintf 'node %s\\n' "$*" >> "$MOCK_LOG"\nif [[ "$2" == request ]]; then\n [[ "$3" != arm ]] || exit 90\n if [[ "$3" == prepare ]];then for u in aistudy-web.service aistudy-worker.service; do mkdir -p "$MOCK_SYSTEMD/$u.d";touch "$MOCK_SYSTEMD/$u.d/96-aistudy-writer-exec.conf";done;fi\n exit 0\nfi\n[[ "\${1##*/}" == runtime-identity.mjs || "$2" == quiescence || "$2" == parser ]] || exit 91\n`,{mode:0o755});
+  writeFileSync(join(bin,'node'),`#!/bin/bash\nprintf 'node %s\\n' "$*" >> "$MOCK_LOG"\nif [[ "$1" == --input-type=module ]]; then exec ${process.execPath} "$@"; fi\nif [[ "$2" == request ]]; then\n [[ "$3" != arm ]] || exit 90\n if [[ "$3" == prepare ]];then for u in aistudy-web.service aistudy-worker.service; do mkdir -p "$MOCK_SYSTEMD/$u.d";touch "$MOCK_SYSTEMD/$u.d/96-aistudy-writer-exec.conf";done;fi\n exit 0\nfi\n[[ "\${1##*/}" == runtime-identity.mjs || "$2" == quiescence || "$2" == parser || "$1" == --input-type=module ]] || exit 91\n`,{mode:0o755});
   writeFileSync(join(bin,'systemctl'),'#!/bin/bash\nprintf "systemctl %s\\n" "$*" >> "$MOCK_LOG"\n[[ "$1" == daemon-reload || "$1" == is-active ]]\n',{mode:0o755});
   writeFileSync(join(bin,'curl'),'#!/bin/bash\nprintf \'{"status":"ok"}\'\n',{mode:0o755});
-  writeFileSync(join(target,'infra/deploy/provision-worker.sh'),'#!/bin/bash\nprintf "provision\\n" >> "$MOCK_LOG"\n[[ "$MOCK_FAIL" != provision ]]\n',{mode:0o755});
+  writeFileSync(join(target,'infra/deploy/provision-worker.py'), 'import os,sys\nwith open(os.environ["MOCK_LOG"],"a") as log: log.write("provision\\n")\nsys.exit(1 if os.environ["MOCK_FAIL"] == "provision" else 0)\n');
   const result=spawnSync('bash',[resolve('infra/deploy/hermes-release.sh'),'complete-postmigration',legacy,releases,current,state,backups,systemd,config,'6291456','e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf',target,'a'.repeat(64),join(root,'retained.tar.gz')],{
     encoding:'utf8',env:{PATH:`${bin}:/usr/bin:/bin`,HERMES_SUPERVISOR_SOCKET:'/fixture/socket',HERMES_SUPERVISOR_HELPER:helper,MOCK_LOG:log,MOCK_SYSTEMD:systemd,MOCK_FAIL:fail},
   });
@@ -215,10 +216,23 @@ test('completion launch submits a single bounded service and retains controls on
       if(argv[0]==='show')return {ok:true,stdout:`LoadState=${fault==='existing'?'loaded':'not-found'}\n`};
       return {ok:argv[0]!==fault && !(fault==='reload' && argv[0]==='daemon-reload'),stdout:''};
     };
-    const launch=()=>launchCompletion('/trusted/hermes-release.sh',args,{root:'/trusted',node:'/usr/bin/node',run,write:(path,text)=>{events.push(['write',path]);assert.match(text,/ExecStopPost=/);}});
+    const launch=()=>launchCompletion('/trusted/hermes-release.sh',args,{root:'/trusted',node:'/usr/bin/node',run,admission:()=>{},write:(path,text)=>{events.push(['write',path]);assert.match(text,/ExecStopPost=/);}});
     if(fault)assert.throws(launch);else assert.equal(launch().submitted,true);
     assert.equal(events.filter(v=>v[0]==='start').length,['','start'].includes(fault)?1:0);
     assert(!events.some(v=>['stop','restart','reset-failed'].includes(v[0])));
+  }
+});
+
+test('completion admission denial is zero-mutation, and final claim race cannot start', () => {
+  const args=['complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/config','6291456','a'.repeat(40),'/release','b'.repeat(64),'/archive'];
+  for (const boundary of ['absent', 'ready']) {
+    const events=[];
+    const run=argv=>{events.push(argv[0]);return {ok:true,stdout:argv[0]==='show'?'LoadState=not-found\n':''};};
+    const admission=(_args,_unit,phase)=>{if(phase===boundary)throw Error('claim or evidence changed');};
+    assert.throws(()=>launchCompletion('/trusted/hermes-release.sh',args,{root:'/trusted',node:'/usr/bin/node',run,admission,write:()=>events.push('write')}));
+    assert(!events.includes('start'));
+    if(boundary==='absent')assert.deepEqual(events,[]);
+    else assert.deepEqual(events,['daemon-reload','show','write','daemon-reload']);
   }
 });
 
@@ -249,7 +263,7 @@ test('actual caller check and launch transport carry exact independent arguments
   writeFileSync(join(bin,'gh'),`#!/bin/bash\nprintf '%s' '{"workflow_runs":[{"head_sha":"${sha}","head_branch":"feat/opening-release","event":"push","id":123,"status":"completed","conclusion":"success","html_url":"https://github.com/Xhhemoing/study-assistant-opening/actions/runs/123"}]}'\n`,{mode:0o755});
   writeFileSync(join(bin,'ssh'),'#!/bin/bash\nprintf "ssh %s\\n" "$*" >> "$LOG"\n/bin/cat > "$INTAKE"\n',{mode:0o755});
   const env={PATH:`${bin}:${process.env.PATH}`,LOG:log,INTAKE:stdin,HOST:'fixture.invalid',COMPLETION_SCOPE:'20261110T081511-846613',COMPLETION_RELEASE:'/opt/aistudy-releases/e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf-existing',COMPLETION_ARCHIVE:'/tmp/retained/release.tar.gz',COMPLETION_CONFIRM:'complete-20261110T081511-846613-existing-e5'};
-  for(const action of ['complete-postmigration-check','complete-postmigration']) {
+  for(const action of ['complete-postmigration-check','complete-postmigration','complete-postmigration-reload-sample','complete-postmigration-archive-retained']) {
     writeFileSync(log,'');
     const result=spawnSync('bash',[resolve('infra/deploy/deploy-hermes.sh'),action],{encoding:'utf8',env});
     assert.equal(result.status,0,result.stderr);
@@ -260,7 +274,9 @@ test('actual caller check and launch transport carry exact independent arguments
       assert.match(events,/'\/opt\/aistudy-deployment' '\/opt\/aistudy-current' '\/etc\/systemd\/system'/);
       assert.match(readFileSync(stdin,'utf8'),/readonlyProbe/);
     } else {
-      assert.match(events,/completion-launch/);
+      const mode = action.endsWith('-reload-sample') ? 'completion-reload-samples'
+        : action.endsWith('-archive-retained') ? 'completion-retained-archive' : 'completion-launch';
+      assert(events.includes(mode));
       assert.match(events,/extract-git/);
       assert.match(events,/4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0/);
       assert.equal(readFileSync(stdin,'utf8'),'fixture-committed-git-controls');
