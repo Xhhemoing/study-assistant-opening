@@ -57,6 +57,7 @@ import { ui as v3ui } from "../v3/ui/controls";
 import { StartSuggestions, type StartConfiguration } from "../start/start-composer";
 import { StartUploads } from "../start/start-uploads";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { GRADED_ATTEMPT_EXPLANATION_TEXT, useGradedAttemptExplanation } from "./graded-attempt-explanation";
 
 export { createJobPoller } from "./job-poller";
 
@@ -297,7 +298,7 @@ export function assistantContextScope(context?: StudyConversationContext): strin
 }
 
 export function AssistantView(props: Props) {
-  const identity = `${assistantContextScope(props.studyContext)}:${props.initialCourseId ?? ""}:${props.initialConversationId ?? ""}:${[...(props.initialSourceIds ?? [])].sort().join(",")}:${props.initialPage ?? ""}:${props.learningAttempt?.id ?? ""}`;
+  const identity = `${assistantContextScope(props.studyContext)}:${props.initialCourseId ?? ""}:${props.initialConversationId ?? ""}:${[...(props.initialSourceIds ?? [])].sort().join(",")}:${props.initialPage ?? ""}:${JSON.stringify(props.learningAttempt ? [props.learningAttempt.id, props.learningAttempt.sessionId, props.learningAttempt.courseId, props.learningAttempt.itemVersionId, props.learningAttempt.observationId, props.learningAttempt.historyRevision, props.learningAttempt.contextAnchor] : null)}`;
   const [sessionState, setSession] = useState({ identity, count: 0 });
   const session = assistantSessionIndex(sessionState, identity);
   return <AssistantWorkspace key={`${identity}:${session}`} {...props}
@@ -855,7 +856,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     if (target?.assistantTurnId === queuedRetry) retryFailedTurnRef.current(target);
   }, [queuedRetry, pending, loading, recoveryRequired, recoveredTurns]);
 
-  async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<ComposerSubmitResult> {
+  async function handleSubmit(input: ComposerSubmit, options?: { preserveDraft: boolean; gradedAttempt?: boolean }): Promise<ComposerSubmitResult> {
     // Composer and reply actions share the same preflight/send boundary.
     if (submissionLock.current || pending || loading || recoveryRequired || interactionDisabled) return { accepted: false };
     const token = Symbol("submission");
@@ -868,7 +869,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     }
   }
 
-  async function submitRequest(input: ComposerSubmit, options?: { preserveDraft: boolean }): Promise<ComposerSubmitResult> {
+  async function submitRequest(input: ComposerSubmit, options?: { preserveDraft: boolean; gradedAttempt?: boolean }): Promise<ComposerSubmitResult> {
     // Check the current clock at the actual send boundary, including background tabs.
     if (unknownTurnRecovery(unknownJob, Date.now())?.canRetry === false) return { accepted: false };
     setError("");
@@ -886,7 +887,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         if (problem) { setError(problem); return { accepted: false }; }
       } catch { setError("指定资料暂时无法读取，问题已保留，请重试。"); return { accepted: false }; }
     }
-    const submittedText = querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
+    const submittedText = options?.gradedAttempt ? input.text : querySystem ? input.text : questionWithStudyContext(input.text, studyContext);
     if (submittedText.length > 20000) { setError("问题和携入背景合计超过 20000 字，请缩短问题或选中片段后再发送。"); return { accepted: false }; }
     let page: number | null | undefined;
     try {
@@ -896,7 +897,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       return { accepted: false };
     }
 
-    if (!querySystem && materialMode === "selected" && !requestSourceIds.length) {
+    if (!options?.gradedAttempt && !querySystem && materialMode === "selected" && !requestSourceIds.length) {
       setError("请先选择资料，或切换为自动参考 / 不用资料。"); setContextOpen(true); return { accepted: false };
     }
 
@@ -968,21 +969,25 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         abortRef.current = null;
         return { accepted: true };
       }
+      if (options?.gradedAttempt) await gradedExplanation.authorize();
       const id = await ensureConversation();
+      if (options?.gradedAttempt) { await gradedExplanation.authorize(); gradedExplanation.markStarted(); }
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.querySystem ? { querySystem: true } : {}),
-        ...(!querySystem ? { contextAnchor: studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) } : {}),
+        ...(!querySystem ? { contextAnchor: options?.gradedAttempt
+          ? studyContextAnchor({ ...Object.fromEntries(Object.entries(learningAttempt?.contextAnchor ?? {}).filter(([, value]) => value != null)), courseId: learningAttempt?.courseId, purpose: "learning_help" }, learningAttempt)
+          : studyContextAnchor(studyContext ? { ...studyContext, purpose: supportPurpose } : undefined, learningAttempt) } : {}),
         conversationId: id,
         text: submittedText,
-        sourceIds: requestSourceIds,
-        ...(!querySystem ? { sourceSelection: materialMode } : {}),
+        sourceIds: options?.gradedAttempt ? [] : requestSourceIds,
+        ...(!querySystem ? { sourceSelection: options?.gradedAttempt ? "auto" as const : materialMode } : {}),
         ...(input.mode ? { mode: input.mode } : {}),
         clientKey: input.clientKey,
         privacy: "saved",
         ...learningAttemptTurnContext(learningAttempt),
-        ...(!querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
-        ...(!querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
+        ...(!options?.gradedAttempt && !querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
+        ...(!options?.gradedAttempt && !querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
       if (submitted.replayed === false || priorSubmittedAt !== undefined) {
         setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
@@ -1065,6 +1070,22 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     setModePrefill({ mode: starter.mode, nonce });
     setPurposePrefill({ purpose: starter.purpose, nonce });
     window.requestAnimationFrame(() => document.getElementById(draftId)?.focus());
+  }
+  const gradedExplanation = useGradedAttemptExplanation(learningAttempt);
+  const gradedExplainKey = useRef<string | null>(null);
+  const gradedExplainBusy = useRef(false);
+  const [gradedExplainSubmitted, setGradedExplainSubmitted] = useState(false);
+  async function explainGradedAttempt() {
+    if (!gradedExplanation.available || pending || loading || recoveryRequired || interactionDisabled
+      || waitingForUnknown || unknownJob || gradedExplanation.reloadedOperation || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
+    gradedExplainBusy.current = true;
+    // Keep the original key after every uncertain response; terminal retries use the existing reply controls.
+    gradedExplainKey.current ??= nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
+    try {
+      const result = await handleSubmit({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
+        privacy: "saved", clientKey: gradedExplainKey.current }, { preserveDraft: true, gradedAttempt: true });
+      if (result.accepted) setGradedExplainSubmitted(true);
+    } finally { gradedExplainBusy.current = false; }
   }
   const directExplainKey = useRef<{ clientKey: string; fingerprint: string } | null>(null);
   const directExplainBusy = useRef(false);
@@ -1182,6 +1203,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         </div>
       ) : null}
 
+      {gradedExplanation.available ? <div className="mx-5 mb-2"><button type="button" className={secondaryButtonClass}
+        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || gradedExplanation.reloadedOperation || gradedExplainSubmitted}
+        onClick={() => void explainGradedAttempt()}>讲解这次作答</button></div> : null}
       {learningAttempt?.spanExercise && capabilities.teachingLoop.api && capabilities.teachingLoop.ui && !loading ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">调整本次学习：卡点、节奏与作答条件</summary><StudyIntentControls key={learningAttempt.id} attempt={learningAttempt} /></details> : null}
       {agent && proposalsEnabled && proposalState.error && !showProposalRail ? <div role="alert" className="mx-5 mb-2 space-y-2 text-sm text-warn"><p>{proposalState.error}</p><button type="button" className={secondaryButtonClass} disabled={proposalState.loading} onClick={() => void proposalState.refresh()}>重新读取建议</button></div> : null}
       {!agent && proposalsEnabled ? <details className="mx-5 mb-2 text-xs text-text-2"><summary className="cursor-pointer py-1">查看学习建议</summary><ProposalPanel state={proposalState} /></details> : null}
