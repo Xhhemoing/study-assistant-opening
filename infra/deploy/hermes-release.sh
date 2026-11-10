@@ -326,9 +326,28 @@ finish() {
   [[ -z "$CONTROL_ROOT" ]] || rm -rf -- "$CONTROL_ROOT"
   exit "$result"
 }
+# Cancellation must not let Bash finish race the Python owner's fixed restore.
+# Node records group signals while its owned Python child drains; Bash waits for
+# that boundary before refence/stop/quiescence or any next deployment step.
+COMPLETION_NODE_PID=''
+completion_cancel() {
+  local result=$1
+  trap '' INT TERM HUP
+  if [[ -n "$COMPLETION_NODE_PID" ]]; then wait "$COMPLETION_NODE_PID" || true; fi
+  exit "$result"
+}
+completion_node() {
+  local result=0
+  node "$@" &
+  COMPLETION_NODE_PID=$!
+  wait "$COMPLETION_NODE_PID" || result=$?
+  COMPLETION_NODE_PID=''
+  return "$result"
+}
 trap 'finish $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'completion_cancel 130' INT
+trap 'completion_cancel 143' TERM
+trap 'completion_cancel 129' HUP
 
 case "$ACTION" in deploy|restart|rollback|repair-pre-migration|complete-postmigration) ;;
   status)
@@ -364,13 +383,13 @@ if [[ "$ACTION" == complete-postmigration ]]; then
   # This helper remains payload-owned e5 bytes already verified in full.
   WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
   # New reviewed control helper owns parser deadline AND escaped descendants.
-  node "$CONTROL_DIR/hermes-db.mjs" parser-owned "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  completion_node "$CONTROL_DIR/hermes-db.mjs" parser-owned "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   managed prepare || fail 'Completion trusted boundary preparation failed.'
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   # Run the verified immutable e5 Python helper without rewriting its bytes.
   # Its internal reload receives the same 60s leaf budget, and the whole helper
   # tree stays bounded: leaves300 (includes failure restore reload60) + IO180.
-  node --input-type=module -e 'const {provisionCompletion}=await import(process.argv[1]); provisionCompletion(process.argv[2],process.argv.slice(3))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
+  completion_node --input-type=module -e 'const {provisionCompletion,ownedNodeCLI}=await import(process.argv[1]); await ownedNodeCLI(()=>provisionCompletion(process.argv[2],process.argv.slice(3)))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
   mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"

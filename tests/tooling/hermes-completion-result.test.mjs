@@ -16,7 +16,8 @@ for(const fault of ['flush-after-write','dump-after-write','trailing-bytes','bad
     'cancel-final-drain':`ns=subprocess.run.__globals__\noriginal=ns['drain']\ndef fault():\n pathlib.Path(${JSON.stringify(hit)}).write_text('signal at final drain')\n os.kill(os.getpid(),signal.SIGTERM)\n return original()\nns['drain']=fault`,
   }[fault];
   writeFileSync(helper,`import subprocess,tempfile,pickle,pathlib,os,signal\n${injection}\ntry:\n value=subprocess.run(['/usr/bin/true'],check=True,capture_output=True)\n pathlib.Path(${JSON.stringify(result)}).write_text('SUCCESS'+str(value.returncode))\nexcept BaseException as error:\n pathlib.Path(${JSON.stringify(result)}).write_text('REFUSED:'+type(error).__name__)\n`);
-  provisionCompletion(helper,[]);
+  if(fault==='cancel-final-drain')assert.throws(()=>provisionCompletion(helper,[]),/immutable provision helper failed/);
+  else provisionCompletion(helper,[]);
   assert(readFileSync(hit,'utf8').length>0,'fault hook did not execute');
   assert.match(readFileSync(result,'utf8'),/^REFUSED:/);
 });

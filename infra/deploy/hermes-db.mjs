@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { parseEnv } from "node:util";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { runCompletionOwned } from './hermes-writer-control.mjs';
+import { runCompletionOwned, ownedNodeCLI } from './hermes-writer-control.mjs';
 
 export function parserPreflightOwned(parserPython, args, options, execute) {
   return runCompletionOwned(parserPython, args, 90, options, execute);
@@ -125,8 +125,8 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     };
     // Match provision-worker's cold-import allowance on the shared host.
     if (action === 'parser-owned') {
-      const result = parserPreflightOwned(parserPython, ['-m', 'opening_parser', '--check'],
-        { cwd: env.PARSER_CWD, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const result = await ownedNodeCLI(()=>parserPreflightOwned(parserPython, ['-m', 'opening_parser', '--check'],
+        { cwd: env.PARSER_CWD, env, stdio: ['ignore', 'ignore', 'pipe'] }));
       if (result.error || result.status !== 0) fail('Owned parser preflight failed; sensitive output withheld.');
     } else run(parserPython, ["-m", "opening_parser", "--check"], { cwd: env.PARSER_CWD, timeout: 90_000 });
   } else {
