@@ -16,6 +16,67 @@ test('pre-spawn rejection is clean; confirmed nonzero command may restore', t =>
   assert.doesNotThrow(()=>provisionCompletion(helper,[]));
 });
 
+test('signal after real fork but before Popen returns cannot leave live child', t => {
+  const root=mkdtempSync(join(tmpdir(),'sm95-popen-window-'));t.after(()=>rmSync(root,{recursive:true}));
+  const pidfile=join(root,'child');
+  const child=`import os,signal,time\nos.setsid()\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nopen(${JSON.stringify(pidfile)},'w').write(str(os.getpid()))\ntime.sleep(20)`;
+  const result=runCompletionOwned('/usr/bin/python3',['-c',child],5,{stdio:'pipe'},(file,args,options)=>{
+    assert.equal(options.stdio,'pipe');
+    const injected=[...args], index=injected.indexOf('-c')+1;
+    const hook=`\nreal_popen=subprocess.Popen\ndef interrupted_popen(*args,**kwargs):\n    process=real_popen(*args,**kwargs)\n    deadline=time.monotonic()+2\n    while not os.path.exists(${JSON.stringify(pidfile)}) and time.monotonic()<deadline: time.sleep(.005)\n    os.kill(os.getpid(),signal.SIGTERM)\n    return process\nsubprocess.Popen=interrupted_popen\n`;
+    injected[index]=injected[index].replace('def cancelled(signum,frame):',hook+'\ndef cancelled(signum,frame):');
+    const program=`import subprocess,pathlib,os,signal,json,sys\nargs=json.loads(${JSON.stringify(JSON.stringify(injected))})\nneighbor=subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)'],start_new_session=True)\nowner=subprocess.Popen([${JSON.stringify(file)},*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\ntry:\n owner.wait(timeout=4)\n pid=int(pathlib.Path(${JSON.stringify(pidfile)}).read_text())\n live=pathlib.Path('/proc/'+str(pid)).exists()\n assert owner.returncode==1\n assert not live,'owner returned while forked child still live'\n assert neighbor.poll() is None,'adjacent session was killed'\nfinally:\n if pathlib.Path(${JSON.stringify(pidfile)}).exists():\n  try: os.kill(int(pathlib.Path(${JSON.stringify(pidfile)}).read_text()),signal.SIGKILL)\n  except ProcessLookupError: pass\n if owner.poll() is None: owner.kill(); owner.wait()\n neighbor.kill(); neighbor.wait()\n`;
+    const check=spawnSync('/usr/bin/python3',['-I','-S','-B','-c',program],{encoding:'utf8',timeout:7_000});
+    assert.equal(check.status,0,check.stderr);
+    return {status:1};
+  });
+  assert.equal(result.status,1);
+});
+
+test('pre-fork cooperative signal with empty owned scope returns cleanly', () => {
+  const result=runCompletionOwned('/usr/bin/python3',['-c','raise SystemExit(0)'],5,{stdio:'pipe'},(file,args,options)=>{
+    const changed=[...args], index=changed.indexOf('-c')+1;
+    const hook=`\ndef interrupted_before_fork(*args,**kwargs):\n    os.kill(os.getpid(),signal.SIGTERM)\nsubprocess.Popen=interrupted_before_fork\n`;
+    changed[index]=changed[index].replace('def cancelled(signum,frame):',hook+'\ndef cancelled(signum,frame):');
+    return spawnSync(file,changed,{...options,timeout:2_000});
+  });
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,1);
+});
+
+test('nested controller never falls back into helper restore after cleanup raises', t => {
+  const root=mkdtempSync(join(tmpdir(),'sm95-controller-exit-'));t.after(()=>rmSync(root,{recursive:true}));
+  const helper=join(root,'helper.py'),log=join(root,'restore');
+  writeFileSync(helper,`import subprocess,os\ntry:\n subprocess.run(['/usr/bin/python3','-c','raise SystemExit(7)'],check=True)\nexcept BaseException:\n with open(${JSON.stringify(log)},'a') as out: out.write(str(os.getpid())+'\\n')\n`);
+  provisionCompletion(helper,[],(file,args,options)=>{
+    const changed=[...args], index=changed.lastIndexOf('-c')+1;
+    const inject=`\nreal_drain=drain\ndef cleanup_raises():\n    real_drain()\n    raise RuntimeError('confirmed-empty cleanup error')\ndrain=cleanup_raises\n`;
+    changed[index]=changed[index].replace('def bounded(argv,*args,**kwargs):',inject+'\ndef bounded(argv,*args,**kwargs):');
+    const result=spawnSync(file,changed,{...options,stdio:'pipe'});
+    assert.equal(result.status,0,result.stderr?.toString());
+    const checked=spawnSync('/usr/bin/python3',['-c',`from pathlib import Path; rows=Path(${JSON.stringify(log)}).read_text().splitlines(); assert len(rows)==1,rows`],{encoding:'utf8'});
+    assert.equal(checked.status,0,checked.stderr);
+    return {status:0};
+  });
+});
+
+test('post-fork ownership handoff fault drains leaf before original helper restore', t => {
+  const root=mkdtempSync(join(tmpdir(),'sm95-fork-handoff-'));t.after(()=>rmSync(root,{recursive:true}));
+  const pidfile=join(root,'pid'),log=join(root,'restore'),helper=join(root,'helper.py');
+  const child=`import os,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nopen(${JSON.stringify(pidfile)},'w').write(str(os.getpid()))\ntime.sleep(10)`;
+  writeFileSync(helper,`import subprocess,sys,time,pathlib,os\ndef trace(frame,event,arg):\n if event=='line' and frame.f_code.co_name=='owned_run' and frame.f_locals.get('controller',0)>0:\n  sys.settrace(None)\n  deadline=time.monotonic()+2\n  while not pathlib.Path(${JSON.stringify(pidfile)}).exists() and time.monotonic()<deadline: time.sleep(.005)\n  raise OSError('post-fork handoff fault')\n return trace\nsys.settrace(trace)\ntry:\n subprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=5)\nexcept BaseException:\n pid=int(pathlib.Path(${JSON.stringify(pidfile)}).read_text())\n assert not pathlib.Path('/proc/'+str(pid)).exists(),'live leaf at restore'\n pathlib.Path(${JSON.stringify(log)}).write_text(str(os.getpid()))\n`);
+  assert.doesNotThrow(()=>provisionCompletion(helper,[]));
+});
+
+test('transient real reap faults cannot execute controller copy of helper restore', t => {
+  const root=mkdtempSync(join(tmpdir(),'sm95-reap-fallthrough-'));t.after(()=>rmSync(root,{recursive:true}));
+  const helper=join(root,'helper.py'),log=join(root,'restore');
+  writeFileSync(helper,`import subprocess,os\nreal_wait=os.waitpid\ncalls=0\ndef interrupted(pid,flags):\n global calls\n if pid==-1 and flags==os.WNOHANG:\n  calls+=1\n  if calls in (1,3): raise OSError('transient reap error')\n return real_wait(pid,flags)\nos.waitpid=interrupted\ntry:\n subprocess.run(['/usr/bin/python3','-c','raise SystemExit(7)'],check=True)\nexcept BaseException:\n with open(${JSON.stringify(log)},'a') as f: f.write(str(os.getpid())+'\\n')\n`);
+  assert.doesNotThrow(()=>provisionCompletion(helper,[]));
+  const result=spawnSync('/usr/bin/python3',['-c',`from pathlib import Path; rows=Path(${JSON.stringify(log)}).read_text().splitlines(); assert len(rows)==1,rows`],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+});
+
 for (const fault of ['signal', 'pidfd-open', 'observe', 'reap']) for (const scope of ['outer', 'nested']) test(`cleanup ${fault} failure retains ${scope} owner and never permits restore while child lives`, t => {
   const root=mkdtempSync(join(tmpdir(),'sm95-cleanup-error-'));
   t.after(()=>rmSync(root,{recursive:true}));
@@ -63,8 +124,12 @@ owner=subprocess.Popen([${JSON.stringify(file)},*args],stdout=subprocess.DEVNULL
 child=None
 try:
  deadline=time.monotonic()+3
- while not pathlib.Path(${JSON.stringify(pidfile)}).exists() and time.monotonic()<deadline: time.sleep(.005)
- child=int(pathlib.Path(${JSON.stringify(pidfile)}).read_text())
+ while time.monotonic()<deadline:
+  try:
+   child=int(pathlib.Path(${JSON.stringify(pidfile)}).read_text())
+   break
+  except (FileNotFoundError,ValueError): time.sleep(.005)
+ assert child is not None,'child PID handoff not complete'
  time.sleep(.9)
  assert owner.poll() is None,'owner returned before cleanup confirmation'
  assert pathlib.Path('/proc/'+str(child)).exists(),'fault did not leave a live owned child'

@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { claimCompletion, verifyCompletionLedger } from '../../infra/deploy/hermes-writer-control.mjs';
 import { fixture, units } from './hermes-supervisor-fixture.mjs';
+import { cleanGitEnvironment } from './hermes-git-fixture.mjs';
 import { cleanupCompletion, completionService, completionServiceUnit, launchCompletion, supervise } from '../../infra/deploy/hermes-supervisor.mjs';
 
 test('completion filesystem and payload readonly negatives', () => {
@@ -303,7 +304,8 @@ test('actual caller check and launch transport carry exact independent arguments
 test('actual Git archive controls intake validates inventory before extraction', t => {
   const root=mkdtempSync(join(tmpdir(),'completion-git-entry-'));t.after(()=>rmSync(root,{recursive:true}));
   const names=['hermes-release.sh','hermes-supervisor.mjs','hermes-config-durability.mjs','hermes-db.mjs','hermes-health.mjs','hermes-writer-control.mjs','hermes-trusted-loader.py','hermes-writer-state.py','hermes-writer-exec.py','hermes-peer-broker.py'];
-  const archive=spawnSync('git',['-c','tar.umask=0022','archive','--format=tar.gz','HEAD',...names.map(n=>'infra/deploy/'+n)]);
+  const archive=spawnSync('git',['-c','tar.umask=0022','archive','--format=tar.gz','HEAD',...names.map(n=>'infra/deploy/'+n)],
+    { cwd: resolve('.'), env: cleanGitEnvironment() });
   assert.equal(archive.status,0);
   const code=`import importlib.util,io,os,sys\ns=importlib.util.spec_from_file_location('entry',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nm.extract(io.BytesIO(sys.stdin.buffer.read()),sys.argv[2],uid=os.geteuid(),git_controls=True)`;
   const result=spawnSync('python3',['-I','-S','-B','-c',code,resolve('infra/deploy/hermes-entry.py'),root],{input:archive.stdout});

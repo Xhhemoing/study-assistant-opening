@@ -79,33 +79,32 @@ def owned_run(argv,*args,**kwargs):
     # One dedicated subreaper per leaf. Only its direct/adopted children are
     # enumerated, never arbitrary host PIDs or another deployment's session.
     with tempfile.TemporaryFile() as result_file:
-        controller=os.fork()
-        if controller == 0:
-            try:
-                prepare_owner()  # Refuse unsupported proc/pidfd before spawning anything.
-                result=leaf(argv,*args,**kwargs)
-                value=(True,result)
-            except BaseException as error:
-                # Includes controller observation errors after a leaf was spawned.
-                # drain cannot release a live owned scope on syscall failure.
-                if owner_spawned: drain()
-                value=(False,error)
-            try:
-                pickle.dump(value,result_file); result_file.flush()
-            finally:
-                os._exit(0)
-        # The controller owns timeout + at most 2s TERM/KILL/drain work.
-        # Parent never restores/configures while this owned leaf is still live.
+        parent_pid=os.getpid()
+        # Fork itself and ALL ownership handoff instructions are protected.
+        # Identity, not a post-fork assignment, owns the child exit guarantee.
         owner_spawned=True
         try:
+            controller=os.fork()
+            if os.getpid()!=parent_pid:
+                try:
+                    prepare_owner()
+                    result=leaf(argv,*args,**kwargs)
+                    value=(True,result)
+                except BaseException as error:
+                    drain()
+                    value=(False,error)
+                pickle.dump(value,result_file); result_file.flush()
+                os._exit(0)
             os.waitpid(controller,0)
             result_file.seek(0)
             success,value=pickle.load(result_file)
         except BaseException:
-            # wait/seek/ACK failures cannot allow restore while the controller or
-            # its newly adopted descendants still exist.
+            # Includes fork failure (empty scope), post-fork signal/fault,
+            # wait and ACK failure. Never release an unconfirmed owned tree.
             drain()
             raise
+        finally:
+            if os.getpid()!=parent_pid: os._exit(0)
         if not success: raise value
         return value
 
@@ -179,15 +178,19 @@ def leaf(argv,*args,**kwargs):
         if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
             raise ValueError('capture_output conflicts with pipes')
         kwargs['stdout']=kwargs['stderr']=subprocess.PIPE
-    proc=subprocess.Popen(argv,*args,**kwargs)
+    # Popen can fork successfully and then be interrupted while reading its
+    # exec-error pipe. Mark possible ownership BEFORE crossing that boundary;
+    # a genuine pre-spawn error simply drains an empty child set.
+    proc=None
     owner_spawned=True
     try:
+        proc=subprocess.Popen(argv,*args,**kwargs)
         out,err=proc.communicate(data,timeout=timeout)
     except BaseException:
         # Do not communicate/reap just the parent and leave inherited pipes or
         # escaped grandchildren alive. Drain the whole adopted tree first.
         drain()
-        proc.communicate(timeout=.25)
+        if proc is not None: proc.communicate(timeout=.25)
         raise
     orphaned=drain()
     if orphaned: raise RuntimeError('Leaf left descendants after return')
@@ -218,7 +221,7 @@ except BaseException:
         except BaseException:
             if owner_spawned: retain_unknown()
             raise
-    if owner_spawned: drain()
+    drain() # Even an interrupted spawn with no returned Popen needs proof of absence.
     sys.exit(1)
 sys.exit(result.returncode)
 `;

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { checkRepair, validateRepairPlan, verifyRepairLedger } from '../../infra/deploy/hermes-writer-control.mjs';
 import { supervise } from '../../infra/deploy/hermes-supervisor.mjs';
 import { fixture, units } from './hermes-supervisor-fixture.mjs';
+import { gitFixture } from './hermes-git-fixture.mjs';
 
 test('incident eligibility Python cases run in the selected tooling suite', () => {
   const result = spawnSync('python3', ['-I', '-S', '-B', resolve('tests/tooling/hermes_pre_migration_repair_test.py')], { encoding: 'utf8' });
@@ -171,19 +172,19 @@ test('repair 95-to-96 preparation failure retains adoption and guards without la
 
 test('Git parent admission allows exact reviewed broker path and rejects other controls and reverted app changes', t => {
   const root = mkdtempSync(join(tmpdir(), 'repair-git-')); t.after(() => rmSync(root, { recursive: true }));
-  const git = (...args) => { const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
-  git('init'); writeFileSync(join(root, 'app'), 'baseline'); git('add', 'app');
+  const isolated = gitFixture(root), git = isolated.run;
+  writeFileSync(join(root, 'app'), 'baseline'); git('add', 'app');
   const commit = () => git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-am', 'fixture');
   commit(); const baseline = git('rev-parse', 'HEAD');
   const script = readFileSync(resolve('infra/deploy/deploy-hermes.sh'), 'utf8');
   const helper = script.slice(script.indexOf('verify_repair_git() {'), script.indexOf('# Execute reviewed Python bytes'))
     .replace('6afaaa70d3467da4f17daaad44a99e2d36b9f991', baseline);
   const check = () => spawnSync('bash', ['-c', `set -euo pipefail; fail() { echo "$*" >&2; exit 1; }; ${helper}\nverify_repair_git`], {
-    cwd: root, env: { ...process.env, COMMIT: git('rev-parse', 'HEAD'), SCRIPT_DIR: `${root}/infra/deploy`, repository: 'Xhhemoing/study-assistant-opening' }, encoding: 'utf8',
+    cwd: root, env: { ...isolated.env, COMMIT: git('rev-parse', 'HEAD'), SCRIPT_DIR: `${root}/infra/deploy`, repository: 'Xhhemoing/study-assistant-opening' }, encoding: 'utf8',
   });
   // Actual approved path, then a temporary application edit and reversal.
   git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test');
-  const result = spawnSync('bash', ['-c', 'mkdir -p infra/deploy; printf controls > infra/deploy/hermes-supervisor.mjs; git add infra/deploy/hermes-supervisor.mjs; git commit -m controls'], { cwd: root, encoding: 'utf8' });
+  const result = spawnSync('bash', ['-c', 'mkdir -p infra/deploy; printf controls > infra/deploy/hermes-supervisor.mjs; git add infra/deploy/hermes-supervisor.mjs; git commit -m controls'], { cwd: root, env: isolated.env, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); assert.equal(check().status, 0, check().stderr);
   writeFileSync(join(root, 'infra/deploy/hermes-peer-broker.py'), '# reviewed typed hook proof');
   git('add', 'infra/deploy/hermes-peer-broker.py'); commit();
@@ -204,8 +205,8 @@ test('Git parent admission allows exact reviewed broker path and rejects other c
 
 test('reviewed control archive strips group write even with permissive repository tar.umask', t => {
   const root = mkdtempSync(join(tmpdir(), 'repair-archive-')); t.after(() => rmSync(root, { recursive: true }));
-  const git = (...args) => { const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
-  git('init'); writeFileSync(join(root, 'control'), 'reviewed'); git('add', 'control');
+  const isolated = gitFixture(root), git = isolated.run;
+  writeFileSync(join(root, 'control'), 'reviewed'); git('add', 'control');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'fixture');
   git('config', 'tar.umask', '0000');
   const script = readFileSync(resolve('infra/deploy/deploy-hermes.sh'), 'utf8');
@@ -213,7 +214,7 @@ test('reviewed control archive strips group write even with permissive repositor
   // Exercise the actual command options (only destination/path variables adapted).
   const archive = join(root, 'controls.tar.gz');
   const r = spawnSync('bash', ['-c', command.replace(' infra/deploy', ' control')], {
-    cwd: root, env: { ...process.env, COMMIT: 'HEAD', control_archive: archive }, encoding: 'utf8',
+    cwd: root, env: { ...isolated.env, COMMIT: 'HEAD', control_archive: archive }, encoding: 'utf8',
   }); assert.equal(r.status, 0, r.stderr);
   const checked = spawnSync('python3', ['-I', '-S', '-B', '-c',
     'import sys,tarfile; t=tarfile.open(sys.argv[1]); assert all(not m.mode & 0o022 for m in t.getmembers())', archive], { encoding: 'utf8' });
