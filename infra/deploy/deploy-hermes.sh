@@ -64,7 +64,7 @@ verify_repair_git() {
   history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
   while IFS= read -r path; do
     case "$path" in
-      infra/deploy/deploy-hermes.sh|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
+      infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
       *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
     esac
   done < <(printf '%s\n' "$history" | sort -u | grep -v '^$')

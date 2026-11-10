@@ -24,7 +24,7 @@ verify_repair_git() { :; }
 fail() { echo "$*" >&2; exit 1; }
 ${script.split('\n').find(line => line.startsWith('quote()'))}
 ssh_run() {
-  python3 -I -S -B -c 'import shlex,sys; args=shlex.split(sys.argv[1]); assert args[:5] == ["/usr/bin/python3", "-I", "-S", "-B", "-c"]; assert args[6:] == ["/fixture/state", "/fixture/current", "/fixture/systemd"]; print(args[5], end="")' "$1"
+  python3 -I -S -B -c 'import shlex,sys; args=shlex.split(sys.argv[1]); assert args[:5] == ["/usr/bin/python3", "-I", "-S", "-B", "-c"]; assert args[6:] == ["/fixture/state", "/fixture/current", "/fixture/systemd"]; assert len(sys.argv[1].encode()) + 1 < 128 * 1024, "SSH command exceeds Linux single-argument limit"; assert len(args[5].encode()) + 1 < 128 * 1024; print(args[5], end="")' "$1"
 }
 ${entry}`], {
     encoding: 'utf8', env: { ...process.env, ACTION: 'repair-check', EXPLICIT_HOST: 'fixture.invalid',
@@ -169,7 +169,7 @@ test('repair 95-to-96 preparation failure retains adoption and guards without la
   assert(!f.events.some(event => event.startsWith('start:')));
 });
 
-test('Git parent diff admission rejects application changes, even reverted at tip, and non-control deploy sources', t => {
+test('Git parent admission allows exact reviewed broker path and rejects other controls and reverted app changes', t => {
   const root = mkdtempSync(join(tmpdir(), 'repair-git-')); t.after(() => rmSync(root, { recursive: true }));
   const git = (...args) => { const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
   git('init'); writeFileSync(join(root, 'app'), 'baseline'); git('add', 'app');
@@ -185,6 +185,19 @@ test('Git parent diff admission rejects application changes, even reverted at ti
   git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test');
   const result = spawnSync('bash', ['-c', 'mkdir -p infra/deploy; printf controls > infra/deploy/hermes-supervisor.mjs; git add infra/deploy/hermes-supervisor.mjs; git commit -m controls'], { cwd: root, encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr); assert.equal(check().status, 0, check().stderr);
+  writeFileSync(join(root, 'infra/deploy/hermes-peer-broker.py'), '# reviewed typed hook proof');
+  git('add', 'infra/deploy/hermes-peer-broker.py'); commit();
+  assert.equal(check().status, 0, check().stderr);
+  const admitted = git('rev-parse', 'HEAD');
+  // Independent descendants retain rejected history; no reset/cherry-pick seam.
+  for (const name of ['hermes-writer-exec.py', 'hermes-trusted-loader.py', 'hermes-peer-broker-extra.py']) {
+    git('checkout', '-b', name, admitted);
+    writeFileSync(join(root, 'infra/deploy', name), '# outside reviewed scope');
+    git('add', `infra/deploy/${name}`); commit();
+    const rejected = check();
+    assert.notEqual(rejected.status, 0); assert.match(rejected.stderr, /outside the reviewed control/);
+  }
+  git('checkout', '-b', 'reverted-app', admitted);
   writeFileSync(join(root, 'app'), 'changed'); commit(); writeFileSync(join(root, 'app'), 'baseline'); commit();
   assert.notEqual(check().status, 0); assert.match(check().stderr, /outside the reviewed control/);
 });
