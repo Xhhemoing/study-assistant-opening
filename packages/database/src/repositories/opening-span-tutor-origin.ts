@@ -6,6 +6,8 @@ import { learningError, mapLearningObservation, probeLearningSourcesAvailability
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import { z } from "zod";
+import { readOpeningSpanPrerequisiteRepair } from "./opening-span-prerequisite-runtime";
+import { spanPrerequisiteRefusalReasonSchema } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
 export type OpeningSpanTutorOriginReference = { activityId: string; expectedRevision: number; observationId: string | null };
 export type OpeningSpanTutorOriginChange = {
@@ -28,6 +30,13 @@ export async function readOpeningSpanTutorOriginChange(db: Sql, scope: Scope, ac
   const [activity] = await db`SELECT course_id,source_ids,goal_json FROM opening_teaching_activities WHERE id=${activityId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   if (!activity) throw learningError("NOT_FOUND", "学习活动不存在。");
+  if (Object.hasOwn((activity.goal_json ?? {}) as object, "spanPrerequisiteRepair")) {
+    try { await readOpeningSpanPrerequisiteRepair(db, scope, activityId); }
+    catch (error) {
+      if (!spanPrerequisiteRefusalReasonSchema.safeParse((error as {reasonCode?:unknown}).reasonCode).success) throw error;
+      return { reason: "evidence_changed", originSession: null, observationId: null };
+    }
+  }
   const raw = (activity.goal_json as { tutorNextAction?: unknown } | null)?.tutorNextAction;
   if (raw === undefined) return undefined;
   const parsed = metadataSchema.safeParse(raw);

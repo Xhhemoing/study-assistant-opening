@@ -1,7 +1,7 @@
-import { spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
-import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository, createOpeningLearningDecisionsRepository, spanTutorReceiptDecision, readOpeningSpanRepair, readOpeningSpanCourseBinding } from "@aistudy/database";
+import { spanPrerequisiteRefusalReasonSchema, spanLessonCreateInputSchema, spanLessonSaveInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
+import { createOpeningSpanSessionRepository, createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyIntentRepository, readOpeningCourseObservationHeads, readOpeningSpanTutorOriginChange, createOpeningLearningAgendaRepository, createOpeningLearningDecisionsRepository, spanTutorReceiptDecision, readOpeningSpanRepair, readOpeningSpanCourseBinding, readOpeningSpanPrerequisiteRepair } from "@aistudy/database";
 import type { Sql } from "postgres";
-import { SPAN_REQUIREMENT_KEY, verifySpanAnswer, spanRepairPublicContext } from "@aistudy/domain";
+import { SPAN_REQUIREMENT_KEY, verifySpanAnswer, spanRepairPublicContext, spanPrerequisiteRepairPublicContext } from "@aistudy/domain";
 import { z } from "zod";
 import type { LearningObservation } from "@aistudy/contracts";
 import { createOpeningPlanService } from "../../planning/plan-service";
@@ -44,9 +44,19 @@ export function createSpanLessonSessionService(sql: Sql) {
       }
       if (!session) return { session: null, estimateMinutes: null, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null };
       let bindingChanged = false, courseBound = false;
+      let prerequisiteRepair, executionUnavailable;
+      try {
+        const saved = await readOpeningSpanPrerequisiteRepair(sql, scope, session.activityId);
+        if (saved) prerequisiteRepair = spanPrerequisiteRepairPublicContext(saved);
+      } catch (error) {
+        const reason = spanPrerequisiteRefusalReasonSchema.safeParse((error as {reasonCode?:unknown}).reasonCode);
+        if (!reason.success) throw error;
+        executionUnavailable = { reasonCode: reason.data, message: "原依据或关系已变化；仅可回看历史或暂停，未回退普通学习。" };
+        bindingChanged = true;
+      }
       try { courseBound = !!await readOpeningSpanCourseBinding(sql, scope, session.activityId); }
       catch (error) {
-        if ((error as {reasonCode?:string}).reasonCode !== "SPAN_COURSE_BINDING_CHANGED") throw error;
+        if (!spanPrerequisiteRefusalReasonSchema.safeParse((error as {reasonCode?:unknown}).reasonCode).success) throw error;
         bindingChanged = true;
       }
       const [rows, heads, hintLevels, intentEvent, originalChange, decisions] = await Promise.all([
@@ -66,7 +76,7 @@ export function createSpanLessonSessionService(sql: Sql) {
         && row.revisionKind !== "retract" && (!row.effectiveHeadId || row.effectiveHeadId === row.id)) : undefined;
       // Superseded activities return read-only history with originChange; do not try to
       // qualify their obsolete plan as runnable content (nor replace it with generic content).
-      const repairPlan = originChange ? null : await readOpeningSpanRepair(sql, scope, session.activityId);
+      const repairPlan = originChange || prerequisiteRepair ? null : await readOpeningSpanRepair(sql, scope, session.activityId);
       const repair = repairPlan ? spanRepairPublicContext(repairPlan) : undefined;
       const targetedFocus = repairPlan ? undefined : focus && receipt ? await readTargetedFocus(sql, scope, focus, receipt.intentVersion) : undefined;
       const executionPhase = decision?.phase && decision.phaseSource ? { phase: decision.phase, source: decision.phaseSource } : null;
@@ -81,7 +91,8 @@ export function createSpanLessonSessionService(sql: Sql) {
       const task = tasks.find(task => task.courseId === courseId && task.teachingTarget?.courseId === courseId && task.teachingTarget.activityId === session.activityId);
       // The estimate describes the bound task, not a per-question time prediction.
       const estimateMinutes = task?.estimateMinutes ?? null;
-      return { session, estimateMinutes, agenda, executionPhase, targetedFocus, ...(repair ? { repair } : {}), attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
+      return { session, estimateMinutes, agenda, executionPhase, targetedFocus, ...(repair ? { repair } : {}), ...(prerequisiteRepair && !executionUnavailable ? { prerequisiteRepair } : {}),
+        ...(executionUnavailable ? { executionUnavailable } : {}), attempts, observations: heads.filter(row => row.sessionId === session.sessionId && row.revisionKind !== "retract"), assistance, hintLevels, intentEvent,
         ...(originChange ? { originChange } : {}) };
     },
   };

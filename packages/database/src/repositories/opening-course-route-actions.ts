@@ -16,8 +16,13 @@ import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseRe
 import { readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
 import { createOpeningCourseSpanSessionInTx } from "./opening-span-session";
 import { readOpeningSpanCourseBinding, hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
-import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
+import { lockSpanTutorAuthorization, readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 import { assertOwnedActivity } from "./opening-teaching-activities";
+import { createOpeningSpanPrerequisiteInTx, readOpeningSpanPrerequisiteRepair, prerequisiteConflict } from "./opening-span-prerequisite-runtime";
+import { createOpeningSpanSessionRepository } from "./opening-span-session";
+import { stageResult } from "./opening-span-repair";
+import { nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
+import { spanPrerequisiteReturnInputSchema, type SpanPrerequisiteReturnInput, type SpanPrerequisiteRepairPlan } from "@aistudy/contracts";
 
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
 const messages={authorization_required:"导师工具尚未授权；未创建课程 span 活动或消耗预算。",binding_unavailable:"已确认 span 内容归属，但课程静态 span 执行桥尚不可用；未创建通用教学活动或消耗预算。",scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
@@ -31,13 +36,26 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
 export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
-  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart):Promise<CourseRouteActionResult>{
+  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart,returnPlan?:SpanPrerequisiteRepairPlan):Promise<CourseRouteActionResult>{
     const key=origin?`course-route-next:${origin.input.activityId}:${origin.input.observationId??"none"}`
       :"taskId" in input&&input.taskId?`course-route-task:${input.taskId.toLowerCase()}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
       if (hasOpeningSpanCourseBinding(receipt.goal_json, receipt.create_intent)) {
+        if (Object.hasOwn((receipt.goal_json ?? {}) as object, "spanPrerequisiteRepair")) {
+          const plan = await readOpeningSpanPrerequisiteRepair(tx, scope, String(receipt.id));
+          const original = (receipt.create_intent as { prerequisiteRequest?: { minutes?: number; key?: string } })?.prerequisiteRequest;
+          if (!plan || original?.minutes !== input.minutes || original.key !== key || plan.courseBinding.goalId !== input.goalId
+            || input.expectedGoalRevision !== plan.courseBinding.goalRevision
+            || ("requirementId" in input ? input.requirementId !== plan.returnToRequirementId
+              || input.expectedRequirementRevision !== plan.courseBinding.returnTarget!.revision
+              : !origin || origin.context.requirementId !== plan.returnToRequirementId))
+            throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
+          const activity = await assertOwnedActivity(tx as unknown as Sql, scope, String(receipt.id));
+          return { kind: "ready", activity, href: href(courseId, activity.id), resumed: true,
+            requirementId: plan.courseBinding.requirement.id, action: "prerequisite" };
+        }
         if (origin || "taskId" in input && input.taskId) return choice(courseId, "binding_unavailable");
         const session = await createOpeningCourseSpanSessionInTx(tx, scope, { ...input as CourseRouteStart, courseId });
         const authority = await readOpeningSpanCourseBinding(tx, scope, session.activityId);
@@ -88,6 +106,35 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       const [created] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id=${activity.id} AND workspace_id=${scope.workspaceId}`;
       const route = courseRouteActivityContextSchema.parse((created!.goal_json as {courseRoute:unknown}).courseRoute);
       return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: current.requirement.id, action: route.action };
+    }
+    if (!returnPlan && !origin?.context.retestId && !origin?.context.coveredRequirementIds
+      && progress.some(row => current.requirement.prerequisiteIds.includes(row.requirement.id)
+      && readConfirmedCourseSpanExerciseKeys(row.requirement.requirementKey, row.requirement.verification)) && !("taskId" in input && input.taskId)) {
+      if (!options.exactVerificationEnabled) return choice(courseId, "configuration", [current.requirement.id]);
+      if (origin) {
+        if (origin.context.goalRevision !== goal.revision || origin.context.requirementRevision !== current.requirement.revision
+          || Number(origin.row.path_version) !== origin.input.expectedPathVersion) return choice(courseId, "evidence_changed", [current.requirement.id]);
+        const all = await readCourseRouteObservations(tx, scope, courseId);
+        const head = all.raw.filter(row => row.activityId === origin.input.activityId)
+          .sort((a,b) => Date.parse(b.submittedAt ?? b.occurredAt)-Date.parse(a.submittedAt ?? a.occurredAt) || b.id.localeCompare(a.id))[0];
+        if (!head || head.id !== origin.input.observationId) return choice(courseId, "evidence_changed", [current.requirement.id]);
+      }
+      const repair = await createOpeningSpanPrerequisiteInTx(tx, scope, { courseId, target: current.requirement,
+        goalId: goal.id, goalRevision: goal.revision, minutes: input.minutes, key });
+      if (repair.kind === "created") {
+        if (origin) {
+          const ended = await tx`UPDATE opening_teaching_activities SET status='completed',path_version=path_version+1,updated_at=now()
+            WHERE id=${origin.input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND path_version=${origin.input.expectedPathVersion} RETURNING id`;
+          if (!ended.length) throw learningError("CONFLICT", "原活动位置已变化，未创建补讲。");
+        }
+        const activity = await assertOwnedActivity(tx as unknown as Sql, scope, repair.activityId);
+        return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: repair.requirementId, action: "prerequisite" };
+      }
+      const unavailable = choice(courseId, repair.reason === "authorization_required" ? "authorization_required" : "evidence_unknown", [current.requirement.id]);
+      if (unavailable.kind === "choice" && repair.reason === "needs_clarification") unavailable.message =
+        "当前直接先修的证据、最早一步或已确认内容供给不足以执行一块补讲，请核对；未创建活动或消耗预算，未借用范围外题目。";
+      return unavailable;
     }
     let boundRetestId:string|undefined;
     if("requirementId" in input&&input.taskId){
@@ -153,7 +200,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         requestedId=remaining.includes(origin.context.requirementId)?origin.context.requirementId:remaining[0]!;
       }
     }
-    let step=selectCourseRouteStep(returnAfterUnknown?progress.filter(row=>row.requirement.id===requestedId):progress,requestedId||undefined);
+    let step=returnPlan ? { requirementId: requestedId, action: "diagnose" as const, focusObservationId: null }
+      : selectCourseRouteStep(returnAfterUnknown ? progress.filter(row=>row.requirement.id===requestedId):progress,requestedId||undefined);
     const initialStep=step;
     if(boundRetestId)step={requirementId:current.requirement.id,action:"transfer_check",focusObservationId:null};
     if(!step){
@@ -180,7 +228,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     if(!["prerequisite","comprehensive"].includes(step.action))step={...step,action:decision.activityKind,focusObservationId:decision.focusObservationId};
     if(["transfer_check","comprehensive"].includes(step.action)&&selected.requirement.verification.status!=="ready")return choice(courseId,"verification_unavailable",[selected.requirement.id]);
     if(!options.compilerEnabled)return choice(courseId,"configuration",[selected.requirement.id]);
-    const action=origin?.context.returnTo===selected.requirement.id?"return":step.action;
+    const action=returnPlan || origin?.context.returnTo===selected.requirement.id?"return":step.action;
     const existing=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
       AND status IN ('active','paused') AND goal_json->'courseRoute'->>'goalId'=${goal.id} AND goal_json->'courseRoute'->>'requirementId'=${selected.requirement.id}
       AND goal_json->'courseRoute'->>'requirementRevision'=${String(selected.requirement.revision)} AND goal_json->'courseRoute'->>'goalRevision'=${String(goal.revision)}
@@ -228,7 +276,47 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const [issuedActivity]=reservedStart?await tx`SELECT * FROM opening_teaching_activities WHERE id=${activity.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`:[];
     return {kind:"ready",activity:issuedActivity?mapTeachingActivity(issuedActivity):activity,href:href(courseId,activity.id),resumed:false,requirementId:selected.requirement.id,action};
   }
-  return {async start(scope:Scope,courseId:string,input:CourseRouteStart){
+  return {
+    /** Server-only explicit return: derive target from the validated saved plan, never caller flags. */
+    async returnFromPrerequisiteInTx(tx: TransactionSql, scope: Scope, raw: SpanPrerequisiteReturnInput) {
+      const input = spanPrerequisiteReturnInputSchema.parse(raw);
+      await lockWorkspaceLearningHistory(tx, scope);
+      const plan = await readOpeningSpanPrerequisiteRepair(tx, scope, input.activityId);
+      if (!plan || plan.qualification.status !== "verified_weak") throw prerequisiteConflict("SPAN_PREREQUISITE_PLAN_UNSUPPORTED");
+      const authorization = await readSpanTutorAuthorization(tx, scope, plan.courseBinding.courseId);
+      if (!authorization.authorized || !authorization.grant) throw learningError("CONFLICT", "导师授权已停止，原位置保留。");
+      await lockSpanTutorAuthorization(tx, scope, plan.courseBinding.courseId, authorization.grant.revision);
+      await readOpeningSpanCourseBinding(tx, scope, input.activityId, { lockSources: true });
+      const session = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, input.activityId);
+      if (!session || session.moveId !== "self_study-reserved" || !["active", "completed"].includes(session.status))
+        throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+      const head = await stageResult(tx, scope, session, "confirmation", false);
+      if (head.id !== input.observationId) throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+      const operation = `span-prerequisite-return:${input.activityId}:${head.id}`;
+      const [savedReturn] = await tx`SELECT goal_json->'spanPrerequisiteReturn' AS returned FROM opening_teaching_activities
+        WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      const returned = savedReturn?.returned as { operation?: string; observationId?: string; targetActivityId?: string } | undefined;
+      if (session.status === "completed" && (returned?.operation !== operation || returned.observationId !== head.id))
+        throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+      const request: CourseRouteStart = { goalId: plan.courseBinding.goalId, expectedGoalRevision: plan.courseBinding.goalRevision,
+        requirementId: plan.returnToRequirementId, expectedRequirementRevision: plan.courseBinding.returnTarget!.revision,
+        clientKey: operation, minutes: session.intent.timeBudgetMinutes };
+      if (session.revision !== input.expectedRevision && !(session.status === "completed" && session.revision === input.expectedRevision + 1))
+        throw learningError("CONFLICT", "原学习位置已变化，请重新读取。");
+      const result = await act(tx, scope, session.courseId, request, undefined, undefined, plan);
+      if (result.kind !== "ready") return result;
+      if (session.status === "completed" && returned?.targetActivityId !== result.activity.id)
+        throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
+      if (session.status !== "completed") {
+        const ended = await tx`UPDATE opening_teaching_activities SET status='completed',path_version=path_version+1,updated_at=now(),
+            goal_json=goal_json || ${tx.json({ spanPrerequisiteReturn: { operation, observationId: head.id, targetActivityId: result.activity.id } })}::jsonb
+          WHERE id=${input.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND path_version=${input.expectedRevision} AND status='active' RETURNING id`;
+        if (!ended.length) throw learningError("CONFLICT", "原学习位置已变化，返回未生效。");
+        await nextWorkspaceLearningHistoryRevision(tx, scope);
+      }
+      return result;
+    }, async start(scope:Scope,courseId:string,input:CourseRouteStart){
     const reservedStart=await prepareCourseReservedStart(sql,scope,courseId,input);
     return sql.begin(async tx=>{await lockWorkspaceLearningHistory(tx,scope);return act(tx,scope,courseId,input,undefined,reservedStart);});},
     async next(scope:Scope,courseId:string,input:CourseRouteNext){return sql.begin(async tx=>{

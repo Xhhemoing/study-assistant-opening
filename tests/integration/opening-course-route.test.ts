@@ -5,6 +5,7 @@ import { createOpeningTeachingActivitiesRepository } from "../../packages/databa
 import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/repositories/opening-backup-evaluation";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import * as prerequisiteDomain from "@aistudy/domain";
 import { getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
 import { createSpanPresentationService } from "../../apps/web/src/features/opening/teaching/span/presentation-service";
 import { createSpanReservedService } from "../../apps/web/src/features/opening/teaching/span/reserved-service";
@@ -335,7 +336,7 @@ it("keeps binding on each attempt while reusing an item across explicit root ses
   const submitted = await createOpeningAttemptService(f.sql).submit(f.scope, reused.id, { clientKey: randomUUID(), answer: "{}", outcome: "unverified", assistance: "independent" });
   expect(submitted.attemptId).toBe(reused.id);
 });
-it("refuses task, next and recursive T-to-P span starts without creating a generic substitute", async () => {
+it("refuses task/ordinary next and leaves unsupported direct T-to-P repair as a non-executing choice", async () => {
   const x = await publicCourseSpan(), before = await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`;
   expect(await x.service.start(f.scope, x.courseId, { ...x.request, clientKey: randomUUID(), taskId: randomUUID(), expectedTaskVersion: 1 }))
     .toMatchObject({ kind: "choice", reason: "binding_unavailable" });
@@ -352,8 +353,47 @@ it("refuses task, next and recursive T-to-P span starts without creating a gener
   await x.repo.confirm(f.scope, x.courseId, { expectedRevisions: scope.requirements.map(row => ({id:row.requirement.id,revision:row.requirement.revision})),
     requirements: [definition, target], confirmScope: true });
   expect(await x.service.start(f.scope, x.courseId, { ...x.request, requirementId: target.id, expectedRequirementRevision: 1, clientKey: randomUUID() }))
-    .toMatchObject({ kind: "choice", reason: "binding_unavailable", requirementIds: [x.requirement.id] });
+    .toMatchObject({ kind: "choice", reason: "evidence_unknown", requirementIds: [target.id] });
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
+});
+it("keeps real direct P exact failure non-executing when the confirmed teaching scope cannot supply two distinct examples", async () => {
+  const x = await courseSpanAuthorityFixture(120), service = createCourseRouteService(f.sql);
+  const { courseId: _courseId, revision: _revision, lifecycle: _lifecycle, approvedAt: _approvedAt, ...definition } = x.requirement;
+  const target: CourseRouteRequirementInput = { ...x.requirements[0]!, id: randomUUID(), stableSkillId: randomUUID(),
+    requirementKey: "requirement:target", prerequisiteIds: [x.requirement.id], position: 1 };
+  await service.confirm(f.scope, x.courseId, { expectedRevisions: [{ id: x.requirement.id, revision: x.requirement.revision }],
+    requirements: [definition, target], confirmScope: true,
+    spanBindings: [{ requirementId: x.requirement.id, exerciseKeys: ["span-example-2d"], confirmContent: true }] });
+  const { courseId: _ignored, ...request } = x.writerRequest;
+  const started = ready(await service.start(f.scope, x.courseId, request));
+  const session = (await createOpeningSpanSessionRepository(f.sql).get(f.scope, started.activity.id))!;
+  const attempt = (await createOpeningLearningAttemptRepository(f.sql).listByActivity(f.scope, session.activityId))[0]!;
+  const problem = attempt.spanExercise!;
+  const observation = await createOpeningAttemptService(f.sql).submit(f.scope, attempt.id, { clientKey: randomUUID(),
+    answer: JSON.stringify({ membership: "in_span", coefficients: ["0", "0"], equation: { vectors: [["999", "0"], ["0", "999"]], target: problem.target } }),
+    outcome: "unverified", assistance: "independent" });
+  expect(observation).toMatchObject({ outcome: "incorrect", verdictSource: "deterministic",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", skills: { equation: "incorrect" } } });
+  const before = {
+    activities: await f.sql`SELECT id,status,path_version,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`,
+    receipts: await f.sql`SELECT id,receipt FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    history: await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`,
+    capacity: await readOpeningLearningCapacity(f.sql, f.scope),
+  };
+  const targetRequest = { ...request, requirementId: target.id, expectedRequirementRevision: 1, clientKey: randomUUID() };
+  const qualification = vi.spyOn(prerequisiteDomain, "qualifySpanPrerequisiteRepair");
+  const [one, two] = await Promise.all([service.start(f.scope, x.courseId, targetRequest), service.start(f.scope, x.courseId, targetRequest)]);
+  expect(one).toMatchObject({ kind: "choice", reason: "evidence_unknown", requirementIds: [target.id] });
+  expect(two).toEqual(one);
+  expect(qualification.mock.results).toHaveLength(2);
+  for (const result of qualification.mock.results) expect(result.value).toMatchObject({ status: "verified_weak",
+    targetRequirement: { id: target.id }, prerequisiteRequirement: { id: x.requirement.id }, basis: { observationId: observation.id } });
+  expect(one.kind === "choice" && one.message).toContain("内容供给不足");
+  expect(await f.sql`SELECT id,status,path_version,goal_json FROM opening_teaching_activities WHERE course_id=${x.courseId} ORDER BY id`).toEqual(before.activities);
+  expect(await f.sql`SELECT id,receipt FROM opening_learning_decisions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`).toEqual(before.receipts);
+  expect(await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual(before.history);
+  expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(before.capacity.usedMinutes);
+  expect((await createOpeningLearningAttemptRepository(f.sql).get(f.scope, attempt.id))?.courseRequirement?.id).toBe(x.requirement.id);
 });
 it("serializes concurrent public start into one root/session/attempt/budget/receipt", async () => {
   const x = await courseSpanAuthorityFixture(), service = createCourseRouteService(f.sql);

@@ -1,4 +1,4 @@
-import type { SpanAnswer, SpanProblem, SpanRepairClarificationReason, SpanRepairPlan, SpanRepairTarget, SpanTargetedExplanation, SpanVerification } from "@aistudy/contracts";
+import type { SpanPrerequisiteRepairPlan, SpanAnswer, SpanProblem, SpanRepairClarificationReason, SpanRepairPlan, SpanRepairTarget, SpanTargetedExplanation, SpanVerification } from "@aistudy/contracts";
 import { addRational, equalRational, formatSpanRational, multiplyRational, parseSpanRational } from "./span-rational";
 import { solveSpanProblemWithSteps, verifySpanAnswer } from "./span-verifier";
 import { spanProblemContentKey } from "./span-generated-items";
@@ -59,6 +59,13 @@ export function spanRepairPublicContext(plan: SpanRepairPlan) {
       focusSummary: SPAN_REPAIR_FOCUS[plan.targetSkill], prerequisiteStatus: "unknown" as const }
     : { status: "needs_clarification" as const, version: plan.version, reasonCode: plan.reasonCode,
       message: "当前证据不足以唯一定位本题步骤，请回原题补写或核对；尚未识别外部先修。", prerequisiteStatus: "unknown" as const };
+}
+
+export function spanPrerequisiteRepairPublicContext(plan: SpanPrerequisiteRepairPlan) {
+  return { version: 1 as const, status: "ready" as const, targetSkill: plan.targetSkill,
+    focusSummary: `先补先修的一块步骤：${SPAN_REPAIR_FOCUS[plan.targetSkill]}完成后明确返回原要求；不代表已掌握。`,
+    prerequisiteRequirement: plan.courseBinding.requirement, targetRequirement: plan.courseBinding.returnTarget!,
+    returnToRequirementId: plan.returnToRequirementId };
 }
 
 /** Every number comes from the currently issued canonical example and the exact RREF solver. */

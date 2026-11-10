@@ -1,6 +1,6 @@
-import { spanRepairIssueInputSchema, type Scope } from "@aistudy/contracts";
+import { spanRepairIssueInputSchema, spanPrerequisiteIssueInputSchema, type Scope } from "@aistudy/contracts";
 import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice,
-  readOpeningSpanRepair, readOpeningSpanCourseBinding, spanRepairAttemptKey, createOpeningSpanSessionRepository, readOpeningSpanRepairVariant, openingSpanRepairRetryKey } from "@aistudy/database";
+  readOpeningSpanRepair, readOpeningSpanCourseBinding, spanRepairAttemptKey, readOpeningSpanPrerequisiteRepair, spanPrerequisiteAttemptKey, createOpeningSpanSessionRepository, readOpeningSpanRepairVariant, openingSpanRepairRetryKey } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
 import { getSpanReservedProblem, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -9,11 +9,12 @@ const inputSchema = z.object({ sessionId: z.string().uuid(), sourceId: z.string(
 /** Reserved operands are issued here only. No solution enters a browser bundle or response. */
 export function createSpanReservedService(sql: Sql) {
   return { async issue(scope: Scope, raw: unknown) {
-    if (raw && typeof raw === "object" && "repairVersion" in raw) {
-      const input = spanRepairIssueInputSchema.parse(raw);
+    if (raw && typeof raw === "object" && ("repairVersion" in raw || "prerequisiteRepairVersion" in raw)) {
+      const isB = "prerequisiteRepairVersion" in raw;
+      const input = isB ? spanPrerequisiteIssueInputSchema.parse(raw) : spanRepairIssueInputSchema.parse(raw);
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const plan = await readOpeningSpanRepair(tx, scope, input.activityId);
+        const plan = isB ? await readOpeningSpanPrerequisiteRepair(tx, scope, input.activityId) : await readOpeningSpanRepair(tx, scope, input.activityId);
         const session = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, input.activityId);
         const expectedMove = input.stage === "variant" ? "self-faded" : "self_study-reserved";
         if (!session || session.status !== "active" || session.revision !== input.expectedRevision || session.moveId !== expectedMove || plan?.status !== "ready") {
@@ -22,7 +23,7 @@ export function createSpanReservedService(sql: Sql) {
         const currentVariant = input.stage === "variant" ? await readOpeningSpanRepairVariant(tx, scope, input.activityId) : null;
         const clientKey = input.retryAfterAttemptId
           ? await openingSpanRepairRetryKey(tx, scope, input.activityId, input.retryAfterAttemptId)
-          : currentVariant ? String(currentVariant.client_key) : spanRepairAttemptKey(input.activityId, input.stage);
+          : currentVariant ? String(currentVariant.client_key) : (isB ? spanPrerequisiteAttemptKey : spanRepairAttemptKey)(input.activityId, input.stage);
         const [existing] = await tx`SELECT create_intent FROM opening_learning_attempts WHERE workspace_id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} AND client_key=${clientKey}`;
         const original = (existing?.create_intent as { spanExercise?: { sourceId: string; problemId: string; version: number } } | undefined)?.spanExercise;
@@ -30,7 +31,8 @@ export function createSpanReservedService(sql: Sql) {
         let identity = plan.practiceVariant;
         if (input.stage === "confirmation") {
           const example = getSpanTeachingProblem(plan.teachingExample.problemId, plan.teachingExample.version)!;
-          const choice = await readOpeningSpanReservedChoice(tx, scope, "self_study", "validation", example.familyId);
+          const choice = await readOpeningSpanReservedChoice(tx, scope, "self_study", "validation", example.familyId,
+            isB ? (await readOpeningSpanCourseBinding(tx, scope, input.activityId))?.allowedExerciseKeys : undefined);
           if (choice.kind !== "available") throw Object.assign(new Error(choice.reason === "unknown_history"
             ? "曝光历史身份不可核实，新题确认暂不可用。" : "同族新题已耗尽，未借用研究题或复测题。"), { code: "CONFLICT", reasonCode: choice.reason });
           identity = { problemId: choice.problem.id, version: choice.problem.version };
@@ -51,6 +53,7 @@ export function createSpanReservedService(sql: Sql) {
       const lesson = (activity?.checkpoint_json as { spanLesson?: { retestId?: string | null; intent?: { purpose?: string } } } | undefined)?.spanLesson;
       const retestId = lesson?.retestId;
       const courseSpan = await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id));
+      if (courseSpan?.binding.returnTarget) throw Object.assign(new Error("先修补讲只接受独立版本的当前阶段请求。"), { code: "CONFLICT" });
       if (courseSpan) {
         const current = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, String(session.activity_id));
         if (!current || current.status !== "active" || current.moveId !== "self_study-reserved" || input.mode !== "self_study"
