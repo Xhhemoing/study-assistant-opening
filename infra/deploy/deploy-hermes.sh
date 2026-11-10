@@ -19,6 +19,15 @@ ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
 case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration|complete-postmigration-reload-sample|complete-postmigration-archive-retained) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
 
+# Git trust checks select this checkout via cwd, never a caller's routed index,
+# gitdir/object/config environment. Subshell-only: do not mutate caller env or
+# shared config, and preserve the existing exact-main/CI/ancestry gates.
+git() (
+  for name in ${!GIT_@}; do unset "$name"; done
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_TEMPLATE_DIR='' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+  command git "$@"
+)
 fail() { echo "[!] $*" >&2; exit 1; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 ssh_run() {

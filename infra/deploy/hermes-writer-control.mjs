@@ -28,7 +28,10 @@ export function durableWrite(file, contents, mode = 0o600) {
 // provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
 //   configure reload60 + effective show15 + failure restore reload60 = 300.
 // Nine leaves each add <=2s owned-tree TERM/KILL/drain (18s maximum).
-// Helper execution480 > leaves300+drain18+IO162; top owner drain <=2 more.
+// Helper envelope480: normal execution400 > leaves300+drain18+IO82;
+// reserve80 covers confirmed-empty two-file cleanup + reload<=60 + drain2.
+// Top owner captures preimages before helper, and never re-enables normal work.
+// Restore is not a successful completion; any restore/reload failure stays fenced.
 // Parser execution90 + owned drain2. Neither Node nor GNU timeout kills owner.
 // Unsupported pidfd/subreaper refuses before spawn. Unconfirmed kill remains
 // UNKNOWN with owner retained (no clean refusal, no configuration continuation).
@@ -108,19 +111,37 @@ def owned_run(argv,*args,**kwargs):
                 except BaseException as error:
                     drain()
                     value=(False,error)
-                pickle.dump(value,result_file); result_file.flush()
+                check_cancel()
+                result_file.write(b'HERMES-RESULT-1\\n')
+                pickle.dump(value,result_file)
+                result_file.write(b'\\nHERMES-RESULT-END\\n')
+                result_file.flush()
+                # Block delivery only at the final commit/exit boundary. A
+                # pending or recorded cancellation invalidates the ACK status.
+                signal.pthread_sigmask(signal.SIG_BLOCK,cancel_signals)
+                check_cancel()
+                if signal.sigpending() & cancel_signals: raise RuntimeError('Cancel pending at result ACK')
                 os._exit(0)
             signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
-            os.waitpid(controller,0)
+            waited,status=os.waitpid(controller,0)
+            if waited!=controller or not os.WIFEXITED(status) or os.WEXITSTATUS(status)!=0:
+                raise RuntimeError('Controller terminal ACK failed')
             result_file.seek(0)
-            success,value=pickle.load(result_file)
+            if result_file.readline()!=b'HERMES-RESULT-1\\n': raise RuntimeError('Result frame header refused')
+            record=pickle.load(result_file)
+            if result_file.read()!=b'\\nHERMES-RESULT-END\\n': raise RuntimeError('Result frame trailer refused')
+            if not isinstance(record,tuple) or len(record)!=2 or type(record[0]) is not bool:
+                raise RuntimeError('Result record refused')
+            success,value=record
+            if success and not isinstance(value,subprocess.CompletedProcess): raise RuntimeError('Successful result type refused')
+            if not success and not isinstance(value,BaseException): raise RuntimeError('Failure result type refused')
         except BaseException:
             # Includes fork failure (empty scope), post-fork signal/fault,
             # wait and ACK failure. Never release an unconfirmed owned tree.
             drain()
             raise
         finally:
-            if os.getpid()!=parent_pid: os._exit(0)
+            if os.getpid()!=parent_pid: os._exit(70)
             signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
         check_cancel() # Controller/leaf has ended; cancellation cannot become success.
         if not success: raise value
@@ -187,6 +208,7 @@ def drain_confirmed():
 
 def leaf(argv,*args,**kwargs):
     global owner_spawned
+    cleanup_only=kwargs.pop('cleanup_only',False)
     timeout=kwargs.pop('timeout',None)
     check=kwargs.pop('check',False)
     data=kwargs.pop('input',None)
@@ -199,7 +221,7 @@ def leaf(argv,*args,**kwargs):
     # Popen can fork successfully and then be interrupted while reading its
     # exec-error pipe. Mark possible ownership BEFORE crossing that boundary;
     # a genuine pre-spawn error simply drains an empty child set.
-    check_cancel()
+    if not cleanup_only: check_cancel()
     proc=None
     deadline=None if timeout is None else time.monotonic()+timeout
     owner_spawned=True
@@ -207,7 +229,7 @@ def leaf(argv,*args,**kwargs):
         proc=subprocess.Popen(argv,*args,**kwargs)
         first=True
         while True:
-            check_cancel()
+            if not cleanup_only: check_cancel()
             remaining=None if deadline is None else deadline-time.monotonic()
             if remaining is not None and remaining<=0: raise subprocess.TimeoutExpired(argv,timeout)
             try:
@@ -215,7 +237,7 @@ def leaf(argv,*args,**kwargs):
                 break
             except subprocess.TimeoutExpired:
                 first=False
-        check_cancel()
+        if not cleanup_only: check_cancel()
     except BaseException:
         # Do not communicate/reap just the parent and leave inherited pipes or
         # escaped grandchildren alive. Drain the whole adopted tree first.
@@ -223,6 +245,7 @@ def leaf(argv,*args,**kwargs):
         if proc is not None: proc.communicate(timeout=.25)
         raise
     orphaned=drain()
+    if not cleanup_only: check_cancel() # Child-local cancellation at final drain is failure.
     if orphaned: raise RuntimeError('Leaf left descendants after return')
     result=subprocess.CompletedProcess(argv,proc.returncode,out,err)
     if check: result.check_returncode()
@@ -233,20 +256,92 @@ def leaf(argv,*args,**kwargs):
 // kills/drains the helper AND nested leaf controllers, even across setsid.
 // No Node/GNU timeout kills this owner before its cleanup confirmation. If the
 // host/service kills it, outcome is UNKNOWN, never a clean cancellation receipt.
-export function runCompletionOwned(command, args, seconds, options = {}, execute = spawnSync) {
-  const code = ownershipProgram + `
+export function runCompletionOwned(command, args, seconds, options = {}, execute = spawnSync, cleanupProgram = '') {
+  const code = ownershipProgram + cleanupProgram + `
+cleanup_enabled='restore_configuration' in globals()
+limit=float(sys.argv[1])
+overall_deadline=time.monotonic()+limit
+if cleanup_enabled: capture_configuration()
+failed=False
 prepare_owner()
 try:
-    result=leaf(sys.argv[2:],timeout=float(sys.argv[1]))
+    # Configuration owner reserves 1/6 of its EXISTING envelope for cleanup.
+    result=leaf(sys.argv[2:],timeout=limit*5/6 if cleanup_enabled else limit)
     check_cancel()
+    failed=result.returncode!=0
 except BaseException:
-    # Signal handlers only record cancellation, including during this cleanup.
+    failed=True
     drain() # Even an interrupted spawn with no returned Popen needs proof of absence.
-    sys.exit(1)
-sys.exit(result.returncode)
+# Terminal linearization: pending/recorded cancellation cannot be published as
+# success. Later signals stay blocked through exit, not raised into finalization.
+signal.pthread_sigmask(signal.SIG_BLOCK,cancel_signals)
+if cancel_requested or signal.sigpending() & cancel_signals: failed=True
+if failed and cleanup_enabled:
+    drain() # Mandatory owned-empty proof BEFORE any file restoration.
+    try:
+        restore_configuration(overall_deadline)
+    except BaseException:
+        print('RESTORE_UNCONFIRMED: retained forward-only configuration; no reentry',file=sys.stderr,flush=True)
+sys.exit(1 if failed else result.returncode)
 `;
   return execute('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, String(seconds), command, ...args],
     { stdio: 'inherit', ...options });
+}
+function configurationCleanup(args) {
+  const option = name => { const index=args.indexOf(name); return index<0 ? undefined : args[index+1]; };
+  const systemd=option('--systemd-dir'), config=option('--config-dir');
+  if (!systemd || !config) return ''; // Object-only minimal subprocess fixtures.
+  const paths=[join(systemd,'aistudy-worker.service'),join(config,'worker-runtime.env')];
+  return `
+import fcntl
+cleanup_paths=${JSON.stringify(paths)}
+cleanup_lock=${JSON.stringify(join(config,'.worker-provision.lock'))}
+trusted=runpy.run_path(${JSON.stringify(join(controls,'hermes-trusted-loader.py'))},run_name='cleanup_bootstrap')
+preimage=[]
+def capture_configuration():
+    for path in cleanup_paths:
+        parent=trusted['safe_open'](os.path.dirname(path),directory=True)
+        try:
+            parent_stat=os.fstat(parent)
+            try:
+                data,ident=trusted['read_trusted'](path)
+                preimage.append((path,data,ident,parent_stat.st_dev,parent_stat.st_ino))
+            except FileNotFoundError:
+                preimage.append((path,None,None,parent_stat.st_dev,parent_stat.st_ino))
+        finally: os.close(parent)
+def restore_configuration(deadline):
+    # This capability is fixed to two captured files and one reload. It never
+    # clears the generation's cancellation flag or admits new normal work.
+    if children(): raise RuntimeError('Owned scope not empty before restore')
+    lock=trusted['safe_open'](cleanup_lock,private=True)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        for path,data,ident,dev,ino in preimage:
+            parent=trusted['safe_open'](os.path.dirname(path),directory=True)
+            try:
+                observed=os.fstat(parent)
+                if (observed.st_dev,observed.st_ino)!=(dev,ino): raise RuntimeError('Restore parent changed')
+                name=os.path.basename(path)
+                if data is None:
+                    try: os.unlink(name,dir_fd=parent)
+                    except FileNotFoundError: pass
+                else:
+                    temporary=name+'.owner-restore-'+str(os.getpid())
+                    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+                    try:
+                        with os.fdopen(os.dup(fd),'wb') as output: output.write(data); output.flush()
+                        os.fchown(fd,int(ident[3]),int(ident[4])); os.fchmod(fd,int(ident[2])&0o777); os.fsync(fd)
+                    finally: os.close(fd)
+                    os.rename(temporary,name,src_dir_fd=parent,dst_dir_fd=parent)
+                os.fsync(parent)
+            finally: os.close(parent)
+        remaining=deadline-time.monotonic()-2
+        if remaining<=0: raise RuntimeError('Cleanup reserve exhausted')
+        # Separate fixed cleanup leaf: ignores cooperative cancellation only in
+        # this owner phase, still owns all descendants and the same hard bound.
+        leaf(['/usr/bin/systemctl','daemon-reload'],timeout=min(60,remaining),check=True,cleanup_only=True)
+    finally: os.close(lock)
+`;
 }
 export function provisionCompletion(helper, args, execute = spawnSync) {
   const code = ownershipProgram + `
@@ -267,7 +362,7 @@ try:
 finally:
     subprocess.run=original`;
   const result = runCompletionOwned('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, helper, ...args], 480,
-    { env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }, execute);
+    { env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }, execute, configurationCleanup(args));
   if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
 }
 export function completionLaunchAdmission(args, unit, phase = 'launch') {

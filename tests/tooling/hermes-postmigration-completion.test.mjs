@@ -205,6 +205,9 @@ for (const fail of ['', 'provision']) test(`actual completion shell ${fail || 's
   const current=join(root,'current');symlinkSync(legacy,current);
   const helper=join(controls,'hermes-supervisor.mjs');writeFileSync(helper,'');writeFileSync(join(controls,'hermes-health.mjs'),'fixture');
   writeFileSync(join(controls,'hermes-writer-control.mjs'),readFileSync(resolve('infra/deploy/hermes-writer-control.mjs')));
+  // Object-only synthetic UID seam, matching the existing trusted-entry fixture.
+  writeFileSync(join(controls,'hermes-trusted-loader.py'),readFileSync(resolve('infra/deploy/hermes-trusted-loader.py'),'utf8').replaceAll('uid=0','uid=os.geteuid()'));
+  writeFileSync(join(config,'.worker-provision.lock'),'',{mode:0o600});
   const log=join(root,'commands');writeFileSync(log,'');
   writeFileSync(join(bin,'node'),`#!/bin/bash\nprintf 'node %s\\n' "$*" >> "$MOCK_LOG"\nif [[ "$1" == --input-type=module ]]; then exec ${process.execPath} "$@"; fi\nif [[ "$2" == request ]]; then\n [[ "$3" != arm ]] || exit 90\n if [[ "$3" == prepare ]];then for u in aistudy-web.service aistudy-worker.service; do mkdir -p "$MOCK_SYSTEMD/$u.d";touch "$MOCK_SYSTEMD/$u.d/96-aistudy-writer-exec.conf";done;fi\n exit 0\nfi\n[[ "\${1##*/}" == runtime-identity.mjs || "$2" == quiescence || "$2" == parser || "$2" == parser-owned || "$1" == --input-type=module ]] || exit 91\n`,{mode:0o755});
   writeFileSync(join(bin,'systemctl'),'#!/bin/bash\nprintf "systemctl %s\\n" "$*" >> "$MOCK_LOG"\n[[ "$1" == daemon-reload || "$1" == is-active ]]\n',{mode:0o755});

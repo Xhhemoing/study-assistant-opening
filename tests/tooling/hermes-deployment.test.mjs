@@ -325,8 +325,15 @@ test('deployment extra overrides cannot reintroduce caller Git routing',t=>{
   caller.run('-c','user.name=Caller','-c','user.email=caller@example.test','commit','-m','caller');
   const before={head:caller.run('rev-parse','HEAD'),config:readFileSync(join(callerRoot,'.git/config')),index:readFileSync(join(callerRoot,'.git/index'))};
   const f=fixture(t);
+  // Successful status requires an existing deployed pointer. Isolation must be
+  // exercised past that boundary, not merely accept the missing-pointer error.
+  symlinkSync(f.server,f.current);
+  writeFileSync(join(f.state,'runtime-identity.mjs'),'// deployed identity fixture\n');
   const result=f.run('status',{GIT_DIR:join(callerRoot,'.git'),GIT_WORK_TREE:callerRoot,GIT_INDEX_FILE:join(callerRoot,'.git/index'),GIT_CONFIG_COUNT:'1',GIT_CONFIG_KEY_0:'core.worktree',GIT_CONFIG_VALUE_0:callerRoot});
   assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/Current:/);
+  assert.match(result.deltaLog,/ssh /);
+  assert.equal(readlinkSync(f.current),f.server);
   assert.equal(caller.run('rev-parse','HEAD'),before.head);
   assert.deepEqual(readFileSync(join(callerRoot,'.git/config')),before.config);
   assert.deepEqual(readFileSync(join(callerRoot,'.git/index')),before.index);

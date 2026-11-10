@@ -80,7 +80,7 @@ test('transient real reap faults cannot execute controller copy of helper restor
 for (const fault of ['signal', 'pidfd-open', 'observe', 'reap']) for (const scope of ['outer', 'nested']) test(`cleanup ${fault} failure retains ${scope} owner and never permits restore while child lives`, t => {
   const root=mkdtempSync(join(tmpdir(),'sm95-cleanup-error-'));
   t.after(()=>rmSync(root,{recursive:true}));
-  const pidfile=join(root,'child'), restore=join(root,'restore'), release=join(root,'release');
+  const pidfile=join(root,'child'), restore=join(root,'restore'), release=join(root,'release'), hit=join(root,'fault-hit');
   const child=`import os,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nopen(${JSON.stringify(pidfile)},'w').write(str(os.getpid()))\ntime.sleep(20)`;
   const helper=join(root,'helper.py');
   writeFileSync(helper,`import subprocess,pathlib\ntry:\n subprocess.run(['/usr/bin/python3','-c',${JSON.stringify(child)}],timeout=.1)\nexcept BaseException:\n pathlib.Path(${JSON.stringify(restore)}).write_text('configuration restore continued')\n`);
@@ -95,17 +95,27 @@ real_children=children
 real_wait=os.waitpid
 def active():
     return os.path.exists(${JSON.stringify(pidfile)}) and not os.path.exists(${JSON.stringify(release)})
+def mark():
+    with open(${JSON.stringify(hit)},'a') as observed: observed.write('triggered')
 def broken_send(fd,sig,*args):
-    if ${JSON.stringify(fault)}=='signal' and sig==signal.SIGKILL and active(): raise PermissionError('synthetic cleanup signal')
+    if ${JSON.stringify(fault)}=='signal' and sig==signal.SIGKILL and active():
+        mark()
+        raise PermissionError('synthetic cleanup signal')
     return real_send(fd,sig,*args)
 def broken_open(pid,*args):
-    if ${JSON.stringify(fault)}=='pidfd-open' and active(): raise OSError('synthetic pidfd error')
+    if ${JSON.stringify(fault)}=='pidfd-open' and active():
+        mark()
+        raise OSError('synthetic pidfd error')
     return real_open(pid,*args)
 def broken_children():
-    if ${JSON.stringify(fault)}=='observe' and active(): raise OSError('synthetic observation error')
+    if ${JSON.stringify(fault)}=='observe' and active():
+        mark()
+        raise OSError('synthetic observation error')
     return real_children()
 def broken_wait(pid,*args):
-    if ${JSON.stringify(fault)}=='reap' and active(): raise OSError('synthetic reap error')
+    if ${JSON.stringify(fault)}=='reap' and active():
+        mark()
+        raise OSError('synthetic reap error')
     return real_wait(pid,*args)
 signal.pidfd_send_signal=broken_send
 os.pidfd_open=broken_open
@@ -114,6 +124,7 @@ os.waitpid=broken_wait
 '''
 index=indexes[${scope === 'outer' ? '0' : '-1'}]
 anchor=${JSON.stringify(scope === 'outer' ? '\nprepare_owner()\ntry:' : 'def bounded(argv,*args,**kwargs):')}
+assert args[index].count(anchor)==1,'fault anchor must uniquely select owner boundary'
 args[index]=args[index].replace(anchor,injection+'\\n'+anchor)
 if ${scope === 'outer' ? 'True' : 'False'}:
  args[args.index('480')]='.15'
@@ -131,6 +142,7 @@ try:
   except (FileNotFoundError,ValueError): time.sleep(.005)
  assert child is not None,'child PID handoff not complete'
  time.sleep(.9)
+ assert pathlib.Path(${JSON.stringify(hit)}).read_text().startswith('triggered'),'fault hook never executed'
  assert owner.poll() is None,'owner returned before cleanup confirmation'
  assert pathlib.Path('/proc/'+str(child)).exists(),'fault did not leave a live owned child'
  assert not pathlib.Path(${JSON.stringify(restore)}).exists(),'helper restored while cleanup unconfirmed'
