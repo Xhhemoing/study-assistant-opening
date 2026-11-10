@@ -55,40 +55,53 @@ function assertPrivatePromptOnly(result: unknown, init: unknown, answer: string)
 }
 // Synthetic PG fixture. Only successful eligibility tests replace the exposure
 // reader; no production coverage marker, provider, paid API or model is created.
-async function setup(candidate = { text: '137*19', answer: '2603' }) {
+async function setup(candidate = { text: '137*19', answer: '2603' }, phase = (_name: string) => {}) {
+  phase('setup.source-and-course');
   const rows = backupRows(f.sql, f.scope), sourceId = await rows.source("uploaded", 1), chunkId = randomUUID(), courseId = randomUUID();
   await f.sql`UPDATE opening_sources SET mime='text/plain' WHERE id=${sourceId}`;
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text) VALUES(${chunkId},${sourceId},1,1,'Rational arithmetic.')`;
   await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'Arithmetic',${courseId})`;
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
     VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
+  phase('setup.goal');
   const goal = await createOpeningLearningGoalRepository(f.sql).create(f.scope, { clientKey: randomUUID(), courseIds: [courseId], title: 'Arithmetic', kind: 'custom',
     targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: 'understand', successCriteria: 'Independent arithmetic' });
   const route = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true, exactVerificationEnabled: true });
+  phase('setup.route.confirm');
   const snapshot = await route.confirm(f.scope, courseId, { expectedRevisions: [], confirmScope: true, requirements: [{ id: randomUUID(), stableSkillId: randomUUID(),
     knowledgeNodeId: null, requirementKey: 'arithmetic', title: 'Arithmetic', position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [],
     sourceRefs: [{ sourceId, sourceVersion: 1, chunkId }], verification: { kind: 'exact', status: 'missing', exerciseKeys: [], rubric: null, missingReasons: [] }, origin: 'confirmed' }] });
   const requirement = snapshot.requirements[0]!.requirement;
   const base: CourseRouteStart = { goalId: goal.id, expectedGoalRevision: 1, requirementId: requirement.id, expectedRequirementRevision: 1, minutes: 20, clientKey: randomUUID() };
+  phase('setup.route.start-origin');
   const origin = ready(await route.start(f.scope, courseId, base)).activity;
+  phase('setup.publish-baseline');
   await publishBaseline(origin, sourceId);
+  phase('setup.session-and-attempt');
   const session = await createOpeningLearningRepository(f.sql).createSession(f.scope, { activityId: origin.id, courseId, sourceIds: [sourceId], skillLabel: 'Arithmetic' });
   const spec = (await createOpeningTeachingContentRepository(f.sql).getActivitySpec(f.scope, origin.id))!;
   const attempts = createOpeningLearningAttemptRepository(f.sql);
   const attempt = await attempts.create(f.scope, { sessionId: session.id, clientKey: randomUUID(), teachingBlock: { blockId: spec.blockOrder[0]!.blockId, contentVersion: 1 } });
+  phase('setup.attempt.submit-baseline');
   const observation = await createOpeningAttemptService(f.sql).submit(f.scope, attempt.id, { clientKey: randomUUID(), answer: '7', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report' });
+  phase('setup.age-baseline-and-preferences');
   await f.sql`UPDATE opening_learning_attempts SET started_at=started_at-interval '4 days',submitted_at=submitted_at-interval '4 days' WHERE id=${attempt.id}`;
   await f.sql`UPDATE opening_learning_observations SET started_at=started_at-interval '4 days',submitted_at=submitted_at-interval '4 days',recorded_at=recorded_at-interval '4 days',occurred_at=occurred_at-interval '4 days' WHERE id=${observation.id}`;
   await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope, { assessmentEnabled: true, retestSuggestionsEnabled: true, automaticRemindersEnabled: false });
   const retests = createOpeningCourseRouteRetestRepository(f.sql, { exactVerificationEnabled: true });
+  phase('setup.retests.schedule');
   const receipt = await retests.schedule(f.scope, courseId, { goalId: goal.id, expectedGoalRevision: 1, activityId: origin.id, expectedPathVersion: 1, observationId: observation.id, clientKey: randomUUID(), minutes: 20 });
+  phase('setup.retests.read-task');
   const task = await retests.readTask(f.scope, courseId, receipt.taskId);
   if (!task.managed) throw new Error('missing managed task');
   const input = { ...base, taskId: task.taskId, expectedTaskVersion: task.expectedTaskVersion, clientKey: randomUUID() };
+  phase('setup.read-purpose-pin');
   const purposes = createOpeningCourseReadySourcesRepository(f.sql), pin = await purposes.readSourcePurposePin(f.scope, { activityId: origin.id, materialUse: 'teaching' });
+  phase('setup.save-reserved-candidates');
   await saveOpeningReservedCandidates(f.sql, f.scope, origin.id, [{ ...candidate, interaction: { kind: 'numeric' } }],
     { assertPinnedContext: tx => purposes.assertSourcePurposePin(f.scope, pin, tx) });
   const service = createCourseRouteService(f.sql, { OPENING_TEACHING_COMPILER_ENABLED: '1' });
+  phase('setup.read-capacity');
   const capacityBefore = await readOpeningLearningCapacity(f.sql, f.scope);
   return { courseId, sourceId, requirement, origin, input, service, capacityBefore };
 }
@@ -240,30 +253,93 @@ it.each([
   expect(feedback?.blocks).toHaveLength(1);
 });
 it.each(['requirement', 'source', 'purpose_cas', 'purpose', 'task_version', 'protocol'] as const)('rejects reserved submission after %s changes without recording an answer', async changed => {
-  // Cover setup and issuance too: the reported 55P03 precedes the rejection assertion.
-  if (changed === 'purpose') f.sql = routeLockDiagnosedSql(f.sql, 'purpose');
-  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
-  const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
-  if (changed === 'requirement') await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
-  if (changed === 'source') await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${x.sourceId}`;
-  if (changed === 'purpose_cas') await f.sql`UPDATE course_asset_memberships SET updated_at=updated_at+interval '1 microsecond' WHERE course_id=${x.courseId}`;
-  if (changed === 'purpose') await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
-  if (changed === 'task_version') await f.sql`UPDATE opening_tasks SET version=version+1 WHERE id=${x.input.taskId}`;
-  if (changed === 'protocol') await f.sql`UPDATE opening_retest_activities SET learning_protocol=jsonb_set(learning_protocol,'{stableSkillId}',to_jsonb(${randomUUID()}::text)) WHERE task_id=${x.input.taskId}`;
-  await expect(createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
-    clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
-  })).rejects.toMatchObject({ code: changed === 'source' ? 'VALIDATION' : 'CONFLICT' });
-  expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(0);
+  const check = async (phase = (_name: string) => {}) => {
+    const x = await setup(undefined, phase);
+    phase('start.reserved-issuance');
+    const issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+    phase('read-issued-attempt');
+    const [attempt] = await f.sql`SELECT id FROM opening_learning_attempts WHERE activity_id=${issued.activity.id}`;
+    phase(`change.${changed}`);
+    if (changed === 'requirement') await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
+    if (changed === 'source') await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${x.sourceId}`;
+    if (changed === 'purpose_cas') await f.sql`UPDATE course_asset_memberships SET updated_at=updated_at+interval '1 microsecond' WHERE course_id=${x.courseId}`;
+    if (changed === 'purpose') await f.sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${x.courseId}`;
+    if (changed === 'task_version') await f.sql`UPDATE opening_tasks SET version=version+1 WHERE id=${x.input.taskId}`;
+    if (changed === 'protocol') await f.sql`UPDATE opening_retest_activities SET learning_protocol=jsonb_set(learning_protocol,'{stableSkillId}',to_jsonb(${randomUUID()}::text)) WHERE task_id=${x.input.taskId}`;
+    phase('submit.expected-rejection');
+    await expect(createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+      clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
+    })).rejects.toMatchObject({ code: changed === 'source' ? 'VALIDATION' : 'CONFLICT' });
+    phase('assert.no-answer-recorded');
+    expect(await f.sql`SELECT id FROM opening_learning_observations WHERE activity_id=${issued.activity.id}`).toHaveLength(0);
+  };
+  if (changed === 'purpose') await withRouteLockDiagnostics('purpose', check);
+  else await check();
 });
-// Local to the named case's fixture/call chain. Preserve lazy query execution
-// and sample only after the original NOWAIT 55P03, never instead of the lock.
-function routeLockDiagnosedSql(db: Sql | TransactionSql, context = 'other-key', requester?: { pid: number; began_at: string }): Sql {
+type RouteLockDiagnostics = { context: string; phase: string; observer: Sql };
+// One preconnected read-only observer per diagnosed case. No polling, sleeps,
+// business-table writes or held test locks; all samples are non-atomic evidence.
+async function withRouteLockDiagnostics(context: string, run: (phase: (name: string) => void) => Promise<void>) {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? '', process.env.OPENING_TEST_DB);
+  const observer = postgres(url.toString(), { max: 1, connect_timeout: 2,
+    connection: { default_transaction_read_only: true, statement_timeout: 2000 } });
+  const diagnostic = { context, phase: 'observer.connect', observer };
+  const lifecycle = (event: string) => console.error(`[route-${context}-lifecycle]`, JSON.stringify({ event, at: new Date().toISOString() }));
+  const originalSql = f.sql, originalClose = f.close;
+  f.close = async () => {
+    lifecycle('fixture.close.begin');
+    try { await originalClose(); } finally { lifecycle('fixture.close.end'); }
+  };
+  try {
+    try { await observer`SELECT pg_backend_pid()`; }
+    catch (error) { console.error(`[route-${context}-observer-connect-failed]`, JSON.stringify({ code: (error as { code?: string })?.code ?? 'unknown' })); }
+    f.sql = routeLockDiagnosedSql(originalSql, diagnostic);
+    await run(name => { diagnostic.phase = name; lifecycle(name); });
+  } finally {
+    lifecycle(`case.end:${diagnostic.phase}`);
+    f.sql = originalSql;
+    try { await observer.end({ timeout: 2 }); }
+    catch (error) { console.error(`[route-${context}-observer-close-failed]`, JSON.stringify({ code: (error as { code?: string })?.code ?? 'unknown' })); }
+    lifecycle('observer.close.end');
+  }
+}
+async function sampleRouteLocks(diagnostic: RouteLockDiagnostics, requester: { pid: number }, relations: string[]) {
+  const { observer } = diagnostic, started = Date.now();
+  try {
+    const [sample] = await observer`SELECT clock_timestamp()::text AS sampled_at, pg_backend_pid() AS observer_pid,
+      pg_blocking_pids(${requester.pid}) AS blocking_pids,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object(
+        'pid',l.pid,'relation',n.nspname || '.' || c.relname,'relation_owner',pg_get_userbyid(c.relowner),
+        'mode',l.mode,'granted',l.granted,
+        'candidate',l.pid IS DISTINCT FROM ${requester.pid} AND l.granted AND l.mode NOT IN ('AccessShareLock','RowShareLock'),
+        'backend_type',a.backend_type,'state',a.state,'xact_start',a.xact_start::text,
+        'query_start',a.query_start::text,'wait_event_type',a.wait_event_type,'wait_event',a.wait_event,
+        'query',substring(a.query FROM '^[[:space:]]*([[:alpha:]]+)') || ' [redacted]') ORDER BY c.relname,l.pid,l.mode)
+        FROM pg_locks l JOIN pg_class c ON c.oid=l.relation JOIN pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_stat_activity a ON a.pid=l.pid
+        WHERE l.locktype='relation' AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+          AND n.nspname=current_schema() AND c.relname IN ${observer(relations)}), '[]'::jsonb) AS locks,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object(
+        'pid',a.pid,'backend_type',a.backend_type,'state',a.state,'xact_start',a.xact_start::text,
+        'query_start',a.query_start::text,'state_change',a.state_change::text,
+        'wait_event_type',a.wait_event_type,'wait_event',a.wait_event,
+        'query',substring(a.query FROM '^[[:space:]]*([[:alpha:]]+)') || ' [redacted]') ORDER BY a.pid)
+        FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()
+          AND (a.state IS DISTINCT FROM 'idle' OR a.pid=${requester.pid})), '[]'::jsonb) AS activity`;
+    return { ...sample, elapsed_ms: Date.now() - started };
+  } catch (error) {
+    return { diagnostic_error: (error as { code?: string })?.code ?? 'unknown', elapsed_ms: Date.now() - started };
+  }
+}
+// Preserve lazy query execution and then/catch/finally behavior. Take the pre
+// sample only when the original lock query is consumed, never at construction.
+function routeLockDiagnosedSql(db: Sql | TransactionSql, diagnostic: RouteLockDiagnostics, requester?: { pid: number; began_at: string }): Sql {
   return new Proxy(db, {
     get(target, key, receiver) {
       if (key === 'begin') return (...args: unknown[]) => Reflect.apply((target as Sql).begin, target, [
         ...args.slice(0, -1), async (tx: TransactionSql) => {
           const [backend] = await tx<{ pid: number; began_at: string }[]>`SELECT pg_backend_pid() AS pid, clock_timestamp()::text AS began_at`;
-          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(routeLockDiagnosedSql(tx, context, backend!) as unknown as TransactionSql);
+          const result = (args.at(-1) as (tx: TransactionSql) => unknown)(routeLockDiagnosedSql(tx, diagnostic, backend!) as unknown as TransactionSql);
           return Array.isArray(result) ? Promise.all(result) : result;
         },
       ]);
@@ -275,48 +351,30 @@ function routeLockDiagnosedSql(db: Sql | TransactionSql, context = 'other-key', 
       const lock = /^LOCK TABLE (.+) IN SHARE ROW EXCLUSIVE MODE NOWAIT$/i.exec(text);
       if (!lock || !requester) return query;
       let observed: Promise<unknown> | undefined;
-      const observe = () => observed ??= query.then((rows: unknown) => rows, async (error: { code?: string; message?: string }) => {
-        if (error.code === '55P03') {
-          const failedAt = new Date().toISOString(), started = Date.now();
-          try {
-            const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? '', process.env.OPENING_TEST_DB);
-            const observer = postgres(url.toString(), { max: 1, connect_timeout: 2,
-              connection: { default_transaction_read_only: true, statement_timeout: 2000 } });
-            try {
-              const relations = lock[1]!.split(',').map(name => name.trim());
-              const rows = await observer`SELECT clock_timestamp()::text AS sampled_at, pg_backend_pid() AS observer_pid,
-                pg_blocking_pids(${requester.pid}) AS blocking_pids, locks.*
-                FROM (SELECT 1) sample LEFT JOIN (
-                  SELECT l.pid, n.nspname || '.' || c.relname AS relation, l.mode, l.granted,
-                    a.backend_type, a.state, a.xact_start::text, a.wait_event_type, a.wait_event,
-                    substring(a.query FROM '^[[:space:]]*([[:alpha:]]+)') || ' [redacted]' AS query
-                  FROM pg_locks l JOIN pg_class c ON c.oid=l.relation JOIN pg_namespace n ON n.oid=c.relnamespace
-                  LEFT JOIN pg_stat_activity a ON a.pid=l.pid
-                  WHERE l.locktype='relation' AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
-                    AND n.nspname=current_schema() AND c.relname IN ${observer(relations)}
-                ) locks ON true ORDER BY relation,pid,mode`;
-              const locks = rows.filter(row => row.relation !== null).map(row => ({ pid: row.pid, relation: row.relation,
-                mode: row.mode, granted: row.granted,
-                candidate: row.pid !== requester.pid && row.granted && !['AccessShareLock', 'RowShareLock'].includes(row.mode),
-                backend_type: row.backend_type, state: row.state, xact_start: row.xact_start,
-                wait_event_type: row.wait_event_type, wait_event: row.wait_event, query: row.query }));
-              console.error(`[route-${context}-lock-diagnostic]`, JSON.stringify({ requester, failed_at: failedAt,
-                error: { code: error.code, failed_relation: /could not obtain lock on relation "([a-z_]+)"/.exec(error.message ?? '')?.[1] ?? null },
-                requested_query: text, requested_mode: 'ShareRowExclusiveLock', sampled_at: rows[0]?.sampled_at,
-                observer_pid: rows[0]?.observer_pid, blocking_pids: rows[0]?.blocking_pids, elapsed_ms: Date.now() - started, locks,
-                visibility: 'Same test database/current schema only; observer privileges apply. Post-failure non-atomic sample; NOWAIT need not leave a wait row. Queries retain command only.',
-                holder_assessment: locks.some(row => row.candidate)
-                  ? 'Incompatible granted candidates at sample time only; failure-time natural holder UNKNOWN.'
-                  : 'UNKNOWN: no visible incompatible granted candidate; holder may have disappeared.',
-              }));
-            } finally { await observer.end({ timeout: 2 }); }
-          } catch (diagnosticError) {
-            console.error(`[route-${context}-lock-diagnostic-failed]`, JSON.stringify({ requester, failed_at: failedAt,
-              code: (diagnosticError as { code?: string } | null)?.code ?? 'unknown', elapsed_ms: Date.now() - started }));
+      const observe = () => observed ??= (async () => {
+        const phase = diagnostic.phase, relations = lock[1]!.split(',').map(name => name.trim());
+        const before = await sampleRouteLocks(diagnostic, requester, relations);
+        console.error(`[route-${diagnostic.context}-lock-before]`, JSON.stringify({ phase, requester,
+          requested_query: text, requested_mode: 'ShareRowExclusiveLock', before }));
+        const requestedAt = new Date().toISOString();
+        try {
+          return await query;
+        } catch (error) {
+          const pgError = error as { code?: string; message?: string };
+          if (pgError.code === '55P03') {
+            const failedAt = new Date().toISOString();
+            const after = await sampleRouteLocks(diagnostic, requester, relations);
+            console.error(`[route-${diagnostic.context}-lock-diagnostic]`, JSON.stringify({ phase, requester,
+              requested_at: requestedAt, failed_at: failedAt,
+              error: { code: pgError.code, failed_relation: /could not obtain lock on relation "([a-z_]+)"/.exec(pgError.message ?? '')?.[1] ?? null },
+              requested_query: text, requested_mode: 'ShareRowExclusiveLock', before, after,
+              visibility: 'Same test database/current schema only; observer privileges apply. Before/after samples are non-atomic, not failure-time proof. NOWAIT need not leave a wait row. Queries retain command only.',
+              holder_assessment: 'Incompatible granted candidates at sample time only; failure-time natural holder UNKNOWN.',
+            }));
           }
+          throw error; // Preserve the exact original error; never retry or replace it.
         }
-        throw error; // Preserve identity, including if observation/close fails; never retry.
-      });
+      })();
       return new Proxy(query, {
         get(original, key, receiver) {
           if (key === 'then') return (...args: Parameters<Promise<unknown>['then']>) => observe().then(...args);
@@ -328,21 +386,25 @@ function routeLockDiagnosedSql(db: Sql | TransactionSql, context = 'other-key', 
     },
   }) as Sql;
 }
-it('samples a controlled NOWAIT conflict after failure without treating candidates as historical holders', async () => {
+it('samples around a controlled NOWAIT conflict without treating candidates as historical holders', async () => {
   const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL ?? '', process.env.OPENING_TEST_DB);
   const holder = postgres(url.toString(), { max: 1 });
   const output = vi.spyOn(console, 'error').mockImplementation(() => {});
-  // Keep the synthetic holder alive through the late sample; no sleep or retry.
+  // Diagnostic-mechanism check only, never evidence for a natural CI holder.
+  // Keep this existing synthetic holder alive through both samples; no sleep/retry.
   try {
     await holder.begin(async tx => {
       const [backend] = await tx`SELECT pg_backend_pid() AS pid`;
       await tx`LOCK TABLE opening_learning_observations IN ROW EXCLUSIVE MODE`;
       let queryError: unknown;
       try {
-        await routeLockDiagnosedSql(f.sql, 'controlled').begin(async requester => {
-          const query = requester`LOCK TABLE opening_learning_observations IN SHARE ROW EXCLUSIVE MODE NOWAIT`;
-          // The transaction must propagate the diagnosed query's rejection unchanged.
-          await query.catch(error => { queryError = error; throw error; });
+        await withRouteLockDiagnostics('controlled', async phase => {
+          phase('controlled.lock');
+          await f.sql.begin(async requester => {
+            const query = requester`LOCK TABLE opening_learning_observations IN SHARE ROW EXCLUSIVE MODE NOWAIT`;
+            // The transaction must propagate the diagnosed query's rejection unchanged.
+            await query.finally(() => {}).catch(error => { queryError = error; throw error; });
+          });
         });
         throw new Error('expected the controlled NOWAIT conflict');
       } catch (error) {
@@ -350,19 +412,28 @@ it('samples a controlled NOWAIT conflict after failure without treating candidat
         expect(error).toBeInstanceOf(postgres.PostgresError);
         expect(error).toMatchObject({ code: '55P03' });
       }
-      expect(output).toHaveBeenCalledTimes(1);
-      const [label, raw] = output.mock.calls[0]!;
+      const diagnostics = output.mock.calls.filter(([label]) => label === '[route-controlled-lock-diagnostic]');
+      expect(diagnostics).toHaveLength(1);
+      const [label, raw] = diagnostics[0]!;
       expect(label).toBe('[route-controlled-lock-diagnostic]');
       const sample = JSON.parse(String(raw));
       expect(sample.error).toEqual({ code: '55P03', failed_relation: 'opening_learning_observations' });
       expect(sample.requested_mode).toBe('ShareRowExclusiveLock');
-      expect(sample.observer_pid).not.toBe(sample.requester.pid);
-      expect(sample.observer_pid).not.toBe(backend!.pid);
-      expect(sample.locks).toEqual(expect.arrayContaining([expect.objectContaining({
-        pid: backend!.pid, relation: 'public.opening_learning_observations',
-        mode: 'RowExclusiveLock', granted: true, candidate: true, query: 'LOCK [redacted]',
-      })]));
-      expect(sample.blocking_pids).toEqual(expect.any(Array));
+      expect(sample.phase).toBe('controlled.lock');
+      for (const snapshot of [sample.before, sample.after]) {
+        expect(snapshot.observer_pid).not.toBe(sample.requester.pid);
+        expect(snapshot.observer_pid).not.toBe(backend!.pid);
+        expect(snapshot.locks).toEqual(expect.arrayContaining([expect.objectContaining({
+          pid: backend!.pid, relation: 'public.opening_learning_observations', relation_owner: expect.any(String),
+          mode: 'RowExclusiveLock', granted: true, candidate: true, query: 'LOCK [redacted]',
+        })]));
+        expect(snapshot.activity).toEqual(expect.arrayContaining([expect.objectContaining({
+          pid: backend!.pid, state: 'idle in transaction', query: 'LOCK [redacted]',
+        })]));
+        expect(snapshot.blocking_pids).toEqual(expect.any(Array));
+        expect(snapshot.diagnostic_error).toBeUndefined();
+      }
+      expect(sample.before.observer_pid).toBe(sample.after.observer_pid);
       expect(sample.holder_assessment).toContain('failure-time natural holder UNKNOWN');
     });
   } finally {
@@ -371,34 +442,40 @@ it('samples a controlled NOWAIT conflict after failure without treating candidat
   }
 });
 it.each(['unsupported', 'interaction', 'spec', 'other_key', 'bad_key', 'stale_issued', 'shadow_body'] as const)('withholds deterministic authority for %s private content', async changed => {
-  if (changed === 'other_key') f.sql = routeLockDiagnosedSql(f.sql);
-  const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
-  const [attempt] = await f.sql`SELECT a.*,v.teaching_revision_id FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${issued.activity.id}`;
-  const submit = () => createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
-    clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
-  });
-  if (changed === 'spec') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=jsonb_set(evaluation_spec,'{activityId}',to_jsonb(${randomUUID()}::text)) WHERE id=${attempt!.item_version_id}`;
-  if (changed === 'stale_issued') {
-    await expect(f.sql`UPDATE opening_course_reserved_questions SET issued_item_version_id=NULL WHERE course_id=${x.courseId}`).rejects.toMatchObject({ code: '23514' });
-    return;
-  }
-  if (changed === 'bad_key') {
-    await expect(f.sql`UPDATE opening_course_reserved_questions SET key_json=jsonb_set(key_json,'{answer}','"2604"') WHERE course_id=${x.courseId}`).rejects.toThrow('reserved question content is immutable');
-    return;
-  }
-  if (changed === 'other_key') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=evaluation_spec||'{"id":"caller-chosen-key","itemVersionId":"caller-chosen-item"}'::jsonb WHERE id=${attempt!.item_version_id}`;
-  if (changed === 'unsupported') {
-    await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,'{0,content,text}','"137^19"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
-    return;
-  }
-  if (changed === 'interaction' || changed === 'shadow_body') {
-    const path = changed === 'interaction' ? '{0,content,interaction}' : '{0,content,figure}';
-    await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,${path}::text[],'"untrusted"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
-    return;
-  }
-  const result = await submit();
-  expect(result.outcome).toBe('unverified');
-  expect(result.verdictSource).not.toBe('deterministic');
+  const check = async (phase = (_name: string) => {}) => {
+    const x = await setup(undefined, phase);
+    phase('start.reserved-issuance');
+    const issued = ready(await x.service.start(f.scope, x.courseId, x.input));
+    phase('private-content.mutation-and-submit');
+    const [attempt] = await f.sql`SELECT a.*,v.teaching_revision_id FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id WHERE a.activity_id=${issued.activity.id}`;
+    const submit = () => createOpeningAttemptService(f.sql).submit(f.scope, String(attempt!.id), {
+      clientKey: randomUUID(), answer: '2603', outcome: 'unverified', assistance: 'independent', verdictSource: 'self_report',
+    });
+    if (changed === 'spec') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=jsonb_set(evaluation_spec,'{activityId}',to_jsonb(${randomUUID()}::text)) WHERE id=${attempt!.item_version_id}`;
+    if (changed === 'stale_issued') {
+      await expect(f.sql`UPDATE opening_course_reserved_questions SET issued_item_version_id=NULL WHERE course_id=${x.courseId}`).rejects.toMatchObject({ code: '23514' });
+      return;
+    }
+    if (changed === 'bad_key') {
+      await expect(f.sql`UPDATE opening_course_reserved_questions SET key_json=jsonb_set(key_json,'{answer}','"2604"') WHERE course_id=${x.courseId}`).rejects.toThrow('reserved question content is immutable');
+      return;
+    }
+    if (changed === 'other_key') await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=evaluation_spec||'{"id":"caller-chosen-key","itemVersionId":"caller-chosen-item"}'::jsonb WHERE id=${attempt!.item_version_id}`;
+    if (changed === 'unsupported') {
+      await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,'{0,content,text}','"137^19"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
+      return;
+    }
+    if (changed === 'interaction' || changed === 'shadow_body') {
+      const path = changed === 'interaction' ? '{0,content,interaction}' : '{0,content,figure}';
+      await expect(f.sql`UPDATE library_revisions SET blocks=jsonb_set(blocks,${path}::text[],'"untrusted"') WHERE id=${attempt!.teaching_revision_id}`).rejects.toThrow('library_revisions is append-only');
+      return;
+    }
+    const result = await submit();
+    expect(result.outcome).toBe('unverified');
+    expect(result.verdictSource).not.toBe('deterministic');
+  };
+  if (changed === 'other_key') await withRouteLockDiagnostics('other-key', check);
+  else await check();
 });
 it('replays one verdict without jobs or budget changes and never upgrades a later submission to independent', async () => {
   const x = await setup(), issued = ready(await x.service.start(f.scope, x.courseId, x.input));
