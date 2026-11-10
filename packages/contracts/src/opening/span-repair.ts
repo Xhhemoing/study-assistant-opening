@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { uuidSchema } from "./foundation";
+import { courseRequirementBindingSchema } from "./learning-attempts";
 
 export const spanRepairTargetSchema = z.enum(["equation", "coefficients", "allCoordinates"]);
 export type SpanRepairTarget = z.infer<typeof spanRepairTargetSchema>;
@@ -13,6 +14,38 @@ export const spanRepairEvidenceSchema = z.object({
 export type SpanRepairEvidence = z.infer<typeof spanRepairEvidenceSchema>;
 const itemSchema = z.object({ problemId: z.string().min(1).max(100), version: z.string().min(1).max(30) }).strict();
 const prerequisiteSchema = z.object({ status: z.literal("unknown"), reasonCode: z.literal("prerequisite_binding_missing") }).strict();
+
+/** Exact server-owned course identity, never a title, label or model attribution. */
+export const spanRepairRequirementIdentitySchema = courseRequirementBindingSchema;
+export type SpanRepairRequirementIdentity = z.infer<typeof spanRepairRequirementIdentitySchema>;
+export const spanPrerequisiteReasonSchema = z.enum([
+  "prerequisite_binding_missing", "requirement_changed", "relation_unconfirmed", "source_unavailable",
+  "prerequisite_evidence_missing", "prerequisite_evidence_changed", "prerequisite_identity_mismatch",
+  "prerequisite_content_unavailable", "prerequisite_verification_mismatch", "prerequisite_not_verified_weak",
+]);
+export type SpanPrerequisiteReason = z.infer<typeof spanPrerequisiteReasonSchema>;
+/** Qualification only, NOT an executable plan or permission to issue/route content.
+ * A v1 plans intentionally keep their original strict unknown prerequisite shape.
+ */
+export const spanPrerequisiteQualificationSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unknown"), reasonCode: spanPrerequisiteReasonSchema }).strict(),
+  z.object({ status: z.literal("needs_clarification"), reasonCode: spanPrerequisiteReasonSchema }).strict(),
+  z.object({ status: z.literal("verified_weak"), courseId: uuidSchema,
+    targetRequirement: spanRepairRequirementIdentitySchema,
+    prerequisiteRequirement: spanRepairRequirementIdentitySchema,
+    relationSource: z.literal("confirmed_course_requirement"),
+    returnToRequirementId: uuidSchema, basis: spanRepairEvidenceSchema,
+    evaluatedContent: itemSchema,
+  }).strict(),
+]).superRefine((value, ctx) => {
+  if (value.status !== "verified_weak") return;
+  if (value.returnToRequirementId !== value.targetRequirement.id)
+    ctx.addIssue({ code: "custom", path: ["returnToRequirementId"], message: "Return to the original target requirement" });
+  if (value.prerequisiteRequirement.id === value.targetRequirement.id
+    || value.prerequisiteRequirement.stableSkillId === value.targetRequirement.stableSkillId)
+    ctx.addIssue({ code: "custom", path: ["prerequisiteRequirement"], message: "A prerequisite must be a distinct requirement and skill" });
+});
+export type SpanPrerequisiteQualification = z.infer<typeof spanPrerequisiteQualificationSchema>;
 export const spanRepairClarificationReasonSchema = z.enum([
   "evidence_unavailable", "verification_mismatch", "predecessor_unobserved", "ambiguous_branch",
   "unsupported_target", "no_verified_error", "teaching_unavailable", "unknown_history",
