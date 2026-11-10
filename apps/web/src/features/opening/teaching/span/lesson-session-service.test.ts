@@ -3,7 +3,7 @@ import type { LearningAttempt, Scope, SpanLessonSnapshot } from "@aistudy/contra
 import type { Sql } from "postgres";
 import { getSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { learningObservation } from "../../../../../../../packages/domain/src/opening/learning-summary-fixtures";
-const mocks = vi.hoisted(() => ({ courseBinding: vi.fn(), decisions: vi.fn(), getAttempt: vi.fn(), repair: vi.fn(), get: vi.fn(), agendaGet: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn(), originChange: vi.fn() }));
+const mocks = vi.hoisted(() => ({ prerequisite: vi.fn(), courseBinding: vi.fn(), decisions: vi.fn(), getAttempt: vi.fn(), repair: vi.fn(), get: vi.fn(), agendaGet: vi.fn(), matchesRetestReference: vi.fn(), latest: vi.fn(), create: vi.fn(), save: vi.fn(), deliveredHintLevels: vi.fn(), listByActivity: vi.fn(), heads: vi.fn(), listDeliveredExposures: vi.fn(), intent: vi.fn(), originChange: vi.fn() }));
 vi.mock("@aistudy/database", async original => ({
   spanTutorReceiptDecision: (await original<typeof import("@aistudy/database")>()).spanTutorReceiptDecision,
   createOpeningLearningDecisionsRepository: () => ({ list: mocks.decisions }),
@@ -15,6 +15,7 @@ vi.mock("@aistudy/database", async original => ({
   createOpeningStudyIntentRepository: () => ({ latest: mocks.intent }),
   readOpeningSpanTutorOriginChange: mocks.originChange,
   readOpeningSpanRepair: mocks.repair,
+  readOpeningSpanPrerequisiteRepair: mocks.prerequisite,
   readOpeningSpanCourseBinding: mocks.courseBinding,
 }));
 import { createSpanLessonSessionService } from "./lesson-session-service";
@@ -25,7 +26,7 @@ const id = "11111111-1111-4111-8111-111111111111", other = "22222222-2222-4222-8
 const scope: Scope = { workspaceId: id, ownerUserId: id };
 const session: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [id], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-independent", status: "paused", revision: 4, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const attempt: LearningAttempt = { id, workspaceId: id, sessionId: id, courseId: id, skillLabel: "span", requirementKey: null, historyRevision: 0, sourceIds: [id], sourceVersions: { [id]: 1 }, problemId: id, itemVersionId: id, spanExercise: getSpanProblem("span-independent-3d")!, startedAt: session.createdAt, submittedAt: null, observationId: null };
-beforeEach(() => { vi.clearAllMocks(); mocks.courseBinding.mockResolvedValue(null); mocks.repair.mockResolvedValue(null); taskReads.listTasks.mockResolvedValue([]); mocks.decisions.mockResolvedValue([]); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.agendaGet.mockResolvedValue(null); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
+beforeEach(() => { vi.clearAllMocks(); mocks.prerequisite.mockResolvedValue(null); mocks.courseBinding.mockResolvedValue(null); mocks.repair.mockResolvedValue(null); taskReads.listTasks.mockResolvedValue([]); mocks.decisions.mockResolvedValue([]); mocks.matchesRetestReference.mockResolvedValue(false); mocks.get.mockResolvedValue(session); mocks.agendaGet.mockResolvedValue(null); mocks.latest.mockResolvedValue(session); mocks.listByActivity.mockResolvedValue([]); mocks.heads.mockResolvedValue([]); mocks.deliveredHintLevels.mockResolvedValue({}); mocks.listDeliveredExposures.mockResolvedValue([]); mocks.intent.mockResolvedValue(null); mocks.originChange.mockResolvedValue(undefined); });
 const service = () => createSpanLessonSessionService({} as Sql);
 function targetedOrigin() {
   const origin = { ...learningObservation, sessionId: other, courseId: id, attemptId: id, problemId: id, itemVersionId: id,
@@ -41,6 +42,21 @@ function targetedOrigin() {
     intentVersion: JSON.stringify({ ruleDecision: { activityKind: "targeted_explain", focusObservationId: origin.id }, sourceRefs: [{ sourceId: id, sourceVersion: 1 }] }) }]);
   return origin;
 }
+it("retains actual history and typed execution refusal for saved B drift without generic repair fallback", async () => {
+  mocks.prerequisite.mockRejectedValueOnce(Object.assign(new Error("relation changed"), {
+    code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_RELATION_CHANGED" }));
+  mocks.listByActivity.mockResolvedValue([attempt]);
+  const details = await service().read(scope, id, id);
+  expect(details).toMatchObject({ executionUnavailable: { reasonCode: "SPAN_PREREQUISITE_RELATION_CHANGED" },
+    originChange: { reason: "evidence_changed" }, attempts: [attempt] });
+  expect(details).not.toHaveProperty("repair"); expect(details).not.toHaveProperty("prerequisiteRepair");
+  expect(mocks.repair).not.toHaveBeenCalled(); expect(mocks.save).not.toHaveBeenCalled();
+});
+it("does not turn B dependency or NOWAIT failure into successful read-only fallback", async () => {
+  const error = Object.assign(new Error("lock unavailable"), { code: "55P03" });
+  mocks.prerequisite.mockRejectedValueOnce(error);
+  await expect(service().read(scope, id, id)).rejects.toBe(error);
+});
 it("returns superseded plan history without trying to qualify obsolete runnable repair content", async () => {
   mocks.originChange.mockResolvedValue({ reason: "evidence_changed", originSession: session, observationId: null });
   mocks.repair.mockRejectedValue(new Error("obsolete basis must not be rendered"));

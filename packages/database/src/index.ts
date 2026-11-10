@@ -306,6 +306,7 @@ export * from "./repositories/opening-today-courses";
 
 export * from "./repositories/opening-span-session";
 export * from "./repositories/opening-span-repair";
+export { readOpeningSpanPrerequisiteRepair } from "./repositories/opening-span-prerequisite-runtime";
 
 export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
 export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";

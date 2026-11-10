@@ -257,6 +257,8 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         if (unchanged) return current;
         if (current.status === "completed") throw learningError("CONFLICT", "已结束的学习保留为小结，请开始新会话。");
         if (Object.hasOwn((row.goal_json ?? {}) as object, "spanCourseBinding")
+          || Object.hasOwn((row.goal_json ?? {}) as object, "spanPrerequisiteRepair")
+          || Object.hasOwn((row.create_intent ?? {}) as object, "prerequisiteRequest")
           || Object.hasOwn((row.create_intent ?? {}) as object, "courseSpanRequest")) {
           const pause = input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
           if (!pause) {
@@ -269,6 +271,8 @@ export function createOpeningSpanSessionRepository(sql: Sql) {
         await assertOpeningSpanRepairTransition(tx, scope, current, input);
         const preservingRepairPause = (Object.hasOwn((row.goal_json ?? {}) as object, "spanRepair")
           || Object.hasOwn((row.goal_json ?? {}) as object, "spanCourseBinding")
+          || Object.hasOwn((row.goal_json ?? {}) as object, "spanPrerequisiteRepair")
+          || Object.hasOwn((row.create_intent ?? {}) as object, "prerequisiteRequest")
           || Object.hasOwn((row.create_intent ?? {}) as object, "courseSpanRequest"))
           && input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent);
         if (!preservingRepairPause) await admitCourseSources(tx, scope, current.courseId, current.sourceIds);

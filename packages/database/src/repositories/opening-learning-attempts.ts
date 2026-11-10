@@ -1,6 +1,6 @@
 import { readTeachingQuestionForAttempt } from "./opening-teaching-question";
 import { readOpeningSpanCourseBinding, readOpeningSpanCourseAttempt } from "./opening-span-course-binding";
-import { assertOpeningSpanRepairAttempt, readOpeningSpanRepair, isOpeningSpanRepairAttemptKey, inheritOpeningSpanRepairRetryHelp } from "./opening-span-repair";
+import { assertOpeningSpanRepairAttempt, readOpeningSpanStagePlan, isOpeningSpanRepairAttemptKey, inheritOpeningSpanRepairRetryHelp } from "./opening-span-repair";
 import { readOpeningReservedIssuedItem, unconfirmedReservedRetestQualification } from "./opening-course-reserved-selection";
 import { getSpanTeachingProblem, listSpanWorkedProblems, getSpanReservedProblem, getSpanItemIdentity, spanProblemContentKey } from "@aistudy/domain/span-heldout-catalog";
 import { parseOpeningSpanExercise, parseOpeningSpanIntent, readOpeningSpanExposureHistory } from "./opening-span-attempt";
@@ -95,7 +95,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
   const intent = { sessionId: input.sessionId, problemId: input.problemId ?? null, problem: input.problem ?? null, requirementKey,
     ...(input.teachingBlock ? { teachingBlock: input.teachingBlock } : {}), ...(input.matrixExercise ? { matrixExercise: input.matrixExercise } : {}),
     ...(input.spanExercise ? { spanExercise: input.spanExercise } : {}), ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}) };
-  const repair = session.activity_id ? await readOpeningSpanRepair(tx, scope, String(session.activity_id)) : null;
+  const repair = session.activity_id ? await readOpeningSpanStagePlan(tx, scope, String(session.activity_id)) : null;
   if (repair && !isOpeningSpanRepairAttemptKey(String(session.activity_id), input.clientKey)) {
     throw learningError("CONFLICT", "本活动只接受服务端绑定的本题步骤题目请求。");
   }
@@ -112,7 +112,7 @@ export async function createOpeningLearningAttemptInTx(tx: TransactionSql, scope
     return { ...mapLearningAttempt(replay[0]), ...(trusted ? { courseRequirement: trusted.binding.requirement } : {}) };
   }
   if (repair) {
-    const prefix = `span-repair:${String(session.activity_id)}:v1:variant:retry:`;
+    const prefix = `${"courseBinding" in repair ? "span-prerequisite" : "span-repair"}:${String(session.activity_id)}:v1:variant:retry:`;
     if (input.clientKey.startsWith(prefix) && input.clientKey !== `${prefix}${issued?.spanRepairRetryParentId}`) {
       throw learningError("CONFLICT", "同题重答只能由当前版本的阶段发题入口授权，不能通过普通作答入口创建。");
     }
@@ -346,7 +346,7 @@ export function createOpeningLearningAttemptRepository(sql: Sql) {
         let trusted: Awaited<ReturnType<typeof readOpeningSpanCourseAttempt>> = null;
         try { trusted = await readOpeningSpanCourseAttempt(sql, scope, r); }
         catch (error) {
-          if ((error as {reasonCode?:string}).reasonCode !== "SPAN_COURSE_BINDING_CHANGED") throw error;
+          if (!/^SPAN_(?:COURSE_BINDING_CHANGED|PREREQUISITE_(?:RELATION_CHANGED|EVIDENCE_CHANGED|SOURCE_UNAVAILABLE|CONTENT_UNSUPPORTED|PLAN_UNSUPPORTED|RECEIPT_MISMATCH))$/.test((error as {reasonCode?:string}).reasonCode ?? "")) throw error;
           // List is historical: preserve original questions without projecting current authority.
         }
         return {
