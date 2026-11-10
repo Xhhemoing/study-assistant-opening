@@ -38,6 +38,15 @@ export const explicitRegradeRequestSchema = z.object({
   resultObservationId: uuidSchema.nullable(),
 }).strict();
 
+/** Version-scoped status: historical fee uncertainty never substitutes for this ledger. */
+export const explicitRegradeStatusSchema = z.object({
+  request: explicitRegradeRequestSchema,
+  ledger: z.enum(["unsent", "in_flight", "unknown", "completed", "blocked"]),
+  jobState: z.enum(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"]).nullable(),
+  status: z.enum(["prepared", "pending_enqueue", "queued", "grading", "graded", "needs_manual", "unknown_cost"]),
+}).strict();
+export type ExplicitRegradeStatus = z.infer<typeof explicitRegradeStatusSchema>;
+
 export type ExplicitRegradePrepare = z.infer<typeof explicitRegradePrepareSchema>;
 export type ExplicitRegradeConfirm = z.infer<typeof explicitRegradeConfirmSchema>;
 export type ExplicitRegradeRequest = z.infer<typeof explicitRegradeRequestSchema>;

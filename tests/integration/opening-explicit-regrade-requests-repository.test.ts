@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { EXPLICIT_REGRADE_CONFIRMATION_TEXT, type ExplicitRegradeRequest } from "@aistudy/contracts";
 import { createOpeningAiGradingJobRepository, createOpeningAiGradingRepository, createOpeningExplicitRegradeRequestRepository,
-  createOpeningJobRepository, openingJobScope, reviseOpeningLearningObservation } from "@aistudy/database";
+  createOpeningBudgetRepository, createOpeningJobRepository, openingJobScope, reviseOpeningLearningObservation } from "@aistudy/database";
 import { createOpeningAiGradingService } from "../../packages/ai/src/opening/ai-grading-service";
+import { createModelGateway } from "../../packages/ai/src/opening/model-gateway";
+import { createGradeObservationHandler } from "../../apps/worker/src/jobs/grade-observation";
+import { runJob } from "../../apps/worker/src/runtime/run-job";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
@@ -38,7 +41,7 @@ async function unknown(photo = false) {
 }
 async function fees() { return [...await fixture.sql`SELECT * FROM opening_budget_reservations ORDER BY request_id`]; }
 
-it("persists server-owned identity and replays preparation/confirmation without jobs, fees or answer changes", async () => {
+it("prepares without jobs or fees and confirms one durable job/outbox without answer or fee changes", async () => {
   const { original, operation, prepare } = await unknown(), before = await fees();
   const [first, replay] = await Promise.all([requests().prepare(fixture.scope, prepare), requests().prepare(fixture.scope, prepare)]);
   expect(replay).toEqual(first);
@@ -53,8 +56,11 @@ it("persists server-owned identity and replays preparation/confirmation without 
   expect(confirmed.state).toBe("confirmed"); expect(confirmed.confirmedAt).not.toBeNull(); expect(repeated).toEqual(confirmed);
   expect(await requests().prepare(fixture.scope, prepare)).toEqual(confirmed);
   expect(await fees()).toEqual(before);
-  expect([...await fixture.sql`SELECT * FROM opening_jobs ORDER BY id`]).toEqual(jobs);
-  expect([...await fixture.sql`SELECT * FROM opening_outbox ORDER BY id`]).toEqual(outbox);
+  expect(await fixture.sql`SELECT id FROM opening_jobs`).toHaveLength(jobs.length + 1);
+  expect(await fixture.sql`SELECT id FROM opening_outbox`).toHaveLength(outbox.length + 1);
+  expect(confirmed.jobId).not.toBeNull();
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE key=${confirmed.operationId}`).toHaveLength(1);
+  expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${confirmed.jobId}`).toHaveLength(1);
   expect([...await fixture.sql`SELECT * FROM opening_learning_observations ORDER BY id`]).toEqual(observations);
 });
 
@@ -201,4 +207,188 @@ it("keeps the legacy unknown API closed and fences late evaluation but allows ol
   expect((await fixture.sql`SELECT state FROM opening_budget_reservations WHERE request_id=${operation}`)[0]?.state).toBe("completed");
   expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE revises_observation_id=${original.id}`).toHaveLength(0);
   expect((await fixture.sql`SELECT effective_head_id FROM opening_learning_observations WHERE id=${original.id}`)[0]?.effective_head_id ?? original.id).toBe(original.id);
+});
+
+
+it("recovers a stage-one confirmed-without-job row via the actual sweep, once across concurrent recoverers", async () => {
+  const { prepare } = await unknown(), before = await fees();
+  const prepared = await requests().prepare(fixture.scope, prepare);
+  // This is the exact durable state produced by the frozen stage-one implementation.
+  await fixture.sql`UPDATE opening_explicit_regrade_requests SET confirmed_at=now() WHERE id=${prepared.requestId}`;
+  expect((await requests().read(fixture.scope, prepared.requestId)).request.jobId).toBeNull();
+  const counts = await Promise.all([requests().recoverConfirmed(), requests().recoverConfirmed()]);
+  expect(counts.reduce((a,b) => a+b,0)).toBe(1);
+  const status = await requests().read(fixture.scope, prepared.requestId);
+  expect(status).toMatchObject({ request: { gradingVersion: 1, operationId: prepared.operationId }, ledger: "unsent", jobState: "queued" });
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE key=${prepared.operationId}`).toHaveLength(1);
+  expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${status.request.jobId}`).toHaveLength(1);
+  expect(await requests().confirm(fixture.scope, consent(prepared))).toEqual(status.request);
+  expect(await fees()).toEqual(before);
+});
+
+it.each([false, true])("runs the confirmed version through real PG budget/gateway/worker once (photo=%s), preserving old unknown fees", async photo => {
+  const { prepare, original, workSource } = await unknown(photo), before = await fees();
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL`;
+  const prepared = await requests().prepare(fixture.scope, prepare);
+  const confirmed = await requests().confirm(fixture.scope, consent(prepared));
+  expect(await fees()).toEqual(before);
+  const queue = createOpeningJobRepository(fixture.sql), repository = createOpeningAiGradingRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const complete = vi.fn(async () => ({ text: JSON.stringify({ outcome: "correct", confidence: .95, questionMatch: true,
+    feedback: "synthetic", criteria: [{ label: "sum", verdict: "correct", feedback: "checked" }] }),
+    inputTokens: 10, outputTokens: 10, citedChunkIds: [], requestId: null, candidates: [] }));
+  const gateway = createModelGateway({ resolve: async () => ({ provider: { complete },
+    modelSnapshot: { id: "synthetic", providerId: "fixture", modelName: "synthetic", inputCentsPerMillion: 100, outputCentsPerMillion: 100,
+      ...(photo ? { mediaInputTokenUpperBound: 10000, mediaMaxInputBytes: 1000000, mediaInputCentsPerMillion: 100 } : {}) },
+    inputCentsPerMillion: 100, outputCentsPerMillion: 100, supportsVision: true }) });
+  const handler = createGradeObservationHandler({ repository, gateway, budget: scope => ({
+    reserve: input => budget.reserve(scope, input), release: (...args) => budget.release(scope, ...args),
+    claimExecution: id => budget.claimExecution(scope, id), settle: (...args) => budget.settle(scope, ...args),
+    markUnknown: id => budget.markUnknown(scope, id),
+  }), images: async (_scope, input) => [{ sourceId: input.sourceIds[0]!, physicalPage: input.physicalPage,
+    mediaType: "image/png", data: "data:image/png;base64,AA==" }] });
+  expect(await runJob(queue, confirmed.jobId!, handler)).toBe(true);
+  const job = await queue.get(fixture.scope, confirmed.jobId!);
+  expect(job.state, JSON.stringify(job.result)).toBe("succeeded");
+  expect(await runJob(queue, confirmed.jobId!, handler)).toBe(false);
+  expect(complete).toHaveBeenCalledTimes(1);
+  const status = await requests().read(fixture.scope, prepared.requestId);
+  expect(status).toMatchObject({ ledger: "completed", jobState: "succeeded", request: { gradingVersion: 1 } });
+  expect(status.request.resultObservationId).not.toBeNull();
+  const [head] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${status.request.resultObservationId}`;
+  expect(head).toMatchObject({ answer: original.answer, answer_revision: 1, grading_operation_id: prepared.operationId,
+    client_key: prepared.operationId, grading_work_source: workSource });
+  expect(await requests().confirm(fixture.scope, consent(prepared))).toEqual(status.request);
+  expect(await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id!=${prepared.operationId} ORDER BY request_id`).toEqual(before);
+  expect(await fixture.sql`SELECT id FROM opening_budget_reservations WHERE request_id=${prepared.operationId}`).toHaveLength(1);
+});
+
+it.each(["epoch", "head", "photo", "payload", "cancel"] as const)("rejects stale confirmed %s before any reserve", async change => {
+  const { prepare, original, workSource } = await unknown(true), before = await fees();
+  const prepared = await requests().prepare(fixture.scope, prepare), confirmed = await requests().confirm(fixture.scope, consent(prepared));
+  const queue = createOpeningJobRepository(fixture.sql), job = (await queue.claim(confirmed.jobId!))!;
+  if (change === "epoch") await fixture.sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${fixture.scope.workspaceId}`;
+  if (change === "head") await reviseOpeningLearningObservation(fixture.sql, fixture.scope, { rootObservationId: original.id,
+    revisesObservationId: original.id, expectedHead: original.id, revisionKind: "replace", reason: "manual",
+    clientKey: randomUUID(), replacement: { answer: "changed", outcome: "unverified", assistance: original.assistance } });
+  if (change === "photo") await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${workSource!.id}`;
+  if (change === "payload") await fixture.sql`UPDATE opening_jobs SET payload=jsonb_set(payload,'{regrade,operationId}','"invented"') WHERE id=${job.id}`;
+  if (change === "cancel") await queue.cancel(fixture.scope, job.id);
+  const reserve = vi.fn(), call = vi.fn();
+  const handler = createGradeObservationHandler({ repository: createOpeningAiGradingRepository(fixture.sql),
+    gateway: { call }, budget: () => ({ reserve } as never), images: async () => [] });
+  await expect(handler(job, job.payload)).rejects.toThrow();
+  expect(reserve).not.toHaveBeenCalled(); expect(call).not.toHaveBeenCalled(); expect(await fees()).toEqual(before);
+});
+
+
+it("keeps a new unknown operation unretried/unreleased, inherits exactly one next version and fences both late predecessors", async () => {
+  const { prepare, original } = await unknown();
+  const first = await requests().confirm(fixture.scope, consent(await requests().prepare(fixture.scope, prepare)));
+  const queue = createOpeningJobRepository(fixture.sql), jobs = createOpeningAiGradingJobRepository(fixture.sql);
+  const claimed = (await queue.claim(first.jobId!))!, grades = createOpeningAiGradingRepository(fixture.sql);
+  const scope = openingJobScope(claimed);
+  expect((await grades.context(scope, { observationId: original.id })).operationId).toBe(first.operationId);
+  await fixture.sql`INSERT INTO opening_budget_reservations(workspace_id,purpose,amount_cents,request_id,state,execution_claimed_at,outcome_unknown_at)
+    VALUES(${fixture.scope.workspaceId},'grading',1,${first.operationId},'reserved',now(),now())`;
+  const before = await fees();
+  await fixture.sql`UPDATE opening_jobs SET updated_at=now()-interval '6 minutes' WHERE id=${first.jobId}`;
+  await jobs.recoverExpired();
+  expect(await requests().read(fixture.scope, first.requestId)).toMatchObject({ ledger: "unknown", status: "unknown_cost", jobState: "outcome_unknown" });
+  expect(await requests().confirm(fixture.scope, consent(first))).toMatchObject({ jobId: first.jobId });
+  expect(await requests().recoverConfirmed()).toBe(0);
+  expect(await queue.claim(first.jobId!)).toBeNull();
+  expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${first.jobId}`).toHaveLength(1);
+  const tabs = await Promise.all([1,2].map(() => requests().prepare(fixture.scope, {
+    ...prepare, expectedGradingVersion: 1, clientKey: randomUUID(),
+  })));
+  const outcomes = await Promise.allSettled(tabs.map(tab => requests().confirm(fixture.scope, consent(tab))));
+  expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
+  const next = (outcomes.find(item => item.status === "fulfilled") as PromiseFulfilledResult<ExplicitRegradeRequest>).value;
+  expect(next).toMatchObject({ gradingVersion: 2, previousOperationId: first.operationId });
+  expect((await requests().read(fixture.scope, next.requestId))).toMatchObject({ ledger: "unsent", status: "queued" });
+  await expect(requests().confirm(fixture.scope, consent(first))).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(grades.context(scope, { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(grades.context(fixture.scope, { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await fees()).toEqual(before);
+  await expect(requests().read(fixture.otherScope, next.requestId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+});
+
+it("rolls confirmation back when its persistent job identity conflicts", async () => {
+  const { prepare } = await unknown(), prepared = await requests().prepare(fixture.scope, prepare), before = await fees();
+  await createOpeningJobRepository(fixture.sql).createOnce(fixture.scope, { key: prepared.operationId,
+    kind: "grade-observation", payload: { invalid: true }, privacyEpoch: prepared.privacyEpoch });
+  await expect(requests().confirm(fixture.scope, consent(prepared))).rejects.toMatchObject({ code: "CONFLICT" });
+  const status = await requests().read(fixture.scope, prepared.requestId);
+  expect(status).toMatchObject({ status: "prepared", request: { confirmedAt: null, jobId: null } });
+  expect(await fixture.sql`SELECT o.id FROM opening_outbox o JOIN opening_jobs j ON j.id=o.job_id WHERE j.key=${prepared.operationId}`).toHaveLength(0);
+  expect(await fees()).toEqual(before);
+});
+
+it("fences an otherwise-live earlier regrade claim when a successor is confirmed, independently of settlement", async () => {
+  const { prepare, original } = await unknown();
+  const first = await requests().confirm(fixture.scope, consent(await requests().prepare(fixture.scope, prepare)));
+  const queue = createOpeningJobRepository(fixture.sql), claimed = (await queue.claim(first.jobId!))!;
+  const scope = openingJobScope(claimed), grades = createOpeningAiGradingRepository(fixture.sql);
+  await grades.context(scope, { observationId: original.id });
+  await fixture.sql`INSERT INTO opening_budget_reservations(workspace_id,purpose,amount_cents,request_id,state,execution_claimed_at,outcome_unknown_at)
+    VALUES(${fixture.scope.workspaceId},'grading',1,${first.operationId},'reserved',now(),now())`;
+  const second = await requests().prepare(fixture.scope, { ...prepare, expectedGradingVersion: 1, clientKey: randomUUID() });
+  await requests().confirm(fixture.scope, consent(second));
+  expect((await queue.get(fixture.scope, first.jobId!)).state).toBe("running");
+  await expect(grades.apply(scope, { observationId: original.id }, { outcome: "correct", confidence: .95,
+    questionMatch: true, feedback: "late", criteria: [{ label: "sum", verdict: "correct", feedback: "late" }] }, "synthetic"))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  await fixture.sql`UPDATE opening_budget_reservations SET state='completed',outcome_unknown_at=NULL WHERE request_id=${first.operationId}`;
+  expect((await requests().read(fixture.scope, first.requestId)).ledger).toBe("completed");
+  expect((await requests().read(fixture.scope, second.requestId)).ledger).toBe("unsent");
+  expect(await fixture.sql`SELECT id FROM opening_learning_observations WHERE revises_observation_id=${original.id}`).toHaveLength(0);
+});
+
+it("honors the existing budget cap after consent without a provider call or touching historical fees", async () => {
+  const { prepare } = await unknown(), confirmed = await requests().confirm(fixture.scope, consent(await requests().prepare(fixture.scope, prepare)));
+  await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL`;
+  const before = await fees(), queue = createOpeningJobRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 1 });
+  const complete = vi.fn();
+  const gateway = createModelGateway({ resolve: async () => ({ provider: { complete },
+    modelSnapshot: { id: "synthetic", providerId: "fixture", modelName: "synthetic", inputCentsPerMillion: 1000000, outputCentsPerMillion: 1000000 },
+    inputCentsPerMillion: 1000000, outputCentsPerMillion: 1000000 }) });
+  const handler = createGradeObservationHandler({ repository: createOpeningAiGradingRepository(fixture.sql), gateway,
+    budget: scope => ({ reserve: input => budget.reserve(scope, input), release: (...args) => budget.release(scope, ...args),
+      claimExecution: id => budget.claimExecution(scope, id), settle: (...args) => budget.settle(scope, ...args),
+      markUnknown: id => budget.markUnknown(scope, id) }), images: async () => [] });
+  await runJob(queue, confirmed.jobId!, handler);
+  expect((await queue.get(fixture.scope, confirmed.jobId!)).state).toBe("failed");
+  expect(complete).not.toHaveBeenCalled(); expect(await fees()).toEqual(before);
+  expect(await requests().read(fixture.scope, confirmed.requestId)).toMatchObject({ ledger: "unsent", status: "needs_manual" });
+});
+
+it("retries transport delivery of the same confirmed job without another consent, job or reserve", async () => {
+  const { prepare } = await unknown(), confirmed = await requests().confirm(fixture.scope, consent(await requests().prepare(fixture.scope, prepare)));
+  const before = await fees(), queue = createOpeningJobRepository(fixture.sql);
+  await queue.dispatchPending(async item => { if (item.jobId === confirmed.jobId) throw new Error("synthetic transport interruption"); });
+  expect((await queue.get(fixture.scope, confirmed.jobId!)).state).toBe("queued");
+  await fixture.sql`UPDATE opening_outbox SET next_attempt_at=now() WHERE job_id=${confirmed.jobId}`;
+  const delivered: string[] = [];
+  await queue.dispatchPending(async item => { delivered.push(item.jobId); });
+  expect(delivered).toContain(confirmed.jobId);
+  expect(await fixture.sql`SELECT id FROM opening_outbox WHERE job_id=${confirmed.jobId} AND state='published'`).toHaveLength(1);
+  expect(await fixture.sql`SELECT id FROM opening_jobs WHERE key=${confirmed.operationId}`).toHaveLength(1);
+  expect(await fees()).toEqual(before);
+});
+
+it("recovers only the new unsent job before reserve and retains its operation with a fresh claim", async () => {
+  const { prepare, original } = await unknown(), before = await fees();
+  const confirmed = await requests().confirm(fixture.scope, consent(await requests().prepare(fixture.scope, prepare)));
+  const queue = createOpeningJobRepository(fixture.sql), jobs = createOpeningAiGradingJobRepository(fixture.sql);
+  const first = (await queue.claim(confirmed.jobId!))!;
+  await fixture.sql`UPDATE opening_jobs SET updated_at=now()-interval '6 minutes' WHERE id=${first.id}`;
+  await jobs.recoverExpired();
+  const next = (await queue.claim(first.id))!;
+  expect(next.claimToken).not.toBe(first.claimToken);
+  const grades = createOpeningAiGradingRepository(fixture.sql);
+  await expect(grades.context(openingJobScope(first), { observationId: original.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await grades.context(openingJobScope(next), { observationId: original.id })).operationId).toBe(confirmed.operationId);
+  expect(await fees()).toEqual(before);
 });
