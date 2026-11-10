@@ -43,16 +43,30 @@ for (const name of ['chromium', 'chromium-headless-shell', 'ffmpeg']) {
     // require a readable executable ELF with neither interpreter nor dependencies.
     require('node:fs').accessSync(executable, require('node:fs').constants.X_OK);
     const inspect = flags => {
-      const elf = spawnSync('readelf', [flags, executable], { encoding: 'utf8' });
+      const elf = spawnSync('readelf', [flags, executable], {
+        encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' },
+      });
       assert.ifError(elf.error);
       assert.equal(elf.status, 0, `ELF inspection failed for ${name}`);
-      return elf.stdout || '';
+      assert.equal(elf.stderr || '', '', `ELF inspection diagnostic for ${name}`);
+      assert.ok(elf.stdout?.trim(), `Empty ELF inspection for ${name}`);
+      return elf.stdout;
     };
     const header = inspect('-h');
     assert.match(header, /ELF Header:/);
     assert.match(header, /Type:\s+(EXEC|DYN)\b/);
-    assert.doesNotMatch(inspect('-l'), /\bINTERP\b/);
-    assert.doesNotMatch(inspect('-d'), /\(NEEDED\)/);
+    const program = inspect('-l');
+    assert.match(program, /There are [1-9]\d* program headers, starting at offset \d+/);
+    assert.match(program, /Program Headers:\s+Type\s+Offset/);
+    assert.match(program, /^\s*LOAD\s+0x[0-9a-f]+/m);
+    assert.doesNotMatch(program, /\bINTERP\b/);
+    const dynamic = inspect('-d');
+    if (!/^\s*There is no dynamic section in this file\.\s*$/.test(dynamic)) {
+      assert.match(dynamic, /Dynamic section at offset 0x[0-9a-f]+ contains [1-9]\d* entries:/);
+      assert.match(dynamic, /Tag\s+Type\s+Name\/Value/);
+      assert.match(dynamic, /\(NULL\)/);
+    }
+    assert.doesNotMatch(dynamic, /\(NEEDED\)/);
     console.log(`Static ELF verified: ${name}`);
   } else {
     assert.equal(result.status, 0, `ldd failed for ${name}`);

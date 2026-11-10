@@ -51,10 +51,15 @@ if [[ "$FAIL_ON" == static-* && "$1" == */ffmpeg ]]; then echo 'not a dynamic ex
 set -eu
 printf 'readelf:%s\\n' "$1" >> "$CALLS"
 if [[ "$FAIL_ON" == static-inspect-failure ]]; then exit 1; fi
+if [[ "$FAIL_ON" == static-empty-program && "$1" == -l ]]; then exit 0; fi
+if [[ "$FAIL_ON" == static-empty-dynamic && "$1" == -d ]]; then exit 0; fi
+if [[ "$FAIL_ON" == static-incomplete-program && "$1" == -l ]]; then echo 'Program Headers:'; exit 0; fi
+if [[ "$FAIL_ON" == static-incomplete-dynamic && "$1" == -d ]]; then echo 'Dynamic section at offset 0x10 contains 1 entries:'; exit 0; fi
+if [[ "$FAIL_ON" == static-warning && "$1" == -l ]]; then echo 'readelf: Warning: incomplete data' >&2; fi
 case "$1" in
  -h) if [[ "$FAIL_ON" == static-invalid-header ]]; then echo 'not ELF'; else printf 'ELF Header:\\n  Type: EXEC (Executable file)\\n'; fi ;;
- -l) if [[ "$FAIL_ON" == static-interpreter ]]; then echo ' INTERP '; fi ;;
- -d) if [[ "$FAIL_ON" == static-needed ]]; then echo ' (NEEDED) Shared library'; fi ;;
+ -l) printf 'Elf file type is EXEC (Executable file)\\nEntry point 0x1000\\nThere are 2 program headers, starting at offset 64\\n\\nProgram Headers:\\n  Type           Offset             VirtAddr           PhysAddr\\n  LOAD           0x0000000000000000 0x0000000000000000 0x0000000000000000\\n'; if [[ "$FAIL_ON" == static-interpreter ]]; then echo ' INTERP '; fi ;;
+ -d) if [[ "$FAIL_ON" == static-needed ]]; then printf 'Dynamic section at offset 0x10 contains 2 entries:\\n  Tag        Type                         Name/Value\\n 0x0000000000000001 (NEEDED) Shared library\\n 0x0000000000000000 (NULL) 0x0\\n'; elif [[ "$FAIL_ON" == static-valid-dynamic ]]; then printf 'Dynamic section at offset 0x10 contains 1 entries:\\n  Tag        Type                         Name/Value\\n 0x0000000000000000 (NULL) 0x0\\n'; else echo 'There is no dynamic section in this file.'; fi ;;
 esac
 ''',
             }
@@ -138,7 +143,11 @@ exports.registry = {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Static ELF verified: ffmpeg', result.stdout)
         self.assertEqual(calls[-3:], ['readelf:-h', 'readelf:-l', 'readelf:-d'])
-        for failure in ('static-inspect-failure', 'static-invalid-header', 'static-interpreter', 'static-needed'):
+        dynamic_result, _, _ = self.run_installer(failure='static-valid-dynamic')
+        self.assertEqual(dynamic_result.returncode, 0, dynamic_result.stderr)
+        for failure in ('static-inspect-failure', 'static-invalid-header', 'static-interpreter', 'static-needed',
+                        'static-empty-program', 'static-empty-dynamic', 'static-incomplete-program',
+                        'static-incomplete-dynamic', 'static-warning'):
             with self.subTest(failure=failure):
                 result, _, _ = self.run_installer(failure=failure)
                 self.assertNotEqual(result.returncode, 0)
