@@ -1,4 +1,5 @@
 import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
+import { compilerFlagMatrix } from "../../../../tests/fixtures/opening/teaching/compiler-flag-matrix";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus, TeachingPartialHints } from "@aistudy/contracts";
 import { OpeningBudgetError, type OpeningJobRecord } from "@aistudy/database";
@@ -175,6 +176,20 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+
+describe("compiler flag matrix through real worker dependency factory", () => {
+  it.each(compilerFlagMatrix)("matches web semantics: $name", ({ opening, legacy, enabled }) => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", opening);
+    vi.stubEnv("TEACHING_COMPILER_ENABLED", legacy);
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    expect(deps.enabled).toBe(enabled);
+    for (const callback of [deps.callModel, deps.buildProviderInput, deps.buildPublishInput]) {
+      expect(typeof callback).toBe(enabled ? "function" : "undefined");
+    }
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
+  });
 });
 
 const rankHints: TeachingPartialHints = {
