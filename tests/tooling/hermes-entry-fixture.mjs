@@ -22,7 +22,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       .replace('preflightConfiguration(args, command =>', 'const preflightConfiguration = (args, run) => productionPreflight(args, run, { trustedUid: process.geteuid() });\npreflightConfiguration(args, command =>');
     result = spawnSync(process.execPath, ['--input-type=module', '-', ...process.argv.slice(5)], { input: source, stdio: ['pipe', 'inherit', 'inherit'], env: process.env });
   } else {
-    const command = process.argv[2].replace('extract(sys.stdin.buffer, sys.argv[2])', 'extract(sys.stdin.buffer, sys.argv[2], uid=os.geteuid())');
+    const signature = 'def extract(stream, directory, *, uid=0, git_controls=False):';
+    const command = process.argv[2].replace(signature, 'def extract(stream, directory, *, uid=os.geteuid(), git_controls=False):');
+    if (process.argv[2].includes('def extract(stream, directory') && command === process.argv[2]) throw new Error('Fixture extractor object injection did not match reviewed entry');
     result = spawnSync('bash', ['-c', command], { stdio: 'inherit', env: process.env });
   }
   process.exitCode = result.status ?? 1;

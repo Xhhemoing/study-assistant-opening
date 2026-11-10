@@ -37,7 +37,7 @@ REPAIR_ADOPTED=0
 FORWARD_GUARD="$STATE/migration-forward-only"
 managed() {
   local session_target='' exact_target=''
-  if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration ]]; then session_target=$RELEASE; fi
+  if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration || "$ACTION" == complete-postmigration ]]; then session_target=$RELEASE; fi
   case "$1" in activate|success|query-success) exact_target=$(current_target) || return 1;; esac
   HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" HERMES_WORKER_REQUIRED="$WORKER_REQUIRED" HERMES_STATE="$STATE" HERMES_CURRENT="$CURRENT" node "$HERMES_SUPERVISOR_HELPER" request "$1"
 }
@@ -298,7 +298,7 @@ trap 'finish $?' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-case "$ACTION" in deploy|restart|rollback|repair-pre-migration) ;;
+case "$ACTION" in deploy|restart|rollback|repair-pre-migration|complete-postmigration) ;;
   status)
     if [[ -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ]]; then echo 'FORWARD FIX REQUIRED: active migration guard; writer state must be inspected.' >&2; exit 3; fi
     target=$(current_target); validate_target "$target"
@@ -318,6 +318,45 @@ case "$ACTION" in deploy|restart|rollback|repair-pre-migration) ;;
   logs) journalctl -u aistudy-web.service -u aistudy-worker.service -f -n 50 --no-pager; exit ;;
   *) fail 'Unknown remote deployment action.' ;;
 esac
+
+if [[ "$ACTION" == complete-postmigration ]]; then
+  # Independent supervisor admission and exclusive claim have already completed.
+  # Reuse the same extracted signed e5 payload and incident, NEVER migrate/backup.
+  RELEASE=$ARCHIVE
+  ARCHIVE=''
+  TRANSITION="$STATE/releases/20261110T081511-846613"
+  CONTROL_DIR="$(dirname -- "$HERMES_SUPERVISOR_HELPER")"
+  FORWARD_ONLY=1
+  WORKER_REQUIRED=$(cat "$TRANSITION/worker-required")
+  [[ "$WORKER_REQUIRED" == 1 ]] || fail 'Incident requires both writers.'
+  # This helper remains payload-owned e5 bytes already verified in full.
+  WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
+  # New reviewed control helper, not the immutable payload-owned e5 helper.
+  node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  managed prepare || fail 'Completion trusted boundary preparation failed.'
+  printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
+  PYTHONDONTWRITEBYTECODE=1 bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
+    --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
+    --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
+  mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"
+  printf '[Service]\nWorkingDirectory=%s\nEnvironmentFile=%s\nExecStart=\nExecStart=/usr/bin/python3 -I -S -B %s/writer-controls/hermes-trusted-loader.py exec %s aistudy-web.service\n' \
+    "$CURRENT" "$CONFIG" "$STATE" "$STATE" > "$WEB_OVERRIDE"
+  chmod 644 -- "$WEB_OVERRIDE"
+  systemctl daemon-reload
+  cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
+  mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
+  atomic_link "$RELEASE" "$CURRENT"
+  restart_services "$WORKER_REQUIRED" "$RELEASE"
+  health "$WORKER_REQUIRED" "$RELEASE"
+  printf '%s\n' "$RELEASE" > "$TRANSITION/to-target"
+  touch "$TRANSITION/succeeded"
+  atomic_link "$TRANSITION" "$STATE/last-transition"
+  SUCCESS_REQUESTED=1
+  managed success
+  SUCCESS_REQUESTED=0
+  FORWARD_ONLY=0
+  exit
+fi
 
 mkdir -p -- "$STATE"
 chmod 700 -- "$STATE"

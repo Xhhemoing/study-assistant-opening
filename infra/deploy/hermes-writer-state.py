@@ -5,10 +5,13 @@ Release scripts already execute as root: this protocol does not contain hostile
 root release code. No session token is needed for durable boot classification.
 """
 import errno
+import hashlib
+import tarfile
 import json
 import os
 import re
 import subprocess
+import pwd
 from pathlib import Path
 import sys
 import tempfile
@@ -416,6 +419,13 @@ def repair_check(state, current, systemd):
                                                   'repair-adopted', 'succeeded', 'degraded', 'to-target')]]:
         if present(path):
             raise ValueError('Incident crossed a boundary or adoption already consumed')
+    check_historical_manager(state, systemd)
+    return {'eligible': True, 'scope': 'pre-migration-filesystem-manager-only',
+            'baseline': REPAIR_BASELINE, 'incident': str(transition), 'automaticRetry': False}
+
+
+def check_historical_manager(state, systemd):
+    """Shared read-only 95-era manager policy; no adoption or migration policy."""
     manager = trusted_loader.load('hermes-peer-broker.py').SystemdManager()
     effective, contents = {}, {}
     for unit in ('aistudy-web.service', WORKER):
@@ -492,11 +502,457 @@ def repair_check(state, current, systemd):
         if manager.configuration(unit) != effective[unit]:
             raise ValueError('Repair manager inputs changed during observation')
     resource_binding(systemd, effective, contents)
-    return {'eligible': True, 'scope': 'pre-migration-filesystem-manager-only',
-            'baseline': REPAIR_BASELINE, 'incident': str(transition), 'automaticRetry': False}
+
+
+COMPLETION_INCIDENT = '20261110T081511-846613'
+COMPLETION_SHA = 'e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf'
+COMPLETION_OWNER = '87923d3e5822888a889e9349fa7a778e'
+COMPLETION_ARCHIVE_SHA = '4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0'
+COMPLETION_BACKUP_SIZE = 537911
+COMPLETION_BACKUP_SHA = 'cf8f522929b4e62fb933b179ed587c383c6ffcb0e154dd6807755ef495672485'
+
+
+def strict_json(data):
+    def pairs(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise ValueError('Duplicate JSON key')
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=pairs,
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Nonfinite JSON')))
+
+
+def completion_stream_sha256(source):
+    """Python 3.10 compatible, bounded reads for retained and installed bytes."""
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = source.read(1024 * 1024)
+        if not chunk:
+            return size, digest.digest()
+        size += len(chunk)
+        digest.update(chunk)
+
+
+def completion_payload_file(path, member, source):
+    fd = safe_open(path)
+    try:
+        before = identity(os.fstat(fd))
+        st = os.fstat(fd)
+        if st.st_size != member.size or st.st_mode & 0o777 != member.mode & 0o777:
+            raise ValueError('Payload size/mode changed')
+        with os.fdopen(os.dup(fd), 'rb') as installed:
+            actual = completion_stream_sha256(installed)
+        if actual != completion_stream_sha256(source) or actual[0] != member.size:
+            raise ValueError('Existing payload differs from signed e5')
+        check = safe_open(path)
+        try:
+            if before != identity(os.fstat(fd)) or before != identity(os.fstat(check)):
+                raise ValueError('Payload changed during comparison')
+        finally:
+            os.close(check)
+    finally:
+        os.close(fd)
+
+
+class CompletionPayloadExtras(ValueError):
+    pass
+
+
+def completion_payload(release, config, archive):
+    """Incident-only full byte inventory against the retained, signed e5 gzip.
+
+    Not a change to verifyTree/artifact admission. The sole deployment extras are
+    the existing config link and release SHA; no wildcard extra exclusions.
+    """
+    fd = safe_open(archive)
+    archive_identity = identity(os.fstat(fd))
+    try:
+        with os.fdopen(os.dup(fd), 'rb') as source:
+            if completion_stream_sha256(source)[1].hex() != COMPLETION_ARCHIVE_SHA:
+                raise ValueError('Retained e5 gzip digest changed')
+        os.lseek(fd, 0, os.SEEK_SET)
+        # One forward decompression pass: getmembers()+random extraction seeks
+        # backwards in gzip for each file. Never retain/read a whole payload file.
+        with os.fdopen(os.dup(fd), 'rb') as source, tarfile.open(fileobj=source, mode='r|gz') as tar:
+            names = set()
+            count, total = 0, 0
+            for member in tar:
+                count += 1
+                total += member.size
+                if count > 300000 or member.size < 0 or total > 12 * 1024**3:
+                    raise ValueError('Retained inventory exceeds release limits')
+                # Python 3.10 caches TarInfo even in stream mode. The names set
+                # owns duplicate detection; no later extraction needs this cache.
+                tar.members.clear()
+                name = member.name.rstrip('/') if member.isdir() else member.name
+                if (name in ('.env.production', '.release-sha') or not name or name.startswith('/') or '\\' in name
+                        or any(c in ('', '.', '..') for c in name.split('/'))
+                        or any(ord(c) < 32 or ord(c) == 127 for c in name)
+                        or name in names or not (member.isdir() or member.isfile())
+                        or member.mode & 0o7022 or member.sparse):
+                    raise ValueError('Unsafe retained inventory')
+                names.add(name)
+                path = Path(release) / name
+                if member.isdir():
+                    directory = safe_open(path, directory=True)
+                    try:
+                        if os.fstat(directory).st_mode & 0o777 != member.mode & 0o777:
+                            raise ValueError('Payload directory mode changed')
+                    finally:
+                        os.close(directory)
+                    continue
+                with tar.extractfile(member) as payload:
+                    completion_payload_file(path, member, payload)
+            observed, unknown = set(), set()
+            for directory, dirs, entries in os.walk(release, followlinks=False):
+                for name in dirs + entries:
+                    path = Path(directory) / name
+                    key = str(path.relative_to(release))
+                    observed.add(key)
+                    if key not in names and key not in ('.env.production', '.release-sha'):
+                        unknown.add(key)
+                    if key in names and path.is_symlink():
+                        raise ValueError('Payload link changed')
+            extras = {'.env.production'}
+            if present(Path(release) / '.release-sha'):
+                extras.add('.release-sha')
+            if observed != names | extras | unknown:
+                raise ValueError('Incomplete existing inventory')
+        check = safe_open(archive)
+        try:
+            if archive_identity != identity(os.fstat(fd)) or archive_identity != identity(os.fstat(check)):
+                raise ValueError('Retained archive changed during comparison')
+        finally:
+            os.close(check)
+    finally:
+        os.close(fd)
+    if os.readlink(Path(release) / '.env.production') != config:
+        raise ValueError('Unexpected payload config link')
+    if present(Path(release) / '.release-sha') and read_trusted(Path(release) / '.release-sha')[0] != (COMPLETION_SHA + '\n').encode():
+        raise ValueError('Unexpected payload release SHA')
+    if unknown:
+        # Signed bytes and retained identity were fully compared. This remains
+        # a strict rejection, but readonly DB reporting may use those verified
+        # modules without treating extras as approved payload inventory.
+        error = CompletionPayloadExtras('Unknown payload deployment extra')
+        prefix = 'services/parser/opening_parser/__pycache__'
+        generated = {prefix, *[prefix + '/' + name for name in (
+            '__main__.cpython-312.pyc', '__init__.cpython-312.pyc',
+            'ocr.cpython-312.pyc', 'physical_pages.cpython-312.pyc')]}
+        error.only_observed_generated = unknown == generated
+        raise error
+    return {'archiveSha256': COMPLETION_ARCHIVE_SHA, 'archiveBytes': os.stat(archive).st_size,
+            'memberCount': count, 'memberBytes': total, 'gzipInventoryPasses': 1,
+            'hashChunkBytes': 1024 * 1024}
+
+
+def completion_generated_observation(release):
+    """Readonly evidence only. NEVER an exclusion, admission or cleanup grant."""
+    directory = Path(release) / 'services/parser/opening_parser/__pycache__'
+    expected = {'__main__.cpython-312.pyc': 11718, '__init__.cpython-312.pyc': 284,
+                'ocr.cpython-312.pyc': 6519, 'physical_pages.cpython-312.pyc': 8252}
+    if not present(directory):
+        return {'present': False, 'admission': False, 'quarantineAuthorized': False}
+    fd = safe_open(directory, directory=True, private=True)
+    try:
+        before = identity(os.fstat(fd))
+        if os.fstat(fd).st_mode & 0o777 != 0o700 or set(os.listdir(fd)) != set(expected):
+            raise ValueError('Generated directory metadata/inventory changed')
+        rows = []
+        for name, size in expected.items():
+            path = directory / name
+            file = safe_open(path, private=True)
+            try:
+                st = os.fstat(file)
+                original = identity(st)
+                if st.st_mode & 0o777 != 0o600 or st.st_size != size:
+                    raise ValueError('Generated file metadata changed')
+                with os.fdopen(os.dup(file), 'rb') as source:
+                    length, digest = completion_stream_sha256(source)
+                check = safe_open(path, private=True)
+                try:
+                    if original != identity(os.fstat(file)) or original != identity(os.fstat(check)) or length != size:
+                        raise ValueError('Generated file changed during observation')
+                finally:
+                    os.close(check)
+                rows.append({'path': str(path.relative_to(release)), 'uid': st.st_uid, 'gid': st.st_gid,
+                             'mode': oct(st.st_mode & 0o777), 'nlink': st.st_nlink, 'size': size,
+                             'sha256': digest.hex(), 'identity': original})
+            finally:
+                os.close(file)
+        check = safe_open(directory, directory=True, private=True)
+        try:
+            if before != identity(os.fstat(fd)) or before != identity(os.fstat(check)) or set(os.listdir(fd)) != set(expected):
+                raise ValueError('Generated directory changed during observation')
+        finally:
+            os.close(check)
+        return {'admission': False, 'quarantineAuthorized': False, 'directoryIdentity': before, 'files': rows}
+    finally:
+        os.close(fd)
+
+
+def completion_incident_check(state, current, systemd, release, config, archive, worker_config):
+    """Exact immutable incident/guard evidence; no policy mutations."""
+    for path in (state, current, systemd, release, config, archive, worker_config):
+        if not re.fullmatch(r'/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*', path) or os.path.normpath(path) != path or '/..' in path:
+            raise ValueError('Unsafe completion path')
+    # Configuration is a trust boundary, not merely a normalized path. This
+    # shared admission runs before any database probe or exclusive claim.
+    read_trusted(config, private=True)
+    state, release = Path(state), Path(release)
+    for path in (state, release, state / 'releases' / COMPLETION_INCIDENT):
+        fd = safe_open(path, private=path != release, directory=True)
+        os.close(fd)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+', release.name) or not release.name.startswith(COMPLETION_SHA + '-'):
+        raise ValueError('Wrong completion release')
+    transition = state / 'releases' / COMPLETION_INCIDENT
+    original = state / 'releases' / REPAIR_INCIDENT
+    expected = {'eligible': True, 'scope': 'pre-migration-filesystem-manager-only',
+                'baseline': REPAIR_BASELINE, 'incident': str(original), 'automaticRetry': False}
+    adopted = strict_json(read_trusted(state / 'repair-adopted', private=True)[0])
+    if (not isinstance(adopted, dict) or type(adopted.get('eligible')) is not bool
+            or type(adopted.get('automaticRetry')) is not bool
+            or adopted != {**expected, 'transition': str(transition), 'release': str(release), 'owner': COMPLETION_OWNER}):
+        raise ValueError('Wrong completion adoption binding')
+    transition_adoption = strict_json(read_trusted(transition / 'repair-adopted', private=True)[0])
+    if (not isinstance(transition_adoption, dict) or type(transition_adoption.get('eligible')) is not bool
+            or type(transition_adoption.get('automaticRetry')) is not bool or transition_adoption != expected):
+        raise ValueError('Wrong transition adoption')
+    guard = strict_json(read_trusted(state / 'migration-forward-only', private=True)[0])
+    if guard != {'transition': str(original), 'reason': 'owner exited without durable success', 'ownerPid': 679352}:
+        raise ValueError('Original forward guard changed')
+    for pid in (679352, 842456, 842459, 846471, 846472, 846613, 846643):
+        if present('/proc/' + str(pid)):
+            raise ValueError('Known owner PID present, including reuse')
+    read_trusted(state / 'writers-fenced', private=True)
+    if read_trusted(state / 'activation-incomplete', private=True)[0] != (str(transition) + '\n').encode():
+        raise ValueError('Completion activation binding changed')
+    for name, literal in (('migration-armed', b'Migration execution authorized; outcome must be inspected.\n'),
+                          ('forward-armed', b'Unknown/partial migration outcome requires forward repair.\n')):
+        if read_trusted(transition / name, private=True)[0] != literal:
+            raise ValueError('Completion armed boundary changed')
+    old = read_trusted(transition / 'from-target', private=True)[0].decode().strip()
+    if os.path.realpath(current) != old or not re.fullmatch(r'1e511[0-9a-f]{35}\n', read_trusted(Path(old) / '.release-sha')[0].decode()):
+        raise ValueError('Completion current changed')
+    if os.path.realpath(state / 'last-transition') != str(state / 'releases' / '20261108T160832-39068'):
+        raise ValueError('Completion previous success changed')
+    for path in (state / 'postmigration-completion-claimed', state / 'protocol2-transition.json',
+                 state / 'writer-controls', state / 'commit-receipts', Path('/run/aistudy-writer-broker'),
+                 *[transition / name for name in ('migration-succeeded', 'to-target', 'succeeded', 'degraded')]):
+        if present(path):
+            raise ValueError('Completion already consumed or unknown boundary')
+    backup = read_trusted(transition / 'database-backup', private=True)[0].decode().strip()
+    data, _ = read_trusted(backup, private=True)
+    if (os.lstat(backup).st_mode & 0o777 != 0o600 or len(data) != COMPLETION_BACKUP_SIZE
+            or hashlib.sha256(data).hexdigest() != COMPLETION_BACKUP_SHA):
+        raise ValueError('Completion backup evidence changed')
+    if read_trusted(transition / 'worker-required', private=True)[0] != b'1\n':
+        raise ValueError('Completion requires both writers')
+    return backup
+
+
+def completion_backup_toc(backup):
+    restore = '/usr/lib/postgresql/16/bin/pg_restore'
+    version = subprocess.run([restore, '--version'], capture_output=True, timeout=5)
+    if version.returncode != 0 or not re.fullmatch(rb'pg_restore \(PostgreSQL\) 16\.[0-9]+(?: [^\r\n]+)?\n?', version.stdout):
+        raise ValueError('Actual PostgreSQL 16 pg_restore required; no restore attempted')
+    result = subprocess.run([restore, '--list', backup], capture_output=True, timeout=15)
+    if result.returncode != 0:
+        raise ValueError('Backup TOC rejected; no restore attempted')
+    return version.stdout.decode().strip()
+
+
+def completion_check(state, current, systemd, release, config, archive, worker_config):
+    """One independent postmigration observation; NEVER migration-succeeded."""
+    backup = completion_incident_check(state, current, systemd, release, config, archive, worker_config)
+    version = completion_backup_toc(backup)
+    payload = completion_payload(str(release), config, archive)
+    check_historical_manager(Path(state), systemd)
+    capacity = completion_capacity(str(state), str(release), systemd, worker_config, archive, str(Path(backup).parent))
+    return {'scope': 'postmigration-independent-observation', 'incident': str(Path(state) / 'releases' / COMPLETION_INCIDENT), 'capacity': capacity,
+            'release': str(release), 'automaticRetry': False, 'payload': payload,
+            'pgRestoreVersion': version}
+
+
+COMPLETION_ENTRY_FILES = ('hermes-release.sh', 'hermes-supervisor.mjs', 'hermes-config-durability.mjs',
+                          'hermes-db.mjs', 'hermes-health.mjs', 'hermes-writer-control.mjs',
+                          'hermes-trusted-loader.py', 'hermes-writer-state.py', 'hermes-writer-exec.py',
+                          'hermes-peer-broker.py')
+
+
+def completion_control_inventory():
+    return {name: len(read_trusted(trusted_loader.directory / name)[0]) for name in COMPLETION_ENTRY_FILES}
+
+
+COMPLETION_CACHE = '/var/cache/aistudy-worker'
+
+
+def completion_capacity(state, release, systemd, worker_config, archive, backup_directory):
+    """No payload extraction/backup/cache migration; retain release/backup floor.
+
+    The control transport is capped at 1 MiB compressed and 1 MiB extracted.
+    Account both staging generations, installed wrappers, config snapshots and
+    a bounded state/log allowance. Existing payload/gzip/dump consume space
+    already reflected by statvfs; they are never copied by this action.
+    """
+    cache = Path(COMPLETION_CACHE)
+    account = pwd.getpwnam('aistudy-worker')
+    st = os.lstat(cache)
+    if cache.is_symlink() or not cache.is_dir() or st.st_uid != account.pw_uid or account.pw_uid == 0:
+        raise ValueError('Completion requires existing dedicated cache; no cache copy authorized')
+    for path in (state, release, systemd, worker_config, str(Path(archive).parent), backup_directory):
+        directory = safe_open(path, directory=True)
+        os.close(directory)
+    inventory = completion_control_inventory()
+    if set(inventory) != set(COMPLETION_ENTRY_FILES) or any(type(v) is not int or v <= 0 for v in inventory.values()):
+        raise ValueError('Incomplete completion controls capacity inventory')
+    block = 4096
+    allocated = sum(((size + block - 1) // block) * block for size in inventory.values())
+    if sum(inventory.values()) > 1048576:
+        raise ValueError('Completion controls exceed small closure capacity')
+    # Reviewed Git controls/entry transport must stay <=1MiB; no new signed
+    # controls artifact is required. No download/extraction happens here.
+    # These are conservative budgets, not measured formal transport sizes.
+    allocations = {'controlArchiveMax': 1048576, 'controlExtractionBlocks': allocated,
+                   'controlStagingBlocks': allocated, 'writerControlsBlocks': allocated,
+                   'configurationAndReceiptsMax': 2097152, 'runtimeAndJournalReserve': 33554432,
+                   'newPayloadDownload': 0, 'newPayloadExtraction': 0, 'newBackup': 0, 'cacheCopy': 0}
+    # Charge each write to its real filesystem, not the entire budget to every
+    # observed mount. No root 6GiB policy is invented. Read-only gzip/cache/config
+    # observations add no writes. Same-device allocations accumulate once.
+    writes = (('/tmp', 'controlArchiveMax'), ('/tmp', 'controlExtractionBlocks'),
+              ('/tmp', 'controlStagingBlocks'), (state, 'writerControlsBlocks'),
+              (state, 'configurationAndReceiptsMax'), ('/var/log', 'runtimeAndJournalReserve'))
+    mounts = {}
+    def observe(path, floor=0):
+        values = os.statvfs(path)
+        device = str(os.stat(path).st_dev)
+        free = values.f_bavail * values.f_frsize
+        row = mounts.setdefault(device, {'device': device, 'availableBytes': free,
+            'additionalPeakBudgetBytes': 0, 'retainedFloorBytes': 0, 'writes': {}})
+        row['availableBytes'] = min(row['availableBytes'], free)
+        row['retainedFloorBytes'] = max(row['retainedFloorBytes'], floor)
+        return row
+    for path in (release, backup_directory):
+        observe(path, 6 * 1024**3)
+    for path, allocation in writes:
+        row = observe(path)
+        row['writes'][allocation] = allocations[allocation]
+        row['additionalPeakBudgetBytes'] += allocations[allocation]
+    # The small provisioning/drop-in/config/release-marker writes are separately
+    # charged, even on devices separate from state or the payload. 2MiB per
+    # destination is an explicit budget, not a measured artifact or disk quota.
+    for label, path in (('systemdControlsMax', systemd), ('workerConfigurationMax', worker_config),
+                        ('releaseMarkerMax', release)):
+        row = observe(path)
+        row['writes'][label] = 2097152
+        row['additionalPeakBudgetBytes'] += 2097152
+    if any(row['availableBytes'] - row['additionalPeakBudgetBytes'] < row['retainedFloorBytes'] for row in mounts.values()):
+        raise ValueError('Insufficient capacity after completion peak; no cleanup or floor reduction authorized')
+    return {'allocations': allocations, 'controlSourceBytes': inventory, 'mounts': list(mounts.values()),
+            'controlTransportLimitBytes': 1048576,
+            'runtimeAndJournalReserveIsBudgetNotHardLimit': True}
+
+
+COMPLETION_CONTEXT = '/run/aistudy-completion'
+
+
+def create_completion_claim(state, scope):
+    """Publish our pre-identified inode exclusively; no pre-claim state record.
+
+    The anonymous inode lives on state's filesystem (RuntimeDirectory may be
+    tmpfs). The private runtime proof is durable BEFORE publishing the name.
+    A crash on either side of link therefore cannot adopt an older claim.
+    """
+    state = Path(state)
+    directory = safe_open(state, private=True, directory=True)
+    context = safe_open(COMPLETION_CONTEXT, private=True, directory=True)
+    fd = None
+    try:
+        fd = os.open('.', os.O_RDWR | os.O_TMPFILE, 0o600, dir_fd=directory)
+        st = os.fstat(fd)
+        proof = {'invocation': scope['invocation'], 'mainPid': scope['mainPid'],
+                 'state': str(state), 'release': scope['release'], 'owner': scope['owner'],
+                 'claimDevice': st.st_dev, 'claimInode': st.st_ino}
+        marker = os.open('claim-origin.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=context)
+        try:
+            with os.fdopen(marker, 'wb') as out:
+                out.write(json.dumps(proof).encode())
+                out.flush()
+                os.fsync(out.fileno())
+        finally:
+            os.fsync(context)
+        # linkat via procfs follows OUR open descriptor, not an input pathname.
+        # Unlike rename, link is exclusive and never replaces preexisting bytes.
+        os.link('/proc/self/fd/' + str(fd), 'postmigration-completion-claimed',
+                dst_dir_fd=directory, follow_symlinks=True)
+        claim = {key: value for key, value in scope.items() if key != 'mainPid'}
+        with os.fdopen(os.dup(fd), 'wb') as out:
+            out.write(json.dumps(claim).encode())
+            out.flush()
+            os.fsync(out.fileno())
+        os.fsync(directory)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(context)
+        os.close(directory)
+
+
+def completion_origin(state):
+    context = safe_open(COMPLETION_CONTEXT, private=True, directory=True)
+    os.close(context)
+    proof = strict_json(read_trusted(Path(COMPLETION_CONTEXT) / 'claim-origin.json', private=True)[0])
+    if (not isinstance(proof, dict) or set(proof) != {'invocation', 'mainPid', 'state', 'release', 'owner', 'claimDevice', 'claimInode'}
+            or proof['state'] != state or not re.fullmatch(r'[1-9][0-9]*', str(proof['mainPid']))
+            or any(not isinstance(proof[key], str) or not re.fullmatch(r'[0-9a-f]{32}', proof[key]) for key in ('owner', 'invocation'))):
+        raise ValueError('Unknown completion creation origin')
+    directory = safe_open(state, private=True, directory=True)
+    try:
+        # No content parse needed: an empty inode after link is still ours.
+        fd = os.open('postmigration-completion-claimed', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            import stat
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != TRUSTED_UID or st.st_mode & 0o077 or st.st_nlink != 1
+                    or [st.st_dev, st.st_ino] != [proof['claimDevice'], proof['claimInode']]):
+                raise ValueError('Completion claim inode is not this invocation creation')
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
+    return proof
+
+
+def completion_claim(state):
+    claim = strict_json(read_trusted(Path(state) / 'postmigration-completion-claimed', private=True)[0])
+    if (set(claim) != {'scope', 'incident', 'release', 'automaticRetry', 'owner', 'invocation', 'capacity', 'payload', 'pgRestoreVersion'}
+            or claim['scope'] != 'postmigration-independent-observation' or claim['automaticRetry'] is not False
+            or claim['incident'] != str(Path(state) / 'releases' / COMPLETION_INCIDENT)
+            or not isinstance(claim['release'], str) or os.path.normpath(claim['release']) != claim['release']
+            or not Path(claim['release']).is_absolute() or not Path(claim['release']).name.startswith(COMPLETION_SHA + '-')
+            or any(not isinstance(claim[key], str) or not re.fullmatch(r'[0-9a-f]{32}', claim[key]) for key in ('owner', 'invocation'))):
+        raise ValueError('Unknown completion claim; manual scoped recovery required')
+    return claim
 
 
 def main():
+    if sys.argv[1] == 'completion-create':
+        create_completion_claim(sys.argv[2], json.load(sys.stdin))
+        return
+    if sys.argv[1] == 'completion-origin':
+        print(json.dumps(completion_origin(sys.argv[2])))
+        return
+    if sys.argv[1] == 'completion-claim':
+        print(json.dumps(completion_claim(sys.argv[2])))
+        return
+    if sys.argv[1] == 'completion-check':
+        print(json.dumps(completion_check(*sys.argv[2:])))
+        return
     if sys.argv[1:] == ['resource-policy']:
         payload = json.load(sys.stdin)
         contents = {row['path']: bytes.fromhex(row['bytes']) for row in payload['files']}

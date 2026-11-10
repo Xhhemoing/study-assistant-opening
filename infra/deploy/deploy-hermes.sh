@@ -17,7 +17,7 @@ TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
-case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration) ;; *) echo "Usage: $0 [deploy|status|logs|restart|rollback|repair-check|repair-pre-migration]" >&2; exit 2 ;; esac
+case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
 
 fail() { echo "[!] $*" >&2; exit 1; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
@@ -64,6 +64,8 @@ verify_repair_git() {
   history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
   while IFS= read -r path; do
     case "$path" in
+      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs)
+        [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration-check ]] || fail 'Additional control paths are completion-only.' ;;
       infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
       *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
     esac
@@ -99,6 +101,44 @@ fd=bootstrap.safe_open(sys.argv[1]+'/deploy.lock',private=True)
 fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
 print(m.json.dumps(m.repair_check(*sys.argv[1:])))"
   ssh_run "/usr/bin/python3 -I -S -B -c $(quote "$check_code") $(quote "$DEPLOY_STATE") $(quote "$CURRENT_LINK") $(quote "$SYSTEMD_DIR")"
+  exit
+fi
+
+if [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration-check ]]; then
+  # Controls follow the existing exact-main/clean/latest-push-CI Git trust path.
+  # The payload remains the already verified signed e5 release and retained gzip.
+  [[ -z "${PI_CODING_AGENT:-}${PI_SESSION_ID:-}${PI_SESSION_FILE:-}" ]] || fail 'Completion intake must run outside Pi in an independently authorized scope.'
+  [[ "${COMPLETION_SCOPE:-}" == 20261110T081511-846613 && -n "$EXPLICIT_HOST" ]] || fail 'Explicit completion incident and HOST required.'
+  [[ "${COMPLETION_RELEASE:-}" == "$RELEASES_DIR/e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf-"* && "${COMPLETION_ARCHIVE:-}" == /* ]] || fail 'Existing e5 release and retained gzip required.'
+  for value in "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$COMPLETION_RELEASE" "$COMPLETION_ARCHIVE"; do
+    [[ "$value" =~ ^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$ && "$value" != *'/..'* ]] || fail 'Unsafe completion path.'
+  done
+  [[ "$MIN_FREE_KB" =~ ^[1-9][0-9]*$ && "$MIN_FREE_KB" -ge 6291456 && -z "$ARTIFACT_RUN_ID" && -z "$TARGET_SHA" ]] || fail 'Completion forbids artifact download/target override or lower capacity floor.'
+  verify_release
+  verify_repair_git
+  if [[ "$ACTION" == complete-postmigration-check ]]; then
+    check_code="$(node "$SCRIPT_DIR/../../tests/tooling/hermes-completion-precheck.mjs")"
+    command='/usr/bin/python3 -I -S -B -'
+    for value in "$DEPLOY_STATE" "$CURRENT_LINK" "$SYSTEMD_DIR" "$COMPLETION_RELEASE" "$DIR/.env.production" "$COMPLETION_ARCHIVE" "$WORKER_CONFIG_DIR"; do command+=" $(quote "$value")"; done
+    ssh_run "$command" <<< "$check_code"
+  else
+    [[ "${COMPLETION_CONFIRM:-}" == complete-20261110T081511-846613-existing-e5 ]] || fail 'Explicit incident completion execution confirmation required.'
+    controls=(hermes-release.sh hermes-supervisor.mjs hermes-config-durability.mjs hermes-db.mjs hermes-health.mjs hermes-writer-control.mjs hermes-trusted-loader.py hermes-writer-state.py hermes-writer-exec.py hermes-peer-broker.py)
+    paths=(); for value in "${controls[@]}"; do paths+=("infra/deploy/$value"); done
+    # Only reviewed committed controls, never a newly downloaded payload.
+    control_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-completion.XXXXXXXX.tar.gz")"
+    trap 'rm -f -- "$control_archive"' EXIT
+    git -c core.autocrlf=false -c core.eol=lf -c tar.umask=0022 archive --format=tar.gz --output="$control_archive" "$COMMIT" "${paths[@]}"
+    [[ $(wc -c < "$control_archive") -le 1048576 ]] || fail 'Completion control transport exceeds 1 MiB.'
+    verify_release
+    remote_command='entry=$(mktemp -d /tmp/aistudy-entry.XXXXXXXX) || exit; '
+    remote_command+="/usr/bin/python3 -I -S -B -c $(quote "$(< "$SCRIPT_DIR/hermes-entry.py")") extract-git \"\$entry\" || exit; "
+    remote_command+='node "$entry/hermes-supervisor.mjs" completion-launch "$entry/hermes-release.sh"'
+    for value in complete-postmigration "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf "$COMPLETION_RELEASE" 4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0 "$COMPLETION_ARCHIVE"; do remote_command+=" $(quote "$value")"; done
+    # Retain the private entry for the full independent service lifetime, even
+    # on SSH loss. No caller EXIT trap may remove an executing service's controls.
+    ssh_run "$remote_command" < "$control_archive"
+  fi
   exit
 fi
 

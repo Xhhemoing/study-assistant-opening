@@ -36,7 +36,7 @@ if p['mode']=='commit': m.commit(p['state'],p['current'],p['broker'],p['record']
 elif p['mode']=='validate': m.validate_config(p['record'],sync=True)
 else: print(m.classify(p['state'],p['current'],p['broker'],p.get('scope'),sync=True))
 `;
-export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply, repair = false } = {}) {
+export function fixture(t, { required = '1', fault, guard, brokerFailure = false, pauseBroker = false, lostReply, repair = false, completion = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hermes-supervisor-'));
   const sockets = new Set();
   const trackSocket = socket => {
@@ -46,7 +46,7 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
   };
   const args = ['deploy', join(root, 'legacy'), join(root, 'releases'), join(root, 'current'), join(root, 'state'), join(root, 'backups'), join(root, 'systemd'), join(root, 'config'), '1', 'a'.repeat(40), 'archive'];
   for (const dir of [args[1], args[2], args[4], args[6], args[7]]) mkdirSync(dir, { mode: 0o700 });
-  const target = join(args[2], 'candidate'), transition = join(args[4], 'releases', 'transition');
+  const target = join(args[2], 'candidate'), transition = join(args[4], 'releases', completion ? '20261110T081511-846613' : 'transition');
   mkdirSync(target); mkdirSync(transition, { recursive: true, mode: 0o700 }); symlinkSync(target, args[3]);
   const configFile = join(args[1], '.env.production'); writeFileSync(configFile, 'fixture=true\n', { mode: 0o600 });
   const brokerPath = join(root, 'exec.sock'), events = [], effective = {}, grants = new Map(), used = {};
@@ -133,6 +133,16 @@ export function fixture(t, { required = '1', fault, guard, brokerFailure = false
       if (existsSync(join(args[4], 'repair-adopted'))) throw new Error('One-shot adoption consumed');
       return { eligible: true, incident: 'synthetic-pre-migration', automaticRetry: false };
     };
+  }
+  if (completion) {
+    args[0] = 'complete-postmigration'; args[10] = target;
+    writeFileSync(join(args[4], 'migration-forward-only'), 'original incident');
+    writeFileSync(join(args[4], 'writers-fenced'), 'original fence');
+    dependencies.completionService = () => ({ InvocationID: 'a'.repeat(32), ExecMainPID: '1234' });
+    // Supervisor protocol tests use a synthetic manager; inode-origin creation
+    // and faults run separately against the real Python implementation.
+    dependencies.claimCompletion = (state, scope) => writeFileSync(join(state, 'postmigration-completion-claimed'), JSON.stringify(scope), { flag: 'wx', mode: 0o600 });
+    dependencies.checkCompletion = () => { events.push('completion:readonly'); return { incident: transition, release: target }; };
   }
   writeFileSync(join(transition, 'expected-target'), target);
   function request(action, extra = {}) {
