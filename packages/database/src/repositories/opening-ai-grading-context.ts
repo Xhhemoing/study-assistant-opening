@@ -1,7 +1,8 @@
 import { readTeachingQuestionForGrading } from "./opening-teaching-question";
 import { isDeepStrictEqual } from "node:util";
-import { answerInterpretationMetadataSchema,aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope, type TeachingMisconception } from "@aistudy/contracts";
+import { gradeObservationJobPayloadSchema, answerInterpretationMetadataSchema,aiGradingInputSchema, learningObservationSchema, type AiGradingInput, type LearningObservation, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
+import type { OpeningJobScope } from "./opening-job-execution";
 import { admitLearningSources, learningError, lockLearningOwner } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { readOpeningAnswerInterpretationMetadata } from "./opening-answer-interpretation-state";
@@ -23,6 +24,7 @@ export interface OpeningAiGradingContext {
   existing: LearningObservation | null;
   answerRevision: number;
   operationId: string;
+  regradeRequestId?: string;
   interpretation?:AnswerInterpretationMetadata;
 }
 
@@ -41,8 +43,8 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
 }
 
 /** Eligibility only: does not authorize execution or accept a client operation/photo. */
-export async function readOpeningExplicitRegradeCandidateContext(tx: TransactionSql, scope: Scope, observationId: string) {
-  return readContextInternal(tx, scope, { observationId }, { explicitRegradeCandidate: true });
+export async function readOpeningExplicitRegradeCandidateContext(tx: TransactionSql, scope: Scope, observationId: string, options: { readOnly?: boolean } = {}) {
+  return readContextInternal(tx, scope, { observationId }, { explicitRegradeCandidate: true, ...options });
 }
 
 /** Admit a student's photo inside the submit transaction; rejection rolls the entire transaction back.
@@ -66,6 +68,25 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!options.readOnly) await lockLearningOwner(tx, scope);
   const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL ${options.readOnly ? tx`` : tx`FOR SHARE`}`;
   if (!owner) throw learningError("NOT_FOUND", "workspace owner unavailable");
+  // This is internal worker authority, never an extension of the public grade input.
+  const execution = (scope as OpeningJobScope).jobExecution;
+  const [job] = execution ? await tx`SELECT payload FROM opening_jobs WHERE id=${execution.id}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND kind='grade-observation'` : [];
+  const payload = job ? gradeObservationJobPayloadSchema.parse(job.payload) : null;
+  const regrade = payload?.regrade;
+  const [request] = regrade ? await tx`SELECT r.* FROM opening_explicit_regrade_requests r
+    JOIN workspaces w ON w.id=r.workspace_id AND w.owner_user_id=r.owner_user_id AND w.privacy_epoch=r.privacy_epoch
+    WHERE r.id=${regrade.requestId} AND r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}
+      AND r.job_id=${execution!.id} AND r.confirmed_at IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM opening_explicit_regrade_requests newer WHERE newer.workspace_id=r.workspace_id
+        AND newer.owner_user_id=r.owner_user_id AND newer.root_observation_id=r.root_observation_id
+        AND newer.answer_revision=r.answer_revision AND newer.confirmed_at IS NOT NULL AND newer.grading_version>r.grading_version)` : [];
+  if (regrade && (!request || request.expected_head_id !== input.observationId || payload!.observationId !== input.observationId
+    || request.root_observation_id !== payload!.rootObservationId || Number(request.answer_revision) !== payload!.answerRevision
+    || request.operation_id !== regrade.operationId || regrade.ownerUserId !== scope.ownerUserId
+    || Number(request.privacy_epoch) !== regrade.privacyEpoch || Number(request.grading_version) !== regrade.gradingVersion
+    || !isDeepStrictEqual(request.work_source, regrade.workSource))) throw learningError("CONFLICT", "显式批改身份已失效");
+  const clientKey = request ? String(request.operation_id) : aiGradingClientKey(input);
   // Head and replay must share a statement snapshot: a concurrent grade can
   // commit between separate SELECTs under READ COMMITTED without any correction.
   const [row] = await tx`SELECT o.*,previous.answer AS previous_answer,COALESCE(root.effective_head_id,root.id) AS current_head_id,
@@ -76,7 +97,7 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
     LEFT JOIN opening_learning_observations previous ON previous.id=o.revises_observation_id
       AND previous.workspace_id=o.workspace_id AND previous.owner_user_id=o.owner_user_id
     LEFT JOIN opening_learning_observations graded ON graded.workspace_id=o.workspace_id AND graded.owner_user_id=o.owner_user_id
-      AND graded.client_key=${aiGradingClientKey(input)}
+      AND graded.client_key=${clientKey}
     JOIN courses c ON c.id=o.course_id AND c.workspace_id=o.workspace_id AND c.archived_at IS NULL
     WHERE o.id=${input.observationId} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}`;
   if (!row) throw learningError("NOT_FOUND", "找不到这次作答");
@@ -88,12 +109,15 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
     input = { ...input, workSourceId: sealedPhoto.id, workSourceVersion: sealedPhoto.version, physicalPage: sealedPhoto.physicalPage };
   }
   const observation = await qualifyObservationRevision(tx, scope, row);
+  if (request && (Number(row.answer_revision) !== Number(request.answer_revision)
+    || (row.root_observation_id ?? row.id) !== request.root_observation_id
+    || !isDeepStrictEqual(row.grading_work_source, request.work_source))) throw learningError("CONFLICT", "封存作答已变化");
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     throw learningError("VALIDATION", "请先关联题目并保存作答，再进行批改");
   }
   // Confirmation fences legacy execution/publication without changing its billing ledger.
   // This check runs inside the same history-locked revision transaction at apply.
-  if (!options.explicitRegradeCandidate && !options.photoAdmissionOnly) {
+  if (!request && !options.explicitRegradeCandidate && !options.photoAdmissionOnly) {
     const [successor] = await tx`SELECT id FROM opening_explicit_regrade_requests
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND root_observation_id=${row.root_observation_id ?? row.id} AND answer_revision=${row.answer_revision}
@@ -109,9 +133,9 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!existingRow && row.current_head_id !== input.observationId) throw learningError("CONFLICT", "作答已更正，请刷新后再批改");
   const interpretation=await readOpeningAnswerInterpretationMetadata(tx,scope,String(row.id));
   const ownInterpretation=(row.submitted_intent as {answerInterpretation?:unknown}|null)?.answerInterpretation;
-  if (!options.explicitRegradeCandidate&&isOpeningManualGradingRevision(row)&&!ownInterpretation) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
+  if (!request&&!options.explicitRegradeCandidate&&isOpeningManualGradingRevision(row)&&!ownInterpretation) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
   if(ownInterpretation&&!interpretation)throw learningError("CONFLICT","校正版来源尚不可核对，未重新发送批改。");
-  if(!options.explicitRegradeCandidate&&interpretation&&await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(row.id)))throw Object.assign(learningError("CONFLICT","原照片批改费用尚未确认；校正版已保存，不会另换请求重复发送。"),{reasonCode:"GRADING_UNKNOWN_COST"});
+  if(!request&&!options.explicitRegradeCandidate&&interpretation&&await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(row.id)))throw Object.assign(learningError("CONFLICT","原照片批改费用尚未确认；校正版已保存，不会另换请求重复发送。"),{reasonCode:"GRADING_UNKNOWN_COST"});
   // Deterministic span evaluation is authoritative for the original answer,
   // but photo admission only seals provenance; it must not reopen grading.
   if (observation.revisionKind === "retract" || (!options.photoAdmissionOnly && observation.verdictSource === "deterministic") || observation.aiEvaluation) {
@@ -192,5 +216,6 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
     referenceSources: [...new Map(chunks.filter(chunk => chunk.image_object_key && chunk.page != null)
       .map(chunk => [`${chunk.source_id}:${chunk.source_version}:${chunk.page}`, { sourceId: String(chunk.source_id), sourceVersion: Number(chunk.source_version), physicalPage: Number(chunk.page) }] as const)).values()],
     sourceIds, sourceVersions, workSource, workSourceMetadata, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
-    answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`),...(interpretation?{interpretation}:{}) };
+    answerRevision: Number(row.answer_revision), operationId: String(request?.operation_id ?? row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`),
+    ...(request ? { regradeRequestId: String(request.id) } : {}),...(interpretation?{interpretation}:{}) };
 }

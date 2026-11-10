@@ -138,7 +138,9 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     const workSource = gradingContext?.workSource ?? head.grading_work_source ?? previous.aiEvaluation?.workSource ?? null;
     await tx`UPDATE opening_learning_observations SET answer_revision=${answerRevision},
       grading_work_source=${workSource ? tx.json(workSource) : null},
-      grading_operation_id=${answerChanged ? `ai-grade:${scope.workspaceId}:${root.id}:${answerRevision}` : String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${headId}`)} WHERE id=${id}`;
+      grading_operation_id=${gradingContext?.operationId ?? (answerChanged ? `ai-grade:${scope.workspaceId}:${root.id}:${answerRevision}` : String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${headId}`))} WHERE id=${id}`;
+    if (gradingContext?.regradeRequestId) await tx`UPDATE opening_explicit_regrade_requests SET result_observation_id=${id}
+      WHERE id=${gradingContext.regradeRequestId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     await tx`UPDATE opening_learning_observations SET effective_head_id=${id} WHERE id=${root.id}`;
     const identity = (observation: Pick<LearningObservation, "courseId" | "requirementKey" | "skillLabel">) => ({ courseId: observation.courseId, requirementKey: observation.requirementKey ?? null, skillLabel: observation.skillLabel });
     await reconcileOpeningRetestEvidence(tx, scope, { rootObservationId: String(root.id), previousHeadObservationId: headId, headObservationId: id,
