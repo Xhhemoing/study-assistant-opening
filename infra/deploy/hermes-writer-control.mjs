@@ -33,7 +33,7 @@ export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
 export function python(file, args, payload) {
   const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
-    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: 30_000,
+    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-check' ? 150_000 : 30_000,
     env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
   });
   if (result.error || result.status !== 0) throw new Error('Trusted writer control unavailable');
@@ -132,6 +132,67 @@ export function brokerPresent() { return existsSync(brokerSocket); }
 export function checkRepair(args) {
   return JSON.parse(python('hermes-writer-state.py', ['repair-check', args[4], args[3], args[6]]));
 }
+export function checkCompletion(args) {
+  const [, dir, , current, state, , systemd, workerConfig, , sha, release, digest, archive] = args;
+  if (sha !== 'e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf'
+    || digest !== '4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0') throw new Error('Wrong completion payload scope');
+  const observation = JSON.parse(python('hermes-writer-state.py', ['completion-check', state, current, systemd, release, join(dir, '.env.production'), archive, workerConfig]));
+  verifyCompletionLedger(join(dir, '.env.production'), release);
+  return observation;
+}
+
+export function completionLedgerProgram(release) {
+  // Payload is fully verified against retained signed gzip BEFORE this import.
+  const module = pathToFileURL(join(release, 'packages/database/src/migrate.ts')).href;
+  return `const { readFile, readdir } = await import('node:fs/promises');
+    const { createHash } = await import('node:crypto');
+    const { createMigrationSqlClient, planMigrations, inspectMigrationQuiescence } = await import(${JSON.stringify(module)});
+    const directory = ${JSON.stringify(join(release, 'packages/database/src/migrations'))};
+    const ids = (await readdir(directory)).filter(id => /^\\d{4}_.+\\.sql$/.test(id)).sort();
+    if (ids.length !== 110 || !ids[109].startsWith('0110_')) throw new Error('Wrong completion inventory');
+    const expected = await Promise.all(ids.map(async id => ({ id,
+      checksum: createHash('sha256').update(await readFile(directory + '/' + id)).digest('hex'), verification_state: 'verified' })));
+    const sql = createMigrationSqlClient(process.env.DATABASE_URL);
+    try {
+      const version = await sql\`SHOW server_version_num\`;
+      if (Math.floor(Number(version[0].server_version_num) / 10000) !== 16) throw new Error('PostgreSQL 16 required');
+      const plan = await planMigrations(sql);
+      if (plan.readOnly !== true || plan.registryReadyWithoutWrites !== true || plan.applied.length || plan.pending.length
+        || JSON.stringify(plan.alreadyApplied) !== JSON.stringify(ids)) throw new Error('Completion planner refused');
+      await sql.begin('isolation level repeatable read read only', async tx => {
+        const rows = await tx\`SELECT id, checksum, verification_state FROM schema_migrations ORDER BY id\`;
+        if (rows.length !== expected.length || rows.some((row, i) => row.id !== expected[i].id
+          || row.checksum !== expected[i].checksum || row.verification_state !== 'verified')) throw new Error('Completion exact verified checksums refused');
+      });
+      const quiet = await inspectMigrationQuiescence(sql);
+      if (quiet.readOnly !== true || quiet.otherSessions !== 0) throw new Error('Completion not quiet');
+      console.log(JSON.stringify({ scope: 'postmigration-independent-observation', plan, ledger: expected, quiet }));
+    } finally { await sql.end({ timeout: 5 }); }`;
+}
+export function verifyCompletionLedger(config, release) {
+  const configured = parseEnv(readFileSync(config, 'utf8'));
+  if (!configured.DATABASE_URL) throw new Error('Configured completion database required');
+  // tsx CLI creates an IPC directory/socket even with cache disabled. Use its
+  // in-process ESM loader: readonly probes must not create filesystem entries.
+  const result = spawnSync('timeout', ['--signal=KILL', '45s', process.execPath, '--import',
+    pathToFileURL(join(release, 'node_modules/tsx/dist/esm/index.mjs')).href, '--input-type=module', '--eval',
+    completionLedgerProgram(release)], {
+    cwd: release, env: { PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C.UTF-8', TSX_DISABLE_CACHE: '1', DATABASE_URL: configured.DATABASE_URL }, encoding: 'utf8', timeout: 50_000,
+  });
+  if (result.error || result.status !== 0) throw new Error('Independent completion ledger observation refused');
+  return JSON.parse(result.stdout);
+}
+
+export function claimCompletion(state, scope) {
+  // First state write of this action. A partial write/fsync/ACK is consumed.
+  const file = join(state, 'postmigration-completion-claimed');
+  const fd = openSync(file, 'wx', 0o600);
+  try {
+    try { writeFileSync(fd, JSON.stringify(scope)); fsyncSync(fd); } finally { closeSync(fd); }
+    syncDirectory(state);
+  } catch (error) { error.completionClaimConsumed = true; throw error; }
+}
+
 export function validateRepairPlan(plan, inventory) {
   const expected = inventory.slice(0, 107), pending = inventory.slice(107);
   if (inventory.length !== 110 || !inventory[106].startsWith('0107_')

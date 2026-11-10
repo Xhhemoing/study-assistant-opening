@@ -4,11 +4,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, createConnection } from "node:net";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, unlinkSync, writeFileSync as writeFileForUnit } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
-import { binding, brokerControl, checkRepair, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources } from './hermes-writer-control.mjs';
+import { binding, brokerControl, checkCompletion, claimCompletion, checkRepair, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources, python } from './hermes-writer-control.mjs';
 export { durableWrite, syncDirectory, installWriterBoundary } from './hermes-writer-control.mjs';
 
 // A disconnected SSH pipe is not permission to abandon independent cleanup.
@@ -36,11 +36,87 @@ function present(path) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 function validateArguments(args) {
-  if (![11, 13].includes(args.length) || !["deploy", "restart", "rollback", "repair-pre-migration"].includes(args[0])) throw new Error("Invalid managed arguments");
+  if (![11, 13].includes(args.length) || !["deploy", "restart", "rollback", "repair-pre-migration", "complete-postmigration"].includes(args[0])) throw new Error("Invalid managed arguments");
   for (const value of args.slice(1, 8)) {
     if (!/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(value) || value.includes('/..') || value.endsWith('/.')) throw new Error("Managed paths must be normalized safe absolute paths");
   }
 }
+export const completionUnit = 'aistudy-postmigration-completion.service';
+const completionLockEntry = "import fcntl,os,sys,stat; fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW); s=os.fstat(fd); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o077 and s.st_nlink==1; fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); os.dup2(fd,9,inheritable=True); os.execv(sys.argv[2],sys.argv[2:])";
+function assertCompletionLock(state) {
+  const held = fstatSync(9), path = lstatSync(join(state, 'deploy.lock'));
+  if (!held.isFile() || held.uid !== 0 || held.mode & 0o077 || held.nlink !== 1 || held.dev !== path.dev || held.ino !== path.ino
+    || !readFileSync('/proc/self/fdinfo/9', 'utf8').split('\n').some(line =>
+      new RegExp(`^lock:\\s+\\d+:\\s+FLOCK\\s+ADVISORY\\s+WRITE\\s+${process.pid}\\s+\\S+:${held.ino}\\s+0\\s+EOF$`).test(line))) throw new Error('Completion exclusive managed lock not held');
+}
+export function completionService(run = command, selfCgroup = () => readFileSync('/proc/self/cgroup', 'utf8').trim(), stopping = false) {
+  const keys = ['Id', 'LoadState', 'Restart', 'KillMode', 'RuntimeMaxUSec', 'TimeoutStopUSec', 'InvocationID', 'ControlGroup', 'Slice', 'MainPID', 'ExecStopPost'];
+  const result = run(['show', '--all', `--property=${keys.join(',')}`, completionUnit]);
+  const pairs = result.stdout.trim().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2));
+  const value = Object.fromEntries(pairs);
+  if (!result.ok || pairs.length !== keys.length || Object.keys(value).length !== keys.length
+    || keys.some(key => !Object.hasOwn(value, key)) || value.Id !== completionUnit || value.LoadState !== 'loaded'
+    || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '30min'
+    || value.TimeoutStopUSec !== '2min' || value.Slice !== 'system.slice' || !(stopping ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value.MainPID)
+    || !/^[0-9a-f]{32}$/.test(value.InvocationID)
+    || !/^\/system.slice\/aistudy-postmigration-completion\.service$/.test(value.ControlGroup)
+    || selfCgroup() !== `0::${value.ControlGroup}`
+    || (value.ExecStopPost.match(/path=/g) ?? []).length !== 1
+    || !value.ExecStopPost.includes(`argv[]=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${process.execPath} ${filename} completion-stop-post ${dirname(filename)}/hermes-release.sh complete-postmigration `)) throw new Error('Independent completion system service unconfirmed');
+  return value;
+}
+
+export function cleanupCompletion(args, dependencies = {}) {
+  const { service = () => completionService(command, undefined, true), hasClaim = () => present(join(args[4], 'postmigration-completion-claimed')),
+    readClaim = () => JSON.parse(python('hermes-writer-state.py', ['completion-claim', args[4]])),
+    query = classify, fence = () => durableWrite(join(args[4], 'writers-fenced'), 'Completion uncommitted; independent scoped cleanup.\n'),
+    stop = stopWriters } = dependencies;
+  const observed = service();
+  if (!hasClaim()) return; // Admission refused before first write: no crash cleanup.
+  let claim;
+  try { claim = readClaim(); } catch { /* Partial exclusive claim is consumed. */ }
+  if (claim && (claim.invocation !== observed.InvocationID || claim.release !== args[10])) throw new Error('Cleanup invocation scope changed');
+  if (claim && query(args[4], args[3], { owner: claim.owner, transition: claim.incident, target: claim.release }) === 'committed') return;
+  // StopPost follows systemd full-cgroup termination: broker grants are dead.
+  // Retain unknown residual names; never connect to or unlink an unknown broker.
+  let fenced = true;
+  try { fence(); } catch { fenced = false; }
+  const stopped = stop(); // Independent even if fence persistence failed.
+  if (!fenced || !stopped) throw new Error('Completion cleanup UNCONFIRMED');
+}
+
+export function completionServiceUnit(args, root = dirname(filename), node = process.execPath) {
+  validateArguments(args);
+  if (args.length !== 13 || args[0] !== 'complete-postmigration' || !canonicalManagedPath(root) || !canonicalManagedPath(node)
+    || args.slice(1).some(value => !/^[A-Za-z0-9_./-]+$/.test(value))) throw new Error('Unsafe completion service arguments');
+  const entry = `${node} ${root}/hermes-supervisor.mjs`;
+  const owner = `${root}/hermes-release.sh ${args.join(' ')}`;
+  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=1800\nTimeoutStopSec=120\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
+}
+
+export function launchCompletion(script, args, dependencies = {}) {
+  const { run = command, root = dirname(filename), node = process.execPath,
+    write = (path, text) => {
+      const fd = openSync(path, 'wx', 0o644);
+      try { writeFileForUnit(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+      syncDirectory(dirname(path));
+    } } = dependencies;
+  if (script !== join(root, 'hermes-release.sh')) throw new Error('Completion owner must be reviewed sibling');
+  const unit = completionServiceUnit(args, root, node);
+  const path = `/run/systemd/system/${completionUnit}`;
+  // Never overwrite/restart an existing service or an earlier retained attempt.
+  const before = run(['show', '--all', '--property=LoadState', completionUnit]);
+  if ((!before.ok && before.status !== 1) || before.stdout.trim() !== 'LoadState=not-found' || present(path)) throw new Error('Completion service already present or unconfirmed');
+  write(path, unit);
+  if (!run(['daemon-reload']).ok) throw new Error('Completion unit reload unconfirmed');
+  // Start once. The service, not SSH, owns its cgroup, timeout and StopPost.
+  const started = run(['start', '--no-block', completionUnit]);
+  if (!started.ok) throw new Error('Completion launch unconfirmed; retain entry and inspect manager');
+  // Never unlink controls or the runtime unit after submission, including loss
+  // of the start ACK. Explicit authorized housekeeping follows manager review.
+  return { submitted: true, unit: completionUnit };
+}
+
 export function boundedQuiescence(helper, config, release) {
   // GNU timeout owns a process group and kills the whole probe tree, including
   // the nested tsx client. No inherited pipe can hold cleanup open afterwards.
@@ -50,7 +126,7 @@ export function boundedQuiescence(helper, config, release) {
 }
 function command(args) {
   const result = spawnSync("systemctl", args, { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
-  return { ok: !result.error && result.status === 0, stdout: result.stdout ?? "" };
+  return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? "" };
 }
 export function cgroupEmpty(group, root = "/sys/fs/cgroup") {
   // Only unified v2 is understood. Missing paths on v1/unknown layouts are
@@ -136,7 +212,7 @@ export async function requestCommand(action, environment = process.env, dependen
   return { exitCode: reply.ok ? 0 : 1 };
 }
 const production = {
-  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -146,23 +222,48 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
   verifyEntrySources();
   const state = args[4], systemd = args[6], action = args[0];
   const repair = action === 'repair-pre-migration';
+  const completion = action === 'complete-postmigration';
+  if (completion && !Object.keys(dependencies).length) {
+    assertCompletionLock(state);
+    if (script !== join(dirname(filename), 'hermes-release.sh')) throw new Error('Completion owner must be the reviewed sibling');
+    for (const path of [args[10], args[12]]) if (!canonicalManagedPath(path)) throw new Error('Unsafe completion target/archive');
+    if (dirname(args[10]) !== args[2]) throw new Error('Completion target must be an immediate managed release');
+    const root = realpathSync(dirname(filename)), payload = realpathSync(args[10]);
+    if (root === payload || root.startsWith(`${payload}/`)) throw new Error('Completion controls must not be payload controls');
+  }
   // Called only with the managed exclusive lock held. Rejection is read-only,
   // never an owner crash and never a rewrite of the original incident.
   const repairScope = repair ? checkRepair(args) : undefined;
   let repairAdopted = false;
+  // All readonly admission is repeated under the existing exclusive deploy.lock.
+  // The exclusive claim is this action's FIRST write, before socket/96/config.
+  const completionOwner = completion ? randomBytes(16).toString('hex') : undefined;
+  if (completion) {
+    const service = completionService();
+    const observation = checkCompletion(args);
+    try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID }); }
+    catch (error) {
+      if (error.completionClaimConsumed) {
+        try { durableWrite(join(state, 'writers-fenced'), 'Completion claim incomplete; no automatic retry.\n'); }
+        finally { stopWriters(); }
+      }
+      throw error;
+    }
+  }
   const guard = join(state, "migration-forward-only");
   const fence = join(state, "writers-fenced");
   const socketPath = join(state, `owner-${process.pid}.sock`);
   const token = randomBytes(32).toString("hex");
-  const ownerIdentity = randomBytes(16).toString("hex"); // Non-secret commit scope, never the bearer token.
+  const ownerIdentity = completionOwner ?? randomBytes(16).toString("hex"); // Non-secret commit scope, never the bearer token.
   let activationTarget, committed, broker, record, ownerFinished = false, brokerClosing = false, migrationArmed = false;
-  let phase = 'idle', generation = 0, queue = Promise.resolve(), wrapperConfirmed = false;
+  let phase = completion ? 'postmigration-independent-observation' : 'idle', generation = 0, queue = Promise.resolve(), wrapperConfirmed = false;
+  let completionPrepared = false, completionActivationConsumed = false, completionFailed = false;
   const lifetime = new AbortController();
   const installedControls = join(state, 'writer-controls');
   function revoke(close = false) {
@@ -186,7 +287,8 @@ export async function supervise(script, args, dependencies = {}) {
     } catch { return "unknown"; }
   }
   let armed = present(guard) || present(fence) || present(join(state, 'activation-incomplete'));
-  let settled = false, owner, transition, ownerStart, ownerPid, ownerPidStart, release, configuration;
+  let settled = false, owner, transition = completion ? join(state, 'releases', '20261110T081511-846613') : undefined,
+    ownerStart, ownerPid, ownerPidStart, release = completion ? args[10] : undefined, configuration;
   function signalOwnerGroup(signal) {
     if (!signalVerifiedGroup(owner?.pid, ownerStart, signal)) {
       console.error("Owner identity no longer observable; descendant termination UNCONFIRMED (no unrelated PID signalled); backend outcome unknown.");
@@ -224,7 +326,7 @@ export async function supervise(script, args, dependencies = {}) {
     let failed = !revoked;
     try {
       if (!present(guard)) durableWrite(guard, `${JSON.stringify({ transition: at ?? null, reason, ownerPid: ownerPid ?? null })}\n`);
-      if (at) durableWrite(join(at, "forward-armed"), "Unknown/partial migration outcome requires forward repair.\n");
+      if (at && !completion) durableWrite(join(at, "forward-armed"), "Unknown/partial migration outcome requires forward repair.\n");
     } catch { failed = true; }
     // Still attempt the boot/start fence when guard storage itself fails.
     try { installFence(); } catch { failed = true; }
@@ -270,6 +372,7 @@ export async function supervise(script, args, dependencies = {}) {
           return;
         }
         if (ownerFinished || lifetime.signal.aborted) throw new Error('Owner generation ended');
+        if (completionFailed && !['ping', 'refence', 'stop'].includes(message.action)) throw new Error('Completion failed; no automatic reentry');
         if (committed && !['ping', 'success', 'settled'].includes(message.action)) throw new Error('Committed generation is immutable');
         if (message.transition) {
           if (transition && message.transition !== transition) throw new Error("Transition identity mismatch");
@@ -287,7 +390,7 @@ export async function supervise(script, args, dependencies = {}) {
         if (["activate", "success"].includes(message.action)) {
           const target = realpathSync(args[3]);
           if (!message.target || message.target !== target || (activationTarget && target !== activationTarget)
-            || (['deploy', 'repair-pre-migration'].includes(action) && target !== release)) throw new Error("Activation target mismatch");
+            || (['deploy', 'repair-pre-migration', 'complete-postmigration'].includes(action) && target !== release)) throw new Error("Activation target mismatch");
           activationTarget = target;
         }
         switch (message.action) {
@@ -301,6 +404,7 @@ export async function supervise(script, args, dependencies = {}) {
             durableWrite(join(transition, 'repair-adopted'), JSON.stringify(repairScope));
             break;
           case "arm":
+            if (completion) throw new Error('Completion never authorizes migration');
             if (phase !== 'idle') throw new Error('Repeated or out-of-phase arm');
             migrationArmed = true;
             // Durable independent boundary BEFORE ACK/runner, never inferred from
@@ -310,7 +414,11 @@ export async function supervise(script, args, dependencies = {}) {
             if (!repair) installWrapper(); // Historical 95 stays intact until post-migration prepare.
             break;
           case 'prepare':
-            if (record || !transition || !['idle', 'fenced'].includes(phase)
+            if (completion) {
+              if (completionPrepared || phase !== 'postmigration-independent-observation') throw new Error('Completion preparation consumed');
+              completionPrepared = true;
+            }
+            if (record || !transition || !['idle', 'fenced', ...(completion ? ['postmigration-independent-observation'] : [])].includes(phase)
               || (repair && !migrationArmed)) throw new Error('Out-of-phase boundary preparation');
             if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
             arm(transition, 'candidate configuration preparation');
@@ -323,6 +431,10 @@ export async function supervise(script, args, dependencies = {}) {
             if (!stopWriters()) throw new Error('Writer stop UNCONFIRMED');
             break;
           case "activate": {
+            if (completion) {
+              if (!completionPrepared || completionActivationConsumed) throw new Error('Completion activation absent or consumed');
+              completionActivationConsumed = true;
+            }
             if (!transition || !['0', '1'].includes(message.required) || !['idle', 'fenced'].includes(phase) || record || ownerFinished
               || (repair && !migrationArmed)) throw new Error('Missing or repeated activation scope');
             if (migrationArmed && !existsSync(join(transition, 'migration-succeeded'))) throw new Error('Migration success unconfirmed');
@@ -427,9 +539,10 @@ export async function supervise(script, args, dependencies = {}) {
         }
         socket.end('{"ok":true}\n');
       } catch (error) {
+        if (completion && ['prepare', 'activate', 'success'].includes(message?.action)) completionFailed = true;
         // Success is a commit boundary. A failed fsync or lost persistence proof
         // cannot fall through to the owner's pre-migration restoration branch.
-        if (!committed && (!repair || repairAdopted) && message?.token === token && ['arm', 'prepare', 'activate'].includes(message.action)) {
+        if (!committed && (!repair || repairAdopted) && message?.token === token && (completion ? ['prepare', 'activate'] : ['arm', 'prepare', 'activate']).includes(message.action)) {
           try { arm(transition, 'activation failed'); } catch { console.error('UNCONFIRMED: activation refence'); }
           stopWriters();
         }
@@ -502,16 +615,39 @@ export async function supervise(script, args, dependencies = {}) {
 async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
-  if (mode === "request") {
+  if (mode === 'completion-launch') {
+    verifyEntrySources(); // No service/state write before reviewed entry trust.
+    launchCompletion(script, args);
+    console.log('Completion submitted; inspect independent manager terminal outcome.');
+  } else if (mode === 'completion-unit') {
+    console.log(completionServiceUnit(args));
+  } else if (mode === "request") {
     const result = await requestCommand(script);
     if (result.output !== undefined) console.log(result.output);
     process.exitCode = result.exitCode;
+  } else if (mode === 'completion-stop-post') {
+    validateArguments(args);
+    if (args[0] !== 'complete-postmigration') throw new Error('Cleanup is incident-only');
+    // StopPost never races a subsequent deploy owner. Open the existing lock
+    // read-only (no creation) and retain it through all scoped cleanup work.
+    const lock = spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c',
+      completionLockEntry,
+      join(args[4], 'deploy.lock'), process.execPath, filename, 'completion-cleanup-owned', script, ...args], { stdio: 'inherit' });
+    process.exitCode = await new Promise(resolve => { lock.once('error', () => resolve(1)); lock.once('exit', code => resolve(code ?? 1)); });
+  } else if (mode === 'completion-cleanup-owned') {
+    validateArguments(args);
+    if (args[0] !== 'complete-postmigration') throw new Error('Cleanup is incident-only');
+    assertCompletionLock(args[4]);
+    const observed = command(['show', '--all', '--property=InvocationID,Result,ExecMainCode,ExecMainStatus', completionUnit]);
+    if (!observed.ok) throw new Error('Completion manager terminal record unavailable');
+    console.error(observed.stdout.trim()); // Manager outcome, not application success proof.
+    cleanupCompletion(args);
   } else if (mode === "run") {
     validateArguments(args);
     verifyEntrySources(); // Before mkdir/chmod/lock, including existing guard recovery.
     const state = args[4];
-    if (args[0] === 'repair-pre-migration') {
-      checkRepair(args); // Before any mkdir/chmod/flock creation.
+    if (args[0] === 'repair-pre-migration' || args[0] === 'complete-postmigration') {
+      if (args[0] !== 'complete-postmigration') checkRepair(args); // Before any mkdir/chmod/flock creation.
       const lock = lstatSync(join(state, 'deploy.lock'));
       if (!lock.isFile() || lock.uid !== 0 || (lock.mode & 0o077) || lock.nlink !== 1) throw new Error('Existing private managed lock required');
     } else {
@@ -519,7 +655,10 @@ async function main() {
       chmodSync(state, 0o700);
       syncDirectory(dirname(state));
     }
-    const child = spawn("flock", ["--nonblock", "--no-fork", join(state, "deploy.lock"), process.execPath, ...process.execArgv, filename, "owned", script, ...args], { stdio: "inherit" });
+    const child = args[0] === 'complete-postmigration'
+      ? spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
+        join(state, 'deploy.lock'), process.execPath, filename, 'owned', script, ...args], { stdio: 'inherit' })
+      : spawn("flock", ["--nonblock", "--no-fork", join(state, "deploy.lock"), process.execPath, ...process.execArgv, filename, "owned", script, ...args], { stdio: "inherit" });
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => child.kill(signal));
     process.exitCode = await new Promise(resolve => { child.once("error", () => resolve(1)); child.once("exit", (code, signal) => resolve(signal ? 1 : code ?? 1)); });
     if (process.exitCode === 1) console.error("Managed entry failed or another deployment is already running; inspect retained state.");

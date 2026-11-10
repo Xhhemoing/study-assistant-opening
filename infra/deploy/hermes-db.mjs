@@ -115,7 +115,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       PARSER_PYTHON: parserPython, PARSER_CWD: join(target, "services/parser"),
       HF_HOME: cache, HF_HUB_CACHE: join(cache, "hub"), HUGGINGFACE_HUB_CACHE: join(cache, "hub"),
       TRANSFORMERS_CACHE: join(cache, "hub"), XDG_CACHE_HOME: cache, TORCH_HOME: join(cache, "torch"),
-      PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", HF_HUB_OFFLINE: "1",
+      PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", HF_HUB_OFFLINE: "1",
       ...(configured.PARSER_OCR_MODEL_DIR ? { PARSER_OCR_MODEL_DIR: configured.PARSER_OCR_MODEL_DIR } : {}),
     };
     // Match provision-worker's cold-import allowance on the shared host.
