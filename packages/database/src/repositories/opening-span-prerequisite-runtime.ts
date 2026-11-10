@@ -77,16 +77,16 @@ export async function createOpeningSpanPrerequisiteInTx(tx: TransactionSql, scop
   const requirements = await readCourseRequirements(tx, scope, input.courseId);
   const direct = requirements.filter(r => input.target.prerequisiteIds.includes(r.id));
   const qualified: Array<{ result: Awaited<ReturnType<typeof qualify>>; prerequisite: CourseRequirement }> = [];
-  let excludedWeak = 0;
+  const excludedWeak: SpanRepairRequirementIdentity[] = [];
   for (const prerequisite of direct) {
     const result = await qualify(tx, scope, input.courseId, input.target, prerequisite);
     if (result.qualification.status === "verified_weak") qualified.push({ result, prerequisite });
-    else if (result.qualification.status === "unknown" && result.qualification.reasonCode === "prerequisite_not_verified_weak") excludedWeak++;
+    else if (result.qualification.status === "unknown" && result.qualification.reasonCode === "prerequisite_not_verified_weak") excludedWeak.push(prerequisiteIdentity(prerequisite));
   }
   // This reason is produced only after owned bridge/current exact verifier/context validation.
   // It excludes a detour, not a blanket claim of prerequisite mastery.
-  if (direct.length > 0 && excludedWeak === direct.length) return { kind: "not_weak" as const };
-  if (qualified.length !== 1 || qualified.length + excludedWeak !== direct.length)
+  if (direct.length > 0 && excludedWeak.length === direct.length) return { kind: "not_weak" as const, prerequisites: excludedWeak };
+  if (qualified.length !== 1 || qualified.length + excludedWeak.length !== direct.length)
     return { kind: "unavailable" as const, reason: qualified.length > 1 ? "needs_clarification" : "unknown" };
   const { result, prerequisite } = qualified[0]!;
   const q = result.qualification;

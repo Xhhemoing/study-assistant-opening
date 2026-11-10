@@ -7,6 +7,7 @@ import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
 import { nextLearningStep, solveSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { readOpeningSpanPrerequisiteRepair } from "../../packages/database/src/repositories/opening-span-prerequisite-runtime";
+import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
 import { createSpanNextActionService } from "../../apps/web/src/features/opening/teaching/span/next-action-service";
 import * as prerequisiteDomain from "@aistudy/domain";
 import { getSpanItemIdentity, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -359,7 +360,7 @@ it("refuses task/ordinary next and leaves unsupported direct T-to-P repair as a 
     .toMatchObject({ kind: "choice", reason: "evidence_unknown", requirementIds: [target.id] });
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toEqual(before);
 });
-async function prerequisiteRuntimeFixture(dailyMinutes = 120, initialOutcome: "correct" | "incorrect" = "incorrect") {
+async function prerequisiteRuntimeFixture(dailyMinutes = 120, initialOutcome: "correct" | "incorrect" = "incorrect", helped = false) {
   const x = await courseSpanAuthorityFixture(dailyMinutes), service = createCourseRouteService(f.sql);
   const { courseId: _courseId, revision: _revision, lifecycle: _lifecycle, approvedAt: _approvedAt, ...definition } = x.requirement;
   const target: CourseRouteRequirementInput = { ...x.requirements[0]!, id: randomUUID(), stableSkillId: randomUUID(),
@@ -373,6 +374,7 @@ async function prerequisiteRuntimeFixture(dailyMinutes = 120, initialOutcome: "c
   const attempt = (await createOpeningLearningAttemptRepository(f.sql).listByActivity(f.scope, session.activityId))[0]!;
   const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
   if (solution.kind !== "unique") throw new Error("real prerequisite fixture requires unique coefficients");
+  if (helped) await createSpanHintService(f.sql).read(f.scope, { attemptId: attempt.id, level: 1 });
   const observation = await createOpeningAttemptService(f.sql).submit(f.scope, attempt.id, { clientKey: randomUUID(),
     answer: JSON.stringify({ membership: "in_span", coefficients: initialOutcome === "correct" ? solution.coefficients : ["0", "0"],
       equation: { vectors: initialOutcome === "correct" ? problem.vectors : [["999", "0"], ["0", "999"]], target: problem.target },
@@ -427,8 +429,9 @@ it("persists real direct P qualification and first B plan exactly once under con
   expect(chooser).not.toHaveBeenCalled();
   expect(await runtimeSnapshot(x.courseId)).toEqual(saved);
 });
-async function finishPrerequisiteBlock(confirmationOutcome: "correct" | "incorrect" = "correct") {
-  const x = await prerequisiteRuntimeFixture(), started = ready(await x.startB());
+async function finishPrerequisiteBlock(confirmationOutcome: "correct" | "incorrect" = "correct",
+  prepared?: { fixture: Awaited<ReturnType<typeof prerequisiteRuntimeFixture>>; started: ReturnType<typeof ready> }) {
+  const x = prepared?.fixture ?? await prerequisiteRuntimeFixture(), started = prepared?.started ?? ready(await x.startB());
   const lessons = createOpeningSpanSessionRepository(f.sql), issuer = createSpanReservedService(f.sql);
   let session = (await lessons.get(f.scope, started.activity.id))!;
   const plan = (await readOpeningSpanPrerequisiteRepair(f.sql, f.scope, session.activityId))!;
@@ -503,8 +506,11 @@ it.each(["correct", "incorrect"] as const)("runs real B release -> exact variant
   expect((await x.repo.read(f.scope, x.courseId)).requirements.find(row => row.requirement.id === x.requirement.id)?.status)
     .toBe(outcome === "correct" ? "verified" : "needs_correction");
 });
-it("allows original T start and next when P's own current trusted exact head rules out a weak detour", async () => {
-  const x = await prerequisiteRuntimeFixture(120, "correct");
+it.each([false, true])("allows original T start and next when P's own current trusted exact head rules out a weak detour (helped=%s)", async helped => {
+  const x = await prerequisiteRuntimeFixture(120, "correct", helped);
+  expect(x.observation.assistance).toBe(helped ? "hinted" : "independent");
+  const originalProgress = (await x.repo.read(f.scope, x.courseId)).requirements.find(row => row.requirement.id === x.requirement.id)!;
+  expect(originalProgress.status).toBe(helped ? "assisted" : "needs_verification");
   const qualification = vi.spyOn(prerequisiteDomain, "qualifySpanPrerequisiteRepair");
   const started = ready(await x.startB());
   expect(started.requirementId).toBe(x.target.id);
@@ -519,6 +525,79 @@ it("allows original T start and next when P's own current trusted exact head rul
     clientKey: randomUUID(), minutes: 20 }));
   expect(next).toMatchObject({ requirementId: x.target.id, action: "targeted_explain" });
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId} AND goal_json ? 'spanPrerequisiteRepair'`).toHaveLength(0);
+  const receipt = await activityDecision(next);
+  expect(JSON.parse(receipt.intentVersion).progress.find((row: { requirement: { id: string } }) => row.requirement.id === x.requirement.id))
+    .toMatchObject({ status: originalProgress.status, observationId: x.observation.id });
+  expect((await x.repo.read(f.scope, x.courseId)).requirements.find(row => row.requirement.id === x.requirement.id)).toEqual(originalProgress);
+});
+it.each(["active", "paused"] as const)("binds two pre-exposure independent B returns to their own confirmations with first T %s", async status => {
+  const fixture = await prerequisiteRuntimeFixture();
+  const first = ready(await fixture.startB());
+  const second = ready(await fixture.service.start(f.scope, fixture.courseId, { ...fixture.targetRequest, clientKey: randomUUID() }));
+  expect(second.activity.id).not.toBe(first.activity.id);
+  const plans = await Promise.all([first, second].map(started => readOpeningSpanPrerequisiteRepair(f.sql, f.scope, started.activity.id)));
+  expect(plans[0]!.qualification).toEqual(plans[1]!.qualification);
+  expect(await f.sql`SELECT id FROM opening_help_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  const one = await finishPrerequisiteBlock("correct", { fixture, started: first });
+  const service = createSpanNextActionService(f.sql), returnedOne = await service.next(f.scope, one.returnRequest);
+  if (returnedOne.kind !== "ready") throw new Error("first return must be ready");
+  if (status === "paused") await createOpeningTeachingActivitiesRepository(f.sql).setStatus(f.scope, returnedOne.activityId, { status: "paused" });
+  const two = await finishPrerequisiteBlock("incorrect", { fixture, started: second });
+  expect(two.observed.id).not.toBe(one.observed.id);
+  const before = await runtimeSnapshot(fixture.courseId);
+  const [returnedTwo, replay] = await Promise.all([service.next(f.scope, two.returnRequest),
+    service.next(f.scope, { ...two.returnRequest, clientKey: randomUUID() })]);
+  if (returnedTwo.kind !== "ready" || replay.kind !== "ready") throw new Error("second return must be ready");
+  expect(returnedTwo.activityId).not.toBe(returnedOne.activityId);
+  expect(replay.activityId).toBe(returnedTwo.activityId);
+  expect([returnedTwo.resumed, replay.resumed].sort()).toEqual([false, true]);
+  const after = await runtimeSnapshot(fixture.courseId);
+  expect(after.activities).toHaveLength(before.activities.length + 1);
+  expect(after.capacity.usedMinutes).toBe(before.capacity.usedMinutes + 20);
+  for (const [block, returned] of [[one, returnedOne], [two, returnedTwo]] as const) {
+    const receipts = after.receipts.filter(row => row.target_id === returned.activityId);
+    expect(receipts).toHaveLength(1);
+    expect(JSON.parse(receipts[0]!.receipt.intentVersion)).toMatchObject({ returnBasis: "bounded_prerequisite_block",
+      prerequisiteReturn: { activityId: block.session.activityId, observationId: block.observed.id,
+        outcome: block.observed.outcome, assistance: block.observed.assistance } });
+    expect(receipts[0]!.receipt.evidenceRefs).toEqual(expect.arrayContaining([
+      `activity:${block.session.activityId}`, `observation:${block.observed.id}`]));
+    expect(receipts[0]!.receipt.reasonCodes).not.toContain("verified_prerequisite_return");
+    expect(after.activities.find(row => row.id === block.session.activityId)!.goal_json.spanPrerequisiteReturn)
+      .toMatchObject({ observationId: block.observed.id, targetActivityId: returned.activityId });
+  }
+  expect(after.activities.find(row => row.id === returnedOne.activityId)!.status).toBe(status);
+  expect(await service.next(f.scope, { ...one.returnRequest, clientKey: randomUUID() })).toMatchObject({ activityId: returnedOne.activityId, resumed: true });
+  expect(await runtimeSnapshot(fixture.courseId)).toEqual(after);
+  // A receipt with another B's confirmation must not restore this completed B.
+  const secondReceipt = after.receipts.find(row => row.target_id === returnedTwo.activityId)!;
+  const corrupted = structuredClone(secondReceipt.receipt);
+  const intent = JSON.parse(corrupted.intentVersion);
+  intent.prerequisiteReturn.observationId = one.observed.id;
+  corrupted.intentVersion = JSON.stringify(intent);
+  await f.sql`UPDATE opening_learning_decisions SET receipt=${f.sql.json(corrupted)} WHERE id=${secondReceipt.id}`;
+  const tampered = await runtimeSnapshot(fixture.courseId);
+  await expect(service.next(f.scope, two.returnRequest)).rejects.toMatchObject({ code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_RECEIPT_MISMATCH" });
+  expect(await runtimeSnapshot(fixture.courseId)).toEqual(tampered);
+});
+it.each(["operation", "activity", "outcome", "assistance", "refs"] as const)("refuses B return replay with changed receipt %s without writes", async field => {
+  const x = await finishPrerequisiteBlock("incorrect"), service = createSpanNextActionService(f.sql);
+  const returned = await service.next(f.scope, x.returnRequest);
+  if (returned.kind !== "ready") throw new Error("return must be ready");
+  const [saved] = await f.sql`SELECT id,receipt FROM opening_learning_decisions WHERE target_id=${returned.activityId}
+    AND workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId}`;
+  const receipt = structuredClone(saved!.receipt), intent = JSON.parse(receipt.intentVersion);
+  if (field === "operation") intent.request.clientKey = `span-prerequisite-return:${randomUUID()}:${x.observed.id}`;
+  if (field === "activity") intent.prerequisiteReturn.activityId = randomUUID();
+  if (field === "outcome") intent.prerequisiteReturn.outcome = "correct";
+  if (field === "assistance") intent.prerequisiteReturn.assistance = x.observed.assistance === "independent" ? "hinted" : "independent";
+  if (field === "refs") receipt.evidenceRefs = receipt.evidenceRefs.filter((ref: string) => ref !== `observation:${x.observed.id}`);
+  receipt.intentVersion = JSON.stringify(intent);
+  await f.sql`UPDATE opening_learning_decisions SET receipt=${f.sql.json(receipt)} WHERE id=${saved!.id}`;
+  const before = await runtimeSnapshot(x.courseId);
+  await expect(service.next(f.scope, { ...x.returnRequest, clientKey: randomUUID() }))
+    .rejects.toMatchObject({ code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_RECEIPT_MISMATCH" });
+  expect(await runtimeSnapshot(x.courseId)).toEqual(before);
 });
 it.each(["budget", "receipt"])("rolls back B first-save activity/session/plan/history/budget on %s failure", async failure => {
   const x = await prerequisiteRuntimeFixture(failure === "budget" ? 20 : 120), before = await runtimeSnapshot(x.courseId);

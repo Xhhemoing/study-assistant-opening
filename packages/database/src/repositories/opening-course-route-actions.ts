@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { courseRouteActivityContextSchema, type CourseRouteActivityContext, type CourseRouteActionResult, type CourseRouteNext, type CourseRouteStart, type Scope } from "@aistudy/contracts";
 import { courseRequirementProgress, selectCourseRouteStep, remainingCourseComprehensiveRequirements } from "@aistudy/domain";
 import { courseRouteDecisionInput,courseRouteTeachingStep } from "./opening-course-route-decision-input";
@@ -10,7 +11,7 @@ import { reserveOpeningLearningActivityBudget } from "./opening-learning-capacit
 import { readOpeningCourseRoute,readCourseRouteObservations,readCourseRouteSourceChunks } from "./opening-course-route-read";
 import { readOpeningAiGradingStatusInTx } from "./opening-ai-grading-jobs";
 import { captureOpeningCourseRouteDecision } from "./opening-course-route-decision";
-import { recordOpeningLearningDecision } from "./opening-learning-decisions";
+import { readOpeningLearningDecisionByClientKey, recordOpeningLearningDecision } from "./opening-learning-decisions";
 import { prepareCourseReservedStart, startCourseReservedQuestion, assertCourseReservedRecovery, type CourseReservedStart } from "./opening-course-route-reserved-start";
 
 import { readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
@@ -22,7 +23,7 @@ import { createOpeningSpanPrerequisiteInTx, readOpeningSpanPrerequisiteRepair, p
 import { createOpeningSpanSessionRepository } from "./opening-span-session";
 import { stageResult } from "./opening-span-repair";
 import { nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
-import { spanPrerequisiteReturnInputSchema, type SpanPrerequisiteReturnInput, type SpanPrerequisiteRepairPlan } from "@aistudy/contracts";
+import { spanPrerequisiteReturnInputSchema, type SpanPrerequisiteReturnInput, type SpanPrerequisiteRepairPlan, type SpanRepairRequirementIdentity } from "@aistudy/contracts";
 
 const href=(courseId:string,activityId?:string)=>activityId?`/opening/courses/${courseId}/study?activity=${activityId}`:`/opening/courses/${courseId}#course-learning-route`;
 const messages={authorization_required:"导师工具尚未授权；未创建课程 span 活动或消耗预算。",binding_unavailable:"已确认 span 内容归属，但课程静态 span 执行桥尚不可用；未创建通用教学活动或消耗预算。",scope_unconfirmed:"先核对并确认本课程的完整要求范围；材料或题目缺口也保留在清单内。",source_unavailable:"要求引用的材料不可用或版本已变化，请核对材料后继续。",
@@ -44,6 +45,25 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
+      if (prerequisiteReturn) {
+        const decision = await readOpeningLearningDecisionByClientKey(tx, scope, `course-route-activity:${receipt.id}`);
+        let captured: { request?: unknown; context?: unknown; returnBasis?: unknown; prerequisiteReturn?: unknown } | undefined;
+        try { captured = decision ? JSON.parse(decision.intentVersion) : undefined; }
+        catch { throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH"); }
+        const expected = { activityId: prerequisiteReturn.activityId, observationId: prerequisiteReturn.confirmationHead,
+          outcome: prerequisiteReturn.outcome, assistance: prerequisiteReturn.assistance };
+        const context = (receipt.goal_json as { courseRoute?: CourseRouteActivityContext })?.courseRoute;
+        if (!decision || decision.targetId !== String(receipt.id) || decision.selectedAction !== "return"
+          || decision.policyVersion !== "course-route-1" || captured?.returnBasis !== "bounded_prerequisite_block"
+          || !isDeepStrictEqual(captured.prerequisiteReturn, expected) || !isDeepStrictEqual(captured.request, input)
+          || !isDeepStrictEqual(captured.context, context) || context?.action !== "return"
+          || context.requirementId !== prerequisiteReturn.plan.returnToRequirementId
+          || !decision.reasonCodes.includes("bounded_prerequisite_block_return")
+          || decision.reasonCodes.includes("verified_prerequisite_return")
+          || !decision.evidenceRefs.includes(`activity:${expected.activityId}`)
+          || !decision.evidenceRefs.includes(`observation:${expected.observationId}`))
+          throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
+      }
       if (hasOpeningSpanCourseBinding(receipt.goal_json, receipt.create_intent)) {
         if (Object.hasOwn((receipt.goal_json ?? {}) as object, "spanPrerequisiteRepair")) {
           const plan = await readOpeningSpanPrerequisiteRepair(tx, scope, String(receipt.id));
@@ -109,6 +129,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       const route = courseRouteActivityContextSchema.parse((created!.goal_json as {courseRoute:unknown}).courseRoute);
       return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: current.requirement.id, action: route.action };
     }
+    let notWeakPrerequisites: SpanRepairRequirementIdentity[] = [];
     if (!returnPlan && !origin?.context.retestId && !origin?.context.coveredRequirementIds
       && progress.some(row => current.requirement.prerequisiteIds.includes(row.requirement.id)
       && readConfirmedCourseSpanExerciseKeys(row.requirement.requirementKey, row.requirement.verification)) && !("taskId" in input && input.taskId)) {
@@ -139,6 +160,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
           "当前直接先修的证据、最早一步或已确认内容供给不足以执行一块补讲，请核对；未创建活动或消耗预算，未借用范围外题目。";
         return unavailable;
       }
+      notWeakPrerequisites = repair.prerequisites;
     }
     let boundRetestId:string|undefined;
     if("requirementId" in input&&input.taskId){
@@ -204,8 +226,14 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         requestedId=remaining.includes(origin.context.requirementId)?origin.context.requirementId:remaining[0]!;
       }
     }
+    // Exclude only this transaction's exact trusted not-weak identities from an
+    // explicit target's detour, not from ordinary course progression after T ends.
+    // Keep actual progress/help facts intact for teaching policy and receipt capture.
+    const routeProgress = requestedId ? progress.filter(row => !notWeakPrerequisites.some(identity =>
+      identity.id === row.requirement.id && identity.revision === row.requirement.revision
+      && identity.stableSkillId === row.requirement.stableSkillId && identity.requirementKey === row.requirement.requirementKey)) : progress;
     let step=returnPlan ? { requirementId: requestedId, action: "diagnose" as const, focusObservationId: null }
-      : selectCourseRouteStep(returnAfterUnknown ? progress.filter(row=>row.requirement.id===requestedId):progress,requestedId||undefined);
+      : selectCourseRouteStep(returnAfterUnknown ? routeProgress.filter(row=>row.requirement.id===requestedId):routeProgress,requestedId||undefined);
     const initialStep=step;
     if(boundRetestId)step={requirementId:current.requirement.id,action:"transfer_check",focusObservationId:null};
     if(!step){
@@ -233,7 +261,9 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     if(["transfer_check","comprehensive"].includes(step.action)&&selected.requirement.verification.status!=="ready")return choice(courseId,"verification_unavailable",[selected.requirement.id]);
     if(!options.compilerEnabled)return choice(courseId,"configuration",[selected.requirement.id]);
     const action=returnPlan || origin?.context.returnTo===selected.requirement.id?"return":step.action;
-    const existing=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
+    // B returns have a semantic key per B activity + actual confirmation head. Only
+    // that key's validated receipt above may resume them, never another B's T/action.
+    const existing=prerequisiteReturn ? [] : await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}
       AND status IN ('active','paused') AND goal_json->'courseRoute'->>'goalId'=${goal.id} AND goal_json->'courseRoute'->>'requirementId'=${selected.requirement.id}
       AND goal_json->'courseRoute'->>'requirementRevision'=${String(selected.requirement.revision)} AND goal_json->'courseRoute'->>'goalRevision'=${String(goal.revision)}
       AND goal_json->'courseRoute'->>'action'=${action} AND goal_json->'courseRoute'->>'originActivityId' IS NOT DISTINCT FROM ${origin?.input.activityId??null}
