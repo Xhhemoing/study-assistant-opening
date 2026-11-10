@@ -53,13 +53,14 @@ type AiGradingCardProps = {
   onGraded: (next: LearningObservation) => void; onDispute?: () => void; onPendingChange?: (pending: boolean) => void;
   completionAction?: AttemptPrimaryAction;
   hideDisputeAction?: boolean;
+  onCorrectAnswer?: () => void;
 };
 
 export function AiGradingCard(props: AiGradingCardProps) {
   return <GradingCard key={props.record.id} {...props} />;
 }
 
-function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingChange, completionAction, hideDisputeAction = false }: AiGradingCardProps) {
+function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingChange, completionAction, hideDisputeAction = false, onCorrectAnswer }: AiGradingCardProps) {
   const client = useMemo(() => createOpeningLearningClient(), []);
   const [status, setStatus] = useState<AiGradingStatus | null>(null);
   const [sending, setSending] = useState(false);
@@ -140,7 +141,11 @@ function GradingCard({ record, disabled = false, onGraded, onDispute, onPendingC
     {photo?<AnswerInterpretationControl key={record.id} observationId={record.id} onUpdated={onGraded} disabled={pending||disabled}/>:null}
     <StageActionBar stage={error ? "failed" : pending ? "processing" : unknown ? "evaluation-pending" : observationStage(record)} message={message}
       primary={completion ?? (status?.retryable && !unknown ? { label: retryLabel, disabled: disabled || sending, onClick: () => void enqueue() }
-        : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: "修改这一步", disabled, onClick: onDispute } : undefined)}>
+        : !pending && onDispute && (unknown || status?.status === "needs_manual") ? { label: unknown ? "人工更正结果（不调用 AI）" : "修改这一步", disabled, onClick: onDispute } : undefined)}>
+      {unknown && onCorrectAnswer ? <div className="space-y-2">
+        <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={disabled} onClick={onCorrectAnswer}>纠正回答并保存新版本（不自动批改）</button>
+        <p className="text-xs leading-6 text-text-3">保存更正不会调用 AI，也不代表旧请求费用已确认。若之后选择重新批改，可能另行产生费用。</p>
+      </div> : null}
       {record.aiEvaluation && onDispute && !hideDisputeAction ? <button type="button" className="min-h-11 rounded px-2 py-2 text-sm text-accent underline underline-offset-4 disabled:opacity-50" disabled={pending || disabled} onClick={onDispute}>判错了</button> : null}
     </StageActionBar>
   </div>;
