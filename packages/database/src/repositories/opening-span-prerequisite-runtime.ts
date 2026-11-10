@@ -39,6 +39,7 @@ async function qualify(db: Db, scope: Scope, courseId: string, target: CourseReq
       AND o.workspace_id=root.workspace_id AND o.owner_user_id=root.owner_user_id
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
       AND a.create_intent->'spanCourseBinding'->'requirement'->>'id'=${prerequisite.id}
+      AND NOT (a.create_intent->'spanCourseBinding' ? 'returnTarget')
       AND (${observationId ?? null}::uuid IS NULL OR o.id=${observationId ?? null}::uuid)
     ORDER BY a.submitted_at DESC NULLS LAST,a.started_at DESC,a.id DESC LIMIT 1`;
   let evidence: SpanPrerequisiteQualificationInput["evidence"] = null;
@@ -91,6 +92,21 @@ export async function createOpeningSpanPrerequisiteInTx(tx: TransactionSql, scop
   const { result, prerequisite } = qualified[0]!;
   const q = result.qualification;
   if (q.status !== "verified_weak" || !result.row || !result.evidence) return { kind: "unavailable" as const, reason: "unknown" };
+  // A completed block can suppress only this exact detour, never qualify P as mastered.
+  // Match the whole current qualification (including identities, basis and sources),
+  // then revalidate the saved plan; actions must still verify its actual return receipt.
+  const [completed] = await tx`SELECT id FROM opening_teaching_activities
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId}
+      AND status='completed' AND goal_json->'spanPrerequisiteRepair'->'qualification'=${tx.json(q)}::jsonb
+      AND goal_json->'spanCourseBinding'->>'goalId'=${input.goalId}
+      AND goal_json->'spanCourseBinding'->>'goalRevision'=${String(input.goalRevision)}
+    ORDER BY updated_at DESC,id DESC LIMIT 1`;
+  if (completed) {
+    const plan = await readOpeningSpanPrerequisiteRepair(tx, scope, String(completed.id));
+    if (!plan || !isDeepStrictEqual(plan.qualification, q)) throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+    return { kind: "completed" as const, activityId: String(completed.id), plan,
+      prerequisites: [...excludedWeak, prerequisiteIdentity(prerequisite)] };
+  }
   const problem = parseOpeningSpanExercise(result.row.evaluation_spec);
   const evaluation = result.evidence.observation.serverEvaluation;
   const diagnosis = problem && evaluation?.evaluatorVersion === "span-exact-v1" && evaluation.skills

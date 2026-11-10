@@ -37,6 +37,59 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
 type PrerequisiteReturn = { plan: SpanPrerequisiteRepairPlan; activityId: string; confirmationHead: string; outcome: "correct" | "incorrect"; assistance: string };
+/** Shared strict reader: replay and completed-detour admission require the same receipt bytes. */
+async function assertPrerequisiteReturnReceipt(tx: TransactionSql, scope: Scope, receipt: Record<string, unknown>,
+  input: CourseRouteStart | CourseRouteNext, prerequisiteReturn: PrerequisiteReturn) {
+  const decision = await readOpeningLearningDecisionByClientKey(tx, scope, `course-route-activity:${receipt.id}`);
+  let captured: { request?: unknown; context?: unknown; returnBasis?: unknown; prerequisiteReturn?: unknown } | undefined;
+  try { captured = decision ? JSON.parse(decision.intentVersion) : undefined; }
+  catch { throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH"); }
+  const expected = { activityId: prerequisiteReturn.activityId, observationId: prerequisiteReturn.confirmationHead,
+    outcome: prerequisiteReturn.outcome, assistance: prerequisiteReturn.assistance };
+  const context = (receipt.goal_json as { courseRoute?: CourseRouteActivityContext })?.courseRoute;
+  if (!decision || decision.targetId !== String(receipt.id) || decision.selectedAction !== "return"
+    || decision.policyVersion !== "course-route-1" || captured?.returnBasis !== "bounded_prerequisite_block"
+    || !isDeepStrictEqual(captured.prerequisiteReturn, expected) || !isDeepStrictEqual(captured.request, input)
+    || !isDeepStrictEqual(captured.context, context) || context?.action !== "return"
+    || context.requirementId !== prerequisiteReturn.plan.returnToRequirementId
+    || !decision.reasonCodes.includes("bounded_prerequisite_block_return")
+    || decision.reasonCodes.includes("verified_prerequisite_return")
+    || !decision.evidenceRefs.includes(`activity:${expected.activityId}`)
+    || !decision.evidenceRefs.includes(`observation:${expected.observationId}`))
+    throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
+}
+
+async function assertCompletedPrerequisiteReturn(tx: TransactionSql, scope: Scope, activityId: string, plan: SpanPrerequisiteRepairPlan) {
+  const authorization = await readSpanTutorAuthorization(tx, scope, plan.courseBinding.courseId);
+  if (!authorization.authorized || !authorization.grant) throw learningError("CONFLICT", "导师授权已停止，原位置保留。");
+  await lockSpanTutorAuthorization(tx, scope, plan.courseBinding.courseId, authorization.grant.revision);
+  await readOpeningSpanCourseBinding(tx, scope, activityId, { lockSources: true });
+  const session = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, activityId);
+  if (!session || session.status !== "completed" || session.moveId !== "self_study-reserved")
+    throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+  const head = await stageResult(tx, scope, session, "confirmation", false);
+  const operation = `span-prerequisite-return:${activityId}:${head.id}`;
+  const [saved] = await tx`SELECT goal_json->'spanPrerequisiteReturn' AS returned FROM opening_teaching_activities
+    WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const returned = saved?.returned as { operation?: string; observationId?: string; targetActivityId?: string } | undefined;
+  if (returned?.operation !== operation || returned.observationId !== head.id || !returned.targetActivityId)
+    throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+  const request: CourseRouteStart = { goalId: plan.courseBinding.goalId, expectedGoalRevision: plan.courseBinding.goalRevision,
+    requirementId: plan.returnToRequirementId, expectedRequirementRevision: plan.courseBinding.returnTarget!.revision,
+    clientKey: operation, minutes: session.intent.timeBudgetMinutes };
+  const [receipt] = await tx`SELECT * FROM opening_teaching_activities WHERE id::text=${returned.targetActivityId}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${session.courseId}
+    AND client_key=${`course-route-start:${session.courseId}:${operation}`}`;
+  const context = courseRouteActivityContextSchema.safeParse((receipt?.goal_json as { courseRoute?: unknown })?.courseRoute);
+  const target = plan.courseBinding.returnTarget!;
+  if (!receipt || !context.success || context.data.goalId !== request.goalId || context.data.goalRevision !== request.expectedGoalRevision
+    || context.data.requirementRevision !== target.revision || context.data.stableSkillId !== target.stableSkillId
+    || context.data.requirementKey !== target.requirementKey)
+    throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
+  await assertPrerequisiteReturnReceipt(tx, scope, receipt, request, { plan, activityId,
+    confirmationHead: head.id, outcome: head.serverEvaluation!.decision as "correct" | "incorrect", assistance: head.assistance });
+}
+
 export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
   async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart,prerequisiteReturn?:PrerequisiteReturn):Promise<CourseRouteActionResult>{
     const returnPlan = prerequisiteReturn?.plan;
@@ -45,25 +98,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
     if(receipt){
-      if (prerequisiteReturn) {
-        const decision = await readOpeningLearningDecisionByClientKey(tx, scope, `course-route-activity:${receipt.id}`);
-        let captured: { request?: unknown; context?: unknown; returnBasis?: unknown; prerequisiteReturn?: unknown } | undefined;
-        try { captured = decision ? JSON.parse(decision.intentVersion) : undefined; }
-        catch { throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH"); }
-        const expected = { activityId: prerequisiteReturn.activityId, observationId: prerequisiteReturn.confirmationHead,
-          outcome: prerequisiteReturn.outcome, assistance: prerequisiteReturn.assistance };
-        const context = (receipt.goal_json as { courseRoute?: CourseRouteActivityContext })?.courseRoute;
-        if (!decision || decision.targetId !== String(receipt.id) || decision.selectedAction !== "return"
-          || decision.policyVersion !== "course-route-1" || captured?.returnBasis !== "bounded_prerequisite_block"
-          || !isDeepStrictEqual(captured.prerequisiteReturn, expected) || !isDeepStrictEqual(captured.request, input)
-          || !isDeepStrictEqual(captured.context, context) || context?.action !== "return"
-          || context.requirementId !== prerequisiteReturn.plan.returnToRequirementId
-          || !decision.reasonCodes.includes("bounded_prerequisite_block_return")
-          || decision.reasonCodes.includes("verified_prerequisite_return")
-          || !decision.evidenceRefs.includes(`activity:${expected.activityId}`)
-          || !decision.evidenceRefs.includes(`observation:${expected.observationId}`))
-          throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");
-      }
+      if (prerequisiteReturn) await assertPrerequisiteReturnReceipt(tx, scope, receipt, input, prerequisiteReturn);
       if (hasOpeningSpanCourseBinding(receipt.goal_json, receipt.create_intent)) {
         if (Object.hasOwn((receipt.goal_json ?? {}) as object, "spanPrerequisiteRepair")) {
           const plan = await readOpeningSpanPrerequisiteRepair(tx, scope, String(receipt.id));
@@ -154,7 +189,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         const activity = await assertOwnedActivity(tx as unknown as Sql, scope, repair.activityId);
         return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: repair.requirementId, action: "prerequisite" };
       }
-      if (repair.kind !== "not_weak") {
+      if (repair.kind === "completed") await assertCompletedPrerequisiteReturn(tx, scope, repair.activityId, repair.plan);
+      if (repair.kind !== "not_weak" && repair.kind !== "completed") {
         const unavailable = choice(courseId, repair.reason === "authorization_required" ? "authorization_required" : "evidence_unknown", [current.requirement.id]);
         if (unavailable.kind === "choice" && repair.reason === "needs_clarification") unavailable.message =
           "当前直接先修的证据、最早一步或已确认内容供给不足以执行一块补讲，请核对；未创建活动或消耗预算，未借用范围外题目。";
@@ -226,7 +262,7 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         requestedId=remaining.includes(origin.context.requirementId)?origin.context.requirementId:remaining[0]!;
       }
     }
-    // Exclude only this transaction's exact trusted not-weak identities from an
+    // Exclude only this transaction's exact trusted not-weak/completed-block identities from an
     // explicit target's detour, not from ordinary course progression after T ends.
     // Keep actual progress/help facts intact for teaching policy and receipt capture.
     const routeProgress = requestedId ? progress.filter(row => !notWeakPrerequisites.some(identity =>
