@@ -32,7 +32,7 @@ beforeAll(async () => { fixture = await createOpeningFixture();
 afterAll(async () => { setAuthRuntimeForTests(null);await runtime?.close();await fixture?.close(); });
 function record(name: string, data: unknown) { if(process.env.REACH_RAW_PATH) appendFileSync(process.env.REACH_RAW_PATH,JSON.stringify({utc:new Date().toISOString(),name,data})+"\n"); }
 const body="求二阶单位矩阵的秩。";
-async function seed(twoQuestions = false, extraContext = false) {
+async function seed(twoQuestions = false, extraContext = false, duplicatePositions = false) {
  const base=await learningAttemptFixture(fixture), sourceIds=[base.sourceId];
  const activity=await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope,{clientKey:randomUUID(),intentKind:"topic",intentSummary:"矩阵秩",courseId:base.courseId,sourceIds,createIntent:{}});
  const content=createOpeningTeachingContentRepository(fixture.sql), blockId=randomUUID(), answerId=randomUUID();
@@ -45,6 +45,17 @@ async function seed(twoQuestions = false, extraContext = false) {
  }
  const extraBlockId=randomUUID(),unboundAnswerId=randomUUID();
  if(extraContext) blocks.push({id:extraBlockId,type:"paragraph",content:{text:"条件：仅考虑实矩阵。"}},{id:unboundAnswerId,type:"answer_key",content:{answer:"未绑定答案"}});
+ if(duplicatePositions) {
+  // Twenty legal refs force PostgreSQL's position-only sort to reorder ties.
+  // Q1 is ref 1 -> 4; unissued Q2 is ref 7 -> 10 in the stable JS order.
+  blocks.length=0;order.length=0;
+  for(let n=1;n<=20;n++) {
+   const prompt=n%2===1;
+   const id=n===1?blockId:n===4?answerId:n===7?secondBlockId:n===10?secondAnswerId:randomUUID();
+   blocks.push({id,type:prompt?"prompt":"answer_key",content:prompt?{text:n===1?body:`合成题 ${n}`}:{answer:"2",hints:{direction:"检查两列。",concept:"线性无关列的数量。",firstStep:"写出第一列。"}}});
+   order.push({blockId:id,position:n%3,role:prompt?"prompt":"answer_key",blockType:prompt?"prompt":"answer_key"});
+  }
+ }
  const unit=await content.createUnit(fixture.scope,{title:"矩阵秩",blocks});
  const refs=[{sourceId:base.sourceId,chunkId:base.chunkId,version:1}];
  await content.publishActivitySpec(fixture.scope,{activityId:activity.id,teachingUnitId:unit.id,expectedVersion:0,expectedRevisionNumber:1,revisionNumber:1,blockOrder:order,sourceRefs:refs});
@@ -219,6 +230,39 @@ it.each([false,true])("multi-answer reference adoption retains only the helped q
  // bindings must still explain A2; don't silently rely only on the current spec.
  expect(await f.command("rephrase",2)).toMatchObject({ok:true,contentVersion:3});
  expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[q1.id]}))[0]).toMatchObject({fresh:true,independent_attempt:"no",prior_question_help:true});
+});
+
+it("duplicate-position publication retains Q1 help after dual-answer adoption with Q2 unissued",async()=>{
+ const f=await seed(true,false,true);
+ const [published]=await fixture.sql`SELECT block_order FROM opening_teaching_activity_specs WHERE activity_id=${f.activity.id}`;
+ expect(published!.block_order).toEqual(f.order);
+ const stable=[...f.order].sort((a,b)=>a.position-b.position);
+ const [pairs]=await fixture.sql`SELECT
+  (SELECT jsonb_agg(jsonb_build_array(ref->>'blockId',answer_ref->>'blockId') ORDER BY position,ordinality)
+   FROM (SELECT ref,(ref->>'position')::int AS position,ordinality,
+     lead(ref) OVER (ORDER BY (ref->>'position')::int,ordinality) AS answer_ref
+    FROM jsonb_array_elements(${fixture.sql.json(f.order)}) WITH ORDINALITY AS refs(ref,ordinality)) ordered) AS stable,
+  (SELECT jsonb_agg(jsonb_build_array(ref->>'blockId',answer_ref->>'blockId') ORDER BY position,ordinality)
+   FROM (SELECT ref,(ref->>'position')::int AS position,ordinality,
+     lead(ref) OVER (ORDER BY (ref->>'position')::int) AS answer_ref
+    FROM jsonb_array_elements(${fixture.sql.json(f.order)}) WITH ORDINALITY AS refs(ref,ordinality)) ordered) AS legacy`;
+ const jsPairs=stable.map((ref,index)=>[ref.blockId,stable[index+1]?.blockId??null]);
+ expect(pairs!.stable).toEqual(jsPairs);
+ record("duplicate-position-order",{order:f.order,jsPairs,sql:pairs});
+ const old=await f.start(),help=await f.hint(old.id);
+ expect((await fixture.sql`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${old.itemVersionId!}`)[0]?.evaluation_spec).toMatchObject({answerBlockId:f.answerId});
+ expect(await fixture.sql`SELECT id FROM opening_learning_item_versions WHERE activity_id=${f.activity.id} AND teaching_block_id=${f.secondBlockId}`).toHaveLength(0);
+ const changed=f.blocks.map(b=>(b.id===f.answerId||b.id===f.secondAnswerId)?{...b,content:{...b.content,answer:"参考答案：2。"}}:b);
+ const revision=await f.content.writeUnitBlocks(fixture.scope,f.unit.id,changed);
+ await createOpeningTeachingContentService(fixture.sql).adoptReferenceRevision(fixture.scope,f.activity.id,{expectedContentVersion:1,expectedRevisionNumber:1,revisionNumber:revision.revisionNumber});
+ const next=await f.start(2),q1=await f.submit(next.id);
+ const second=await f.service.create(fixture.scope,{sessionId:f.session.id,clientKey:randomUUID(),teachingBlock:{blockId:f.secondBlockId,contentVersion:2}}),q2=await f.submit(second.id);
+ expect((await fixture.sql`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${second.itemVersionId!}`)[0]?.evaluation_spec).toMatchObject({answerBlockId:f.secondAnswerId});
+ record("duplicate-position-adoption",{old,help,next,q1,second,q2});
+ expect(q1.eligibility?.independentAttempt).toBe("no");
+ expect(q2.eligibility).toMatchObject({independentAttempt:"yes",verifiedCorrect:"unknown"});
+ expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[q1.id]}))[0]).toMatchObject({fresh:true,independent_attempt:"no",prior_question_help:true});
+ expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE activity_id=${f.activity.id}`).toEqual([{id:help.exposureReceipt.id}]);
 });
 
 it.each(["unbound_answer","context","other_prompt","answer_metadata"] as const)("multi-question comparison preserves %s differences",async kind=>{

@@ -45,8 +45,8 @@ export function unchangedTeachingQuestionHelpMatches(db: LearningSql) {
       -- Raw answer blocks or their physical adjacency are not binding evidence.
       SELECT ordered.answer_ref->>'blockId' FROM opening_teaching_activity_specs spec
       CROSS JOIN LATERAL (SELECT ref,
-          lead(ref) OVER (ORDER BY (ref->>'position')::int) AS answer_ref
-        FROM jsonb_array_elements(spec.block_order) ref) ordered
+          lead(ref) OVER (ORDER BY (ref->>'position')::int, ref_ordinality) AS answer_ref
+        FROM jsonb_array_elements(spec.block_order) WITH ORDINALITY AS refs(ref,ref_ordinality)) ordered
       WHERE spec.workspace_id=v.workspace_id AND spec.owner_user_id=v.owner_user_id
         AND spec.activity_id=v.activity_id AND spec.teaching_unit_id=unit.id
         AND spec.document_id=now_revision.document_id
