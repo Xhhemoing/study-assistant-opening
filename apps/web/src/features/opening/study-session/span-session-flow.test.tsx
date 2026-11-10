@@ -529,16 +529,23 @@ it("reloading never requests a new hint level; it only re-reads released ones", 
   expect(view.help.level).toBe("hinted");
 });
 
-it("replays the same sealed request after a network failure", async () => {
-  const { attempt, details } = fixture("self-independent", "span-independent-3d");
-  mocks.request.mockResolvedValue({}); mocks.createAttempt.mockResolvedValue(attempt);
+it.each([false, true])("replays the same sealed request after a network failure B=%s", async b => {
+  const { attempt, details } = fixture(b ? "self-faded" : "self-independent", "span-independent-3d");
+  mocks.request.mockResolvedValue(b ? attempt : {}); mocks.createAttempt.mockResolvedValue(attempt);
   mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
-  const port = createSpanStudySession(details, vi.fn());
+  const bound = b ? readyPrerequisite(details) : details;
+  const port = createSpanStudySession(bound, vi.fn());
   await port.load(); port.edit({ membership: "in_span" });
-  const saved = { id: uuid(), assistance: "independent", serverEvaluation: { decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
+  const saved = { id: uuid(), attemptId: attempt.id, assistance: "independent", serverEvaluation: { evaluatorVersion: "span-exact-v1", attemptId: attempt.id,
+    itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, decision: "incorrect", reasonCodes: [] } } as unknown as LearningObservation;
   mocks.submitAttempt.mockRejectedValueOnce(new Error("network")).mockResolvedValueOnce(saved);
   await expect(port.primary()).rejects.toThrow("network");
   expect(port.current!()?.sealed).toBe(true);
+  if (b) {
+    const restored = await createSpanStudySession(bound, vi.fn()).load();
+    expect(restored.step.id).toBe(attempt.id); expect(restored.sealed).toBe(true); expect(restored.answer.membership).toBe("in_span");
+    expect(mocks.submitAttempt).toHaveBeenCalledTimes(1);
+  }
   // A skipped choice is sealed as skipped: a late choice cannot change the replayed request.
   expect(() => port.setConfidence!("confident")).toThrow("答案已提交");
   mocks.read.mockResolvedValue({ observation: saved, deliveredAssistance: "none" });
@@ -867,12 +874,18 @@ it.each(["no read-back", "a null read-back", "a throwing read-back"] as const)("
 function readyRepair(details: SpanLessonDetails, targetSkill: "equation" | "coefficients" | "allCoordinates" = "equation"): SpanLessonDetails {
   return { ...details, repair: { status: "ready", version: 1, contentVersion: 1, targetSkill, focusSummary: "补当前已核验的步骤", prerequisiteStatus: "unknown" } };
 }
+function readyPrerequisite(details: SpanLessonDetails, targetSkill: "equation" | "coefficients" | "allCoordinates" = "equation"): SpanLessonDetails {
+  const prerequisiteRequirement = { id: uuid(), revision: 1, stableSkillId: uuid(), requirementKey: "span:linear-combination:v1" };
+  const targetRequirement = { ...prerequisiteRequirement, id: uuid(), stableSkillId: uuid(), requirementKey: "requirement:target" };
+  return { ...details, prerequisiteRepair: { version: 1, status: "ready", targetSkill, focusSummary: "补直接前置的已核验步骤",
+    prerequisiteRequirement, targetRequirement, returnToRequirementId: targetRequirement.id } };
+}
 const requestBodies = (suffix: string) => mocks.request.mock.calls.filter(call => String(call[0]).endsWith(suffix)).map(call => JSON.parse(call[2].body));
 
-it.each([true, false])("renders repair in V2=%s without generic content, advances only explicitly and preserves the original intent on pause failure", async v2 => {
+it.each([[true, false], [false, false], [true, true], [false, true]])("renders bounded lesson V2=%s B=%s without generic content, advances only explicitly and preserves original intent on pause failure", async (v2, b) => {
   mocks.v2 = v2;
   const { details, attempt } = fixture("self-example");
-  const bound = readyRepair(details, "allCoordinates");
+  const bound = b ? readyPrerequisite(details, "allCoordinates") : readyRepair(details, "allCoordinates");
   const explanation = buildSpanTargetedExplanation(attempt.spanExercise!, "allCoordinates")!;
   let snapshot = bound.session!;
   let failPause = true;
@@ -897,16 +910,18 @@ it.each([true, false])("renders repair in V2=%s without generic content, advance
   try {
     await act(async () => root.render(<SpanLessonSession courseId={snapshot.courseId} sourceIds={snapshot.sourceIds} sourceLoadError={false} initialActivityId={snapshot.activityId} />));
     expect(host.textContent).toContain(explanation.brief);
-    expect(host.textContent).toContain("外部先修关系与薄弱证据尚未确认");
+    expect(host.textContent).toContain(b ? "只补这一个有依据的先修步骤，再返回原要求" : "外部先修关系与薄弱证据尚未确认");
+    if (b) expect(host.textContent).not.toContain("外部先修关系与薄弱证据尚未确认");
     expect(host.textContent).not.toContain("span 是所有");
     expect(host.querySelector("[aria-label='span 学习目录']")).toBeNull();
     expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled();
     expect(mocks.request.mock.calls.some(call => call[2]?.method === "PATCH" || String(call[0]).endsWith("/next"))).toBe(false);
-    expect(requestBodies("/presentation")).toEqual([{ activityId: snapshot.activityId, repairVersion: 1, stage: "example", clientKey: `span-repair:${snapshot.activityId}:v1:example` }]);
+    const protocol = b ? { prerequisiteRepairVersion: 1 } : { repairVersion: 1 };
+    expect(requestBodies("/presentation")).toEqual([{ activityId: snapshot.activityId, ...protocol, stage: "example", clientKey: `span-${b ? "prerequisite" : "repair"}:${snapshot.activityId}:v1:example` }]);
     await click("开始做题");
     expect(snapshot.moveId).toBe("self-faded");
     expect(mocks.hint).not.toHaveBeenCalled();
-    expect(requestBodies("/reserved")[0]).toMatchObject({ activityId: snapshot.activityId, repairVersion: 1, stage: "variant", expectedRevision: snapshot.revision });
+    expect(requestBodies("/reserved")[0]).toMatchObject({ activityId: snapshot.activityId, ...protocol, stage: "variant", expectedRevision: snapshot.revision });
     expect(requestBodies("/reserved")[0]).not.toHaveProperty("sourceId");
     await click("更多"); await click("暂停并保存");
     expect(host.textContent).toContain("暂停还没保存"); expect(snapshot.status).toBe("active");
@@ -944,7 +959,7 @@ it.each(["equation", "coefficients", "allCoordinates"] as const)("renders only t
   await port.primary(); expect(save).toHaveBeenCalledExactlyOnceWith(bound.session!.intent, "self-faded", "active");
 });
 
-it("blocks clarification and unavailable/mismatched new content without generic fallback or automatic progression", async () => {
+it.each([false, true])("blocks clarification and unavailable/mismatched content without generic fallback B=%s", async b => {
   const { details, attempt } = fixture("self-example");
   const save = vi.fn(async () => true);
   const clarify = { ...details, repair: { status: "needs_clarification", version: 1, reasonCode: "predecessor_unobserved", message: "请补写原向量等式", prerequisiteStatus: "unknown" } } as SpanLessonDetails;
@@ -955,15 +970,15 @@ it("blocks clarification and unavailable/mismatched new content without generic 
   for (const response of [null, { problem: attempt.spanExercise, solution: solveSpanProblem(attempt.spanExercise!), exposureReceipt: { id: uuid() } },
     { problem: attempt.spanExercise, solution: solveSpanProblem(attempt.spanExercise!), targetedExplanation: buildSpanTargetedExplanation(attempt.spanExercise!, "coefficients"), exposureReceipt: { id: uuid() } }]) {
     mocks.request.mockImplementation(async () => { if (!response) throw new Error("stale plan"); return response; });
-    const port = createSpanStudySession(readyRepair(details), save), view = await port.load();
+    const port = createSpanStudySession(b ? readyPrerequisite(details) : readyRepair(details), save), view = await port.load();
     expect(view.blocked).toBeTruthy(); expect(view.step.kind === "learn" && view.step.body).not.toContain("span 是所有");
     await port.primary();
   }
   expect(save).toHaveBeenCalledTimes(1);
 });
 
-it("restores the exact current variant/draft/help, explicitly retries without overwriting the first answer, then skips self-independent", async () => {
-  const { details, attempt } = fixture(), bound = readyRepair(details, "coefficients");
+it.each([false, true])("restores exact variant/draft/help and explicit retry without overwriting first answer B=%s", async b => {
+  const { details, attempt } = fixture(), bound = b ? readyPrerequisite(details, "coefficients") : readyRepair(details, "coefficients");
   const retry = { ...attempt, id: uuid(), historyRevision: 2 };
   let current = attempt;
   const records = new Map<string, LearningObservation>();
@@ -994,6 +1009,12 @@ it("restores the exact current variant/draft/help, explicitly retries without ov
   const p = retry.spanExercise!, solution = solveSpanProblem(p); if (solution.kind !== "unique") throw new Error("fixture");
   port.edit({ membership: "in_span", coefficients: solution.coefficients, equation: { vectors: p.vectors, target: p.target }, coordinateChecks: p.target });
   const result = await port.primary(); expect(result.result).toMatchObject({ outcome: "correct", assistance: "revealed" });
+  expect(primaryAction(result, false).label).toBe(b ? "发放新题确认" : "看下一步安排");
+  if (b) {
+    expect(requestBodies("/reserved")).toContainEqual({ activityId: details.session!.activityId, prerequisiteRepairVersion: 1,
+      expectedRevision: details.session!.revision, stage: "variant", clientKey: `span-prerequisite:${details.session!.activityId}:v1:retry:${attempt.id}`, retryAfterAttemptId: attempt.id });
+    expect(requestBodies("/reserved").every(input => !input.repairVersion && !input.returnToRequirementId)).toBe(true);
+  }
   expect(mocks.submitAttempt.mock.lastCall![1].assistance).toBe("revealed"); expect(records.get(attempt.id)).toEqual(first);
   const scopes = Object.keys(sessionStorage).filter(key => key.startsWith("opening-practice:v2:"));
   expect(JSON.parse(sessionStorage.getItem(scopes[0]!)!).drafts).toHaveLength(2);
@@ -1002,9 +1023,9 @@ it("restores the exact current variant/draft/help, explicitly retries without ov
   expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next") || String(call[0]).endsWith("/session"))).toBe(false);
 });
 
-it("restores only previously delivered repair hint levels and keeps help attached to the current issued attempt", async () => {
+it.each([false, true])("restores only delivered bounded hint levels attached to current attempt B=%s", async b => {
   const { details, attempt } = fixture();
-  const bound = { ...readyRepair(details), hintLevels: { [attempt.id]: [1, 3] as (1 | 3)[] } };
+  const bound = { ...(b ? readyPrerequisite(details) : readyRepair(details)), hintLevels: { [attempt.id]: [1, 3] as (1 | 3)[] } };
   mocks.request.mockResolvedValue(attempt);
   mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "hinted" });
   mocks.hint.mockImplementation(async (_attempt, level) => hintResponse(level));
@@ -1019,8 +1040,8 @@ it("restores only previously delivered repair hint levels and keeps help attache
   expect(mocks.submitAttempt).not.toHaveBeenCalled();
 });
 
-it("preserves the current draft on stale stage issue and never treats incomplete or mismatched confirmation as correct", async () => {
-  const { details, attempt } = fixture("self_study-reserved"), bound = readyRepair(details);
+it.each([false, true])("preserves draft on stale stage and rejects incomplete/mismatched confirmation B=%s", async b => {
+  const { details, attempt } = fixture("self_study-reserved"), bound = b ? readyPrerequisite(details) : readyRepair(details);
   mocks.request.mockResolvedValue(attempt); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "none" });
   const port = createSpanStudySession(bound, vi.fn());
   await port.load(); port.edit({ membership: "in_span", coefficients: ["7", "8"] });
@@ -1053,4 +1074,131 @@ it.each(["independent", "hinted", "revealed"] as const)("shows only current conf
     expect(requestBodies("/reserved")[0]).toMatchObject({ stage: "confirmation", expectedRevision: details.session!.revision });
     expect(mocks.request.mock.calls.some(call => String(call[0]).endsWith("/next"))).toBe(false);
   } finally { await ui.unmount(); }
+});
+
+
+it.each(["correct", "incorrect"] as const)("returns explicitly from actual B confirmation %s with strict identity and no extra remediation", async outcome => {
+  const { details, attempt } = fixture("self_study-reserved"), bound = readyPrerequisite(details);
+  const record = { id: uuid(), attemptId: attempt.id, answer: "saved original answer", assistance: "hinted",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: outcome, coreEvidenceComplete: true,
+      attemptId: attempt.id, itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } } as unknown as LearningObservation;
+  const target = uuid(), returned = { kind: "ready", activityId: target, courseId: details.session!.courseId,
+    href: `/opening/courses/${details.session!.courseId}/study?activity=${target}`, label: "返回原要求", resumed: false };
+  mocks.request.mockImplementation(async (path: string) => path.endsWith("/reserved") ? attempt : returned);
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "hinted" });
+  const save = vi.fn(async () => true), port = createSpanStudySession(bound, save), ui = await mount(port);
+  try {
+    expect(ui.host.textContent).toContain(outcome === "correct" ? "答案正确" : "尚未正确");
+    expect(ui.host.textContent).toContain("使用过提示"); expect(ui.host.textContent).toContain("不代表先修已修复或已经掌握");
+    expect(ui.host.querySelector("[data-primary-action]")?.textContent).toBe("返回原要求");
+    expect(port.changeExplanation).toBeUndefined(); expect(requestBodies("/next")).toEqual([]); expect(save).not.toHaveBeenCalled();
+    const refreshed = await createSpanStudySession(bound, save).load();
+    expect(refreshed.step.id).toBe(attempt.id); expect(refreshed.result).toMatchObject({ outcome, assistance: "hinted" });
+    await ui.click("返回原要求");
+    expect(requestBodies("/next")).toEqual([{ activityId: details.session!.activityId, prerequisiteRepairVersion: 1,
+      expectedRevision: details.session!.revision, observationId: record.id, clientKey: `span-prerequisite-return:${details.session!.activityId}:${record.id}` }]);
+    expect(mocks.push).not.toHaveBeenCalled();
+    await ui.click("返回原要求");
+    expect(mocks.push).toHaveBeenCalledExactlyOnceWith(returned.href);
+    expect(requestBodies("/next")).toHaveLength(1);
+    expect(record.answer).toBe("saved original answer"); expect(save).not.toHaveBeenCalled();
+    expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled();
+  } finally { await ui.unmount(); }
+});
+
+it.each(["abstain", "retracted", "incomplete", "foreign-item"])("never returns or generically falls back for B %s confirmation", async fault => {
+  const { details, attempt } = fixture("self_study-reserved"), bound = readyPrerequisite(details);
+  mocks.request.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), attemptId: attempt.id, assistance: "independent",
+    revisionKind: fault === "retracted" ? "retract" : undefined,
+    serverEvaluation: fault === "retracted" ? null : { evaluatorVersion: "span-exact-v1", decision: fault === "abstain" ? "abstain" : "correct",
+      coreEvidenceComplete: fault !== "incomplete", attemptId: attempt.id, itemVersionId: fault === "foreign-item" ? uuid() : attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } }, deliveredAssistance: "none" });
+  const save = vi.fn(), port = createSpanStudySession(bound, save), view = await port.load();
+  expect(view.result?.outcome).toBe("unknown"); expect(view.blocked).toBeTruthy();
+  expect(primaryAction(view, false)).toMatchObject({ kind: "none", disabled: true });
+  await port.primary(); expect(requestBodies("/next")).toEqual([]); expect(save).not.toHaveBeenCalled();
+  expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(port.changeExplanation).toBeUndefined();
+});
+
+
+it.each([true, false])("keeps unavailable B history read-only in V2=%s and permits only explicit original pause", async v2 => {
+  mocks.v2 = v2;
+  const { details, attempt } = fixture("self-faded");
+  const record = { id: uuid(), skillLabel: "原作答", answer: "保留的原始错误答案" } as LearningObservation;
+  let snapshot = details.session!;
+  mocks.request.mockImplementation(async (_path: string, _schema: unknown, init?: RequestInit) => {
+    if (!init) return { ...details, session: snapshot, attempts: [attempt], observations: [record], executionUnavailable: { reasonCode: "SPAN_PREREQUISITE_EVIDENCE_CHANGED", message: "原先修证据已变化" } };
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(String(init.body))).toEqual({ expectedRevision: snapshot.revision, intent: snapshot.intent, moveId: snapshot.moveId, status: "paused" });
+    snapshot = { ...snapshot, status: "paused", revision: snapshot.revision + 1 }; return snapshot;
+  });
+  const host = document.createElement("div"), root = createRoot(host); document.body.append(host);
+  const click = async (text: string) => { const node = [...host.querySelectorAll("button")].find(row => row.textContent === text); expect(node).toBeDefined(); await act(async () => node!.click()); };
+  try {
+    await act(async () => root.render(<SpanLessonSession courseId={snapshot.courseId} sourceIds={snapshot.sourceIds} sourceLoadError={false} initialActivityId={snapshot.activityId} />));
+    expect(host.textContent).toContain("原先修证据已变化"); expect(host.querySelector("select, input, [data-primary-action]")).toBeNull();
+    await click("查看原活动历史"); expect(host.textContent).toContain(record.answer); expect(host.textContent).toContain("只读");
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    await click("返回重新选择"); await click("暂停并保留记录");
+    expect(host.textContent).toContain("本次学习已暂停，原记录保留");
+    expect([...host.querySelectorAll("button")].some(row => row.textContent?.includes("继续原来的步骤"))).toBe(false);
+    expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled(); expect(mocks.hint).not.toHaveBeenCalled();
+    expect(requestBodies("/presentation")).toEqual([]); expect(requestBodies("/reserved")).toEqual([]); expect(requestBodies("/next")).toEqual([]);
+  } finally { await act(async () => root.unmount()); host.remove(); }
+});
+
+
+it.each(["abstain", "incomplete", "foreign-item"])("requires exact complete B variant before issuing confirmation: %s", async fault => {
+  const { details, attempt } = fixture("self-faded"), bound = readyPrerequisite(details);
+  mocks.request.mockResolvedValue(attempt);
+  mocks.read.mockResolvedValue({ observation: { id: uuid(), attemptId: attempt.id, assistance: "independent",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: fault === "abstain" ? "abstain" : "correct", coreEvidenceComplete: fault !== "incomplete",
+      attemptId: attempt.id, itemVersionId: fault === "foreign-item" ? uuid() : attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } }, deliveredAssistance: "none" });
+  const save = vi.fn(), port = createSpanStudySession(bound, save), view = await port.load();
+  expect(view.result?.outcome).toBe("unknown"); expect(primaryAction(view, false).label).not.toBe("发放新题确认");
+  await expect(port.primary()).rejects.toThrow("显式选择改这道题");
+  expect(save).not.toHaveBeenCalled(); expect(requestBodies("/reserved").map(input => input.stage)).toEqual(["variant"]);
+});
+
+it("adopts only the server's current B retry on refresh while retaining the original sealed answer and help", async () => {
+  const { details, attempt } = fixture("self-faded"), bound = readyPrerequisite(details);
+  const wrong = { id: uuid(), attemptId: attempt.id, answer: JSON.stringify({ membership: "in_span", coefficients: ["9", "9"] }), assistance: "hinted",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect", attemptId: attempt.id, itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.request.mockResolvedValue(attempt); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "hinted" });
+  mocks.submitAttempt.mockResolvedValue(wrong);
+  const port = createSpanStudySession(bound, vi.fn()); await port.load(); port.edit({ membership: "in_span", coefficients: ["9", "9"] });
+  mocks.read.mockResolvedValue({ observation: wrong, deliveredAssistance: "hinted" }); await port.primary();
+  const firstInput = structuredClone(mocks.submitAttempt.mock.calls[0]![1]);
+  const retry = { ...attempt, id: uuid(), historyRevision: 2 };
+  // Another tab has explicitly authorized the current retry; no client chooser reconstructs it.
+  mocks.request.mockResolvedValue(retry); mocks.read.mockResolvedValue({ observation: null, deliveredAssistance: "hinted" });
+  const view = await createSpanStudySession(bound, vi.fn()).load();
+  expect(view.step.id).toBe(retry.id); expect(view.sealed).toBe(false); expect(view.result).toBeNull(); expect(view.help.level).toBe("hinted");
+  expect(mocks.submitAttempt).toHaveBeenCalledTimes(1);
+  const collections = Object.keys(sessionStorage).filter(key => key.startsWith("opening-practice:v2:")).map(key => JSON.parse(sessionStorage.getItem(key)!));
+  const original = collections.flatMap(collection => collection.drafts).find(row => row.attemptId === attempt.id);
+  expect(original).toMatchObject({ observationId: wrong.id, submission: { input: firstInput } });
+  expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.hint).not.toHaveBeenCalled();
+});
+
+it.each(["choice", "error", "foreign"])("retains B confirmation facts and position after return %s without generic fallback", async failure => {
+  const { details, attempt } = fixture("self_study-reserved"), bound = readyPrerequisite(details);
+  const record = { id: uuid(), attemptId: attempt.id, answer: "original confirmation answer", assistance: "revealed",
+    serverEvaluation: { evaluatorVersion: "span-exact-v1", decision: "incorrect", attemptId: attempt.id, itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, reasonCodes: [] } } as unknown as LearningObservation;
+  mocks.request.mockImplementation(async (path: string) => {
+    if (path.endsWith("/reserved")) return attempt;
+    if (failure === "error") throw new Error("return basis changed");
+    return { kind: "choice", reason: "evidence_changed", message: "依据变化，原记录保留", primary: { label: "核对记录",
+      href: `/opening/courses/${failure === "foreign" ? uuid() : details.session!.courseId}#course-learning-records` } };
+  });
+  mocks.read.mockResolvedValue({ observation: record, deliveredAssistance: "revealed" });
+  const save = vi.fn(), port = createSpanStudySession(bound, save), view = await port.load();
+  if (failure === "choice") {
+    const result = await port.primary();
+    expect(result.step.id).toBe(attempt.id); expect(result.result).toMatchObject({ outcome: "incorrect", assistance: "revealed" });
+    expect(result.next).toMatchObject({ choiceReason: "evidence_changed", notice: "依据变化，原记录保留" });
+    expect(result.next?.href).not.toContain("mode=practice");
+  } else await expect(port.primary()).rejects.toThrow();
+  expect(view.step.id).toBe(attempt.id); expect(record.answer).toBe("original confirmation answer"); expect(save).not.toHaveBeenCalled();
+  expect(mocks.createAttempt).not.toHaveBeenCalled(); expect(mocks.submitAttempt).not.toHaveBeenCalled(); expect(port.changeExplanation).toBeUndefined();
 });

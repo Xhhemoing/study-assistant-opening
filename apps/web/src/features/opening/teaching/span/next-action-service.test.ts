@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createSpanNextActionService } from "./next-action-service";
+import { readSpanNextResult, readSpanPrerequisiteReturnResult } from "./span-next-action-control";
 const dependency = vi.hoisted(() => ({ next: vi.fn() }));
 vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<object>(), createOpeningSpanTutorNextRepository: () => dependency }));
 const id = "00000000-0000-4000-8000-000000000001", courseId = "00000000-0000-4000-8000-000000000002";
@@ -61,6 +62,8 @@ it("maps only typed server course-return to the actual T course activity href, n
   const result = await createSpanNextActionService({} as Sql).next(scope, returnBody);
   expect(result).toMatchObject({ kind: "ready", activityId: target, href, courseId, resumed: false });
   expect(result).not.toHaveProperty("sessionId");
+  expect(readSpanPrerequisiteReturnResult(result, courseId)).toEqual(result);
+  expect(() => readSpanNextResult(result, courseId)).toThrow();
   expect(dependency.next).toHaveBeenCalledExactlyOnceWith(scope, returnBody);
 });
 it("keeps failed B return at the original activity without ordinary-practice fallback", async () => {
@@ -68,6 +71,7 @@ it("keeps failed B return at the original activity without ordinary-practice fal
   const result = await createSpanNextActionService({} as Sql).next(scope, returnBody);
   expect(result).toMatchObject({ kind: "choice", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${id}` } });
   expect(JSON.stringify(result)).not.toContain("mode=practice");
+  expect(readSpanPrerequisiteReturnResult(result, courseId)).toEqual(result);
 });
 it("propagates typed refusal and dependency failure rather than pretending to return successfully", async () => {
   const failure = Object.assign(new Error("relationship changed"), { code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_RELATION_CHANGED" });
