@@ -34,7 +34,7 @@ it("mount does not request an estimate or submit; explicit quote and consent gat
 it.each(["queued", "running", "outcome_unknown"])("restores %s via GET only, never resends on remount", async state => {
   localStorage.setItem(`aistudy:teaching-example:${id}:${id}`, JSON.stringify(request));
   fetcher.mockResolvedValue(Response.json({ operation: { ...status, state } }));
-  await render(); await render(); await click("只读刷新原请求");
+  await render(); await render(); await click("刷新进度");
   expect(fetcher.mock.calls.every(call => !call[1]?.method)).toBe(true);
   expect(host.textContent).not.toContain("确认付费生成新例题");
 });
@@ -42,9 +42,9 @@ it("keeps a lost POST read-only, including when the subsequent lookup finds noth
   await render(); fetcher.mockResolvedValueOnce(Response.json({ operation: null })); fetcher.mockResolvedValueOnce(Response.json({ target, estimatedCents: 2, isCap: false, consentVersion: TEACHING_EXAMPLE_CONSENT_VERSION, consentText: TEACHING_EXAMPLE_CONSENT_TEXT }));
   await click("先查看模型费用预估"); await act(async () => host.querySelector<HTMLInputElement>("input")!.click());
   fetcher.mockRejectedValueOnce(new Error("offline")); await click("确认付费生成新例题");
-  fetcher.mockResolvedValueOnce(Response.json({ operation: null })); await click("只读刷新原请求");
+  fetcher.mockResolvedValueOnce(Response.json({ operation: null })); await click("刷新进度");
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
-  expect(host.textContent).toContain("不会自动重新发送");
+  expect(host.textContent).toContain("不会自动重新生成");
 });
 it.each(["resolve", "reject"] as const)("clears target A quote busy on switching to B, ignores A %s, and does not submit", async ending => {
   let resolve!: (value: Response) => void, reject!: (reason: Error) => void;
@@ -68,10 +68,10 @@ it.each(["resolve", "reject"] as const)("ignores a deferred original-operation r
   expect(host.textContent).toContain("结果或费用待确认");
   let resolve!: (value: Response) => void, reject!: (reason: Error) => void;
   fetcher.mockReturnValueOnce(new Promise<Response>((yes, no) => { resolve = yes; reject = no; }));
-  await click("只读刷新原请求");
+  await click("刷新进度");
   await render({ ...target, blockId: "22222222-2222-4222-8222-222222222222" });
   await act(async () => { if (ending === "resolve") resolve(Response.json({ operation: status })); else reject(new Error("old refresh failed")); });
-  expect(host.textContent).not.toContain("原请求暂不可读取");
+  expect(host.textContent).not.toContain("暂时无法查看处理进度");
   expect(host.textContent).not.toContain("结果或费用待确认");
   expect([...host.querySelectorAll("button")].find(button => button.textContent === "先查看模型费用预估")!.disabled).toBe(false);
   expect(fetcher.mock.calls.some(call => call[1]?.method === "POST")).toBe(false);
@@ -88,7 +88,7 @@ it("returns to target A during a lost paid response using the persisted identity
   fetcher.mockResolvedValue(Response.json({ operation: { ...status, clientKey: original.clientKey } }));
   await render();
   await act(async () => fail(new Error("lost original POST")));
-  await click("只读刷新原请求");
+  await click("刷新进度");
   expect(host.textContent).toContain("结果或费用待确认");
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
   expect(host.textContent).not.toContain("确认付费生成新例题");
@@ -117,11 +117,11 @@ it.each(["pending", "resolve", "reject"] as const)("allows B read-only quote whi
   fetcher.mockResolvedValueOnce(Response.json({ target: other, estimatedCents: 3, isCap: false, consentVersion: TEACHING_EXAMPLE_CONSENT_VERSION, consentText: TEACHING_EXAMPLE_CONSENT_TEXT }));
   await act(async () => resolveB(Response.json({ operation: null })));
   expect(host.textContent).toContain("预估 3 分");
-  expect(host.textContent).not.toContain("请求结果未确认");
+  expect(host.textContent).not.toContain("本次生成的结果还未确认");
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
   fetcher.mockImplementation(async () => Response.json({ operation: { ...status, clientKey: original.clientKey } }));
   await render();
-  await click("只读刷新原请求");
+  await click("刷新进度");
   expect(host.textContent).toContain("结果或费用待确认");
   expect(host.textContent).not.toContain("确认付费生成新例题");
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(1);
@@ -145,15 +145,15 @@ it("keeps B submission isolated when stale A settles, without another POST on ei
   }
   await act(async () => failed[0]!(new Error("stale A failed")));
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(2);
-  expect([...host.querySelectorAll("button")].find(button => button.textContent === "只读刷新原请求")!.disabled).toBe(true);
-  expect(host.textContent).not.toContain("请求结果未确认");
+  expect([...host.querySelectorAll("button")].find(button => button.textContent === "刷新进度")!.disabled).toBe(true);
+  expect(host.textContent).not.toContain("本次生成的结果还未确认");
   await act(async () => failed[1]!(new Error("B response unknown")));
-  expect(host.textContent).toContain("请求结果未确认");
-  expect([...host.querySelectorAll("button")].find(button => button.textContent === "只读刷新原请求")!.disabled).toBe(false);
+  expect(host.textContent).toContain("本次生成的结果还未确认");
+  expect([...host.querySelectorAll("button")].find(button => button.textContent === "刷新进度")!.disabled).toBe(false);
   for (const selected of [target, other]) {
     const saved = JSON.parse(localStorage.getItem(`aistudy:teaching-example:${id}:${selected.blockId}`)!);
     fetcher.mockImplementation(async () => Response.json({ operation: { ...status, target: selected, clientKey: saved.clientKey } }));
-    await render(selected); await click("只读刷新原请求");
+    await render(selected); await click("刷新进度");
     expect(host.textContent).not.toContain("确认付费生成新例题");
   }
   expect(fetcher.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(2);

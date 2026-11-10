@@ -6,7 +6,7 @@ import { ui } from "../design/ui";
 
 const labels = { queued: "已排队", running: "正在生成", succeeded: "新例题已发布", failed: "未完成发布", cancelled: "已取消", outcome_unknown: "结果或费用待确认" };
 async function json(response: Response): Promise<unknown> {
-  if (!response.ok) throw new Error("例题请求暂不可读取，请保留原请求并稍后重新读取。");
+  if (!response.ok) throw new Error("暂时无法查看本次生成的进度，请保留页面，稍后再查看。");
   return response.json();
 }
 
@@ -21,9 +21,9 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
     const result = await json(await fetch(`/api/opening/teaching/examples?clientKey=${encodeURIComponent(original.clientKey)}`, { cache: "no-store" }));
     const operation = (result as { operation?: unknown }).operation;
     if (epoch !== current.current) return;
-    if (!operation) { setError("尚未读到原请求。结果未确认，不会自动重新发送；请保留此页稍后再读取。"); return; }
+    if (!operation) { setError("暂时查不到本次生成的进度。结果还未确认，不会自动重新生成；请保留此页，稍后再查看。"); return; }
     const parsed = teachingExampleStatusSchema.parse(operation);
-    if (JSON.stringify(parsed.target) !== JSON.stringify(original.target) || parsed.clientKey !== original.clientKey) throw new Error("原请求身份不匹配。");
+    if (JSON.stringify(parsed.target) !== JSON.stringify(original.target) || parsed.clientKey !== original.clientKey) throw new Error("查到的生成记录与本次操作不符，未继续处理。");
     setStatus(parsed); setError("");
   }
   useEffect(() => {
@@ -36,7 +36,7 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
       if (original.target.activityId !== target.activityId || original.target.blockId !== target.blockId) throw new Error("stored identity mismatch");
       setPending(original);
       void read(original, epoch).catch(() => { if (epoch === current.current) setError("原例题请求尚未确认，只能重新读取，不会自动重发。"); });
-    } catch { setError("浏览器无法安全恢复原请求，未允许另建付费请求。请保留页面并核对原操作。"); }
+    } catch { setError("浏览器无法安全恢复本次生成的记录，暂不能再次付费生成。请保留页面并核对之前的操作。"); }
     return () => { current.current += 1; };
   }, [binding, storageKey]);
   async function quote() {
@@ -70,16 +70,16 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
       })));
       if (epoch === current.current) setStatus(result);
-    } catch { if (epoch === current.current) setError("请求结果未确认。只读恢复原请求，不会换标识重发。"); }
+    } catch { if (epoch === current.current) setError("本次生成的结果还未确认。只能查看处理进度，不会再次发送或重新生成。"); }
     finally { if (sending.current === token) sending.current = null; if (epoch === current.current) setBusy(false); }
   }
   return <section className="space-y-3 rounded-lg border border-line p-3 text-sm" aria-label="同类新例题">
     <h4 className="font-medium">生成同类新例题与完整解答</h4>
     <p className="text-xs leading-6 text-text-2">保留原例题，追加同知识点的新题与分步解答。属于已揭示的教学辅助，不计为独立掌握；数学结果待你核对。</p>
     {pending ? <div className="space-y-2" role="status">
-      <p>{status ? labels[status.state] : "原请求待确认"}</p>
-      {status ? <p className="text-xs text-text-2">原预估 {status.estimatedCents} 分（不是费用上限）。{status.costState === "unknown" || status.costState === "in_flight" ? "费用尚未确认；即使例题已发布也不会重发。" : "实际费用以账本为准。"}</p> : null}
-      <button type="button" className={ui.secondary} disabled={busy} onClick={() => { const epoch = current.current; setBusy(true); void read(pending, epoch).catch(() => { if (epoch === current.current) setError("原请求暂不可读取，未重新发送。"); }).finally(() => { if (epoch === current.current) setBusy(false); }); }}>只读刷新原请求</button>
+      <p>{status ? labels[status.state] : "本次生成待确认"}</p>
+      {status ? <p className="text-xs text-text-2">原预估 {status.estimatedCents} 分（不是费用上限）。{status.costState === "unknown" || status.costState === "in_flight" ? "费用尚未确认；即使例题已发布也不会重发。" : "实际费用请查看费用记录。"}</p> : null}
+      <button type="button" className={ui.secondary} disabled={busy} onClick={() => { const epoch = current.current; setBusy(true); void read(pending, epoch).catch(() => { if (epoch === current.current) setError("暂时无法查看处理进度，没有再次发送。"); }).finally(() => { if (epoch === current.current) setBusy(false); }); }}>刷新进度</button>
       {status?.publication ? <button type="button" className={ui.secondary} onClick={() => void onPublished()}>读取已发布的新例题</button> : null}
     </div> : <>
       <button type="button" className={ui.secondary} disabled={busy || blocked} onClick={() => void quote()}>先查看模型费用预估</button>
