@@ -22,7 +22,7 @@ import { useWorkspaceLayout } from "../shell/workspace-layout-context";
 import { ConversationCompanionTabs } from "./conversation-companion-tabs";
 import { conversationObjectHref } from "../assistant/conversation-links";
 import { canCompleteObservation } from "../learning/stage-action-bar";
-import { createOpeningApi, type OpeningApi } from "../client/api";
+import { createOpeningApi, OpeningApiError, type OpeningApi } from "../client/api";
 import {
   BlockCommands,
   isBranchStackEmpty,
@@ -119,13 +119,13 @@ export type TeachingWorkspaceProps = {
  * failed/cancelled/stale/empty still refuse.
  */
 export function isTeachingWorkspaceContentUsable(
-  activity: Pick<TeachingActivity, "generateStatus">,
+  activity: Pick<TeachingActivity, "generateStatus" | "contentVersion">,
   clientInit: ActivitySpecClientInit | null | undefined,
 ): boolean {
   if (activity.generateStatus !== "ready" && activity.generateStatus !== "needs_check") {
     return false;
   }
-  if (!clientInit) return false;
+  if (activity.contentVersion <= 0 || !clientInit || clientInit.contentVersion <= 0) return false;
   if (!Array.isArray(clientInit.blocks) || clientInit.blocks.length === 0) return false;
   return true;
 }
@@ -667,6 +667,9 @@ export function TeachingContinueEntry({
   const [waitError, setWaitError] = useState<string | null>(null);
   const [waitBusy, setWaitBusy] = useState(false);
   const [liveResume, setLiveResume] = useState<LearningResume | null>(resumeProp);
+  const compileInFlight = useRef(false);
+  const [compileBlocked, setCompileBlocked] = useState(false);
+  const [compilerUnavailable, setCompilerUnavailable] = useState(false);
 
   useEffect(() => {
     setActivity(activityProp);
@@ -675,6 +678,11 @@ export function TeachingContinueEntry({
   useEffect(() => {
     if (resumeProp) setLiveResume(resumeProp);
   }, [resumeProp]);
+
+  const updateResume = useCallback((next: LearningResume) => {
+    setLiveResume(next);
+    setActivity(previous => ({ ...previous, status: next.status, generateStatus: next.generateStatus, contentVersion: next.contentVersion, pathVersion: next.pathVersion }));
+  }, []);
 
   const openWorkspaceFromResume = useCallback(
     async (resume: LearningResume) => {
@@ -686,7 +694,7 @@ export function TeachingContinueEntry({
       if (
         resume.clientInit &&
         isTeachingWorkspaceContentUsable(
-          { generateStatus: resume.generateStatus },
+          resume,
           resume.clientInit,
         )
       ) {
@@ -707,7 +715,7 @@ export function TeachingContinueEntry({
         const init = await api.getTeachingClientInit(activity.id);
         if (
           isTeachingWorkspaceContentUsable(
-            { generateStatus: resume.generateStatus },
+            resume,
             init,
           )
         ) {
@@ -717,11 +725,7 @@ export function TeachingContinueEntry({
           setWaitError("主讲内容尚未可用；请稍后再继续。断点与草稿仍保留。");
         }
       } catch (err) {
-        setWaitError(
-          err instanceof Error
-            ? err.message
-            : "这节讲解暂时打不开，请稍后再试。",
-        );
+        setWaitError(userFacingMessage(err, "这节讲解暂时打不开，请稍后重新读取。"));
       } finally {
         setWaitBusy(false);
       }
@@ -739,28 +743,64 @@ export function TeachingContinueEntry({
     setWaitBusy(true);
     try {
       const fresh = await api.getTeachingResume(activity.id);
+      setCompileBlocked(false);
+      setWaitError(null);
+      setActivity(previous => ({ ...previous, status: fresh.status, generateStatus: fresh.generateStatus, contentVersion: fresh.contentVersion, pathVersion: fresh.pathVersion }));
+      setLiveResume(fresh);
       setWaitBusy(false);
-      await openWorkspaceFromResume(fresh);
+      if (phase === "wait_init") await openWorkspaceFromResume(fresh);
     } catch (err) {
       setWaitBusy(false);
       setWaitError(userFacingMessage(err, "无法刷新断点；不会伪造讲义。"));
     }
-  }, [activity.id, api, openWorkspaceFromResume]);
+  }, [activity.id, api, openWorkspaceFromResume, phase]);
+
+  const inFlight = activity.generateStatus === "queued" || activity.generateStatus === "generating"
+    || liveResume?.gates.job === "in_flight";
+  const compilerOff = !teachingCompileEnabled || compilerUnavailable;
+  // Resume maps known failed/cancelled jobs to unknown, but those terminal states
+  // permit a new user-requested compile; a genuinely unknown operation does not.
+  const canCompile = !compileBlocked && !compilerOff && !inFlight && Boolean(liveResume)
+    && (liveResume?.gates.job !== "unknown"
+      || activity.generateStatus === "failed" || activity.generateStatus === "cancelled")
+    && liveResume?.gates.materials === "available"
+    && activity.status !== "completed" && activity.status !== "skipped"
+    && canRequestTeachingCompile(activity, { compilerEnabled: teachingCompileEnabled });
 
   const requestCompile = useCallback(async () => {
+    if (compileInFlight.current || waitBusy || !canCompile) return;
+    compileInFlight.current = true;
     setWaitBusy(true);
     setWaitError(null);
     try {
       const next = await api.requestTeachingCompile(activity.id, `compile:${Date.now().toString(36)}`);
       setActivity(next);
       onActivityUpdated?.(next);
+      setLiveResume(null);
       setLiveResume(await api.getTeachingResume(activity.id));
     } catch (err) {
-      setWaitError(userFacingMessage(err, "无法开始生成主讲内容。"));
+      setCompileBlocked(true);
+      if (err instanceof OpeningApiError && err.code === "CONFIGURATION") setCompilerUnavailable(true);
+      setWaitError(userFacingMessage(err, "生成请求未确认，请先重新读取状态；不会自动重试。"));
     } finally {
+      compileInFlight.current = false;
       setWaitBusy(false);
     }
-  }, [activity.id, api, onActivityUpdated]);
+  }, [activity.id, api, onActivityUpdated, waitBusy, canCompile]);
+
+  const contentState = liveResume ?? activity;
+  const contentUsable = isTeachingWorkspaceContentUsable(contentState, liveResume?.clientInit ?? workspaceInit);
+  const contentLabel = contentState.generateStatus === "ready" && !contentUsable && contentState.contentVersion > 0
+    ? "主讲内容暂不可用" : teachingActivityGenerateStatusLabel(contentState.generateStatus, { contentVersion: contentState.contentVersion });
+  const availability = !contentUsable ? <div className="space-y-3 px-5 py-4" role="status" data-teaching-content-state={inFlight ? "pending" : compilerOff ? "disabled" : contentState.generateStatus}>
+    <p className="text-sm font-medium text-text">{inFlight ? "正在生成主讲内容" : contentLabel}</p>
+    <p className="text-xs leading-6 text-text-2">{inFlight ? "生成任务仍在处理中；重新读取只查询状态，不会重复生成。" : compilerOff ? "主讲内容生成功能未开启；可以重新读取已有内容或暂停，不会自动重试生成。" : "尚无可用的主讲内容；不会记为已学完。生成仅在你明确点击后提交。"}</p>
+    {waitError ? <p className="text-xs leading-6 text-danger" role="alert">{waitError}</p> : null}
+    <div className="flex flex-wrap gap-2">
+      {canCompile ? <button type="button" className={ui.primary} disabled={waitBusy} data-teaching-request-compile="true" onClick={() => void requestCompile()}>{waitBusy ? "正在提交…" : contentState.contentVersion === 0 && contentState.generateStatus === "ready" ? "生成主讲内容" : "重新生成主讲内容"}</button> : null}
+      <button type="button" className={ui.secondary} disabled={waitBusy} data-teaching-refresh-status="true" onClick={() => void retryFromFreshResume()}>{waitBusy ? "正在读取…" : "重新读取状态"}</button>
+    </div>
+  </div> : null;
 
   if (activity.status === "completed" && phase !== "workspace") {
     return <div className="p-5" data-teaching-continue-entry="completed"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>;
@@ -785,13 +825,6 @@ export function TeachingContinueEntry({
   }
 
   if (phase === "wait_init") {
-    const canCompile = canRequestTeachingCompile(liveResume ?? activity, {
-      compilerEnabled: teachingCompileEnabled,
-    });
-    const actions = waitInitActionVisibility({
-      jobGate: liveResume?.gates.job,
-      canCompile,
-    });
     const waitingInFlight = liveResume?.gates.job === "in_flight";
     return (
       <section
@@ -805,7 +838,7 @@ export function TeachingContinueEntry({
         <p className="mt-2 text-xs leading-5 text-text-2">
           {waitingInFlight
             ? "正在为你准备讲解，稍后就可以继续。"
-            : "这节讲解还没准备好，可以再试一次或先回去。"}
+            : "尚无可用讲解，学习位置与草稿仍保留。"}
         </p>
         {liveResume && diagnostics ? (
           <details className="mt-2 text-xs tabular-nums text-text-3"><summary className="cursor-pointer">诊断信息</summary><p>
@@ -813,45 +846,16 @@ export function TeachingContinueEntry({
             {liveResume.contentVersion}
           </p></details>
         ) : null}
-        {waitError ? (
-          <div className={`mt-3 text-xs ${tone.danger}`} role="alert">
-            <p>{studentCopy.lessonRetry}</p>
-            {diagnostics ? <details><summary className="cursor-pointer">技术信息</summary><p>{waitError}</p></details> : null}
-          </div>
-        ) : null}
+        {availability}
         <div className="mt-4 flex flex-wrap gap-2">
-          {actions.showCompile ? (
-            <button
-              type="button"
-              className={ui.primary}
-              disabled={waitBusy}
-              data-teaching-request-compile="true"
-              onClick={() => void requestCompile()}
-            >
-              {waitBusy ? "正在提交…" : "重新生成主讲内容"}
-            </button>
-          ) : null}
-          {actions.showRetryFetch ? (
-            <button
-              type="button"
-              className={ui.secondary}
-              disabled={waitBusy}
-              data-resume-retry-client-init="true"
-              onClick={() => void retryFromFreshResume()}
-            >
-              {waitBusy ? "正在读取…" : "刷新准备状态"}
-            </button>
-          ) : null}
-          {actions.showBack ? (
-            <button
-              type="button"
-              className={ui.quiet}
-              data-resume-back-to-card="true"
-              onClick={backToCard}
-            >
-              返回断点卡片
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className={ui.quiet}
+            data-resume-back-to-card="true"
+            onClick={backToCard}
+          >
+            返回断点卡片
+          </button>
         </div>
         <div className="mt-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
       </section>
@@ -860,6 +864,7 @@ export function TeachingContinueEntry({
 
   return (
     <div data-teaching-continue-entry="card">
+      {availability}
       <ResumeCard
         activity={activity}
         resume={liveResume}
@@ -870,7 +875,7 @@ export function TeachingContinueEntry({
           setActivity(next);
           onActivityUpdated?.(next);
         }}
-        onResumeUpdated={setLiveResume}
+        onResumeUpdated={updateResume}
       />
       <div className="px-5 pb-5"><ActivityEndControl activity={activity} api={api} onActivityUpdated={(next) => { setActivity(next); onActivityUpdated?.(next); }} /></div>
     </div>
