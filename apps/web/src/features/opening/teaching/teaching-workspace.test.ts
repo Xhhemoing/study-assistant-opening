@@ -62,7 +62,7 @@ vi.mock("./resume-card", async () => {
 });
 
 import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
-import type { OpeningApi } from "../client/api";
+import { OpeningApiError, type OpeningApi } from "../client/api";
 import {
   formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
@@ -612,6 +612,118 @@ function learningResume(overrides?: Partial<LearningResume>): LearningResume {
     ...overrides,
   };
 }
+
+describe("TeachingContinueEntry empty-content states", () => {
+  const shell = { ...activityReady, contentVersion: 0 };
+  const empty = learningResume({ contentVersion: 0, clientInit: null });
+  async function mount(api: Partial<OpeningApi>, run: (host: HTMLDivElement, reload: () => Promise<void>) => Promise<void>, enabled = true) {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+    const render = () => root.render(createElement(TeachingContinueEntry, { activity: shell, resume: empty, teachingCompileEnabled: enabled, api: api as OpeningApi }));
+    try {
+      await act(async () => render());
+      await run(host, async () => { await act(async () => root.render(null)); await act(async () => render()); });
+    } finally { await act(async () => root.unmount()); host.remove(); }
+  }
+  const button = (host: HTMLDivElement, selector: string) => host.querySelector<HTMLButtonElement>(selector)!;
+
+  it("reproduces ready + cv0 without a spec, shows disabled honestly and preserves the resume card", async () => {
+    const api = { requestTeachingCompile: vi.fn(), getTeachingResume: vi.fn().mockResolvedValue(empty) };
+    await mount(api, async (host, reload) => {
+      expect(host.textContent).toContain("主讲内容未生成");
+      expect(host.textContent).toContain("主讲内容生成功能未开启");
+      expect(host.textContent).not.toContain("主讲内容已就绪");
+      expect(host.querySelector('[data-testid="resume-card-mock"]')).toBeTruthy();
+      expect(host.querySelector('[data-teaching-request-compile]')).toBeNull();
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      await reload();
+      expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+    }, false);
+  });
+
+  it.each(["queued", "generating", "failed"] as const)("shows %s without compiling on mount", status => {
+    const html = renderToStaticMarkup(createElement(TeachingContinueEntry, { activity: { ...shell, generateStatus: status }, resume: { ...empty, generateStatus: status } }));
+    expect(html).toContain(status === "failed" ? "生成失败" : "正在生成主讲内容");
+    expect(html.includes('data-teaching-request-compile="true"')).toBe(status === "failed");
+  });
+
+  it("never mounts a zero-version workspace even with synthetic nonempty blocks", () => {
+    const html = renderToStaticMarkup(createElement(TeachingContinueEntry, { activity: shell, startInWorkspace: true, initialClientInit: clientInit({ contentVersion: 0 }) }));
+    expect(html).not.toContain('data-teaching-workspace="true"');
+    expect(html).toContain("主讲内容未生成");
+  });
+
+  it.each(["unknown", "in_flight"] as const)("blocks explicit compile for job gate %s", job => {
+    const html = renderToStaticMarkup(createElement(TeachingContinueEntry, { activity: shell, resume: { ...empty, gates: { ...empty.gates, job } } }));
+    expect(html).not.toContain('data-teaching-request-compile="true"');
+  });
+
+  it("blocks compile for unavailable materials", () => {
+    const html = renderToStaticMarkup(createElement(TeachingContinueEntry, { activity: shell, resume: { ...empty, gates: { ...empty.gates, materials: "unavailable" } } }));
+    expect(html).not.toContain('data-teaching-request-compile="true"');
+  });
+
+  it("submits once only after an explicit click, including double clicks, refresh and reload", async () => {
+    let resolve!: (activity: TeachingActivity) => void;
+    const pending = { ...shell, generateStatus: "queued" as const };
+    const pendingResume = { ...empty, generateStatus: "queued" as const, gates: { ...empty.gates, job: "in_flight" as const } };
+    const api = { requestTeachingCompile: vi.fn(() => new Promise<TeachingActivity>(done => { resolve = done; })), getTeachingResume: vi.fn().mockResolvedValue(pendingResume) };
+    await mount(api, async (host, reload) => {
+      expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+      await act(async () => { const compile = button(host, '[data-teaching-request-compile]'); compile.click(); compile.click(); });
+      expect(api.requestTeachingCompile).toHaveBeenCalledOnce();
+      await act(async () => resolve(pending));
+      expect(host.textContent).toContain("正在生成主讲内容");
+      expect(host.querySelector('[data-teaching-request-compile]')).toBeNull();
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      await reload();
+      expect(api.requestTeachingCompile).toHaveBeenCalledOnce();
+    });
+  });
+
+  it.each([new OpeningApiError(503, "主讲内容生成未开启", "CONFIGURATION"), new Error("生成请求未确认")])("shows real errors outside diagnostics without automatic retry: %s", async error => {
+    const api = { requestTeachingCompile: vi.fn().mockRejectedValue(error), getTeachingResume: vi.fn().mockResolvedValue(empty) };
+    await mount(api, async host => {
+      await act(async () => button(host, '[data-teaching-request-compile]').click());
+      expect(host.querySelector('[role="alert"]')?.textContent).toBe(error.message);
+      expect(host.querySelector('[data-teaching-request-compile]')).toBeNull();
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      if (error instanceof OpeningApiError) {
+        expect(host.textContent).toContain("主讲内容生成功能未开启");
+        expect(host.querySelector('[data-teaching-request-compile]')).toBeNull();
+      }
+      expect(api.requestTeachingCompile).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("keeps wait-init honest and can read published content after a completed job", async () => {
+    const pending = { ...empty, generateStatus: "queued" as const, gates: { ...empty.gates, job: "in_flight" as const } };
+    const api = { requestTeachingCompile: vi.fn(), getTeachingResume: vi.fn().mockResolvedValue(pending), getTeachingClientInit: vi.fn() };
+    await mount(api, async host => {
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      await act(async () => button(host, '[data-resume-continue-cta]').click());
+      expect(host.querySelector('[data-teaching-continue-entry="wait_init"]')).toBeTruthy();
+      expect(host.textContent).toContain("正在生成主讲内容");
+      expect(host.querySelector('[data-teaching-request-compile]')).toBeNull();
+      api.getTeachingResume.mockResolvedValue(learningResume());
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      expect(host.querySelector('[data-teaching-workspace]')).toBeTruthy();
+      expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+      expect(api.getTeachingClientInit).not.toHaveBeenCalled();
+    });
+  });
+
+  it("refreshes from no result to published positive-version content without another compile", async () => {
+    const api = { requestTeachingCompile: vi.fn(), getTeachingResume: vi.fn().mockResolvedValue(learningResume()) };
+    await mount(api, async host => {
+      await act(async () => button(host, '[data-teaching-refresh-status]').click());
+      expect(host.querySelector('[data-teaching-content-state]')).toBeNull();
+      await act(async () => button(host, '[data-resume-continue-cta]').click());
+      expect(host.querySelector('[data-teaching-workspace]')).toBeTruthy();
+      expect(api.requestTeachingCompile).not.toHaveBeenCalled();
+    });
+  });
+});
 
 describe("TeachingContinueEntry", () => {
   it("workspace admits needs_check via continue entry and shows 待核对", () => {
