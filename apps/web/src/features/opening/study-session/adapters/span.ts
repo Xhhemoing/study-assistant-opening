@@ -379,7 +379,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
           if (!await save(session.intent, nextMove.id, "active")) throw new Error("学习进度还没保存，请再试一次。");
           return view;
         }
-        if (prerequisite && (repairStage !== "confirmation" || view.result?.outcome !== "correct" && view.result?.outcome !== "incorrect")) throw new Error("确认结果尚未核实，未返回原要求。");
+        if (prerequisite && (repairStage !== "confirmation" || view.result?.outcome !== "correct" && view.result?.outcome !== "incorrect")) throw new Error("还不能确认这次作答结果，暂未返回原要求。");
         const raw = await spanLessonRequest("/api/opening/teaching/span/next", z.unknown(), { method: "POST", body: JSON.stringify({ activityId: session.activityId,
           ...(prerequisite ? protocol : {}), expectedRevision: session.revision, observationId: record.id,
           clientKey: prerequisite ? `span-prerequisite-return:${session.activityId}:${record.id}` : `span-next:${session.activityId}:${session.revision}:${record.id}` }) });
