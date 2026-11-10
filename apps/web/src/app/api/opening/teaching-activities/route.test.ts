@@ -38,6 +38,15 @@ describe("GET/POST /api/opening/teaching-activities", () => {
     expect(list).toHaveBeenCalledWith({ workspaceId: "workspace", ownerUserId: "owner" });
   });
 
+  it("preserves the legacy ready cv0 shell without claiming a published spec", async () => {
+    const shell = { id: "activity-1", status: "active", generateStatus: "ready", contentVersion: 0 };
+    create.mockResolvedValue(shell);
+    const response = await POST(post(JSON.stringify({ clientKey: "synthetic-compiler-off", intentKind: "topic", intentSummary: "合成未生成教学", createIntent: { intentKind: "topic" } })));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual(shell);
+    expect(create).toHaveBeenCalledOnce();
+  });
+
   it("rejects a Content-Length above the Opening JSON limit", async () => {
     const response = await POST(post("{}", "131073"));
     expect(response.status).toBe(413);

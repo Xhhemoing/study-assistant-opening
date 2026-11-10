@@ -307,7 +307,7 @@ jobs:
 
       - name: Install Playwright Chromium
         timeout-minutes: 10
-        run: npx playwright install chromium --with-deps
+        run: bash scripts/ci/install-playwright.sh
 
       - name: Technology spike tests
         run: npm test -- --project '@aistudy/spike-*'
@@ -367,10 +367,11 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - name: CI classifier and gate regression tests
-        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - name: Install dependencies
         run: npm ci
+      # Installer fixtures exercise the pinned Playwright dependency installer.
+      - name: CI classifier and gate regression tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
       - name: Check SenseWeave vendor integrity
         run: node scripts/check-senseweave-vendor.mjs
       - name: Lint
@@ -557,7 +558,7 @@ jobs:
 
       - name: Install Playwright Chromium
         timeout-minutes: 10
-        run: npx playwright install chromium --with-deps
+        run: bash scripts/ci/install-playwright.sh
 
       - name: Real worker PDF upload and recovery browser flow
         timeout-minutes: 15
