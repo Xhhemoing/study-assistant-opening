@@ -8,7 +8,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, fstatSync, lstatSync, mkdi
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { captureConfiguration, persistConfiguration } from "./hermes-config-durability.mjs";
-import { binding, brokerControl, checkCompletion, claimCompletion, checkRepair, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources, python } from './hermes-writer-control.mjs';
+import { binding, brokerControl, checkCompletion, claimCompletion, checkRepair, classify, closeBroker, configIdentity, durableWrite, installWriterBoundary, retireBroker, startBroker, syncDirectory, terminalCommit, verifyEntrySources, python, systemctlCommand, SUPERVISOR_REQUEST_TIMEOUT_MS, completionLaunchAdmission } from './hermes-writer-control.mjs';
 export { durableWrite, syncDirectory, installWriterBoundary } from './hermes-writer-control.mjs';
 
 // A disconnected SSH pipe is not permission to abandon independent cleanup.
@@ -56,8 +56,8 @@ export function completionService(run = command, selfCgroup = () => readFileSync
   const value = Object.fromEntries(pairs);
   if (!result.ok || pairs.length !== keys.length || Object.keys(value).length !== keys.length
     || keys.some(key => !Object.hasOwn(value, key)) || value.Id !== completionUnit || value.LoadState !== 'loaded'
-    || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '30min'
-    || value.TimeoutStopUSec !== '2min' || value.Slice !== 'system.slice' || !(stopping ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value.MainPID)
+    || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '2h'
+    || value.TimeoutStopUSec !== '4min' || value.Slice !== 'system.slice' || !(stopping ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value.MainPID)
     || !/^[1-9][0-9]*$/.test(value.ExecMainPID) || (!stopping && value.MainPID !== value.ExecMainPID)
     || !/^[0-9a-f]{32}$/.test(value.InvocationID)
     || !/^\/system.slice\/aistudy-postmigration-completion\.service$/.test(value.ControlGroup)
@@ -98,11 +98,12 @@ export function completionServiceUnit(args, root = dirname(filename), node = pro
     || args.slice(1).some(value => !/^[A-Za-z0-9_./-]+$/.test(value))) throw new Error('Unsafe completion service arguments');
   const entry = `${node} ${root}/hermes-supervisor.mjs`;
   const owner = `${root}/hermes-release.sh ${args.join(' ')}`;
-  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=1800\nTimeoutStopSec=120\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
+  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=7200\nTimeoutStopSec=240\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
 }
 
 export function launchCompletion(script, args, dependencies = {}) {
   const { run = command, root = dirname(filename), node = process.execPath,
+    admission = completionLaunchAdmission, beforeStart = () => {},
     write = (path, text) => {
       const fd = openSync(path, 'wx', 0o644);
       try { writeFileForUnit(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
@@ -111,12 +112,19 @@ export function launchCompletion(script, args, dependencies = {}) {
   if (script !== join(root, 'hermes-release.sh')) throw new Error('Completion owner must be reviewed sibling');
   const unit = completionServiceUnit(args, root, node);
   const path = `/run/systemd/system/${completionUnit}`;
+  // Incident-only archival is descriptor/DAC checked, never a generic overwrite.
+  admission(args, unit, 'absent');
+  // Archival retains the loaded manager record; unload it only after admission.
+  if (!run(['daemon-reload']).ok) throw new Error('Archived unit unload unconfirmed');
   // Never overwrite/restart an existing service or an earlier retained attempt.
   const before = run(['show', '--all', '--property=LoadState', completionUnit]);
   if ((!before.ok && before.status !== 1) || before.stdout.trim() !== 'LoadState=not-found' || present(path)) throw new Error('Completion service already present or unconfirmed');
+  admission(args, unit, 'unloaded'); // Historical writer proof again before creating new unit.
   write(path, unit);
   if (!run(['daemon-reload']).ok) throw new Error('Completion unit reload unconfirmed');
+  admission(args, unit, 'ready'); // Recheck evidence, guards and claim race before submission.
   // Start once. The service, not SSH, owns its cgroup, timeout and StopPost.
+  beforeStart(); // Release intake lock so the service can acquire its own lock.
   const started = run(['start', '--no-block', completionUnit]);
   if (!started.ok) throw new Error('Completion launch unconfirmed; retain entry and inspect manager');
   // Never unlink controls or the runtime unit after submission, including loss
@@ -131,10 +139,7 @@ export function boundedQuiescence(helper, config, release) {
     { stdio: "ignore", timeout: 20_000, killSignal: "SIGKILL" });
   return !result.error && result.status === 0;
 }
-function command(args) {
-  const result = spawnSync("systemctl", args, { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
-  return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? "" };
-}
+const command = systemctlCommand;
 export function cgroupEmpty(group, root = "/sys/fs/cgroup") {
   // Only unified v2 is understood. Missing paths on v1/unknown layouts are
   // not evidence of an empty group, even if a unit reports inactive.
@@ -184,7 +189,7 @@ async function request(action, environment) {
   const socket = createConnection(environment.HERMES_SUPERVISOR_SOCKET);
   return new Promise((resolve, reject) => {
     let body = "";
-    socket.setTimeout(90_000, () => socket.destroy(new Error("Managed supervisor response timed out")));
+    socket.setTimeout(SUPERVISOR_REQUEST_TIMEOUT_MS, () => socket.destroy(new Error("Managed supervisor response timed out")));
     socket.on("connect", () => socket.write(`${JSON.stringify({ action, token: environment.HERMES_SUPERVISOR_TOKEN, transition: environment.HERMES_TRANSITION, release: environment.HERMES_RELEASE, target: environment.HERMES_TARGET, required: environment.HERMES_WORKER_REQUIRED })}\n`));
     socket.on("data", data => { body += data; if (body.includes("\n")) { socket.end(); try { resolve(JSON.parse(body)); } catch (error) { reject(error); } } });
     socket.on("error", reject);
@@ -219,7 +224,7 @@ export async function requestCommand(action, environment = process.env, dependen
   return { exitCode: reply.ok ? 0 : 1 };
 }
 const production = {
-  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
+  createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService, completionLaunchAdmission,
   startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn,
   health: (state, args, target, required) => {
     const result = spawnSync(process.execPath, [join(state, 'runtime-identity.mjs'), join(args[1], '.env.production'), target, required], { stdio: 'ignore', timeout: 30_000 });
@@ -229,7 +234,7 @@ const production = {
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
 export async function supervise(script, args, dependencies = {}) {
-  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService,
+  const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService, completionLaunchAdmission,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
   verifyEntrySources();
@@ -254,6 +259,9 @@ export async function supervise(script, args, dependencies = {}) {
   if (completion) {
     const service = completionService();
     const observation = checkCompletion(args);
+    // Always traverse this boundary, including object-injected manager fixtures.
+    // Production uses the real admission; tests must explicitly own their seam.
+    completionLaunchAdmission(args, Object.keys(dependencies).length ? undefined : completionServiceUnit(args), 'claim');
     try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID, mainPid: service.ExecMainPID }); }
     catch (error) {
       if (error.completionClaimConsumed) {
@@ -359,7 +367,7 @@ export async function supervise(script, args, dependencies = {}) {
   }
   const server = createServer(socket => {
     let body = "", handled = false;
-    socket.setTimeout(90_000, () => socket.destroy());
+    socket.setTimeout(SUPERVISOR_REQUEST_TIMEOUT_MS, () => socket.destroy());
     socket.on("error", () => {});
     socket.on("data", data => {
       if (handled) return;
@@ -622,9 +630,29 @@ export async function supervise(script, args, dependencies = {}) {
 async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
-  if (mode === 'completion-launch') {
+  if (mode === 'completion-reload-samples' || mode === 'completion-retained-archive') {
+    verifyEntrySources();
+    validateArguments(args);
+    const lock = spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
+      join(args[4], 'deploy.lock'), process.execPath, filename, `${mode}-owned`, script, ...args], { stdio: 'inherit' });
+    process.exitCode = await new Promise(resolve => { lock.once('error', () => resolve(1)); lock.once('exit', code => resolve(code ?? 1)); });
+  } else if (mode === 'completion-reload-samples-owned' || mode === 'completion-retained-archive-owned') {
+    verifyEntrySources();
+    validateArguments(args);
+    assertCompletionLock(args[4]);
+    const retainedUnit = completionServiceUnit(args, '/tmp/aistudy-entry.Pz65J76D')
+      .replace('RuntimeMaxSec=7200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+    console.log(python('hermes-writer-state.py', [mode.replace('-owned', ''), args[4]], { args, retainedUnit }));
+  } else if (mode === 'completion-launch') {
+    verifyEntrySources();
+    validateArguments(args);
+    const lock = spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
+      join(args[4], 'deploy.lock'), process.execPath, filename, 'completion-launch-owned', script, ...args], { stdio: 'inherit' });
+    process.exitCode = await new Promise(resolve => { lock.once('error', () => resolve(1)); lock.once('exit', code => resolve(code ?? 1)); });
+  } else if (mode === 'completion-launch-owned') {
     verifyEntrySources(); // No service/state write before reviewed entry trust.
-    launchCompletion(script, args);
+    assertCompletionLock(args[4]);
+    launchCompletion(script, args, { beforeStart: () => closeSync(9) });
     console.log('Completion submitted; inspect independent manager terminal outcome.');
   } else if (mode === 'completion-unit') {
     console.log(completionServiceUnit(args));

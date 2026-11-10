@@ -6,6 +6,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { cleanGitEnvironment } from './hermes-git-environment.mjs';
 
 export const REPOSITORY = 'Xhhemoing/study-assistant-opening';
 export const BRANCH = 'feat/opening-release';
@@ -13,7 +14,7 @@ const WORKFLOW = '.github/workflows/ci.yml';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = message => { throw new Error(message); };
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options });
+  const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options, ...(command === 'git' ? {env:cleanGitEnvironment(options.env)} : {}) });
   if (result.error || result.status !== 0) fail(`${command} failed; artifact rejected.`);
   return result.stdout;
 }
@@ -77,7 +78,7 @@ export function pack(root, archive, sha, gitRoot = root) {
   const staging = mkdtempSync(join(tmpdir(), 'aistudy-pack-'));
   const source = mkdtempSync(join(tmpdir(), 'aistudy-pack-source-'));
   try {
-    const committed = spawnSync('git', ['-C', gitRoot, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', sha], { maxBuffer: 256 * 1024 * 1024 });
+    const committed = spawnSync('git', ['-C', gitRoot, '-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'archive', sha], { maxBuffer: 256 * 1024 * 1024, env:cleanGitEnvironment() });
     if (committed.status !== 0) fail('Cannot archive committed release code.');
     run('tar', ['-x', '-C', source], { input: committed.stdout });
     // Committed code only, independent of ignored files produced during build.

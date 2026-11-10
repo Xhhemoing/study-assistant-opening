@@ -17,8 +17,17 @@ TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
-case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
+case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration|complete-postmigration-reload-sample|complete-postmigration-archive-retained) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
 
+# Git trust checks select this checkout via cwd, never a caller's routed index,
+# gitdir/object/config environment. Subshell-only: do not mutate caller env or
+# shared config, and preserve the existing exact-main/CI/ancestry gates.
+git() (
+  for name in ${!GIT_@}; do unset "$name"; done
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_TEMPLATE_DIR='' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+  command git "$@"
+)
 fail() { echo "[!] $*" >&2; exit 1; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 ssh_run() {
@@ -64,13 +73,13 @@ verify_repair_git() {
   history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
   while IFS= read -r path; do
     case "$path" in
-      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs)
-        [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration-check ]] || fail 'Additional control paths are completion-only.' ;;
+      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs|infra/deploy/hermes-git-environment.mjs|infra/deploy/verify-release-artifact.mjs|scripts/check-new-fixed-colors.mjs|scripts/check-new-fixed-colors.test.mjs|scripts/ci/checks.py|scripts/ci/test_checks.py|tests/tooling/release-artifact.test.mjs)
+        [[ "$ACTION" == complete-postmigration* ]] || fail 'Additional control paths are completion-only.' ;;
       infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
       *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
     esac
   done < <(printf '%s\n' "$history" | sort -u | grep -v '^$')
-  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' || fail 'Repair application/migration bytes differ from baseline.'
+  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' ':!scripts/check-new-fixed-colors.mjs' ':!scripts/check-new-fixed-colors.test.mjs' ':!scripts/ci/checks.py' ':!scripts/ci/test_checks.py' || fail 'Repair application/migration bytes differ from baseline.'
 }
 
 # Execute reviewed Python bytes in memory over strict SSH: no remote entry
@@ -104,7 +113,7 @@ print(m.json.dumps(m.repair_check(*sys.argv[1:])))"
   exit
 fi
 
-if [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration-check ]]; then
+if [[ "$ACTION" == complete-postmigration* ]]; then
   # Controls follow the existing exact-main/clean/latest-push-CI Git trust path.
   # The payload remains the already verified signed e5 release and retained gzip.
   [[ -z "${PI_CODING_AGENT:-}${PI_SESSION_ID:-}${PI_SESSION_FILE:-}" ]] || fail 'Completion intake must run outside Pi in an independently authorized scope.'
@@ -118,7 +127,9 @@ if [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration
   verify_repair_git
   if [[ "$ACTION" == complete-postmigration-check ]]; then
     check_code="$(node "$SCRIPT_DIR/../../tests/tooling/hermes-completion-precheck.mjs")"
-    command='/usr/bin/python3 -I -S -B -'
+    # Full signed gzip/payload comparison may be cold IO; do not retain a
+    # hidden short shell deadline around the reviewed readonly Python program.
+    command='timeout --signal=KILL 2700s /usr/bin/python3 -I -S -B -'
     for value in "$DEPLOY_STATE" "$CURRENT_LINK" "$SYSTEMD_DIR" "$COMPLETION_RELEASE" "$DIR/.env.production" "$COMPLETION_ARCHIVE" "$WORKER_CONFIG_DIR"; do command+=" $(quote "$value")"; done
     ssh_run "$command" <<< "$check_code"
   else
@@ -133,7 +144,10 @@ if [[ "$ACTION" == complete-postmigration || "$ACTION" == complete-postmigration
     verify_release
     remote_command='entry=$(mktemp -d /tmp/aistudy-entry.XXXXXXXX) || exit; '
     remote_command+="/usr/bin/python3 -I -S -B -c $(quote "$(< "$SCRIPT_DIR/hermes-entry.py")") extract-git \"\$entry\" || exit; "
-    remote_command+='node "$entry/hermes-supervisor.mjs" completion-launch "$entry/hermes-release.sh"'
+    mode=completion-launch
+    if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then mode=completion-reload-samples; fi
+    if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then mode=completion-retained-archive; fi
+    remote_command+="node \"\$entry/hermes-supervisor.mjs\" $mode \"\$entry/hermes-release.sh\""
     for value in complete-postmigration "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf "$COMPLETION_RELEASE" 4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0 "$COMPLETION_ARCHIVE"; do remote_command+=" $(quote "$value")"; done
     # Retain the private entry for the full independent service lifetime, even
     # on SSH loss. No caller EXIT trap may remove an executing service's controls.

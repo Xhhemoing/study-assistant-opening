@@ -115,6 +115,11 @@ worker_paused() {
   marker=$(worker_pause_file "$1") || return 1
   [[ -f "$marker" ]]
 }
+reload_manager() {
+  if [[ "$ACTION" == complete-postmigration ]]; then
+    node --input-type=module -e 'const {systemctlCommand}=await import(process.argv[1]); if(!systemctlCommand(["daemon-reload"]).ok) process.exit(1)' "file://$CONTROL_DIR/hermes-writer-control.mjs"
+  else systemctl daemon-reload; fi
+}
 install_worker_guard() {
   local marker temporary="$WORKER_GUARD.next.$$"
   marker=$(worker_pause_file "$1") || return 1
@@ -124,7 +129,7 @@ install_worker_guard() {
   printf '[Unit]\nConditionPathExists=!%s\n' "$marker" > "$temporary" || return 1
   chmod 644 -- "$temporary" || return 1
   mv -Tf -- "$temporary" "$WORKER_GUARD" || return 1
-  systemctl daemon-reload || return 1
+  reload_manager || return 1
 }
 pause_worker() {
   local marker temporary
@@ -207,14 +212,41 @@ restart_services() {
   managed activate || return 1
   return 0
 }
+completion_health() {
+  local required=$1 expected=$2 body remaining limit
+  local deadline=$((SECONDS + 1000))
+  # A time window, not an attempt count: fast connection/identity failures must
+  # leave cold parser/OCR its full startup opportunity. Each leaf uses only the
+  # remaining window, so no final 30s probe runs past the readiness deadline.
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    limit=$((remaining < 5 ? remaining : 5))
+    body=$(timeout --signal=KILL "${limit}s" curl -fsS --max-time "$limit" http://127.0.0.1:18090/api/health 2>/dev/null || true)
+    if [[ "$body" == *'"status":"ok"'* ]]; then
+      remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+      limit=$((remaining < 15 ? remaining : 15))
+      if [[ "$required" == 0 ]] || timeout --signal=KILL "${limit}s" systemctl is-active --quiet aistudy-worker.service; then
+        [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is missing.' >&2; return 1; }
+        remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+        limit=$((remaining < 30 ? remaining : 30))
+        if timeout --signal=KILL "${limit}s" node "$STATE/runtime-identity.mjs" "$CONFIG" "$expected" "$required"; then return 0; fi
+      fi
+    fi
+    remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+    limit=$((remaining < 2 ? remaining : 2))
+    sleep "$limit"
+  done
+  echo 'Completion readiness deadline expired; no automatic completion reentry.' >&2
+  return 1
+}
 health() {
   local required=$1 expected=$2 profile=${3:-}
-  local body attempt
+  if [[ "$ACTION" == complete-postmigration ]]; then completion_health "$required" "$expected"; return; fi
+  local body attempt attempts=120
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
   # Cold parser imports + OCR probe can exceed two minutes. Readiness, not
   # systemd active, controls success; a bounded retry also covers startup backoff.
-  for attempt in {1..120}; do
+  for ((attempt=1; attempt<=attempts; attempt++)); do
     body=$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
     if [[ "$body" == *'"status":"ok"'* ]]; then
       if [[ "$required" == 1 ]] && ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
@@ -228,7 +260,12 @@ health() {
 }
 finish() {
   local result=$1 rollback_result=0 restored_required can_restore=1
-  trap - EXIT INT TERM
+  trap - EXIT
+  # Result/cancellation is fixed. Drain every launched child before any finish
+  # effect, including a Node whose $! assignment has not run. Repeated signals
+  # cannot interrupt this wait; an UNKNOWN owner must stay owned, not be killed.
+  trap '' INT TERM HUP
+  wait || true
   if [[ "$result" != 0 && "$SUCCESS_REQUESTED" == 1 ]]; then
     # Lost ACK is not failed commit. One authenticated read; never replay success/start.
     if managed query-success; then
@@ -294,9 +331,34 @@ finish() {
   [[ -z "$CONTROL_ROOT" ]] || rm -rf -- "$CONTROL_ROOT"
   exit "$result"
 }
+# Cancellation must not let Bash finish race the Python owner's fixed restore.
+# Node records group signals while its owned Python child drains; Bash waits for
+# that boundary before refence/stop/quiescence or any next deployment step.
+COMPLETION_NODE_PID=''
+completion_cancel() {
+  local result=$1
+  trap '' INT TERM HUP
+  if [[ -n "$COMPLETION_NODE_PID" ]]; then
+    wait "$COMPLETION_NODE_PID" || true
+  else
+    # The child can run before the shell publishes $!. Bare wait also covers
+    # that launched-but-unpublished child; never enter finish ahead of it.
+    wait || true
+  fi
+  exit "$result"
+}
+completion_node() {
+  local result=0
+  node "$@" &
+  COMPLETION_NODE_PID=$!
+  wait "$COMPLETION_NODE_PID" || result=$?
+  COMPLETION_NODE_PID=''
+  return "$result"
+}
 trap 'finish $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'completion_cancel 130' INT
+trap 'completion_cancel 143' TERM
+trap 'completion_cancel 129' HUP
 
 case "$ACTION" in deploy|restart|rollback|repair-pre-migration|complete-postmigration) ;;
   status)
@@ -331,18 +393,21 @@ if [[ "$ACTION" == complete-postmigration ]]; then
   [[ "$WORKER_REQUIRED" == 1 ]] || fail 'Incident requires both writers.'
   # This helper remains payload-owned e5 bytes already verified in full.
   WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
-  # New reviewed control helper, not the immutable payload-owned e5 helper.
-  node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  # New reviewed control helper owns parser deadline AND escaped descendants.
+  completion_node "$CONTROL_DIR/hermes-db.mjs" parser-owned "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   managed prepare || fail 'Completion trusted boundary preparation failed.'
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
-  PYTHONDONTWRITEBYTECODE=1 bash "$WORKER_HELPER" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
+  # Run the verified immutable e5 Python helper without rewriting its bytes.
+  # Its internal reload receives the same 60s leaf budget, and the whole helper
+  # tree stays bounded: leaves300 (includes failure restore reload60) + IO180.
+  completion_node --input-type=module -e 'const {provisionCompletion,ownedNodeCLI}=await import(process.argv[1]); await ownedNodeCLI(()=>provisionCompletion(process.argv[2],process.argv.slice(3)))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
   mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"
   printf '[Service]\nWorkingDirectory=%s\nEnvironmentFile=%s\nExecStart=\nExecStart=/usr/bin/python3 -I -S -B %s/writer-controls/hermes-trusted-loader.py exec %s aistudy-web.service\n' \
     "$CURRENT" "$CONFIG" "$STATE" "$STATE" > "$WEB_OVERRIDE"
   chmod 644 -- "$WEB_OVERRIDE"
-  systemctl daemon-reload
+  reload_manager
   cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
   atomic_link "$RELEASE" "$CURRENT"

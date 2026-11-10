@@ -18,6 +18,440 @@ export function durableWrite(file, contents, mode = 0o600) {
   renameSync(temporary, file);
   syncDirectory(dirname(file));
 }
+// Completion budget (seconds; reload=R60, ordinary systemctl=S15):
+// prepare: 3R + 2S wrapper proof + 4S stop/show = 270.
+// activate: prepare270 + capture60 + 3*persist60 + broker-ready10 +
+//   4*broker-control30 + 2S starts = 670. Failure refence/revoke/stop <=150.
+// success: broker90 + identity shows60 + health30 + persist60 + close30 +
+//   terminal30 = 300; failure refence/stop <=150. No blind retry.
+// request: both socket ends1200 > max(prepare270, activate670, success300)+150.
+// provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
+//   configure reload60 + effective show15 + failure restore reload60 = 300.
+// Nine leaves each add <=2s owned-tree TERM/KILL/drain (18s maximum).
+// Helper envelope480: normal execution400 > leaves300+drain18+IO82;
+// reserve80 covers confirmed-empty two-file cleanup + reload<=60 + drain2.
+// Top owner captures preimages before helper, and never re-enables normal work.
+// Restore is not a successful completion; any restore/reload failure stays fenced.
+// Parser execution90 + owned drain2. Neither Node nor GNU timeout kills owner.
+// Unsupported pidfd/subreaper refuses before spawn. Unconfirmed kill remains
+// UNKNOWN with owner retained (no clean refusal, no configuration continuation).
+// Full signed payload observation is synchronous BEFORE socket creation/claim:
+// Python2400 + ledger50 + claim-admission300 + claim30 + entry/service45 = 2825.
+// service7200: admission2825 + prepare270 + parser/provision574 + owner reloads120
+//   + activate670 + health1001 + success300 = 5760; IO/failure margin1440.
+// Service/cgroup hard death is UNKNOWN, not an owned-cancellation receipt;
+// StopPost retains guards and scopes cleanup, and never invents a consumed claim.
+// Health uses SECONDS deadline1000, remaining-time leaf caps; <=1s clock rounding.
+// StopPost240 > cleanup180; no-claim StopPost NEVER performs payload observation.
+// Readonly formal precheck: shell timeout2700 > full-check2400+ledger55+report IO.
+// Provision runs in owner shell, NOT inside socket requests: socket1200 unchanged.
+// Historical checker <=120 (two units, optional typed-hook queries included).
+// PM samples: seven full incident scopes270 + 3*(reload60+2*manager15)=2160;
+// Python3000 leaves 840 for IO. Scope repeats backup/current/guard, NOT payload.
+// Archive python650 > 2*scope270+2*manager15+IO; launch-check300 > scope270+manager15.
+// Socket timers cannot preempt synchronous work: bounded subprocesses and the
+// independent system service, not timer callbacks, own hard termination.
+// SSH ConnectTimeout15 bounds CONNECT only; no command/pipe deadline kills
+// these requests. The independent service, not SSH, owns execution lifetime.
+// Reload has measured 19s latency; do not apply the ordinary command budget.
+export const RELOAD_TIMEOUT_MS = 60_000;
+export const SYSTEMCTL_TIMEOUT_MS = 15_000;
+export const SUPERVISOR_REQUEST_TIMEOUT_MS = 1_200_000;
+export const COMPLETION_CHECK_TIMEOUT_MS = 2_400_000;
+export function systemctlCommand(args, execute = spawnSync) {
+  const result = execute('systemctl', args, { encoding: 'utf8',
+    timeout: args[0] === 'daemon-reload' ? RELOAD_TIMEOUT_MS : SYSTEMCTL_TIMEOUT_MS, killSignal: 'SIGKILL' });
+  return { ok: !result.error && result.status === 0, status: result.error ? null : result.status, stdout: result.stdout ?? '' };
+}
+const ownershipProgram = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
+original=subprocess.run
+owner_spawned=False
+cancel_requested=False
+cancel_signals={signal.SIGTERM,signal.SIGINT,signal.SIGHUP}
+
+def record_cancel(signum,frame):
+    global cancel_requested
+    cancel_requested=True # Never raise into handoff/cleanup/serialization/exit.
+
+for cancel_signal in cancel_signals: signal.signal(cancel_signal,record_cancel)
+
+def check_cancel():
+    if cancel_requested: raise RuntimeError('Owned command cancelled')
+
+def terminal_commit(code):
+    # Approved terminal contract: one check under the cancellation mask. Any
+    # recorded/pending cancellation at this point must fail. Successful commit
+    # is allowed only with no owned children and no remaining side effects;
+    # keep the mask through immediate exit. Later signals are post-commit.
+    signal.pthread_sigmask(signal.SIG_BLOCK,cancel_signals)
+    if cancel_requested or signal.sigpending() & cancel_signals: return 1
+    return code
+
+def terminal_exit(code):
+    os._exit(terminal_commit(code))
+
+def prepare_owner():
+    if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
+        raise OSError('Subreaper unavailable')
+    probe=os.pidfd_open(os.getpid())
+    try: signal.pidfd_send_signal(probe,0)
+    finally: os.close(probe)
+    children()
+
+def owned_run(argv,*args,**kwargs):
+    global owner_spawned
+    # Parent must also adopt if its leaf controller exits before an ACK.
+    prepare_owner()
+    # One dedicated subreaper per leaf. Only its direct/adopted children are
+    # enumerated, never arbitrary host PIDs or another deployment's session.
+    with tempfile.TemporaryFile() as result_file:
+        parent_pid=os.getpid()
+        # Fork itself and ALL ownership handoff instructions are protected.
+        # Identity, not a post-fork assignment, owns the child exit guarantee.
+        check_cancel()
+        previous_mask=signal.pthread_sigmask(signal.SIG_BLOCK,cancel_signals)
+        owner_spawned=True
+        try:
+            controller=os.fork()
+            if os.getpid()!=parent_pid:
+                try:
+                    for sig in cancel_signals: signal.signal(sig,record_cancel)
+                    signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+                    prepare_owner()
+                    result=leaf(argv,*args,**kwargs)
+                    value=(True,result)
+                except BaseException as error:
+                    drain()
+                    value=(False,error)
+                check_cancel()
+                result_file.write(b'HERMES-RESULT-1\\n')
+                pickle.dump(value,result_file)
+                result_file.write(b'\\nHERMES-RESULT-END\\n')
+                result_file.flush()
+                check_cancel()
+                terminal_exit(0)
+            signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+            waited,status=os.waitpid(controller,0)
+            if waited!=controller or not os.WIFEXITED(status) or os.WEXITSTATUS(status)!=0:
+                raise RuntimeError('Controller terminal ACK failed')
+            result_file.seek(0)
+            if result_file.readline()!=b'HERMES-RESULT-1\\n': raise RuntimeError('Result frame header refused')
+            record=pickle.load(result_file)
+            if result_file.read()!=b'\\nHERMES-RESULT-END\\n': raise RuntimeError('Result frame trailer refused')
+            if not isinstance(record,tuple) or len(record)!=2 or type(record[0]) is not bool:
+                raise RuntimeError('Result record refused')
+            success,value=record
+            if success and not isinstance(value,subprocess.CompletedProcess): raise RuntimeError('Successful result type refused')
+            if not success and not isinstance(value,BaseException): raise RuntimeError('Failure result type refused')
+        except BaseException:
+            # Includes fork failure (empty scope), post-fork signal/fault,
+            # wait and ACK failure. Never release an unconfirmed owned tree.
+            drain()
+            raise
+        finally:
+            if os.getpid()!=parent_pid: terminal_exit(70)
+            signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+        check_cancel() # Controller/leaf has ended; cancellation cannot become success.
+        if not success: raise value
+        return value
+
+def children():
+    with open('/proc/self/task/'+str(os.getpid())+'/children') as source:
+        return [int(pid) for pid in source.read().split()]
+
+class OwnedScopeConfirmedEmpty(RuntimeError):
+    pass
+
+def retain_unknown():
+    # Cleanup/observation itself failed. Never pickle an ordinary error back to
+    # the helper or let the outer owner exit while descendants may be live.
+    # Signals cannot interrupt retention; service hard death remains UNKNOWN.
+    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):
+        try: signal.signal(sig,signal.SIG_IGN)
+        except BaseException: pass
+    try: print('UNKNOWN: owned cleanup unconfirmed; owner retained',file=sys.stderr,flush=True)
+    except BaseException: pass
+    while True:
+        try:
+            while True:
+                try:
+                    pid,_=os.waitpid(-1,os.WNOHANG)
+                    if pid == 0: break
+                except ChildProcessError: break
+            if not children(): break
+        except BaseException:
+            pass # Observation failure is NOT evidence of absence.
+        try: time.sleep(.02)
+        except BaseException: pass
+    raise OwnedScopeConfirmedEmpty('Owned cleanup was UNKNOWN; descendants now confirmed absent')
+
+def drain():
+    try:
+        return drain_confirmed()
+    except BaseException:
+        retain_unknown()
+
+def drain_confirmed():
+    # Killing a parent adopts its children even after runuser/setsid. pidfds
+    # pin the observed direct child; no numeric PID signalling/reuse race.
+    had_children=False
+    for sig,grace in ((signal.SIGTERM,.25),(signal.SIGKILL,1.5)):
+        deadline=time.monotonic()+grace
+        while True:
+            while True:
+                try:
+                    pid,_=os.waitpid(-1,os.WNOHANG)
+                    if pid == 0: break
+                except ChildProcessError: break
+            owned=children()
+            if not owned: return had_children
+            had_children=True
+            for pid in owned:
+                try:
+                    fd=os.pidfd_open(pid)
+                    try:
+                        if pid in children(): signal.pidfd_send_signal(fd,sig)
+                    finally: os.close(fd)
+                except ProcessLookupError: pass
+            if time.monotonic()>=deadline: break
+            time.sleep(.005)
+    raise RuntimeError('Owned descendants termination UNCONFIRMED')
+
+def leaf(argv,*args,**kwargs):
+    global owner_spawned
+    cleanup_only=kwargs.pop('cleanup_only',False)
+    timeout=kwargs.pop('timeout',None)
+    check=kwargs.pop('check',False)
+    data=kwargs.pop('input',None)
+    capture=kwargs.pop('capture_output',False)
+    if data is not None: kwargs['stdin']=subprocess.PIPE
+    if capture:
+        if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+            raise ValueError('capture_output conflicts with pipes')
+        kwargs['stdout']=kwargs['stderr']=subprocess.PIPE
+    # Popen can fork successfully and then be interrupted while reading its
+    # exec-error pipe. Mark possible ownership BEFORE crossing that boundary;
+    # a genuine pre-spawn error simply drains an empty child set.
+    if not cleanup_only: check_cancel()
+    proc=None
+    deadline=None if timeout is None else time.monotonic()+timeout
+    owner_spawned=True
+    try:
+        proc=subprocess.Popen(argv,*args,**kwargs)
+        first=True
+        while True:
+            if not cleanup_only: check_cancel()
+            remaining=None if deadline is None else deadline-time.monotonic()
+            if remaining is not None and remaining<=0: raise subprocess.TimeoutExpired(argv,timeout)
+            try:
+                out,err=proc.communicate(data if first else None,timeout=.05 if remaining is None else min(.05,remaining))
+                break
+            except subprocess.TimeoutExpired:
+                first=False
+        if not cleanup_only: check_cancel()
+    except BaseException:
+        # Do not communicate/reap just the parent and leave inherited pipes or
+        # escaped grandchildren alive. Drain the whole adopted tree first.
+        drain()
+        if proc is not None: proc.communicate(timeout=.25)
+        raise
+    orphaned=drain()
+    if not cleanup_only: check_cancel() # Child-local cancellation at final drain is failure.
+    if orphaned: raise RuntimeError('Leaf left descendants after return')
+    result=subprocess.CompletedProcess(argv,proc.returncode,out,err)
+    if check: result.check_returncode()
+    return result
+`;
+
+// The top-level owner is outside the helper's cancellation scope. Its deadline
+// kills/drains the helper AND nested leaf controllers, even across setsid.
+// No Node/GNU timeout kills this owner before its cleanup confirmation. If the
+// host/service kills it, outcome is UNKNOWN, never a clean cancellation receipt.
+export function runCompletionOwned(command, args, seconds, options = {}, execute = spawnSync, cleanupProgram = '') {
+  const code = ownershipProgram + cleanupProgram + `
+cleanup_enabled='restore_configuration' in globals()
+limit=float(sys.argv[1])
+overall_deadline=time.monotonic()+limit
+if cleanup_enabled:
+    capture_configuration()
+    sys.argv=[str(provision_lock_fd) if value=='__PROVISION_LOCK_FD__' else value for value in sys.argv]
+def require_empty_scope():
+    try:
+        drain()
+    except BaseException:
+        # Retention may raise only AFTER observing empty; an observation error
+        # is never absence. Preserve failure but still allow fixed cleanup once
+        # owned-empty is actually proved, rather than silently skip restoration.
+        try:
+            observed_children=children()
+        except BaseException:
+            observed_children=None
+        if observed_children is None or observed_children:
+            try:
+                retain_unknown()
+            except OwnedScopeConfirmedEmpty:
+                pass # This invocation proved absence; failure still proceeds to cleanup.
+failed=False
+prepare_owner()
+try:
+    # Configuration owner reserves 1/6 of its EXISTING envelope for cleanup.
+    result=leaf(sys.argv[2:],timeout=limit*5/6 if cleanup_enabled else limit,
+                pass_fds=(provision_lock_fd,) if cleanup_enabled else ())
+    check_cancel()
+    failed=result.returncode!=0
+except BaseException:
+    failed=True
+    require_empty_scope() # A raised-but-confirmed-empty drain remains failure.
+# Outer publishes once, after helper return+owned-empty. Approved contract:
+# commit checks recorded/pending cancellation under mask; success has only exit
+# remaining. Failure may perform bounded cleanup but can never publish success.
+final_status=terminal_commit(1 if failed else result.returncode)
+if final_status!=0 and cleanup_enabled:
+    require_empty_scope() # Mandatory owned-empty proof BEFORE any file restoration.
+    try:
+        restore_configuration(overall_deadline)
+    except BaseException:
+        print('RESTORE_UNCONFIRMED: retained forward-only configuration; no reentry',file=sys.stderr,flush=True)
+os._exit(final_status)
+`;
+  return execute('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, String(seconds), command, ...args],
+    { stdio: 'inherit', ...options });
+}
+function configurationCleanup(args) {
+  const option = name => { const index=args.indexOf(name); return index<0 ? undefined : args[index+1]; };
+  const systemd=option('--systemd-dir'), config=option('--config-dir');
+  if (!systemd || !config) return ''; // Object-only minimal subprocess fixtures.
+  const paths=[join(systemd,'aistudy-worker.service'),join(config,'worker-runtime.env')];
+  return `
+import fcntl
+cleanup_paths=${JSON.stringify(paths)}
+cleanup_lock=${JSON.stringify(join(config,'.worker-provision.lock'))}
+trusted=runpy.run_path(${JSON.stringify(join(controls,'hermes-trusted-loader.py'))},run_name='cleanup_bootstrap')
+preimage=[]
+provision_lock_fd=None
+def capture_configuration():
+    global provision_lock_fd
+    # One open file description owns snapshot->mutation->cleanup. Contention
+    # refuses BEFORE reading a potentially mixed preimage from another writer.
+    provision_lock_fd=trusted['safe_open'](cleanup_lock,private=True)
+    fcntl.flock(provision_lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    for path in cleanup_paths:
+        parent=trusted['safe_open'](os.path.dirname(path),directory=True)
+        try:
+            parent_stat=os.fstat(parent)
+            try:
+                data,ident=trusted['read_trusted'](path)
+                preimage.append((path,data,ident,parent_stat.st_dev,parent_stat.st_ino))
+            except FileNotFoundError:
+                preimage.append((path,None,None,parent_stat.st_dev,parent_stat.st_ino))
+        finally: os.close(parent)
+def restore_configuration(deadline):
+    # This capability is fixed to two captured files and one reload. It never
+    # clears the generation's cancellation flag or admits new normal work.
+    if children(): raise RuntimeError('Owned scope not empty before restore')
+    lock_stat=os.fstat(provision_lock_fd)
+    check_lock=trusted['safe_open'](cleanup_lock,private=True)
+    try:
+        if (lock_stat.st_dev,lock_stat.st_ino)!=(os.fstat(check_lock).st_dev,os.fstat(check_lock).st_ino):
+            raise RuntimeError('Provision lock generation changed')
+        fcntl.flock(provision_lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        for path,data,ident,dev,ino in preimage:
+            parent=trusted['safe_open'](os.path.dirname(path),directory=True)
+            try:
+                observed=os.fstat(parent)
+                if (observed.st_dev,observed.st_ino)!=(dev,ino): raise RuntimeError('Restore parent changed')
+                name=os.path.basename(path)
+                if data is None:
+                    try: os.unlink(name,dir_fd=parent)
+                    except FileNotFoundError: pass
+                else:
+                    temporary=name+'.owner-restore-'+str(os.getpid())
+                    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+                    try:
+                        with os.fdopen(os.dup(fd),'wb') as output: output.write(data); output.flush()
+                        os.fchown(fd,int(ident[3]),int(ident[4])); os.fchmod(fd,int(ident[2])&0o777); os.fsync(fd)
+                    finally: os.close(fd)
+                    os.rename(temporary,name,src_dir_fd=parent,dst_dir_fd=parent)
+                os.fsync(parent)
+            finally: os.close(parent)
+        remaining=deadline-time.monotonic()-2
+        if remaining<=0: raise RuntimeError('Cleanup reserve exhausted')
+        # Separate fixed cleanup leaf: ignores cooperative cancellation only in
+        # this owner phase, still owns all descendants and the same hard bound.
+        leaf(['/usr/bin/systemctl','daemon-reload'],timeout=min(60,remaining),check=True,cleanup_only=True)
+    finally: os.close(check_lock)
+`;
+}
+// CLI boundary: keep Node alive while its synchronous ownership child drains.
+// Deliver queued Node signals after the child returns, before caller progression.
+export async function ownedNodeCLI(operation) {
+  let cancelled=false;
+  const signals=['SIGTERM','SIGINT','SIGHUP'];
+  const mark=()=>{cancelled=true;};
+  for(const name of signals) process.on(name,mark);
+  try {
+    let result,error;
+    try { result=operation(); } catch(caught) { error=caught; }
+    await new Promise(resolve=>setImmediate(resolve));
+    if(cancelled) throw new Error('Owned Node boundary cancelled after child cleanup');
+    if(error) throw error;
+    return result;
+  } finally { for(const name of signals) process.off(name,mark); }
+}
+export function provisionCompletion(helper, args, execute = spawnSync) {
+  const cleanup=configurationCleanup(args);
+  const configIndex=args.indexOf('--config-dir');
+  const lockPath=cleanup ? join(args[configIndex+1],'.worker-provision.lock') : undefined;
+  const code = ownershipProgram + (cleanup ? `
+# The owner passes this descriptor explicitly, never through ambient env.
+import fcntl,stat
+lock_fd=int(sys.argv[1]); sys.argv.pop(1)
+held=os.fstat(lock_fd)
+if not stat.S_ISREG(held.st_mode) or held.st_uid!=os.geteuid() or held.st_mode&0o077 or held.st_nlink!=1:
+    raise RuntimeError('Inherited provision lock is untrusted')
+check=os.stat(${JSON.stringify(lockPath)},follow_symlinks=False)
+if (held.st_dev,held.st_ino)!=(check.st_dev,check.st_ino): raise RuntimeError('Provision lock replaced')
+original_flock=fcntl.flock
+def same_generation_flock(fd,operation):
+    observed=os.fstat(fd)
+    if (observed.st_dev,observed.st_ino)!=(held.st_dev,held.st_ino):
+        raise RuntimeError('Helper attempted a different provision lock generation')
+    if operation!=fcntl.LOCK_EX: raise RuntimeError('Unexpected provision lock operation')
+    original_flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+fcntl.flock=same_generation_flock
+` : '') + `
+def bounded(argv,*args,**kwargs):
+    if isinstance(argv,(list,tuple)) and argv and argv[0] in ('systemctl','/usr/bin/systemctl','/bin/systemctl'):
+        limit=${SYSTEMCTL_TIMEOUT_MS / 1000}
+        if len(argv)>1 and argv[1]=='daemon-reload': limit=${RELOAD_TIMEOUT_MS / 1000}
+        prior=kwargs.get('timeout')
+        kwargs['timeout']=limit if prior is None else min(prior,limit)
+    elif isinstance(argv,(list,tuple)) and argv and argv[0].rsplit('/',1)[-1] in ('systemd-analyze','groupadd','useradd'):
+        prior=kwargs.get('timeout')
+        kwargs['timeout']=${SYSTEMCTL_TIMEOUT_MS / 1000} if prior is None else min(prior,${SYSTEMCTL_TIMEOUT_MS / 1000})
+    return owned_run(argv,*args,**kwargs)
+subprocess.run=bounded
+helper_status=0
+try:
+    sys.argv=sys.argv[1:]
+    runpy.run_path(sys.argv[0],run_name="__main__")
+except SystemExit as error:
+    helper_status=error.code if isinstance(error.code,int) else (0 if error.code is None else 1)
+finally:
+    subprocess.run=original
+# Even SystemExit(0) must not bypass helper-local cancellation publication.
+# Outer still owns and drains this helper's residual scope on any exit.
+check_cancel()
+terminal_exit(helper_status)`;
+  const result = runCompletionOwned('/usr/bin/python3', ['-I', '-S', '-B', '-c', code, ...(cleanup ? ['__PROVISION_LOCK_FD__'] : []), helper, ...args], 480,
+    { env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }, execute, cleanup);
+  if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
+}
+export function completionLaunchAdmission(args, unit, phase = 'launch') {
+  const retainedUnit = unit.split(controls).join('/tmp/aistudy-entry.Pz65J76D')
+    .replace('RuntimeMaxSec=7200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+  return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit }));
+}
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const controls = dirname(fileURLToPath(import.meta.url));
 const sourceNames = ['hermes-trusted-loader.py', 'hermes-writer-exec.py', 'hermes-peer-broker.py', 'hermes-writer-state.py'];
@@ -31,10 +465,13 @@ export function verifyEntrySources() {
 }
 export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
-export function python(file, args, payload) {
-  const result = spawnSync('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
-    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-check' ? 150_000 : 30_000,
-    env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
+export function python(file, args, payload, execute = spawnSync) {
+  const result = execute('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
+    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 3_000_000
+      : args[0] === 'completion-retained-archive' ? 650_000
+      : args[0] === 'completion-launch-check' ? 300_000
+      : args[0] === 'completion-check' ? COMPLETION_CHECK_TIMEOUT_MS : 30_000,
+    killSignal: 'SIGKILL', env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' },
   });
   if (result.error || result.status !== 0) throw new Error('Trusted writer control unavailable');
   return result.stdout.trim();
@@ -132,12 +569,13 @@ export function brokerPresent() { return existsSync(brokerSocket); }
 export function checkRepair(args) {
   return JSON.parse(python('hermes-writer-state.py', ['repair-check', args[4], args[3], args[6]]));
 }
-export function checkCompletion(args) {
+export function checkCompletion(args, dependencies = {}) {
+  const observe = dependencies.python ?? python, ledger = dependencies.ledger ?? verifyCompletionLedger;
   const [, dir, , current, state, , systemd, workerConfig, , sha, release, digest, archive] = args;
   if (sha !== 'e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf'
     || digest !== '4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0') throw new Error('Wrong completion payload scope');
-  const observation = JSON.parse(python('hermes-writer-state.py', ['completion-check', state, current, systemd, release, join(dir, '.env.production'), archive, workerConfig]));
-  verifyCompletionLedger(join(dir, '.env.production'), release);
+  const observation = JSON.parse(observe('hermes-writer-state.py', ['completion-check', state, current, systemd, release, join(dir, '.env.production'), archive, workerConfig]));
+  ledger(join(dir, '.env.production'), release);
   return observation;
 }
 
