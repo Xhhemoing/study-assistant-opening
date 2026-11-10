@@ -81,6 +81,7 @@ class Repair(unittest.TestCase):
             self.conditions[unit] = [['ConditionPathExists', False, True, str(self.state / 'writers-fenced'), 0]]
         self.manager_extra = ''
         self.configuration_extra = ''
+        self.hook_proofs = {}
         self.env_extra = {unit: ('/etc/aistudy/worker-runtime.env (ignore_errors=no)' if unit == state.WORKER
                                else '/opt/aistudy/.env.production (ignore_errors=no)') for unit in self.values}
         self.owner_alive = False
@@ -103,7 +104,14 @@ class Repair(unittest.TestCase):
                 raise AssertionError('Unexpected external command: ' + repr(command))
             if command[0] == '/usr/bin/busctl':
                 unit = next(unit for unit in self.values if unit.replace('-', '_2d').replace('.', '_2e') in command[5])
-                raw = json.dumps({'type': 'a(sbbsi)', 'data': self.conditions[unit]})
+                if command[-1] == 'Conditions':
+                    raw = json.dumps({'type': 'a(sbbsi)', 'data': self.conditions[unit]})
+                else:
+                    self.assertEqual(command[6], 'org.freedesktop.systemd1.Service')
+                    proof = self.hook_proofs[(unit, command[-1])]
+                    if isinstance(proof, Exception):
+                        raise proof
+                    raw = proof
             elif '--all' in command:
                 unit = command[-1]
                 raw = ''.join(key + '=' + value + '\n' for key, value in self.stopped[unit].items())
@@ -186,6 +194,35 @@ class Repair(unittest.TestCase):
         self.assertFalse(result['automaticRetry'])
         self.assertEqual(sum(command[:2] == ['/usr/bin/systemctl', 'show'] and '--all' not in command
                              for command in self.commands), 4)
+
+    def test_omitted_empty_hooks_use_typed_proof_read_only_for_both_units(self):
+        hooks = ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')
+        for unit in self.values:
+            for hook in hooks:
+                del self.values[unit][hook]
+                self.hook_proofs[(unit, hook)] = '{"type":"a(sasbttttuii)","data":[]}'
+        self.assertTrue(self.check()['eligible'])
+        self.assertEqual(len([cmd for cmd in self.commands if cmd[-1] in hooks]), 16)
+        for unit in self.values:
+            for hook in hooks:
+                for bad in ('{"type":"as","data":[]}', '{"type":"a(sasbttttuii)","data":[[]]}',
+                            '{"type":"a(sasbttttuii)","data":[["/evil",["/evil"],false,0,0,0,0,0,0,0]]}',
+                            '{"type":"a(sasbttttuii)","data":null}', '{}',
+                            subprocess.CalledProcessError(1, 'busctl', stderr='UnknownProperty')):
+                    with self.subTest(unit=unit, hook=hook, bad=bad):
+                        self.hook_proofs[(unit, hook)] = bad
+                        with self.assertRaises((PermissionError, ValueError, subprocess.SubprocessError)):
+                            self.check()
+                self.hook_proofs[(unit, hook)] = '{"type":"a(sasbttttuii)","data":[]}'
+        # Empty hook proof does not bypass other missing fields or env ordering.
+        unit = state.WORKER
+        original = self.values[unit].pop('MemoryMax')
+        with self.assertRaises(PermissionError):
+            self.check()
+        self.values[unit]['MemoryMax'] = original
+        self.values[unit]['EnvironmentFiles'], self.env_extra[unit] = self.env_extra[unit], self.values[unit]['EnvironmentFiles']
+        with self.assertRaises(ValueError):
+            self.check()
 
     @unittest.skipUnless(GENERATED_CHECK is not None, 'requires actual shell-generated code')
     def test_memory_inventory_is_complete_before_any_sibling_executes(self):
