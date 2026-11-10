@@ -29,4 +29,3 @@ test('drain and observe faults retain until real empty proof then commit failure
   const steps=readFileSync(proof,'utf8').trim().split('\n');
   assert.equal(steps[0],'retention-empty');assert(steps.includes('commit'));assert.equal(steps.at(-1),'reload');
 });
-
