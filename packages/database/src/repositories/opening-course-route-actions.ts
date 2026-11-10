@@ -35,8 +35,10 @@ function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):Co
   return {kind:"choice",reason,message:messages[reason],courseId,href:href(courseId),requirementIds:ids};
 }
 type Origin={row:Record<string,unknown>;context:CourseRouteActivityContext;input:CourseRouteNext};
+type PrerequisiteReturn = { plan: SpanPrerequisiteRepairPlan; activityId: string; confirmationHead: string; outcome: "correct" | "incorrect"; assistance: string };
 export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
-  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart,returnPlan?:SpanPrerequisiteRepairPlan):Promise<CourseRouteActionResult>{
+  async function act(tx:TransactionSql,scope:Scope,courseId:string,input:CourseRouteStart|CourseRouteNext,origin?:Origin,reservedStart?:CourseReservedStart,prerequisiteReturn?:PrerequisiteReturn):Promise<CourseRouteActionResult>{
+    const returnPlan = prerequisiteReturn?.plan;
     const key=origin?`course-route-next:${origin.input.activityId}:${origin.input.observationId??"none"}`
       :"taskId" in input&&input.taskId?`course-route-task:${input.taskId.toLowerCase()}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
@@ -131,10 +133,12 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         const activity = await assertOwnedActivity(tx as unknown as Sql, scope, repair.activityId);
         return { kind: "ready", activity, href: href(courseId, activity.id), resumed: false, requirementId: repair.requirementId, action: "prerequisite" };
       }
-      const unavailable = choice(courseId, repair.reason === "authorization_required" ? "authorization_required" : "evidence_unknown", [current.requirement.id]);
-      if (unavailable.kind === "choice" && repair.reason === "needs_clarification") unavailable.message =
-        "当前直接先修的证据、最早一步或已确认内容供给不足以执行一块补讲，请核对；未创建活动或消耗预算，未借用范围外题目。";
-      return unavailable;
+      if (repair.kind !== "not_weak") {
+        const unavailable = choice(courseId, repair.reason === "authorization_required" ? "authorization_required" : "evidence_unknown", [current.requirement.id]);
+        if (unavailable.kind === "choice" && repair.reason === "needs_clarification") unavailable.message =
+          "当前直接先修的证据、最早一步或已确认内容供给不足以执行一块补讲，请核对；未创建活动或消耗预算，未借用范围外题目。";
+        return unavailable;
+      }
     }
     let boundRetestId:string|undefined;
     if("requirementId" in input&&input.taskId){
@@ -255,7 +259,10 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       :`${action==="prerequisite"?"先补前置要求，检查后返回原要求：":action==="return"?"返回原要求：":"课程要求："}${selected.requirement.title}；本次${input.minutes}分钟；验证方式${selected.requirement.verification.kind}。${selected.requirement.verification.rubric??""}`;
     const receiptInput=await captureOpeningCourseRouteDecision(tx,scope,{courseId,goal,request:input,entry:origin?"next":"start",requestedId,progress,
       excluded:snapshot.requirements.filter(row=>!progress.some(candidate=>candidate.requirement.id===row.requirement.id)),initialStep,context,decisionInput,
-      ...(action==="return"&&returnAfterUnknown?{returnBasis:"uncalibrated" as const}:{})});
+      ...(prerequisiteReturn ? { returnBasis: "bounded_prerequisite_block" as const,
+        prerequisiteReturn: { activityId: prerequisiteReturn.activityId, observationId: prerequisiteReturn.confirmationHead,
+          outcome: prerequisiteReturn.outcome, assistance: prerequisiteReturn.assistance } }
+        : action==="return"&&returnAfterUnknown?{returnBasis:"uncalibrated" as const}:{})});
     const focusedPart=all.projected.find(row=>row.id===decision.focusObservationId
       &&row.requirementKey===selected.requirement.requirementKey&&row.courseRequirement?.id===selected.requirement.id
       &&row.courseRequirement.revision===selected.requirement.revision&&row.courseRequirement.stableSkillId===selected.requirement.stableSkillId
@@ -303,7 +310,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
         clientKey: operation, minutes: session.intent.timeBudgetMinutes };
       if (session.revision !== input.expectedRevision && !(session.status === "completed" && session.revision === input.expectedRevision + 1))
         throw learningError("CONFLICT", "原学习位置已变化，请重新读取。");
-      const result = await act(tx, scope, session.courseId, request, undefined, undefined, plan);
+      const result = await act(tx, scope, session.courseId, request, undefined, undefined, { plan, activityId: session.activityId,
+        confirmationHead: head.id, outcome: head.serverEvaluation!.decision as "correct" | "incorrect", assistance: head.assistance });
       if (result.kind !== "ready") return result;
       if (session.status === "completed" && returned?.targetActivityId !== result.activity.id)
         throw prerequisiteConflict("SPAN_PREREQUISITE_RECEIPT_MISMATCH");

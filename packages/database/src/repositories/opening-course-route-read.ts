@@ -1,4 +1,4 @@
-import { courseRequirementSchema, courseRouteActivityContextSchema, knowledgeSnapshotSchema, type CourseRequirement, type CourseRouteRequirementInput, type CourseRouteSnapshot, type Scope } from "@aistudy/contracts";
+import { spanPrerequisiteRefusalReasonSchema, courseRequirementSchema, courseRouteActivityContextSchema, knowledgeSnapshotSchema, type CourseRequirement, type CourseRouteRequirementInput, type CourseRouteSnapshot, type Scope } from "@aistudy/contracts";
 import { courseRequirementProgress, toSnapshotEvidence } from "@aistudy/domain";
 import type { Sql,TransactionSql } from "postgres";
 import { learningError, learningIso, mapLearningObservation } from "./opening-learning-facts";
@@ -58,7 +58,8 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
       const trusted = await readOpeningSpanCourseAttempt(db, scope, attempt);
       if (trusted) spanBindings.set(String(row.id), trusted.binding.requirement);
     } catch (error) {
-      if ((error as {reasonCode?:string}).reasonCode !== "SPAN_COURSE_BINDING_CHANGED") throw error;
+      if ((error as { code?: string }).code !== "CONFLICT"
+        || !spanPrerequisiteRefusalReasonSchema.safeParse((error as { reasonCode?: unknown }).reasonCode).success) throw error;
       // Current drift removes authority, never the historical fact or its original bytes.
     }
   }

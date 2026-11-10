@@ -1,17 +1,18 @@
 import { expect, it } from "vitest";
 import type { Sql } from "postgres";
 import { chooseSpanRepairTeaching, listSpanTeachingProblems } from "@aistudy/domain";
-import { getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
+import { getSpanItemIdentity, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
 import { resolveCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
 import { readOpeningSpanPrerequisiteRepair } from "./opening-span-prerequisite-runtime";
 const id = "11111111-1111-4111-8111-111111111111", scope = { workspaceId: id, ownerUserId: id };
-it("does not borrow generated teaching outside the explicitly confirmed canonical set to manufacture B supply", () => {
-  // Real R1 confirmation expansions, not a fabricated executable plan or SQL authority seed.
+it("does not borrow new teaching permissions from legacy confirmed scope to manufacture B supply", () => {
+  // Legacy finite scope remains executable only within its originally confirmed identities.
   for (const confirmed of listSpanTeachingProblems()) {
     let allowed: string[];
     try { allowed = resolveCourseSpanExerciseKeys([confirmed.id]); }
     catch { continue; } // Public confirmation itself refuses families with no validation supply.
-    const candidates = allowed.flatMap(key => { const p = getSpanTeachingProblem(key); return p ? [p] : []; });
+    const legacy = allowed.filter(key => getSpanItemIdentity(key)?.purpose !== "teaching");
+    const candidates = legacy.flatMap(key => { const p = getSpanTeachingProblem(key); return p ? [p] : []; });
     expect(chooseSpanRepairTeaching(confirmed, { contentKeys: new Set(), unknownHistory: false }, candidates)).toBeNull();
   }
 });
