@@ -755,12 +755,20 @@ export function TeachingContinueEntry({
     }
   }, [activity.id, api, openWorkspaceFromResume, phase]);
 
+  const inFlight = activity.generateStatus === "queued" || activity.generateStatus === "generating"
+    || liveResume?.gates.job === "in_flight";
+  const compilerOff = !teachingCompileEnabled || compilerUnavailable;
+  // Resume maps known failed/cancelled jobs to unknown, but those terminal states
+  // permit a new user-requested compile; a genuinely unknown operation does not.
+  const canCompile = !compileBlocked && !compilerOff && !inFlight && Boolean(liveResume)
+    && (liveResume?.gates.job !== "unknown"
+      || activity.generateStatus === "failed" || activity.generateStatus === "cancelled")
+    && liveResume?.gates.materials === "available"
+    && activity.status !== "completed" && activity.status !== "skipped"
+    && canRequestTeachingCompile(activity, { compilerEnabled: teachingCompileEnabled });
+
   const requestCompile = useCallback(async () => {
-    if (compileInFlight.current || waitBusy || compileBlocked || compilerUnavailable
-      || activity.status === "completed" || activity.status === "skipped" || !liveResume
-      || !canRequestTeachingCompile(activity, { compilerEnabled: teachingCompileEnabled })
-      || liveResume?.gates.job === "in_flight" || liveResume?.gates.job === "unknown"
-      || (liveResume && liveResume.gates.materials !== "available")) return;
+    if (compileInFlight.current || waitBusy || !canCompile) return;
     compileInFlight.current = true;
     setWaitBusy(true);
     setWaitError(null);
@@ -778,17 +786,9 @@ export function TeachingContinueEntry({
       compileInFlight.current = false;
       setWaitBusy(false);
     }
-  }, [activity, api, onActivityUpdated, teachingCompileEnabled, waitBusy, compileBlocked, compilerUnavailable, liveResume]);
+  }, [activity.id, api, onActivityUpdated, waitBusy, canCompile]);
 
   const contentState = liveResume ?? activity;
-  const inFlight = activity.generateStatus === "queued" || activity.generateStatus === "generating"
-    || liveResume?.gates.job === "in_flight";
-  const compilerOff = !teachingCompileEnabled || compilerUnavailable;
-  const canCompile = !compileBlocked && !compilerOff && !inFlight && Boolean(liveResume)
-    && liveResume?.gates.job !== "unknown"
-    && liveResume?.gates.materials === "available"
-    && activity.status !== "completed" && activity.status !== "skipped"
-    && canRequestTeachingCompile(activity, { compilerEnabled: teachingCompileEnabled });
   const contentUsable = isTeachingWorkspaceContentUsable(contentState, liveResume?.clientInit ?? workspaceInit);
   const contentLabel = contentState.generateStatus === "ready" && !contentUsable && contentState.contentVersion > 0
     ? "主讲内容暂不可用" : teachingActivityGenerateStatusLabel(contentState.generateStatus, { contentVersion: contentState.contentVersion });
