@@ -40,6 +40,11 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
   return readContextInternal(tx, scope, raw, options);
 }
 
+/** Eligibility only: does not authorize execution or accept a client operation/photo. */
+export async function readOpeningExplicitRegradeCandidateContext(tx: TransactionSql, scope: Scope, observationId: string) {
+  return readContextInternal(tx, scope, { observationId }, { explicitRegradeCandidate: true });
+}
+
 /** Admit a student's photo inside the submit transaction; rejection rolls the entire transaction back.
  * Validation and conflict rejections carry the work_source_rejected reason. This does not authorize model execution. */
 export async function admitOpeningAiGradingWorkSource(tx: TransactionSql, scope: Scope, observationId: string) {
@@ -56,7 +61,7 @@ export async function admitOpeningAiGradingWorkSource(tx: TransactionSql, scope:
 }
 
 async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGradingInput,
-  options: { readOnly?: boolean; photoAdmissionOnly?: true }): Promise<OpeningAiGradingContext> {
+  options: { readOnly?: boolean; photoAdmissionOnly?: true; explicitRegradeCandidate?: true }): Promise<OpeningAiGradingContext> {
   let input = aiGradingInputSchema.parse(raw);
   if (!options.readOnly) await lockLearningOwner(tx, scope);
   const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL ${options.readOnly ? tx`` : tx`FOR SHARE`}`;
@@ -86,7 +91,16 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!observation.attemptId || !observation.problemId || !observation.itemVersionId) {
     throw learningError("VALIDATION", "请先关联题目并保存作答，再进行批改");
   }
-  const existingRow = row.existing_grade as Record<string, unknown> | null;
+  // Confirmation fences legacy execution/publication without changing its billing ledger.
+  // This check runs inside the same history-locked revision transaction at apply.
+  if (!options.explicitRegradeCandidate && !options.photoAdmissionOnly) {
+    const [successor] = await tx`SELECT id FROM opening_explicit_regrade_requests
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND root_observation_id=${row.root_observation_id ?? row.id} AND answer_revision=${row.answer_revision}
+        AND confirmed_at IS NOT NULL LIMIT 1`;
+    if (successor) throw learningError("CONFLICT", "已确认新的显式批改请求，旧请求不能再次执行或发布结果");
+  }
+  const existingRow = options.explicitRegradeCandidate ? null : row.existing_grade as Record<string, unknown> | null;
   if (existingRow && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, raw)
     && !isDeepStrictEqual((existingRow.submitted_intent as { aiGrading?: { input?: unknown } } | null)?.aiGrading?.input, input)) {
     throw learningError("CONFLICT", "这次作答已使用其他照片批改，请先查看当前结果");
@@ -95,9 +109,9 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (!existingRow && row.current_head_id !== input.observationId) throw learningError("CONFLICT", "作答已更正，请刷新后再批改");
   const interpretation=await readOpeningAnswerInterpretationMetadata(tx,scope,String(row.id));
   const ownInterpretation=(row.submitted_intent as {answerInterpretation?:unknown}|null)?.answerInterpretation;
-  if (isOpeningManualGradingRevision(row)&&!ownInterpretation) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
+  if (!options.explicitRegradeCandidate&&isOpeningManualGradingRevision(row)&&!ownInterpretation) throw learningError("CONFLICT", "已保留人工更正；未修改答案不会再次批改");
   if(ownInterpretation&&!interpretation)throw learningError("CONFLICT","校正版来源尚不可核对，未重新发送批改。");
-  if(interpretation&&await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(row.id)))throw Object.assign(learningError("CONFLICT","原照片批改费用尚未确认；校正版已保存，不会另换请求重复发送。"),{reasonCode:"GRADING_UNKNOWN_COST"});
+  if(!options.explicitRegradeCandidate&&interpretation&&await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(row.id)))throw Object.assign(learningError("CONFLICT","原照片批改费用尚未确认；校正版已保存，不会另换请求重复发送。"),{reasonCode:"GRADING_UNKNOWN_COST"});
   // Deterministic span evaluation is authoritative for the original answer,
   // but photo admission only seals provenance; it must not reopen grading.
   if (observation.revisionKind === "retract" || (!options.photoAdmissionOnly && observation.verdictSource === "deterministic") || observation.aiEvaluation) {

@@ -267,6 +267,8 @@ export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, ty
 export * from "./schema/opening-exam-integration";
 export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
 export { createOpeningAiGradingRepository, type OpeningAiGradingContext } from "./repositories/opening-ai-grading";
+export * from "./schema/opening-explicit-regrade-requests";
+export { createOpeningExplicitRegradeRequestRepository } from "./repositories/opening-explicit-regrade-requests";
 export { createOpeningAiGradingJobRepository, readOpeningAttemptGradingUsesVision, readOpeningObservationGradingUsesVision } from "./repositories/opening-ai-grading-jobs";
 export { createOpeningParserHealthRepository, parseParserOcrHealth, PARSER_OCR_FILES, PARSER_HEALTH_TTL_MS,
   type ParserOcrHealth, type ParserOcrObservation, type ParserOcrStatus } from "./repositories/opening-parser-health";
