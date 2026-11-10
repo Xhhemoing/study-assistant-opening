@@ -711,3 +711,114 @@ it("revalidates pinned source/requirement versions after generation and leaves n
   }, admitAndPersist: x.admit })).rejects.toMatchObject({ code: "CONFLICT" });
   expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
 });
+
+// Synthetic PG regressions: compare all workspace-owned base-table rows, not only candidate state.
+async function closureWorkspaceRows() {
+  const tables = await f.sql<{ table_name: string }[]>`SELECT c.table_name FROM information_schema.columns c
+    JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
+    WHERE c.table_schema=current_schema() AND c.column_name='workspace_id' AND t.table_type='BASE TABLE'
+    ORDER BY c.table_name`;
+  const result: Record<string, unknown> = {};
+  for (const { table_name } of tables) {
+    result[table_name] = await f.sql`SELECT to_jsonb(r) AS row FROM ${f.sql(table_name)} r
+      WHERE workspace_id=${f.scope.workspaceId} ORDER BY to_jsonb(r)::text`;
+  }
+  result.workspaces = await f.sql`SELECT to_jsonb(w) AS row FROM workspaces w WHERE id=${f.scope.workspaceId}`;
+  return result;
+}
+it.each(["opening_learning_observations", "opening_teaching_activities"] as const)(
+  "closure: real %s NOWAIT refusal rolls back every workspace business row during reserve and issue", async table => {
+    const x = await setup();
+    await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holder = f.sql.begin(async tx => {
+      await tx`LOCK TABLE ${tx(table)} IN SHARE UPDATE EXCLUSIVE MODE`;
+      entered(); await held;
+    });
+    try {
+      await Promise.race([ready, holder.then(() => { throw new Error("closure holder ended before release"); })]);
+      const before = await closureWorkspaceRows();
+      await expect(f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" })))
+        .rejects.toMatchObject({ code: "55P03" });
+      expect(await closureWorkspaceRows()).toEqual(before);
+    } finally { release(); await holder; }
+    await f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" }));
+    let entered2!: () => void, release2!: () => void;
+    const ready2 = new Promise<void>(resolve => { entered2 = resolve; });
+    const held2 = new Promise<void>(resolve => { release2 = resolve; });
+    const holder2 = f.sql.begin(async tx => {
+      await tx`LOCK TABLE ${tx(table)} IN SHARE UPDATE EXCLUSIVE MODE`;
+      entered2(); await held2;
+    });
+    try {
+      await Promise.race([ready2, holder2.then(() => { throw new Error("closure issue holder ended before release"); })]);
+      const before = await closureWorkspaceRows();
+      await expect(f.sql.begin(tx => issueOpeningReservedQuestion(tx, f.scope, x.activityId)))
+        .rejects.toMatchObject({ code: "55P03" });
+      expect(await closureWorkspaceRows()).toEqual(before);
+    } finally { release2(); await holder2; }
+    await f.sql.begin(tx => issueOpeningReservedQuestion(tx, f.scope, x.activityId));
+    expect(await f.sql`SELECT state FROM opening_course_reserved_questions WHERE reserved_activity_id=${x.activityId}`)
+      .toEqual([{ state: "issued" }]);
+  });
+
+it.each(["purpose_changed_back", "source_version", "requirement_revision"] as const)(
+  "closure: rejected original admission pin (%s) leaves every workspace business row unchanged", async drift => {
+    const x = await setup();
+    if (drift === "purpose_changed_back") {
+      await f.sql`UPDATE course_asset_memberships SET purpose='reference',updated_at=updated_at+interval '1 microsecond'
+        WHERE course_id=${x.courseId} AND asset_id=${x.sourceId} AND workspace_id=${f.scope.workspaceId}`;
+      await f.sql`UPDATE course_asset_memberships SET purpose=NULL,updated_at=updated_at+interval '1 microsecond'
+        WHERE course_id=${x.courseId} AND asset_id=${x.sourceId} AND workspace_id=${f.scope.workspaceId}`;
+    } else if (drift === "source_version") {
+      await f.sql`UPDATE opening_sources SET version=2 WHERE id=${x.sourceId}`;
+    } else {
+      await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${x.requirement.id}`;
+    }
+    // The permitted synthetic drift is outside the no-write assertion boundary.
+    const before = await closureWorkspaceRows();
+    await expect(produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await closureWorkspaceRows()).toEqual(before);
+  });
+it("closure: a failing publication callback rolls back callback and spec writes across all workspace tables", async () => {
+  const x = await setup(), content = createOpeningTeachingContentRepository(f.sql), blockId = randomUUID();
+  const unit = await content.createUnit(f.scope, { title: "Closure synthetic", blocks: [{ id: blockId, type: "text", content: { text: "Lesson" } }] });
+  const before = await closureWorkspaceRows();
+  const failure = Object.assign(new Error("closure admission rejected"), { code: "CONFLICT" });
+  await expect(content.publishActivitySpec(f.scope, { activityId: x.activityId, teachingUnitId: unit.id,
+    expectedVersion: 0, revisionNumber: 1, blockOrder: [{ blockId, position: 0, role: "teach", blockType: "text" }] }, undefined,
+    async tx => {
+      await tx`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
+        VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},'closure-rollback','teaching','{}','{}',0)`;
+      throw failure;
+    })).rejects.toBe(failure);
+  expect(await closureWorkspaceRows()).toEqual(before);
+});
+it("closure: pending production and foreign init are typed refusals with zero workspace row changes", async () => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  await f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" }));
+  const before = await closureWorkspaceRows();
+  await expect(createOpeningTeachingContentService(f.sql).getClientInit(f.scope, x.activityId))
+    .rejects.toMatchObject({ status: 409, code: "CONFLICT" });
+  expect(await closureWorkspaceRows()).toEqual(before);
+  await expect(createOpeningTeachingContentRepository(f.sql).getClientInit(f.otherScope, x.activityId))
+    .rejects.toMatchObject({ code: "NOT_FOUND" });
+  expect(await closureWorkspaceRows()).toEqual(before);
+});
+it("closure: error after real issuance rolls back library, canonical attempt, exposure and reservation rows", async () => {
+  const x = await setup();
+  await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
+  await f.sql.begin(tx => reserveOpeningCourseQuestion(tx, f.scope, x.requirement, x.activityId, { kind: "new_question" }));
+  const before = await closureWorkspaceRows();
+  const failure = Object.assign(new Error("closure after issue"), { code: "CLOSURE_ROLLBACK" });
+  await expect(f.sql.begin(async tx => { await issueOpeningReservedQuestion(tx, f.scope, x.activityId); throw failure; }))
+    .rejects.toBe(failure);
+  expect(await closureWorkspaceRows()).toEqual(before);
+  await f.sql.begin(tx => issueOpeningReservedQuestion(tx, f.scope, x.activityId));
+  expect(await f.sql`SELECT state FROM opening_course_reserved_questions WHERE reserved_activity_id=${x.activityId}`)
+    .toEqual([{ state: "issued" }]);
+});
