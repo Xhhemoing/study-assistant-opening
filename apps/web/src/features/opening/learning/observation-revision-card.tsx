@@ -92,7 +92,7 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
-  async function load(kind?: "replace" | "retract", dispute = false) {
+  async function load(kind?: "replace" | "retract", dispute = false, resetOutcome = false) {
     const request = ++historyRequest.current;
     const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
     setBusy(true); setMessage("");
@@ -107,7 +107,7 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
         setCourses(options);
         setDisputing(dispute);
         if (dispute) updateHistory({ type: "close" });
-        setEditor({ record: head, expectedHead: next.headObservationId, draft: { ...observationRevisionDraft(head), ...(dispute ? { outcome: "unverified" as const } : {}) }, revisionKind: kind, reason: dispute ? "AI 批改结果不准确" : "", conflict: false });
+        setEditor({ record: head, expectedHead: next.headObservationId, draft: { ...observationRevisionDraft(head), ...(dispute || resetOutcome ? { outcome: "unverified" as const } : {}) }, revisionKind: kind, reason: dispute ? "AI 批改结果不准确" : "", conflict: false });
       }
     } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
@@ -150,7 +150,7 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     </div>
     <p className="text-xs font-medium text-text-2">我的解答 · 原答案</p>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
-    {current.revisionKind !== "retract" ? <AiGradingCard hideDisputeAction record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} onCorrectAnswer={() => void load("replace")} /> : null}
+    {current.revisionKind !== "retract" ? <AiGradingCard hideDisputeAction record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} onCorrectAnswer={() => void load("replace", false, true)} /> : null}
     <p className="text-xs text-text-3">作答时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{diagnostics && current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
     <details className="relative"><summary aria-label="更多作答操作" className="inline-flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-md text-lg focus-visible:ring-2 focus-visible:ring-accent">…</summary><div className="flex flex-wrap gap-2 rounded-lg border border-line bg-surface p-2">
       {current.outcome === "incorrect" && current.revisionKind !== "retract" && (!current.aiEvaluation || current.verdictSource !== "ai_graded" || current.aiEvaluation.questionMatch) ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}
