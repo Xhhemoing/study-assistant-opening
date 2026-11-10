@@ -184,13 +184,17 @@ export function verifyCompletionLedger(config, release) {
 }
 
 export function claimCompletion(state, scope) {
-  // First state write of this action. A partial write/fsync/ACK is consumed.
-  const file = join(state, 'postmigration-completion-claimed');
-  const fd = openSync(file, 'wx', 0o600);
-  try {
-    try { writeFileSync(fd, JSON.stringify(scope)); fsyncSync(fd); } finally { closeSync(fd); }
-    syncDirectory(state);
-  } catch (error) { error.completionClaimConsumed = true; throw error; }
+  // First named state write remains the exclusive claim. Independent StopPost
+  // verifies the durable runtime origin even when creation/write/fsync ACK dies.
+  try { python('hermes-writer-state.py', ['completion-create', state], scope); }
+  catch (error) {
+    try {
+      const origin = JSON.parse(python('hermes-writer-state.py', ['completion-origin', state]));
+      error.completionClaimConsumed = origin.invocation === scope.invocation && origin.mainPid === scope.mainPid
+        && origin.release === scope.release && origin.owner === scope.owner;
+    } catch { /* No independently verified creation: never adopt an old claim. */ }
+    throw error;
+  }
 }
 
 export function validateRepairPlan(plan, inventory) {

@@ -92,10 +92,12 @@ class Completion(Repair):
                 if argv[:3] == ['/usr/bin/busctl', '--system', '--xml-interface']:
                     import subprocess
                     required = {'Restart':'s','KillMode':'s','RuntimeMaxUSec':'t','TimeoutStopUSec':'t',
-                                'Result':'s','ExecMainCode':'i','ExecMainStatus':'i','ExecStopPost':'a(sasbttttuii)',
+                                'Result':'s','ExecMainPID':'u','ExecMainCode':'i','ExecMainStatus':'i','ExecStopPost':'a(sasbttttuii)',
                                 'InvocationID':'ay'}
                     xml = '<node><interface>' + ''.join('<property name="'+k+'" type="'+v+'"/>' for k,v in required.items()) + '</interface></node>'
                     return subprocess.CompletedProcess(argv, 0, xml, '')
+                if argv[:2] == ['node', '-e']:
+                    self.database_probed = True
                 if argv[:2] == ['node', '-e'] or argv[:3] == ['/usr/bin/systemctl', 'show', '--all'] and 'RuntimeMaxUSec' in argv[3]:
                     import subprocess
                     return subprocess.CompletedProcess(argv, 0, '{}', '')
@@ -164,6 +166,116 @@ class Completion(Repair):
         self.assertNotIn('controlArchiveMax', rows['2']['writes'])
         self.assertIn('controlArchiveMax', rows['1']['writes'])
         self.assertIn('workerConfigurationMax', rows['2']['writes'])
+
+    def test_completion_config_dac_refuses_before_database_or_claim(self):
+        original = self.config.read_bytes()
+        for kind in ('symlink', 'wrongowner', 'writable', 'hardlink', 'ancestor'):
+            self.database_probed = False
+            real_fstat = os.fstat
+            def fstat(fd):
+                st = real_fstat(fd)
+                if kind == 'wrongowner' and os.readlink('/proc/self/fd/' + str(fd)) == str(self.config):
+                    from types import SimpleNamespace
+                    values = {name: getattr(st, name) for name in dir(st) if name.startswith('st_')}
+                    values['st_uid'] = os.geteuid() + 1
+                    return SimpleNamespace(**values)
+                return st
+            other = self.root / 'other-config'
+            if kind == 'symlink':
+                self.config.rename(other)
+                self.config.symlink_to(other)
+            elif kind == 'hardlink':
+                os.link(self.config, other)
+            elif kind == 'writable':
+                self.config.chmod(0o620)
+            elif kind == 'ancestor':
+                self.root.chmod(0o720)
+            try:
+                with self.subTest(kind=kind), patch.object(os, 'fstat', fstat):
+                    with self.assertRaises((PermissionError, OSError)):
+                        self.check()
+                    self.assertFalse(self.database_probed)
+                    self.assertFalse((self.state / 'postmigration-completion-claimed').exists())
+            finally:
+                self.root.chmod(0o700)
+                if kind == 'symlink':
+                    self.config.unlink()
+                    other.rename(self.config)
+                elif kind == 'hardlink':
+                    other.unlink()
+                self.config.chmod(0o600)
+                self.assertEqual(self.config.read_bytes(), original)
+
+    def test_completion_claim_origin_exclusive_partial_faults_and_unknown_inode(self):
+        if GENERATED is not None:
+            return  # Generated precheck is readonly; creation covered directly.
+        import tempfile
+        # Container overlayfs lacks O_TMPFILE; use real Linux tmpfs rather than
+        # mocking exclusive inode publication. Runtime proof stays on /tmp,
+        # deliberately a different filesystem from this synthetic state.
+        anonymous_state = tempfile.TemporaryDirectory(prefix='completion-inode-', dir='/dev/shm')
+        self.addCleanup(anonymous_state.cleanup)
+        self.state = Path(anonymous_state.name)
+        context = self.root / 'runtime'
+        context.mkdir(mode=0o700)
+        claim = self.state / 'postmigration-completion-claimed'
+        scope = {'invocation': 'a' * 32, 'owner': 'b' * 32, 'mainPid': '1234', 'release': str(self.release)}
+        with patch.object(state, 'COMPLETION_CONTEXT', str(context)):
+            for contents in ('', '{broken'):
+                self.write(claim, contents)
+                with self.assertRaises(FileExistsError):
+                    state.create_completion_claim(str(self.state), scope)
+                with self.assertRaises(ValueError):
+                    state.completion_origin(str(self.state))
+                self.assertEqual(claim.read_text(), contents)
+                claim.unlink()
+                (context / 'claim-origin.json').unlink()
+            for fault in ('none', 'link-ack', 'write', 'fsync', 'directory-fsync'):
+                original_fsync, original_fdopen, original_link = os.fsync, os.fdopen, os.link
+                def link(*args, **kwargs):
+                    original_link(*args, **kwargs)
+                    if fault == 'link-ack':
+                        raise OSError('injected lost link ACK')
+                def fsync(fd):
+                    path = os.readlink('/proc/self/fd/' + str(fd))
+                    if (fault == 'fsync' and '/#' in path or
+                            fault == 'directory-fsync' and path == str(self.state)):
+                        raise OSError('injected claim fsync fault')
+                    return original_fsync(fd)
+                def fdopen(fd, *args, **kwargs):
+                    if fault == 'write' and '/#' in os.readlink('/proc/self/fd/' + str(fd)):
+                        os.close(fd)
+                        raise OSError('injected claim write fault')
+                    return original_fdopen(fd, *args, **kwargs)
+                with self.subTest(fault=fault), patch.object(os, 'fsync', fsync), patch.object(os, 'fdopen', fdopen), patch.object(os, 'link', link):
+                    if fault == 'none':
+                        state.create_completion_claim(str(self.state), scope)
+                    else:
+                        with self.assertRaises(OSError):
+                            state.create_completion_claim(str(self.state), scope)
+                proof = state.completion_origin(str(self.state))
+                self.assertEqual(proof['invocation'], scope['invocation'])
+                self.assertEqual(proof['mainPid'], scope['mainPid'])
+                self.assertEqual(proof['claimInode'], claim.stat().st_ino)
+                # Keep the old inode allocated so replacement cannot reuse it.
+                held = os.open(claim, os.O_RDONLY)
+                try:
+                    claim.unlink()
+                    self.write(claim, '')
+                    with self.assertRaises(ValueError):
+                        state.completion_origin(str(self.state))
+                    claim.unlink()
+                finally:
+                    os.close(held)
+                (context / 'claim-origin.json').unlink()
+            # Origin persistence failure is before claim publication, even if
+            # the partial runtime file remains for independent inspection.
+            with patch.object(os, 'fsync', side_effect=OSError('runtime origin fsync')):
+                with self.assertRaises(OSError):
+                    state.create_completion_claim(str(self.state), scope)
+            self.assertFalse(claim.exists())
+            with self.assertRaises(FileNotFoundError):
+                state.completion_origin(str(self.state))
 
     def test_completion_exact_readonly(self):
         self.assertEqual(self.check()['scope'], 'postmigration-independent-observation')

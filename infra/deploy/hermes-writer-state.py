@@ -699,6 +699,9 @@ def completion_incident_check(state, current, systemd, release, config, archive,
     for path in (state, current, systemd, release, config, archive, worker_config):
         if not re.fullmatch(r'/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*', path) or os.path.normpath(path) != path or '/..' in path:
             raise ValueError('Unsafe completion path')
+    # Configuration is a trust boundary, not merely a normalized path. This
+    # shared admission runs before any database probe or exclusive claim.
+    read_trusted(config, private=True)
     state, release = Path(state), Path(release)
     for path in (state, release, state / 'releases' / COMPLETION_INCIDENT):
         fd = safe_open(path, private=path != release, directory=True)
@@ -854,6 +857,77 @@ def completion_capacity(state, release, systemd, worker_config, archive, backup_
             'runtimeAndJournalReserveIsBudgetNotHardLimit': True}
 
 
+COMPLETION_CONTEXT = '/run/aistudy-completion'
+
+
+def create_completion_claim(state, scope):
+    """Publish our pre-identified inode exclusively; no pre-claim state record.
+
+    The anonymous inode lives on state's filesystem (RuntimeDirectory may be
+    tmpfs). The private runtime proof is durable BEFORE publishing the name.
+    A crash on either side of link therefore cannot adopt an older claim.
+    """
+    state = Path(state)
+    directory = safe_open(state, private=True, directory=True)
+    context = safe_open(COMPLETION_CONTEXT, private=True, directory=True)
+    fd = None
+    try:
+        fd = os.open('.', os.O_RDWR | os.O_TMPFILE, 0o600, dir_fd=directory)
+        st = os.fstat(fd)
+        proof = {'invocation': scope['invocation'], 'mainPid': scope['mainPid'],
+                 'state': str(state), 'release': scope['release'], 'owner': scope['owner'],
+                 'claimDevice': st.st_dev, 'claimInode': st.st_ino}
+        marker = os.open('claim-origin.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=context)
+        try:
+            with os.fdopen(marker, 'wb') as out:
+                out.write(json.dumps(proof).encode())
+                out.flush()
+                os.fsync(out.fileno())
+        finally:
+            os.fsync(context)
+        # linkat via procfs follows OUR open descriptor, not an input pathname.
+        # Unlike rename, link is exclusive and never replaces preexisting bytes.
+        os.link('/proc/self/fd/' + str(fd), 'postmigration-completion-claimed',
+                dst_dir_fd=directory, follow_symlinks=True)
+        claim = {key: value for key, value in scope.items() if key != 'mainPid'}
+        with os.fdopen(os.dup(fd), 'wb') as out:
+            out.write(json.dumps(claim).encode())
+            out.flush()
+            os.fsync(out.fileno())
+        os.fsync(directory)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(context)
+        os.close(directory)
+
+
+def completion_origin(state):
+    context = safe_open(COMPLETION_CONTEXT, private=True, directory=True)
+    os.close(context)
+    proof = strict_json(read_trusted(Path(COMPLETION_CONTEXT) / 'claim-origin.json', private=True)[0])
+    if (not isinstance(proof, dict) or set(proof) != {'invocation', 'mainPid', 'state', 'release', 'owner', 'claimDevice', 'claimInode'}
+            or proof['state'] != state or not re.fullmatch(r'[1-9][0-9]*', str(proof['mainPid']))
+            or any(not isinstance(proof[key], str) or not re.fullmatch(r'[0-9a-f]{32}', proof[key]) for key in ('owner', 'invocation'))):
+        raise ValueError('Unknown completion creation origin')
+    directory = safe_open(state, private=True, directory=True)
+    try:
+        # No content parse needed: an empty inode after link is still ours.
+        fd = os.open('postmigration-completion-claimed', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            import stat
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != TRUSTED_UID or st.st_mode & 0o077 or st.st_nlink != 1
+                    or [st.st_dev, st.st_ino] != [proof['claimDevice'], proof['claimInode']]):
+                raise ValueError('Completion claim inode is not this invocation creation')
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
+    return proof
+
+
 def completion_claim(state):
     claim = strict_json(read_trusted(Path(state) / 'postmigration-completion-claimed', private=True)[0])
     if (set(claim) != {'scope', 'incident', 'release', 'automaticRetry', 'owner', 'invocation', 'capacity', 'payload', 'pgRestoreVersion'}
@@ -867,6 +941,12 @@ def completion_claim(state):
 
 
 def main():
+    if sys.argv[1] == 'completion-create':
+        create_completion_claim(sys.argv[2], json.load(sys.stdin))
+        return
+    if sys.argv[1] == 'completion-origin':
+        print(json.dumps(completion_origin(sys.argv[2])))
+        return
     if sys.argv[1] == 'completion-claim':
         print(json.dumps(completion_claim(sys.argv[2])))
         return

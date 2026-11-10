@@ -91,7 +91,7 @@ try:
             check=True,capture_output=True,text=True,timeout=5)
         properties={p.attrib['name']:p.attrib.get('type') for p in ET.fromstring(xml.stdout).iter('property')}
         required={'Restart':'s','KillMode':'s','RuntimeMaxUSec':'t','TimeoutStopUSec':'t',
-            'Result':'s','ExecMainCode':'i','ExecMainStatus':'i','ExecStopPost':'a(sasbttttuii)'}
+            'Result':'s','ExecMainPID':'u','ExecMainCode':'i','ExecMainStatus':'i','ExecStopPost':'a(sasbttttuii)'}
         if any(properties.get(k)!=v for k,v in required.items()):
             raise ValueError('Completion service capability not proven')
         xml=subprocess.run(['/usr/bin/busctl','--system','--xml-interface','introspect',
@@ -112,6 +112,9 @@ try:
     ledger=ledger.replace(${JSON.stringify(JSON.stringify('file:///__COMPLETION_RELEASE__/packages/database/src/migrate.ts'))},json.dumps('file://'+sys.argv[4]+'/packages/database/src/migrate.ts'))
     ledger=ledger.replace(${JSON.stringify(JSON.stringify('/__COMPLETION_RELEASE__/packages/database/src/migrations'))},json.dumps(sys.argv[4]+'/packages/database/src/migrations'))
     def database():
+        # Independent observations continue after incident failures; never let
+        # that reporting behavior bypass the configuration trust boundary.
+        m.read_trusted(sys.argv[5],private=True)
         if not payload_modules_verified:
             raise ValueError('DB probe blocked: signed module bytes not verified; report is not a pass')
         result=subprocess.run(['node','-e',code,sys.argv[5],sys.argv[4],'(async()=>{'+ledger+'})()'],

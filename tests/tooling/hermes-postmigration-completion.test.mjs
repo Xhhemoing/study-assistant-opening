@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { claimCompletion, verifyCompletionLedger } from '../../infra/deploy/hermes-writer-control.mjs';
 import { fixture, units } from './hermes-supervisor-fixture.mjs';
-import { cleanupCompletion, completionService, completionServiceUnit, launchCompletion } from '../../infra/deploy/hermes-supervisor.mjs';
+import { cleanupCompletion, completionService, completionServiceUnit, launchCompletion, supervise } from '../../infra/deploy/hermes-supervisor.mjs';
 
 test('completion filesystem and payload readonly negatives', () => {
   const result = spawnSync('python3', ['-I','-S','-B',resolve('tests/tooling/hermes_postmigration_completion_test.py')],{encoding:'utf8'});
@@ -56,7 +56,7 @@ for (const boundary of ['initial', 'partial96', 'broker', 'active']) test(`compl
   if (boundary !== 'broker') f.ownerExit();
   assert.equal(await f.running, 1);
   assert(existsSync(join(f.args[4], 'writers-fenced')));
-  assert.throws(() => claimCompletion(f.args[4], {}), /EEXIST/);
+  assert(existsSync(join(f.args[4], 'postmigration-completion-claimed')));
 });
 
 test('completion queued cleanup after broker failure cannot admit another generation', async t => {
@@ -72,13 +72,13 @@ test('completion queued cleanup after broker failure cannot admit another genera
   assert.equal(await f.running,1);
   assert(existsSync(join(f.args[4],'writers-fenced')));
   assert(f.events.includes('stop:both'));
-  assert.throws(()=>claimCompletion(f.args[4],{}),/EEXIST/);
+  assert(existsSync(join(f.args[4],'postmigration-completion-claimed')));
 });
 
 test('independent service bounds, identity and cgroup fail closed', () => {
   const group = '/system.slice/aistudy-postmigration-completion.service';
   const good = { Id: 'aistudy-postmigration-completion.service', LoadState:'loaded', Restart:'no', KillMode:'control-group',
-    RuntimeMaxUSec:'30min',TimeoutStopUSec:'2min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',
+    RuntimeMaxUSec:'30min',TimeoutStopUSec:'2min', InvocationID:'a'.repeat(32),ControlGroup:group,Slice:'system.slice',MainPID:'1234',ExecMainPID:'1234',
     ExecStopPost:`{ path=/usr/bin/env ; argv[]=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${process.execPath} ${resolve('infra/deploy/hermes-supervisor.mjs')} completion-stop-post ${resolve('infra/deploy/hermes-release.sh')} complete-postmigration /legacy ; }` };
   const run = values => () => ({ok:true,stdout:Object.entries(values).map(([k,v])=>`${k}=${v}`).join('\n')});
   assert.equal(completionService(run(good),()=>`0::${group}`).InvocationID,good.InvocationID);
@@ -95,10 +95,12 @@ test('independent service bounds, identity and cgroup fail closed', () => {
 test('independent deadline/parent-death cleanup respects committed scope and stops both after fence failure', () => {
   const args = ['complete-postmigration','','','/current','/state','','','','','','/release'];
   const claim = {invocation:'a'.repeat(32),owner:'b'.repeat(32),incident:'/incident',release:'/release'};
+  const origin = {...claim,state:'/state',mainPid:'1234'};
   for (const state of ['committed','fenced','unknown','partial-claim','no-claim','fence-fault']) {
     const events=[];
     const run=()=>cleanupCompletion(args,{
-      service:()=>({InvocationID:claim.invocation}),hasClaim:()=>state!=='no-claim',
+      service:()=>({InvocationID:claim.invocation,ExecMainPID:'1234'}),hasClaim:()=>state!=='no-claim',
+      readOrigin:()=>origin,
       readClaim:()=>{if(state==='partial-claim')throw Error('partial');return claim;},
       query:(_s,_c,scope)=>{assert.deepEqual(scope,{owner:claim.owner,transition:claim.incident,target:claim.release});return state;},
       fence:()=>{events.push('fence');if(state==='fence-fault')throw Error('fsync');},stop:()=>{events.push('stop:both');return true;},
@@ -106,15 +108,40 @@ test('independent deadline/parent-death cleanup respects committed scope and sto
     if(state==='fence-fault')assert.throws(run,/UNCONFIRMED/);else run();
     assert.deepEqual(events,['committed','no-claim'].includes(state)?[]:['fence','stop:both']);
   }
-  assert.throws(()=>cleanupCompletion(args,{service:()=>({InvocationID:'c'.repeat(32)}),hasClaim:()=>true,readClaim:()=>claim}),/scope changed/);
+  for (const changed of [{invocation:'c'.repeat(32)},{mainPid:'999'},{state:'/other'},{release:'/other'}]) {
+    const events=[];
+    assert.throws(()=>cleanupCompletion(args,{service:()=>({InvocationID:claim.invocation,ExecMainPID:'1234'}),hasClaim:()=>true,
+      readOrigin:()=>({...origin,...changed}),readClaim:()=>claim,fence:()=>events.push('fence'),stop:()=>events.push('stop')}),/scope changed/);
+    assert.deepEqual(events,[]);
+  }
+  for (const contents of ['', '{broken']) {
+    const events=[];
+    assert.throws(()=>cleanupCompletion(args,{service:()=>({InvocationID:claim.invocation,ExecMainPID:'1234'}),hasClaim:()=>true,
+      readOrigin:()=>{throw Error('no trusted origin');},readClaim:()=>JSON.parse(contents),
+      fence:()=>events.push('fence'),stop:()=>events.push('stop')}),/no trusted origin/);
+    assert.deepEqual(events,[]);
+  }
 });
 
-test('claim uses exclusive creation, never replaces consumed bytes', t => {
+test('immediate claim fault fences only independently proven creation', async t => {
+  const root=mkdtempSync(join(tmpdir(),'completion-claim-fault-'));t.after(()=>rmSync(root,{recursive:true}));
+  const args=['complete-postmigration','','','/current',root,'','','','','','/release'];
+  for (const consumed of [false,true]) {
+    const events=[];
+    await assert.rejects(supervise('unused',args,{
+      verifyEntrySources:()=>{},completionService:()=>({InvocationID:'a'.repeat(32),ExecMainPID:'1234'}),
+      checkCompletion:()=>({release:'/release'}),claimCompletion:()=>{throw Object.assign(Error('claim fault'),{completionClaimConsumed:consumed});},
+      stopWriters:()=>{events.push('stop:both');return true;},createServer:()=>{throw Error('must not start');},
+    }),/claim fault/);
+    assert.deepEqual(events,consumed?['stop:both']:[]);
+    assert.equal(existsSync(join(root,'writers-fenced')),consumed);
+  }
+});
+
+test('claim refuses an untrusted production entry without writing fixture state', t => {
   const root = mkdtempSync(join(tmpdir(), 'completion-claim-')); t.after(() => rmSync(root, { recursive: true }));
-  claimCompletion(root, { owner: 'a'.repeat(32) });
-  const before = readFileSync(join(root, 'postmigration-completion-claimed'));
-  assert.throws(() => claimCompletion(root, { owner: 'b'.repeat(32) }), /EEXIST/);
-  assert.deepEqual(readFileSync(join(root, 'postmigration-completion-claimed')), before);
+  assert.throws(() => claimCompletion(root, { owner: 'a'.repeat(32) }));
+  assert(!existsSync(join(root, 'postmigration-completion-claimed')));
 });
 
 test('exact planner plus full verified id/checksum ledger and quiet activity required', t => {

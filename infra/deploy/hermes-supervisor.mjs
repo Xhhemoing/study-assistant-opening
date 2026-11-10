@@ -50,7 +50,7 @@ function assertCompletionLock(state) {
       new RegExp(`^lock:\\s+\\d+:\\s+FLOCK\\s+ADVISORY\\s+WRITE\\s+${process.pid}\\s+\\S+:${held.ino}\\s+0\\s+EOF$`).test(line))) throw new Error('Completion exclusive managed lock not held');
 }
 export function completionService(run = command, selfCgroup = () => readFileSync('/proc/self/cgroup', 'utf8').trim(), stopping = false) {
-  const keys = ['Id', 'LoadState', 'Restart', 'KillMode', 'RuntimeMaxUSec', 'TimeoutStopUSec', 'InvocationID', 'ControlGroup', 'Slice', 'MainPID', 'ExecStopPost'];
+  const keys = ['Id', 'LoadState', 'Restart', 'KillMode', 'RuntimeMaxUSec', 'TimeoutStopUSec', 'InvocationID', 'ControlGroup', 'Slice', 'MainPID', 'ExecMainPID', 'ExecStopPost'];
   const result = run(['show', '--all', `--property=${keys.join(',')}`, completionUnit]);
   const pairs = result.stdout.trim().split('\n').map(line => line.split(/=(.*)/s).slice(0, 2));
   const value = Object.fromEntries(pairs);
@@ -58,6 +58,7 @@ export function completionService(run = command, selfCgroup = () => readFileSync
     || keys.some(key => !Object.hasOwn(value, key)) || value.Id !== completionUnit || value.LoadState !== 'loaded'
     || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '30min'
     || value.TimeoutStopUSec !== '2min' || value.Slice !== 'system.slice' || !(stopping ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value.MainPID)
+    || !/^[1-9][0-9]*$/.test(value.ExecMainPID) || (!stopping && value.MainPID !== value.ExecMainPID)
     || !/^[0-9a-f]{32}$/.test(value.InvocationID)
     || !/^\/system.slice\/aistudy-postmigration-completion\.service$/.test(value.ControlGroup)
     || selfCgroup() !== `0::${value.ControlGroup}`
@@ -68,14 +69,20 @@ export function completionService(run = command, selfCgroup = () => readFileSync
 
 export function cleanupCompletion(args, dependencies = {}) {
   const { service = () => completionService(command, undefined, true), hasClaim = () => present(join(args[4], 'postmigration-completion-claimed')),
+    readOrigin = () => JSON.parse(python('hermes-writer-state.py', ['completion-origin', args[4]])),
     readClaim = () => JSON.parse(python('hermes-writer-state.py', ['completion-claim', args[4]])),
     query = classify, fence = () => durableWrite(join(args[4], 'writers-fenced'), 'Completion uncommitted; independent scoped cleanup.\n'),
     stop = stopWriters } = dependencies;
   const observed = service();
   if (!hasClaim()) return; // Admission refused before first write: no crash cleanup.
+  // A preexisting malformed claim is refusal, NOT evidence of our first write.
+  // The descriptor-checked runtime proof must match manager identity and inode.
+  const origin = readOrigin();
+  if (origin.invocation !== observed.InvocationID || origin.mainPid !== observed.ExecMainPID
+    || origin.state !== args[4] || origin.release !== args[10]) throw new Error('Cleanup creation scope changed');
   let claim;
-  try { claim = readClaim(); } catch { /* Partial exclusive claim is consumed. */ }
-  if (claim && (claim.invocation !== observed.InvocationID || claim.release !== args[10])) throw new Error('Cleanup invocation scope changed');
+  try { claim = readClaim(); } catch { /* Proven own inode: partial claim consumed. */ }
+  if (claim && (claim.invocation !== origin.invocation || claim.owner !== origin.owner || claim.release !== origin.release)) throw new Error('Cleanup invocation scope changed');
   if (claim && query(args[4], args[3], { owner: claim.owner, transition: claim.incident, target: claim.release }) === 'committed') return;
   // StopPost follows systemd full-cgroup termination: broker grants are dead.
   // Retain unknown residual names; never connect to or unlink an unknown broker.
@@ -91,7 +98,7 @@ export function completionServiceUnit(args, root = dirname(filename), node = pro
     || args.slice(1).some(value => !/^[A-Za-z0-9_./-]+$/.test(value))) throw new Error('Unsafe completion service arguments');
   const entry = `${node} ${root}/hermes-supervisor.mjs`;
   const owner = `${root}/hermes-release.sh ${args.join(' ')}`;
-  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=1800\nTimeoutStopSec=120\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
+  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=1800\nTimeoutStopSec=120\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
 }
 
 export function launchCompletion(script, args, dependencies = {}) {
@@ -247,7 +254,7 @@ export async function supervise(script, args, dependencies = {}) {
   if (completion) {
     const service = completionService();
     const observation = checkCompletion(args);
-    try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID }); }
+    try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID, mainPid: service.ExecMainPID }); }
     catch (error) {
       if (error.completionClaimConsumed) {
         try { durableWrite(join(state, 'writers-fenced'), 'Completion claim incomplete; no automatic retry.\n'); }
