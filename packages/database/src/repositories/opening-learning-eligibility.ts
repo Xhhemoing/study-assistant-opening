@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { unchangedTeachingQuestionHelpMatches } from "./opening-teaching-question-help";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
@@ -37,6 +38,7 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
         WHERE g."skillLabel"=o.skill_label AND g."requirementKey" IS NOT DISTINCT FROM o.requirement_key)` : db`TRUE`}
   ), live AS (
     SELECT o.*,GREATEST(COALESCE(help.revision,0),COALESCE(exam_help.revision,0)) AS live_help_revision,
+      COALESCE(help.prior_question_help,FALSE) AS prior_question_help,
       (EXISTS(SELECT 1 FROM opening_learning_item_versions v JOIN opening_problem_refs r
         ON r.problem_id=v.problem_id AND r.workspace_id=v.workspace_id
           AND r.source_id IS NOT DISTINCT FROM v.source_id AND r.source_version IS NOT DISTINCT FROM v.source_version AND r.stem_snapshot=v.stem_snapshot
@@ -53,9 +55,17 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
     FROM heads o
     LEFT JOIN LATERAL (SELECT identity_current,requirement_key,observation_id FROM (${openingExamIdentityStateQuery(db, scope)}) identity
       WHERE identity.attempt_id=o.attempt_id OR identity.observation_id=o.current_root_id LIMIT 1) exam_identity ON TRUE
-    LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision FROM opening_help_exposures h
+    LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision,
+        bool_or(cross_question.same_question AND h.delivered_at<o.started_at
+          AND COALESCE(h.kind,'hint')<>'instruction'
+          AND (h.support_domain IS DISTINCT FROM 'language' OR o.requirement_key LIKE 'language:%')
+          AND h.attempt_id IS NOT NULL) AS prior_question_help
+      FROM opening_help_exposures h
       LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
       JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
+      LEFT JOIN LATERAL (SELECT TRUE AS same_question FROM opening_learning_item_versions v WHERE v.id=o.item_version_id
+        AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
+        AND v.teaching_revision_id IS NOT NULL AND ${unchangedTeachingQuestionHelpMatches(db)}) cross_question ON TRUE
       WHERE h.workspace_id=o.workspace_id AND h.delivered=TRUE AND COALESCE(h.owner_user_id,l.owner_user_id)=o.owner_user_id AND (COALESCE(h.course_id,l.course_id)=origin.course_id OR (h.course_id IS NULL AND h.session_id IS NULL))
         AND (h.attempt_id=o.attempt_id OR (h.problem_id=o.problem_id AND COALESCE(h.release_intent->'originReference'->>'possibleOpenAttemptOnly','false')<>'true') OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND h.session_id=o.session_id)
           OR EXISTS(SELECT 1 FROM opening_learning_item_versions v WHERE v.id=o.item_version_id
@@ -63,6 +73,7 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
             AND h.context_anchor->>'activityId'=v.activity_id::text
             AND h.context_anchor->>'blockId'=v.evaluation_spec->>'blockId'
             AND h.context_anchor->>'contentVersion'=v.evaluation_spec->>'contentVersion')
+          OR cross_question.same_question
           OR (h.attempt_id IS NULL AND h.problem_id IS NULL AND EXISTS(SELECT 1 FROM opening_learning_item_versions v
             WHERE v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
               AND v.source_id::text=h.context_anchor->>'sourceId' AND v.source_version::text=h.context_anchor->>'sourceVersion'
@@ -96,6 +107,10 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
     p.independent_attempt,p.verified_correct,p.usable_for_current_version,p.usable_for_delayed_check,p.reason_codes,p.version_applicability,
     COALESCE(p.head_observation_id=live.id AND p.head_revision=live.workspace_history_revision
       AND p.policy_version=${openingEligibilityPolicyVersion()} AND p.help_revision=live.live_help_revision
+      -- Old positive projections may already have the same max help revision
+      -- from a newer receipt. Exact prior classroom help still invalidates yes;
+      -- fixed no/unknown projections remain fresh, with no public policy change.
+      AND NOT (p.independent_attempt='yes' AND live.prior_question_help)
       AND p.item_matches=live.live_item_matches AND p.source_states=live.live_source_states AND p.privacy_source_ids=live.live_privacy_ids,FALSE) AS fresh,
     EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=live.workspace_id AND e.source_id::text=ANY(live.live_privacy_ids)) AS privacy_excluded
     FROM live LEFT JOIN opening_learning_eligibility p ON p.workspace_id=live.workspace_id AND p.owner_user_id=live.owner_user_id AND p.root_observation_id=live.current_root_id`;

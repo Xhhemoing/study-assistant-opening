@@ -1,4 +1,5 @@
 import { teachingQuestionIdentityMatches } from "./opening-teaching-question";
+import { unchangedTeachingQuestionHelpMatches } from "./opening-teaching-question-help";
 import { parseOpeningSpanExercise } from "./opening-span-attempt";
 import { aiEvaluationSchema, serverEvaluationSchema, type LearningObservation, type Scope } from "@aistudy/contracts";
 import { SPAN_REQUIREMENT_KEY, evaluateEvidenceEligibility, examAttemptExposureQualification, parseCanonicalMatrixExercise, parseExamChoiceSpec, type EvidenceObservation, type EvidenceEligibilityContext } from "@aistudy/domain";
@@ -128,6 +129,16 @@ export async function readOpeningLearningEvidenceContexts(
             AND EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(h.release_intent->'originReference'->'sourceRefs','[]'::jsonb)) ref
               WHERE ref->>'sourceId'=ANY(${recordSourceIds}::text[])))))
     ORDER BY h.created_at,h.id` : [];
+  // Only the in-memory association changes; the original receipt, raw attempt,
+  // delivery time and history order remain immutable.
+  const crossRevisionHelp = itemIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,
+      v.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,
+      h.workspace_history_revision,h.support_domain,h.context_anchor,h.release_intent,
+      v.course_id,v.id AS target_item_id
+    FROM opening_learning_item_versions v JOIN opening_help_exposures h
+      ON h.workspace_id=v.workspace_id AND h.owner_user_id=v.owner_user_id AND h.course_id=v.course_id AND h.delivered=TRUE
+    WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
+      AND v.teaching_revision_id IS NOT NULL AND ${unchangedTeachingQuestionHelpMatches(db)}` : [];
   const retestIds = [...new Set(records.flatMap(record => record.retestId ? [record.retestId] : []))];
   const retestProtocols = includeRetestProtocols && retestIds.length ? await db`SELECT r.id,r.candidate_id,r.candidate_reference_id,r.course_id,r.skill_label,r.requirement_key,r.not_before_at,r.accepted_at,
       r.learning_protocol AS protocol,to_jsonb(baseline) AS baseline_record,baseline.id AS baseline_id,baseline.recorded_at AS baseline_recorded_at,baseline.submitted_at AS baseline_submitted_at,
@@ -345,6 +356,7 @@ export async function readOpeningLearningEvidenceContexts(
     }).map(row => ({ ...row, problem_id: record.problemId, same_question: true })) : [];
     const history = [...new Map([
       ...sourceHelp, ...uncertainSourceHelp,
+      ...crossRevisionHelp.filter(row => row.target_item_id === record.itemVersionId).map((row): Row => ({ ...row, same_question: true })),
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []), ...teachingHelp,
