@@ -36,8 +36,27 @@ for (const name of ['chromium', 'chromium-headless-shell', 'ffmpeg']) {
   process.stdout.write(result.stdout || '');
   process.stderr.write(result.stderr || '');
   assert.ifError(result.error);
-  assert.equal(result.status, 0, `ldd failed for ${name}`);
-  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /not found/, `Missing system library for ${name}`);
-  console.log(`Linked libraries OK: ${name}`);
+  const output = `${result.stdout}${result.stderr}`;
+  assert.doesNotMatch(output, /not found/, `Missing system library for ${name}`);
+  if (name === 'ffmpeg' && result.status === 1 && /not a dynamic executable/.test(output)) {
+    // The pinned Linux ffmpeg may be static. Do not accept ldd's message alone:
+    // require a readable executable ELF with neither interpreter nor dependencies.
+    require('node:fs').accessSync(executable, require('node:fs').constants.X_OK);
+    const inspect = flags => {
+      const elf = spawnSync('readelf', [flags, executable], { encoding: 'utf8' });
+      assert.ifError(elf.error);
+      assert.equal(elf.status, 0, `ELF inspection failed for ${name}`);
+      return elf.stdout || '';
+    };
+    const header = inspect('-h');
+    assert.match(header, /ELF Header:/);
+    assert.match(header, /Type:\s+(EXEC|DYN)\b/);
+    assert.doesNotMatch(inspect('-l'), /\bINTERP\b/);
+    assert.doesNotMatch(inspect('-d'), /\(NEEDED\)/);
+    console.log(`Static ELF verified: ${name}`);
+  } else {
+    assert.equal(result.status, 0, `ldd failed for ${name}`);
+    console.log(`Linked libraries OK: ${name}`);
+  }
 }
 NODE

@@ -45,6 +45,17 @@ set -eu
 printf 'ldd:%s\\n' "$*" >> "$CALLS"
 if [[ "$FAIL_ON" == ldd-exit ]]; then exit 24; fi
 if [[ "$FAIL_ON" == ldd-missing ]]; then echo 'libfixture.so => not found'; fi
+if [[ "$FAIL_ON" == static-* && "$1" == */ffmpeg ]]; then echo 'not a dynamic executable' >&2; exit 1; fi
+''',
+                "readelf": '''#!/bin/bash
+set -eu
+printf 'readelf:%s\\n' "$1" >> "$CALLS"
+if [[ "$FAIL_ON" == static-inspect-failure ]]; then exit 1; fi
+case "$1" in
+ -h) if [[ "$FAIL_ON" == static-invalid-header ]]; then echo 'not ELF'; else printf 'ELF Header:\\n  Type: EXEC (Executable file)\\n'; fi ;;
+ -l) if [[ "$FAIL_ON" == static-interpreter ]]; then echo ' INTERP '; fi ;;
+ -d) if [[ "$FAIL_ON" == static-needed ]]; then echo ' (NEEDED) Shared library'; fi ;;
+esac
 ''',
             }
             for name, text in scripts.items():
@@ -69,9 +80,15 @@ if (process.argv[2] === 'install-deps') {{
             registry.parent.mkdir(parents=True)
             registry.write_text('''
 exports.registry = {
-  findExecutable: name => ({ executablePath: () => `/fixture/${name}` })
+  findExecutable: name => ({ executablePath: () => process.env.FIXTURE_BIN + '/' + name })
 };
 ''')
+            fixture_bin = root / 'executables'
+            fixture_bin.mkdir()
+            for name in ('chromium', 'chromium-headless-shell', 'ffmpeg'):
+                executable = fixture_bin / name
+                executable.write_text('synthetic executable')
+                executable.chmod(0o700)
             calls_file = root / "calls"
             wrapper_path_file = root / "wrapper-path"
             config_dump_file = root / "config-dump"
@@ -80,11 +97,12 @@ exports.registry = {
                 timeout=20,
                 env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                      "GITHUB_ACTIONS": ci, "FAIL_ON": failure,
+                     "FIXTURE_BIN": str(fixture_bin),
                      "PLAYWRIGHT_CACHE_HIT": cache_hit,
                      "CALLS": str(calls_file), "WRAPPER_PATH": str(wrapper_path_file),
                      "CONFIG_DUMP": str(config_dump_file)},
             )
-            calls = calls_file.read_text().splitlines() if calls_file.exists() else []
+            calls = calls_file.read_text().replace(str(fixture_bin), '/fixture').splitlines() if calls_file.exists() else []
             config = config_dump_file.read_text() if config_dump_file.exists() else ""
             if wrapper_path_file.exists():
                 self.assertFalse(Path(wrapper_path_file.read_text()).exists(),
@@ -114,6 +132,17 @@ exports.registry = {
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertEqual(len(calls), count, result.stderr)
                 self.assertNotIn("Linked libraries OK:", result.stdout)
+
+    def test_static_ffmpeg_requires_positive_elf_evidence(self):
+        result, calls, _ = self.run_installer(failure='static-valid')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Static ELF verified: ffmpeg', result.stdout)
+        self.assertEqual(calls[-3:], ['readelf:-h', 'readelf:-l', 'readelf:-d'])
+        for failure in ('static-inspect-failure', 'static-invalid-header', 'static-interpreter', 'static-needed'):
+            with self.subTest(failure=failure):
+                result, _, _ = self.run_installer(failure=failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('Static ELF verified:', result.stdout)
 
     def test_refuses_non_ci_invocation_before_sudo(self):
         result, calls, _ = self.run_installer(ci="")
