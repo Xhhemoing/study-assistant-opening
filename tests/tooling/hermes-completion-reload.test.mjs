@@ -17,6 +17,37 @@ test('review immutable helper ordinary systemctl receives bounded timeout', t =>
   provisionCompletion(helper, []);
 });
 
+test('review verify and identity commands have bounded leaves and restore fits the outer budget', t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-restore-budget-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const helper = join(root, 'helper.py');
+  writeFileSync(helper, `import subprocess\nfor name in ['systemd-analyze','groupadd','useradd']:\n    for supplied in [None,1,100]:\n        subprocess.run([name,'fixture'],timeout=supplied)\n`);
+  provisionCompletion(helper, [], (file, args, options) => {
+    const code = args[args.indexOf('-c') + 1];
+    const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw.get('timeout'))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert seen == [15,1,15,15,1,15,15,1,15],repr(seen)\n`;
+    const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert(Number.parseInt(args[1]) >= 300 + 120); // 300 leaf sum + IO/restore margin.
+    return { status: 0 };
+  });
+});
+
+test('synthetic immutable helper failure completes configure and restore reload within outer budget', t => {
+  const root = mkdtempSync(join(tmpdir(), 'sm95-full-restore-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const helper = join(root, 'helper.py');
+  writeFileSync(helper, `import subprocess\nfor cmd in [['systemctl','is-active'],['systemctl','is-enabled'],['groupadd'],['useradd']]:\n    subprocess.run(cmd)\nsubprocess.run(['runuser','parser'],timeout=90)\nsubprocess.run(['systemd-analyze','verify'])\ntry:\n    subprocess.run(['systemctl','daemon-reload'])\n    subprocess.run(['systemctl','show'])\n    raise ValueError('effective verification failed')\nexcept ValueError:\n    subprocess.run(['systemctl','daemon-reload'])\n`);
+  provisionCompletion(helper, [], (file, args, options) => {
+    const code = args[args.indexOf('-c') + 1];
+    const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append((argv,kw['timeout']))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert [v[1] for v in seen] == [15,15,15,15,90,15,60,15,60],repr(seen)\nassert seen[-1][0] == ['systemctl','daemon-reload']\nassert sum(v[1] for v in seen) == 300\nassert subprocess.run is observe\n`;
+    const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(args[1], '480s');
+    assert.equal(options.timeout, 485_000);
+    return { status: 0 };
+  });
+});
+
 for (const failure of [false, true]) test(`provision wrapper budgets every systemctl, preserves stricter limits, restores on ${failure ? 'exception' : 'return'}`, t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-provision-wrapper-'));
   t.after(() => rmSync(root, { recursive: true }));
@@ -24,8 +55,8 @@ for (const failure of [false, true]) test(`provision wrapper budgets every syste
   writeFileSync(helper, `import subprocess\nfor command in ['is-active','is-enabled','show','daemon-reload']:\n    for supplied in [None,1,100]:\n        subprocess.run(['systemctl',command,'fixture'],timeout=supplied)\n${failure ? "raise RuntimeError('synthetic helper failure')" : ''}\n`);
   provisionCompletion(helper, [], (file, args, options) => {
     assert.equal(file, 'timeout');
-    assert.deepEqual(args.slice(0, 2), ['--signal=KILL', '240s']);
-    assert.equal(options.timeout, 245_000);
+    assert.deepEqual(args.slice(0, 2), ['--signal=KILL', '480s']);
+    assert.equal(options.timeout, 485_000);
     const code = args[args.indexOf('-c') + 1];
     const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw['timeout'])\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\ntry:\n    exec(${JSON.stringify(code)})\nexcept RuntimeError:\n    assert ${failure ? 'True' : 'False'}\nassert subprocess.run is observe\nassert seen == [15,1,15,15,1,15,15,1,15,60,1,60],repr(seen)\n`;
     const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
@@ -48,8 +79,8 @@ test('synthetic delayed child is leaf-killed and provision outer deadline kills 
   const helper = join(root, 'slow.py');
   writeFileSync(helper, 'import time\ntime.sleep(10)\n');
   assert.throws(() => provisionCompletion(helper, [], (file, args, options) => {
-    assert.equal(args[1], '240s');
-    assert.equal(options.timeout, 245_000);
+    assert.equal(args[1], '480s');
+    assert.equal(options.timeout, 485_000);
     // Scale only the deadline, not the actual timeout/process-group mechanism.
     return spawnSync(file, [args[0], '0.05s', ...args.slice(2)], { ...options, timeout: 1_000 });
   }), /immutable provision helper failed/);

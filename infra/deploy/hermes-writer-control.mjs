@@ -25,9 +25,13 @@ export function durableWrite(file, contents, mode = 0o600) {
 // success: broker90 + identity shows60 + health30 + persist60 + close30 +
 //   terminal30 = 300; failure refence/stop <=150. No blind retry.
 // request: both socket ends1200 > max(prepare270, activate670, success300)+150.
-// service3600: admission/claim530 + prepare270 + parser/provision330 +
-//   owner reloads120 + activate670 + health1040 + success300 = 3260,
-//   leaving 340 for IO/failure cleanup. StopPost240 > bounded cleanup180.
+// provision leaves: snapshot2*15 + identity2*15 + parser90 + verify15 +
+//   configure reload60 + effective show15 + failure restore reload60 = 300.
+// Helper outer480 adds 180 for IO/restore; node outer485 must not kill restore.
+// service4200: admission/claim530 + prepare270 + parser/provision570 +
+//   owner reloads120 + activate670 + health1040 + success300 = 3500,
+//   leaving 700 for IO/failure cleanup. StopPost240 > bounded cleanup180.
+// Provision runs in owner shell, NOT inside socket requests: socket1200 unchanged.
 // Historical checker <=120 (two units, optional typed-hook queries included).
 // PM samples: python1500 > scope270 + 3*(reload60+2*historical120+2*manager15)=1260.
 // Archive python650 > 2*scope270+2*manager15+IO; launch-check300 > scope270+manager15.
@@ -53,6 +57,9 @@ def bounded(argv,*args,**kwargs):
         if len(argv)>1 and argv[1]=='daemon-reload': limit=${RELOAD_TIMEOUT_MS / 1000}
         prior=kwargs.get('timeout')
         kwargs['timeout']=limit if prior is None else min(prior,limit)
+    elif isinstance(argv,(list,tuple)) and argv and argv[0].rsplit('/',1)[-1] in ('systemd-analyze','groupadd','useradd'):
+        prior=kwargs.get('timeout')
+        kwargs['timeout']=${SYSTEMCTL_TIMEOUT_MS / 1000} if prior is None else min(prior,${SYSTEMCTL_TIMEOUT_MS / 1000})
     return original(argv,*args,**kwargs)
 subprocess.run=bounded
 try:
@@ -60,13 +67,13 @@ try:
     runpy.run_path(sys.argv[0],run_name="__main__")
 finally:
     subprocess.run=original`;
-  const result = execute('timeout', ['--signal=KILL', '240s', '/usr/bin/python3', '-I', '-S', '-B', '-c', code, helper, ...args],
-    { stdio: 'inherit', timeout: 245_000, killSignal: 'SIGKILL', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
+  const result = execute('timeout', ['--signal=KILL', '480s', '/usr/bin/python3', '-I', '-S', '-B', '-c', code, helper, ...args],
+    { stdio: 'inherit', timeout: 485_000, killSignal: 'SIGKILL', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
   if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
 }
 export function completionLaunchAdmission(args, unit, phase = 'launch') {
   const retainedUnit = unit.split(controls).join('/tmp/aistudy-entry.Pz65J76D')
-    .replace('RuntimeMaxSec=3600\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+    .replace('RuntimeMaxSec=4200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
   return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit }));
 }
 const units = ['aistudy-web.service', 'aistudy-worker.service'];

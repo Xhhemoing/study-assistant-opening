@@ -56,7 +56,7 @@ export function completionService(run = command, selfCgroup = () => readFileSync
   const value = Object.fromEntries(pairs);
   if (!result.ok || pairs.length !== keys.length || Object.keys(value).length !== keys.length
     || keys.some(key => !Object.hasOwn(value, key)) || value.Id !== completionUnit || value.LoadState !== 'loaded'
-    || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '1h'
+    || value.Restart !== 'no' || value.KillMode !== 'control-group' || value.RuntimeMaxUSec !== '1h 10min'
     || value.TimeoutStopUSec !== '4min' || value.Slice !== 'system.slice' || !(stopping ? /^(0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/).test(value.MainPID)
     || !/^[1-9][0-9]*$/.test(value.ExecMainPID) || (!stopping && value.MainPID !== value.ExecMainPID)
     || !/^[0-9a-f]{32}$/.test(value.InvocationID)
@@ -98,7 +98,7 @@ export function completionServiceUnit(args, root = dirname(filename), node = pro
     || args.slice(1).some(value => !/^[A-Za-z0-9_./-]+$/.test(value))) throw new Error('Unsafe completion service arguments');
   const entry = `${node} ${root}/hermes-supervisor.mjs`;
   const owner = `${root}/hermes-release.sh ${args.join(' ')}`;
-  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=3600\nTimeoutStopSec=240\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
+  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=4200\nTimeoutStopSec=240\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
 }
 
 export function launchCompletion(script, args, dependencies = {}) {
@@ -639,7 +639,7 @@ async function main() {
     validateArguments(args);
     assertCompletionLock(args[4]);
     const retainedUnit = completionServiceUnit(args, '/tmp/aistudy-entry.Pz65J76D')
-      .replace('RuntimeMaxSec=3600\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
+      .replace('RuntimeMaxSec=4200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
     console.log(python('hermes-writer-state.py', [mode.replace('-owned', ''), args[4]], { args, retainedUnit }));
   } else if (mode === 'completion-launch') {
     verifyEntrySources();

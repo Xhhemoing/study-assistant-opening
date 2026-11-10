@@ -992,12 +992,14 @@ def completion_manager():
     return values
 
 
-def completion_never_started(manager):
+def completion_never_started(manager, not_found=False):
     expected = {'Id': COMPLETION_UNIT, 'LoadState': 'loaded', 'ActiveState': 'inactive', 'SubState': 'dead',
                 'MainPID': '0', 'ControlPID': '0', 'ExecMainPID': '0', 'ExecMainStartTimestampMonotonic': '0',
                 'ExecMainExitTimestampMonotonic': '0', 'ActiveEnterTimestampMonotonic': '0', 'InactiveExitTimestampMonotonic': '0',
                 'ExecMainCode': '0', 'ExecMainStatus': '0', 'InvocationID': '', 'NRestarts': '0',
                 'Result': 'success', 'FragmentPath': COMPLETION_UNIT_PATH, 'DropInPaths': '', 'NeedDaemonReload': 'no'}
+    if not_found:
+        expected.update(LoadState='not-found', FragmentPath='')
     if any(manager.get(k) != v for k, v in expected.items()) or manager.get('Job') not in ('', '0'):
         raise ValueError('Completion manager is not exact never-started unit')
 
@@ -1168,14 +1170,20 @@ def completion_launch_check(payload):
         if present(COMPLETION_UNIT_PATH):
             raise ValueError('Existing completion unit is not replaceable')
         manager = completion_manager()
-        # Removing the fragment marks the retained never-started record stale.
-        # Only this single expected field may differ before explicit unload.
-        if manager.get('NeedDaemonReload') not in ('yes', 'no'):
-            raise ValueError('Unknown retained manager reload state')
-        completion_never_started({**manager, 'NeedDaemonReload': 'no'})
+        if manager.get('LoadState') == 'not-found':
+            # External reload may already have unloaded the archived fragment.
+            # All prior archive/source/boot/scope checks still apply; no arbitrary
+            # existing unit, stale fragment, invocation or start history qualifies.
+            completion_never_started(manager, not_found=True)
+        else:
+            # Removing the fragment marks the retained never-started record stale.
+            if manager.get('NeedDaemonReload') not in ('yes', 'no'):
+                raise ValueError('Unknown retained manager reload state')
+            completion_never_started({**manager, 'NeedDaemonReload': 'no'})
     elif phase == 'unloaded':
         if present(COMPLETION_UNIT_PATH):
             raise ValueError('Completion fragment appeared before install')
+        completion_never_started(completion_manager(), not_found=True)
     elif phase in ('ready', 'claim'):
         if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['unit'].encode():
             raise ValueError('New completion unit bytes changed')

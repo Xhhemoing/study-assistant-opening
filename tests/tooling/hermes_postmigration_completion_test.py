@@ -794,6 +794,31 @@ class Completion(Repair):
         with patch.object(state, 'completion_reload_admission'), self.assertRaises(FileNotFoundError):
             state.completion_launch_check(payload)
 
+    def test_completion_review_archived_external_reload_strict_notfound_admitted(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        with patch.object(state, 'completion_reload_admission'):
+            state.completion_retained_archive(payload)
+            unloaded = {**manager, 'LoadState': 'not-found', 'FragmentPath': ''}
+            with patch.object(state, 'completion_manager', return_value=unloaded):
+                self.assertTrue(state.completion_launch_check(payload)['admitted'])
+                self.assertTrue(state.completion_launch_check({**payload, 'phase': 'unloaded'})['admitted'])
+
+    def test_completion_review_archived_notfound_started_claimed_fragment_refused(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        with patch.object(state, 'completion_reload_admission'):
+            state.completion_retained_archive(payload)
+            unloaded = {**manager, 'LoadState': 'not-found', 'FragmentPath': ''}
+            for key, value in [('FragmentPath', '/unreviewed/unit'), ('InvocationID', 'a'*32),
+                               ('ExecMainStartTimestampMonotonic', '1'), ('ExecMainExitTimestampMonotonic', '1'),
+                               ('MainPID', '42'), ('Job', '7'), ('NeedDaemonReload', 'yes'),
+                               ('DropInPaths', '/unreviewed/dropin'), ('ControlPID', '42')]:
+                with patch.object(state, 'completion_manager', return_value={**unloaded, key: value}):
+                    with self.assertRaises(ValueError):
+                        state.completion_launch_check(payload)
+            self.write(self.state / 'postmigration-completion-claimed', '{partial')
+            with patch.object(state, 'completion_manager', return_value=unloaded), self.assertRaises(ValueError):
+                state.completion_launch_check(payload)
+
     def test_completion_new_wrapper_or_unknown_broker_refuse(self):
         original = state.present
         with patch.object(state, 'present', lambda path: str(path) == '/run/aistudy-writer-broker' or original(path)):

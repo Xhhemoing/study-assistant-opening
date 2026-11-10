@@ -216,7 +216,7 @@ health() {
   local required=$1 expected=$2 profile=${3:-}
   local body attempt attempts=120
   # Completion has a separately budgeted 20*(curl5 + active15 + identity30 + sleep2)
-  # <=1040s readiness window inside its independent 3600s service lifetime.
+  # <=1040s readiness window inside its independent 4200s service lifetime.
   if [[ "$ACTION" == complete-postmigration ]]; then attempts=20; fi
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
@@ -351,7 +351,7 @@ if [[ "$ACTION" == complete-postmigration ]]; then
   printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
   # Run the verified immutable e5 Python helper without rewriting its bytes.
   # Its internal reload receives the same 60s leaf budget, and the whole helper
-  # tree stays bounded (parser90 + reload60 + provisioning/IO margin90).
+  # tree stays bounded: leaves300 (includes failure restore reload60) + IO180.
   node --input-type=module -e 'const {provisionCompletion}=await import(process.argv[1]); provisionCompletion(process.argv[2],process.argv.slice(3))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
     --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
     --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
