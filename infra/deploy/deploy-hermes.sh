@@ -73,6 +73,8 @@ verify_repair_git() {
   history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
   while IFS= read -r path; do
     case "$path" in
+      infra/deploy/pm-capture-readonly.py|tests/tooling/hermes-pm-capture.test.mjs|tests/tooling/hermes_pm_capture_test.py)
+        [[ "$ACTION" == complete-postmigration* ]] || fail 'PM capture paths are completion-only.' ;;
       infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs|infra/deploy/hermes-git-environment.mjs|infra/deploy/verify-release-artifact.mjs|scripts/check-new-fixed-colors.mjs|scripts/check-new-fixed-colors.test.mjs|scripts/ci/checks.py|scripts/ci/test_checks.py|tests/tooling/release-artifact.test.mjs)
         [[ "$ACTION" == complete-postmigration* ]] || fail 'Additional control paths are completion-only.' ;;
       infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
@@ -147,10 +149,23 @@ if [[ "$ACTION" == complete-postmigration* ]]; then
     mode=completion-launch
     if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then mode=completion-reload-samples; fi
     if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then mode=completion-retained-archive; fi
-    remote_command+="node \"\$entry/hermes-supervisor.mjs\" $mode \"\$entry/hermes-release.sh\""
+    remote_command+="if node \"\$entry/hermes-supervisor.mjs\" $mode \"\$entry/hermes-release.sh\""
     for value in complete-postmigration "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf "$COMPLETION_RELEASE" 4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0 "$COMPLETION_ARCHIVE"; do remote_command+=" $(quote "$value")"; done
     # Retain the private entry for the full independent service lifetime, even
     # on SSH loss. No caller EXIT trap may remove an executing service's controls.
+    # Capture from this action's real entry, using reviewed source bytes in
+    # memory, not another target file/SSH session or a caller-supplied helper.
+    # Command substitution strips trailing newlines; retain the exact reviewed
+    # helper bytes by appending and then removing a non-newline sentinel.
+    metadata_code="$(cat -- "$SCRIPT_DIR/pm-capture-readonly.py" && printf x)"
+    metadata_code="${metadata_code%x}"
+    capture_stage=C
+    if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then capture_stage=A; fi
+    if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then capture_stage=B; fi
+    remote_command+='; then action_rc=0; else action_rc=$?; fi; '
+    # Helper owns the leading separator and strict frame; prior stderr is untouched.
+    remote_command+="if /usr/bin/python3 -I -S -B -c $(quote "$metadata_code") target --stage $(quote "$capture_stage") --entry \"\$entry\" --state $(quote "$DEPLOY_STATE") >&2; then capture_rc=0; else capture_rc=\$?; fi; "
+    remote_command+='if [ "$action_rc" != 0 ]; then exit "$action_rc"; fi; exit "$capture_rc"'
     ssh_run "$remote_command" < "$control_archive"
   fi
   exit
