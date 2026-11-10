@@ -260,7 +260,12 @@ health() {
 }
 finish() {
   local result=$1 rollback_result=0 restored_required can_restore=1
-  trap - EXIT INT TERM
+  trap - EXIT
+  # Result/cancellation is fixed. Drain every launched child before any finish
+  # effect, including a Node whose $! assignment has not run. Repeated signals
+  # cannot interrupt this wait; an UNKNOWN owner must stay owned, not be killed.
+  trap '' INT TERM HUP
+  wait || true
   if [[ "$result" != 0 && "$SUCCESS_REQUESTED" == 1 ]]; then
     # Lost ACK is not failed commit. One authenticated read; never replay success/start.
     if managed query-success; then
@@ -333,7 +338,13 @@ COMPLETION_NODE_PID=''
 completion_cancel() {
   local result=$1
   trap '' INT TERM HUP
-  if [[ -n "$COMPLETION_NODE_PID" ]]; then wait "$COMPLETION_NODE_PID" || true; fi
+  if [[ -n "$COMPLETION_NODE_PID" ]]; then
+    wait "$COMPLETION_NODE_PID" || true
+  else
+    # The child can run before the shell publishes $!. Bare wait also covers
+    # that launched-but-unpublished child; never enter finish ahead of it.
+    wait || true
+  fi
   exit "$result"
 }
 completion_node() {

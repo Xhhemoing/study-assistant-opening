@@ -11,6 +11,19 @@ import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { spawn, spawnSync } from 'node:child_process';
 
+// The generated helper exits with os._exit: never put assertions after exec.
+// Publish observations at the real exit boundary; assert them in this parent.
+function observeBudgetWrapper(code, helper, failure = false) {
+  const program=`import subprocess,sys,os,json\nseen=[]\nraised=False\ndef observe(argv,*a,**kw):\n    seen.append([argv,kw.get('timeout')])\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nreal_exit=os._exit\ndef publish(code):\n    print(json.dumps({'seen':seen,'restored':subprocess.run is observe,'raised':raised,'code':code}),flush=True)\n    real_exit(code)\nos._exit=publish\nsys.argv=['entry',${JSON.stringify(helper)}]\ntry:\n    exec(${JSON.stringify(code)})\nexcept RuntimeError:\n    raised=True\n    publish(0)\n`;
+  const result=spawnSync('/usr/bin/python3',['-I','-S','-B','-c',program],{encoding:'utf8'});
+  assert.equal(result.error,undefined);assert.equal(result.signal,null);
+  assert.equal(result.status,0,result.stderr);
+  const observed=JSON.parse(result.stdout.trim());
+  assert.equal(observed.code,0);assert.equal(observed.raised,failure);
+  assert.equal(observed.restored,true,'wrapper did not restore subprocess.run');
+  return observed.seen;
+}
+
 for (const overLimit of [false, true]) test(`scaled real completion-check child ${overLimit ? 'exceeds new hard limit: clean refusal, no claim/StopPost consumption' : 'exceeds old 150s equivalent and reaches first claim only after check'}`, async t => {
   const root = mkdtempSync(join(tmpdir(), 'sm95-full-check-'));
   t.after(() => rmSync(root, { recursive: true }));
@@ -153,9 +166,8 @@ test('review verify and identity commands have bounded leaves and restore fits t
   writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor name in ['systemd-analyze','groupadd','useradd']:\n    for supplied in [None,1,100]:\n        subprocess.run([name,'fixture'],timeout=supplied)\n`);
   provisionCompletion(helper, [], (file, args) => {
     const code = args[args.lastIndexOf('-c') + 1];
-    const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw.get('timeout'))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert seen == [15,1,15,15,1,15,15,1,15],repr(seen)\n`;
-    const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
+    const seen=observeBudgetWrapper(code,helper);
+    assert.deepEqual(seen.map(value=>value[1]),[15,1,15,15,1,15,15,1,15]);
     assert(args.includes('480')); // 300 leaf sum + IO/restore margin.
     return { status: 0 };
   });
@@ -168,9 +180,10 @@ test('synthetic immutable helper failure completes configure and restore reload 
   writeFileSync(helper, `import subprocess\nsubprocess.run.__globals__['owned_run']=subprocess.run.__globals__['original']\nfor cmd in [['systemctl','is-active'],['systemctl','is-enabled'],['groupadd'],['useradd']]:\n    subprocess.run(cmd)\nsubprocess.run(['runuser','parser'],timeout=90)\nsubprocess.run(['systemd-analyze','verify'])\ntry:\n    subprocess.run(['systemctl','daemon-reload'])\n    subprocess.run(['systemctl','show'])\n    raise ValueError('effective verification failed')\nexcept ValueError:\n    subprocess.run(['systemctl','daemon-reload'])\n`);
   provisionCompletion(helper, [], (file, args, options) => {
     const code = args[args.lastIndexOf('-c') + 1];
-    const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append((argv,kw['timeout']))\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\nexec(${JSON.stringify(code)})\nassert [v[1] for v in seen] == [15,15,15,15,90,15,60,15,60],repr(seen)\nassert seen[-1][0] == ['systemctl','daemon-reload']\nassert sum(v[1] for v in seen) == 300\nassert subprocess.run is observe\n`;
-    const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
+    const seen=observeBudgetWrapper(code,helper);
+    assert.deepEqual(seen.map(value=>value[1]),[15,15,15,15,90,15,60,15,60]);
+    assert.deepEqual(seen.at(-1)[0],['systemctl','daemon-reload']);
+    assert.equal(seen.reduce((sum,value)=>sum+value[1],0),300);
     assert(args.includes('480'));
     assert.equal(options.timeout, undefined);
     return { status: 0 };
@@ -187,9 +200,8 @@ for (const failure of [false, true]) test(`provision wrapper budgets every syste
     assert(args.includes('480'));
     assert.equal(options.timeout, undefined);
     const code = args[args.lastIndexOf('-c') + 1];
-    const program = `import subprocess,sys\nseen=[]\ndef observe(argv,*a,**kw):\n    seen.append(kw['timeout'])\n    return subprocess.CompletedProcess(argv,0)\nsubprocess.run=observe\nsys.argv=['entry',${JSON.stringify(helper)}]\ntry:\n    exec(${JSON.stringify(code)})\nexcept RuntimeError:\n    assert ${failure ? 'True' : 'False'}\nassert subprocess.run is observe\nassert seen == [15,1,15,15,1,15,15,1,15,60,1,60],repr(seen)\n`;
-    const result = spawnSync('/usr/bin/python3', ['-I','-S','-B','-c',program], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
+    const seen=observeBudgetWrapper(code,helper,failure);
+    assert.deepEqual(seen.map(value=>value[1]),[15,1,15,15,1,15,15,1,15,60,1,60]);
     return { status: 0 };
   });
 });

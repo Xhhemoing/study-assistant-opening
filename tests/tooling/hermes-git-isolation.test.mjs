@@ -28,8 +28,8 @@ test('all real Git entry families preserve hostile caller metadata across Bash i
     GIT_WORK_TREE:caller,GIT_INDEX_FILE:join(caller,'.git/index'),GIT_OBJECT_DIRECTORY:join(caller,'.git/objects'),
     GIT_CONFIG_COUNT:'1',GIT_CONFIG_KEY_0:'core.worktree',GIT_CONFIG_VALUE_0:caller,HOME:join(root,'hostile-home'),XDG_CONFIG_HOME:join(root,'hostile-xdg')};
   const runs=[
-    [process.execPath,['--test','--test-name-pattern=Git parent admission|reviewed control archive strips|pack uses committed source|compares a real commit','tests/tooling/hermes-pre-migration-repair.test.mjs','tests/tooling/release-artifact.test.mjs','scripts/check-new-fixed-colors.test.mjs']],
-    [process.execPath,['--test','--test-name-pattern=deploy prepares a separate release|deployment extra overrides','tests/tooling/hermes-deployment.test.mjs']],
+    [process.execPath,['--test','--test-reporter=tap','--test-name-pattern=Git parent admission|reviewed control archive strips|pack uses committed source|compares a real commit','tests/tooling/hermes-pre-migration-repair.test.mjs','tests/tooling/release-artifact.test.mjs','scripts/check-new-fixed-colors.test.mjs']],
+    [process.execPath,['--test','--test-reporter=tap','--test-name-pattern=deploy prepares a separate release|deployment extra overrides','tests/tooling/hermes-deployment.test.mjs']],
     ['/usr/bin/python3',['-B','-m','unittest','discover','-s','scripts/ci','-p','test_checks.py']],
   ];
   for(const [command,args] of runs){

@@ -159,6 +159,9 @@ def children():
     with open('/proc/self/task/'+str(os.getpid())+'/children') as source:
         return [int(pid) for pid in source.read().split()]
 
+class OwnedScopeConfirmedEmpty(RuntimeError):
+    pass
+
 def retain_unknown():
     # Cleanup/observation itself failed. Never pickle an ordinary error back to
     # the helper or let the outer owner exit while descendants may be live.
@@ -180,7 +183,7 @@ def retain_unknown():
             pass # Observation failure is NOT evidence of absence.
         try: time.sleep(.02)
         except BaseException: pass
-    raise RuntimeError('Owned cleanup was UNKNOWN; descendants now confirmed absent')
+    raise OwnedScopeConfirmedEmpty('Owned cleanup was UNKNOWN; descendants now confirmed absent')
 
 def drain():
     try:
@@ -280,9 +283,14 @@ def require_empty_scope():
         # is never absence. Preserve failure but still allow fixed cleanup once
         # owned-empty is actually proved, rather than silently skip restoration.
         try:
-            if children(): retain_unknown()
+            observed_children=children()
         except BaseException:
-            retain_unknown()
+            observed_children=None
+        if observed_children is None or observed_children:
+            try:
+                retain_unknown()
+            except OwnedScopeConfirmedEmpty:
+                pass # This invocation proved absence; failure still proceeds to cleanup.
 failed=False
 prepare_owner()
 try:
