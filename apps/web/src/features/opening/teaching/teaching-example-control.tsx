@@ -15,7 +15,7 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
   const [estimate, setEstimate] = useState<TeachingExampleEstimate | null>(null), [status, setStatus] = useState<TeachingExampleStatus | null>(null);
   const [pending, setPending] = useState<TeachingExampleRequest | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [blocked, setBlocked] = useState(true), [consent, setConsent] = useState(false);
-  const current = useRef(0), sending = useRef(false);
+  const current = useRef(0), sending = useRef<{ epoch: number; clientKey: string } | null>(null);
   const binding = JSON.stringify(target), storageKey = `aistudy:teaching-example:${target.activityId}:${target.blockId}`;
   async function read(original: TeachingExampleRequest, epoch: number) {
     const result = await json(await fetch(`/api/opening/teaching/examples?clientKey=${encodeURIComponent(original.clientKey)}`, { cache: "no-store" }));
@@ -28,7 +28,7 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
   }
   useEffect(() => {
     const epoch = ++current.current;
-    setEstimate(null); setStatus(null); setPending(null); setConsent(false); setError(""); setBlocked(true);
+    setEstimate(null); setStatus(null); setPending(null); setConsent(false); setError(""); setBlocked(true); setBusy(false);
     try {
       const saved = localStorage.getItem(storageKey);
       if (!saved) { setBlocked(false); return; }
@@ -40,7 +40,7 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
     return () => { current.current += 1; };
   }, [binding, storageKey]);
   async function quote() {
-    if (busy || blocked || sending.current) return;
+    if (busy || blocked || sending.current?.epoch === current.current) return;
     const epoch = current.current; setBusy(true); setError("");
     try {
       const query = new URLSearchParams(Object.entries(target).map(([key, value]) => [key, String(value)]));
@@ -58,19 +58,20 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
     finally { if (epoch === current.current) setBusy(false); }
   }
   async function generate() {
-    if (busy || blocked || pending || !consent || !estimate || sending.current) return;
+    if (busy || blocked || pending || !consent || !estimate || sending.current?.epoch === current.current) return;
     const epoch = current.current;
     const request: TeachingExampleRequest = { target, clientKey: `example-${crypto.randomUUID()}`, consentVersion: TEACHING_EXAMPLE_CONSENT_VERSION, acceptPaidGeneration: true };
     try { localStorage.setItem(storageKey, JSON.stringify(request)); }
     catch { setError("浏览器无法保留请求身份，未发送付费请求。"); setBlocked(true); return; }
-    sending.current = true; setPending(request); setBlocked(true); setBusy(true); setError("");
+    const token = { epoch, clientKey: request.clientKey };
+    sending.current = token; setPending(request); setBlocked(true); setBusy(true); setError("");
     try {
       const result = teachingExampleStatusSchema.parse(await json(await fetch("/api/opening/teaching/examples", {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request),
       })));
       if (epoch === current.current) setStatus(result);
     } catch { if (epoch === current.current) setError("请求结果未确认。只读恢复原请求，不会换标识重发。"); }
-    finally { sending.current = false; if (epoch === current.current) setBusy(false); }
+    finally { if (sending.current === token) sending.current = null; if (epoch === current.current) setBusy(false); }
   }
   return <section className="space-y-3 rounded-lg border border-line p-3 text-sm" aria-label="同类新例题">
     <h4 className="font-medium">生成同类新例题与完整解答</h4>
@@ -78,7 +79,7 @@ export function TeachingExampleControl({ target, onPublished }: { target: Teachi
     {pending ? <div className="space-y-2" role="status">
       <p>{status ? labels[status.state] : "原请求待确认"}</p>
       {status ? <p className="text-xs text-text-2">原预估 {status.estimatedCents} 分（不是费用上限）。{status.costState === "unknown" || status.costState === "in_flight" ? "费用尚未确认；即使例题已发布也不会重发。" : "实际费用以账本为准。"}</p> : null}
-      <button type="button" className={ui.secondary} disabled={busy} onClick={() => { const epoch = current.current; setBusy(true); void read(pending, epoch).catch(() => setError("原请求暂不可读取，未重新发送。")).finally(() => { if (epoch === current.current) setBusy(false); }); }}>只读刷新原请求</button>
+      <button type="button" className={ui.secondary} disabled={busy} onClick={() => { const epoch = current.current; setBusy(true); void read(pending, epoch).catch(() => { if (epoch === current.current) setError("原请求暂不可读取，未重新发送。"); }).finally(() => { if (epoch === current.current) setBusy(false); }); }}>只读刷新原请求</button>
       {status?.publication ? <button type="button" className={ui.secondary} onClick={() => void onPublished()}>读取已发布的新例题</button> : null}
     </div> : <>
       <button type="button" className={ui.secondary} disabled={busy || blocked} onClick={() => void quote()}>先查看模型费用预估</button>

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createModelGateway } from "@aistudy/ai";
 import { createTeachingExampleHandler } from "../../apps/worker/src/jobs/teaching-example";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingExamplesRepository, createOpeningJobRepository, openingJobScope, teachingExampleJobPayloadSchema, createOpeningLearningRepository, createOpeningTeachingHintRepository, readOpeningLearningEvidenceContext } from "@aistudy/database";
+import { createOpeningTeachingCommandService } from "../../apps/web/src/features/opening/teaching/command-service";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
@@ -34,6 +35,124 @@ async function seed() {
   return { ...base, activity, unit, content, blocks, order, refs, q1, q2, repository, jobs, request, start, submit };
 }
 const proposal = { problem: "求 $\\int x^4 dx$。", workedSolution: "幂次加一后除以5，得 $x^5/5+C$；求导核对。" };
+it.each(["append-rephrase", "rephrase-append", "append-reference", "reference-append"] as const)("composes %s with no intermediate attempt and preserves only the real hint", async chain => {
+  const f = await seed(), old = await f.start(f.q1, 1);
+  const hint = await createOpeningTeachingHintRepository(fixture.sql).read(fixture.scope, { attemptId: old.id, level: 1 });
+  const originalReceipt = await fixture.sql`SELECT * FROM opening_help_exposures WHERE id=${hint.exposureReceipt.id}`;
+  let version = 1;
+  for (const step of chain.split("-")) {
+    const init = (await f.content.getClientInit(fixture.scope, f.activity.id))!;
+    if (step === "append") {
+      const queued = await f.repository.request(fixture.scope, { ...f.request, target: { ...f.request.target, revisionNumber: init.revisionNumber, contentVersion: version } }, 1);
+      const job = (await f.jobs.claim(queued.operationId))!;
+      await f.repository.publish(openingJobScope(job), job.id, teachingExampleJobPayloadSchema.parse(job.payload), proposal);
+    } else if (step === "rephrase") {
+      const changed = await createOpeningTeachingCommandService(fixture.sql).execute(fixture.scope, f.activity.id,
+        { clientKey: randomUUID(), kind: "rephrase", blockId: f.q1, expectedVersion: version, expectedRevisionNumber: init.revisionNumber });
+      expect(changed.ok).toBe(true);
+    } else {
+      const [saved] = await fixture.sql`SELECT blocks FROM library_revisions WHERE document_id=${f.unit.documentId} AND revision_number=${init.revisionNumber}`;
+      const revised = saved!.blocks.map((block: { id: string; type: string; content: Record<string, unknown> }) => block.type === "answer_key"
+        ? { ...block, content: { ...block.content, answer: `${String(block.content.answer)}（等价写法）` } } : block);
+      const revision = await f.content.writeUnitBlocks(fixture.scope, f.unit.id, revised);
+      await f.content.adoptReferenceRevision(fixture.scope, f.activity.id, { expectedContentVersion: version,
+        expectedRevisionNumber: init.revisionNumber, revisionNumber: revision.revisionNumber });
+    }
+    version++;
+  }
+  // Neither R2 path above issues an attempt. Identity must follow the proven edges.
+  const observed = await f.submit((await f.start(f.q1, version)).id);
+  const unrelated = await f.submit((await f.start(f.q2, version)).id);
+  expect(observed.eligibility?.independentAttempt).toBe("no");
+  expect(unrelated.eligibility?.independentAttempt).toBe("yes");
+  const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, observed);
+  expect(evidence.context.helpHistory!.exposures.some(item => item.level === "hinted")).toBe(true);
+  expect(evidence.context.helpHistory!.exposures.some(item => item.level === "revealed")).toBe(false);
+  expect(await fixture.sql`SELECT * FROM opening_help_exposures WHERE id=${hint.exposureReceipt.id}`).toEqual(originalReceipt);
+  expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE activity_id=${f.activity.id}`).toHaveLength(1);
+});
+it.each(["conditions", "options", "unit", "figure", "refs"] as const)("does not compose changed %s with a later example append", async change => {
+  const f = await seed(), old = await f.start(f.q1, 1);
+  await createOpeningTeachingHintRepository(fixture.sql).read(fixture.scope, { attemptId: old.id, level: 1 });
+  const revised = f.blocks.map(block => block.id !== f.q1 ? block : { ...block, content: { ...block.content,
+    ...(change === "conditions" ? { text: "求定积分 x³ 从0到1。" } : {}),
+    ...(change === "options" ? { interaction: { kind: "choice", options: [{ id: "A", label: "0" }, { id: "B", label: "1" }] } } : {}),
+    ...(change === "unit" ? { interaction: { kind: "numeric", unit: "平方单位" } } : {}),
+    ...(change === "figure" ? { figure: { label: "新增必要图形条件" } } : {}),
+  } });
+  const refs = change === "refs" ? f.refs.map(ref => ({ ...ref, page: 1 })) : f.refs;
+  const revision = await f.content.writeUnitBlocks(fixture.scope, f.unit.id, revised);
+  await f.content.publishActivitySpec(fixture.scope, { activityId: f.activity.id, teachingUnitId: f.unit.id,
+    expectedVersion: 1, revisionNumber: revision.revisionNumber, blockOrder: f.order, sourceRefs: refs });
+  const queued = await f.repository.request(fixture.scope, { ...f.request, target: { ...f.request.target, revisionNumber: revision.revisionNumber, contentVersion: 2 } }, 1);
+  const job = (await f.jobs.claim(queued.operationId))!;
+  await f.repository.publish(openingJobScope(job), job.id, teachingExampleJobPayloadSchema.parse(job.payload), proposal);
+  const observed = await f.submit((await f.start(f.q1, 3)).id);
+  const evidence = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, observed);
+  expect(evidence.context.helpHistory!.exposures.some(item => item.level === "hinted" || item.level === "revealed")).toBe(false);
+});
+async function secondCourse(f: Awaited<ReturnType<typeof seed>>) {
+  const id = randomUUID();
+  await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${id},${fixture.scope.workspaceId},'Synthetic second course',${id})`;
+  await fixture.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility,purpose)
+    VALUES(${fixture.scope.workspaceId},${id},'source',${f.sourceId},'core',0,'course','teaching')`;
+  return id;
+}
+it("rejects rebinding between request preparation and final enqueue without a job/outbox", async () => {
+  const f = await seed(), c2 = await secondCourse(f), context = f.repository.context.bind(f.repository);
+  vi.spyOn(f.repository, "context").mockImplementationOnce(async (...args) => {
+    const pinned = await context(...args);
+    await createOpeningTeachingActivitiesRepository(fixture.sql).associateCourse(fixture.scope, f.activity.id, { courseId: c2 });
+    return pinned;
+  });
+  await expect(f.repository.request(fixture.scope, f.request, 1)).rejects.toThrow("课程绑定");
+  expect(await f.repository.find(fixture.scope, f.request.clientKey)).toBeNull();
+});
+it.each(["before_send", "after_output", "purpose_revoked"] as const)("rejects %s against the actual activity course with zero publication", async stage => {
+  const f = await seed(), c2 = await secondCourse(f);
+  const queued = await f.repository.request(fixture.scope, f.request, 1), job = (await f.jobs.claim(queued.operationId))!;
+  const payload = teachingExampleJobPayloadSchema.parse(job.payload), scope = openingJobScope(job);
+  if (stage === "after_output") await f.repository.assertCurrent(scope, payload);
+  if (stage === "purpose_revoked") {
+    await fixture.sql`UPDATE course_asset_memberships SET purpose='mock_exam',updated_at=now() WHERE workspace_id=${fixture.scope.workspaceId}
+      AND course_id=${f.courseId} AND asset_id=${f.sourceId}`;
+  } else {
+    await createOpeningTeachingActivitiesRepository(fixture.sql).associateCourse(fixture.scope, f.activity.id, { courseId: c2 });
+    await fixture.sql`UPDATE course_asset_memberships SET purpose='mock_exam',updated_at=now() WHERE workspace_id=${fixture.scope.workspaceId}
+      AND course_id=${c2} AND asset_id=${f.sourceId}`;
+  }
+  await expect(f.repository.assertCurrent(scope, payload)).rejects.toThrow();
+  await expect(f.repository.publish(scope, job.id, payload, proposal)).rejects.toThrow();
+  expect(await fixture.sql`SELECT id FROM library_revisions WHERE document_id=${f.unit.documentId}`).toHaveLength(1);
+  const [spec] = await fixture.sql`SELECT version,revision_number FROM opening_teaching_activity_specs WHERE activity_id=${f.activity.id}`;
+  expect(spec).toMatchObject({ version: 1, revision_number: 1 });
+  const [activity] = await fixture.sql`SELECT content_version FROM opening_teaching_activities WHERE id=${f.activity.id}`;
+  expect(activity!.content_version).toBe(1);
+});
+it.each(["exact", "normalized"] as const)("refuses %s current prompt collision after synthetic output without publication, resend or unrelated help", async spelling => {
+  const f = await seed(), queued = await f.repository.request(fixture.scope, f.request, 1), job = (await f.jobs.claim(queued.operationId))!;
+  const collision = spelling === "exact" ? String(f.blocks[1]!.content.text) : String(f.blocks[1]!.content.text).replace(/\s+/g, "");
+  const release = vi.fn(async () => {}), settle = vi.fn(async () => {}), markUnknown = vi.fn(async () => {});
+  let ledger: "unsent" | "unknown" = "unsent";
+  const provider = { complete: vi.fn(async () => ({ text: JSON.stringify({ problem: collision, workedSolution: "幂次加一后除以4，得 $x^4/4+C$；求导核对。" }),
+    inputTokens: 20, outputTokens: 40, citedChunkIds: [], requestId: null, candidates: [] })) };
+  const gateway = createModelGateway({ resolve: async () => ({ provider, modelSnapshot: { id: "synthetic", providerId: "synthetic", modelName: "synthetic", inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }) });
+  const handler = createTeachingExampleHandler({ repository: { ...f.repository, ledger: async () => ledger }, gateway, budget: () => ({
+    reserve: async () => ({ id: randomUUID(), state: "reserved" }), claimExecution: async () => true, release, settle,
+    markUnknown: async () => { ledger = "unknown"; await markUnknown(); },
+  }) });
+  await expect(handler(job, job.payload)).rejects.toThrow("当前练习题");
+  expect(provider.complete).toHaveBeenCalledTimes(1);
+  expect(markUnknown).toHaveBeenCalledTimes(1); expect(release).not.toHaveBeenCalled(); expect(settle).not.toHaveBeenCalled();
+  await expect(handler(job, job.payload)).rejects.toThrow("不会重发");
+  expect(provider.complete).toHaveBeenCalledTimes(1);
+  const init = (await f.content.getClientInit(fixture.scope, f.activity.id))!;
+  expect(init.contentVersion).toBe(1); expect(init.revisionNumber).toBe(1); expect(init.blocks).toHaveLength(5);
+  expect(await fixture.sql`SELECT id FROM library_revisions WHERE document_id=${f.unit.documentId}`).toHaveLength(1);
+  expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE activity_id=${f.activity.id}`).toHaveLength(0);
+  expect((await f.submit((await f.start(f.q1, 1)).id)).eligibility?.independentAttempt).toBe("yes");
+  expect((await f.submit((await f.start(f.q2, 1)).id)).eligibility?.independentAttempt).toBe("yes");
+});
 it("atomically appends an example, preserves old help grade, and does not reveal unrelated limits", async () => {
   const f = await seed(), old = await f.start(f.q1, 1);
   const hint = await createOpeningTeachingHintRepository(fixture.sql).read(fixture.scope, { attemptId: old.id, level: 1 });
@@ -52,9 +171,9 @@ it("atomically appends an example, preserves old help grade, and does not reveal
   expect(q2.eligibility?.independentAttempt).toBe("yes");
   const helped = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, q1);
   const unrelated = await readOpeningLearningEvidenceContext(fixture.sql, fixture.scope, q2);
-  expect(helped.context.helpHistory.exposures.some(exposure => exposure.level === "hinted")).toBe(true);
-  expect(helped.context.helpHistory.exposures.some(exposure => exposure.kind === "solution" || exposure.level === "revealed")).toBe(false);
-  expect(unrelated.context.helpHistory.exposures.some(exposure => exposure.kind === "solution" || exposure.level === "revealed")).toBe(false);
+  expect(helped.context.helpHistory!.exposures.some(exposure => exposure.level === "hinted")).toBe(true);
+  expect(helped.context.helpHistory!.exposures.some(exposure => exposure.kind === "solution" || exposure.level === "revealed")).toBe(false);
+  expect(unrelated.context.helpHistory!.exposures.some(exposure => exposure.kind === "solution" || exposure.level === "revealed")).toBe(false);
   expect(await fixture.sql`SELECT * FROM opening_help_exposures WHERE id=${hint.exposureReceipt.id}`).toEqual(before);
   expect(await fixture.sql`SELECT id FROM opening_help_exposures WHERE activity_id=${f.activity.id}`).toHaveLength(1);
   const revision = await fixture.sql`SELECT blocks FROM library_revisions WHERE document_id=${f.unit.documentId} AND revision_number=2`;

@@ -1,3 +1,4 @@
+import { createModelGateway } from "@aistudy/ai";
 import { expect, it, vi } from "vitest";
 import { createTeachingExampleHandler } from "./teaching-example";
 const id = "11111111-1111-4111-8111-111111111111";
@@ -33,6 +34,27 @@ it("refuses unknown ledger and stale source before generating", async () => {
 it("does not equate model completion without persistence to success", async () => {
   const f = fixture(); f.gateway.call.mockImplementation(async () => ({} as never));
   await expect(f.handler(job, payload)).rejects.toThrow("不能记为成功");
+});
+it.each(["before_send", "after_output"] as const)("preserves gateway fee semantics for course drift %s without resending", async phase => {
+  const f = fixture(), release = vi.fn(async () => {}), markUnknown = vi.fn(async () => {}), settle = vi.fn(async () => {});
+  const provider = { complete: vi.fn(async () => ({ text: JSON.stringify({ problem: "求 $\\\\int x^3 dx$。", workedSolution: "$x^4/4+C$，求导核对。" }),
+    inputTokens: 20, outputTokens: 40, citedChunkIds: [], candidates: [], requestId: null })) };
+  if (phase === "before_send") f.repository.assertCurrent.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("course rebound"));
+  else f.repository.publish.mockRejectedValueOnce(new Error("course rebound"));
+  const gateway = createModelGateway({ resolve: async () => ({ provider,
+    modelSnapshot: { id: "synthetic", providerId: "synthetic", modelName: "synthetic", inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+    inputCentsPerMillion: 1, outputCentsPerMillion: 1 }) });
+  const handler = createTeachingExampleHandler({ repository: f.repository, gateway, budget: () => ({
+    reserve: async () => ({ id, state: "reserved" }), claimExecution: async () => true, release, markUnknown, settle,
+  }) });
+  await expect(handler(job, payload)).rejects.toThrow("course rebound");
+  expect(provider.complete).toHaveBeenCalledTimes(phase === "before_send" ? 0 : 1);
+  expect(release).toHaveBeenCalledTimes(phase === "before_send" ? 1 : 0);
+  expect(markUnknown).toHaveBeenCalledTimes(phase === "after_output" ? 1 : 0);
+  expect(settle).not.toHaveBeenCalled();
+  f.repository.ledger.mockResolvedValue("unknown" as never);
+  await expect(handler(job, payload)).rejects.toThrow("不会重发");
+  expect(provider.complete).toHaveBeenCalledTimes(phase === "before_send" ? 0 : 1);
 });
 it("rejects legacy/mixed payloads and absent execution authority", async () => {
   const f = fixture(); await expect(f.handler(job, { ...payload, activityId: id })).rejects.toThrow();

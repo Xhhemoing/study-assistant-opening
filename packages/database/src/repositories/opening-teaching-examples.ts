@@ -3,13 +3,14 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { Sql, TransactionSql } from "postgres";
 import { teachingExampleRequestSchema, teachingExampleTargetSchema, teachingExampleStatusSchema, teachingExampleProposalSchema, teachingSourceRefSchema, teachingBlockRefSchema,
-  type Scope, type TeachingExampleRequest, type TeachingExampleTarget, type TeachingExampleProposal, type TeachingExampleStatus } from "@aistudy/contracts";
+  type Scope, type TeachingBlockRef, type TeachingExampleRequest, type TeachingExampleTarget, type TeachingExampleProposal, type TeachingExampleStatus } from "@aistudy/contracts";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { learningError, learningIso, lockWorkspaceLearningHistory, lockLearningOwner } from "./opening-learning-facts";
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 import { createLibraryRepository } from "./library";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
 import type { OpeningJobScope } from "./opening-job-execution";
+import { teachingQuestionBody, teachingQuestionText } from "./opening-teaching-question";
 
 const openingMaterialPurposePinSchema = z.object({
   courseId: z.string().uuid().nullable(), materialUse: z.literal("teaching"),
@@ -31,6 +32,23 @@ export const teachingExampleJobPayloadSchema = z.object({
 export type TeachingExampleJobPayload = z.infer<typeof teachingExampleJobPayloadSchema>;
 const operationKey = (id: string) => `teaching-example:${id}`;
 const conflict = (message: string) => learningError("CONFLICT", message);
+const normalizeProblem = (text: string) => text.normalize("NFKC").replace(/\s+/g, "");
+
+/** Server-only exact collision refusal, not semantic equivalence or help exposure.
+ * Compare both saved body and rendered interaction/units; never read hidden keys.
+ */
+export function assertTeachingExampleDoesNotRepeatPrompt(problem: string,
+  blocks: Array<{ id: string; type: string; content: Record<string, unknown> }>, blockOrder: TeachingBlockRef[]) {
+  const normalized = normalizeProblem(problem);
+  for (const ref of blockOrder) {
+    if (ref.role === "answer_key" || !(ref.role === "prompt" || ["prompt", "question"].includes(ref.blockType))) continue;
+    const prompt = blocks.find(block => block.id === ref.blockId && ["prompt", "question"].includes(block.type));
+    if (prompt && [teachingQuestionBody(prompt.content), teachingQuestionText(prompt.content)]
+      .some(text => text !== null && normalizeProblem(text) === normalized)) {
+      throw conflict("新例题与当前练习题重复，未发布解答；请保留本次生成记录。");
+    }
+  }
+}
 
 async function snapshot(tx: TransactionSql, scope: Scope, target: TeachingExampleTarget, lock = false) {
   const [owner] = await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} AND disabled_at IS NULL FOR SHARE`;
@@ -44,7 +62,7 @@ async function snapshot(tx: TransactionSql, scope: Scope, target: TeachingExampl
     JOIN library_revisions r ON r.document_id=d.id AND r.workspace_id=s.workspace_id AND r.revision_number=s.revision_number
     WHERE s.activity_id=${target.activityId} AND s.document_id=${target.documentId}
       AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
-    ${lock ? tx`FOR UPDATE OF a,s,u,d` : tx``}`;
+    ${lock ? tx`FOR UPDATE OF a,s,u,d` : tx`FOR SHARE OF a,s,u,d`}`;
   if (!row) throw learningError("NOT_FOUND", "找不到当前发布的例题。");
   if (Number(row.content_version) !== target.contentVersion || Number(row.version) !== target.contentVersion
     || Number(row.revision_number) !== target.revisionNumber || Number(row.current_revision_number) !== target.revisionNumber) throw conflict("例题发布版本已变化，请重新读取。");
@@ -137,6 +155,7 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
         const current = await snapshot(tx, scope, request.target, true);
         if (!isDeepStrictEqual(current.row.source_ids, context.row.source_ids) || !isDeepStrictEqual(current.blocks, context.blocks) || !isDeepStrictEqual(current.blockOrder, context.blockOrder)
           || !isDeepStrictEqual(current.sourceRefs, context.sourceRefs)) throw conflict("例题快照已变化。");
+        if (current.row.course_id !== context.purposePin.courseId) throw conflict("课堂课程绑定已变化，请重新读取后确认。");
         await purposes.assertMaterialPurposePin(scope, context.purposePin, tx);
         const previous = await tx`SELECT id FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
           AND kind='compile-teaching-unit' AND payload->>'mode'='example'
@@ -160,6 +179,7 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
       await sql.begin(async tx => {
         await lockLearningOwner(tx, scope);
         const current = await snapshot(tx, scope, payload.request.target);
+        if (current.row.course_id !== payload.purposePin.courseId) throw conflict("课堂课程绑定已变化，未发送模型。");
         if (!isDeepStrictEqual(current.row.source_ids, payload.activitySourceIds)) throw conflict("课堂材料选择已变化。");
         if (!isDeepStrictEqual(current.blocks, payload.blocks) || !isDeepStrictEqual(current.blockOrder, payload.blockOrder)
           || !isDeepStrictEqual(current.sourceRefs, payload.sourceRefs)) throw conflict("例题发布快照已变化。");
@@ -177,10 +197,12 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
           AND owner_user_id=${scope.ownerUserId} AND kind='compile-teaching-unit'`;
         if (!job || !isDeepStrictEqual(teachingExampleJobPayloadSchema.parse(job.payload), payload)) throw conflict("例题执行身份不一致。");
         const current = await snapshot(tx, scope, payload.request.target, true);
+        if (current.row.course_id !== payload.purposePin.courseId) throw conflict("课堂课程绑定已变化，未发布例题。");
         if (!isDeepStrictEqual(current.row.source_ids, payload.activitySourceIds)) throw conflict("课堂材料选择已变化。");
         if (!isDeepStrictEqual(current.blocks, payload.blocks) || !isDeepStrictEqual(current.blockOrder, payload.blockOrder)
           || !isDeepStrictEqual(current.sourceRefs, payload.sourceRefs)) throw conflict("例题发布快照已变化。");
         await purposes.assertMaterialPurposePin(scope, payload.purposePin, tx);
+        assertTeachingExampleDoesNotRepeatPrompt(proposal.problem, current.blocks, current.blockOrder);
         const exampleId = randomUUID(), solutionId = randomUUID();
         const generatedExample = { operationId: id, target: payload.request.target, mathematicalStatus: "unchecked", assistance: "revealed", masteryEvidence: false };
         const blocks = [...current.blocks, { id: exampleId, type: "example", content: { text: `同类新例题（教学辅助，数学待核，不计独立掌握）\n\n${proposal.problem}`, generatedExample } },
