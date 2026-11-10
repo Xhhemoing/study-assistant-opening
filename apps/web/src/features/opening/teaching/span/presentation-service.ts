@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { spanRepairPresentationInputSchema, type Scope } from "@aistudy/contracts";
 import { createOpeningLearningAttemptRepository, createOpeningLearningRepository, createOpeningStudyExposureRepository,
-  createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanRepair, spanRepairAttemptKey,
+  createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanRepair, readOpeningSpanCourseBinding, spanRepairAttemptKey,
   createOpeningSpanSessionRepository, generateOpeningStudyExposure, releaseOpeningStudyExposure } from "@aistudy/database";
 import { buildSpanTargetedExplanation, getSpanProblem, solveSpanProblem, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -37,6 +37,29 @@ export function createSpanPresentationService(sql: Sql) {
     if (input.sessionId) {
       const [owned] = await sql`SELECT activity_id FROM opening_learning_sessions WHERE id=${input.sessionId}
         AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      if (owned?.activity_id && await readOpeningSpanCourseBinding(sql, scope, String(owned.activity_id))) {
+        if (input.kind !== "worked") throw Object.assign(new Error("课程 span 仅使用已确认范围内的示范。"), { code: "CONFLICT" });
+        return sql.begin(async tx => {
+          await lockWorkspaceLearningHistory(tx, scope);
+          const current = await readOpeningSpanCourseBinding(tx, scope, String(owned.activity_id));
+          const session = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, String(owned.activity_id));
+          if (!current || !session || session.status !== "active" || session.courseId !== input.courseId
+            || session.moveId !== "self-example" || !session.sourceIds.includes(input.sourceId))
+            throw Object.assign(new Error("课程 span 示范步骤或身份已变化。"), { code: "CONFLICT" });
+          // Existing repository savepoints retain this history transaction through release.
+          const db = new Proxy(tx, { get(target, key, receiver) {
+            if (key === "begin") return (callback: (nested: typeof tx) => Promise<unknown>) => target.savepoint(callback);
+            return Reflect.get(target, key, receiver);
+          } }) as unknown as Sql;
+          const attempt = await createOpeningLearningAttemptRepository(db).createSpanWorked(scope,
+            { sessionId: session.sessionId, sourceId: input.sourceId, clientKey: input.clientKey });
+          const generated = await generateOpeningStudyExposure(tx, scope, { releaseKey: `${input.clientKey}:release`,
+            contextAnchor: { courseId: session.courseId, attemptId: attempt.id, itemVersionId: attempt.itemVersionId, purpose: "learning_help" },
+            sessionId: session.sessionId, origin: "assistant", kind: "solution", level: "revealed" });
+          const exposureReceipt = await releaseOpeningStudyExposure(tx, scope, generated.id);
+          return { problem: attempt.spanExercise!, solution: solveSpanProblem(attempt.spanExercise!), exposureReceipt };
+        });
+      }
       if (owned?.activity_id && await readOpeningSpanRepair(sql, scope, String(owned.activity_id))) {
         throw Object.assign(new Error("本活动只接受已绑定版本的本题步骤短讲请求，未返回通用讲解。"), { code: "CONFLICT" });
       }

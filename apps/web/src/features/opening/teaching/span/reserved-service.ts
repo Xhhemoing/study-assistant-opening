@@ -1,6 +1,6 @@
 import { spanRepairIssueInputSchema, type Scope } from "@aistudy/contracts";
 import { createOpeningLearningAttemptInTx, lockWorkspaceLearningHistory, readOpeningSpanReservedChoice,
-  readOpeningSpanRepair, spanRepairAttemptKey, createOpeningSpanSessionRepository, readOpeningSpanRepairVariant, openingSpanRepairRetryKey } from "@aistudy/database";
+  readOpeningSpanRepair, readOpeningSpanCourseBinding, spanRepairAttemptKey, createOpeningSpanSessionRepository, readOpeningSpanRepairVariant, openingSpanRepairRetryKey } from "@aistudy/database";
 import { z } from "zod";
 import type { Sql } from "postgres";
 import { getSpanReservedProblem, getSpanTeachingProblem } from "@aistudy/domain/span-heldout-catalog";
@@ -50,6 +50,12 @@ export function createSpanReservedService(sql: Sql) {
         AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
       const lesson = (activity?.checkpoint_json as { spanLesson?: { retestId?: string | null; intent?: { purpose?: string } } } | undefined)?.spanLesson;
       const retestId = lesson?.retestId;
+      const courseSpan = await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id));
+      if (courseSpan) {
+        const current = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, String(session.activity_id));
+        if (!current || current.status !== "active" || current.moveId !== "self_study-reserved" || input.mode !== "self_study"
+          || retestId || input.afterAttemptId) throw Object.assign(new Error("课程 span 发题只接受原目的的当前检查阶段。"), { code: "CONFLICT" });
+      }
       if (await readOpeningSpanRepair(tx, scope, String(session.activity_id))) throw Object.assign(new Error("本活动只接受已绑定版本和阶段的本题步骤发题请求。"), { code: "CONFLICT" });
       let familyId: string | undefined;
       // A learner-requested same-family practice is anchored to a real corrected attempt,
@@ -81,7 +87,7 @@ export function createSpanReservedService(sql: Sql) {
         if (saved.sessionId !== input.sessionId || saved.spanExercise?.sourceId !== input.sourceId || !getSpanReservedProblem(saved.spanExercise.problemId, saved.spanExercise.version)) throw Object.assign(new Error("保留题请求已改变"), { code: "CONFLICT" });
         return createOpeningLearningAttemptInTx(tx, scope, { sessionId: input.sessionId, clientKey, spanExercise: saved.spanExercise });
       }
-      const choice = await readOpeningSpanReservedChoice(tx, scope, input.mode, retestId ? "retest" : "validation", familyId);
+      const choice = await readOpeningSpanReservedChoice(tx, scope, input.mode, retestId ? "retest" : "validation", familyId, courseSpan?.allowedExerciseKeys);
       if (choice.kind === "unavailable") throw Object.assign(new Error(choice.reason === "unknown_history"
         ? "旧记录中的题目身份暂不可核实，不能把下一题称作未曝光检查。请先核对旧记录，或继续普通练习。"
         : "本组检查题或题族已发放完毕；可回看记录或继续普通练习，重复不标作未曝光检查。"), { code: "CONFLICT" });

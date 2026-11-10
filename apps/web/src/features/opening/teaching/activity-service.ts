@@ -6,7 +6,7 @@ import {
   type TeachingActivity,
 } from "@aistudy/contracts";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
-import { createOpeningTeachingActivitiesRepository, createOpeningPlanningSettingsRepository, createOpeningCourseReadySourcesRepository, readOpeningTeachingTaskFocus } from "@aistudy/database";
+import { assertPublicTeachingActivityIntent, createOpeningTeachingActivitiesRepository, createOpeningPlanningSettingsRepository, createOpeningCourseReadySourcesRepository, readOpeningTeachingTaskFocus } from "@aistudy/database";
 import { loadFeatureSwitches } from "@aistudy/config";
 import { localDateKeyInZone } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -55,6 +55,7 @@ export function createOpeningTeachingActivityService(
         throw new ApiError("VALIDATION", "请从卡片复习中开始这道题。", 400);
       }
       try {
+        assertPublicTeachingActivityIntent(input);
         // Always discard the client-owned derived field, including with the flag off.
         if (input.goalJson && "learnerFocus" in input.goalJson) {
           input.goalJson = { ...input.goalJson };
