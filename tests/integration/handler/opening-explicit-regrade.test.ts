@@ -28,8 +28,9 @@ beforeAll(async () => {
 });
 beforeEach(async () => { await f.reset(); await f.sql`TRUNCATE opening_learning_sessions,opening_conversations CASCADE`; });
 afterAll(async () => { setAuthRuntimeForTests(null); await runtime?.close(); await f?.close(); });
-const base = "http://localhost/api/opening/observations/regrade";
-function request(method = "GET", body?: unknown, query = "", cookie = f.cookie, origin = "http://localhost") {
+const originForTest = new URL(process.env.PUBLIC_BASE_URL ?? "http://localhost").origin;
+const base = `${originForTest}/api/opening/observations/regrade`;
+function request(method = "GET", body?: unknown, query = "", cookie = f.cookie, origin = originForTest) {
   return new Request(`${base}${query}`, { method, headers: { cookie, origin, "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
