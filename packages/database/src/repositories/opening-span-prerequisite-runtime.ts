@@ -26,7 +26,7 @@ export const prerequisiteIdentity = (r: CourseRequirement): SpanRepairRequiremen
   ({ id: r.id, revision: r.revision, stableSkillId: r.stableSkillId, requirementKey: r.requirementKey });
 
 /** Latest original submission time wins, not regrade time or a search for an older incorrect head. */
-async function qualify(db: Db, scope: Scope, courseId: string, target: CourseRequirement, prerequisite: CourseRequirement, observationId?: string) {
+async function qualify(db: Db, scope: Scope, courseId: string, target: CourseRequirement, prerequisite: CourseRequirement) {
   const requirements = await readCourseRequirements(db, scope, courseId);
   const materials = await readCourseRouteMaterials(db, scope, courseId);
   const chunks = await readCourseRouteSourceChunks(db, scope, courseId);
@@ -40,7 +40,6 @@ async function qualify(db: Db, scope: Scope, courseId: string, target: CourseReq
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.course_id=${courseId}
       AND a.create_intent->'spanCourseBinding'->'requirement'->>'id'=${prerequisite.id}
       AND NOT (a.create_intent->'spanCourseBinding' ? 'returnTarget')
-      AND (${observationId ?? null}::uuid IS NULL OR o.id=${observationId ?? null}::uuid)
     ORDER BY a.submitted_at DESC NULLS LAST,a.started_at DESC,a.id DESC LIMIT 1`;
   let evidence: SpanPrerequisiteQualificationInput["evidence"] = null;
   const row = rows[0];
@@ -168,7 +167,7 @@ export async function createOpeningSpanPrerequisiteInTx(tx: TransactionSql, scop
   return { kind: "created" as const, activityId, requirementId: prerequisite.id };
 }
 
-/** Validate only the saved basis and receipt. Never reselect a head or teaching pair. */
+/** Compare the saved basis with current original P authority; never replace the saved plan or teaching pair. */
 export async function readOpeningSpanPrerequisiteRepair(db: Db, scope: Scope, activityId: string): Promise<SpanPrerequisiteRepairPlan | null> {
   const [activity] = await db`SELECT goal_json,checkpoint_json FROM opening_teaching_activities WHERE id=${activityId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -189,7 +188,7 @@ export async function readOpeningSpanPrerequisiteRepair(db: Db, scope: Scope, ac
   const requirements = await readCourseRequirements(db, scope, q.courseId);
   const target = requirements.find(r => r.id === q.targetRequirement.id), prerequisite = requirements.find(r => r.id === q.prerequisiteRequirement.id);
   if (!target || !prerequisite) throw prerequisiteConflict("SPAN_PREREQUISITE_RELATION_CHANGED");
-  const original = await qualify(db, scope, q.courseId, target, prerequisite, q.basis.observationId);
+  const original = await qualify(db, scope, q.courseId, target, prerequisite);
   if (!isDeepStrictEqual(original.qualification, q)) throw prerequisiteConflict("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
   const problem = original.row && parseOpeningSpanExercise(original.row.evaluation_spec);
   const evaluation = original.evidence?.observation.serverEvaluation;
