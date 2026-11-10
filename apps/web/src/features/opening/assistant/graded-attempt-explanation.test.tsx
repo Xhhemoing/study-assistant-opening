@@ -2,7 +2,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { LearningAttempt } from "@aistudy/contracts";
+import { turnInputSchema, type LearningAttempt, type ProviderInput } from "@aistudy/contracts";
+import type { OpeningTutorJobsRepository, TutorAttemptContext } from "@aistudy/database";
+import { createTutorTurnHandler, type TutorTurnDeps } from "../../../../../worker/src/jobs/tutor-turn";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 import { clearSessionExpiry } from "../../auth/session-expiry";
@@ -68,6 +70,39 @@ it("sends the complete native client body from a fresh empty session, once per c
   expect(Object.keys(receipt).sort()).toEqual(["binding", "clientKey", "conversationId", "owner", "phase", "snapshot", "version"]);
   await act(async () => root.render(null)); await render(); expect(bodies).toHaveLength(1);
   expect(action()!.disabled).toBe(true); await act(async () => action()!.click()); expect(bodies).toHaveLength(1);
+});
+it("carries the fresh-session native button request through the actual worker envelope without client answer text", async () => {
+  await render(); await act(async () => action()!.click());
+  const request = turnInputSchema.parse(bodies[0]);
+  expect(request).toMatchObject({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
+    sourceSelection: "auto", sourceIds: [], learningSessionId: sessionId, attemptId: id, contextAnchor: attempt.contextAnchor });
+  expect(request).not.toHaveProperty("answer"); expect(request).not.toHaveProperty("aiEvaluation");
+  const context: TutorAttemptContext = { privacyEpoch: 0, anchor: attempt.contextAnchor!, originalQuestion: "Saved server question",
+    originalAnswer: { observationId: record.id, answer: "Saved server answer", answerRevision: 1 },
+    currentAnswer: { observationId: record.id, answer: "Saved server answer", answerRevision: 1 },
+    rootObservationId: record.id, headObservationId: record.id, workSource: null, sourceRefs: [],
+    effectiveGrading: { observationId: record.id, answerRevision: 1, outcome: "incorrect", verdictSource: "ai_graded", aiEvaluation: null, serverEvaluation: null } };
+  // Repository doubles stand in only for persisted identities; the native request and worker are real.
+  const jobs = { get: vi.fn(async () => ({ workspaceId: id, ownerUserId: identity.id })),
+    claim: vi.fn(async () => ({ id: item, workspaceId: id, ownerUserId: identity.id, conversationId, userTurnId: sessionId, assistantTurnId: item, mode: request.mode })),
+    getUserTurn: vi.fn(async () => ({ ...request, sourceVersions: {} })),
+    freezeHelpInputSnapshot: vi.fn(async () => ({ userTurnId: sessionId, assistantTurnId: item, tutorMode: request.mode, studyIntent: null })),
+    readAttemptContext: vi.fn(async () => context), assertAttemptContext: vi.fn(async () => {}),
+    loadHistoryContext: vi.fn(async () => ({ history: [], sourceRefs: [] })), completeTurn: vi.fn(async () => {}),
+    fail: vi.fn(async () => {}), markUnknown: vi.fn(async () => {}) };
+  const provider = { complete: vi.fn(async (_input: ProviderInput) => ({ text: "Original explanation", citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1, requestId: null })) };
+  await createTutorTurnHandler({ tutorJobs: jobs as unknown as OpeningTutorJobsRepository,
+    chunks: { listForSources: vi.fn(async () => []), listChunksAtVersion: vi.fn(async () => []) },
+    budget: { reserve: vi.fn(async () => ({ id: "reservation" })), claimExecution: vi.fn(async () => true),
+      release: vi.fn(async () => ({})), settle: vi.fn(async () => ({})), markUnknown: vi.fn(async () => ({})) } as unknown as TutorTurnDeps["budget"],
+    provider, config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  })(item);
+  expect(jobs.readAttemptContext).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: identity.id }, { userTurnId: sessionId, jobId: item, claimToken: undefined });
+  expect(provider.complete).toHaveBeenCalledOnce();
+  expect(JSON.parse(provider.complete.mock.calls[0]![0].text)).toMatchObject({ request: GRADED_ATTEMPT_EXPLANATION_TEXT,
+    attemptContext: { originalQuestion: "Saved server question", originalAnswer: context.originalAnswer,
+      currentAnswer: { observationId: record.id, answerRevision: 1, answerFrom: "originalAnswer" }, effectiveGrading: context.effectiveGrading } });
+  expect(jobs.assertAttemptContext).toHaveBeenCalled(); expect(jobs.completeTurn).toHaveBeenCalledOnce();
 });
 it("recovers an accepted lost-response turn by GET after remount without another POST", async () => {
   const normal = transport.getMockImplementation()!;

@@ -1125,7 +1125,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         if (result.accepted) setGradedExplainSubmitted(true);
       });
     } catch (error) {
-      setError(userFacingMessage(error, "原请求暂时无法恢复，未新建讲解。"));
+      setError(userFacingMessage(error, "之前的讲解暂时无法恢复，未重复创建。"));
     } finally { gradedExplainBusy.current = false; }
   }
   const directExplainKey = useRef<{ clientKey: string; fingerprint: string } | null>(null);

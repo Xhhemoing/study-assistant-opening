@@ -42,7 +42,7 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
   function readReceipt(): Receipt | null {
     if (!validOwner()) throw new Error(changedMessage);
     // Older builds wrote only this marker. It cannot identify a recoverable operation.
-    if (sessionStorage.getItem(operationScope) !== null) throw new Error("旧操作回执缺少会话与请求键，不能安全新建。");
+    if (sessionStorage.getItem(operationScope) !== null) throw new Error("旧版操作记录不足，暂时无法确认讲解是否已创建；不会重复发送。");
     const raw = localStorage.getItem(operationScope);
     if (raw === null) return null;
     const parsed = receiptSchema.parse(JSON.parse(raw));
@@ -79,7 +79,7 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
       baseline.current = snapshot; setReceipt(saved); setReady(true);
       if (saved?.phase === "creating") setRecoveryMessage("会话创建结果尚未确认；现有 API 无创建请求键 GET 恢复，已停止新建，未发送收费讲解。");
     })().catch(() => {
-      if (active && epoch === generation.current && validOwner()) setRecoveryMessage("原操作回执或权限无法验证，已停止发送；不会换键重发。");
+      if (active && epoch === generation.current && validOwner()) setRecoveryMessage("无法确认之前的讲解或账户权限，已停止发送；不会重复创建。");
     });
     const changed = (event: StorageEvent) => {
       if (event.key === operationScope) { setReady(false); setRecoveryMessage("另一标签页已更新本次操作，请重新读取原讲解；不会新建请求。"); }
@@ -107,7 +107,7 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
       if (!lock) return;
       await authorize();
       const saved = readReceipt();
-      if (saved) { setReceipt(saved); setRecoveryMessage("已保留原请求，请重新读取原讲解；不会新建收费请求。"); return; }
+      if (saved) { setReceipt(saved); setRecoveryMessage("已保留之前的讲解，请重新读取；不会再次调用 AI。"); return; }
       await action();
     });
   }
