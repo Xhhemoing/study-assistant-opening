@@ -59,16 +59,34 @@ test('ineligible repair is an early rejection, not a crash fence or spawned owne
   assert.equal(readFileSync(incident, 'utf8'), 'original incident');
 });
 
-test('normal guarded deploy/restart/rollback refuse without crashFence writes or stops', async t => {
+test('normal guarded deploy/restart/rollback persist crash fence and stop both without launching owner', async t => {
   const root = mkdtempSync(join(tmpdir(), 'repair-guard-')); t.after(() => rmSync(root, { recursive: true }));
-  const incident = join(root, 'migration-forward-only'); writeFileSync(incident, 'original incident');
   for (const action of ['deploy', 'restart', 'rollback']) {
-    const args = [action, root, root, root, root, root, root, root, '1', '', ''];
-    const forbidden = () => { assert.fail('Guard refusal performed a side effect'); };
-    assert.equal(await supervise('unused', args, { verifyEntrySources() {}, command: forbidden,
-      stopWriters: forbidden, spawn: forbidden, createServer: forbidden }), 3);
+    const directory = join(root, action); mkdirSync(directory);
+    const incident = join(directory, 'migration-forward-only'); writeFileSync(incident, 'original incident');
+    const args = [action, directory, directory, directory, directory, directory, directory, directory, '1', '', ''];
+    const events = [];
+    const forbidden = () => { assert.fail('Guard refusal launched an owner/server'); };
+    assert.equal(await supervise('unused', args, { verifyEntrySources() {},
+      command(argv) { events.push(argv); return { ok: true }; },
+      stopWriters() { events.push('stop:both'); return true; }, spawn: forbidden, createServer: forbidden }), 3);
+    assert.deepEqual(events, [['daemon-reload'], 'stop:both']);
+    assert.match(readFileSync(join(directory, 'writers-fenced'), 'utf8'), /Writers fenced/);
+    for (const unit of units) assert.equal(readFileSync(join(directory, `${unit}.d/95-aistudy-migration-fence.conf`), 'utf8'),
+      `[Unit]\nConditionPathExists=!${directory}/writers-fenced\n`);
     assert.equal(readFileSync(incident, 'utf8'), 'original incident');
   }
+});
+
+test('repair before adoption refuses mutation requests and owner death without rewriting the incident', async t => {
+  const f = fixture(t, { repair: true }); await f.ownerReady;
+  const incident = readFileSync(join(f.args[4], 'migration-forward-only'), 'utf8');
+  for (const action of ['arm', 'prepare', 'activate', 'refence', 'stop']) assert.equal((await f.request(action)).ok, false);
+  f.ownerExit(); assert.equal(await f.running, 1);
+  assert.equal(readFileSync(join(f.args[4], 'migration-forward-only'), 'utf8'), incident);
+  assert(!existsSync(join(f.args[4], 'repair-adopted')));
+  assert(!f.events.some(event => event.startsWith('stop:') || event.startsWith('start:')));
+  for (const unit of units) assert(!existsSync(join(f.args[6], `${unit}.d`)));
 });
 
 test('repair-check is read-only on missing state and creates no state directory', t => {
@@ -105,6 +123,22 @@ test('adopted repair owner death retains forward-only guards and migration bound
   assert.equal((await f.request('adopt-repair')).ok, true);
   assert.equal((await f.request('arm')).ok, true);
   f.ownerExit(); assert.equal(await f.running, 1);
+  for (const name of ['migration-forward-only', 'writers-fenced', 'repair-adopted']) assert(existsSync(join(f.args[4], name)));
+  assert(existsSync(join(f.transition, 'migration-armed')));
+  assert(!f.events.some(event => event.startsWith('start:')));
+});
+
+test('repair 95-to-96 preparation failure retains adoption and guards without launching old writers', async t => {
+  const f = fixture(t, { repair: true }); await f.ownerReady;
+  assert.equal((await f.request('adopt-repair')).ok, true);
+  assert.equal((await f.request('arm')).ok, true);
+  writeFileSync(join(f.transition, 'migration-succeeded'), 'synthetic runner success');
+  // A concrete filesystem failure inside the real boundary installer, not a
+  // claimed real-manager/database E2E. The other unit must remain crash-fenced.
+  const blocked = join(f.args[6], `${units[1]}.d`); mkdirSync(blocked, { recursive: true });
+  mkdirSync(join(blocked, '96-aistudy-writer-exec.conf'));
+  assert.equal((await f.request('prepare')).ok, false);
+  f.finish(1); assert.equal(await f.running, 1);
   for (const name of ['migration-forward-only', 'writers-fenced', 'repair-adopted']) assert(existsSync(join(f.args[4], name)));
   assert(existsSync(join(f.transition, 'migration-armed')));
   assert(!f.events.some(event => event.startsWith('start:')));

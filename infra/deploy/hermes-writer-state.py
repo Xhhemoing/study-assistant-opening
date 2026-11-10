@@ -416,21 +416,61 @@ def repair_check(state, current, systemd):
                                                   'repair-adopted', 'succeeded', 'degraded', 'to-target')]]:
         if present(path):
             raise ValueError('Incident crossed a boundary or adoption already consumed')
+    manager = trusted_loader.load('hermes-peer-broker.py').SystemdManager()
+    effective, contents = {}, {}
     for unit in ('aistudy-web.service', WORKER):
+        # Reuse the reviewed raw ExecStart/ordered EnvironmentFiles parser, not
+        # a dict that loses repeated manager records. No relaxed repair adapter.
+        values = manager.configuration(unit)
+        expected_env = '/opt/aistudy/.env.production (ignore_errors=no)'
+        if unit == WORKER:
+            expected_env += ' /etc/aistudy/worker-runtime.env (ignore_errors=no)'
+        if values['EnvironmentFiles'] not in ([expected_env, expected_env + ' ' + expected_env]
+                                              if unit != WORKER else [expected_env]):
+            raise ValueError('Unreviewed repair environment input')
+        effective[unit] = values
+        # resource_binding below owns the complete fragment/drop-in allowlist,
+        # duplicate rejection, legacy bytes and persistent memory policy.
+        for path in [values['FragmentPath'], *values['DropInPaths'].split(' ')]:
+            if path:
+                contents[path] = read_trusted(path)[0]
         directory = Path(systemd) / (unit + '.d')
         fence = directory / '95-aistudy-migration-fence.conf'
         expected = ('[Unit]\nConditionPathExists=!' + str(state / 'writers-fenced') + '\n').encode()
         if read_trusted(fence)[0] != expected or present(directory / '96-aistudy-writer-exec.conf'):
             raise ValueError('Historical fence configuration changed')
-        result = subprocess.run(['systemctl', 'show', '--all',
+        # Conditions is a typed D-Bus array in systemd 249. Query the actual
+        # effective list: an on-disk 95 alone cannot prove a live boot barrier.
+        object_path = '/org/freedesktop/systemd1/unit/' + unit.replace('-', '_2d').replace('.', '_2e')
+        result = subprocess.run(['/usr/bin/busctl', '--system', '--json=short', 'get-property',
+                                 'org.freedesktop.systemd1', object_path,
+                                 'org.freedesktop.systemd1.Unit', 'Conditions'],
+                                check=True, capture_output=True, text=True, timeout=5)
+        conditions = json.loads(result.stdout)
+        rows = conditions.get('data')
+        if conditions.get('type') != 'a(sbbsi)' or not isinstance(rows, list):
+            raise ValueError('Unknown effective conditions')
+        for row in rows:
+            if (not isinstance(row, list) or len(row) != 5
+                    or not isinstance(row[0], str) or type(row[1]) is not bool
+                    or type(row[2]) is not bool or not isinstance(row[3], str)
+                    or type(row[4]) is not int):
+                raise ValueError('Malformed effective condition')
+        matches = [row for row in rows if row[0] == 'ConditionPathExists'
+                   and row[3] == str(state / 'writers-fenced')]
+        if len(matches) != 1 or matches[0][1:3] != [False, True]:
+            raise ValueError('Effective negative fence condition missing or changed')
+        result = subprocess.run(['/usr/bin/systemctl', 'show', '--all',
                                  '--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job,ControlGroup,NeedDaemonReload,DropInPaths', unit],
                                 check=True, capture_output=True, text=True, timeout=5)
         pairs = [line.split('=', 1) for line in result.stdout.splitlines()]
         values = dict(pairs)
         required = {'LoadState': 'loaded', 'MainPID': '0', 'ControlPID': '0', 'Job': '', 'NeedDaemonReload': 'no'}
-        if (len(pairs) != len(values) or any(values.get(key) != value for key, value in required.items())
+        if (set(values) != set(required) | {'ActiveState', 'SubState', 'ControlGroup', 'DropInPaths'}
+                or len(pairs) != len(values) or any(values.get(key) != value for key, value in required.items())
                 or values.get('ActiveState') not in ('inactive', 'failed')
                 or values.get('SubState') not in ('dead', 'failed')
+                or values.get('DropInPaths') != effective[unit]['DropInPaths']
                 or str(fence) not in values.get('DropInPaths', '').split(' ')):
             raise ValueError('Historical fence/stopped manager state unconfirmed')
         group = values.get('ControlGroup')
@@ -449,6 +489,9 @@ def repair_check(state, current, systemd):
                     raise ValueError('Writer cgroup not empty')
             if not (root / 'cgroup.procs').is_file():
                 raise ValueError('Writer cgroup unavailable')
+        if manager.configuration(unit) != effective[unit]:
+            raise ValueError('Repair manager inputs changed during observation')
+    resource_binding(systemd, effective, contents)
     return {'eligible': True, 'scope': 'pre-migration-filesystem-manager-only',
             'baseline': REPAIR_BASELINE, 'incident': str(transition), 'automaticRetry': False}
 

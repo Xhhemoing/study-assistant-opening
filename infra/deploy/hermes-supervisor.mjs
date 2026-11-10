@@ -246,7 +246,7 @@ export async function supervise(script, args, dependencies = {}) {
     } else console.error("UNCONFIRMED: no trusted migration session target available for backend probe; writers remain fenced.");
   }
   if (armed && ["deploy", "restart", "rollback"].includes(action)) {
-    console.error('FORWARD FIX REQUIRED: active migration guard; managed action refused.'); return 3;
+    crashFence(); return 3;
   }
   const server = createServer(socket => {
     let body = "", handled = false;
