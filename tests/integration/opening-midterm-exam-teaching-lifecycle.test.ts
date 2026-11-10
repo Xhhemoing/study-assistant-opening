@@ -132,6 +132,14 @@ it("shares converted-exam correction capacity across courses/goals and replays a
   ]);
   const originalEvidence = await readCourseRouteObservations(f.sql, f.scope, course.id, false);
   expect(originalEvidence.raw).toHaveLength(1);
+  expect(originalEvidence.raw[0]).toMatchObject({
+    id: link.observationId, workspaceId: f.scope.workspaceId,
+    courseId: course.id, answer: "a", outcome: "correct", assistance: "independent",
+    serverEvaluation: { decision: "correct", outcome: "correct" },
+  });
+  const [canonicalOwner] = await f.sql`SELECT owner_user_id FROM opening_learning_observations
+    WHERE id=${link.observationId} AND workspace_id=${f.scope.workspaceId} AND course_id=${course.id}`;
+  expect(canonicalOwner?.owner_user_id).toBe(f.scope.ownerUserId);
   expect((await routes().read(f.scope, course.id)).requirements.find(row => row.requirement.id === target.id)!.status)
     .toBe("needs_correction");
   expect((await readOpeningLearningCapacity(f.sql, f.scope)).usedMinutes).toBe(10);
