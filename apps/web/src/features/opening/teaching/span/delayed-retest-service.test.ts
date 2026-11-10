@@ -143,6 +143,22 @@ it.each([
   expect(dependencies.accept).not.toHaveBeenCalled();
 });
 
+it("keeps the original accepted task identity and protocol on an automatic scheduling conflict", async () => {
+  const h = harness({ status: "accepted", accepted: true, taskId: randomUUID() }), before = h.state();
+  await expect(createSpanDelayedRetestService(h.sql).scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 }))
+    .rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("已有另一条 span 复测任务") });
+  expect(h.state()).toEqual(before);
+  expect(dependencies.accept).not.toHaveBeenCalled(); expect(dependencies.save).not.toHaveBeenCalled();
+  expect(dependencies.revision).not.toHaveBeenCalled();
+});
+
+it("propagates a history lock failure without treating it as an existing-task conflict", async () => {
+  const h = harness(), before = h.state(), failure = Object.assign(new Error("lock unavailable"), { code: "55P03" });
+  dependencies.lockHistory.mockRejectedValue(failure);
+  await expect(createSpanDelayedRetestService(h.sql).scheduleAutomatic(scope, { ...request, expectedGrantRevision: 1 })).rejects.toBe(failure);
+  expect(h.state()).toEqual(before); expect(dependencies.accept).not.toHaveBeenCalled();
+});
+
 it.each(["changed_needs_check", "unavailable", "privacy_excluded", "version_unknown"])("refuses a %s baseline before candidate mutation", async applicability => {
   const h = harness(), before = h.state();
   dependencies.evidence.mockResolvedValue({ context: { version: { applicability } } });

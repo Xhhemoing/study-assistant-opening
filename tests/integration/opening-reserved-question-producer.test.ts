@@ -9,7 +9,7 @@ import { admitOpeningReservedCandidate, readOpeningReservedSupply, reserveOpenin
 import { produceReservedQuestion } from "../../packages/ai/src/opening/reserved-question-producer";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
-import type { CourseRouteRequirementInput } from "@aistudy/contracts";
+import { uuidSchema, type CourseRouteRequirementInput } from "@aistudy/contracts";
 import postgres, { type Sql, type TransactionSql } from "postgres";
 import { assertOpeningTestDatabase } from "@aistudy/config";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
@@ -59,6 +59,71 @@ async function setup() {
   return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit, admission, goal, definition };
 }
 const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, answer: "2603" };
+// Like the reserved-start privacy test, exempt only semantic ID paths AND a
+// complete UUID. Never skip create_intent, context, receipts or body text.
+function assertNoPrivateAnswer(value: unknown, answer: string, path: readonly string[] = []): void {
+  if (typeof value === "string") {
+    // Match actual path segments, never a dot-joined path: literal dotted keys
+    // in arbitrary JSON are content, not trusted metadata references.
+    const row = path[0] === "tables" && /^[a-z_]+$/.test(path[1] ?? "") && /^\d+$/.test(path[2] ?? "");
+    const rowId = row && (path.length === 4 && /^(?:id|[a-z_]+_id)$/.test(path[3]!)
+      || path.length === 5 && path[3] === "source_ids" && /^\d+$/.test(path[4]!));
+    const contextField = /^(?:courseId|activityId|blockId|attemptId|itemVersionId|sourceId|chunkId)$/;
+    const contextId = row && path[1] === "opening_learning_attempts"
+      && (path.length === 5 && path[3] === "context_anchor" && contextField.test(path[4]!)
+        || path.length === 6 && path[3] === "create_intent" && path[4] === "contextAnchor" && contextField.test(path[5]!));
+    if ((rowId || contextId) && uuidSchema.safeParse(value).success) return;
+    // Receipts may themselves be JSON strings. Parse only JSON containers, and
+    // retain their original semantic path so their text is checked recursively.
+    if (/^\s*[[{]/.test(value)) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(value); } catch { /* Non-JSON text is checked below. */ }
+      if (parsed !== undefined) { assertNoPrivateAnswer(parsed, answer, path); return; }
+    }
+    expect(value, JSON.stringify(path)).not.toContain(answer);
+  } else if (typeof value === "number") expect(String(value), JSON.stringify(path)).not.toContain(answer);
+  else if (Array.isArray(value)) value.forEach((entry, index) => assertNoPrivateAnswer(entry, answer, [...path, String(index)]));
+  else if (value && typeof value === "object") for (const [key, entry] of Object.entries(value)) {
+    expect(key, JSON.stringify(path)).not.toContain(answer);
+    assertNoPrivateAnswer(entry, answer, [...path, key]);
+  }
+}
+it("ignores answer digits only in UUID backup row IDs and context references", () => {
+  const id = "9827300d-2603-4ad7-89cb-e5b00c25d4cb";
+  const backup = { tables: {
+    opening_learning_attempts: [{ id, context_anchor: { attemptId: id, purpose: "learning_help" },
+      create_intent: { contextAnchor: { attemptId: id }, problem: null } }],
+    opening_learning_shadow_predictions: [{ attempt_id: id, receipt: JSON.stringify({ mode: "shadow", predictions: [] }) }],
+  } };
+  // Deterministically reproduce the original raw-substring false positive.
+  expect(JSON.stringify(backup)).toContain(candidate.answer);
+  expect(() => assertNoPrivateAnswer(backup, candidate.answer)).not.toThrow();
+  expect(() => assertNoPrivateAnswer(JSON.stringify(backup), candidate.answer)).not.toThrow();
+});
+it("still detects private answers in backup text, nested JSON and stringified receipts", () => {
+  const id = "9827300d-2603-4ad7-89cb-e5b00c25d4cb";
+  for (const row of [
+    { id: candidate.answer }, { id: `prefix-${id}` }, { id: `${id}-suffix` },
+    { text: `The answer is ${candidate.answer}.` }, { text: id },
+    { create_intent: { problem: { answer: candidate.answer } } },
+    { create_intent: { "contextAnchor.attemptId": id } },
+    { "context_anchor.attemptId": id },
+    { create_intent: JSON.stringify({ "contextAnchor.attemptId": id }) },
+    { create_intent: { contextAnchor: { attemptId: candidate.answer } } },
+    { context_anchor: { attemptId: `answer=${candidate.answer}` } },
+    { context_anchor: { text: candidate.answer } },
+    { context_anchor: { text: id } },
+    { receipt: { nested: [{ answer: Number(candidate.answer) }] } },
+    { receipt: JSON.stringify({ nested: { answer: candidate.answer } }) },
+    { receipt: JSON.stringify({ nested: { text: id } }) },
+    { receipt: '{"answer":"\\u0032\\u0036\\u0030\\u0033"}' },
+    { receipt: `invalid JSON { answer: ${candidate.answer}` },
+    { [candidate.answer]: "unexpected field" },
+  ]) {
+    const backup = { tables: { opening_learning_attempts: [row] } };
+    expect(() => assertNoPrivateAnswer(backup, candidate.answer), JSON.stringify(row)).toThrow();
+  }
+});
 // Observe actual SQL, including nested transaction clients, without stubbing rows.
 function observedSql(db: Sql | TransactionSql, queries: string[]): Sql {
   return new Proxy(db, {
@@ -418,8 +483,8 @@ it("generates into authoritative private admission, never a public block/config/
   expect(row).toMatchObject({ state: "available", question_json: { text: candidate.text }, key_json: { answer: candidate.answer },
     identity_json: { reservedQuestionId: result.privateRefId, requirementId: x.requirement.id, requirementRevision: 1, familyId: "arithmetic:*" } });
   expect(await f.sql`SELECT id FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
-  const backup = JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope));
-  expect(backup).not.toContain(candidate.text); expect(backup).not.toContain(candidate.answer);
+  const backup = await readOpeningBackupRecords(f.sql, f.scope);
+  expect(JSON.stringify(backup)).not.toContain(candidate.text); assertNoPrivateAnswer(backup, candidate.answer);
   expect(JSON.stringify(result)).not.toContain(candidate.answer);
 });
 it("rejects a plausible wrong key and concurrent generation admits only one exact question", async () => {
@@ -477,7 +542,7 @@ it("proves real generated supply through coverage, racing reservation, issued ow
     .toMatchObject({ status: "ready", available: 1 });
   expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement, { kind: "new_family", excludedFamilyIds: [] }))
     .toMatchObject({ status: "missing", available: 0 });
-  expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
+  assertNoPrivateAnswer(await readOpeningBackupRecords(f.sql, f.scope), candidate.answer);
 });
 
 it("runs server-only pinned authority inside the original publication transaction before any spec writes", async () => {
@@ -623,7 +688,7 @@ it("runs only public compilation through the production worker and real budget l
     expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(JSON.stringify(await f.sql`SELECT blocks FROM library_revisions WHERE workspace_id=${f.scope.workspaceId}`)).toBe(revisions);
     expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
-    expect(JSON.stringify(await readOpeningBackupRecords(f.sql, f.scope))).not.toContain(candidate.answer);
+    assertNoPrivateAnswer(await readOpeningBackupRecords(f.sql, f.scope), candidate.answer);
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
 });
 it("keeps production supply unknown while direct unsupported inventory stays missing and mastery unknown", async () => {

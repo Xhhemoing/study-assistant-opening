@@ -14,12 +14,19 @@ export const spanLessonDetailsSchema = z.object({ repair: spanRepairContextSchem
 });
 // Bound locally only after a successful lesson read/create confirms the route reference.
 export type SpanLessonDetails = z.infer<typeof spanLessonDetailsSchema> & { continuityRetestId?: string };
+export class SpanLessonRequestError extends Error {
+  constructor(readonly status: number, readonly code: string | undefined, message: string) {
+    super(message);
+    this.name = "SpanLessonRequestError";
+  }
+}
 export async function spanLessonRequest<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {
   const response = await createSessionFetch(fetch)(path, { ...init, headers: { "content-type": "application/json", ...init?.headers }, cache: "no-store" });
   const body: unknown = await response.json();
   if (!response.ok) {
-    const error = z.object({ error: z.object({ message: z.string() }) }).safeParse(body);
-    throw new Error(error.success ? error.data.error.message : "学习进度暂未确认；原题和答案保留，请重新读取。");
+    const error = z.object({ error: z.object({ message: z.string(), code: z.string().optional() }) }).safeParse(body);
+    throw new SpanLessonRequestError(response.status, error.success ? error.data.error.code : undefined,
+      error.success ? error.data.error.message : "学习进度暂未确认；原题和答案保留，请重新读取。");
   }
   return schema.parse(body);
 }
