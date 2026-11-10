@@ -55,11 +55,26 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
     FROM heads o
     LEFT JOIN LATERAL (SELECT identity_current,requirement_key,observation_id FROM (${openingExamIdentityStateQuery(db, scope)}) identity
       WHERE identity.attempt_id=o.attempt_id OR identity.observation_id=o.current_root_id LIMIT 1) exam_identity ON TRUE
+    -- Same answer-event walk as evidence loading: attribution/check-only heads
+    -- inherit capture, while a changed answer starts a new server-ordered event.
+    LEFT JOIN LATERAL (WITH RECURSIVE answer_chain AS (
+        SELECT o.id,o.revises_observation_id,o.answer,o.recorded_at,o.workspace_history_revision,0 AS depth
+        UNION ALL
+        SELECT previous.id,previous.revises_observation_id,previous.answer,previous.recorded_at,previous.workspace_history_revision,chain.depth+1
+        FROM answer_chain chain JOIN opening_learning_observations previous ON previous.id=chain.revises_observation_id
+          AND previous.workspace_id=o.workspace_id AND previous.owner_user_id=o.owner_user_id
+          AND COALESCE(previous.root_observation_id,previous.id)=o.current_root_id
+        WHERE chain.answer IS NOT DISTINCT FROM previous.answer
+      ) SELECT workspace_history_revision,
+        CASE WHEN id=o.current_root_id THEN o.submitted_at ELSE recorded_at END AS captured_at
+        FROM answer_chain ORDER BY depth DESC LIMIT 1) answer_event ON TRUE
     LEFT JOIN LATERAL (SELECT max(h.history_revision) AS revision,
-        bool_or(cross_question.same_question AND h.delivered_at<o.started_at
+        bool_or(cross_question.same_question
+          AND CASE WHEN h.workspace_history_revision IS NOT NULL AND answer_event.workspace_history_revision>0
+            THEN h.workspace_history_revision<answer_event.workspace_history_revision
+            ELSE h.delivered_at IS NULL OR answer_event.captured_at IS NULL OR h.delivered_at<=answer_event.captured_at END
           AND COALESCE(h.kind,'hint')<>'instruction'
-          AND (h.support_domain IS DISTINCT FROM 'language' OR o.requirement_key LIKE 'language:%')
-          AND h.attempt_id IS NOT NULL) AS prior_question_help
+          AND (h.support_domain IS DISTINCT FROM 'language' OR o.requirement_key LIKE 'language:%')) AS prior_question_help
       FROM opening_help_exposures h
       LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
       JOIN opening_learning_sessions origin ON origin.id=o.session_id AND origin.workspace_id=o.workspace_id AND origin.owner_user_id=o.owner_user_id
@@ -108,8 +123,9 @@ export function openingEligibilityStateQuery(db: LearningSql, scope: Scope, filt
     COALESCE(p.head_observation_id=live.id AND p.head_revision=live.workspace_history_revision
       AND p.policy_version=${openingEligibilityPolicyVersion()} AND p.help_revision=live.live_help_revision
       -- Old positive projections may already have the same max help revision
-      -- from a newer receipt. Exact prior classroom help still invalidates yes;
-      -- fixed no/unknown projections remain fresh, with no public policy change.
+      -- from a newer receipt. Exact classroom help before answer capture still
+      -- invalidates yes, including anchor-only association-unknown deliveries.
+      -- Postcapture help does not taint the old answer; no/unknown stays fresh.
       AND NOT (p.independent_attempt='yes' AND live.prior_question_help)
       AND p.item_matches=live.live_item_matches AND p.source_states=live.live_source_states AND p.privacy_source_ids=live.live_privacy_ids,FALSE) AS fresh,
     EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=live.workspace_id AND e.source_id::text=ANY(live.live_privacy_ids)) AS privacy_excluded

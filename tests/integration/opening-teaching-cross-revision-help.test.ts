@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { LearningObservation } from "@aistudy/contracts";
-import { assembleLearnerState, learnerEvidenceDisplayState, buildDecisionInput, courseRouteRetestOutcome } from "@aistudy/domain";
+import { assembleLearnerState, learnerEvidenceDisplayState, buildDecisionInput, courseRouteRetestOutcome, evaluateEvidenceEligibility } from "@aistudy/domain";
 import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 import { POST as commandHandler } from "../../apps/web/src/app/api/opening/teaching/activities/[id]/commands/route";
 import { POST as attemptHandler } from "../../apps/web/src/app/api/opening/attempts/route";
 import { POST as submitHandler } from "../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
-import { openingEligibilityStateQuery, createOpeningLearnerStateService, createOpeningLearningRepository, createOpeningTeachingActivitiesRepository,
+import { openingEligibilityStateQuery, readOpeningLearningEvidenceContext, createOpeningLearnerStateService, createOpeningLearningRepository, createOpeningTeachingActivitiesRepository,
  createOpeningTeachingContentRepository, createOpeningTeachingHintRepository } from "@aistudy/database";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningTeachingCommandService } from "../../apps/web/src/features/opening/teaching/command-service";
@@ -32,13 +32,20 @@ beforeAll(async () => { fixture = await createOpeningFixture();
 afterAll(async () => { setAuthRuntimeForTests(null);await runtime?.close();await fixture?.close(); });
 function record(name: string, data: unknown) { if(process.env.REACH_RAW_PATH) appendFileSync(process.env.REACH_RAW_PATH,JSON.stringify({utc:new Date().toISOString(),name,data})+"\n"); }
 const body="求二阶单位矩阵的秩。";
-async function seed() {
+async function seed(twoQuestions = false, extraContext = false) {
  const base=await learningAttemptFixture(fixture), sourceIds=[base.sourceId];
  const activity=await createOpeningTeachingActivitiesRepository(fixture.sql).create(fixture.scope,{clientKey:randomUUID(),intentKind:"topic",intentSummary:"矩阵秩",courseId:base.courseId,sourceIds,createIntent:{}});
  const content=createOpeningTeachingContentRepository(fixture.sql), blockId=randomUUID(), answerId=randomUUID();
- const blocks=[{id:blockId,type:"prompt",content:{text:body}},{id:answerId,type:"answer_key",content:{answer:"2",hidden:true,hints:{direction:"检查两列。",concept:"线性无关列的数量。",firstStep:"写出第一列。"}}}];
- const unit=await content.createUnit(fixture.scope,{title:"矩阵秩",blocks});
+ const blocks: Array<{id:string;type:string;content:Record<string,unknown>}>=[{id:blockId,type:"prompt",content:{text:body}},{id:answerId,type:"answer_key",content:{answer:"2",hidden:true,hints:{direction:"检查两列。",concept:"线性无关列的数量。",firstStep:"写出第一列。"}}}];
  const order=[{blockId,position:0,role:"prompt" as const,blockType:"prompt"},{blockId:answerId,position:1,role:"answer_key" as const,blockType:"answer_key"}];
+ const secondBlockId=randomUUID(), secondAnswerId=randomUUID();
+ if(twoQuestions) {
+  blocks.push({id:secondBlockId,type:"prompt",content:{text:"求三阶单位矩阵的秩。"}},{id:secondAnswerId,type:"answer_key",content:{answer:"3"}});
+  order.push({blockId:secondBlockId,position:2,role:"prompt",blockType:"prompt"},{blockId:secondAnswerId,position:3,role:"answer_key",blockType:"answer_key"});
+ }
+ const extraBlockId=randomUUID(),unboundAnswerId=randomUUID();
+ if(extraContext) blocks.push({id:extraBlockId,type:"paragraph",content:{text:"条件：仅考虑实矩阵。"}},{id:unboundAnswerId,type:"answer_key",content:{answer:"未绑定答案"}});
+ const unit=await content.createUnit(fixture.scope,{title:"矩阵秩",blocks});
  const refs=[{sourceId:base.sourceId,chunkId:base.chunkId,version:1}];
  await content.publishActivitySpec(fixture.scope,{activityId:activity.id,teachingUnitId:unit.id,expectedVersion:0,expectedRevisionNumber:1,revisionNumber:1,blockOrder:order,sourceRefs:refs});
  const learning=createOpeningLearningRepository(fixture.sql), service=createOpeningAttemptService(fixture.sql);
@@ -48,7 +55,7 @@ async function seed() {
  const hint=(attemptId:string)=>createOpeningTeachingHintRepository(fixture.sql).read(fixture.scope,{attemptId,level:1});
  const command=(kind:"example"|"rephrase"|"expand"|"branch"|"return",expectedVersion=1,expectedPathVersion?:number)=>createOpeningTeachingCommandService(fixture.sql).execute(fixture.scope,activity.id,{clientKey:randomUUID(),kind,blockId,expectedVersion,...(expectedPathVersion===undefined?{}:{expectedPathVersion}),prompt:"用更清楚的方式说明本题"});
  const revise=(old:LearningObservation,answer:string)=>createOpeningObservationService(learning).reviseObservation(fixture.scope,{rootObservationId:old.rootObservationId??old.id,revisesObservationId:old.id,expectedHead:old.id,revisionKind:"replace",reason:"synthetic correction",clientKey:randomUUID(),replacement:{answer,outcome:"unverified",assistance:"independent"}});
- return {...base,activity,content,unit,blocks,blockId,answerId,session,start,submit,hint,command,revise,order,refs,service};
+ return {...base,activity,content,unit,blocks,blockId,answerId,secondBlockId,secondAnswerId,extraBlockId,unboundAnswerId,session,start,submit,hint,command,revise,order,refs,service};
 }
 it("refuses example without changing question identity or losing help",async()=>{
  const f=await seed(),old=await f.start(); await f.hint(old.id); const result=await f.command("example");
@@ -190,6 +197,102 @@ it("legacy anchor-only receipt cannot become independent after publication chang
  await f.command("rephrase");const next=await f.start(2),observed=await f.submit(next.id);
  expect(observed.eligibility?.independentAttempt).toBe("unknown");
  expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[observed.id]}))[0]?.fresh).toBe(true);
+});
+
+it.each([false,true])("multi-answer reference adoption retains only the helped question's qualification (Q2 issued=%s)",async issued=>{
+ const f=await seed(true),old=await f.start();await f.hint(old.id);
+ // Current pinned order proves unattempted bindings; an issued item's immutable
+ // spec also proves historical bindings without guessing from block adjacency.
+ if(issued) await f.service.create(fixture.scope,{sessionId:f.session.id,clientKey:randomUUID(),teachingBlock:{blockId:f.secondBlockId,contentVersion:1}});
+ const changed=f.blocks.map(b=>(b.id===f.answerId||b.id===f.secondAnswerId)?{...b,content:{...b.content,answer:b.id===f.answerId?"秩为2。":"秩为3。"}}:b);
+ const revision=await f.content.writeUnitBlocks(fixture.scope,f.unit.id,changed);
+ await createOpeningTeachingContentService(fixture.sql).adoptReferenceRevision(fixture.scope,f.activity.id,{expectedContentVersion:1,expectedRevisionNumber:1,revisionNumber:revision.revisionNumber});
+ const next=await f.start(2);
+ const response=await submitHandler(new Request(`https://localhost/api/opening/attempts/${next.id}/submit`,{method:"POST",headers:{cookie:fixture.cookie,"content-type":"application/json"},body:JSON.stringify({clientKey:randomUUID(),answer:"2",outcome:"unverified",assistance:"independent",verdictSource:"self_report"})}),{params:Promise.resolve({id:next.id})});
+ expect(response.status).toBe(201);const q1=await response.json();
+ const second=await f.service.create(fixture.scope,{sessionId:f.session.id,clientKey:randomUUID(),teachingBlock:{blockId:f.secondBlockId,contentVersion:2}}),q2=await f.submit(second.id,"3");
+ record("multi-answer-adoption",{old,next,q1,q2});
+ expect(q1.eligibility?.independentAttempt).toBe("no");
+ expect(q2.eligibility).toMatchObject({independentAttempt:"yes",verifiedCorrect:"unknown"});
+ expect((await readOpeningCourseObservationHeads(fixture.sql,fixture.scope,f.courseId)).find(o=>o.id===q1.id)?.eligibility?.independentAttempt).toBe("no");
+ // Move the mutable publication pin away from both compared revisions. Issued
+ // bindings must still explain A2; don't silently rely only on the current spec.
+ expect(await f.command("rephrase",2)).toMatchObject({ok:true,contentVersion:3});
+ expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[q1.id]}))[0]).toMatchObject({fresh:true,independent_attempt:"no",prior_question_help:true});
+});
+
+it.each(["unbound_answer","context","other_prompt","answer_metadata"] as const)("multi-question comparison preserves %s differences",async kind=>{
+ const f=await seed(true,true),old=await f.start();await f.hint(old.id);
+ const changed=f.blocks.map(b=>{
+  if(b.id===f.answerId) return {...b,content:{...b.content,answer:"秩为2。"}};
+  if(b.id===f.secondAnswerId) return {...b,content:{...b.content,answer:"秩为3。",...(kind==="answer_metadata"?{hidden:false}:{})}};
+  if(kind==="unbound_answer"&&b.id===f.unboundAnswerId) return {...b,content:{...b.content,answer:"新的未绑定答案"}};
+  if(kind==="context"&&b.id===f.extraBlockId) return {...b,content:{...b.content,text:"条件：仅考虑复矩阵。"}};
+  if(kind==="other_prompt"&&b.id===f.secondBlockId) return {...b,content:{...b.content,text:"求四阶单位矩阵的秩。"}};
+  return b;
+ });
+ const revision=await f.content.writeUnitBlocks(fixture.scope,f.unit.id,changed);
+ await f.content.publishActivitySpec(fixture.scope,{activityId:f.activity.id,teachingUnitId:f.unit.id,expectedVersion:1,expectedRevisionNumber:1,revisionNumber:revision.revisionNumber,blockOrder:f.order,sourceRefs:f.refs});
+ const next=await f.start(2),observed=await f.submit(next.id);
+ expect(observed.eligibility).toMatchObject({independentAttempt:"yes",verifiedCorrect:"unknown"});
+});
+
+it.each(["before_attempt","during_attempt","after_capture","server_before_clock_after","legacy_before","legacy_after"] as const)("cross-session anchor-only cache repair respects answer capture (%s)",async timing=>{
+ const postcapture=timing==="after_capture"||timing==="legacy_after";
+ const f=await seed(),old=await f.start();
+ const legacy=await f.hint(old.id);
+ await fixture.sql`UPDATE opening_help_exposures SET item_version_id=NULL,attempt_id=NULL,problem_id=NULL WHERE id=${legacy.exposureReceipt.id}`;
+ await f.command("rephrase");
+ const session=await createOpeningLearningRepository(fixture.sql).createSession(fixture.scope,{courseId:f.courseId,activityId:f.activity.id,skillLabel:"矩阵秩",sourceIds:[f.sourceId]});
+ const next=await f.service.create(fixture.scope,{sessionId:session.id,clientKey:randomUUID(),teachingBlock:{blockId:f.blockId,contentVersion:2}}),observed=await f.submit(next.id);
+ // A newer current-question receipt already supplied the old cache's max revision.
+ const mask=await f.hint(next.id);
+ // Synthetic legacy import: wall-clock remains before capture, but authoritative
+ // server order records delivery after it. Never call hints on a stale attempt.
+ if(timing==="after_capture") await fixture.sql`UPDATE opening_help_exposures SET workspace_history_revision=(SELECT workspace_history_revision FROM opening_help_exposures WHERE id=${mask.exposureReceipt.id}) WHERE id=${legacy.exposureReceipt.id}`;
+ if(timing==="during_attempt") await fixture.sql`UPDATE opening_help_exposures SET delivered_at=(SELECT started_at+(submitted_at-started_at)/2 FROM opening_learning_observations WHERE id=${observed.id}) WHERE id=${legacy.exposureReceipt.id}`;
+ if(timing==="server_before_clock_after") await fixture.sql`UPDATE opening_help_exposures SET delivered_at=(SELECT submitted_at+interval '1 hour' FROM opening_learning_observations WHERE id=${observed.id}) WHERE id=${legacy.exposureReceipt.id}`;
+ if(timing==="legacy_before"||timing==="legacy_after") await fixture.sql`UPDATE opening_help_exposures SET workspace_history_revision=NULL,delivered_at=(SELECT submitted_at+${timing==="legacy_after"?1:-1}*interval '1 hour' FROM opening_learning_observations WHERE id=${observed.id}) WHERE id=${legacy.exposureReceipt.id}`;
+ const before=await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${observed.id}`;
+ await readOpeningCourseLearningSummary(fixture.sql,fixture.scope,{courseId:f.courseId,limit:10});
+ const [live]=await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[observed.id]});
+ await fixture.sql`UPDATE opening_learning_eligibility SET independent_attempt='yes',reason_codes=ARRAY[]::text[],help_revision=${Number(live!.live_help_revision)} WHERE root_observation_id=${observed.id}`;
+ const [warm]=await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[observed.id]});
+ const evidence=await readOpeningLearningEvidenceContext(fixture.sql,fixture.scope,observed);
+ const domain=evaluateEvidenceEligibility(evidence.observation,evidence.context);
+ const receiptsBeforeRepair=await fixture.sql`SELECT * FROM opening_help_exposures WHERE id IN (${legacy.exposureReceipt.id},${mask.exposureReceipt.id}) ORDER BY id`;
+ expect(domain.independentAttempt).toBe(postcapture?"yes":"unknown");
+ if(!postcapture) expect(domain.reasonCodes).toContain("help_association_unknown");
+ record("anchor-masked-cache",{timing,postcapture,legacy,mask,observed,warm,domain});
+ expect(warm?.fresh).toBe(postcapture);
+ expect((await readOpeningCourseLearningSummary(fixture.sql,fixture.scope,{courseId:f.courseId,limit:10})).status).toBe("ready");
+ const [repaired]=await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[observed.id]});
+ expect(repaired).toMatchObject({fresh:true,independent_attempt:postcapture?"yes":"unknown"});
+ if(!postcapture) expect(repaired?.reason_codes).toContain("help_association_unknown");
+ expect(await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${observed.id}`).toEqual(before);
+ expect(await fixture.sql`SELECT * FROM opening_help_exposures WHERE id IN (${legacy.exposureReceipt.id},${mask.exposureReceipt.id}) ORDER BY id`).toEqual(receiptsBeforeRepair);
+});
+
+it.each([false,true])("anchor-only masked cache follows the last changed answer, not metadata head (changed=%s)",async changed=>{
+ const f=await seed(),old=await f.start(),legacy=await f.hint(old.id);
+ await fixture.sql`UPDATE opening_help_exposures SET item_version_id=NULL,attempt_id=NULL,problem_id=NULL WHERE id=${legacy.exposureReceipt.id}`;
+ await f.command("rephrase");
+ const session=await createOpeningLearningRepository(fixture.sql).createSession(fixture.scope,{courseId:f.courseId,activityId:f.activity.id,skillLabel:"矩阵秩",sourceIds:[f.sourceId]});
+ const next=await f.service.create(fixture.scope,{sessionId:session.id,clientKey:randomUUID(),teachingBlock:{blockId:f.blockId,contentVersion:2}}),original=await f.submit(next.id,"1"),mask=await f.hint(next.id);
+ // Imported legacy delivery is after the original answer but before correction.
+ await fixture.sql`UPDATE opening_help_exposures SET workspace_history_revision=(SELECT workspace_history_revision FROM opening_help_exposures WHERE id=${mask.exposureReceipt.id}) WHERE id=${legacy.exposureReceipt.id}`;
+ // Make the masking receipt instruction-only so only legacy association matters.
+ await fixture.sql`UPDATE opening_help_exposures SET kind='instruction' WHERE id=${mask.exposureReceipt.id}`;
+ const replacement=await f.revise(original,changed?"2":"1");
+ const head=replacement.observation!;
+ // One additional metadata-only revision must retain the latest answer event.
+ const metadata=(await f.revise(head,head.answer!)).observation!;
+ expect(metadata.eligibility?.independentAttempt).toBe(changed?"unknown":"yes");
+ const [live]=await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[original.id]});
+ await fixture.sql`UPDATE opening_learning_eligibility SET independent_attempt='yes',reason_codes=ARRAY[]::text[],help_revision=${Number(live!.live_help_revision)} WHERE root_observation_id=${original.id}`;
+ expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[original.id]}))[0]?.fresh).toBe(!changed);
+ await readOpeningCourseLearningSummary(fixture.sql,fixture.scope,{courseId:f.courseId,limit:10});
+ expect((await openingEligibilityStateQuery(fixture.sql,fixture.scope,{rootIds:[original.id]}))[0]).toMatchObject({fresh:true,independent_attempt:changed?"unknown":"yes"});
 });
 
 it("authenticated HTTP rephrase preserves old help qualification on subsequent submission",async()=>{
