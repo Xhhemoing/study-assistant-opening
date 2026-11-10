@@ -13,6 +13,31 @@ test('incident eligibility Python cases run in the selected tooling suite', () =
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test('actual repair-check shell-generated code loads the trusted dependency inventory in memory', () => {
+  const script = readFileSync(resolve('infra/deploy/deploy-hermes.sh'), 'utf8');
+  const entry = script.slice(script.indexOf('if [[ "$ACTION" == repair-check ]]'), script.indexOf("remote_archive=''"));
+  // Run the production shell generator, not a copied Python entry. Stub only
+  // release/network gates; the generated code is executed locally below.
+  const generated = spawnSync('bash', ['-c', `set -euo pipefail
+verify_release() { :; }
+verify_repair_git() { :; }
+fail() { echo "$*" >&2; exit 1; }
+${script.split('\n').find(line => line.startsWith('quote()'))}
+ssh_run() {
+  python3 -I -S -B -c 'import shlex,sys; args=shlex.split(sys.argv[1]); assert args[:5] == ["/usr/bin/python3", "-I", "-S", "-B", "-c"]; assert args[6:] == ["/fixture/state", "/fixture/current", "/fixture/systemd"]; print(args[5], end="")' "$1"
+}
+${entry}`], {
+    encoding: 'utf8', env: { ...process.env, ACTION: 'repair-check', EXPLICIT_HOST: 'fixture.invalid',
+      SCRIPT_DIR: resolve('infra/deploy'), DEPLOY_STATE: '/fixture/state', CURRENT_LINK: '/fixture/current', SYSTEMD_DIR: '/fixture/systemd' },
+  });
+  assert.equal(generated.status, 0, generated.stdout + generated.stderr);
+  assert(generated.stdout.length > 0);
+  const checked = spawnSync('python3', ['-I', '-S', '-B', resolve('tests/tooling/hermes_pre_migration_repair_test.py'), '--generated-check'], {
+    encoding: 'utf8', input: generated.stdout,
+  });
+  assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+});
+
 const inventory = Array.from({ length: 110 }, (_, i) => `${String(i + 1).padStart(4, '0')}_migration.sql`);
 const valid = () => ({ readOnly: true, registryReadyWithoutWrites: true, applied: [], alreadyApplied: inventory.slice(0, 107), pending: inventory.slice(107) });
 test('repair accepts only exact contiguous ledger 107 and pending 108/109/110', () => {

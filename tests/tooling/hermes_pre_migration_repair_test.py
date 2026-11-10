@@ -1,11 +1,16 @@
 """Synthetic incident/manager facts, real descriptor-based read-only state reads.
 No production state, PostgreSQL, systemd mutations or role grants.
 """
+import contextlib
+import fcntl
+import functools
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -17,6 +22,9 @@ spec.loader.exec_module(bootstrap)
 bootstrap.TRUSTED_UID = os.geteuid()
 state = bootstrap.SourceLoader(ROOT).load('hermes-writer-state.py')
 state.TRUSTED_UID = os.geteuid()
+GENERATED_CHECK = sys.stdin.read() if '--generated-check' in sys.argv else None
+if GENERATED_CHECK is not None:
+    sys.argv.remove('--generated-check')
 
 
 class Repair(unittest.TestCase):
@@ -36,6 +44,7 @@ class Repair(unittest.TestCase):
         (self.state / 'last-transition').symlink_to(self.state / 'releases' / '20261108T160832-39068')
         self.write(self.state / 'migration-forward-only', json.dumps({
             'transition': str(self.incident), 'reason': 'owner exited without durable success', 'ownerPid': 679352}))
+        self.write(self.state / 'deploy.lock', '')
         self.write(self.state / 'writers-fenced', 'fenced\n')
         self.write(self.state / 'activation-incomplete', str(self.incident) + '\n')
         self.write(self.incident / 'from-target', str(self.old) + '\n')
@@ -87,7 +96,11 @@ class Repair(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(state, 'present', present).start()
         patch.dict(state.RESOURCE_ROOTS, {str(self.systemd): str(self.root / 'systemd.control')}).start()
+        self.commands = []
         def manager(command, **options):
+            self.commands.append(command)
+            if command[0] not in ('/usr/bin/busctl', '/usr/bin/systemctl') or command[1] not in ('--system', 'show'):
+                raise AssertionError('Unexpected external command: ' + repr(command))
             if command[0] == '/usr/bin/busctl':
                 unit = next(unit for unit in self.values if unit.replace('-', '_2d').replace('.', '_2e') in command[5])
                 raw = json.dumps({'type': 'a(sbbsi)', 'data': self.conditions[unit]})
@@ -115,15 +128,98 @@ class Repair(unittest.TestCase):
     def check(self):
         before = self.snapshot()
         try:
+            if GENERATED_CHECK is not None:
+                return self.generated_check()
             return state.repair_check(str(self.state), str(self.current), str(self.systemd))
         finally:
             self.assertEqual(before, self.snapshot(), 'check wrote persistent state')
+            if str(self.state / 'repair-adopted') not in before:
+                self.assertFalse((self.state / 'repair-adopted').exists())
+
+    def generated_check(self, code=None):
+        # Execute the actual shell-generated program unchanged. Object seams are
+        # installed after its real memory loader has loaded state, before lock IO.
+        # Never substitute the loader, SystemdManager or filesystem/resource code.
+        namespace, output = {'__name__': 'generated_repair_check'}, io.StringIO()
+        bound = False
+        def trace(frame, event, arg):
+            nonlocal bound
+            if frame.f_code.co_filename == '<repair-check>' and not bound and 'm' in namespace:
+                bound = True
+                module, entry = namespace['m'], namespace['bootstrap']
+                module.TRUSTED_UID = os.geteuid()
+                module.present = state.present
+                module.RESOURCE_ROOTS = dict(state.RESOURCE_ROOTS)
+                entry.safe_open = functools.partial(entry.safe_open, uid=os.geteuid())
+            return trace
+        active = True
+        def no_writes(event, args):
+            if not active:
+                return
+            if event == 'open':
+                if args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                    raise AssertionError('check opened a writable file')
+            if event in ('os.mkdir', 'os.remove', 'os.rename', 'os.rmdir', 'os.chmod',
+                         'os.chown', 'os.link', 'os.symlink', 'os.truncate', 'subprocess.Popen', 'socket.connect'):
+                raise AssertionError('check attempted a side effect: ' + event)
+        sys.addaudithook(no_writes)
+        previous = sys.gettrace()
+        try:
+            with patch.object(sys, 'argv', ['repair-check', str(self.state), str(self.current), str(self.systemd)]), \
+                    patch.object(os, 'fsync', side_effect=AssertionError('check fsync')), \
+                    patch.object(os, 'write', side_effect=AssertionError('check write')), contextlib.redirect_stdout(output):
+                sys.settrace(trace)
+                exec(compile(code if code is not None else GENERATED_CHECK, '<repair-check>', 'exec'), namespace)
+                self.assertTrue(bound)
+                self.assertIs(namespace['loader'].modules['hermes-peer-broker.py'].state_api, namespace['m'])
+                return json.loads(output.getvalue())
+        finally:
+            active = False
+            sys.settrace(previous)
+            if 'fd' in namespace:
+                os.close(namespace['fd'])
 
     def test_exact_incident_is_read_only_and_does_not_claim_database_eligibility(self):
         result = self.check()
         self.assertTrue(result['eligible'])
         self.assertEqual(result['scope'], 'pre-migration-filesystem-manager-only')
         self.assertFalse(result['automaticRetry'])
+        self.assertEqual(sum(command[:2] == ['/usr/bin/systemctl', 'show'] and '--all' not in command
+                             for command in self.commands), 4)
+
+    @unittest.skipUnless(GENERATED_CHECK is not None, 'requires actual shell-generated code')
+    def test_memory_inventory_is_complete_before_any_sibling_executes(self):
+        for name in bootstrap.SOURCES:
+            with self.subTest(name=name):
+                code = GENERATED_CHECK.replace("bootstrap=types.ModuleType('bootstrap')",
+                                               "sources.pop(" + repr(name) + ")\nbootstrap=types.ModuleType('bootstrap')")
+                with self.assertRaises((KeyError, ValueError)):
+                    self.generated_check(code)
+        self.assertTrue(self.generated_check(GENERATED_CHECK)['eligible'])
+
+    @unittest.skipUnless(GENERATED_CHECK is not None, 'requires actual shell-generated code')
+    def test_read_only_existing_lock_and_dac_are_mandatory(self):
+        lock = self.state / 'deploy.lock'
+        lock.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.check()
+        self.assertFalse(lock.exists(), 'check created its lock')
+        self.write(lock, '')
+        with lock.open('rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                self.check()
+        for path, mode in ((lock, 0o644), (self.state, 0o777),
+                           (self.systemd / state.WORKER, 0o666)):
+            original = path.stat().st_mode & 0o777
+            path.chmod(mode)
+            with self.subTest(path=path), self.assertRaises(PermissionError):
+                self.check()
+            path.chmod(original)
+        lock.unlink()
+        lock.symlink_to(self.state / 'writers-fenced')
+        with self.assertRaises(OSError):
+            self.check()
 
     def test_owner_alive_refuses_without_signal_or_rewrite(self):
         self.owner_alive = True
@@ -228,8 +324,20 @@ class Repair(unittest.TestCase):
                 self.stopped[state.WORKER][key] = original
 
     def test_wrong_guard_or_target_or_new_wrapper_refuse(self):
-        self.write(self.state / 'migration-forward-only', '{}')
+        guard = self.state / 'migration-forward-only'
+        original = guard.read_text()
+        self.write(guard, '{}')
         with self.assertRaises(ValueError):
+            self.check()
+        self.write(guard, original)
+        self.current.unlink()
+        self.current.symlink_to(self.root / 'different')
+        with self.assertRaisesRegex(ValueError, 'current target'):
+            self.check()
+        self.current.unlink()
+        self.current.symlink_to(self.old)
+        self.write(self.systemd / (state.WORKER + '.d') / '96-aistudy-writer-exec.conf', '[Service]\n')
+        with self.assertRaisesRegex(ValueError, 'Historical fence'):
             self.check()
 
 

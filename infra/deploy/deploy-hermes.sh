@@ -79,10 +79,22 @@ if [[ "$ACTION" == repair-check ]]; then
   verify_repair_git
   [[ -n "$EXPLICIT_HOST" ]] || fail 'Explicit HOST is required for repair check.'
   check_code="import fcntl,types,sys
+sources=$(python3 -c 'import json,sys; from pathlib import Path; print(json.dumps({name: (Path(sys.argv[1])/name).read_text() for name in ("hermes-trusted-loader.py", "hermes-writer-exec.py", "hermes-peer-broker.py", "hermes-writer-state.py")}))' "$SCRIPT_DIR")
 bootstrap=types.ModuleType('bootstrap')
-exec($(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$SCRIPT_DIR/hermes-trusted-loader.py"), bootstrap.__dict__)
-m=types.ModuleType('repair'); m.bootstrap=bootstrap
-exec($(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1]).read()))' "$SCRIPT_DIR/hermes-writer-state.py"), m.__dict__)
+exec(sources['hermes-trusted-loader.py'], bootstrap.__dict__)
+class MemorySourceLoader(bootstrap.SourceLoader):
+    def verify(self):
+        # Reviewed checkout bytes arrive over SSH, never as remote source files.
+        # Keep the real loader/cache/dependency injection and exact inventory;
+        # state and manager still use the descriptor-based DAC readers.
+        if set(sources) != set(bootstrap.SOURCES) or any(not isinstance(value,str) for value in sources.values()):
+            raise ValueError('Invalid memory source inventory')
+        captured={name: (value.encode(),None) for name,value in sources.items()}
+        if self.sources is not None and captured != self.sources:
+            raise ValueError('Memory source inventory changed')
+        self.sources=captured
+loader=MemorySourceLoader('/reviewed-memory')
+m=loader.load('hermes-writer-state.py')
 fd=bootstrap.safe_open(sys.argv[1]+'/deploy.lock',private=True)
 fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
 print(m.json.dumps(m.repair_check(*sys.argv[1:])))"
