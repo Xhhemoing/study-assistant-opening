@@ -43,8 +43,8 @@ export async function readOpeningAiGradingContext(tx: TransactionSql, scope: Sco
 }
 
 /** Eligibility only: does not authorize execution or accept a client operation/photo. */
-export async function readOpeningExplicitRegradeCandidateContext(tx: TransactionSql, scope: Scope, observationId: string) {
-  return readContextInternal(tx, scope, { observationId }, { explicitRegradeCandidate: true });
+export async function readOpeningExplicitRegradeCandidateContext(tx: TransactionSql, scope: Scope, observationId: string, options: { readOnly?: boolean } = {}) {
+  return readContextInternal(tx, scope, { observationId }, { explicitRegradeCandidate: true, ...options });
 }
 
 /** Admit a student's photo inside the submit transaction; rejection rolls the entire transaction back.

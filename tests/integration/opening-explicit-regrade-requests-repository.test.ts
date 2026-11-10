@@ -226,7 +226,9 @@ it("recovers a stage-one confirmed-without-job row via the actual sweep, once ac
   expect(await fees()).toEqual(before);
 });
 
-it.each([false, true])("runs the confirmed version through real PG budget/gateway/worker once (photo=%s), preserving old unknown fees", async photo => {
+it.each([
+  { photo: false, outcome: "correct" }, { photo: true, outcome: "correct" }, { photo: false, outcome: "unverified" },
+] as const)("runs the confirmed version through real PG budget/gateway/worker once ($photo/$outcome), preserving old unknown fees", async ({ photo, outcome }) => {
   const { prepare, original, workSource } = await unknown(photo), before = await fees();
   await fixture.sql`UPDATE opening_source_chunks SET image_object_key=NULL`;
   const prepared = await requests().prepare(fixture.scope, prepare);
@@ -234,8 +236,8 @@ it.each([false, true])("runs the confirmed version through real PG budget/gatewa
   expect(await fees()).toEqual(before);
   const queue = createOpeningJobRepository(fixture.sql), repository = createOpeningAiGradingRepository(fixture.sql);
   const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
-  const complete = vi.fn(async () => ({ text: JSON.stringify({ outcome: "correct", confidence: .95, questionMatch: true,
-    feedback: "synthetic", criteria: [{ label: "sum", verdict: "correct", feedback: "checked" }] }),
+  const complete = vi.fn(async () => ({ text: JSON.stringify({ outcome, confidence: .95, questionMatch: true,
+    feedback: "synthetic", criteria: [{ label: "sum", verdict: outcome, feedback: "checked" }] }),
     inputTokens: 10, outputTokens: 10, citedChunkIds: [], requestId: null, candidates: [] }));
   const gateway = createModelGateway({ resolve: async () => ({ provider: { complete },
     modelSnapshot: { id: "synthetic", providerId: "fixture", modelName: "synthetic", inputCentsPerMillion: 100, outputCentsPerMillion: 100,
@@ -253,7 +255,8 @@ it.each([false, true])("runs the confirmed version through real PG budget/gatewa
   expect(await runJob(queue, confirmed.jobId!, handler)).toBe(false);
   expect(complete).toHaveBeenCalledTimes(1);
   const status = await requests().read(fixture.scope, prepared.requestId);
-  expect(status).toMatchObject({ ledger: "completed", jobState: "succeeded", request: { gradingVersion: 1 } });
+  expect(status).toMatchObject({ ledger: "completed", jobState: "succeeded",
+    status: outcome === "unverified" ? "needs_manual" : "graded", request: { gradingVersion: 1 } });
   expect(status.request.resultObservationId).not.toBeNull();
   const [head] = await fixture.sql`SELECT * FROM opening_learning_observations WHERE id=${status.request.resultObservationId}`;
   expect(head).toMatchObject({ answer: original.answer, answer_revision: 1, grading_operation_id: prepared.operationId,
@@ -261,6 +264,8 @@ it.each([false, true])("runs the confirmed version through real PG budget/gatewa
   expect(await requests().confirm(fixture.scope, consent(prepared))).toEqual(status.request);
   expect(await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id!=${prepared.operationId} ORDER BY request_id`).toEqual(before);
   expect(await fixture.sql`SELECT id FROM opening_budget_reservations WHERE request_id=${prepared.operationId}`).toHaveLength(1);
+  await fixture.sql`UPDATE opening_budget_reservations SET state='reserved',outcome_unknown_at=now() WHERE request_id=${prepared.operationId}`;
+  expect((await requests().read(fixture.scope, prepared.requestId)).status).toBe("unknown_cost");
 });
 
 it.each(["epoch", "head", "photo", "payload", "cancel"] as const)("rejects stale confirmed %s before any reserve", async change => {

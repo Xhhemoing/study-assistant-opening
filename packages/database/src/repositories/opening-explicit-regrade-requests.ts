@@ -4,11 +4,75 @@ import type { Sql, TransactionSql } from "postgres";
 import {
   EXPLICIT_REGRADE_CONFIRMATION_TEXT, EXPLICIT_REGRADE_CONFIRMATION_VERSION,
   explicitRegradeConfirmSchema, explicitRegradePrepareSchema, explicitRegradeRequestSchema, explicitRegradeStatusSchema, gradeObservationJobPayloadSchema,
-  type ExplicitRegradeRequest, type Scope,
+  uuidSchema, type ExplicitRegradeRequest, type Scope,
 } from "@aistudy/contracts";
 import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningExplicitRegradeCandidateContext } from "./opening-ai-grading-context";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
+import { qualifyObservationRevision } from "./opening-observation-revision-history";
+import { checkOpeningAutoGradeBudget, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
+
+async function estimate(tx: TransactionSql, scope: Scope, observationId: string, policy?: OpeningAutoGradePolicy) {
+  if (!policy?.modelAvailable) return null;
+  const context = await readOpeningExplicitRegradeCandidateContext(tx, scope, observationId, { readOnly: true });
+  const budget = await checkOpeningAutoGradeBudget(tx, scope, policy, {
+    question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
+    misconceptions: context.misconceptions, workSource: context.workSourceMetadata, referenceSources: context.referenceSourceMetadata,
+  });
+  return budget.allowed ? budget.requiredCents : null;
+}
+
+/** Latest owner snapshot, not UI history or the legacy operation's status. */
+async function snapshot(tx: TransactionSql, scope: Scope, observationId: string) {
+  const [row] = await tx`SELECT h.*,w.privacy_epoch FROM opening_learning_observations o
+    JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)
+      AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
+    JOIN opening_learning_observations h ON h.id=COALESCE(root.effective_head_id,root.id)
+      AND h.workspace_id=root.workspace_id AND h.owner_user_id=root.owner_user_id
+    JOIN workspaces w ON w.id=h.workspace_id AND w.owner_user_id=h.owner_user_id
+    JOIN users u ON u.id=w.owner_user_id AND u.disabled_at IS NULL
+    JOIN courses c ON c.id=h.course_id AND c.workspace_id=h.workspace_id AND c.archived_at IS NULL
+    WHERE o.id=${observationId} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}`;
+  if (!row) throw learningError("NOT_FOUND", "找不到这次作答");
+  const observation = await qualifyObservationRevision(tx, scope, row);
+  if (observation.eligibility?.usableForCurrentVersion !== "yes") throw conflict();
+  const root = observation.rootObservationId ?? observation.id;
+  const prior = await latest(tx, scope, root, Number(row.answer_revision));
+  const ledger = await readOpeningAiGradingLedger(tx, scope, String(prior?.operation_id ?? row.grading_operation_id));
+  const [job] = await tx`SELECT state FROM opening_jobs
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND kind='grade-observation'
+      AND privacy_epoch=${Number(row.privacy_epoch)}
+      AND ${prior ? tx`id=${prior.job_id}` : tx`key=${`ai-grade:${scope.workspaceId}:${root}:${Number(row.answer_revision)}`}`}`;
+  return { rootObservationId: root, expectedHead: observation.id, answerRevision: Number(row.answer_revision),
+    privacyEpoch: Number(row.privacy_epoch), previousGradingVersion: Number(prior?.grading_version ?? 0),
+    oldStatus: ledger === "unknown" || ledger === "in_flight" && job?.state !== "running" ? "unknown_cost" as const
+      : observation.aiEvaluation ? observation.outcome === "unverified" ? "needs_manual" as const : "graded" as const : job?.state === "running" ? "grading" as const
+        : job?.state === "queued" ? "queued" as const : "needs_manual" as const };
+}
+
+/** Historical reads may outlive a head/version, never an owner/epoch/source pin. */
+async function guardRead(tx: TransactionSql, scope: Scope, row: Row) {
+  const [observation] = await tx`SELECT o.* FROM opening_learning_observations o
+    JOIN workspaces w ON w.id=o.workspace_id AND w.owner_user_id=o.owner_user_id AND w.privacy_epoch=${Number(row.privacy_epoch)}
+    JOIN courses c ON c.id=o.course_id AND c.workspace_id=o.workspace_id AND c.archived_at IS NULL
+    WHERE o.id=${String(row.expected_head_id)} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}`;
+  if (!observation) throw learningError("NOT_FOUND", "找不到批改确认请求");
+  const qualified = await qualifyObservationRevision(tx, scope, observation);
+  if (qualified.eligibility?.usableForCurrentVersion !== "yes") throw conflict();
+  if (Number(observation.answer_revision) !== Number(row.answer_revision)
+    || (observation.root_observation_id ?? observation.id) !== row.root_observation_id
+    || !isDeepStrictEqual(observation.grading_work_source, row.work_source)) throw conflict();
+  const photo = row.work_source as ExplicitRegradeRequest["workSource"];
+  if (photo) {
+    const [source] = await tx`SELECT id FROM opening_sources s WHERE s.id=${photo.id} AND s.workspace_id=${scope.workspaceId}
+      AND s.version=${photo.version} AND s.upload_state='uploaded'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+      AND (s.mime IN ('image/jpeg','image/png','image/webp') AND ${photo.physicalPage}=1
+        OR s.mime='application/pdf' AND s.parse_state='ready' AND EXISTS (SELECT 1 FROM opening_source_chunks c
+          WHERE c.source_id=s.id AND c.source_version=s.version AND c.page=${photo.physicalPage}))`;
+    if (!source) throw conflict();
+  }
+}
 
 type Row = Record<string, unknown>;
 const conflict = () => learningError("CONFLICT", "批改身份或确认已变化，请刷新后重新确认；不会重发旧请求");
@@ -101,7 +165,7 @@ export function createOpeningExplicitRegradeRequestRepository(sql: Sql) {
         return record(created!);
       }) as Promise<ExplicitRegradeRequest>;
     },
-    async confirm(scope: Scope, raw: unknown): Promise<ExplicitRegradeRequest> {
+    async confirm(scope: Scope, raw: unknown, policy?: OpeningAutoGradePolicy): Promise<ExplicitRegradeRequest> {
       const input = explicitRegradeConfirmSchema.parse(raw);
       return sql.begin(async tx => {
         const epoch = await lockIdentity(tx, scope);
@@ -125,26 +189,50 @@ export function createOpeningExplicitRegradeRequestRepository(sql: Sql) {
         // into regrading a known result, or rely on stale consent to an unknown fee.
         const ledger = await readOpeningAiGradingLedger(tx, scope, String(request.previous_operation_id));
         if (ledger !== "unknown") throw conflict();
+        if (policy && await estimate(tx, scope, String(request.expected_head_id), policy) === null) {
+          throw learningError("CONFLICT", "当前模型或预算无法估价，请检查 AI 设置后重新确认");
+        }
         const [confirmed] = await tx`UPDATE opening_explicit_regrade_requests SET confirmed_at=clock_timestamp()
           WHERE id=${request.id} AND confirmed_at IS NULL RETURNING *`;
         return ensureJob(tx, scope, confirmed!);
       }) as Promise<ExplicitRegradeRequest>;
     },
-    /** Read-only and bound to this exact version, not the legacy operation. */
-    async read(scope: Scope, requestId: string) {
+    snapshot(scope: Scope, observationId: string) {
+      uuidSchema.parse(observationId);
+      return sql.begin("isolation level repeatable read read only", tx => snapshot(tx, scope, observationId));
+    },
+    /** Read-only and bound to this exact version, not the legacy operation.
+     * clientKey lookup recovers a lost prepare response without replaying POST. */
+    async read(scope: Scope, selector: string | { observationId: string; clientKey: string; requestId?: string }, policy?: OpeningAutoGradePolicy) {
+      if (typeof selector !== "string") {
+        uuidSchema.parse(selector.observationId);
+        if (selector.requestId) uuidSchema.parse(selector.requestId);
+        explicitRegradePrepareSchema.shape.clientKey.parse(selector.clientKey);
+      }
+      const requestId = typeof selector === "string" ? uuidSchema.parse(selector) : selector.requestId ?? null;
       return sql.begin("isolation level repeatable read read only", async tx => {
-        const [row] = await tx`SELECT r.*,j.state AS job_state FROM opening_explicit_regrade_requests r
+        const [row] = await tx`SELECT r.*,j.state AS job_state,result.outcome AS result_outcome FROM opening_explicit_regrade_requests r
           JOIN workspaces w ON w.id=r.workspace_id AND w.owner_user_id=r.owner_user_id
           JOIN users u ON u.id=w.owner_user_id AND u.disabled_at IS NULL
           LEFT JOIN opening_jobs j ON j.id=r.job_id AND j.workspace_id=r.workspace_id AND j.owner_user_id=r.owner_user_id
-          WHERE r.id=${requestId} AND r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}`;
+          LEFT JOIN opening_learning_observations result ON result.id=r.result_observation_id
+            AND result.workspace_id=r.workspace_id AND result.owner_user_id=r.owner_user_id
+          WHERE ${requestId ? tx`r.id=${requestId}` : tx`r.client_key=${typeof selector === "string" ? "" : selector.clientKey}`}
+            ${typeof selector === "string" ? tx`` : tx`AND r.expected_head_id=${selector.observationId} AND r.client_key=${selector.clientKey}`}
+            AND r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}`;
         if (!row) throw learningError("NOT_FOUND", "找不到批改确认请求");
+        await guardRead(tx, scope, row);
         const ledger = await readOpeningAiGradingLedger(tx, scope, String(row.operation_id));
         const status = row.confirmed_at == null ? "prepared"
           : ledger === "unknown" || ledger === "in_flight" && row.job_state !== "running" ? "unknown_cost"
-            : row.result_observation_id != null ? "graded" : row.job_state === "running" ? "grading"
+            : row.result_observation_id != null ? row.result_outcome === "unverified" || row.result_outcome == null ? "needs_manual" : "graded" : row.job_state === "running" ? "grading"
               : row.job_state === "queued" ? "queued" : row.job_id == null ? "pending_enqueue" : "needs_manual";
-        return explicitRegradeStatusSchema.parse({ request: record(row), ledger, jobState: row.job_state ?? null, status });
+        const result = explicitRegradeStatusSchema.parse({ request: record(row), ledger, jobState: row.job_state ?? null, status });
+        const head = await snapshot(tx, scope, String(row.expected_head_id));
+        const estimateCents = row.confirmed_at == null && head.expectedHead === row.expected_head_id
+          && head.previousGradingVersion === Number(row.previous_grading_version)
+          ? await estimate(tx, scope, String(row.expected_head_id), policy) : null;
+        return { ...result, snapshot: head, estimateCents };
       });
     },
     /** Called by the existing worker sweep before generic recovery. A crash after
