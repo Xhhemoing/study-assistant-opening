@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { cleanGitEnvironment } from '../infra/deploy/hermes-git-environment.mjs';
 
 const palettes = "slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose";
 const roles = "text-shadow|text|bg|border(?:-[xytrblse])?|divide(?:-[xy])?|ring(?:-offset)?|fill|stroke|accent|caret|outline|decoration|shadow|from|via|to";
@@ -43,7 +44,7 @@ export function addedFixedColors(diff) {
 }
 
 export function checkNewFixedColors({ cwd = process.cwd(), base = process.env.FIXED_COLOR_BASE || "HEAD" } = {}) {
-  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
+  const git = (...args) => execFileSync("git", args, { cwd, env: cleanGitEnvironment(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024 });
   // Resolve explicitly so an unavailable shallow-checkout base fails, rather than skipping the check.
   const commit = git("rev-parse", "--verify", `${base}^{commit}`).trim();
   const snapshots = [[], ["--cached"]];

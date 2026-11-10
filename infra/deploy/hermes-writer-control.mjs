@@ -63,6 +63,17 @@ export function systemctlCommand(args, execute = spawnSync) {
 const ownershipProgram = `import runpy,subprocess,sys,os,signal,time,ctypes,tempfile,pickle
 original=subprocess.run
 owner_spawned=False
+cancel_requested=False
+cancel_signals={signal.SIGTERM,signal.SIGINT,signal.SIGHUP}
+
+def record_cancel(signum,frame):
+    global cancel_requested
+    cancel_requested=True # Never raise into handoff/cleanup/serialization/exit.
+
+for cancel_signal in cancel_signals: signal.signal(cancel_signal,record_cancel)
+
+def check_cancel():
+    if cancel_requested: raise RuntimeError('Owned command cancelled')
 
 def prepare_owner():
     if ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0) != 0:
@@ -82,11 +93,15 @@ def owned_run(argv,*args,**kwargs):
         parent_pid=os.getpid()
         # Fork itself and ALL ownership handoff instructions are protected.
         # Identity, not a post-fork assignment, owns the child exit guarantee.
+        check_cancel()
+        previous_mask=signal.pthread_sigmask(signal.SIG_BLOCK,cancel_signals)
         owner_spawned=True
         try:
             controller=os.fork()
             if os.getpid()!=parent_pid:
                 try:
+                    for sig in cancel_signals: signal.signal(sig,record_cancel)
+                    signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
                     prepare_owner()
                     result=leaf(argv,*args,**kwargs)
                     value=(True,result)
@@ -95,6 +110,7 @@ def owned_run(argv,*args,**kwargs):
                     value=(False,error)
                 pickle.dump(value,result_file); result_file.flush()
                 os._exit(0)
+            signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
             os.waitpid(controller,0)
             result_file.seek(0)
             success,value=pickle.load(result_file)
@@ -105,6 +121,8 @@ def owned_run(argv,*args,**kwargs):
             raise
         finally:
             if os.getpid()!=parent_pid: os._exit(0)
+            signal.pthread_sigmask(signal.SIG_SETMASK,previous_mask)
+        check_cancel() # Controller/leaf has ended; cancellation cannot become success.
         if not success: raise value
         return value
 
@@ -181,11 +199,23 @@ def leaf(argv,*args,**kwargs):
     # Popen can fork successfully and then be interrupted while reading its
     # exec-error pipe. Mark possible ownership BEFORE crossing that boundary;
     # a genuine pre-spawn error simply drains an empty child set.
+    check_cancel()
     proc=None
+    deadline=None if timeout is None else time.monotonic()+timeout
     owner_spawned=True
     try:
         proc=subprocess.Popen(argv,*args,**kwargs)
-        out,err=proc.communicate(data,timeout=timeout)
+        first=True
+        while True:
+            check_cancel()
+            remaining=None if deadline is None else deadline-time.monotonic()
+            if remaining is not None and remaining<=0: raise subprocess.TimeoutExpired(argv,timeout)
+            try:
+                out,err=proc.communicate(data if first else None,timeout=.05 if remaining is None else min(.05,remaining))
+                break
+            except subprocess.TimeoutExpired:
+                first=False
+        check_cancel()
     except BaseException:
         # Do not communicate/reap just the parent and leave inherited pipes or
         # escaped grandchildren alive. Drain the whole adopted tree first.
@@ -205,22 +235,12 @@ def leaf(argv,*args,**kwargs):
 // host/service kills it, outcome is UNKNOWN, never a clean cancellation receipt.
 export function runCompletionOwned(command, args, seconds, options = {}, execute = spawnSync) {
   const code = ownershipProgram + `
-def cancelled(signum,frame):
-    raise RuntimeError('Ownership cancellation requested')
 prepare_owner()
-signal.signal(signal.SIGTERM,cancelled)
-signal.signal(signal.SIGINT,cancelled)
-signal.signal(signal.SIGHUP,cancelled)
 try:
     result=leaf(sys.argv[2:],timeout=float(sys.argv[1]))
+    check_cancel()
 except BaseException:
-    # leaf already drained on timeout. Recheck after cancellation/failed spawn.
-    # Disable interrupting this final cleanup with another cooperative signal.
-    for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):
-        try: signal.signal(sig,signal.SIG_IGN)
-        except BaseException:
-            if owner_spawned: retain_unknown()
-            raise
+    # Signal handlers only record cancellation, including during this cleanup.
     drain() # Even an interrupted spawn with no returned Popen needs proof of absence.
     sys.exit(1)
 sys.exit(result.returncode)

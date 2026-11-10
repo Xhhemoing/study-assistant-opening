@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { gitFixture, cleanGitEnvironment } from './hermes-git-fixture.mjs';
 import { platform, tree } from "../../infra/deploy/verify-release-artifact.mjs";
 
 const deploymentDirectory = fileURLToPath(new URL("../../infra/deploy/", import.meta.url));
@@ -75,15 +76,11 @@ function fixture(t, overrides = {}) {
   mkdirSync(join(repo, "infra/deploy"), { recursive: true });
   mkdirSync(join(repo, "services/parser"), { recursive: true });
   writeFileSync(join(repo, "services/parser/placeholder"), "parser source\n");
-  for (const name of ["deploy-hermes.sh", "hermes-entry.py", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py", "hermes-trusted-loader.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
+  for (const name of ["deploy-hermes.sh", "hermes-entry.py", "hermes-release.sh", "hermes-supervisor.mjs", "hermes-config-durability.mjs", "hermes-db.mjs", "hermes-ci.mjs", "hermes-health.mjs", "verify-release-artifact.mjs", "hermes-git-environment.mjs", "hermes-writer-control.mjs", "hermes-writer-exec.py", "hermes-writer-state.py", "hermes-peer-broker.py", "hermes-trusted-loader.py"]) copyFileSync(join(deploymentDirectory, name), join(repo, "infra/deploy", name));
   writeFileSync(join(repo, "infra/deploy/provision-worker.sh"), workerHelper, { mode: 0o755 });
   if (overrides.MOCK_ARTIFACT_PROTOCOL) writeFileSync(join(repo, ".worker-protocol"), `${overrides.MOCK_ARTIFACT_PROTOCOL}\n`);
-  const git = (...args) => {
-    const result = spawnSync(realGit, args, { cwd: repo, encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout.trim();
-  };
-  git("init", "-b", "feat/opening-release");
+  const isolated=gitFixture(repo), git=isolated.run;
+  git('checkout','-b','feat/opening-release');
   git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "add", ".");
   git("-c", "user.name=Deployment Test", "-c", "user.email=deployment@example.test", "commit", "-m", "fixture");
   const repository = overrides.MOCK_PREBUILT ? "Xhhemoing/study-assistant-opening" : "test-owner/test-repo";
@@ -306,7 +303,7 @@ printf '{"status":"ok"}'`,
     setRuns(runs) { writeFileSync(ciFile, JSON.stringify({ workflow_runs: runs })); },
     run(action = "deploy", extra = {}) {
       const logStart = readFileSync(log, "utf8").length;
-      const childEnvironment = { ...env, ...extra };
+      const childEnvironment = { ...cleanGitEnvironment({...env,...extra}), ...Object.fromEntries(Object.entries(isolated.env).filter(([key])=>key.startsWith('GIT_') || ['HOME','XDG_CONFIG_HOME'].includes(key))) };
       const parserFailure = join(root, "parser-failure");
       if (childEnvironment.MOCK_FAIL === "parser") writeFileSync(parserFailure, "");
       else rmSync(parserFailure, { force: true });
@@ -321,6 +318,19 @@ printf '{"status":"ok"}'`,
     },
   };
 }
+
+test('deployment extra overrides cannot reintroduce caller Git routing',t=>{
+  const callerRoot=mkdtempSync(join(tmpdir(),'deployment-caller-'));t.after(()=>rmSync(callerRoot,{recursive:true}));
+  const caller=gitFixture(callerRoot);writeFileSync(join(callerRoot,'caller'),'safe');caller.run('add','caller');
+  caller.run('-c','user.name=Caller','-c','user.email=caller@example.test','commit','-m','caller');
+  const before={head:caller.run('rev-parse','HEAD'),config:readFileSync(join(callerRoot,'.git/config')),index:readFileSync(join(callerRoot,'.git/index'))};
+  const f=fixture(t);
+  const result=f.run('status',{GIT_DIR:join(callerRoot,'.git'),GIT_WORK_TREE:callerRoot,GIT_INDEX_FILE:join(callerRoot,'.git/index'),GIT_CONFIG_COUNT:'1',GIT_CONFIG_KEY_0:'core.worktree',GIT_CONFIG_VALUE_0:callerRoot});
+  assert.equal(result.status,0,result.stderr);
+  assert.equal(caller.run('rev-parse','HEAD'),before.head);
+  assert.deepEqual(readFileSync(join(callerRoot,'.git/config')),before.config);
+  assert.deepEqual(readFileSync(join(callerRoot,'.git/index')),before.index);
+});
 
 for (const action of ['status', 'logs']) test(`${action} retains its existing direct release path without entry preflight`, t => {
   const f = fixture(t);

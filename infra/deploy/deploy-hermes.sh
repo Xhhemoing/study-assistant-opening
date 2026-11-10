@@ -64,13 +64,13 @@ verify_repair_git() {
   history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
   while IFS= read -r path; do
     case "$path" in
-      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs)
+      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs|infra/deploy/hermes-git-environment.mjs|infra/deploy/verify-release-artifact.mjs|scripts/check-new-fixed-colors.mjs|scripts/check-new-fixed-colors.test.mjs|scripts/ci/checks.py|scripts/ci/test_checks.py|tests/tooling/release-artifact.test.mjs)
         [[ "$ACTION" == complete-postmigration* ]] || fail 'Additional control paths are completion-only.' ;;
       infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
       *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
     esac
   done < <(printf '%s\n' "$history" | sort -u | grep -v '^$')
-  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' || fail 'Repair application/migration bytes differ from baseline.'
+  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' ':!scripts/check-new-fixed-colors.mjs' ':!scripts/check-new-fixed-colors.test.mjs' ':!scripts/ci/checks.py' ':!scripts/ci/test_checks.py' || fail 'Repair application/migration bytes differ from baseline.'
 }
 
 # Execute reviewed Python bytes in memory over strict SSH: no remote entry

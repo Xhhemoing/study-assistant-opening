@@ -24,7 +24,7 @@ test('signal after real fork but before Popen returns cannot leave live child', 
     assert.equal(options.stdio,'pipe');
     const injected=[...args], index=injected.indexOf('-c')+1;
     const hook=`\nreal_popen=subprocess.Popen\ndef interrupted_popen(*args,**kwargs):\n    process=real_popen(*args,**kwargs)\n    deadline=time.monotonic()+2\n    while not os.path.exists(${JSON.stringify(pidfile)}) and time.monotonic()<deadline: time.sleep(.005)\n    os.kill(os.getpid(),signal.SIGTERM)\n    return process\nsubprocess.Popen=interrupted_popen\n`;
-    injected[index]=injected[index].replace('def cancelled(signum,frame):',hook+'\ndef cancelled(signum,frame):');
+    injected[index]=injected[index].replace('\nprepare_owner()\ntry:',hook+'\nprepare_owner()\ntry:');
     const program=`import subprocess,pathlib,os,signal,json,sys\nargs=json.loads(${JSON.stringify(JSON.stringify(injected))})\nneighbor=subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)'],start_new_session=True)\nowner=subprocess.Popen([${JSON.stringify(file)},*args],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\ntry:\n owner.wait(timeout=4)\n pid=int(pathlib.Path(${JSON.stringify(pidfile)}).read_text())\n live=pathlib.Path('/proc/'+str(pid)).exists()\n assert owner.returncode==1\n assert not live,'owner returned while forked child still live'\n assert neighbor.poll() is None,'adjacent session was killed'\nfinally:\n if pathlib.Path(${JSON.stringify(pidfile)}).exists():\n  try: os.kill(int(pathlib.Path(${JSON.stringify(pidfile)}).read_text()),signal.SIGKILL)\n  except ProcessLookupError: pass\n if owner.poll() is None: owner.kill(); owner.wait()\n neighbor.kill(); neighbor.wait()\n`;
     const check=spawnSync('/usr/bin/python3',['-I','-S','-B','-c',program],{encoding:'utf8',timeout:7_000});
     assert.equal(check.status,0,check.stderr);
@@ -37,7 +37,7 @@ test('pre-fork cooperative signal with empty owned scope returns cleanly', () =>
   const result=runCompletionOwned('/usr/bin/python3',['-c','raise SystemExit(0)'],5,{stdio:'pipe'},(file,args,options)=>{
     const changed=[...args], index=changed.indexOf('-c')+1;
     const hook=`\ndef interrupted_before_fork(*args,**kwargs):\n    os.kill(os.getpid(),signal.SIGTERM)\nsubprocess.Popen=interrupted_before_fork\n`;
-    changed[index]=changed[index].replace('def cancelled(signum,frame):',hook+'\ndef cancelled(signum,frame):');
+    changed[index]=changed[index].replace('\nprepare_owner()\ntry:',hook+'\nprepare_owner()\ntry:');
     return spawnSync(file,changed,{...options,timeout:2_000});
   });
   assert.equal(result.error,undefined);
@@ -113,7 +113,7 @@ children=broken_children
 os.waitpid=broken_wait
 '''
 index=indexes[${scope === 'outer' ? '0' : '-1'}]
-anchor=${JSON.stringify(scope === 'outer' ? 'def cancelled(signum,frame):' : 'def bounded(argv,*args,**kwargs):')}
+anchor=${JSON.stringify(scope === 'outer' ? '\nprepare_owner()\ntry:' : 'def bounded(argv,*args,**kwargs):')}
 args[index]=args[index].replace(anchor,injection+'\\n'+anchor)
 if ${scope === 'outer' ? 'True' : 'False'}:
  args[args.index('480')]='.15'
