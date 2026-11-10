@@ -33,7 +33,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 async function click(label: string) {
   const button = Array.from(container.querySelectorAll("button")).find(element => element.textContent === label);
   expect(button, `button ${label}`).toBeTruthy(); await act(async () => button!.click());
@@ -75,7 +75,15 @@ it("double clicks enqueue once, use only sealed identity, and recover status aft
 it("unknown cost exposes manual correction, never a retry that could resend", async () => {
   api.getGradingStatus.mockResolvedValue(status({ status: "unknown_cost", retryable: false }));
   await renderCard({ onDispute: vi.fn() }); expect(container.textContent).toContain("不会重复发送");
-  expect(container.textContent).not.toContain("重试批改"); await click("修改这一步"); expect(api.gradeObservation).not.toHaveBeenCalled();
+  expect(container.textContent).not.toContain("重试批改"); await click("人工更正结果（不调用 AI）"); expect(api.gradeObservation).not.toHaveBeenCalled();
+});
+
+it("preserves the existing modify-step action outside unknown cost", async () => {
+  const onDispute = vi.fn();
+  api.getGradingStatus.mockResolvedValue(status({ retryable: false }));
+  await renderCard({ onDispute }); await click("修改这一步");
+  expect(onDispute).toHaveBeenCalledTimes(1);
+  expect(container.textContent).not.toContain("纠正回答并保存新版本");
 });
 
 it.each([
@@ -126,6 +134,106 @@ it("ignores a stale poll/history response after switching to another answer", as
   await renderCard({ record: next, onGraded });
   await act(async () => request.resolve(status({ status: "graded", headObservationId: graded.id })));
   expect(onGraded).not.toHaveBeenCalled(); expect(api.getObservationHistory).not.toHaveBeenCalled();
+});
+
+async function changeField(element: HTMLTextAreaElement | HTMLSelectElement, value: string) {
+  await act(async () => {
+    if (element instanceof HTMLTextAreaElement) {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(element, value);
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      element.value = value; element.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+}
+
+// Exercise the real learning HTTP client, while all responses stay fixed/in-memory.
+async function mockRevisionHttp(photo: boolean) {
+  const { createOpeningLearningClient } = await vi.importActual<typeof import("../client/learning-client")>("../client/learning-client");
+  const revisions = [record];
+  let gradingStatus = status({ status: "unknown_cost", retryable: true,
+    workSource: photo ? { id: "44444444-4444-4444-8444-444444444444", version: 1, physicalPage: 1 } : null });
+  const http = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input), method = init?.method ?? "GET";
+    const head = revisions[revisions.length - 1]!;
+    const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    if (path.startsWith("/api/opening/observations/grade?") && method === "GET") return json(gradingStatus);
+    if (path.endsWith("/history") && method === "GET") return json({ rootObservationId: record.id, headObservationId: head.id, revisions });
+    if (path === "/api/courses" && method === "GET") return json({ courses: [{ id: record.courseId, title: "示例课程" }] });
+    if (path === "/api/opening/observations/revisions" && method === "POST") {
+      const command = JSON.parse(String(init?.body));
+      const changed = command.replacement.answer !== head.answer;
+      const next: LearningObservation = { ...head, ...command.replacement, id: "99999999-9999-4999-8999-999999999999",
+        rootObservationId: record.id, revisesObservationId: head.id, revisionKind: "replace", revisionReason: command.reason };
+      revisions.push(next);
+      gradingStatus = { ...gradingStatus, headObservationId: next.id,
+        ...(changed ? { status: "needs_manual", retryable: true, jobId: null, answerRevision: 2, autoGradeSkipped: "answer_changed" } : { retryable: false }) };
+      return json({ disposition: "applied", rootObservationId: record.id, headObservationId: next.id,
+        revisionKind: "replace", observation: next, historyRevision: 1 });
+    }
+    throw new Error(`Unexpected mock HTTP: ${method} ${path}`);
+  });
+  vi.stubGlobal("fetch", http);
+  const client = createOpeningLearningClient(http as typeof fetch);
+  for (const key of ["getGradingStatus", "getObservationHistory", "reviseObservation", "listRevisionCourses", "gradeObservation"] as const) {
+    api[key].mockImplementation(client[key]);
+  }
+  return { http, revisions };
+}
+
+it.each([
+  [false, "correct"], [false, "incorrect"], [false, "unverified"],
+  [true, "correct"], [true, "incorrect"], [true, "unverified"],
+] as const)("unknown manual save uses no grade POST; photo=%s, judgment=%s", async (photo, outcome) => {
+  const { http } = await mockRevisionHttp(photo), complete = vi.fn(), onUpdated = vi.fn();
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record, onChanged() {}, onUpdated,
+    completionAction: { label: "继续练习", onClick: complete } })));
+  expect(container.textContent).toContain("费用或发送结果尚未确认");
+  expect(container.textContent).not.toMatch(/重试批改|重新批改（可能产生费用）|继续练习/);
+  await click("人工更正结果（不调用 AI）");
+  const select = container.querySelector("form select") as HTMLSelectElement;
+  expect(select.value).toBe("unverified");
+  await changeField(select, outcome); await click("保存纠正");
+  expect(api.reviseObservation).toHaveBeenCalledTimes(1);
+  expect(api.reviseObservation.mock.calls[0]![0]).toMatchObject({ expectedHead: record.id,
+    replacement: { answer: record.answer, outcome, verdictSource: "self_report" } });
+  expect(onUpdated).toHaveBeenCalledTimes(1);
+  if (outcome === "unverified") expect(container.textContent).not.toContain("继续练习");
+  else { await click("继续练习"); expect(complete).toHaveBeenCalledTimes(1); }
+  expect(container.textContent).toContain("费用或发送结果尚未确认");
+  expect(container.textContent).not.toMatch(/重试批改|重新批改（可能产生费用）/);
+  await click("查看历史");
+  const history = container.querySelector('[aria-label="观察修订历史"]')!;
+  expect(history.children).toHaveLength(2); expect(history.textContent).toContain(record.answer);
+  expect(history.textContent).toContain("历史记录（不重复计数）");
+  expect(api.gradeObservation).not.toHaveBeenCalled();
+  expect(http.mock.calls.filter(([path, init]) => path === "/api/opening/observations/grade" && init?.method === "POST")).toHaveLength(0);
+});
+
+it.each([false, true])("unknown answer save keeps history and only offers explicit paid regrading; photo=%s", async photo => {
+  const { http } = await mockRevisionHttp(photo), complete = vi.fn();
+  await act(async () => root.render(createElement(ObservationRevisionCard, { record, onChanged() {},
+    completionAction: { label: "继续练习", onClick: complete } })));
+  expect(container.textContent).toContain("不代表旧请求费用已确认");
+  expect(container.textContent).not.toMatch(/重试批改|重新批改（可能产生费用）/);
+  await click("纠正回答并保存新版本（不自动批改）");
+  const fields = container.querySelectorAll<HTMLTextAreaElement>("form textarea");
+  expect(fields[0]!.value).toBe(record.answer);
+  await changeField(fields[0]!, "更正后的答案：x = 3，重新计算后确认。");
+  await changeField(fields[1]!, "原回答计算有误");
+  await click("保存纠正");
+  expect(api.reviseObservation).toHaveBeenCalledTimes(1);
+  expect(api.reviseObservation.mock.calls[0]![0]).toMatchObject({ expectedHead: record.id,
+    replacement: { answer: "更正后的答案：x = 3，重新计算后确认。", outcome: "unverified", verdictSource: "self_report" } });
+  expect(container.textContent).toContain("不会自动重批");
+  expect(container.textContent).toContain("重新批改（可能产生费用）");
+  expect(container.textContent).not.toMatch(/免费|继续练习|重试批改/);
+  await click("查看历史");
+  const history = container.querySelector('[aria-label="观察修订历史"]')!;
+  expect(history.children).toHaveLength(2); expect(history.textContent).toContain(record.answer);
+  expect(history.textContent).toContain("更正后的答案：x = 3，重新计算后确认。");
+  expect(complete).not.toHaveBeenCalled(); expect(api.gradeObservation).not.toHaveBeenCalled();
+  expect(http.mock.calls.filter(([path, init]) => path === "/api/opening/observations/grade" && init?.method === "POST")).toHaveLength(0);
 });
 
 async function advance(ms: number) {
