@@ -33,7 +33,7 @@ function DraftEditor({ metadata, onDraft }: { metadata: MappingDraftMetadata; on
   function clear(message: string) {
     setFields(emptyMappingDraftFields()); setHandedOff(false); setStatus(message);
   }
-  const inputClass = "w-full rounded border border-slate-300 bg-white p-2 text-slate-950 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600";
+  const inputClass = "w-full rounded border border-text-3 bg-surface p-2 text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus-ring";
   function textInput(label: string, name: "stem" | "answer" | "unit") {
     const id = `${prefix}-${name}`;
     return <div className="space-y-1"><label htmlFor={id}>{label}</label>
@@ -42,7 +42,7 @@ function DraftEditor({ metadata, onDraft }: { metadata: MappingDraftMetadata; on
   }
   function location(part: "question" | "answer", label: string) {
     const chunk = metadata.chunks.find(item => item.chunkId === fields[`${part}Chunk`]);
-    return <fieldset className="space-y-2 rounded border border-slate-300 p-3"><legend>{label}来源定位</legend>
+    return <fieldset className="space-y-2 rounded border border-line p-3"><legend>{label}来源定位</legend>
       <label className="block" htmlFor={`${prefix}-${part}-chunk`}>{label}来源片段</label>
       <select id={`${prefix}-${part}-chunk`} className={inputClass} value={fields[`${part}Chunk`]} onChange={event => {
         // Rebinding either side discards BOTH transcriptions and confirmation.
@@ -67,7 +67,7 @@ function DraftEditor({ metadata, onDraft }: { metadata: MappingDraftMetadata; on
       <p className="text-sm">按原片段文本填写范围；不从题号、印刷标记猜测页码。{chunk ? `片段长度：${chunk.textLength}。` : "尚未选择来源片段。"}</p>
     </fieldset>;
   }
-  return <section aria-label="人工映射本地草稿" className="space-y-4 rounded border border-slate-300 p-4 text-slate-950">
+  return <section aria-label="人工映射本地草稿" className="space-y-4 rounded border border-line p-4 text-text">
     <h2 className="text-lg font-semibold">资料作者 · 人工映射草稿</h2>
     <p>仅限获准的资料作者。资料信息由负责人提供，本组件不认证身份或授予访问权限。</p>
     <p>仅编辑本地草稿，不自动保存或发布；不作为独立作答或掌握证据，不用于学生首答。</p>
@@ -93,7 +93,7 @@ function DraftEditor({ metadata, onDraft }: { metadata: MappingDraftMetadata; on
       我已人工核对题文、答案及各自源定位，确认交出本地草稿；这不是保存、发布或最终样例批准。</label>
     {!draft && <p>请完整填写合法题文、答案与来源范围，并人工确认。未知定位不可猜测。</p>}
     <div className="flex flex-wrap gap-3">
-      <button className="rounded bg-blue-700 px-3 py-2 text-white disabled:opacity-50" type="button" disabled={!draft || handedOff} onClick={() => {
+      <button className="rounded bg-ink px-3 py-2 text-on-ink disabled:opacity-50" type="button" disabled={!draft || handedOff} onClick={() => {
         if (!draft || handedOff) return;
         onDraft(draft); setHandedOff(true); setStatus("草稿已交给调用方；尚未保存或发布。");
       }}>交出本地草稿</button>
