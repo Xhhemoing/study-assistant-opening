@@ -25,7 +25,7 @@ const fallbackLabels = {
 export function ExperimentalLearningAdvice({ advice }: { advice: ExperimentalLearningAdvicePort }) {
   const [optedIn, setOptedIn] = useState(false);
   const message = advice.status === "disabled" ? fallbackLabels.disabled
-    : advice.status === "unavailable" ? "实验资格数据尚未接入，仍使用规则建议。"
+    : advice.status === "unavailable" ? "实验所需记录尚未接入，仍使用规则建议。"
       : advice.status === "fallback" ? fallbackLabels[advice.reason]
         : advice.experimentalAdvice.kind === "supported_practice" ? "实验提示：可考虑增加有支持的练习；当前行动仍以规则建议为准。"
           : "实验提示：保留当前规则建议。";
@@ -41,7 +41,7 @@ export function ExperimentalLearningAdvice({ advice }: { advice: ExperimentalLea
     {optedIn ? <div className="space-y-1 border-t border-line pt-3" role="status" aria-label="未校准实验建议">
       <h3 className="text-sm font-semibold">未校准实验建议 · 只读对照</h3>
       <p className="text-sm leading-7">{message}</p>
-      <p className="text-xs leading-6 text-text-2">实验尚未校准，不代表掌握程度，不改变晋级、考试或正式资格，不自动选题。样本门槛是实验约定，不是充分学习证据。</p>
+      <p className="text-xs leading-6 text-text-2">实验尚未校准，不代表掌握程度，不改变晋级或考试安排，不自动选题。样本门槛是实验约定，不是充分学习证据。</p>
     </div> : <p className="text-xs leading-6 text-text-2">实验展示默认关闭；当前只使用规则建议。</p>}
     <p className="text-xs leading-6 text-text-2">此开关只控制当前组件展示，不保存为用户设置。</p>
   </section>;

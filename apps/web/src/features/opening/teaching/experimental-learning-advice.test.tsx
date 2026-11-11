@@ -88,7 +88,7 @@ it("does not pretend an enabled host without a provider has connected qualificat
   const { input } = fixture();
   await render(createExperimentalLearningAdvicePort({ ruleDecision: nextLearningStep(input), experimentEnabled: true }));
   await toggle();
-  expect(host.textContent).toContain("实验资格数据尚未接入，仍使用规则建议");
+  expect(host.textContent).toContain("实验所需记录尚未接入，仍使用规则建议");
   expectReadOnly();
 });
 
@@ -174,7 +174,7 @@ it.each([true, false])("renders real %s-outcome comparison as uncalibrated, neve
   await toggle();
   expect(host.textContent).toContain(correct ? "保留当前规则建议" : "可考虑增加有支持的练习");
   expect(host.textContent).toContain("实验尚未校准，不代表掌握程度");
-  expect(host.textContent).toContain("不改变晋级、考试或正式资格，不自动选题");
+  expect(host.textContent).toContain("不改变晋级或考试安排，不自动选题");
   expect(host.querySelector('[aria-label="当前规则建议"]')?.textContent).toBe(ruleBefore);
   await toggle();
   expect(host.querySelector('[aria-label="未校准实验建议"]')).toBeNull(); expectReadOnly();
