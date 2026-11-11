@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 
 export type IdentityErrorCode =
   | "NOT_FOUND"
@@ -132,6 +132,72 @@ function mapWorkspace(row: Record<string, unknown>): WorkspaceOwnerRecord {
 /** Hash opaque token material for storage (never store raw cookie secret bits). */
 export function hashSessionToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
+}
+
+/** Server-internal input, not a grant; object shape never confers authority. */
+export type ServerSessionWriteCredential = {
+  userId: string;
+  workspaceId: string;
+  sessionId: string;
+  tokenHash: string;
+  jwtExpiresAtSeconds: number;
+};
+
+/**
+ * Caller must first acquire history/required existing fences, in the SAME
+ * READ COMMITTED transaction, and retain all locks through its commit.
+ * Call before writes and again after final writes/projection. Every call takes
+ * the real locks (including a standalone final call); no cached authority.
+ *
+ * Only guarantees validity at this call's last DB clock cut t, with revocation
+ * row writes ordered by locks. NOT expiry validity at commit, global deadlock
+ * freedom, or privacy/membership authorization. Native lock/SQL errors escape:
+ * abort the whole transaction; never continue via savepoint or auto-retry.
+ */
+export async function assertIdentitySessionForWriteInTx(
+  tx: TransactionSql,
+  credential: ServerSessionWriteCredential,
+): Promise<void> {
+  const isolation = await tx`SHOW transaction_isolation`;
+  if (isolation[0]?.transaction_isolation !== "read committed") {
+    throw new IdentityError("FORBIDDEN", "Write session requires READ COMMITTED");
+  }
+  const denied = () => new IdentityError("UNAUTHORIZED", "Invalid write session");
+  // Separate statements establish the lock order, unlike a joined locking read.
+  const users = await tx`
+    SELECT id FROM users WHERE id = ${credential.userId} FOR SHARE NOWAIT
+  `;
+  if (!users.length) throw denied();
+  const sessions = await tx`
+    SELECT id FROM sessions
+    WHERE id = ${credential.sessionId} AND user_id = ${credential.userId}
+    FOR SHARE NOWAIT
+  `;
+  if (!sessions.length) throw denied();
+  const workspaces = await tx`
+    SELECT id FROM workspaces
+    WHERE id = ${credential.workspaceId} AND owner_user_id = ${credential.userId}
+    FOR SHARE NOWAIT
+  `;
+  if (!workspaces.length) throw denied();
+  // One materialized clock for BOTH expiries, after all locks are acquired.
+  // No JS Date mapping and no transaction-start now(). Re-read current state on
+  // every invocation, even when this transaction already owns the row locks.
+  if (!Number.isFinite(credential.jwtExpiresAtSeconds)) throw denied();
+  const valid = await tx`
+    WITH cut AS MATERIALIZED (SELECT clock_timestamp() AS t)
+    SELECT s.id FROM users u
+    JOIN sessions s ON s.user_id = u.id
+    JOIN workspaces w ON w.owner_user_id = u.id
+    CROSS JOIN cut
+    WHERE u.id = ${credential.userId} AND u.disabled_at IS NULL
+      AND s.id = ${credential.sessionId} AND s.revoked_at IS NULL
+      AND s.token_hash = ${credential.tokenHash}
+      AND w.id = ${credential.workspaceId}
+      AND s.expires_at > cut.t
+      AND to_timestamp(${credential.jwtExpiresAtSeconds}) > cut.t
+  `;
+  if (!valid.length) throw denied();
 }
 
 export function createIdentityRepository(sql: Sql): IdentityRepository {
