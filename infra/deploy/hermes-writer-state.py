@@ -945,6 +945,8 @@ COMPLETION_UNIT = 'aistudy-postmigration-completion.service'
 COMPLETION_UNIT_PATH = '/run/systemd/system/' + COMPLETION_UNIT
 COMPLETION_RETAINED_ENTRY = '/tmp/aistudy-entry.Pz65J76D'
 COMPLETION_ADMISSION = '/run/aistudy-completion-admission'
+POSTARCHIVE_ADMISSION = '/run/aistudy-completion-postarchive-admission'
+POSTARCHIVE_UNIT_SHA = 'b215c973c4dcd06803403cb4294cfe05dbf3fced8a6b484c965b91079ac7934a'
 COMPLETION_QUARANTINE = '/run/systemd/system/aistudy-completion-retained-205'
 RELOAD_BOUND_NS = 60_000_000_000
 # Covers three samples, archive/launch admission and the cold full payload check.
@@ -1002,6 +1004,8 @@ def completion_never_started(manager, not_found=False):
                 'Result': 'success', 'FragmentPath': COMPLETION_UNIT_PATH, 'DropInPaths': '', 'NeedDaemonReload': 'no'}
     if not_found:
         expected.update(LoadState='not-found', FragmentPath='')
+        if set(manager) != set(expected) | {'Job'}:
+            raise ValueError('Archived manager observation inventory changed')
     if any(manager.get(k) != v for k, v in expected.items()) or manager.get('Job') not in ('', '0'):
         raise ValueError('Completion manager is not exact never-started unit')
 
@@ -1030,27 +1034,45 @@ def completion_scope(payload):
     return args
 
 
-def completion_reload_samples(payload):
-    # Explicit PM operation ONLY. No production caller executes this implicitly.
+def completion_sample_guard(payload, postarchive):
     args = completion_scope(payload)
-    completion_never_started(completion_manager())
-    if present(COMPLETION_QUARANTINE):
-        raise ValueError('Retained archive already consumed; no repeated sampling')
     completion_retained_sources()
-    if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['retainedUnit'].encode():
-        raise ValueError('Retained unit differs before measured manager operations')
-    os.mkdir(COMPLETION_ADMISSION, 0o700)  # Existing attempt is not retry permission.
-    sync_dir(Path(COMPLETION_ADMISSION).parent)
+    if postarchive:
+        old, _ = completion_archive(payload, args)
+        if hashlib.sha256(old).hexdigest() != POSTARCHIVE_UNIT_SHA or present(COMPLETION_UNIT_PATH):
+            raise ValueError('Postarchive original unit unconfirmed or live fragment present')
+    else:
+        if present(COMPLETION_QUARANTINE):
+            raise ValueError('Retained archive already consumed; no repeated sampling')
+        if read_trusted(COMPLETION_UNIT_PATH)[0] != payload['retainedUnit'].encode():
+            raise ValueError('Retained unit differs before measured manager operations')
+    manager = completion_manager()
+    completion_never_started(manager, not_found=postarchive)
+    return args, manager
+
+
+def completion_reload_samples(payload, postarchive=False):
+    # Separate explicit one-shot root; old evidence is never changed or adopted.
+    args, _ = completion_sample_guard(payload, postarchive)
+    directory = POSTARCHIVE_ADMISSION if postarchive else COMPLETION_ADMISSION
+    os.mkdir(directory, 0o700)  # Existing attempt is not retry permission.
+    sync_dir(Path(directory).parent)
     header = {'synthetic': False, 'deploymentReceipt': False, 'automaticRetry': False,
               'args': args, 'controls': completion_controls(),
               'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'boundNs': RELOAD_BOUND_NS}
-    completion_private_write(Path(COMPLETION_ADMISSION) / 'scope.json', header)
+    if postarchive:
+        header['samplePhase'] = 'postarchive'
+    completion_private_write(Path(directory) / 'scope.json', header)
+    def observe():
+        _, manager = completion_sample_guard(payload, postarchive)
+        if postarchive and (completion_controls() != header['controls'] or
+                Path('/proc/sys/kernel/random/boot_id').read_text().strip() != header['boot']):
+            raise ValueError('Postarchive controls/boot changed during sampling')
+        return manager
     for index in range(3):
-        completion_scope(payload)  # Full incident + effective fence/stopped proof before EVERY reload.
-        before = completion_manager()
-        completion_never_started(before)
+        before = observe()
         started = time.monotonic_ns()
-        completion_private_write(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '-started.json'),
+        completion_private_write(Path(directory) / ('sample-' + str(index) + '-started.json'),
                                  {**header, 'index': index, 'startNs': started, 'before': before})
         code, error = None, None
         try:
@@ -1062,38 +1084,57 @@ def completion_reload_samples(payload):
             error = type(failure).__name__
         ended = time.monotonic_ns()
         try:
-            completion_scope(payload)  # Includes guard/adoption/backup/current, not the full payload.
-            after = completion_manager()
+            after = observe()
         except Exception as failure:
             after = {'observationError': type(failure).__name__}
         record = {**header, 'index': index, 'startNs': started, 'endNs': ended, 'elapsedNs': ended - started,
                   'exit': code, 'error': error, 'before': before, 'after': after}
-        completion_private_write(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '.json'), record)
-        completion_never_started(after)
+        completion_private_write(Path(directory) / ('sample-' + str(index) + '.json'), record)
+        completion_never_started(after, not_found=postarchive)
         if code != 0 or error is not None or not 0 <= ended - started <= RELOAD_BOUND_NS // 2:
             raise ValueError('Reload admission failed; evidence/unit/claim retained')
     return {'samples': 3, 'boundNs': RELOAD_BOUND_NS, 'maximumNs': RELOAD_BOUND_NS // 2}
 
 
-def completion_reload_admission(args):
-    header = strict_json(read_trusted(Path(COMPLETION_ADMISSION) / 'scope.json', private=True)[0])
+def completion_reload_admission(args, sample_phase=None):
+    if sample_phase not in (None, 'postarchive'):
+        raise ValueError('Unknown sample phase')
+    postarchive = sample_phase == 'postarchive'
+    if not postarchive and present(POSTARCHIVE_ADMISSION):
+        raise ValueError('Postarchive evidence requires explicit postarchive entry')
+    directory = POSTARCHIVE_ADMISSION if postarchive else COMPLETION_ADMISSION
+    header = strict_json(read_trusted(Path(directory) / 'scope.json', private=True)[0])
     expected = {'synthetic': False, 'deploymentReceipt': False, 'automaticRetry': False,
                 'args': args, 'controls': completion_controls(),
                 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'boundNs': RELOAD_BOUND_NS}
-    if header != expected:
+    if postarchive:
+        expected['samplePhase'] = 'postarchive'
+    if header != expected or postarchive and (any(type(header.get(k)) is not bool for k in ('synthetic', 'deploymentReceipt', 'automaticRetry'))
+            or type(header.get('boundNs')) is not int):
         raise ValueError('Reload evidence controls/scope/boot changed')
+    if postarchive and {p.name for p in Path(directory).iterdir()} != {'scope.json'} | {
+            'sample-' + str(i) + suffix + '.json' for i in range(3) for suffix in ('-started', '')}:
+        raise ValueError('Postarchive sample directory inventory changed')
     previous = None
     for index in range(3):
-        row = strict_json(read_trusted(Path(COMPLETION_ADMISSION) / ('sample-' + str(index) + '.json'), private=True)[0])
+        row = strict_json(read_trusted(Path(directory) / ('sample-' + str(index) + '.json'), private=True)[0])
+        if postarchive:
+            if set(row) != set(header) | {'index', 'startNs', 'endNs', 'elapsedNs', 'exit', 'error', 'before', 'after'}:
+                raise ValueError('Postarchive sample inventory changed')
+            started = strict_json(read_trusted(Path(directory) / ('sample-' + str(index) + '-started.json'), private=True)[0])
+            if (started != {**header, 'index': index, 'startNs': row.get('startNs'), 'before': row.get('before')}
+                    or type(started.get('index')) is not int or type(started.get('startNs')) is not int):
+                raise ValueError('Postarchive started evidence changed')
         if (any(row.get(k) != v for k, v in header.items()) or row.get('index') != index
+                or postarchive and (type(row.get('index')) is not int or any(type(row.get(k)) is not bool for k in ('synthetic', 'deploymentReceipt', 'automaticRetry')) or type(row.get('boundNs')) is not int)
                 or any(type(row.get(k)) is not int for k in ('startNs', 'endNs', 'elapsedNs', 'exit'))
                 or row['exit'] != 0 or row.get('error') is not None
                 or not 0 <= row['elapsedNs'] == row['endNs'] - row['startNs'] <= RELOAD_BOUND_NS // 2
                 or not 0 <= time.monotonic_ns() - row['endNs'] <= RELOAD_EVIDENCE_AGE_NS
                 or previous is not None and row['startNs'] < previous):
             raise ValueError('Three consecutive timely successful actual reload samples required')
-        completion_never_started(row['before'])
-        completion_never_started(row['after'])
+        completion_never_started(row['before'], not_found=postarchive)
+        completion_never_started(row['after'], not_found=postarchive)
         previous = row['endNs']
 
 
@@ -1141,10 +1182,7 @@ def completion_retained_archive(payload):
     return {'archived': True, 'automaticRetry': False}
 
 
-def completion_launch_check(payload):
-    args = completion_scope(payload)
-    completion_reload_admission(args)
-    completion_retained_sources()
+def completion_archive(payload, args):
     archived = strict_json(read_trusted(Path(COMPLETION_QUARANTINE) / 'manifest.json', private=True)[0])
     old, archived_identity = read_trusted(Path(COMPLETION_QUARANTINE) / COMPLETION_UNIT)
     proof = strict_json(read_trusted(Path(COMPLETION_QUARANTINE) / 'archive-identity.json', private=True)[0])
@@ -1164,13 +1202,29 @@ def completion_launch_check(payload):
             or archived.get('entry') != COMPLETION_RETAINED_ENTRY
             or archived.get('unitSha256') != hashlib.sha256(old).hexdigest()):
         raise ValueError('Retained unit archive unconfirmed')
-    completion_never_started(archived['manager'])
+    completion_never_started(archived['manager'])  # Historical prearchive loaded record, never relaxed.
+    return old, archived_identity
+
+
+def completion_launch_check(payload):
+    args = completion_scope(payload)
+    sample_phase = payload.get('samplePhase')
+    if sample_phase is None:
+        completion_reload_admission(args)
+    else:
+        completion_reload_admission(args, sample_phase)
+    completion_retained_sources()
+    old, _ = completion_archive(payload, args)
+    if sample_phase == 'postarchive' and hashlib.sha256(old).hexdigest() != POSTARCHIVE_UNIT_SHA:
+        raise ValueError('Postarchive original unit bytes changed')
     phase = payload['phase']
     if phase == 'absent':
         if present(COMPLETION_UNIT_PATH):
             raise ValueError('Existing completion unit is not replaceable')
         manager = completion_manager()
-        if manager.get('LoadState') == 'not-found':
+        if sample_phase == 'postarchive' or manager.get('LoadState') == 'not-found':
+            # Explicit postarchive intake always requires strict not-found;
+            # only the original route may observe the archived loaded record.
             # External reload may already have unloaded the archived fragment.
             # All prior archive/source/boot/scope checks still apply; no arbitrary
             # existing unit, stale fragment, invocation or start history qualifies.
@@ -1189,14 +1243,17 @@ def completion_launch_check(payload):
             raise ValueError('New completion unit bytes changed')
         if phase == 'ready':
             completion_never_started(completion_manager())
+        elif sample_phase == 'postarchive' and completion_manager().get('LoadState') != 'loaded':
+            raise ValueError('Postarchive claim requires loaded new unit')
     else:
         raise ValueError('Unknown completion admission phase')
     return {'admitted': True}
 
 
 def main():
-    if sys.argv[1] in ('completion-reload-samples', 'completion-retained-archive', 'completion-launch-check'):
+    if sys.argv[1] in ('completion-reload-samples', 'completion-postarchive-reload-samples', 'completion-retained-archive', 'completion-launch-check'):
         operations = {'completion-reload-samples': completion_reload_samples,
+                      'completion-postarchive-reload-samples': lambda payload: completion_reload_samples(payload, postarchive=True),
                       'completion-retained-archive': completion_retained_archive,
                       'completion-launch-check': completion_launch_check}
         print(json.dumps(operations[sys.argv[1]](json.load(sys.stdin))))

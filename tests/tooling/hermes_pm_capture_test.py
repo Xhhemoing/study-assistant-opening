@@ -9,7 +9,7 @@ def manager(exit=0):
  props={k:'' for k in p.TARGET_PROPS};props.update(Id=p.UNIT,LoadState='loaded',InvocationID='b'*32)
  for k in ('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts'):props[k]='0'
  return {'argv':['/usr/bin/systemctl','show','--all','--property='+','.join(p.TARGET_PROPS),p.UNIT],'startedNs':12,'endedNs':13,'actualExit':exit,'stdoutBase64':base64.b64encode(('\n'.join(k+'='+v for k,v in props.items())+'\n').encode()).decode(),'stderrBase64':''}
-def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False,manager_value=None):
+def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False,manager_value=None,sample_phase=None):
  def read(path,category):
   if path.endswith('postmigration-completion-claimed') or path==p.ORIGIN:
    if stage!='C' or claim_absent:raise FileNotFoundError(2,'synthetic')
@@ -17,7 +17,7 @@ def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False,manager_
   r=row(mode=0o644 if category=='code' else mode)
   if category=='metadata':r.pop('bytesBase64')
   return r
- with patch.object(p,'clock_raw',side_effect=[clock(10),clock(20)]),patch.object(p,'manager_raw',return_value=manager(exit) if manager_value is None else manager_value),patch.object(p,'fixed_read',side_effect=read):return p.collect(stage,None if stage=='pre' else '/tmp/aistudy-entry.ABCDEFGH','/opt/state')
+ with patch.object(p,'clock_raw',side_effect=[clock(10),clock(20)]),patch.object(p,'manager_raw',return_value=manager(exit) if manager_value is None else manager_value),patch.object(p,'fixed_read',side_effect=read):return p.collect(stage,None if stage=='pre' else '/tmp/aistudy-entry.ABCDEFGH','/opt/state',sample_phase)
 class Pure(unittest.TestCase):
  def test_stages_complete_and_expected_absence(self):
   for stage in ('pre','A','B','C'):
@@ -94,6 +94,26 @@ class Pure(unittest.TestCase):
    for stage in ('B','C'):
     for missing in (p.ARCHIVE_ROOT+'/manifest.json',p.ARCHIVE_ROOT+'/archive-identity.json',p.SAMPLE_ROOT+'/sample-1.json'):
      self.assertEqual(collect(stage,missing=missing,claim_absent=True,manager_value=encode(props))['status'],'UNKNOWN')
+ def test_postarchive_explicit_selector_pre_A_C_and_no_old_schema_relaxation(self):
+  raw=manager();props=dict(line.split('=',1) for line in p.b64(raw['stdoutBase64']).decode().splitlines())
+  props.update(LoadState='not-found',ActiveState='inactive',SubState='dead',Result='success',NeedDaemonReload='no',InvocationID='',FragmentPath='',DropInPaths='',Slice='',ControlGroup='')
+  raw={**raw,'stdoutBase64':base64.b64encode(('\n'.join(k+'='+v for k,v in props.items())+'\n').encode()).decode()}
+  for stage in ('pre','A','C'):
+   out=collect(stage,claim_absent=True,manager_value=raw,sample_phase='postarchive')
+   self.assertEqual(out['status'],'COMPLETE');self.assertEqual(out['samplePhase'],'postarchive');p.validate(out)
+   self.assertIn(p.ARCHIVE_ROOT+'/manifest.json',out['files'])
+   self.assertFalse(any(k.startswith(p.SAMPLE_ROOT+'/') for k in out['files']))
+   self.assertEqual(any(k.startswith(p.POSTARCHIVE_SAMPLE_ROOT+'/') for k in out['files']),stage!='pre')
+   if stage=='pre':self.assertEqual(out['entryFiles'],{})
+   for missing in (p.ARCHIVE_ROOT+'/manifest.json',p.ARCHIVE_ROOT+'/archive-identity.json'):
+    self.assertEqual(collect(stage,missing=missing,claim_absent=True,manager_value=raw,sample_phase='postarchive')['status'],'UNKNOWN')
+  for stage in ('pre','A'):
+   self.assertEqual(collect(stage,claim_absent=True,manager_value=raw)['status'],'UNKNOWN')
+   self.assertEqual(collect(stage,sample_phase='postarchive')['status'],'UNKNOWN') # loaded not a postarchive sample
+  self.assertEqual(collect('C',sample_phase='postarchive')['status'],'COMPLETE') # loaded observed pair remains structural
+  self.assertEqual(collect('C',manager_value=raw,sample_phase='postarchive')['status'],'UNKNOWN')
+  out=collect('A',claim_absent=True,manager_value=raw,sample_phase='postarchive');out.pop('samplePhase')
+  with self.assertRaises(ValueError):p.validate(out)
  def test_json_duplicate_nonfinite(self):
   for raw in (b'{"x":1,"x":2}',b'{"x":NaN}'):
    with self.assertRaises(ValueError):p.strict_json(raw)

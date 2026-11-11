@@ -17,7 +17,7 @@ TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
-case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration|complete-postmigration-reload-sample|complete-postmigration-archive-retained) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
+case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration|complete-postmigration-reload-sample|complete-postmigration-archive-retained|complete-postmigration-postarchive-reload-sample|complete-postmigration-postarchive) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
 
 # Git trust checks select this checkout via cwd, never a caller's routed index,
 # gitdir/object/config environment. Subshell-only: do not mutate caller env or
@@ -149,6 +149,8 @@ if [[ "$ACTION" == complete-postmigration* ]]; then
     mode=completion-launch
     if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then mode=completion-reload-samples; fi
     if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then mode=completion-retained-archive; fi
+    if [[ "$ACTION" == complete-postmigration-postarchive-reload-sample ]]; then mode=completion-postarchive-reload-samples; fi
+    if [[ "$ACTION" == complete-postmigration-postarchive ]]; then mode=completion-postarchive-launch; fi
     remote_command+="if node \"\$entry/hermes-supervisor.mjs\" $mode \"\$entry/hermes-release.sh\""
     for value in complete-postmigration "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf "$COMPLETION_RELEASE" 4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0 "$COMPLETION_ARCHIVE"; do remote_command+=" $(quote "$value")"; done
     # Retain the private entry for the full independent service lifetime, even
@@ -160,11 +162,13 @@ if [[ "$ACTION" == complete-postmigration* ]]; then
     metadata_code="$(cat -- "$SCRIPT_DIR/pm-capture-readonly.py" && printf x)"
     metadata_code="${metadata_code%x}"
     capture_stage=C
-    if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then capture_stage=A; fi
+    if [[ "$ACTION" == complete-postmigration-reload-sample || "$ACTION" == complete-postmigration-postarchive-reload-sample ]]; then capture_stage=A; fi
     if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then capture_stage=B; fi
+    sample_phase_arg=''
+    if [[ "$ACTION" == complete-postmigration-postarchive* ]]; then sample_phase_arg=' --sample-phase postarchive'; fi
     remote_command+='; then action_rc=0; else action_rc=$?; fi; '
     # Helper owns the leading separator and strict frame; prior stderr is untouched.
-    remote_command+="if /usr/bin/python3 -I -S -B -c $(quote "$metadata_code") target --stage $(quote "$capture_stage") --entry \"\$entry\" --state $(quote "$DEPLOY_STATE") >&2; then capture_rc=0; else capture_rc=\$?; fi; "
+    remote_command+="if /usr/bin/python3 -I -S -B -c $(quote "$metadata_code") target --stage $(quote "$capture_stage") --entry \"\$entry\" --state $(quote "$DEPLOY_STATE")$sample_phase_arg >&2; then capture_rc=0; else capture_rc=\$?; fi; "
     remote_command+='if [ "$action_rc" != 0 ]; then exit "$action_rc"; fi; exit "$capture_rc"'
     ssh_run "$remote_command" < "$control_archive"
   fi

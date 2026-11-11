@@ -20,6 +20,7 @@ FRAME_END=b'\nAISTUDY_CAPTURE_V2_END\n'
 MAX_FRAME=16*1024*1024
 MAX_FILE=1024*1024
 SAMPLE_ROOT='/run/aistudy-completion-admission'
+POSTARCHIVE_SAMPLE_ROOT='/run/aistudy-completion-postarchive-admission'
 ARCHIVE_ROOT='/run/systemd/system/aistudy-completion-retained-205'
 UNIT='aistudy-postmigration-completion.service'
 LOCK='/etc/aistudy/.worker-provision.lock'
@@ -54,14 +55,17 @@ def b64(value):
     return base64.b64decode(value,validate=True)
 
 
-def paths(stage,state):
+def paths(stage,state,sample_phase=None):
     require(stage in ('pre','A','B','C'),'stage')
     require(type(state)is str and re.fullmatch(r'/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)*',state) and '/..' not in state,'state')
+    require(sample_phase in (None,'postarchive'),'sample phase')
+    require(sample_phase is None or stage in ('pre','A','C'),'postarchive stage')
+    sample_root=POSTARCHIVE_SAMPLE_ROOT if sample_phase else SAMPLE_ROOT
     result={LOCK:'metadata',state+'/postmigration-completion-claimed':'private',ORIGIN:'private'}
     if stage!='pre':
-        result[SAMPLE_ROOT+'/scope.json']='private'
-        result.update({SAMPLE_ROOT+'/sample-'+str(i)+suffix+'.json':'private' for i in range(3) for suffix in ('-started','')})
-    if stage in ('B','C'):
+        result[sample_root+'/scope.json']='private'
+        result.update({sample_root+'/sample-'+str(i)+suffix+'.json':'private' for i in range(3) for suffix in ('-started','')})
+    if stage in ('B','C') or sample_phase:
         result.update({ARCHIVE_ROOT+'/'+name:'private' for name in ('manifest.json','archive-identity.json')})
     return result
 
@@ -127,7 +131,7 @@ def clock_check(clock):
     require(type(clock['collectorCgroup'])is str and bool(clock['collectorCgroup']),'collector cgroup')
 
 
-def manager_check(row,before,after,stage):
+def manager_check(row,before,after,stage,sample_phase=None):
     require(type(row)is dict and set(row)==MANAGER_KEYS,'manager schema')
     require(row['argv']==['/usr/bin/systemctl','show','--all','--property='+','.join(TARGET_PROPS),UNIT],'fixed manager argv')
     require(type(row['actualExit'])is int and row['actualExit']==0,'manager nonzero')
@@ -141,11 +145,13 @@ def manager_check(row,before,after,stage):
         # B/C may observe the archived fragment's unloaded manager record.
         # This is structural observation ONLY, never launch/claim/terminal proof;
         # both stages still require archive files and independent bridge checks.
-        require(stage in ('B','C'),'not-found outside archived stages')
+        require(stage in ('B','C') or sample_phase=='postarchive','not-found outside archived stages')
         empty=('InvocationID','FragmentPath','DropInPaths','Slice','ControlGroup')
         zero=('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts')
         require(all(props[k]=='' for k in empty) and all(props[k]=='0' for k in zero) and props['ActiveState']=='inactive' and props['SubState']=='dead' and props['Result']=='success' and props['Job'] in ('','0') and props['NeedDaemonReload']=='no','archived not exact never-started not-found')
-    else:require(props['LoadState']=='loaded','manager load state')
+    else:
+        require(not (sample_phase=='postarchive' and stage in ('pre','A')),'postarchive sampling requires not-found')
+        require(props['LoadState']=='loaded','manager load state')
     for name in ('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts'):
         require(re.fullmatch('[0-9]+',props[name])is not None,'manager integer text')
     require(not props['InvocationID'] or re.fullmatch('[0-9a-f]{32}',props['InvocationID']),'manager invocation')
@@ -165,15 +171,18 @@ def row_check(row,category):
 
 
 def validate(envelope):
-    require(type(envelope)is dict and set(envelope)==ENVELOPE_KEYS,'envelope schema')
+    require(type(envelope)is dict,'envelope schema')
+    sample_phase=envelope.get('samplePhase')
+    require(sample_phase in (None,'postarchive'),'sample phase')
+    require(set(envelope)==ENVELOPE_KEYS|({'samplePhase'} if sample_phase else set()),'envelope schema')
     require(type(envelope['version'])is int and envelope['version']==VERSION and envelope['kind']==KIND,'version/kind')
     require(envelope['status']=='COMPLETE' and envelope['errors']==[],'capture UNKNOWN')
-    stage=envelope['stage'];state=envelope['state'];inventory=paths(stage,state)
+    stage=envelope['stage'];state=envelope['state'];inventory=paths(stage,state,sample_phase)
     entry=envelope['entry']
     require(entry is None if stage=='pre' else type(entry)is str and re.fullmatch(r'/tmp/aistudy-entry\.[A-Za-z0-9]{8}',entry) and entry!='/tmp/aistudy-entry.Pz65J76D','entry')
     before=envelope['clockBefore'];after=envelope['clockAfter'];clock_check(before);clock_check(after)
     require(before['endedNs']<=after['startedNs'] and all(before[k]==after[k] for k in ('clock','boot','hostId','timeNamespace','collectorCgroup')),'same target clock identity')
-    manager=manager_check(envelope['manager'],before,after,stage)
+    manager=manager_check(envelope['manager'],before,after,stage,sample_phase)
     files=envelope['files'];require(type(files)is dict and set(files)==set(inventory),'stage file inventory')
     claim=state+'/postmigration-completion-claimed'
     absent=[]
@@ -184,7 +193,7 @@ def validate(envelope):
             require(path in (claim,ORIGIN) and files[path]['errno']==2,'required file unavailable')
             absent.append(path)
     require(not absent or set(absent)=={claim,ORIGIN},'partial claim/origin')
-    if manager['LoadState']=='not-found':
+    if manager['LoadState']=='not-found' or sample_phase and stage in ('pre','A'):
         require(set(absent)=={claim,ORIGIN},'unloaded archive cannot authenticate an observed claim')
     entries=envelope['entryFiles'];require(type(entries)is dict and set(entries)==(set() if stage=='pre' else set(CONTROL_NAMES)),'ten entry controls')
     for row in entries.values():require(row_check(row,'code'),'code missing')
@@ -198,9 +207,10 @@ def frame(envelope):
     return b'\n'+FRAME_BEGIN+str(len(body)).encode()+b'\n'+body+FRAME_END
 
 
-def collect(stage,entry,state):
-    inventory=paths(stage,state)
+def collect(stage,entry,state,sample_phase=None):
+    inventory=paths(stage,state,sample_phase)
     out={'version':VERSION,'kind':KIND,'stage':stage,'status':'UNKNOWN','entry':entry,'state':state,'clockBefore':None,'clockAfter':None,'manager':None,'files':{},'entryFiles':{},'errors':[]}
+    if sample_phase:out['samplePhase']=sample_phase
     try:
         out['clockBefore']=clock_raw()
         for path,category in inventory.items():
@@ -218,8 +228,9 @@ def collect(stage,entry,state):
 
 def main(argv=None):
     p=argparse.ArgumentParser();p.add_argument('phase',choices=('target',));p.add_argument('--stage',required=True,choices=('pre','A','B','C'));p.add_argument('--entry');p.add_argument('--state',required=True)
+    p.add_argument('--sample-phase',choices=('postarchive',))
     args=p.parse_args(argv)
-    out=collect(args.stage,args.entry,args.state)
+    out=collect(args.stage,args.entry,args.state,args.sample_phase)
     sys.stdout.buffer.write(frame(out));sys.stdout.buffer.flush()
     return 0 if out['status']=='COMPLETE' else 2
 

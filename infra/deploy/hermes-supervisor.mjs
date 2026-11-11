@@ -92,37 +92,40 @@ export function cleanupCompletion(args, dependencies = {}) {
   if (!fenced || !stopped) throw new Error('Completion cleanup UNCONFIRMED');
 }
 
-export function completionServiceUnit(args, root = dirname(filename), node = process.execPath) {
+export function completionServiceUnit(args, root = dirname(filename), node = process.execPath, samplePhase) {
   validateArguments(args);
   if (args.length !== 13 || args[0] !== 'complete-postmigration' || !canonicalManagedPath(root) || !canonicalManagedPath(node)
     || args.slice(1).some(value => !/^[A-Za-z0-9_./-]+$/.test(value))) throw new Error('Unsafe completion service arguments');
   const entry = `${node} ${root}/hermes-supervisor.mjs`;
+  if (samplePhase !== undefined && samplePhase !== 'postarchive') throw new Error('Unknown completion sample phase');
+  const runMode = samplePhase === 'postarchive' ? 'run-postarchive' : 'run';
   const owner = `${root}/hermes-release.sh ${args.join(' ')}`;
-  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=7200\nTimeoutStopSec=240\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} run ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
+  return `[Unit]\nDescription=AIstudy one-shot postmigration completion\n[Service]\nType=exec\nUser=root\nWorkingDirectory=/\nUMask=0077\nRuntimeDirectory=aistudy-completion\nRuntimeDirectoryMode=0700\nSlice=system.slice\nRestart=no\nKillMode=control-group\nRuntimeMaxSec=7200\nTimeoutStopSec=240\nStandardInput=null\nStandardOutput=journal\nStandardError=journal\nExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} ${runMode} ${owner}\nExecStopPost=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 ${entry} completion-stop-post ${owner}\n`;
 }
 
 export function launchCompletion(script, args, dependencies = {}) {
   const { run = command, root = dirname(filename), node = process.execPath,
-    admission = completionLaunchAdmission, beforeStart = () => {},
+    admission = completionLaunchAdmission, samplePhase, beforeStart = () => {},
     write = (path, text) => {
       const fd = openSync(path, 'wx', 0o644);
       try { writeFileForUnit(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
       syncDirectory(dirname(path));
     } } = dependencies;
   if (script !== join(root, 'hermes-release.sh')) throw new Error('Completion owner must be reviewed sibling');
-  const unit = completionServiceUnit(args, root, node);
+  const unit = completionServiceUnit(args, root, node, samplePhase);
+  const admit = phase => admission(args, unit, phase, samplePhase);
   const path = `/run/systemd/system/${completionUnit}`;
   // Incident-only archival is descriptor/DAC checked, never a generic overwrite.
-  admission(args, unit, 'absent');
+  admit('absent');
   // Archival retains the loaded manager record; unload it only after admission.
   if (!run(['daemon-reload']).ok) throw new Error('Archived unit unload unconfirmed');
   // Never overwrite/restart an existing service or an earlier retained attempt.
   const before = run(['show', '--all', '--property=LoadState', completionUnit]);
   if ((!before.ok && before.status !== 1) || before.stdout.trim() !== 'LoadState=not-found' || present(path)) throw new Error('Completion service already present or unconfirmed');
-  admission(args, unit, 'unloaded'); // Historical writer proof again before creating new unit.
+  admit('unloaded'); // Historical writer proof again before creating new unit.
   write(path, unit);
   if (!run(['daemon-reload']).ok) throw new Error('Completion unit reload unconfirmed');
-  admission(args, unit, 'ready'); // Recheck evidence, guards and claim race before submission.
+  admit('ready'); // Recheck evidence, guards and claim race before submission.
   // Start once. The service, not SSH, owns its cgroup, timeout and StopPost.
   beforeStart(); // Release intake lock so the service can acquire its own lock.
   const started = run(['start', '--no-block', completionUnit]);
@@ -233,7 +236,7 @@ const production = {
 };
 // Object injection is restricted to module callers in tests. CLI always uses
 // production dependencies; no environment, HTTP or command-line adapter switch.
-export async function supervise(script, args, dependencies = {}) {
+export async function supervise(script, args, dependencies = {}, samplePhase) {
   const { createServer, command, stopWriters, boundedQuiescence, captureConfiguration, persistConfiguration, verifyEntrySources, checkRepair, checkCompletion, claimCompletion, completionService, completionLaunchAdmission,
     startBroker, brokerControl, closeBroker, retireBroker, classify, terminalCommit, spawn, health } = { ...production, ...dependencies };
   // Failure is an early rejection, NOT an owner crash: never fence/stop writers.
@@ -241,6 +244,7 @@ export async function supervise(script, args, dependencies = {}) {
   const state = args[4], systemd = args[6], action = args[0];
   const repair = action === 'repair-pre-migration';
   const completion = action === 'complete-postmigration';
+  if (samplePhase !== undefined && (samplePhase !== 'postarchive' || !completion)) throw new Error('Invalid postarchive owner scope');
   if (completion && !Object.keys(dependencies).length) {
     assertCompletionLock(state);
     if (script !== join(dirname(filename), 'hermes-release.sh')) throw new Error('Completion owner must be the reviewed sibling');
@@ -261,7 +265,7 @@ export async function supervise(script, args, dependencies = {}) {
     const observation = checkCompletion(args);
     // Always traverse this boundary, including object-injected manager fixtures.
     // Production uses the real admission; tests must explicitly own their seam.
-    completionLaunchAdmission(args, Object.keys(dependencies).length ? undefined : completionServiceUnit(args), 'claim');
+    completionLaunchAdmission(args, Object.keys(dependencies).length ? undefined : completionServiceUnit(args, undefined, undefined, samplePhase), 'claim', samplePhase);
     try { claimCompletion(state, { ...observation, owner: completionOwner, invocation: service.InvocationID, mainPid: service.ExecMainPID }); }
     catch (error) {
       if (error.completionClaimConsumed) {
@@ -630,29 +634,29 @@ export async function supervise(script, args, dependencies = {}) {
 async function main() {
   protectCleanupStreams();
   const [mode, script, ...args] = process.argv.slice(2);
-  if (mode === 'completion-reload-samples' || mode === 'completion-retained-archive') {
+  if (['completion-reload-samples', 'completion-postarchive-reload-samples', 'completion-retained-archive'].includes(mode)) {
     verifyEntrySources();
     validateArguments(args);
     const lock = spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
       join(args[4], 'deploy.lock'), process.execPath, filename, `${mode}-owned`, script, ...args], { stdio: 'inherit' });
     process.exitCode = await new Promise(resolve => { lock.once('error', () => resolve(1)); lock.once('exit', code => resolve(code ?? 1)); });
-  } else if (mode === 'completion-reload-samples-owned' || mode === 'completion-retained-archive-owned') {
+  } else if (['completion-reload-samples-owned', 'completion-postarchive-reload-samples-owned', 'completion-retained-archive-owned'].includes(mode)) {
     verifyEntrySources();
     validateArguments(args);
     assertCompletionLock(args[4]);
     const retainedUnit = completionServiceUnit(args, '/tmp/aistudy-entry.Pz65J76D')
       .replace('RuntimeMaxSec=7200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
     console.log(python('hermes-writer-state.py', [mode.replace('-owned', ''), args[4]], { args, retainedUnit }));
-  } else if (mode === 'completion-launch') {
+  } else if (mode === 'completion-launch' || mode === 'completion-postarchive-launch') {
     verifyEntrySources();
     validateArguments(args);
     const lock = spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
-      join(args[4], 'deploy.lock'), process.execPath, filename, 'completion-launch-owned', script, ...args], { stdio: 'inherit' });
+      join(args[4], 'deploy.lock'), process.execPath, filename, `${mode}-owned`, script, ...args], { stdio: 'inherit' });
     process.exitCode = await new Promise(resolve => { lock.once('error', () => resolve(1)); lock.once('exit', code => resolve(code ?? 1)); });
-  } else if (mode === 'completion-launch-owned') {
+  } else if (mode === 'completion-launch-owned' || mode === 'completion-postarchive-launch-owned') {
     verifyEntrySources(); // No service/state write before reviewed entry trust.
     assertCompletionLock(args[4]);
-    launchCompletion(script, args, { beforeStart: () => closeSync(9) });
+    launchCompletion(script, args, { samplePhase: mode === 'completion-postarchive-launch-owned' ? 'postarchive' : undefined, beforeStart: () => closeSync(9) });
     console.log('Completion submitted; inspect independent manager terminal outcome.');
   } else if (mode === 'completion-unit') {
     console.log(completionServiceUnit(args));
@@ -677,8 +681,9 @@ async function main() {
     if (!observed.ok) throw new Error('Completion manager terminal record unavailable');
     console.error(observed.stdout.trim()); // Manager outcome, not application success proof.
     cleanupCompletion(args);
-  } else if (mode === "run") {
+  } else if (mode === 'run' || mode === 'run-postarchive') {
     validateArguments(args);
+    if (mode === 'run-postarchive' && args[0] !== 'complete-postmigration') throw new Error('Postarchive is completion-only');
     verifyEntrySources(); // Before mkdir/chmod/lock, including existing guard recovery.
     const state = args[4];
     if (args[0] === 'repair-pre-migration' || args[0] === 'complete-postmigration') {
@@ -692,7 +697,7 @@ async function main() {
     }
     const child = args[0] === 'complete-postmigration'
       ? spawn('/usr/bin/python3', ['-I', '-S', '-B', '-c', completionLockEntry,
-        join(state, 'deploy.lock'), process.execPath, filename, 'owned', script, ...args], { stdio: 'inherit' })
+        join(state, 'deploy.lock'), process.execPath, filename, mode === 'run-postarchive' ? 'owned-postarchive' : 'owned', script, ...args], { stdio: 'inherit' })
       : spawn("flock", ["--nonblock", "--no-fork", join(state, "deploy.lock"), process.execPath, ...process.execArgv, filename, "owned", script, ...args], { stdio: "inherit" });
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => child.kill(signal));
     process.exitCode = await new Promise(resolve => { child.once("error", () => resolve(1)); child.once("exit", (code, signal) => resolve(signal ? 1 : code ?? 1)); });
@@ -706,7 +711,7 @@ async function main() {
     child.once("exit", (code, signal) => process.send({ result: signal ? 128 + ({ SIGKILL: 9, SIGTERM: 15, SIGINT: 2, SIGHUP: 1 }[signal] ?? 1) : code ?? 1 }));
     process.on("message", message => { if (message.done) process.exit(0); });
     process.on("disconnect", () => { try { process.kill(-process.pid, "SIGKILL"); } catch { process.exit(1); } });
-  } else if (mode === "owned") { validateArguments(args); process.exitCode = await supervise(script, args); }
+  } else if (mode === 'owned' || mode === 'owned-postarchive') { validateArguments(args); process.exitCode = await supervise(script, args, {}, mode === 'owned-postarchive' ? 'postarchive' : undefined); }
   else throw new Error("Unknown supervisor mode");
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(`Managed entry failed: ${error.message}`); process.exitCode = 1; });

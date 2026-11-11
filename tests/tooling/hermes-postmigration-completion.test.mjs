@@ -242,6 +242,29 @@ test('completion launch submits a single bounded service and retains controls on
   }
 });
 
+test('postarchive phase reaches all intake admissions and the service claim path', async t => {
+  const args=['complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/config','6291456','a'.repeat(40),'/release','b'.repeat(64),'/archive'];
+  const calls=[];
+  launchCompletion('/trusted/hermes-release.sh',args,{root:'/trusted',node:'/usr/bin/node',samplePhase:'postarchive',
+    run:argv=>({ok:true,stdout:argv[0]==='show'?'LoadState=not-found\n':''}),
+    admission:(_args,unit,phase,samplePhase)=>{calls.push([phase,samplePhase]);assert.match(unit,/run-postarchive/);},
+    write:()=>{},
+  });
+  assert.deepEqual(calls,[['absent','postarchive'],['unloaded','postarchive'],['ready','postarchive']]);
+  const root=mkdtempSync(join(tmpdir(),'postarchive-claim-'));t.after(()=>rmSync(root,{recursive:true}));
+  const owned=[...args];owned[4]=root;
+  await assert.rejects(supervise('unused',owned,{
+    verifyEntrySources:()=>{},completionService:()=>({InvocationID:'a'.repeat(32),ExecMainPID:'1234'}),checkCompletion:()=>({}),
+    completionLaunchAdmission:(_a,_u,phase,samplePhase)=>{calls.push([phase,samplePhase]);throw Error('claim boundary observed');},
+    claimCompletion:()=>{throw Error('must not claim');},
+  },'postarchive'),/claim boundary observed/);
+  assert.deepEqual(calls.at(-1),['claim','postarchive']);
+  assert(!existsSync(join(root,'postmigration-completion-claimed')));
+  const unit=completionServiceUnit(args,'/trusted','/usr/bin/node','postarchive');
+  assert.match(unit,/ExecStart=.* run-postarchive /);assert.match(unit,/ExecStopPost=.* completion-stop-post /);
+  assert.doesNotMatch(completionServiceUnit(args,'/trusted','/usr/bin/node'),/run-postarchive/);
+});
+
 test('completion admission denial is zero-mutation, and final claim race cannot start', () => {
   const args=['complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/config','6291456','a'.repeat(40),'/release','b'.repeat(64),'/archive'];
   for (const boundary of ['absent', 'ready']) {
@@ -329,7 +352,7 @@ test('candidate readonly stdin generator syntax and source hashes are reproducib
   const exercised = spawnSync('python3',['-I','-S','-B',resolve('tests/tooling/hermes_postmigration_completion_test.py'),'--generated-check'],{input:generated.stdout,encoding:'utf8'});
   assert.equal(exercised.status,0,exercised.stdout+exercised.stderr);
   assert.match(exercised.stderr,/test_completion_existing_exclusive_lock_refuses_without_writes .* \.\.\. ok/);
-  assert.match(exercised.stderr,/Ran 40 tests/);
+  assert.match(exercised.stderr,/Ran 45 tests/);
   assert.match(exercised.stderr,/OK \(skipped=3\)/);
   const invalid=spawnSync('python3',['-I','-S','-B',resolve('tests/tooling/hermes_postmigration_completion_test.py'),'--generated-check'],{input:'this is deliberately invalid python !!!\n',encoding:'utf8'});
   assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/SyntaxError/);
