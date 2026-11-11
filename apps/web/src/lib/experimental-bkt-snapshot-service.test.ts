@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
-import { evaluateEvidenceEligibility } from "@aistudy/domain";
+import { evaluateEvidenceEligibility, type NextLearningStep } from "@aistudy/domain";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ExperimentalLearningAdvice } from "../features/opening/teaching/experimental-learning-advice";
@@ -265,12 +265,12 @@ describe("experimental BKT host snapshot seam", () => {
     for (const secret of ["ANSWER_CANARY", "SOURCE_CANARY", "SOURCE_ID_CANARY", "0.77391"]) expect(JSON.stringify(result)).not.toContain(secret);
     expect(value.features[0]!.sourceIds).toEqual(["SOURCE_ID_CANARY"]);
   });
-  const ruleDecision = { activityKind: "independent_practice", focusObservationId: null, reasonCode: "independent" } as const;
+  const ruleDecision = { activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" } as const satisfies NextLearningStep;
   it("port defaults false and performs no read or wrapper invocation", async () => {
     const f = fixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>();
     const service = createExperimentalBktSnapshotService({ ...f, ruleDecision, wrapper });
     expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
-      port: { ruleDecision: { activityKind: ruleDecision.activityKind, reasonCode: ruleDecision.reasonCode },
+      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
         status: "disabled", experimentalAdvice: null } });
     expect(f.repository.read).not.toHaveBeenCalled(); expect(wrapper).not.toHaveBeenCalled();
   });
@@ -501,8 +501,12 @@ describe("service with exact snapshot R2 repository (typed SQL fake, NOT PG)", (
   });
   it("real R2 readPort returns real R4 insufficient fallback, ignoring injected substitute", async () => {
     const f = realRepositoryFixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>(() => { throw new Error("UNAPPROVED_WRAPPER"); });
-    const ruleDecision = { activityKind: "independent_practice", focusObservationId: uuid(10), reasonCode: "independent" } as const;
+    const ruleDecision = { activityKind: "transfer_check", focusObservationId: uuid(10), reasonCode: "independent" } as const satisfies NextLearningStep;
     const service = createExperimentalBktSnapshotService({ host: f.host, repository: f.repository, wrapper, ruleDecision });
+    expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
+      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
+        status: "disabled", experimentalAdvice: null } });
+    expect(f.queries).toHaveLength(0);
     expect(await service.readPort({ enabled: true })).toEqual({ comparisonReady: false, reason: "insufficient_samples",
       port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" }, status: "fallback", reason: "insufficient_samples", experimentalAdvice: null } });
     expect(wrapper).not.toHaveBeenCalled(); expect(f.queries).toHaveLength(3);
