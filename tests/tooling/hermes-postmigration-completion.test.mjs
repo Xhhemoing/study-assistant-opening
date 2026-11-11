@@ -352,7 +352,7 @@ test('candidate readonly stdin generator syntax and source hashes are reproducib
   const exercised = spawnSync('python3',['-I','-S','-B',resolve('tests/tooling/hermes_postmigration_completion_test.py'),'--generated-check'],{input:generated.stdout,encoding:'utf8'});
   assert.equal(exercised.status,0,exercised.stdout+exercised.stderr);
   assert.match(exercised.stderr,/test_completion_existing_exclusive_lock_refuses_without_writes .* \.\.\. ok/);
-  assert.match(exercised.stderr,/Ran 45 tests/);
+  assert.match(exercised.stderr,/Ran 46 tests/);
   assert.match(exercised.stderr,/OK \(skipped=3\)/);
   const invalid=spawnSync('python3',['-I','-S','-B',resolve('tests/tooling/hermes_postmigration_completion_test.py'),'--generated-check'],{input:'this is deliberately invalid python !!!\n',encoding:'utf8'});
   assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/SyntaxError/);

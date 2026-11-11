@@ -702,6 +702,18 @@ class Completion(Repair):
         self.assertEqual(before, {p.name: p.read_bytes() for p in old.iterdir()})
         self.assertTrue(quarantine.exists())
 
+    def test_completion_postarchive_missing_archive_refuses_both_manager_states(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        self.postarchive_sample(payload)
+        moved = self.root / 'unavailable-archive'
+        quarantine.rename(moved)
+        route = {**payload, 'samplePhase': 'postarchive', 'phase': 'absent'}
+        with patch.object(state.time, 'monotonic_ns', return_value=401):
+            for observation in (manager, {**manager, 'LoadState': 'loaded', 'FragmentPath': str(unit)}):
+                with patch.object(state, 'completion_manager', return_value=observation), self.assertRaises(FileNotFoundError):
+                    state.completion_launch_check(route)
+        self.assertTrue(moved.exists()); self.assertFalse(quarantine.exists())
+
     def test_completion_postarchive_bad_samples_do_not_fallback_or_admit_old_scope(self):
         payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
         route = {**payload, 'samplePhase': 'postarchive'}
