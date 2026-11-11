@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { listMigrationFiles } from "../../packages/database/src/migrate";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import postgres, { type Sql, type TransactionSql } from "postgres";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
@@ -80,12 +82,25 @@ async function assertPositive(f: Seed) {
 }
 
 describe("card 1 — real migration/schema and metadata SQL", () => {
-  it("has every real migration through 0111 with verified checksums", async () => {
+  it("has every real migration with verified checksums and preserves revision immutability", async () => {
+    const files = await listMigrationFiles();
+    expect(files).toContain("0001_library.sql");
+    expect(files).toContain("0111_opening_explicit_regrade_requests.sql");
+    const expected = files.map(id => ({
+      id,
+      checksum: createHash("sha256").update(readFileSync(
+        new URL(`../../packages/database/src/migrations/${id}`, import.meta.url), "utf8",
+      )).digest("hex"),
+      verification_state: "verified",
+    }));
     const rows = await fixture.sql`SELECT id,checksum,verification_state FROM schema_migrations ORDER BY id`;
-    expect(rows).toHaveLength(111);
-    expect(rows[0]!.id).toBe("0001_library.sql");
-    expect(rows.at(-1)!.id).toBe("0111_opening_explicit_regrade_requests.sql");
-    expect(rows.every(r => r.verification_state === "verified" && /^[a-f0-9]{64}$/.test(String(r.checksum)))).toBe(true);
+    expect(rows).toHaveLength(files.length);
+    expect([...rows]).toEqual(expected);
+    const guards = await fixture.sql`SELECT tgname,tgenabled FROM pg_trigger WHERE tgrelid='library_revisions'::regclass AND NOT tgisinternal ORDER BY tgname`;
+    expect(guards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tgname: "library_revisions_no_update", tgenabled: "O" }),
+      expect.objectContaining({ tgname: "library_revisions_no_delete", tgenabled: "O" }),
+    ]));
   });
   it("executes both exported SQL queries on real PG in readonly repeatable read, then admits nonzero evidence", async () => {
     const f = await seed();
