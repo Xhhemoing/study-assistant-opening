@@ -148,7 +148,11 @@ function CatalogBody({
           data-catalog="example"
         >
           <p className="mb-1 text-xs font-medium text-accent">例题 / 示例</p>
-          {text ? <LearningProse text={text} /> : <p>（空示例）</p>}
+          {text ? params.generated === true
+            // Free worked examples contain exact plain-text algebra, not Markdown:
+            // paired multiplication signs must not become emphasis delimiters.
+            ? <p className="whitespace-pre-wrap break-words">{text}</p>
+            : <LearningProse text={text} /> : <p>（空示例）</p>}
         </aside>
       );
     case "question":

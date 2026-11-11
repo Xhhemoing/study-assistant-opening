@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Sql, TransactionSql } from "postgres";
+import type { JSONValue, Sql, TransactionSql } from "postgres";
 import type { Scope, StudyContextAnchor, StudyExposureReceipt } from "@aistudy/contracts";
 import { helpInputSnapshotSchema, type HelpInputSnapshot } from "@aistudy/contracts";
 import { learningError, learningIso, lockWorkspaceLearningHistory, nextLearningHistoryRevision, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
@@ -11,6 +11,9 @@ import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
 
 export type OpeningStudyExposureInput = {
   releaseKey: string;
+  /** Internal command publication binding; never accepted from HTTP input. */
+  teachingPublication?: { documentId: string; revisionNumber: number; teachingUnitId: string;
+    sourceRefs: JSONValue; blockOrder: JSONValue; blocks: JSONValue };
   contextAnchor: StudyContextAnchor;
   origin: StudyExposureReceipt["origin"];
   originReference?: { type: "source" | "note" | "card" | "observation"; id: string; version: string; sourceRefs?: Array<{ sourceId: string; sourceVersion: number | null }>; requirementKey?: string | null; skillLabel?: string | null; possibleOpenAttemptOnly?: boolean };
@@ -114,6 +117,29 @@ export async function releaseOpeningStudyExposure(tx: TransactionSql, scope: Sco
               WHERE ref->>'sourceId'=ANY(o.source_ids::text[]) AND ${row.release_intent ? tx.json(row.release_intent) : null}::jsonb->'originReference'->>'skillLabel'=o.skill_label))))`;
   await invalidateOpeningLearningEligibility(tx, scope, { rootIds: roots.map(root => String(root.root_id)) });
   return mapOpeningStudyExposure(released!);
+}
+
+/** Carry a proven unchanged command publication association without re-dating help.
+ * Caller holds the publication/history locks and validates both saved revisions.
+ * The immutable receipt retains its actual delivery time and history revisions.
+ */
+export async function carryTeachingExampleExposure(tx: TransactionSql, scope: Scope, receiptId: string,
+  input: OpeningStudyExposureInput) {
+  const anchor = input.contextAnchor;
+  const intent = JSON.parse(JSON.stringify(input)) as OpeningStudyExposureInput;
+  await tx`INSERT INTO opening_help_exposures(id,workspace_id,owner_user_id,course_id,session_id,attempt_id,problem_id,
+      item_version_id,activity_id,turn_id,kind,level,delivered,release_key,release_intent,context_anchor,
+      exposure_origin,support_domain,hint_stage,initiated_by,help_input_snapshot,generated_at,released_at,
+      delivered_at,history_revision,workspace_history_revision)
+    SELECT ${randomUUID()},h.workspace_id,h.owner_user_id,h.course_id,NULL,NULL,NULL,NULL,h.activity_id,NULL,
+      h.kind,h.level,TRUE,${input.releaseKey},${tx.json(intent)},${tx.json(anchor)},h.exposure_origin,h.support_domain,
+      h.hint_stage,h.initiated_by,h.help_input_snapshot,h.generated_at,h.released_at,h.delivered_at,
+      h.history_revision,h.workspace_history_revision
+    FROM opening_help_exposures h WHERE h.id=${receiptId} AND h.workspace_id=${scope.workspaceId}
+      AND h.owner_user_id=${scope.ownerUserId} AND h.delivered=TRUE AND h.released_at IS NOT NULL
+      AND h.kind='solution' AND h.level='revealed' AND h.release_key LIKE 'teaching-example:%'
+      AND h.attempt_id IS NULL AND h.problem_id IS NULL AND h.item_version_id IS NULL
+    ON CONFLICT (workspace_id,release_key) WHERE release_key IS NOT NULL DO NOTHING`;
 }
 
 /** Called by delivery boundaries; query readers themselves remain read-only. */

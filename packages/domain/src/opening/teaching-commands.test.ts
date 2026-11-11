@@ -103,7 +103,7 @@ describe("teaching-commands domain", () => {
     expect(skip).toEqual({ ok: true });
   });
 
-  it("rejects example generation rather than accepting a provenance-only copy as a new variant", () => {
+  it("leaves example body eligibility to the pinned-body repository, never the structured copy", () => {
     const prior = [{ id: blockA, type: "example", content: { text: "Synthetic worked example: 7x + 4 = 25." } }];
     // The legacy rewrite only changes metadata, even with an explicit request for different data.
     const copy = buildStructuredRewriteBlocks(prior, {
@@ -114,7 +114,7 @@ describe("teaching-commands domain", () => {
     expect(assertCommandAllowed({
       activity: { generateStatus: "needs_check", contentVersion: 2, pathVersion: 1 },
       kind: "example", blockId: blockA, blockIdsInSpec: [blockA], branchStack: [],
-    })).toMatchObject({ ok: false, conflict: "validation", message: expect.stringContaining("未生成新例题") });
+    })).toEqual({ ok: true });
   });
 
   it("T14 block_not_in_spec and T10 empty return", () => {

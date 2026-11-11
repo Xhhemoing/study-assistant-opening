@@ -357,10 +357,19 @@ export async function readOpeningLearningEvidenceContexts(
     const teachingHelp: Row[] = teachingSpec ? help.filter(row => {
       const anchor = row.context_anchor as { activityId?: string; blockId?: string; contentVersion?: number } | null;
       return anchor?.activityId === teachingSpec.activityId && anchor.blockId === teachingSpec.blockId && anchor.contentVersion === teachingSpec.contentVersion;
-    }).map(row => ({ ...row, problem_id: record.problemId, same_question: true })) : [];
+    }).map(row => ({ ...row,
+      // Only this deterministic command owns a before-attempt revealed receipt.
+      // Generic anchor-only help must retain its existing unknown association.
+      attempt_id: row.attempt_id ?? ((row.release_intent as { releaseKey?: string } | null)?.releaseKey?.startsWith("teaching-example:") ? record.attemptId : null),
+      problem_id: record.problemId, same_question: true,
+    })) : [];
     const history = [...new Map([
       ...sourceHelp, ...uncertainSourceHelp,
-      ...crossRevisionHelp.filter(row => row.target_item_id === record.itemVersionId).map((row): Row => ({ ...row, same_question: true })),
+      ...crossRevisionHelp.filter(row => row.target_item_id === record.itemVersionId).map((row): Row => ({
+        ...row,
+        attempt_id: row.attempt_id ?? ((row.release_intent as { releaseKey?: string } | null)?.releaseKey?.startsWith("teaching-example:") ? record.attemptId : null),
+        same_question: true,
+      })),
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []), ...teachingHelp,
