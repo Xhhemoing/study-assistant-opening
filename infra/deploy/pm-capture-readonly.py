@@ -170,7 +170,9 @@ def validate(envelope):
     absent=[]
     for path,category in inventory.items():
         if not row_check(files[path],category):
-            require(stage!='C' and path in (claim,ORIGIN) and files[path]['errno']==2,'required file unavailable')
+            # C reports only the nonblocking submission instant. The service
+            # may not have reached claim yet; paired absence is not success.
+            require(path in (claim,ORIGIN) and files[path]['errno']==2,'required file unavailable')
             absent.append(path)
     require(not absent or set(absent)=={claim,ORIGIN},'partial claim/origin')
     entries=envelope['entryFiles'];require(type(entries)is dict and set(entries)==(set() if stage=='pre' else set(CONTROL_NAMES)),'ten entry controls')
