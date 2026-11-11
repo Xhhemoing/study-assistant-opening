@@ -9,7 +9,7 @@ def manager(exit=0):
  props={k:'' for k in p.TARGET_PROPS};props.update(Id=p.UNIT,LoadState='loaded',InvocationID='b'*32)
  for k in ('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts'):props[k]='0'
  return {'argv':['/usr/bin/systemctl','show','--all','--property='+','.join(p.TARGET_PROPS),p.UNIT],'startedNs':12,'endedNs':13,'actualExit':exit,'stdoutBase64':base64.b64encode(('\n'.join(k+'='+v for k,v in props.items())+'\n').encode()).decode(),'stderrBase64':''}
-def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False):
+def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False,manager_value=None):
  def read(path,category):
   if path.endswith('postmigration-completion-claimed') or path==p.ORIGIN:
    if stage!='C' or claim_absent:raise FileNotFoundError(2,'synthetic')
@@ -17,7 +17,7 @@ def collect(stage='A',missing=None,exit=0,mode=0o600,claim_absent=False):
   r=row(mode=0o644 if category=='code' else mode)
   if category=='metadata':r.pop('bytesBase64')
   return r
- with patch.object(p,'clock_raw',side_effect=[clock(10),clock(20)]),patch.object(p,'manager_raw',return_value=manager(exit)),patch.object(p,'fixed_read',side_effect=read):return p.collect(stage,None if stage=='pre' else '/tmp/aistudy-entry.ABCDEFGH','/opt/state')
+ with patch.object(p,'clock_raw',side_effect=[clock(10),clock(20)]),patch.object(p,'manager_raw',return_value=manager(exit) if manager_value is None else manager_value),patch.object(p,'fixed_read',side_effect=read):return p.collect(stage,None if stage=='pre' else '/tmp/aistudy-entry.ABCDEFGH','/opt/state')
 class Pure(unittest.TestCase):
  def test_stages_complete_and_expected_absence(self):
   for stage in ('pre','A','B','C'):
@@ -76,6 +76,24 @@ class Pure(unittest.TestCase):
    return result
   with patch.object(p,'clock_raw',side_effect=[clock(10),clock(20)]),patch.object(p,'manager_raw',return_value=manager()),patch.object(p,'fixed_read',side_effect=read):
    self.assertEqual(p.collect('C','/tmp/aistudy-entry.ABCDEFGH','/opt/state')['status'],'UNKNOWN')
+ def test_archived_notfound_only_B_C_exact_and_complete_evidence(self):
+  raw=manager();props=dict(line.split('=',1) for line in p.b64(raw['stdoutBase64']).decode().splitlines())
+  props.update(Id=p.UNIT,LoadState='not-found',ActiveState='inactive',SubState='dead',Result='success',NeedDaemonReload='no',Job='',InvocationID='',FragmentPath='',DropInPaths='',Slice='',ControlGroup='')
+  def encode(values):return {**raw,'stdoutBase64':base64.b64encode(('\n'.join(k+'='+v for k,v in values.items())+'\n').encode()).decode()}
+  for stage in ('pre','A','B','C'):
+   with patch.object(p,'manager_raw',return_value=encode(props)):
+    result=collect(stage,claim_absent=True,manager_value=encode(props))
+   self.assertEqual(result['status'],'COMPLETE' if stage in ('B','C') else 'UNKNOWN')
+  for key,value in [('MainPID','1'),('InvocationID','a'*32),('FragmentPath','/run/systemd/system/'+p.UNIT),('ControlGroup','/system.slice/x'),('Job','1'),('NRestarts','1'),('ActiveState','active'),('Result','exit-code')]:
+   modified={**props,key:value}
+   with patch.object(p,'manager_raw',return_value=encode(modified)):
+    self.assertEqual(collect('B',claim_absent=True,manager_value=encode(modified))['status'],'UNKNOWN')
+    self.assertEqual(collect('C',claim_absent=True,manager_value=encode(modified))['status'],'UNKNOWN')
+  with patch.object(p,'manager_raw',return_value=encode(props)):
+   self.assertEqual(collect('C',manager_value=encode(props))['status'],'UNKNOWN') # present claim cannot pair with unloaded manager
+   for stage in ('B','C'):
+    for missing in (p.ARCHIVE_ROOT+'/manifest.json',p.ARCHIVE_ROOT+'/archive-identity.json',p.SAMPLE_ROOT+'/sample-1.json'):
+     self.assertEqual(collect(stage,missing=missing,claim_absent=True,manager_value=encode(props))['status'],'UNKNOWN')
  def test_json_duplicate_nonfinite(self):
   for raw in (b'{"x":1,"x":2}',b'{"x":NaN}'):
    with self.assertRaises(ValueError):p.strict_json(raw)

@@ -127,7 +127,7 @@ def clock_check(clock):
     require(type(clock['collectorCgroup'])is str and bool(clock['collectorCgroup']),'collector cgroup')
 
 
-def manager_check(row,before,after):
+def manager_check(row,before,after,stage):
     require(type(row)is dict and set(row)==MANAGER_KEYS,'manager schema')
     require(row['argv']==['/usr/bin/systemctl','show','--all','--property='+','.join(TARGET_PROPS),UNIT],'fixed manager argv')
     require(type(row['actualExit'])is int and row['actualExit']==0,'manager nonzero')
@@ -136,7 +136,16 @@ def manager_check(row,before,after):
     for line in b64(row['stdoutBase64']).decode().splitlines():
         key,sep,value=line.partition('=');require(sep and key not in props,'manager property syntax/duplicate');props[key]=value
     b64(row['stderrBase64'])
-    require(set(props)==set(TARGET_PROPS) and props['Id']==UNIT and props['LoadState']=='loaded','manager inventory/unit')
+    require(set(props)==set(TARGET_PROPS) and props['Id']==UNIT,'manager inventory/unit')
+    if props['LoadState']=='not-found':
+        # B/C may observe the archived fragment's unloaded manager record.
+        # This is structural observation ONLY, never launch/claim/terminal proof;
+        # both stages still require archive files and independent bridge checks.
+        require(stage in ('B','C'),'not-found outside archived stages')
+        empty=('InvocationID','FragmentPath','DropInPaths','Slice','ControlGroup')
+        zero=('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts')
+        require(all(props[k]=='' for k in empty) and all(props[k]=='0' for k in zero) and props['ActiveState']=='inactive' and props['SubState']=='dead' and props['Result']=='success' and props['Job'] in ('','0') and props['NeedDaemonReload']=='no','archived not exact never-started not-found')
+    else:require(props['LoadState']=='loaded','manager load state')
     for name in ('MainPID','ControlPID','ExecMainPID','ExecMainStartTimestampMonotonic','ExecMainExitTimestampMonotonic','ActiveEnterTimestampMonotonic','InactiveExitTimestampMonotonic','ExecMainCode','ExecMainStatus','NRestarts'):
         require(re.fullmatch('[0-9]+',props[name])is not None,'manager integer text')
     require(not props['InvocationID'] or re.fullmatch('[0-9a-f]{32}',props['InvocationID']),'manager invocation')
@@ -164,7 +173,7 @@ def validate(envelope):
     require(entry is None if stage=='pre' else type(entry)is str and re.fullmatch(r'/tmp/aistudy-entry\.[A-Za-z0-9]{8}',entry) and entry!='/tmp/aistudy-entry.Pz65J76D','entry')
     before=envelope['clockBefore'];after=envelope['clockAfter'];clock_check(before);clock_check(after)
     require(before['endedNs']<=after['startedNs'] and all(before[k]==after[k] for k in ('clock','boot','hostId','timeNamespace','collectorCgroup')),'same target clock identity')
-    manager_check(envelope['manager'],before,after)
+    manager=manager_check(envelope['manager'],before,after,stage)
     files=envelope['files'];require(type(files)is dict and set(files)==set(inventory),'stage file inventory')
     claim=state+'/postmigration-completion-claimed'
     absent=[]
@@ -175,6 +184,8 @@ def validate(envelope):
             require(path in (claim,ORIGIN) and files[path]['errno']==2,'required file unavailable')
             absent.append(path)
     require(not absent or set(absent)=={claim,ORIGIN},'partial claim/origin')
+    if manager['LoadState']=='not-found':
+        require(set(absent)=={claim,ORIGIN},'unloaded archive cannot authenticate an observed claim')
     entries=envelope['entryFiles'];require(type(entries)is dict and set(entries)==(set() if stage=='pre' else set(CONTROL_NAMES)),'ten entry controls')
     for row in entries.values():require(row_check(row,'code'),'code missing')
     return envelope
