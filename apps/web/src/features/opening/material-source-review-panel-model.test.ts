@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { adaptMaterialCourseFullPackage, materialCourseFullPackageSchema } from "../../../../../packages/domain/src/opening/material-course-package-adapter";
 import { readMaterialSourceReview, type MaterialSourceReviewInput } from "./material-source-review-panel-model";
+import { syntheticReviewBindings, syntheticReviewInput } from "./material-source-review-panel-synthetic.fixture";
 
 // Current real material stays private. Synthetic host bindings are not runtime identity proof.
 function load(): MaterialSourceReviewInput {
@@ -14,6 +15,73 @@ const hostBindings = (pack: MaterialSourceReviewInput) => pack.sources.map((s, i
   sourceId: `11111111-1111-4111-8111-${String(i + 1).padStart(12, "0")}`, sourceVersion: i,
   pdfUrl: `https://synthetic.example/pdf-${i}.pdf?signature=A%2Bb&keep=%2F` }));
 it.each([null, undefined, {}, { questions: [] }])("fails closed on malformed input %j", input => expect(readMaterialSourceReview(input)).toBeNull());
+
+describe("synthetic metadata projection (always runs, not real-input evidence)", () => {
+  it("projects exact question/skill locations with null bodies and no eligibility or private feedback", () => {
+    const input = syntheticReviewInput(), before = JSON.stringify(input);
+    const model = readMaterialSourceReview(input, syntheticReviewBindings(input))!;
+    expect(model.choices.map(c => c.key)).toEqual(["question:synthetic-q1", "question:synthetic-q2", "question:synthetic-q3", "skill:synthetic-s1", "skill:synthetic-s2"]);
+    expect(model.choices.map(c => c.result.locations.map(l => [l.file, l.physicalPage]))).toEqual([
+      [["synthetic-alpha.pdf", 2]], [["synthetic-beta.pdf", 7]], [["synthetic-alpha.pdf", 4]],
+      [["synthetic-alpha.pdf", 1], ["synthetic-alpha.pdf", 4]], [["synthetic-beta.pdf", 7]],
+    ]);
+    for (const choice of model.choices) expect(choice.result).toMatchObject({ bodyStatus: "metadata_only", prompt: null,
+      answer: null, canonicalFamilyId: null, visualReview: "pending", mathematicalVerification: "unverified",
+      diagnosticEligible: false, scoringEligible: false, bktEligible: false });
+    expect(JSON.stringify(model)).not.toMatch(/PRIVATE_|postAttemptNotes|postAttemptMetadata|learningObjectives|commonErrors/);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+  it("leaves missing/empty/partial bindings unbound and preserves exact explicit host URL only for matching SHA", () => {
+    const input = syntheticReviewInput(), bindings = syntheticReviewBindings(input);
+    expect(readMaterialSourceReview(input, [])).toEqual(readMaterialSourceReview(input));
+    const unbound = readMaterialSourceReview(input)!;
+    for (const choice of unbound.choices) for (const location of choice.result.locations) {
+      expect(location).toMatchObject({ status: "unbound", sourceId: null, sourceVersion: null, target: null });
+    }
+    const partial = readMaterialSourceReview(input, [bindings[0]])!;
+    for (const choice of partial.choices) for (const location of choice.result.locations) {
+      if (location.file === bindings[0]!.file) expect(location).toMatchObject({ status: "located", pdfSha256: bindings[0]!.pdfSha256,
+        sourceId: bindings[0]!.sourceId, sourceVersion: 0, target: { pdfUrl: bindings[0]!.pdfUrl, fragment: `#page=${location.physicalPage}` } });
+      else expect(location).toMatchObject({ status: "unbound", target: null });
+    }
+    expect(readMaterialSourceReview(input, [{ ...bindings[0], pdfSha256: "0".repeat(64) }])).toBeNull();
+    expect(readMaterialSourceReview(input, [{ file: bindings[0]!.file }])).toBeNull();
+  });
+  it.each([" https://synthetic.invalid/a.pdf", "http://synthetic.invalid/a.pdf", "https://synthetic.invalid/a.pdf#page=8", "/api/private.pdf", "javascript:alert(1)"])("rejects unsafe host URL %j without repairing it", pdfUrl => {
+    const input = syntheticReviewInput();
+    expect(readMaterialSourceReview(input, [{ ...syntheticReviewBindings(input)[0], pdfUrl }])).toBeNull();
+  });
+  it("rejects projection/feedback objects and added prompt/answer fields rather than treating them as raw metadata", () => {
+    const input = syntheticReviewInput(), projection = readMaterialSourceReview(input)!;
+    expect(readMaterialSourceReview(projection)).toBeNull();
+    expect(readMaterialSourceReview({ safeFirstAnswerInput: { questions: [] }, postAttemptMetadata: { role: "feedback_only" } })).toBeNull();
+    expect(readMaterialSourceReview({ ...input, postAttemptMetadata: { questions: [{ answer: "PRIVATE_ANSWER" }] } })).toBeNull();
+    for (const field of ["prompt", "answer", "notes", "diagnosticEligible"]) {
+      expect(readMaterialSourceReview({ ...input, questions: [{ ...input.questions[0], [field]: "PRIVATE_BODY" }] })).toBeNull();
+    }
+  });
+  it("revalidates same-object mutations and rejects tail references, duplicate identity and out-of-range pages", () => {
+    for (const mutate of [
+      (p: MaterialSourceReviewInput) => { p.skills[1]!.sourceRefs[0]!.file = "unknown.pdf"; },
+      (p: MaterialSourceReviewInput) => { p.questions[2]!.physicalPage = 5; },
+      (p: MaterialSourceReviewInput) => { p.questions[2]!.id = p.questions[0]!.id; },
+      (p: MaterialSourceReviewInput) => { p.questions[2]!.primarySkillId = "unknown-skill"; },
+    ]) {
+      const input = syntheticReviewInput(); expect(readMaterialSourceReview(input)).not.toBeNull();
+      mutate(input); expect(readMaterialSourceReview(input)).toBeNull();
+    }
+  });
+  it("reports readiness reasons on questions and primary/secondary skills without upgrading any candidate", () => {
+    const model = readMaterialSourceReview(syntheticReviewInput())!;
+    const first = model.choices[0]!;
+    expect(first.questionStatuses[0]!.declaredDiagnosticRole).toBe("entry-candidate");
+    expect(model.choices[1]!.questionStatuses[0]!.declaredDiagnosticRole).toBe("supplemental-candidate");
+    expect(model.choices[1]!.questionStatuses[0]!.reasons.join()).toContain("待视觉确认");
+    expect(model.choices[2]!.questionStatuses[0]!.reasons.join()).toContain("资料作者排除");
+    expect(model.choices[4]!.questionStatuses.map(q => q.id)).toEqual(["synthetic-q1", "synthetic-q2"]);
+    for (const c of model.choices) expect(c.result).toMatchObject({ diagnosticEligible: false, scoringEligible: false, bktEligible: false });
+  });
+});
 
 describe.skipIf(!process.env.MATERIAL_COURSE_REAL_FULL_INPUT)("current 041fc package typed panel projection", () => {
   it("maps all 150 questions, 77 skills, 15 PDFs and 385 locations with exact explicit synthetic identity or unbound defaults", () => {
