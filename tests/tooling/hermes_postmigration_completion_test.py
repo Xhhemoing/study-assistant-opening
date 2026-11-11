@@ -12,13 +12,20 @@ import tarfile
 import unittest
 from unittest.mock import patch
 
+# Consume completion's own input before importing Repair, whose standalone CLI
+# otherwise consumes the same flag and stdin as a repair-generated program.
+GENERATED = None
+if '--generated-check' in sys.argv:
+    sys.argv.remove('--generated-check')
+    GENERATED = sys.stdin.read()
+    compile(GENERATED, '<completion-check>', 'exec')
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hermes_pre_migration_repair_test import Repair, state
 COMPLETION_MANAGER = state.completion_manager
 COMPLETION_SCOPE = state.completion_scope
 import subprocess
 REAL_SUBPROCESS_RUN = subprocess.run
-GENERATED = sys.stdin.read() if '--generated-check' in sys.argv else None
 
 
 class Completion(Repair):
