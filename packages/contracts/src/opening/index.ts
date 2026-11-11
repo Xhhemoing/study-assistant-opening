@@ -1,4 +1,12 @@
 export {
+  MATERIAL_IMPORT_BINDING_SCHEMA_VERSION, materialImportBindingInputSchema,
+  materialImportQuestionContentSchema, materialImportAnswerContentSchema,
+  canonicalMaterialImportQuestionContent, canonicalMaterialImportAnswerContent, computeMaterialImportContentHashes,
+  type MaterialImportBindingInput, type MaterialImportQuestionContent, type MaterialImportAnswerContent,
+  type MaterialImportComputeSha256,
+} from "./material-import-binding";
+
+export {
   DOCLING_PINNED_VERSION,
   uuidSchema,
   isoDateTimeSchema,
@@ -302,8 +310,3 @@ export * from "./learning-asset-links";
 export * from "./course-shared-skill";
 export * from "./question-identity";
 export * from "./question-evaluation";
-
-export {
-  materialImportBindingInputSchema,
-  type MaterialImportBindingInput,
-} from "./material-import-binding";
