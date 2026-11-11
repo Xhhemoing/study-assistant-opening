@@ -413,7 +413,8 @@ check=os.stat(${JSON.stringify(lockPath)},follow_symlinks=False)
 if (held.st_dev,held.st_ino)!=(check.st_dev,check.st_ino): raise RuntimeError('Provision lock replaced')
 original_flock=fcntl.flock
 def same_generation_flock(fd,operation):
-    observed=os.fstat(fd)
+    descriptor=fd if isinstance(fd,int) else fd.fileno()
+    observed=os.fstat(descriptor)
     if (observed.st_dev,observed.st_ino)!=(held.st_dev,held.st_ino):
         raise RuntimeError('Helper attempted a different provision lock generation')
     if operation!=fcntl.LOCK_EX: raise RuntimeError('Unexpected provision lock operation')

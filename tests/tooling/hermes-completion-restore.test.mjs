@@ -64,15 +64,17 @@ test('same real provision lock description spans coherent snapshot helper writes
   const systemd=join(root,'systemd'),config=join(root,'config');for(const p of [systemd,config])mkdirSync(p,{mode:0o700});
   const unit=join(systemd,'aistudy-worker.service'),runtime=join(config,'worker-runtime.env'),lock=join(config,'.worker-provision.lock');
   writeFileSync(unit,'old-unit',{mode:0o600});writeFileSync(runtime,'old-runtime',{mode:0o600});writeFileSync(lock,'',{mode:0o600});
-  const helper=join(root,'helper.py'),pidfile=join(root,'pid');
-  writeFileSync(helper,`import os,fcntl,pathlib,subprocess,sys\npathlib.Path(${JSON.stringify(pidfile)}).write_text(str(os.getpid()))\nwith open(${JSON.stringify(lock)},'a') as held:\n fcntl.flock(held,fcntl.LOCK_EX)\n # Unmodified lock call is routed only to the inherited same-generation FD.\n peer=subprocess.run([sys.executable,'-c',"import fcntl,sys; f=open(sys.argv[1],'rb'); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)",${JSON.stringify(lock)}])\n assert peer.returncode!=0,'peer entered live generation'\n pathlib.Path(${JSON.stringify(unit)}).write_text('candidate-unit')\n pathlib.Path(${JSON.stringify(runtime)}).write_text('candidate-runtime')\n raise SystemExit(7)\n`);
+  const helper=join(root,'helper.py'),pidfile=join(root,'pid'),milestone=join(root,'locked-and-mutated');
+  writeFileSync(helper,`import os,fcntl,pathlib,subprocess,sys\npathlib.Path(${JSON.stringify(pidfile)}).write_text(str(os.getpid()))\nwith open(${JSON.stringify(lock)},'a') as held:\n fcntl.flock(held,fcntl.LOCK_EX)\n # Unmodified lock call is routed only to the inherited same-generation FD.\n peer=subprocess.run([sys.executable,*(['-O'] if sys.flags.optimize else []),'-c',"import fcntl,sys\\nf=open(sys.argv[1],'rb')\\ntry:\\n fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\\nexcept BlockingIOError:\\n print('EXPECTED_LOCK_CONTENTION',file=sys.stderr)\\n sys.exit(73)\\nraise RuntimeError('peer entered live generation')",${JSON.stringify(lock)}],capture_output=True,text=True)\n if peer.returncode!=73 or peer.stderr.strip()!='EXPECTED_LOCK_CONTENTION':\n  raise RuntimeError('peer did not prove expected lock contention: '+repr((peer.returncode,peer.stderr)))\n pathlib.Path(${JSON.stringify(unit)}).write_text('candidate-unit')\n pathlib.Path(${JSON.stringify(runtime)}).write_text('candidate-runtime')\n pathlib.Path(${JSON.stringify(milestone)}).write_text('locked-peer-excluded-both-written')\n raise SystemExit(7)\n`);
   assert.throws(()=>provisionCompletion(helper,['--systemd-dir',systemd,'--config-dir',config],(file,args,options)=>{
     const changed=[...args],index=changed.indexOf('-c')+1;
     changed[index]=changed[index].replace('preimage=[]',`import functools\ntrusted['safe_open']=functools.partial(trusted['safe_open'],uid=os.geteuid())\ntrusted['read_trusted']=functools.partial(trusted['read_trusted'],uid=os.geteuid())\npreimage=[]`)
       .replace("['/usr/bin/systemctl','daemon-reload']","['/usr/bin/true']");
-    return spawnSync(file,changed,{...options,stdio:'pipe',timeout:4_000});
+    const actual=process.env.SM95_FLOCK_OPTIMIZE==='1' ? changed.flatMap(value=>value==='-c'?['-O','-c']:[value]) : changed;
+    return spawnSync(file,actual,{...options,stdio:'pipe',timeout:4_000});
   }),/immutable provision helper failed/);
   assert(readFileSync(pidfile,'utf8').trim().length>0,'real helper did not execute');
+  assert.equal(readFileSync(milestone,'utf8'),'locked-peer-excluded-both-written','restore must follow real lock acceptance and mutation, not an early TypeError');
   assert.equal(readFileSync(unit,'utf8'),'old-unit');assert.equal(readFileSync(runtime,'utf8'),'old-runtime');
 });
 
