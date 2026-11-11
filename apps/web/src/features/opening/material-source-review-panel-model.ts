@@ -33,9 +33,9 @@ export function readMaterialSourceReview(input: unknown, providedSources: unknow
       declaredDiagnosticRole: pack.diagnostic.questionIds.includes(q.id) ? "entry-candidate"
         : pack.diagnostic.constructedResponseCandidates.includes(q.id) ? "supplemental-candidate" : null,
       reasons: [
-        "仅题目元数据，题干、可信答案与既往接触尚未核验；诊断禁用",
-        ...(q.mappingStatus === "needs-visual-check" || q.assessmentReadiness === "blocked-visual-check" ? ["待视觉核验，排除诊断"] : []),
-        ...(q.assessmentReadiness === "blocked-author-exclusion" ? ["资料作者排除，禁用诊断；不从答后说明推断原因"] : []),
+        "仅题目元数据，题干、可信答案与既往接触尚未确认；诊断禁用",
+        ...(q.mappingStatus === "needs-visual-check" || q.assessmentReadiness === "blocked-visual-check" ? ["待视觉确认，排除诊断"] : []),
+        ...(q.assessmentReadiness === "blocked-author-exclusion" ? ["资料作者排除，禁用诊断；不从答后说明判断原因"] : []),
         ...(q.assessmentReadiness === false ? ["assessmentReadiness=false，禁用诊断"] : []),
         ...(q.bktAdmission === false ? ["bktAdmission=false，禁用诊断、评分与 BKT"] : []),
       ],

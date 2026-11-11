@@ -58,7 +58,7 @@ describe.skipIf(!process.env.MATERIAL_COURSE_REAL_FULL_INPUT)("real metadata sou
     a.addEventListener("click", event => event.preventDefault()); act(() => a.click());
     expect(detail().textContent).toContain(binding.sourceId); expect(detail().textContent).toContain("version：3");
     expect(detail().textContent).toContain("sourceID 不等于 canonical family");
-    expect(detail().textContent).toContain("此处不可作答、施测、评分或写入 BKT");
+    expect(detail().textContent).toContain("此处不可作答、施测、评分或用于 BKT");
     expect(JSON.stringify(input)).toBe(before);
   });
   it("provides labeled keyboard-native selection, focus continuity, live status and safe input replacement", () => {
@@ -122,7 +122,7 @@ describe.skipIf(!process.env.MATERIAL_COURSE_REAL_FULL_INPUT)("real metadata sou
     expect(host.textContent).toContain(purpose === "review" ? "当前用途：资料审阅" : "当前用途：答后核对");
     expect(host.textContent).toContain("计为帮助（help）"); expect(host.textContent).toContain("不能作为无帮助首答证据");
     expect(host.textContent).not.toContain("PRIVATE_");
-    expect(host.textContent).toContain("此处不可作答、施测、评分或写入 BKT");
+    expect(host.textContent).toContain("此处不可作答、施测、评分或用于 BKT");
     expect(host.querySelectorAll("iframe, form, script")).toHaveLength(0);
     // Only the deliberate test sentinel changes occurred; viewing generated no attempt fields.
     expect(Object.keys(input)).toEqual(Object.keys(JSON.parse(before)));
@@ -182,7 +182,7 @@ describe.skipIf(!process.env.MATERIAL_COURSE_REAL_FULL_INPUT)("real metadata sou
     for (const id of [...input.validation.visualCheckRequired, "T5-Q9"]) {
       const q = input.questions.find(q => q.id === id)!;
       choose(`question:${id}`);
-      const expected = id === "T5-Q9" ? "资料作者排除，禁用诊断" : "待视觉核验，排除诊断";
+      const expected = id === "T5-Q9" ? "资料作者排除，禁用诊断" : "待视觉确认，排除诊断";
       expect(detail().textContent).toContain(expected);
       choose(`skill:${q.primarySkillId}`); expect(detail().textContent).toContain(`${id}：`); expect(detail().textContent).toContain(expected);
     }
