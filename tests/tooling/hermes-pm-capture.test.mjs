@@ -16,6 +16,8 @@ test('actual completion tail preserves thirteen args ACK and diagnostics with ac
     ['complete-postmigration-reload-sample','completion-reload-samples','A'],
     ['complete-postmigration-archive-retained','completion-retained-archive','B'],
     ['complete-postmigration','completion-launch','C'],
+    ['complete-postmigration-postarchive-reload-sample','completion-postarchive-reload-samples','A'],
+    ['complete-postmigration-postarchive','completion-postarchive-launch','C'],
   ]) for(const actionExit of [0,77]) for(const captureExit of [0,2]){
     const variables={ACTION:action,SCRIPT_DIR:resolve('infra/deploy'),DIR:'/legacy',RELEASES_DIR:'/releases',CURRENT_LINK:'/current',DEPLOY_STATE:'/state',BACKUP_DIR:'/backups',SYSTEMD_DIR:'/systemd',WORKER_CONFIG_DIR:'/etc/aistudy',MIN_FREE_KB:'6291456',COMPLETION_RELEASE:'/release',COMPLETION_ARCHIVE:'/archive'};
     const expected=[mode,'/tmp/aistudy-entry.ABCDEFGH/hermes-release.sh','complete-postmigration','/legacy','/releases','/current','/state','/backups','/systemd','/etc/aistudy','6291456','e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf','/release','4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0','/archive'];
@@ -31,7 +33,8 @@ test('actual completion tail preserves thirteen args ACK and diagnostics with ac
     assert.equal(result.stdout,'ORIGINAL-ACK\n');assert(result.stderr.startsWith('original diagnostic without newline'));
     observed.push(...result.output[3].split('\0').filter(Boolean));
     assert.deepEqual(observed.slice(0,16),['/tmp/aistudy-entry.ABCDEFGH/hermes-supervisor.mjs',...expected]);
-    assert.deepEqual(observed.slice(16),['-I','-S','-B','-c',helper,'target','--stage',stage,'--entry','/tmp/aistudy-entry.ABCDEFGH','--state','/state']);
+    const selector=action.startsWith('complete-postmigration-postarchive')?['--sample-phase','postarchive']:[];
+    assert.deepEqual(observed.slice(16),['-I','-S','-B','-c',helper,'target','--stage',stage,'--entry','/tmp/aistudy-entry.ABCDEFGH','--state','/state',...selector]);
   }
 });
 

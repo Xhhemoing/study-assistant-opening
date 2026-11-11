@@ -657,6 +657,133 @@ class Completion(Repair):
         self.assertTrue(unit.exists())
         self.assertFalse(quarantine.exists())
 
+    def postarchive_fixture(self):
+        payload, manager, directory, quarantine, unit = self.reload_fixture()
+        with patch.object(state, 'completion_reload_admission'):
+            state.completion_retained_archive(payload)
+        post = self.root / 'postarchive-samples'
+        patch.object(state, 'POSTARCHIVE_ADMISSION', str(post)).start()
+        # Synthetic unit bytes are explicitly not the real1574 reference.
+        patch.object(state, 'POSTARCHIVE_UNIT_SHA', hashlib.sha256(payload['retainedUnit'].encode()).hexdigest()).start()
+        unloaded = {**manager, 'LoadState': 'not-found', 'FragmentPath': ''}
+        patch.object(state, 'completion_manager', return_value=unloaded).start()
+        return payload, unloaded, post, directory, quarantine, unit
+
+    def postarchive_sample(self, payload):
+        ticks = iter([100, 200, 201, 300, 301, 400])
+        with patch.object(state.time, 'monotonic_ns', side_effect=lambda: next(ticks)), patch.object(state.subprocess, 'run', self.reload_result):
+            state.completion_reload_samples(payload, postarchive=True)
+
+    def test_completion_postarchive_samples_preserve_old_root_and_all_four_admissions(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        old.mkdir(mode=0o700)
+        self.write(old / 'old-evidence', 'historical immutable fixture')
+        before = {p.name: p.read_bytes() for p in old.iterdir()}
+        self.postarchive_sample(payload)
+        header = json.loads((post / 'scope.json').read_text())
+        self.assertEqual(header['samplePhase'], 'postarchive')
+        self.assertEqual(len(list(post.iterdir())), 7)
+        route = {**payload, 'samplePhase': 'postarchive'}
+        with patch.object(state.time, 'monotonic_ns', return_value=401):
+            for phase in ('absent', 'unloaded'):
+                self.assertTrue(state.completion_launch_check({**route, 'phase': phase})['admitted'])
+            with patch.object(state, 'completion_manager', return_value={**manager, 'LoadState': 'loaded', 'FragmentPath': str(unit), 'NeedDaemonReload': 'yes'}):
+                with self.assertRaises(ValueError): state.completion_launch_check({**route, 'phase': 'absent'})
+            self.write(unit, payload['unit'])
+            with patch.object(state, 'completion_manager', return_value={**manager, 'LoadState': 'loaded', 'FragmentPath': str(unit)}):
+                for phase in ('ready', 'claim'):
+                    self.assertTrue(state.completion_launch_check({**route, 'phase': phase})['admitted'])
+            with self.assertRaises(ValueError):
+                state.completion_launch_check({**route, 'phase': 'claim'})
+            unit.unlink()
+            with self.assertRaises(ValueError):
+                state.completion_launch_check(payload)  # No implicit new-root adoption.
+        with self.assertRaises(FileExistsError): self.postarchive_sample(payload)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in old.iterdir()})
+        self.assertTrue(quarantine.exists())
+
+    def test_completion_postarchive_missing_archive_refuses_both_manager_states(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        self.postarchive_sample(payload)
+        moved = self.root / 'unavailable-archive'
+        quarantine.rename(moved)
+        route = {**payload, 'samplePhase': 'postarchive', 'phase': 'absent'}
+        with patch.object(state.time, 'monotonic_ns', return_value=401):
+            for observation in (manager, {**manager, 'LoadState': 'loaded', 'FragmentPath': str(unit)}):
+                with patch.object(state, 'completion_manager', return_value=observation), self.assertRaises(FileNotFoundError):
+                    state.completion_launch_check(route)
+        self.assertTrue(moved.exists()); self.assertFalse(quarantine.exists())
+
+    def test_completion_postarchive_bad_samples_do_not_fallback_or_admit_old_scope(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        route = {**payload, 'samplePhase': 'postarchive'}
+        with self.assertRaises(FileNotFoundError): state.completion_launch_check(route)
+        self.postarchive_sample(payload)
+        with patch.object(state.time, 'monotonic_ns', return_value=401):
+            for name, change in [('scope.json', lambda v: v.update(samplePhase='wrong')),
+                                 ('scope.json', lambda v: v.update(boot='wrong')),
+                                 ('scope.json', lambda v: v['controls'].update({'hermes-supervisor.mjs': '0'*64})),
+                                 ('scope.json', lambda v: v.update(extra=True)),
+                                 ('scope.json', lambda v: v.update(synthetic=0)),
+                                 ('sample-0.json', lambda v: v.update(exit=1)),
+                                 ('sample-0.json', lambda v: v.update(error='TimeoutExpired')),
+                                 ('sample-0.json', lambda v: v.update(extra=True)),
+                                 ('sample-0.json', lambda v: v.update(index=False)),
+                                 ('sample-0-started.json', lambda v: v.update(index=False)),
+                                 ('sample-0.json', lambda v: v['before'].update(Job='42')),
+                                 ('sample-1.json', lambda v: v['after'].update(LoadState='loaded')),
+                                 ('sample-2-started.json', lambda v: v.update(startNs=999))]:
+                path = post / name; original = path.read_bytes(); value = json.loads(original); change(value)
+                self.write(path, json.dumps(value))
+                with self.assertRaises(ValueError): state.completion_launch_check(route)
+                path.write_bytes(original)
+            self.write(post / 'sample-3.json', '{}')
+            with self.assertRaises(ValueError): state.completion_launch_check(route)
+            (post / 'sample-3.json').unlink()
+        with patch.object(state.time, 'monotonic_ns', return_value=state.RELOAD_EVIDENCE_AGE_NS + 1000):
+            with self.assertRaises(ValueError): state.completion_launch_check(route)
+
+    def test_completion_postarchive_guard_after_reload_retains_partial_no_next_reload(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        external = state.subprocess.run; calls = []
+        def command(argv, **kwargs):
+            if argv == ['/usr/bin/systemctl', 'daemon-reload']:
+                calls.append(argv); self.conditions[state.WORKER] = []
+                return subprocess.CompletedProcess(argv, 0)
+            return external(argv, **kwargs)
+        with patch.object(state.subprocess, 'run', command), self.assertRaises(ValueError):
+            state.completion_reload_samples(payload, postarchive=True)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue((post / 'sample-0.json').exists())
+        self.assertFalse((post / 'sample-1-started.json').exists())
+        self.assertTrue(quarantine.exists()); self.assertFalse(unit.exists())
+
+    def test_completion_formal_readonly_remains_reachable_after_existing_archive(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        self.assertFalse(unit.exists())
+        before = self.snapshot()
+        self.assertEqual(self.check()['scope'], 'postmigration-independent-observation')
+        self.assertEqual(before, self.snapshot())
+        self.assertTrue(quarantine.exists()); self.assertFalse(post.exists())
+
+    def test_completion_postarchive_archive_changed_or_live_manager_refuses_before_directory(self):
+        payload, manager, post, old, quarantine, unit = self.postarchive_fixture()
+        for field, value in [('MainPID', '7'), ('InvocationID', 'a'*32), ('LoadState', 'loaded'), ('NeedDaemonReload', 'yes')]:
+            with patch.object(state, 'completion_manager', return_value={**manager, field: value}), self.assertRaises(ValueError):
+                state.completion_reload_samples(payload, postarchive=True)
+            self.assertFalse(post.exists())
+        self.write(unit, payload['unit'])
+        with self.assertRaises(ValueError): state.completion_reload_samples(payload, postarchive=True)
+        unit.unlink()
+        self.write(self.state / 'postmigration-completion-claimed', '{}')
+        with self.assertRaises(ValueError): state.completion_reload_samples(payload, postarchive=True)
+        (self.state / 'postmigration-completion-claimed').unlink()
+        self.assertFalse(post.exists())
+        archived = quarantine / state.COMPLETION_UNIT
+        replacement = quarantine / 'replacement'; self.write(replacement, archived.read_text()); os.replace(replacement, archived)
+        with self.assertRaises(ValueError): state.completion_reload_samples(payload, postarchive=True)
+        self.assertFalse(post.exists())
+
     def test_completion_manager_requires_complete_unambiguous_actual_observation(self):
         import subprocess
         # The fixture manager mock is NOT used here: exercise real parser, fake subprocess only.

@@ -447,10 +447,10 @@ terminal_exit(helper_status)`;
     { env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }, execute, cleanup);
   if (result.error || result.status !== 0) throw new Error('Completion immutable provision helper failed');
 }
-export function completionLaunchAdmission(args, unit, phase = 'launch') {
-  const retainedUnit = unit.split(controls).join('/tmp/aistudy-entry.Pz65J76D')
+export function completionLaunchAdmission(args, unit, phase = 'launch', samplePhase) {
+  const retainedUnit = unit.replace(' run-postarchive ', ' run ').split(controls).join('/tmp/aistudy-entry.Pz65J76D')
     .replace('RuntimeMaxSec=7200\nTimeoutStopSec=240', 'RuntimeMaxSec=1800\nTimeoutStopSec=120');
-  return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit }));
+  return JSON.parse(python('hermes-writer-state.py', ['completion-launch-check', args[4]], { args, unit, phase, retainedUnit, ...(samplePhase ? { samplePhase } : {}) }));
 }
 const units = ['aistudy-web.service', 'aistudy-worker.service'];
 const controls = dirname(fileURLToPath(import.meta.url));
@@ -467,7 +467,7 @@ export const brokerDirectory = '/run/aistudy-writer-broker';
 export const brokerSocket = join(brokerDirectory, 'exec.sock');
 export function python(file, args, payload, execute = spawnSync) {
   const result = execute('/usr/bin/python3', ['-I', '-S', '-B', join(controls, 'hermes-trusted-loader.py'), file === 'hermes-writer-state.py' ? 'state' : 'broker', ...args], {
-    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: args[0] === 'completion-reload-samples' ? 3_000_000
+    input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8', timeout: ['completion-reload-samples', 'completion-postarchive-reload-samples'].includes(args[0]) ? 3_000_000
       : args[0] === 'completion-retained-archive' ? 650_000
       : args[0] === 'completion-launch-check' ? 300_000
       : args[0] === 'completion-check' ? COMPLETION_CHECK_TIMEOUT_MS : 30_000,
