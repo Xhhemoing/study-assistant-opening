@@ -342,3 +342,4 @@ export * from "./repositories/opening-learning-asset-links";
 export * from "./repositories/opening-study-notes";
 export * from "./repositories/opening-answer-interpretation";
 export * from "./repositories/opening-source-visual-recognitions";
+export { createOpeningLearningAdviceContextRepository } from './repositories/opening-learning-advice-context';
