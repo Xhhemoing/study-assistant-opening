@@ -198,11 +198,12 @@ const mappingOptionsSchema = optionsSchema.extend({
 export type MaterialCourseMappingOptions = z.infer<typeof mappingOptionsSchema>;
 
 const sha256 = z.string().regex(/^[a-fA-F0-9]{64}$/);
-const fullQuestionSchema = materialCourseMappingPackageSchema.shape.questions.element.extend({
-  diagnosticEligible: z.boolean().optional(),
-  assessmentReadiness: z.enum(["requires-answer-key-and-exposure-check", "blocked-visual-check", "blocked-material-dispute"]),
-  bktAdmission: z.literal("requires-runtime-evidence-qualification"),
-});
+// Current full package intentionally does NOT accept legacy notes/diagnosticEligible.
+const fullQuestionSchema = materialCourseMappingPackageSchema.shape.questions.element.omit({ notes: true, diagnosticEligible: true }).extend({
+  postAttemptNotes: text,
+  assessmentReadiness: z.union([z.enum(["requires-answer-key-and-exposure-check", "blocked-visual-check", "blocked-author-exclusion"]), z.literal(false)]),
+  bktAdmission: z.union([z.literal("requires-runtime-evidence-qualification"), z.literal(false)]),
+}).strict();
 export const materialCourseFullPackageSchema = z.object({
   schemaVersion: z.literal(1), status: z.literal("offline-candidate-not-imported"), sourceManifestSha256: sha256, questionIndexSha256: sha256,
   mappingFiles: z.array(z.object({ file: key, sha256 }).strict()),
@@ -211,9 +212,10 @@ export const materialCourseFullPackageSchema = z.object({
   diagnostic: z.object({ status: z.literal("candidate-not-administered"), source: text, questionIds: z.array(key),
     constructedResponseCandidates: z.array(key), conditions: z.array(text) }).strict(),
   bktBoundary: z.object({ model: z.literal("existing-classical-bkt"), calibrated: z.literal(false), learnerStateCreated: z.literal(false),
-    policy: text, requiredRuntimeChecks: z.array(text), constructedResponsePolicy: text, familyPolicy: text }).strict(),
+    policy: text, requiredRuntimeChecks: z.array(text), constructedResponsePolicy: text, familyPolicy: text, feedbackPolicy: text }).strict(),
   schedule: z.object({ productTarget: text, latestProductUseDate: text, actualExamDate: z.string().nullable(),
-    dailyStudyMinutes: z.number().int().positive().nullable(), policy: text }).strict(),
+    dailyStudyMinutes: z.number().int().positive().nullable(), policy: text,
+    unmeasuredPrerequisitePolicy: z.literal("teach-bridge-without-mastery-credit"), unmeasuredSkillIds: z.array(key) }).strict(),
   coverageGaps: materialCourseMappingPackageSchema.shape.coverageGaps, coverageGapNotes: z.array(text),
   validation: z.object({ sourcePdfs: z.number().int().nonnegative(), questionCount: z.number().int().nonnegative(), skillCount: z.number().int().nonnegative(),
     textMappedCount: z.number().int().nonnegative(), visualCheckRequired: z.array(key), disputedDiagnosticExclusions: z.array(key),
@@ -337,6 +339,9 @@ export function adaptMaterialCourseFullPackage(input: unknown, options: Material
   for (const skill of pack.skills) for (const parent of skill.prerequisiteIds) {
     if (!order.has(parent) || order.get(parent)! >= order.get(skill.id)!) errors.push(`Invalid prerequisite order ${parent} -> ${skill.id}`);
   }
+  const skillIds = new Set(pack.skills.map(s => s.id));
+  if (new Set(pack.schedule.unmeasuredSkillIds).size !== pack.schedule.unmeasuredSkillIds.length) errors.push("Duplicate unmeasured skill");
+  for (const id of pack.schedule.unmeasuredSkillIds) if (!skillIds.has(id)) errors.push(`Unknown unmeasured skill ${id}`);
   const sources = new Set(pack.sources.map(s => s.file));
   for (const file of [...pack.questions.map(q => q.sourceFile), ...pack.skills.flatMap(s => s.sourceRefs.map(ref => ref.file))]) {
     if (!sources.has(file)) errors.push(`Missing source manifest ${file}`);
@@ -348,7 +353,7 @@ export function adaptMaterialCourseFullPackage(input: unknown, options: Material
     for (const id of ids) if (!questions.has(id)) errors.push(`Unknown diagnostic identity ${id}`);
   }
   const visual = pack.questions.filter(q => q.mappingStatus === "needs-visual-check").map(q => q.id);
-  const disputed = pack.questions.filter(q => q.assessmentReadiness === "blocked-material-dispute").map(q => q.id);
+  const disputed = pack.questions.filter(q => q.assessmentReadiness === "blocked-author-exclusion").map(q => q.id);
   const sameIds = (a: string[], b: string[]) => a.length === b.length && new Set(b).size === b.length && a.every(id => b.includes(id));
   if (pack.validation.sourcePdfs !== pack.sources.length || pack.validation.skillCount !== pack.skills.length || pack.validation.questionCount !== pack.questions.length
     || pack.validation.textMappedCount !== pack.questions.filter(q => q.mappingStatus === "text-reviewed").length
@@ -356,26 +361,56 @@ export function adaptMaterialCourseFullPackage(input: unknown, options: Material
   if (errors.length) throw new Error(errors.join("; "));
   const candidate = adaptMaterialCourseMappingPackage({
     schemaVersion: pack.schemaVersion, topics: [...new Set(pack.skills.map(s => s.topic))], skills: pack.skills,
-    questions: pack.questions.map(({ assessmentReadiness, bktAdmission: _bktAdmission, ...q }) => ({ ...q,
-      diagnosticEligible: q.diagnosticEligible !== false && assessmentReadiness === "requires-answer-key-and-exposure-check" })),
+    questions: pack.questions.map(({ assessmentReadiness, bktAdmission, postAttemptNotes, ...q }) => ({ ...q,
+      notes: postAttemptNotes,
+      diagnosticEligible: assessmentReadiness === "requires-answer-key-and-exposure-check" && bktAdmission !== false })),
+
     verificationScope: pack.validation.semanticMathVerification, sourceResolution: "Author source manifest PDF hashes; no database bindings", coverageGaps: pack.coverageGaps,
   }, { ...context, validationScope: "complete", expectedQuestionCount: 150,
     sourceManifest: pack.sources.map(s => ({ file: s.file, pdfSha256: s.sha256, pageCount: s.physicalPages, sourceId: null, sourceVersion: null })) });
   const questionMappings = candidate.questionMappings.map(q => {
     const original = questions.get(q.id)!;
-    return { ...q, assessmentReadiness: original.assessmentReadiness, bktAdmission: original.bktAdmission,
+    const { notes: _legacyNotes, ...mapping } = q;
+    return { ...mapping, assessmentReadiness: original.assessmentReadiness, bktAdmission: original.bktAdmission,
       diagnosticEntryCandidate: pack.diagnostic.questionIds.includes(q.id) && q.diagnosticEligible,
+      supplementalDiagnosticCandidate: pack.diagnostic.constructedResponseCandidates.includes(q.id) && q.diagnosticEligible,
       canonicalFamilyId: null, bktEligible: false as const, reliablePartScoring: "unverified" as const };
   });
   const selectedDiagnosticIds = questionMappings.filter(q => q.diagnosticEntryCandidate).map(q => q.id);
   const selected = new Set(selectedDiagnosticIds);
-  const requirements = candidate.routeInput.requirements.map(r => ({ ...r, diagnosticQuestionIds: r.diagnosticQuestionIds.filter(id => selected.has(id)) }));
+  const conceptBridges = pack.skills.flatMap(skill => skill.prerequisiteIds.map(prerequisiteSkillId => ({
+    targetSkillId: skill.id, prerequisiteSkillId, action: "concept_bridge" as const,
+    reason: pack.schedule.unmeasuredSkillIds.includes(prerequisiteSkillId) ? "declared_measurement_gap" as const : "no_learner_measurement" as const,
+    measurementStatus: "untested" as const, skippable: true as const, requiredPass: false as const, masteryCredit: false as const,
+  })));
+  const requirements = candidate.routeInput.requirements.map(r => ({ ...r, diagnosticQuestionIds: r.diagnosticQuestionIds.filter(id => selected.has(id)),
+    prerequisitePolicy: "concept_bridge_without_mastery_gate" as const,
+    conceptBridges: conceptBridges.filter(bridge => bridge.targetSkillId === r.externalSkillId) }));
+  const supplemental = new Set(questionMappings.filter(q => q.supplementalDiagnosticCandidate).map(q => q.id));
+  // Private feedback/teaching authoring data, never a first-answer prompt or a grading key.
+  const postAttemptMetadata = {
+    role: "feedback_only" as const,
+    questions: pack.questions.map(q => ({ questionId: q.id, postAttemptNotes: q.postAttemptNotes })),
+    skills: pack.skills.map(s => ({ skillId: s.id, title: s.title, learningObjectives: s.learningObjectives, commonErrors: s.commonErrors })),
+    independentIfExposedBeforeAnswer: false as const, scoringEvidence: false as const,
+  };
+  const teachingItems = candidate.teachingInput.items.map(({ learningObjectives: _objectives, commonErrors: _errors, ...item }) => item);
   return { ...candidate, kind: "material_course_full_package_candidate" as const,
+    postAttemptMetadata,
+    // Offline allowlisted planning projection only, NOT a product/client DTO or executable question.
+    safeFirstAnswerInput: { status: "proposed" as const, bodyStatus: "missing" as const,
+      questions: questionMappings.map(q => ({ questionId: q.id, sourceRef: q.sourceRef })) },
+    teachingInput: { status: "proposed" as const, items: teachingItems },
     questionMappings, prerequisiteOrder: pack.prerequisiteOrder, sourceManifestSha256: pack.sourceManifestSha256, questionIndexSha256: pack.questionIndexSha256,
     mappingFiles: pack.mappingFiles, sources: pack.sources, coverageGapNotes: pack.coverageGapNotes, coverageExhaustive: false as const,
     diagnostic: { ...pack.diagnostic, eligibleEntryQuestionIds: pack.diagnostic.questionIds.filter(id => selected.has(id)),
-      blockedEntryQuestionIds: pack.diagnostic.questionIds.filter(id => !selected.has(id)), administered: false as const },
+      blockedEntryQuestionIds: pack.diagnostic.questionIds.filter(id => !selected.has(id)),
+      declaredConstructedResponseCandidates: pack.diagnostic.constructedResponseCandidates,
+      constructedResponseCandidates: pack.diagnostic.constructedResponseCandidates.filter(id => supplemental.has(id)),
+      blockedConstructedResponseCandidates: pack.diagnostic.constructedResponseCandidates.filter(id => !supplemental.has(id)), administered: false as const },
     bktBoundary: pack.bktBoundary, schedule: pack.schedule, validation: pack.validation,
+    prerequisiteGuidance: { status: "proposed" as const, policy: pack.schedule.unmeasuredPrerequisitePolicy,
+      learnerMeasurement: "not_supplied" as const, conceptBridges, masteryCredit: false as const, permanentPassGate: false as const },
     routeInput: { status: "proposed" as const, requirements },
     planInput: { status: "proposed" as const, items: candidate.planInput.items.map(item => ({ ...item, diagnosticQuestionIds: item.diagnosticQuestionIds.filter(id => selected.has(id)) })) },
     coverage: candidate.coverage.map(row => ({ ...row, diagnosticQuestionIds: row.diagnosticQuestionIds.filter(id => selected.has(id)) })),

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { courseRouteRequirementInputSchema } from "@aistudy/contracts";
 import {
@@ -46,16 +47,17 @@ const partialMappingOptions = { deadlineAt: null, validationScope: "partial" as 
 
 function syntheticFullFixture(): MaterialCourseFullPackage {
   const part = syntheticMappingFixture();
+  const { notes, diagnosticEligible: _legacyEligibility, ...question } = part.questions[0]!;
   return {
     schemaVersion: 1, status: "offline-candidate-not-imported", sourceManifestSha256: "a".repeat(64), questionIndexSha256: "b".repeat(64), mappingFiles: [],
     sources: [{ file: "synthetic.pdf", sha256: "c".repeat(64), physicalPages: 1 }],
     skills: [{ ...part.skills[0]!, prerequisiteIds: [], sourceRefs: [{ file: "synthetic.pdf", physicalPages: [1], verification: "text-reviewed" }] }],
     prerequisiteOrder: ["fixture-basic"],
-    questions: Array.from({ length: 150 }, (_, i) => ({ ...part.questions[0]!, id: `fixture-q-${i}`, kind: "Test", evidenceType: "objective-choice", mappingStatus: "text-reviewed",
+    questions: Array.from({ length: 150 }, (_, i) => ({ ...question, postAttemptNotes: notes, id: `fixture-q-${i}`, kind: "Test", evidenceType: "objective-choice", mappingStatus: "text-reviewed",
       assessmentReadiness: "requires-answer-key-and-exposure-check", bktAdmission: "requires-runtime-evidence-qualification" })),
     diagnostic: { status: "candidate-not-administered", source: "Synthetic 20-item entry", questionIds: Array.from({ length: 20 }, (_, i) => `fixture-q-${i}`), constructedResponseCandidates: [], conditions: [] },
-    bktBoundary: { model: "existing-classical-bkt", calibrated: false, learnerStateCreated: false, policy: "Synthetic no admission", requiredRuntimeChecks: [], constructedResponsePolicy: "No duplicated subskill verdict", familyPolicy: "Not canonical family" },
-    schedule: { productTarget: "Synthetic product deadline", latestProductUseDate: "Synthetic target", actualExamDate: null, dailyStudyMinutes: null, policy: "No inferred exam date" },
+    bktBoundary: { model: "existing-classical-bkt", calibrated: false, learnerStateCreated: false, policy: "Synthetic no admission", requiredRuntimeChecks: [], constructedResponsePolicy: "No duplicated subskill verdict", familyPolicy: "Not canonical family", feedbackPolicy: "Feedback only after answer" },
+    schedule: { productTarget: "Synthetic product deadline", latestProductUseDate: "Synthetic target", actualExamDate: null, dailyStudyMinutes: null, policy: "No inferred exam date", unmeasuredPrerequisitePolicy: "teach-bridge-without-mastery-credit", unmeasuredSkillIds: [] },
     coverageGaps: [], coverageGapNotes: ["Machine gaps not exhaustive"],
     validation: { sourcePdfs: 1, questionCount: 150, skillCount: 1, textMappedCount: 150, visualCheckRequired: [], disputedDiagnosticExclusions: [], semanticMathVerification: "not-complete", runtimeCoursePublication: "not-verified" },
   };
@@ -72,13 +74,73 @@ describe("complete real-package structure", () => {
     expect(result.questionMappings.every(q => !q.scoringEligible && !q.bktEligible && q.canonicalFamilyId === null)).toBe(true);
   });
 
-  it("blocks readiness exclusions even if diagnosticEligible says true", () => {
+  it("blocks author readiness exclusions without a legacy eligibility override", () => {
     const pack = syntheticFullFixture();
-    pack.questions[0]!.assessmentReadiness = "blocked-material-dispute";
+    pack.questions[0]!.assessmentReadiness = "blocked-author-exclusion";
     pack.validation.disputedDiagnosticExclusions = ["fixture-q-0"];
     const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
     expect(result.diagnostic.blockedEntryQuestionIds).toEqual(["fixture-q-0"]);
     expect(result.planInput.items[0]!.diagnosticQuestionIds).not.toContain("fixture-q-0");
+  });
+
+  it.each(["notes", "diagnosticEligible", "postsAttemptNotes", "unknownExtra"])("rejects legacy/unknown full-question field %s", field => {
+    const pack = syntheticFullFixture();
+    const question = { ...pack.questions[0]!, [field]: field === "diagnosticEligible" ? false : "not current schema" };
+    expect(() => adaptMaterialCourseFullPackage({ ...pack, questions: [question, ...pack.questions.slice(1)] }, unknownDeadline)).toThrow();
+  });
+
+  it.each(["assessmentReadiness", "bktAdmission"] as const)("honors explicit false %s", field => {
+    const pack = syntheticFullFixture(); pack.questions[0]![field] = false;
+    const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
+    expect(result.diagnostic.blockedEntryQuestionIds).toEqual(["fixture-q-0"]);
+    expect(result.questionMappings[0]!.diagnosticEligible).toBe(false);
+  });
+
+  it("isolates feedback-only notes/objectives/errors from safe first-answer input and teaching candidate blocks", () => {
+    const pack = syntheticFullFixture();
+    pack.questions[0]!.postAttemptNotes = "PRIVATE_FEEDBACK_SENTINEL";
+    pack.skills[0]!.learningObjectives = ["PRIVATE_OBJECTIVE_SENTINEL"];
+    pack.skills[0]!.commonErrors = ["PRIVATE_ERROR_SENTINEL"];
+    pack.skills[0]!.title = "PRIVATE_SKILL_TITLE_SENTINEL";
+    const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
+    expect(result.postAttemptMetadata).toMatchObject({ role: "feedback_only", independentIfExposedBeforeAnswer: false, scoringEvidence: false });
+    expect(result.postAttemptMetadata.questions[0]).toEqual({ questionId: "fixture-q-0", postAttemptNotes: "PRIVATE_FEEDBACK_SENTINEL" });
+    const firstAnswer = JSON.stringify(result.safeFirstAnswerInput);
+    for (const secret of ["PRIVATE_FEEDBACK_SENTINEL", "PRIVATE_OBJECTIVE_SENTINEL", "PRIVATE_ERROR_SENTINEL", "PRIVATE_SKILL_TITLE_SENTINEL"]) expect(firstAnswer).not.toContain(secret);
+    expect(JSON.stringify(result.questionMappings)).not.toContain("PRIVATE_FEEDBACK_SENTINEL");
+    expect(JSON.stringify(result.teachingInput)).not.toContain("PRIVATE_OBJECTIVE_SENTINEL");
+    expect(JSON.stringify(result.teachingInput)).not.toContain("PRIVATE_ERROR_SENTINEL");
+    expect(result.safeFirstAnswerInput.questions[0]).not.toHaveProperty("answer");
+    expect(result.safeFirstAnswerInput.questions[0]).not.toHaveProperty("skillId");
+    expect(result.learnerPrompts).toEqual([]);
+    expect(result.privateAnswerKeys).toEqual([]);
+  });
+
+  it.each(["assessmentReadiness", "bktAdmission"] as const)("excludes explicit false %s from BOTH main and supplemental paths", field => {
+    const pack = syntheticFullFixture();
+    pack.diagnostic.constructedResponseCandidates = ["fixture-q-20", "fixture-q-21", "fixture-q-22", "fixture-q-23", "fixture-q-24"];
+    pack.questions[0]![field] = false; pack.questions[20]![field] = false;
+    const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
+    expect(result.diagnostic.blockedEntryQuestionIds).toEqual(["fixture-q-0"]);
+    expect(result.diagnostic.blockedConstructedResponseCandidates).toEqual(["fixture-q-20"]);
+    expect(result.diagnostic.eligibleEntryQuestionIds).not.toContain("fixture-q-0");
+    expect(result.diagnostic.constructedResponseCandidates).not.toContain("fixture-q-20");
+    expect(result.questionMappings[20]!.supplementalDiagnosticCandidate).toBe(false);
+  });
+
+  it.each(["visual", "author"])("blocks %s exclusions in BOTH diagnostic paths", reason => {
+    const pack = syntheticFullFixture();
+    pack.diagnostic.constructedResponseCandidates = ["fixture-q-20"];
+    for (const i of [0, 20]) {
+      if (reason === "visual") { pack.questions[i]!.mappingStatus = "needs-visual-check"; pack.questions[i]!.assessmentReadiness = "blocked-visual-check"; }
+      else pack.questions[i]!.assessmentReadiness = "blocked-author-exclusion";
+    }
+    if (reason === "visual") { pack.validation.visualCheckRequired = ["fixture-q-0", "fixture-q-20"]; pack.validation.textMappedCount = 148; }
+    else pack.validation.disputedDiagnosticExclusions = ["fixture-q-0", "fixture-q-20"];
+    const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
+    expect(result.diagnostic.blockedEntryQuestionIds).toEqual(["fixture-q-0"]);
+    expect(result.diagnostic.blockedConstructedResponseCandidates).toEqual(["fixture-q-20"]);
+    expect(result.questionMappings[20]!.bktEligible).toBe(false);
   });
 
   it.each(["order", "source", "diagnostic", "diagnostic-count", "counts", "page"])("rejects invalid full-package %s", mode => {
@@ -94,7 +156,9 @@ describe("complete real-package structure", () => {
 
   const fullPath = process.env.MATERIAL_COURSE_REAL_FULL_INPUT;
   it.skipIf(!fullPath)("replays the PM-delivered real 77-skill/150-question full package", () => {
-    const input: unknown = JSON.parse(readFileSync(fullPath!, "utf8"));
+    const bytes = readFileSync(fullPath!);
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe("041fc627da988c794309d116b4d2f85a4796ed497e33e99155b59f4dcd5c2a5b");
+    const input: unknown = JSON.parse(bytes.toString("utf8"));
     const result = adaptMaterialCourseFullPackage(input, unknownDeadline);
     expect(result.routeInput.requirements).toHaveLength(77);
     expect(result.questionMappings).toHaveLength(150);
@@ -105,13 +169,43 @@ describe("complete real-package structure", () => {
     expect(result.diagnostic.eligibleEntryQuestionIds).toHaveLength(20);
     expect(result.diagnostic.constructedResponseCandidates).toHaveLength(5);
     expect(result.questionMappings.filter(q => q.unverifiedFormula).map(q => q.id).sort()).toEqual(["T1-P3", "T1-Q2", "T1-Q6", "T4-Q13", "T5-Q16", "T5-Q18"].sort());
-    expect(result.questionMappings.find(q => q.id === "T5-Q9")).toMatchObject({ diagnosticEligible: false, bktEligible: false, assessmentReadiness: "blocked-material-dispute" });
+    expect(result.questionMappings.find(q => q.id === "T5-Q9")).toMatchObject({ diagnosticEligible: false, bktEligible: false, assessmentReadiness: "blocked-author-exclusion" });
     expect(result.questionMappings.every(q => !q.scoringEligible && !q.bktEligible && q.canonicalFamilyId === null && q.prompt === null && q.answer === null)).toBe(true);
     expect(result.schedule).toMatchObject({ actualExamDate: null, dailyStudyMinutes: null });
     expect(result).toMatchObject({ published: false, status: "proposed", ownerUserId: null, courseId: null, routeVersion: null, teachingVersion: null, deadlineAt: null, coverageExhaustive: false });
     expect(result.coverageGaps).toHaveLength(4);
     expect(result.coverageGapNotes.length).toBeGreaterThan(0);
     expect(result.coverage.every(row => row.measurementStatus === "untested")).toBe(true);
+    const taylor = result.questionMappings.find(q => q.id === "T3-Q17")!;
+    expect(taylor.primarySkillId).toBe("t3-taylor");
+    expect(taylor.secondarySkillIds).not.toContain("t3-taylor-error");
+    expect(result.coverage.find(row => row.skillId === "t3-taylor-error")!.questionIds).not.toContain("T3-Q17");
+    expect(result.questionMappings.find(q => q.id === "T5-P10")!.secondarySkillIds).toEqual(["t1-algebra-functions"]);
+    expect(result.routeInput.requirements.find(row => row.externalSkillId === "t4-fundamental-theorem")!.prerequisiteSkillIds).toEqual(["t4-antiderivatives", "t2-continuity", "t3-derivatives"]);
+    expect(result.routeInput.requirements.find(row => row.externalSkillId === "t4-definite-integrals")!.prerequisiteSkillIds).toContain("t4-fundamental-theorem");
+    const power = result.routeInput.requirements.find(row => row.externalSkillId === "t5-power-operations")!;
+    expect(power.prerequisiteSkillIds).toEqual(["t5-power-radius", "t3-taylor"]);
+    expect(power.prerequisiteSkillIds).not.toContain("t5-termwise-operations");
+    expect(result.prerequisiteGuidance).toMatchObject({ masteryCredit: false, permanentPassGate: false, learnerMeasurement: "not_supplied" });
+    expect(result.prerequisiteGuidance.conceptBridges.some(b => b.targetSkillId === "t4-fundamental-theorem" && b.prerequisiteSkillId === "t4-antiderivatives" && b.reason === "declared_measurement_gap")).toBe(true);
+    expect(result.prerequisiteGuidance.conceptBridges.every(b => b.skippable && !b.requiredPass && !b.masteryCredit && b.measurementStatus === "untested")).toBe(true);
+  });
+
+  it("turns untested prerequisites into optional bridges, never learner mastery gates", () => {
+    const pack = syntheticFullFixture();
+    pack.skills.push({ ...pack.skills[0]!, id: "fixture-next", prerequisiteIds: ["fixture-basic"] });
+    pack.prerequisiteOrder.push("fixture-next"); pack.validation.skillCount = 2;
+    pack.schedule.unmeasuredSkillIds = ["fixture-basic"];
+    const result = adaptMaterialCourseFullPackage(pack, unknownDeadline);
+    expect(result.prerequisiteGuidance.conceptBridges).toEqual([{ targetSkillId: "fixture-next", prerequisiteSkillId: "fixture-basic", action: "concept_bridge",
+      reason: "declared_measurement_gap", measurementStatus: "untested", skippable: true, requiredPass: false, masteryCredit: false }]);
+    expect(result.routeInput.requirements[1]!.prerequisitePolicy).toBe("concept_bridge_without_mastery_gate");
+    expect(result.coverage.every(row => row.measurementStatus === "untested")).toBe(true);
+  });
+
+  it.each(["unknown", "duplicate"])("rejects %s unmeasured skill references rather than inferring a bridge identity", mode => {
+    const pack = syntheticFullFixture(); pack.schedule.unmeasuredSkillIds = mode === "unknown" ? ["unknown"] : ["fixture-basic", "fixture-basic"];
+    expect(() => adaptMaterialCourseFullPackage(pack, unknownDeadline)).toThrow();
   });
 });
 
@@ -156,18 +250,15 @@ describe("actual author mapping structure", () => {
     expect(() => adaptMaterialCourseMappingPackage(pack, options)).toThrow("Page outside PDF");
   });
 
-  // Opt-in local real-file replay. Never substitutes a fixture when the private file is absent.
-  const realPath = process.env.MATERIAL_COURSE_REAL_INPUT;
-  it.skipIf(!realPath)("replays the PM-delivered real Topic 4–5 package", () => {
-    const actual: unknown = JSON.parse(readFileSync(realPath!, "utf8"));
+  // Compatibility-only synthetic partial test. Historical real parts are no longer current inputs.
+  const realPath = "synthetic-partial-compatibility";
+  it.skipIf(!realPath)("retains explicit legacy partial compatibility without reading superseded real input", () => {
+    const pack = syntheticMappingFixture();
+    const actual = { ...pack, skills: [...pack.skills, { ...pack.skills[0]!, id: "fixture-second", prerequisiteIds: ["fixture-basic"] }] };
     const result = adaptMaterialCourseMappingPackage(actual, partialMappingOptions);
-    expect(result.routeInput.requirements).toHaveLength(35);
-    expect(result.questionMappings).toHaveLength(60);
-    expect(result.coverageGaps).toHaveLength(4);
-    expect(result.pendingExternalPrerequisites.map(ref => ref.skillId).sort()).toEqual([...MIDTERM_PENDING_PREREQUISITE_IDS].sort());
-    expect(result.questionMappings.filter(q => q.mappingStatus === "text-reviewed")).toHaveLength(57);
-    expect(result.questionMappings.filter(q => q.unverifiedFormula).map(q => q.id)).toEqual(["T4-Q13", "T5-Q16", "T5-Q18"]);
-    expect(result.questionMappings.filter(q => !q.diagnosticEligible).map(q => q.id)).toEqual(["T4-Q13", "T5-Q9", "T5-Q16", "T5-Q18"]);
+    expect(result.routeInput.requirements).toHaveLength(2);
+    expect(result.questionMappings).toHaveLength(1);
+    expect(result.pendingExternalPrerequisites.map(ref => ref.skillId)).toEqual([MIDTERM_PENDING_PREREQUISITE_IDS[4]]);
     expect(result.questionMappings.every(q => q.mathematicalVerification === "unverified" && !q.scoringEligible && q.prompt === null && q.answer === null)).toBe(true);
     expect(result.coverage.every(row => row.measurementStatus === "untested" && row.independentEligibility === "unknown")).toBe(true);
     expect(result).toMatchObject({ published: false, coverageStatus: "partial", deadlineAt: null, ownerUserId: null, courseId: null, routeVersion: null, teachingVersion: null });
