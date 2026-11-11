@@ -4,6 +4,8 @@ import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
 import type { NextLearningStep } from "@aistudy/domain";
 import { ApiError } from "../../auth/service";
+import { isAllowedCookieAuthOrigin } from "../access-policy";
+import { cookieAuthBaseUrl } from "../../../middleware";
 
 type Rule = Pick<NextLearningStep, "activityKind" | "reasonCode">;
 export type LearningAdviceInput = { attemptId: string; expectedRevision: number; optIn: boolean };
@@ -19,7 +21,9 @@ const invalid = () => new ApiError("VALIDATION", "Invalid learning advice reques
 /** A bounded same-origin POST, never a grant or a scope producer. Authentication belongs to the route. */
 export async function parseLearningAdviceRequest(request: Request, activityId: string): Promise<LearningAdviceInput> {
   const id = z.string().uuid().safeParse(activityId);
-  if (!id.success || request.method !== "POST" || request.headers.get("origin") !== new URL(request.url).origin
+  const publicBaseUrl = cookieAuthBaseUrl(process.env, new URL(request.url).origin);
+  if (!id.success || request.method !== "POST" || !publicBaseUrl
+    || !isAllowedCookieAuthOrigin(request.headers.get("origin"), publicBaseUrl)
     || request.headers.get("sec-fetch-site") === "cross-site"
     || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get("content-type") ?? "")
     || ![null, "identity"].includes(request.headers.get("content-encoding"))) throw invalid();

@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { IncomingMessage } from "node:http";
+import { Socket } from "node:net";
+import { NodeNextRequest } from "next/dist/server/base-http/node";
+import { NextRequestAdapter } from "next/dist/server/web/spec-extension/adapters/next-request";
+import { addRequestMeta } from "next/dist/server/request-meta";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createOpeningAdaptivePrefsRepository, createOpeningCourseRouteRepository,
@@ -76,6 +81,7 @@ async function cookieFor(claims: { sub?: string; workspaceId?: string; sid?: str
 
 describe.skipIf(!enabled)("real authenticated rule-only advice handler / PG16", () => {
   beforeAll(async () => {
+    vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("PUBLIC_BASE_URL", "");
     vi.stubEnv("AUTH_SECRET", secret); vi.stubEnv("OPENING_TEACHING_LOOP", "1");
     vi.stubEnv("OPENING_TEACHING_LOOP_ROLLOUT_USER_IDS", "");
     f = await createOpeningFixture();
@@ -89,6 +95,43 @@ describe.skipIf(!enabled)("real authenticated rule-only advice handler / PG16", 
   afterAll(async () => {
     setAuthRuntimeForTests(null); vi.restoreAllMocks(); vi.unstubAllEnvs();
     try { await runtime?.close(); } finally { await f?.close(); }
+  });
+
+  it("accepts the configured public origin through the pinned native Next proxy adapter, not the internal host", async () => {
+    const publicOrigin = "https://study.example", path = `/api/opening/teaching/activities/${own.session.activityId}/learning-advice`;
+    // Offline Node transport -> actual locked Next adapter -> actual route/auth/SQL.
+    // initURL mirrors trustHostHeader=false: the server hostname/port, not forwarded Host.
+    const adapted = (origin: string | null, cookie = f.cookie) => {
+      const incoming = new IncomingMessage(new Socket());
+      incoming.method = "POST"; incoming.url = path;
+      incoming.headers = { host: "study.example", "x-forwarded-host": "study.example", "x-forwarded-proto": "https",
+        cookie, "content-type": "application/json", ...(origin === null ? {} : { origin }) };
+      const nodeRequest = new NodeNextRequest(incoming);
+      addRequestMeta(nodeRequest, "initURL", `http://localhost:18090${path}`);
+      incoming.push(Buffer.from(JSON.stringify({ attemptId: own.attempt.id, expectedRevision: own.session.revision, optIn: true })));
+      incoming.push(null);
+      const result = NextRequestAdapter.fromNodeNextRequest(nodeRequest, new AbortController().signal);
+      expect(result.url).toBe(`http://localhost:18090${path}`);
+      return result;
+    };
+    const snapshot = () => f.sql`SELECT
+      (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM opening_teaching_activities a) AS activities,
+      (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM opening_learning_sessions s) AS sessions,
+      (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM opening_learning_attempts p) AS attempts,
+      (SELECT count(*) FROM opening_learning_decisions) AS decisions,
+      (SELECT count(*) FROM opening_budget_reservations) AS budgets`;
+    vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("PUBLIC_BASE_URL", ` ${publicOrigin} `);
+    try {
+      const before = await snapshot();
+      expect(await checked(await POST(adapted(publicOrigin), context(own.session.activityId)), 200))
+        .toMatchObject({ messageCode: "rule_only", experimentState: "off", advice: { status: "disabled", experimentalAdvice: null } });
+      for (const origin of ["https://foreign.invalid", "not-an-origin", "null", "", null, "http://localhost:18090"])
+        await checked(await POST(adapted(origin), context(own.session.activityId)), 400);
+      for (const origin of [publicOrigin, "https://foreign.invalid", "not-an-origin"])
+        expect(await checked(await POST(adapted(origin, ""), context(own.session.activityId)), 401))
+          .toMatchObject({ error: { code: "UNAUTHENTICATED" } });
+      expect(await snapshot()).toEqual(before);
+    } finally { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("PUBLIC_BASE_URL", ""); }
   });
 
   it.each([false, true])("projects only the current rule, optIn=%s remains off and writes nothing", async optIn => {

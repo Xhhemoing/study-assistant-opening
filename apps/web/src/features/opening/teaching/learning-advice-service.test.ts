@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningLearningAdviceService, parseLearningAdviceRequest } from "./learning-advice-service";
 
 const activityId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", attemptId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
@@ -9,6 +9,32 @@ function request(body: unknown = input, headers: Record<string, string> = {}) {
     origin: "https://study.example", "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 }
 describe("learning advice bounded request", () => {
+  beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("PUBLIC_BASE_URL", ""); });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it("uses the configured public base rather than the internal proxy URL in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PUBLIC_BASE_URL", " https://study.example ");
+    const proxied = new Request("http://localhost:18090/api/advice", { method: "POST",
+      headers: { origin: "https://study.example", "content-type": "application/json" }, body: JSON.stringify(input) });
+    expect(await parseLearningAdviceRequest(proxied, activityId)).toEqual(input);
+  });
+  it.each(["http://localhost:18090", "https://evil.example", "null", "not-an-origin", ""])(
+    "does not trust the internal URL or invalid/foreign origin with a configured public base: %s", async origin => {
+      vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("PUBLIC_BASE_URL", "https://study.example");
+      await expect(parseLearningAdviceRequest(new Request("http://localhost:18090/api/advice", { method: "POST",
+        headers: { origin, "content-type": "application/json" }, body: JSON.stringify(input) }), activityId))
+        .rejects.toMatchObject({ status: 400 });
+    });
+  it("fails closed when production has no configured base, even for a matching request origin", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    await expect(parseLearningAdviceRequest(request(), activityId)).rejects.toMatchObject({ status: 400 });
+  });
+  it("preserves the unified loopback equivalence only for the selected nonproduction base", async () => {
+    const local = new Request("http://localhost:18090/api/advice", { method: "POST",
+      headers: { origin: "http://127.0.0.1:18090", "content-type": "application/json" }, body: JSON.stringify(input) });
+    expect(await parseLearningAdviceRequest(local, activityId)).toEqual(input);
+  });
   it("accepts an explicit same-origin real Request", async () => {
     expect(await parseLearningAdviceRequest(request(), activityId)).toEqual(input);
   });
@@ -19,7 +45,7 @@ describe("learning advice bounded request", () => {
     { ...input, expectedRevision: 1.5 }, { ...input, expectedRevision: Number.MAX_SAFE_INTEGER + 1 }, { ...input, attemptId: "catalog-key" }])("rejects incomplete/invalid input %j", async body => {
     await expect(parseLearningAdviceRequest(request(body), activityId)).rejects.toMatchObject({ status: 400 });
   });
-  it.each([{ origin: "https://evil.example" }, { origin: "null" }, { "content-type": "text/plain" },
+  it.each<Record<string, string>>([{ origin: "https://evil.example" }, { origin: "null" }, { "content-type": "text/plain" },
     { "content-length": "4097" }, { "sec-fetch-site": "cross-site" }, { "content-encoding": "gzip" }])("rejects unsafe request metadata %j", async headers => {
     await expect(parseLearningAdviceRequest(request(input, headers), activityId)).rejects.toMatchObject({ status: 400 });
   });
