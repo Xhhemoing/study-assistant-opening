@@ -405,7 +405,11 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
               const generated = target?.type === "example" && ref?.role === "example" && typeof body === "string"
                 ? generateTeachingWorkedExample(body, previousBodies) : null;
               if (!generated || priorBlocks.length >= 500 || blockOrder.length >= 500) {
-                return conflict("validation", "未生成新例题：目前仅支持明确的分数加法、多项式求导/切线、多项式定积分例题；输入不受支持或本题族新题已用完。原题与学习记录保持不变。");
+                return conflict("validation", "未生成新例题：目前仅支持明确的分数加法、多项式求导/切线、多项式定积分例题；输入不受支持或本题族新题已用完。原题与学习记录保持不变。", {
+                  currentContentVersion: contentVersion,
+                  currentPathVersion: pathVersion,
+                  currentRevisionNumber: Number(spec.revision_number),
+                });
               }
               const id = randomUUID();
               newBlocks = [...priorBlocks, { id, type: "example", content: {
