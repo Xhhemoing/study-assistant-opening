@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { createTeachingExampleHandler } from "../jobs/teaching-example";
 import { readStoredTeachingOutline } from "./teaching-outline";
 import { checkTeachingFormula } from "./teaching-formula-check";
 import type { Sql } from "postgres";
 import { type Scope, type ProviderOutput, type OpeningModelSnapshot, type ActivitySpecPublishInput } from "@aistudy/contracts";
 import {
   createLibraryRepository,
+  createOpeningTeachingExamplesRepository,
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
   createOpeningCourseReadySourcesRepository,
@@ -146,6 +148,8 @@ export function createCompileTeachingUnitWorkerDeps(
   const preflightedInputs = new WeakSet<object>();
   return {
     budget,
+    exampleHandler: teachingCompilerOn ? createTeachingExampleHandler({ repository: createOpeningTeachingExamplesRepository(sql), gateway: models,
+      budget: scope => scopeBudget(budget, scope) }) : async () => { throw new Error("AI 例题生成当前已关闭，未发送模型。"); },
     resolveParentBudget: (scope, payload) => readOpeningTeachingParentBudget(sql, scope, payload.activityId),
     ...modelPath,
     enabled: teachingCompilerOn,
