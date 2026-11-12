@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
-import { evaluateEvidenceEligibility } from "@aistudy/domain";
+import { evaluateEvidenceEligibility, type NextLearningStep } from "@aistudy/domain";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ExperimentalLearningAdvice } from "../features/opening/teaching/experimental-learning-advice";
@@ -24,7 +24,7 @@ function snapshot(): ExperimentalBktSnapshot {
     cutoff: context.target.cutoff, dataAsOf: "2026-11-11T08:01:00Z", stateVersion: "bkt-read:test:1:asof",
     features: [{ observationId: id, attemptId: "attempt-one", courseId: context.target.courseId, requirementKey: context.target.requirementKey,
       itemVersionId: "version-one", skillLabel: "span", attemptedAt, recordedAt: "2026-11-11T07:01:00Z",
-      sourceIds: [], sourceVersions: {}, eligibility: { policyVersion: "test", independentAttempt: "yes", verifiedCorrect: "no",
+      sourceIds: [], sourceVersions: {}, eligibility: { policyVersion: "opening-evidence-v4", independentAttempt: "yes", verifiedCorrect: "no",
         usableForCurrentVersion: "yes", usableForDelayedCheck: "unknown", reasonCodes: ["deterministic_incorrect"] },
       availability: "available", views: ["independent"], transfer: { usable: "unknown", knowledgeComponents: [], reasonCodes: [] },
       retention: { protocolId: null, earliestAt: null, recordedIntervalSupportCount: null, intervalExposureComplete: null },
@@ -213,7 +213,7 @@ describe("experimental BKT host snapshot seam", () => {
     ["head time", s => { s.observationHeads[0]!.attemptedAt = "2026-11-11T07:00:01Z"; }, "strict_asof_unavailable"],
     ["unknown truth", s => { s.features[0]!.eligibility.verifiedCorrect = "unknown"; }, "snapshot_qualification_conflict"],
     ["head truth conflict", s => { s.observationHeads[0]!.verifiedCorrect = "yes"; }, "snapshot_qualification_conflict"],
-    ["AI evidence", s => { s.features[0]!.eligibility.reasonCodes = ["ai_feedback"]; }, "snapshot_qualification_conflict"],
+    ["AI evidence", s => { s.features[0]!.eligibility.reasonCodes = ["ai_graded_incorrect"]; }, "snapshot_qualification_conflict"],
     ["help", s => { s.features[0]!.views.push("help"); }, "snapshot_qualification_conflict"],
   ];
   it.each(invalidCases)("rejects %s without partial qualification", async (_name, mutate, reason) => {
@@ -265,12 +265,12 @@ describe("experimental BKT host snapshot seam", () => {
     for (const secret of ["ANSWER_CANARY", "SOURCE_CANARY", "SOURCE_ID_CANARY", "0.77391"]) expect(JSON.stringify(result)).not.toContain(secret);
     expect(value.features[0]!.sourceIds).toEqual(["SOURCE_ID_CANARY"]);
   });
-  const ruleDecision = { activityKind: "independent_practice", focusObservationId: null, reasonCode: "independent" } as const;
+  const ruleDecision = { activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" } as const satisfies NextLearningStep;
   it("port defaults false and performs no read or wrapper invocation", async () => {
     const f = fixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>();
     const service = createExperimentalBktSnapshotService({ ...f, ruleDecision, wrapper });
     expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
-      port: { ruleDecision: { activityKind: ruleDecision.activityKind, reasonCode: ruleDecision.reasonCode },
+      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
         status: "disabled", experimentalAdvice: null } });
     expect(f.repository.read).not.toHaveBeenCalled(); expect(wrapper).not.toHaveBeenCalled();
   });
@@ -501,8 +501,12 @@ describe("service with exact snapshot R2 repository (typed SQL fake, NOT PG)", (
   });
   it("real R2 readPort returns real R4 insufficient fallback, ignoring injected substitute", async () => {
     const f = realRepositoryFixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>(() => { throw new Error("UNAPPROVED_WRAPPER"); });
-    const ruleDecision = { activityKind: "independent_practice", focusObservationId: uuid(10), reasonCode: "independent" } as const;
+    const ruleDecision = { activityKind: "transfer_check", focusObservationId: uuid(10), reasonCode: "independent" } as const satisfies NextLearningStep;
     const service = createExperimentalBktSnapshotService({ host: f.host, repository: f.repository, wrapper, ruleDecision });
+    expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
+      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
+        status: "disabled", experimentalAdvice: null } });
+    expect(f.queries).toHaveLength(0);
     expect(await service.readPort({ enabled: true })).toEqual({ comparisonReady: false, reason: "insufficient_samples",
       port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" }, status: "fallback", reason: "insufficient_samples", experimentalAdvice: null } });
     expect(wrapper).not.toHaveBeenCalled(); expect(f.queries).toHaveLength(3);
