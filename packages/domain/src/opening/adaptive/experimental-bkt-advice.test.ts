@@ -17,7 +17,7 @@ function fixture(outcomes: boolean[] = [true, true, true, true, true, true]) {
     retention: { protocolId: null, earliestAt: null, recordedIntervalSupportCount: null, intervalExposureComplete: null },
     gaps: [], outcome: correct ? "correct" : "incorrect", ordinal: index,
   }));
-  const observations: SnapshotObservation[] = features.map((row, index): SnapshotObservation => ({
+  const observations: SnapshotObservation[] = features.map<SnapshotObservation>((row, index) => ({
     id: row.observationId, skillLabel: row.skillLabel, requirementKey: row.requirementKey, itemVersionId: row.itemVersionId,
     attemptedAt: row.attemptedAt, assistance: "independent", independentAttempt: "yes", usableForCurrentVersion: "yes",
     verifiedCorrect: row.eligibility.verifiedCorrect, problemId: `problem-${index}`,

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { listMigrationFiles } from "../../packages/database/src/migrate";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { projectMaterialFeedback } from "../../packages/domain/src/opening/material-attempt-presentation";
@@ -12,12 +14,15 @@ beforeAll(async () => { f = await createOpeningFixture(); });
 afterAll(async () => { await f?.close(); });
 
 describe("card1: real PG submitted teaching-item/current publication binding (DI host only)", () => {
-  it("uses all 111 real migrations and preserves revision immutability", async () => {
-    const migrations = await f.sql`SELECT id,verification_state FROM schema_migrations ORDER BY id`;
-    expect(migrations).toHaveLength(111);
-    expect(migrations[0]!.id).toMatch(/^0001_/);
-    expect(migrations[110]!.id).toMatch(/^0111_/);
-    expect(migrations.every(row => row.verification_state === "verified")).toBe(true);
+  it("uses all real migrations with verified checksums and preserves revision immutability", async () => {
+    const migrationsDir = new URL("../../packages/database/src/migrations/", import.meta.url);
+    const expected = (await listMigrationFiles(fileURLToPath(migrationsDir))).map(id => ({
+      id,
+      checksum: createHash("sha256").update(readFileSync(new URL(id, migrationsDir), "utf8")).digest("hex"),
+      verification_state: "verified",
+    }));
+    const migrations = await f.sql`SELECT id,checksum,verification_state FROM schema_migrations ORDER BY id`;
+    expect(migrations).toEqual(expected);
     const guards = await f.sql`SELECT tgname,tgenabled FROM pg_trigger WHERE tgrelid='library_revisions'::regclass AND NOT tgisinternal ORDER BY tgname`;
     expect(guards).toEqual(expect.arrayContaining([
       expect.objectContaining({ tgname: "library_revisions_no_update", tgenabled: "O" }),

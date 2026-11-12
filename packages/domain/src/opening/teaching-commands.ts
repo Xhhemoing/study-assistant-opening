@@ -164,16 +164,8 @@ export function assertCommandAllowed(input: {
       message: "blockId is not in current ActivitySpec blockOrder",
     };
   }
-  // The legacy structured rewrite only copies the body and adds provenance.
-  // It cannot fulfill a request for a new worked example or variant. Reject
-  // before any revision/checkpoint write; do not silently start a paid tutor job.
-  if (kind === "example") {
-    return {
-      ok: false,
-      conflict: "validation",
-      message: "未生成新例题：当前例题命令不支持生成新正文，原例题与学习记录保持不变。",
-    };
-  }
+  // Example body support is checked by the repository against the pinned body.
+  // It must never fall through to the legacy metadata-only structured rewrite.
   if (kind === "branch" || kind === "skip") {
     // targetBlockId presence checked by caller when provided
   }

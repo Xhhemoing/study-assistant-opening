@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
-import { evaluateEvidenceEligibility, type NextLearningStep } from "@aistudy/domain";
+import { evaluateEvidenceEligibility } from "@aistudy/domain";
+import type { NextLearningStep } from "../../../../packages/domain/src/opening/adaptive/snapshot-sources";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ExperimentalLearningAdvice } from "../features/opening/teaching/experimental-learning-advice";
@@ -220,6 +221,22 @@ describe("experimental BKT host snapshot seam", () => {
     const f = fixture(), value = snapshot(); mutate(value); f.repository.read.mockResolvedValue(value);
     expect(await f.service.read({ enabled: true })).toEqual({ status: "unavailable", reason });
   });
+  it("legal policy and AI reason fixtures retain the old runtime branches", async () => {
+    for (const policyVersion of ["test", "opening-evidence-v4"]) {
+      const control = fixture(), clean = snapshot();
+      // Historical invalid wire value is deliberate here, not a typed baseline.
+      Object.assign(clean.features[0]!.eligibility, { policyVersion });
+      control.repository.read.mockResolvedValue(clean);
+      expect(await control.service.read({ enabled: true })).toMatchObject({ reason: "comparison_not_requested",
+        preparation: { qualification: { experiment: { features: [{ eligibility: { policyVersion } }] } } } });
+      for (const reasonCode of ["ai_feedback", "ai_graded_incorrect"]) {
+        const f = fixture(), value = snapshot();
+        Object.assign(value.features[0]!.eligibility, { policyVersion, reasonCodes: [reasonCode] });
+        f.repository.read.mockResolvedValue(value);
+        expect(await f.service.read({ enabled: true })).toEqual({ status: "unavailable", reason: "snapshot_qualification_conflict" });
+      }
+    }
+  });
   it("rejects duplicate features/heads/problems/families rather than Map overwriting", async () => {
     const f = fixture(), value = snapshot();
     value.features.push(structuredClone(value.features[0]!));
@@ -265,7 +282,21 @@ describe("experimental BKT host snapshot seam", () => {
     for (const secret of ["ANSWER_CANARY", "SOURCE_CANARY", "SOURCE_ID_CANARY", "0.77391"]) expect(JSON.stringify(result)).not.toContain(secret);
     expect(value.features[0]!.sourceIds).toEqual(["SOURCE_ID_CANARY"]);
   });
-  const ruleDecision = { activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" } as const satisfies NextLearningStep;
+  const ruleDecision = { activityKind: "transfer_check", focusObservationId: null, reasonCode: "independent" } satisfies NextLearningStep;
+  it("caller activity remains display-only for old and legal independent fixtures", async () => {
+    for (const activityKind of ["independent_practice", "transfer_check"]) {
+      const f = fixture(), callerRule = { ...ruleDecision };
+      // Keep the old invalid wire value only as an explicit ignored-caller control.
+      Object.assign(callerRule, { activityKind });
+      const service = createExperimentalBktSnapshotService({ ...f, ruleDecision: callerRule });
+      expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
+        port: { ruleDecision: { activityKind, reasonCode: "independent" }, status: "disabled", experimentalAdvice: null } });
+      expect(f.repository.read).not.toHaveBeenCalled();
+      expect(await service.readPort({ enabled: true })).toMatchObject({ comparisonReady: false, reason: "priority_rule",
+        port: { ruleDecision: { activityKind: "targeted_explain", reasonCode: "verified_incorrect" }, status: "fallback" } });
+      expect(f.repository.read).toHaveBeenCalledTimes(1);
+    }
+  });
   it("port defaults false and performs no read or wrapper invocation", async () => {
     const f = fixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>();
     const service = createExperimentalBktSnapshotService({ ...f, ruleDecision, wrapper });
@@ -499,12 +530,13 @@ describe("service with exact snapshot R2 repository (typed SQL fake, NOT PG)", (
     expect(await f.service.prepare({ enabled: true })).toEqual({ status: "unavailable", reason: "host_authorization_revoked" });
     expect(f.modes).toHaveLength(1);
   });
-  it("real R2 readPort returns real R4 insufficient fallback, ignoring injected substitute", async () => {
+  it.each(["independent_practice", "transfer_check"])("real R2 readPort returns real R4 insufficient fallback, ignoring injected substitute and caller activity %s", async activityKind => {
     const f = realRepositoryFixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>(() => { throw new Error("UNAPPROVED_WRAPPER"); });
-    const ruleDecision = { activityKind: "transfer_check", focusObservationId: uuid(10), reasonCode: "independent" } as const satisfies NextLearningStep;
+    const ruleDecision = { activityKind: "transfer_check", focusObservationId: uuid(10), reasonCode: "independent" } satisfies NextLearningStep;
+    Object.assign(ruleDecision, { activityKind });
     const service = createExperimentalBktSnapshotService({ host: f.host, repository: f.repository, wrapper, ruleDecision });
     expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
-      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
+      port: { ruleDecision: { activityKind, reasonCode: "independent" },
         status: "disabled", experimentalAdvice: null } });
     expect(f.queries).toHaveLength(0);
     expect(await service.readPort({ enabled: true })).toEqual({ comparisonReady: false, reason: "insufficient_samples",

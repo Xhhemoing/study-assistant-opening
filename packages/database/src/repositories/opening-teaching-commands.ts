@@ -1,5 +1,10 @@
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Sql } from "postgres";
+import { generateTeachingWorkedExample } from "./teaching-worked-example";
+import { teachingQuestionText } from "./opening-teaching-question";
+import { carryTeachingExampleExposure, generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
+import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import type { JSONValue, Sql } from "postgres";
 import type {
   ActivitySpecClientInit,
   Scope,
@@ -15,6 +20,7 @@ import {
   isTeachingPathKind,
   isTeachingRewriteKind,
   TEACHING_COMMAND_LOG_MAX,
+  teachingQuestionInteractionSchema,
 } from "@aistudy/contracts";
 import {
   appendCommandLog,
@@ -38,6 +44,7 @@ import {
   assertOwnedActivity,
 } from "./opening-teaching-activities";
 import {
+  admitLearningSources,
   learningError,
   learningIso,
   lockLearningOwner,
@@ -165,7 +172,9 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
       // Domain lock: skip must not touch observations — keep symbol referenced for tests.
       void classifySkipSideEffects();
 
-      const intentFingerprint = fingerprintCommandIntent(request);
+      const intentFingerprint = request.kind === "example"
+        ? JSON.stringify([fingerprintCommandIntent(request), request.expectedRevisionNumber ?? null])
+        : fingerprintCommandIntent(request);
 
       try {
         return await sql.begin(async (tx) => {
@@ -187,6 +196,21 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
           const checkpoint = (activity.checkpoint_json ?? {}) as Record<string, unknown>;
           const generateStatus = String(activity.generate_status);
 
+          // Explicit example operations replay before CAS; a lost response must not
+          // create a second body. Other commands retain their existing semantics.
+          if (request.kind === "example") {
+            const replay = findCommandLogByClientKey(readCommandLog(checkpoint), request.clientKey, intentFingerprint);
+            if (replay.hit === "mismatch") return conflict("client_key_intent_mismatch", "example operation intent changed");
+            if (replay.hit === "replay") {
+              const stored = readReplayStore(checkpoint)[request.clientKey];
+              if (stored) return { ...stored, replayed: true };
+              return conflict("validation", "此操作已执行，请重新读取已保存的例题；不会自动再生成。");
+            }
+            // Durable receipt survives the bounded command replay ring.
+            const [released] = await tx`SELECT id FROM opening_help_exposures WHERE workspace_id=${scope.workspaceId}
+              AND owner_user_id=${scope.ownerUserId} AND release_key=${`teaching-example:${createHash("sha256").update(JSON.stringify([activity.id, request.clientKey])).digest("hex")}`}`;
+            if (released) return conflict("validation", "此操作已执行，请重新读取已保存的例题；不会自动再生成。");
+          }
           if (contentVersion !== request.expectedVersion) {
             return conflict("stale_content_version", "activity content_version mismatch; reread clientInit", {
               currentContentVersion: contentVersion,
@@ -247,7 +271,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             });
           }
           const spec = specRows[0] as unknown as SpecRow;
-          const blockOrder = asBlockOrder(spec.block_order);
+          let blockOrder = asBlockOrder(spec.block_order);
           const presentIds = new Set(blockOrder.map((b) => b.blockId));
           const branchStack = readBranchStack(checkpoint);
 
@@ -274,6 +298,13 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             });
           }
 
+          if (request.kind === "example" && (!blockOrder.some(block => block.blockId === request.blockId && block.role === "example" && block.blockType === "example")
+            || ["unknown", "failed"].includes(generateStatus))) {
+            return conflict("validation", "未生成新例题：请选择已保存的例题；生成状态不明确时不会自动重发。", {
+              currentContentVersion: contentVersion, currentPathVersion: pathVersion, currentRevisionNumber: Number(spec.revision_number),
+            });
+          }
+
           if (
             request.expectedRevisionNumber != null &&
             request.expectedRevisionNumber !== Number(spec.revision_number)
@@ -292,6 +323,9 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
           let nextCheckpoint = { ...checkpoint };
           let assist: TeachingCommandSuccess["assist"];
           let nextSpec = spec;
+          let exampleQuestionBlocks: TeachingBlockRef[] = [];
+          let carriedHelp: Array<{ id: string; blockId: string }> = [];
+          let publicationBlocks: JSONValue = null;
 
           if (request.kind === "why" || request.kind === "confused") {
             const ref = blockOrder.find((b) => b.blockId === request.blockId);
@@ -343,18 +377,104 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
               throw error;
             }
 
-            const newBlocks = buildStructuredRewriteBlocks(
-              prior.blocks.map((b) => ({
-                id: b.id,
-                type: b.type,
-                content: b.content as Record<string, unknown>,
-              })),
-              {
-                kind: request.kind,
-                blockId: request.blockId!,
-                prompt: request.prompt,
-              },
-            );
+            const priorBlocks = prior.blocks.map(b => ({ id: b.id, type: b.type, content: b.content as Record<string, unknown> }));
+            let newBlocks = priorBlocks;
+            if (request.kind === "example") {
+              await assertOpeningCourseRouteCurrent(tx, scope, activityId);
+              const [unit] = await tx`SELECT current_revision_number FROM opening_teaching_units
+                WHERE id=${String(spec.teaching_unit_id)} AND workspace_id=${scope.workspaceId}
+                  AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+              if (!unit || Number(unit.current_revision_number) !== pinnedRev || Number(spec.version) !== contentVersion) {
+                return conflict("stale_revision", "教学正文绑定已变化，请重新读取。");
+              }
+              const [owned] = await tx`SELECT source_ids FROM opening_teaching_activities WHERE id=${activityId}`;
+              const sources = await admitLearningSources(tx, scope, (owned?.source_ids ?? []) as string[], { recordVersions: false });
+              const versions = new Map(sources.map(source => [String(source.id), Number(source.version)]));
+              const refs = Array.isArray(spec.source_refs) ? spec.source_refs as Array<{sourceId: string; version?: string | number | null}> : [];
+              if ([...versions.keys()].some(id => !refs.some(ref => ref.sourceId === id))
+                || refs.some(ref => ref.version == null || versions.get(ref.sourceId) !== Number(ref.version))) {
+                return conflict("stale_revision", "来源版本已变化，未发布新例题。");
+              }
+              const target = priorBlocks.find(block => block.id === request.blockId);
+              const ref = blockOrder.find(block => block.blockId === request.blockId);
+              const body = target?.content.text;
+              const history = await tx`SELECT blocks FROM library_revisions WHERE workspace_id=${scope.workspaceId}
+                AND document_id=${documentId} AND revision_number<=${pinnedRev}`;
+              const previousBodies = history.flatMap(row => (row.blocks as RevisionRecord["blocks"])
+                .map(block => typeof block.content.text === "string" ? block.content.text : ""));
+              const generated = target?.type === "example" && ref?.role === "example" && typeof body === "string"
+                ? generateTeachingWorkedExample(body, previousBodies) : null;
+              if (!generated || priorBlocks.length >= 500 || blockOrder.length >= 500) {
+                return conflict("validation", "未生成新例题：目前仅支持明确的分数加法、多项式求导/切线、多项式定积分例题；输入不受支持或本题族新题已用完。原题与学习记录保持不变。", {
+                  currentContentVersion: contentVersion,
+                  currentPathVersion: pathVersion,
+                  currentRevisionNumber: Number(spec.revision_number),
+                });
+              }
+              const id = randomUUID();
+              newBlocks = [...priorBlocks, { id, type: "example", content: {
+                ...generated, generated: true, workedExampleOf: { blockId: request.blockId!, contentVersion,
+                  revisionNumber: pinnedRev, sourceRefs: spec.source_refs, skillLabel: generated.skillLabel,
+                  clientKey: request.clientKey },
+              } }];
+              // Match readTeachingQuestionForAttempt's ref/body admission, not
+              // role=prompt alone: teach/meta/example roles can hold saved questions.
+              // Never turn an answer-key/solution body into a question anchor.
+              exampleQuestionBlocks = blockOrder.filter(block => {
+                if (block.role === "answer_key" || !(block.role === "prompt" || ["prompt", "question"].includes(block.blockType))) return false;
+                const saved = priorBlocks.find(body => body.id === block.blockId);
+                return saved !== undefined && ["prompt", "question"].includes(saved.type)
+                  && (saved.content.interaction === undefined || teachingQuestionInteractionSchema.safeParse(saved.content.interaction).success)
+                  && teachingQuestionText(saved.content) !== null;
+              });
+              // Append, never replace the original prompt/example or its drafts.
+              blockOrder = [...blockOrder, { blockId: id, blockType: "example", role: "example",
+                position: Math.max(-1, ...blockOrder.map(block => block.position)) + 1 }];
+            } else {
+              newBlocks = buildStructuredRewriteBlocks(priorBlocks, {
+                kind: request.kind, blockId: request.blockId!, prompt: request.prompt,
+              });
+              const withoutRewrite = (blocks: typeof priorBlocks) => blocks.map(block => {
+                if (block.id !== request.blockId) return block;
+                const { rewriteOf: _rewrite, ...content } = block.content;
+                return { ...block, content };
+              });
+              // Compare actual saved content/context, not rewriteOf's claim. The
+              // receipt's server-only binding proves the prior source publication
+              // even if no attempt/item has ever been issued there.
+              if (isDeepStrictEqual(withoutRewrite(priorBlocks), withoutRewrite(newBlocks))) {
+                const receipts = await tx`SELECT h.id,h.context_anchor,h.release_intent FROM opening_help_exposures h
+                  WHERE h.workspace_id=${scope.workspaceId} AND h.owner_user_id=${scope.ownerUserId}
+                    AND h.activity_id=${activityId} AND h.delivered=TRUE AND h.released_at IS NOT NULL
+                    AND h.kind='solution' AND h.level='revealed' AND h.release_key LIKE 'teaching-example:%'
+                    AND h.attempt_id IS NULL AND h.problem_id IS NULL AND h.item_version_id IS NULL
+                    AND h.context_anchor->>'contentVersion'=${String(contentVersion)}`;
+                for (const receipt of receipts) {
+                  const anchor = receipt.context_anchor as OpeningStudyExposureInput["contextAnchor"];
+                  const binding = (receipt.release_intent as OpeningStudyExposureInput | null)?.teachingPublication;
+                  if (!binding || anchor.activityId !== activity.id || anchor.contentVersion !== contentVersion
+                    || binding.documentId !== documentId || binding.revisionNumber !== pinnedRev
+                    || binding.teachingUnitId !== String(spec.teaching_unit_id)
+                    || !isDeepStrictEqual(binding.blocks, prior.blocks)
+                    || !isDeepStrictEqual(binding.sourceRefs, spec.source_refs)
+                    || !isDeepStrictEqual(binding.blockOrder, blockOrder)) continue;
+                  const ref = blockOrder.find(block => block.blockId === anchor.blockId);
+                  const body = priorBlocks.find(block => block.id === anchor.blockId);
+                  if (!ref || ref.role === "answer_key" || !(ref.role === "prompt" || ["prompt", "question"].includes(ref.blockType))
+                    || !body || !["prompt", "question"].includes(body.type) || !teachingQuestionText(body.content)
+                    || body.content.interaction !== undefined && !teachingQuestionInteractionSchema.safeParse(body.content.interaction).success) continue;
+                  carriedHelp.push({ id: String(receipt.id), blockId: ref.blockId });
+                }
+                if (carriedHelp.length) {
+                  const [owned] = await tx`SELECT source_ids FROM opening_teaching_activities WHERE id=${activityId}`;
+                  const sources = await admitLearningSources(tx, scope, (owned?.source_ids ?? []) as string[], { recordVersions: false });
+                  const refs = Array.isArray(spec.source_refs) ? spec.source_refs as Array<{ sourceId: string; version?: string | number | null }> : [];
+                  const versions = new Map(sources.map(source => [String(source.id), Number(source.version)]));
+                  if ([...versions.keys()].some(id => !refs.some(ref => ref.sourceId === id))
+                    || refs.some(ref => ref.version == null || versions.get(ref.sourceId) !== Number(ref.version))) carriedHelp = [];
+                }
+              }
+            }
 
             // Draft preserve: surviving blockIds only; lost → draft_anchor_lost (no LWW drop).
             const presentAfter = new Set(newBlocks.map((b) => b.id));
@@ -396,12 +516,14 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
               throw error;
             }
 
+            publicationBlocks = newBlocks.map((block, position) => ({ ...block, position })) as JSONValue;
             nextRevisionNumber = pinnedRev + 1;
             nextContentVersion = contentVersion + 1;
 
             const upserted = await tx`
               UPDATE opening_teaching_activity_specs
               SET revision_number = ${nextRevisionNumber},
+                  block_order = ${tx.json(blockOrder as never)},
                   version = ${nextContentVersion},
                   updated_at = now()
               WHERE workspace_id = ${scope.workspaceId}
@@ -433,10 +555,8 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             nextCheckpoint = mergeCheckpointPreservingPrefs(nextCheckpoint, {
               drafts: kept as TeachingDraftAnchor[],
               commandLog: appendCommandLog(commandLog, entry),
-              currentBlockId:
-                typeof checkpoint.currentBlockId === "string"
-                  ? checkpoint.currentBlockId
-                  : request.blockId!,
+              currentBlockId: request.kind === "example" ? blockOrder[blockOrder.length - 1]!.blockId
+                : typeof checkpoint.currentBlockId === "string" ? checkpoint.currentBlockId : request.blockId!,
             });
           } else if (request.kind === "skip") {
             const skipped = new Set(readSkippedBlockIds(checkpoint));
@@ -559,9 +679,36 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
                 RETURNING content_version, path_version, checkpoint_json`;
 
           if (!updated.length) {
-            return conflict("stale_content_version", "activity version raced; reread clientInit", {
-              currentContentVersion: contentVersion,
-              currentPathVersion: pathVersion,
+            // Throw to roll back library/spec writes as well as activity CAS.
+            throw learningError("CONFLICT", "activity version raced; reread clientInit");
+          }
+          if (request.kind === "example") {
+            const generatedBlock = blockOrder[blockOrder.length - 1]!;
+            // A demonstrated solution is assistance, not a fresh independent item.
+            // Pin receipts to this publication's questions as well as the example:
+            // changing surrounding context must not wash help away (#382).
+            const exposed = [generatedBlock, ...exampleQuestionBlocks];
+            for (const block of exposed) {
+              const receipt = await generateOpeningStudyExposure(tx, scope, {
+                releaseKey: `teaching-example:${createHash("sha256").update(JSON.stringify([activity.id, request.clientKey])).digest("hex")}${block.blockId === generatedBlock.blockId ? "" : `:${createHash("sha256").update(block.blockId).digest("hex")}`}`,
+                contextAnchor: { activityId: activity.id, blockId: block.blockId, contentVersion: nextContentVersion, purpose: "learning_help" },
+                origin: "assistant", kind: "solution", level: "revealed", supportDomain: "unknown", initiatedBy: "user",
+                teachingPublication: { documentId: String(nextSpec.document_id), revisionNumber: nextRevisionNumber,
+                  teachingUnitId: String(nextSpec.teaching_unit_id), blocks: publicationBlocks,
+                  sourceRefs: nextSpec.source_refs as JSONValue, blockOrder: blockOrder as JSONValue },
+              });
+              await releaseOpeningStudyExposure(tx, scope, receipt.id);
+            }
+          }
+
+          for (const receipt of carriedHelp) {
+            await carryTeachingExampleExposure(tx, scope, receipt.id, {
+              releaseKey: `teaching-example:carry:${activity.id}:${nextContentVersion}:${receipt.blockId}`,
+              contextAnchor: { activityId: activity.id, blockId: receipt.blockId, contentVersion: nextContentVersion, purpose: "learning_help" },
+              origin: "assistant", kind: "solution", level: "revealed", supportDomain: "unknown", initiatedBy: "user",
+              teachingPublication: { documentId: String(nextSpec.document_id), revisionNumber: nextRevisionNumber,
+                teachingUnitId: String(nextSpec.teaching_unit_id), blocks: publicationBlocks,
+                sourceRefs: nextSpec.source_refs as JSONValue, blockOrder: blockOrder as JSONValue },
             });
           }
 
@@ -592,7 +739,8 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
                 blocks,
                 sanitizeCheckpointForRestore(finalCheckpoint),
               );
-            } catch {
+            } catch (error) {
+              if (request.kind === "example") throw error;
               return undefined;
             }
           })();

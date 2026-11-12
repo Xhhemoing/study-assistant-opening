@@ -124,6 +124,8 @@ export type BlockCommandsBarViewProps = {
   defaultOpen?: boolean;
   /** When false, hide Why (stub-only era). Default false. */
   whyAvailable?: boolean;
+  exampleAvailable?: boolean;
+  exampleRefused?: boolean;
   onCommand: (kind: TeachingCommandKind) => void;
   onReread?: () => void;
   rereadBusy?: boolean;
@@ -143,6 +145,8 @@ export function BlockCommandsBarView({
   disabled = false,
   compact = false,
   whyAvailable = false,
+  exampleAvailable = false,
+  exampleRefused = false,
   onCommand,
   onReread,
   rereadBusy = false,
@@ -170,6 +174,18 @@ export function BlockCommandsBarView({
       data-why-available={whyAvailable ? "true" : "false"}
     >
       <ExplanationActions onAction={explain} availableActions={availableActions} disabled={disabled || busy} />
+      {exampleAvailable ? <div className="space-y-1">
+        <button type="button" className={ui.secondary} disabled={disabled || busy} onClick={() => onCommand("example")}>
+          {busyKind === "example" ? "正在准备新例题…" : "生成新例题（免费）"}
+        </button>
+        <p className="text-xs leading-5 text-text-3">点击即确认展示新例题的题干、精确答案和逐步解法；结果显示在学习内容中，保留原题与笔记。已展示解法只作学习帮助，不是独立作答、未见题或掌握证据。</p>
+        <details className="text-xs leading-5 text-text-3">
+          <summary className="cursor-pointer py-2">支持范围与限制</summary>
+          <p>仅支持首行题干明确的分数加法，以及 0–5 次多项式的求导、指定点切线和带符号定积分（不是几何面积）。不支持通用高数、极限、体积、不定积分或三角函数。</p>
+          <p>多项式不能有重复幂次；求导/切线的系数与切点须为分子绝对值 ≤12、分母 1–12 的有理数；定积分系数分子绝对值 ≤1000、分母 1–1000，上下限须为 −10 至 10 的整数。</p>
+          <p>只支持已保存例题中格式明确的题干，不会根据解答猜题目是什么意思。题库中的题目有限，遇到不支持的题目或题库用完时，不生成新题、不收费，也不会自动改为付费生成或调用 AI 模型。</p>
+        </details>
+      </div> : null}
 
       {showAssist && assist?.kind === "why" && explanationContext && onAskExplanation ? <InlineExplain
         context={{ ...explanationContext, blockId }} content={assist!.summary!}
@@ -191,8 +207,9 @@ export function BlockCommandsBarView({
           data-command-conflict={conflict.conflict}
         >
           <p className="font-medium">
-            {teachingCommandConflictLabel(conflict.conflict)}
+            {conflict.conflict === "validation" ? conflict.message : teachingCommandConflictLabel(conflict.conflict)}
           </p>
+          {exampleRefused && conflict.conflict === "validation" ? <p className="mt-1">本次未生成新例题，不收费；原题、笔记与学习记录保留。不会自动重试或转为付费生成。</p> : null}
           {diagnostics ? (
             <details className="mt-1 text-text-2">
               <summary className="min-h-11 cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent py-2">
@@ -247,6 +264,7 @@ export type BlockCommandsProps = {
   defaultOpen?: boolean;
   /** When false, hide Why control (default). */
   whyAvailable?: boolean;
+  exampleAvailable?: boolean;
   api?: OpeningApi;
   onSuccess?: (result: TeachingCommandSuccess) => void;
   onConflict?: (conflict: TeachingCommandConflict) => void;
@@ -268,6 +286,7 @@ export function BlockCommands({
   compact = false,
   defaultOpen = false,
   whyAvailable = false,
+  exampleAvailable = false,
   api: apiProp,
   onSuccess,
   onConflict,
@@ -279,29 +298,33 @@ export function BlockCommands({
   const [busyKind, setBusyKind] = useState<TeachingCommandKind | null>(null);
   const [rereadBusy, setRereadBusy] = useState(false);
   const [conflict, setConflict] = useState<TeachingCommandConflict | null>(null);
+  const [exampleRefused, setExampleRefused] = useState(false);
   const [assist, setAssist] = useState<{ binding: string; value: TeachingCommandAssist; context?: StudyConversationContext } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const binding = JSON.stringify([activityId, blockId, contentVersion]);
   const currentBinding = useRef({ key: binding });
   if (currentBinding.current.key !== binding) currentBinding.current = { key: binding };
   const operation = useRef(0);
+  const inFlight = useRef<{ key: string } | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    setAssist(null); setConflict(null); setError(null); setBusyKind(null); setRereadBusy(false);
+    setAssist(null); setConflict(null); setExampleRefused(false); setError(null); setBusyKind(null); setRereadBusy(false);
   }, [binding]);
 
   const runCommand = useCallback(
     async (kind: TeachingCommandKind) => {
-      if (busyKind) return;
+      if (busyKind || inFlight.current === currentBinding.current) return;
       if (kind === "return" && returnDisabled) return;
       if (kind === "why" && !whyAvailable) return;
       const snapshot = currentBinding.current;
+      inFlight.current = snapshot;
       const request = ++operation.current;
       const isCurrent = () => mounted.current && currentBinding.current === snapshot && operation.current === request;
       setBusyKind(kind);
       setError(null);
       setConflict(null);
+      setExampleRefused(false);
       if (kind !== "why") setAssist(null);
 
       const body: TeachingCommandRequest = {
@@ -332,12 +355,16 @@ export function BlockCommands({
             setError("未知冲突码");
           } else {
             setConflict(result);
+            // Other validation results include an already-executed operation;
+            // do not mislabel replay recovery as a failed publication.
+            setExampleRefused(kind === "example" && result.conflict === "validation" && result.message.startsWith("未生成新例题："));
             onConflict?.(result);
           }
         }
       } catch (err) {
         if (isCurrent()) setError(userFacingMessage(err, "命令失败"));
       } finally {
+        if (inFlight.current === snapshot) inFlight.current = null;
         if (isCurrent()) setBusyKind(null);
       }
     },
@@ -386,6 +413,8 @@ export function BlockCommands({
         compact={compact}
         defaultOpen={defaultOpen}
         whyAvailable={whyAvailable}
+        exampleAvailable={exampleAvailable}
+        exampleRefused={exampleRefused}
         onCommand={(kind) => void runCommand(kind)}
         onReread={onReread ? () => void handleReread() : undefined}
         rereadBusy={rereadBusy}

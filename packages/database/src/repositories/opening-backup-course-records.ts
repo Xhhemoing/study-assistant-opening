@@ -4,6 +4,11 @@ import type { TransactionSql } from "postgres";
 
 type Rows = Record<string, unknown>[];
 
+function hasSourceIdentities(value: unknown): value is Array<{ sourceId: string }> {
+  return Array.isArray(value) && value.every((ref: unknown) => ref !== null && typeof ref === "object"
+    && !Array.isArray(ref) && "sourceId" in ref && typeof ref.sourceId === "string");
+}
+
 /** The caller owns the workspace owner gate and repeatable-read transaction. */
 export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspaceId: string, sourceIds: readonly string[]) {
   const workspace_preferences: Rows = [...await tx`
@@ -59,11 +64,12 @@ export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspa
   const goal_time_windows: Rows = [...await tx`SELECT * FROM goal_time_windows WHERE workspace_id=${workspaceId} ORDER BY id`];
   const includedSources = new Set(sourceIds);
   const course_requirements: Rows = [...await tx`SELECT * FROM course_requirements WHERE workspace_id=${workspaceId} ORDER BY id`].map(row => {
-    const refs = row.source_refs as Array<{ sourceId: string }>;
-    if (refs.every(ref => includedSources.has(ref.sourceId))) return row;
+    // Persisted JSON is untrusted; malformed lineage is not a source-free requirement.
+    const refs = hasSourceIdentities(row.source_refs) ? row.source_refs : null;
+    if (refs !== null && refs.every(ref => includedSources.has(ref.sourceId))) return row;
     // Preserve the full range and dependency identities without exporting excluded source-derived text.
     return { ...row, title: "材料不可用的课程要求", knowledge_node_id: null, approved_at: null,
-      source_refs: refs.filter(ref => includedSources.has(ref.sourceId)), verification: {
+      source_refs: refs?.filter(ref => includedSources.has(ref.sourceId)) ?? [], verification: {
         kind: "unavailable", status: "missing", exerciseKeys: [], rubric: null,
         missingReasons: ["此要求部分材料未包含在备份中，请补充可读材料并重新确认要求与验证标准。"],
       } };
