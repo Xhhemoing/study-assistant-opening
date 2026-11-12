@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { createOpeningMaterialImportBindingsRepository } from "./opening-material-import-bindings";
+import { createOpeningMaterialImportBindingsRepository, createOpeningMaterialImportAcceptInTx,
+  createOpeningMaterialImportSessionAcceptInTx } from "./opening-material-import-bindings";
+import { assertIdentitySessionForWriteInTx, type ServerSessionWriteCredential } from "./identity";
+import { lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
+
+vi.mock("./identity", () => ({ assertIdentitySessionForWriteInTx: vi.fn() }));
+vi.mock("./opening-learning-facts", async importOriginal => ({
+  ...await importOriginal<typeof import("./opening-learning-facts")>(),
+  lockLearningOwner: vi.fn(), lockWorkspaceLearningHistory: vi.fn(),
+}));
 import { validateRetainedMaterialImportState } from "./opening-material-import-state";
 
 function input() {
@@ -64,6 +73,71 @@ describe("retained audit instant precision", () => {
     const sourceId = row.material_manifest.bindings[0]!.input.sourceId;
     expect(() => validateRetainedMaterialImportState(row, sourceId, 1, 1)).toThrow();
     expect(row).toEqual(before);
+  });
+});
+
+describe("source-only transaction seams", () => {
+  const credential: ServerSessionWriteCredential = { userId: scope.ownerUserId, workspaceId: scope.workspaceId,
+    sessionId: randomUUID(), tokenHash: "synthetic", jwtExpiresAtSeconds: 4_000_000_000 };
+  function harness() {
+    vi.mocked(assertIdentitySessionForWriteInTx).mockReset();
+    vi.mocked(lockLearningOwner).mockReset();
+    vi.mocked(lockWorkspaceLearningHistory).mockReset();
+    const begin = vi.fn();
+    const sql = Object.assign(vi.fn(), { begin }) as unknown as Sql;
+    // Unit double only; actual TransactionSql and isolation are exercised on PG.
+    const query = vi.fn().mockResolvedValue([{ transaction_isolation: "read committed" }]);
+    return { sql, begin, query, tx: query as unknown as TransactionSql };
+  }
+  it("keeps exactly the old runtime facade and begins RC only after valid preparation", async () => {
+    const { sql, begin } = harness(), receipt = { synthetic: "begin result" };
+    begin.mockResolvedValue(receipt);
+    const repo = createOpeningMaterialImportBindingsRepository(sql);
+    expect(Object.keys(repo).sort()).toEqual(["accept", "readCurrent"]);
+    expect(await repo.accept(scope, selection, input())).toBe(receipt);
+    expect(begin).toHaveBeenCalledExactlyOnceWith("isolation level read committed", expect.any(Function));
+  });
+  it("low-level prepares without beginning, and preserves native SQL errors by identity", async () => {
+    const { sql, begin, query, tx } = harness();
+    const error = Object.assign(new Error("native"), { code: "55P03" });
+    query.mockRejectedValue(error);
+    await expect(createOpeningMaterialImportAcceptInTx(sql)(tx, scope, selection, input())).rejects.toBe(error);
+    expect(begin).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+  it("low-level malformed/hash-mismatch input fails before touching tx", async () => {
+    const { sql, begin, query, tx } = harness(), accept = createOpeningMaterialImportAcceptInTx(sql);
+    await expect(accept(tx, scope, selection, { ...input(), grant: true })).rejects.toThrow();
+    const raw = input(); Object.assign(raw.answer, { expectedContentSha256: "b".repeat(64) });
+    await expect(accept(tx, scope, selection, raw)).rejects.toThrow("SHA-256 mismatch");
+    expect(query).not.toHaveBeenCalled(); expect(begin).not.toHaveBeenCalled();
+  });
+  it("session seam derives only credential scope and orders history, owner, first auth before preparation", async () => {
+    const { sql, begin, tx } = harness(), events: string[] = [];
+    vi.mocked(lockWorkspaceLearningHistory).mockImplementation(async (_tx, localScope) => {
+      events.push("history"); expect(localScope).toEqual(scope); expect(_tx).toBe(tx);
+    });
+    vi.mocked(lockLearningOwner).mockImplementation(async () => { events.push("owner"); });
+    vi.mocked(assertIdentitySessionForWriteInTx).mockImplementation(async (_tx, local) => {
+      events.push("auth"); expect(local).toEqual(credential); expect(local).not.toBe(credential);
+    });
+    await expect(createOpeningMaterialImportSessionAcceptInTx(sql)(tx, credential, selection, {})).rejects.toThrow();
+    expect(events).toEqual(["history", "owner", "auth"]); expect(begin).not.toHaveBeenCalled();
+  });
+  it.each(["repeatable read", "serializable"])("session refuses %s before history writes", async isolation => {
+    const { sql, tx, query, begin } = harness();
+    query.mockResolvedValue([{ transaction_isolation: isolation }]);
+    await expect(createOpeningMaterialImportSessionAcceptInTx(sql)(tx, credential, selection, input())).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(lockWorkspaceLearningHistory).not.toHaveBeenCalled();
+    expect(assertIdentitySessionForWriteInTx).not.toHaveBeenCalled(); expect(begin).not.toHaveBeenCalled();
+  });
+  it("first auth native failure escapes without append or retry", async () => {
+    const { sql, tx, begin, query } = harness();
+    const error = Object.assign(new Error("serialization"), { code: "40001" });
+    vi.mocked(assertIdentitySessionForWriteInTx).mockRejectedValue(error);
+    await expect(createOpeningMaterialImportSessionAcceptInTx(sql)(tx, credential, selection, input())).rejects.toBe(error);
+    expect(assertIdentitySessionForWriteInTx).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(1); expect(begin).not.toHaveBeenCalled();
   });
 });
 
