@@ -54,7 +54,8 @@ export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspa
     ORDER BY id`] : [];
   // Export only source memberships from this exact inventory.
   const course_asset_memberships: Rows = sourceIds.length ? [...await tx`
-    SELECT m.id, m.workspace_id, m.course_id, m.asset_type, m.asset_id, m.role, m.sort_order, m.visibility, m.created_at, m.updated_at
+    SELECT m.id, m.workspace_id, m.course_id, m.asset_type, m.asset_id, m.role, m.sort_order, m.visibility, m.purpose, m.created_at,
+      to_char(m.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at
     FROM course_asset_memberships m JOIN courses c ON c.id = m.course_id AND c.workspace_id = ${workspaceId}
     WHERE m.workspace_id = ${workspaceId} AND m.asset_type = 'source' AND m.asset_id = ANY(${[...sourceIds]}::uuid[])
     ORDER BY m.id`] : [];

@@ -3,6 +3,7 @@ import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation"
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
+import { validateRetainedMaterialImportState } from "./opening-material-import-state";
 /**
  * Opening-scoped restore apply executor (Q03).
  *
@@ -164,10 +165,11 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   ],
   course_asset_memberships: [
     "id", "workspace_id", "course_id", "asset_type", "asset_id", "role",
-    "sort_order", "visibility", "created_at", "updated_at",
+    "sort_order", "visibility", "purpose", "created_at", "updated_at",
   ],
   opening_source_versions: [
     "source_id", "workspace_id", "version", "bytes", "sha256", "availability",
+    "material_manifest", "material_manifest_revision", "material_reviewed_by", "material_reviewed_at",
   ],
   opening_source_chunks: [
     "id", "source_id", "source_version", "page", "slide_label", "start_ms", "end_ms", "text", "created_at",
@@ -296,6 +298,7 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
 };
 
 const JSONB_COLUMNS = new Set([
+  "opening_source_versions.material_manifest",
   "opening_turns.help_input_snapshot", "opening_help_exposures.help_input_snapshot",
   "opening_retest_activities.learning_protocol",
   "learning_events.payload",
@@ -382,6 +385,11 @@ function filterPayload(
     if (value === undefined) continue;
     if (col === "workspace_id" && typeof value === "string" && value.toLowerCase() !== workspaceId.toLowerCase()) {
       throw new Error(`${table} row workspace_id diverges from backup workspace`);
+    }
+    // postgres.js serializes inferred timestamptz parameters through Date,
+    // losing microseconds used by material purpose pins. Send text explicitly.
+    if (table === "course_asset_memberships" && col === "updated_at" && typeof value === "string") {
+      value = tx`${tx.typed(value, 25)}::timestamptz`;
     }
     if (JSONB_COLUMNS.has(`${table}.${col}`) && value !== null && typeof value === "object" && !(value instanceof Date)) {
       value = tx.json(value as never);
@@ -494,6 +502,21 @@ export async function executeOpeningRestoreApply(
         throw err;
       }
 
+      const importedVersions = new Map<Record<string, unknown>, Record<string, unknown>>();
+      const historyRows = (backup.tables.opening_workspace_history_revisions as Record<string, unknown>[] | undefined) ?? [];
+      const history = historyRows.find(row => row.owner_user_id === workspace.owner_user_id && row.workspace_id === workspaceId);
+      for (const row of (backup.tables.opening_source_versions as Record<string, unknown>[] | undefined) ?? []) {
+        const manifest = validateRetainedMaterialImportState({ material_manifest_revision: 0, ...row },
+          String(row.source_id), Number(row.version), Number(history?.revision ?? 0));
+        if (!manifest) continue;
+        // Archive contents cannot authenticate a reviewer, even if the UUID still
+        // exists locally. Keep original audit/pins, but never activate it as a
+        // current acceptance. Missing user pointers follow 0097's nullable FK.
+        const users = row.material_reviewed_by == null ? [] : await tx`SELECT id FROM users WHERE id=${String(row.material_reviewed_by)} FOR KEY SHARE`;
+        importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true },
+          material_reviewed_by: users.length ? row.material_reviewed_by : null });
+      }
+
       const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
       let restoredObservations = observations;
       if (observations.length) {
@@ -523,7 +546,8 @@ export async function executeOpeningRestoreApply(
           // Export order is by UUID, not predecessor; reconnect only after every
           // validated observation exists, in this same restore transaction.
           const insertRow = table === "opening_learning_observations"
-            ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null } : row;
+            ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null }
+            : table === "opening_source_versions" ? importedVersions.get(row) ?? row : row;
           const payload = filterPayload(tx as unknown as Sql, table, insertRow, workspaceId);
           if (!payload) continue;
           if (table === "cards") {

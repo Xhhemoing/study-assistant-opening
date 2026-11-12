@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type MaterialCourseFullPackage, materialCourseFullPackageSchema } from "./material-course-package-adapter";
 import {
   createMaterialSourceLocator, type MaterialProvidedSource, type MaterialSourceLocatorRequest,
@@ -214,6 +214,122 @@ describe("material source locator", () => {
     pack.questions.push({ ...pack.questions[0]!, id: "same-page-not-same-family", assessmentReadiness: "blocked-author-exclusion" });
     const resolver = createMaterialSourceLocator(pack, hostFixture(pack));
     for (const question of pack.questions) expect(resolver.resolve({ kind: "question", questionId: question.id })).toMatchObject(noAdmission);
+  });
+});
+
+// Always-on manifest replay: synthetic metadata only, never evidence for real150/385.
+// Reuse the local fixture; no private JSON/PDF input or environment switch is required.
+describe("synthetic full package PDF locator replay", () => {
+  it("replays every synthetic question/skill through exact manifest and explicit host bindings without network or identity inference", () => {
+    const pack = fixture(), bindings = hostFixture(pack);
+    const before = structuredClone({ pack, bindings });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => { throw new Error("Unexpected locator network I/O"); });
+    try {
+      const bound = createMaterialSourceLocator(pack, bindings);
+      const unbound = createMaterialSourceLocator(pack, []);
+      const partial = createMaterialSourceLocator(pack, bindings.slice(0, 1));
+      const requests: { request: MaterialSourceLocatorRequest; refs: { file: string; page: number; status: "text-reviewed" | "needs-visual-check" }[] }[] = [
+        ...pack.questions.map(q => ({ request: { kind: "question" as const, questionId: q.id },
+          refs: [{ file: q.sourceFile, page: q.physicalPage, status: q.mappingStatus }] })),
+        ...pack.skills.map(s => ({ request: { kind: "skill" as const, skillId: s.id },
+          refs: s.sourceRefs.flatMap(ref => ref.physicalPages.map(page => ({ file: ref.file, page, status: ref.verification }))) })),
+      ];
+      for (const { request, refs } of requests) {
+        for (const [resolver, supplied] of [[bound, bindings], [unbound, []], [partial, bindings.slice(0, 1)]] as const) {
+          expect(resolver.resolve(request)).toEqual({ request, ...noAdmission, locations: refs.map(ref => {
+            const source = pack.sources.find(source => source.file === ref.file)!;
+            const binding = supplied.find(binding => binding.file === ref.file);
+            return { file: ref.file, physicalPage: ref.page, pageCount: source.physicalPages, pdfSha256: source.sha256,
+              mappingStatus: ref.status, ...(binding
+                ? { status: "located", sourceId: binding.sourceId, sourceVersion: binding.sourceVersion,
+                  target: { pdfUrl: binding.pdfUrl, fragment: `#page=${ref.page}` } }
+                : { status: "unbound", sourceId: null, sourceVersion: null, target: null }) };
+          }) });
+        }
+      }
+      expect(fetch).not.toHaveBeenCalled();
+      expect({ pack, bindings }).toEqual(before);
+    } finally { fetch.mockRestore(); }
+  });
+
+  it.each(["question", "skill"] as const)("checks every synthetic manifest's physical page boundaries for %s references", kind => {
+    for (const source of fixture().sources) {
+      for (const page of [1, source.physicalPages, 0, -1, source.physicalPages + 1, NaN, 1.5]) {
+        const pack = fixture();
+        if (kind === "question") Object.assign(pack.questions[0]!, { sourceFile: source.file, physicalPage: page });
+        else pack.skills[0]!.sourceRefs = [{ file: source.file, physicalPages: [page], verification: "text-reviewed" }];
+        const build = () => createMaterialSourceLocator(pack, hostFixture(pack));
+        if (!Number.isInteger(page) || page < 1 || page > source.physicalPages) expect(build).toThrow();
+        else {
+          const request: MaterialSourceLocatorRequest = kind === "question" ? { kind, questionId: "q" } : { kind, skillId: "skill" };
+          expect(build().resolve(request).locations[0]).toMatchObject({ file: source.file, physicalPage: page, pageCount: source.physicalPages });
+        }
+      }
+    }
+  });
+
+  it.each(["file", "pdfSha256", "sourceId", "sourceVersion", "pdfUrl"] as const)("rejects missing host %s even on a manifest-only PDF", field => {
+    const pack = fixture(), bindings = hostFixture(pack);
+    Reflect.deleteProperty(bindings.at(-1)!, field);
+    expect(() => createMaterialSourceLocator(pack, bindings)).toThrow();
+  });
+
+  it("rejects hash mismatch for every manifest binding and missing PDFs in both reference kinds", () => {
+    for (const source of fixture().sources) {
+      const pack = fixture(), bindings = hostFixture(pack);
+      bindings.find(binding => binding.file === source.file)!.pdfSha256 = "0".repeat(64);
+      expect(() => createMaterialSourceLocator(pack, bindings)).toThrow();
+    }
+    for (const kind of ["question", "skill"] as const) {
+      const pack = fixture();
+      if (kind === "question") pack.questions[0]!.sourceFile = "absent.pdf";
+      else pack.skills[0]!.sourceRefs[0]!.file = "absent.pdf";
+      expect(() => createMaterialSourceLocator(pack)).toThrow();
+    }
+  });
+
+  it.each([
+    { label: "undefined", input: undefined }, { label: "null", input: null }, { label: "empty string", input: "" },
+    { label: "empty array", input: [] }, { label: "empty object", input: {} },
+  ])("rejects empty raw package $label without creating identities", ({ input }) => {
+    expect(() => createMaterialSourceLocator(input)).toThrow();
+  });
+
+  it("allows an empty question list as skill-only metadata with unbound sources", () => {
+    const pack = fixture(); pack.questions = [];
+    const resolver = createMaterialSourceLocator(pack);
+    expect(resolver.resolve({ kind: "skill", skillId: "skill" })).toMatchObject(noAdmission);
+    expect(resolver.resolve({ kind: "skill", skillId: "skill" }).locations.every(location =>
+      location.status === "unbound" && location.sourceId === null && location.sourceVersion === null && location.target === null)).toBe(true);
+    expect(() => resolver.resolve({ kind: "question", questionId: "q" })).toThrow();
+  });
+
+  it.each([
+    "javascript:alert(1)", "http://pdf-host.invalid/a.pdf", "https://pdf-host.invalid/a.pdf#page=99",
+    " https://pdf-host.invalid/a.pdf", "https://pdf-host.invalid/a.pdf\r\n", "https:////pdf-host.invalid/a.pdf",
+    "https://user:password@pdf-host.invalid/a.pdf", "https://pdf-host.invalid/%2e%2e/a.pdf",
+  ])("rejects unsafe synthetic href %j", pdfUrl => {
+    const bindings = hostFixture(); bindings.at(-1)!.pdfUrl = pdfUrl;
+    expect(() => createMaterialSourceLocator(fixture(), bindings)).toThrow();
+  });
+
+  it("rejects canonical URL aliases across distinct manifest bindings", () => {
+    const bindings = hostFixture();
+    bindings.at(-1)!.pdfUrl = bindings[0]!.pdfUrl.replace("pdf-host.invalid", "PDF-HOST.invalid:443");
+    expect(() => createMaterialSourceLocator(fixture(), bindings)).toThrow();
+  });
+
+  // HTTPS host authorization belongs to the caller; these URLs do not attest PDF bytes or ownership.
+  it.each([
+    "https://another-host.invalid/opaque-resource?signature=a%2Bb%2Fz&case=%aF",
+    "https://PDF-HOST.invalid:443/authorized/%41.pdf?signature=fixture%2Btoken",
+  ])("returns the host-supplied safe href bytes and a separate page fragment: %s", pdfUrl => {
+    const pack = fixture(), bindings = hostFixture(pack); bindings[0]!.pdfUrl = pdfUrl;
+    const location = createMaterialSourceLocator(pack, bindings).resolve({ kind: "question", questionId: "q" }).locations[0]!;
+    expect(location).toMatchObject({ status: "located", sourceId: bindings[0]!.sourceId, sourceVersion: bindings[0]!.sourceVersion,
+      target: { pdfUrl, fragment: "#page=3" } });
+    if (location.status !== "located") throw new Error("Expected explicit host binding");
+    expect(new URL(`${location.target.pdfUrl}${location.target.fragment}`).protocol).toBe("https:");
   });
 });
 
