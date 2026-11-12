@@ -139,8 +139,9 @@ function detailLinks() {
 }
 function expectPrivateAbsent(markup = host.innerHTML) {
   const decoded = document.createElement("div"); decoded.innerHTML = markup;
+  const decodedText = decoded.textContent;
   for (const sentinel of PRIVATE_REVIEW_CANARIES) {
-    expect(markup).not.toContain(sentinel); expect(decoded.textContent).not.toContain(sentinel);
+    expect(markup).not.toContain(sentinel); expect(decodedText).not.toContain(sentinel);
     expect(markup).not.toContain(sentinel.split("_<")[0]);
   }
 }

@@ -78,14 +78,17 @@ describe("card1: complete actual-module host request contract", () => {
     expect(Object.values(r.permissions)).toEqual([false, false, false, false]);
   });
 
-  it.each(purposes)("independent host compares every leaf for %s, with a matched control", purpose => {
+  describe.each(purposes)("independent host leaf cases for %s", purpose => {
+    // This suite owns one unmodified fixture/oracle. Only per-case oracle clones
+    // are changed; no caller/request/call snapshot or production clone is removed.
     const f = fixture(), records = expectedRequests(f);
-    matched(f);
     const index = records.findIndex(r => r.purpose === purpose);
-    // Change the independently resolved record, not observed callback data. Full request
-    // leaves include owner/course/both versions, explicit asOf, candidate and payload.
-    // Candidate forwarding is covered above in full; probe each outer/payload leaf here.
-    for (const leaf of leaves(records[index]!).filter(l => l.path[0] !== "candidate")) {
+    it("accepts every purpose with a matched control", () => { matched(f); });
+    // Keep the exact original non-candidate leaf domain. Candidate forwarding
+    // remains covered by the complete all-record/all-leaf test above.
+    const probes = leaves(records[index]!).filter(l => l.path[0] !== "candidate")
+      .map(leaf => ({ path: leaf.path.join("."), leaf }));
+    it.each(probes)("rejects an independent mismatch at $path", ({ leaf }) => {
       const changed = structuredClone(records);
       replaceAt(changed[index], leaf.path, different(leaf.value));
       const host = exactHost(changed), r = assess(f.candidate, f.bindings, host.authority);
@@ -93,7 +96,7 @@ describe("card1: complete actual-module host request contract", () => {
       expect(capability(r, purpose).status, leaf.path.join(".")).toBe("not_ready");
       // Different external questions/purposes remain independent, not blanket denial.
       if (purpose === "scoring" || purpose === "diagnostic_execution") expect(capability(r, purpose, "host-q-1").status).toBe("ready");
-    }
+    });
   });
 
   const mutations: { name: string; purpose: Purpose; change: (f: Fixture) => void }[] = [
