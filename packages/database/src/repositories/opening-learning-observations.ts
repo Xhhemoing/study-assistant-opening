@@ -1,4 +1,5 @@
 import { syncOpeningAutomaticErrorCard } from "./opening-auto-error-cards";
+import { hasOpeningSpanCourseBinding, readOpeningSpanCourseBinding, readOpeningSpanCourseAttempt } from "./opening-span-course-binding";
 import { readOpeningAutoGradeSkip, readOpeningAutoGradeAdmissionTime, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -37,7 +38,15 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   if (session.course_id !== input.courseId || session.skill_label !== input.skillLabel) throw learningError("VALIDATION", "observation does not match its session course and skill");
   if (input.sourceIds.some((id) => !(session.source_ids as string[]).includes(id))) throw learningError("VALIDATION", "observation source is outside the session");
   await lockLearningHistory(tx, scope, input.courseId);
-  const sources = await admitLearningSources(tx, scope, input.sourceIds);
+  let sources;
+  try { sources = await admitLearningSources(tx, scope, input.sourceIds); }
+  catch (error) {
+    if ((error as {code?:string}).code !== "VALIDATION") throw error;
+    // Preserve ordinary admission errors. Bound drift uses the unified typed
+    // refusal; this read acquires no new locks and cannot grant write authority.
+    await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id));
+    throw error;
+  }
   const submittedVerdictSource = opts.verdictSource ?? input.verdictSource ?? "self_report";
   const verdictSource = learnerVerdictSource(submittedVerdictSource);
   const referenceSourceId = opts.referenceSourceId ?? input.referenceSourceId ?? input.referenceCheck?.referenceSourceId ?? null;
@@ -50,11 +59,27 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
   const attemptRows = input.attemptId ? await tx`SELECT * FROM opening_learning_attempts WHERE id=${input.attemptId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE` : [];
   const attempt = attemptRows[0];
-  if (input.attemptId && (!attempt || attempt.session_id !== input.sessionId || attempt.course_id !== input.courseId)) throw learningError("VALIDATION", "attempt is outside this session");
+  if (input.attemptId && (!attempt || attempt.session_id !== input.sessionId || attempt.course_id !== input.courseId)) {
+    if (await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id)))
+      throw Object.assign(learningError("CONFLICT", "课程 span 记录缺少匹配的原始绑定作答。"), { reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
+    throw learningError("VALIDATION", "attempt is outside this session");
+  }
   if (attempt && input.problemId && input.problemId !== attempt.problem_id) throw learningError("VALIDATION", "attempt problem mismatch");
   const preAnswerConfidence = preAnswerConfidenceSchema.nullable().parse(opts.preAnswerConfidence ?? null);
   if (preAnswerConfidence !== null && !attempt) throw learningError("VALIDATION", "pre-answer confidence requires an attempt");
   const attemptSources = attempt ? await admitLearningSources(tx, scope, attempt.source_ids as string[]) : sources;
+  // Common final writer for submit AND direct observation POST. Revalidate under
+  // the original history -> owner/session/course -> source -> attempt locks,
+  // before either replay or a new fact can escape the transaction.
+  const [routeActivity] = await tx`SELECT goal_json,create_intent FROM opening_teaching_activities WHERE id=${String(session.activity_id)}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  const courseSpan = hasOpeningSpanCourseBinding(routeActivity?.goal_json, routeActivity?.create_intent)
+    ? await readOpeningSpanCourseBinding(tx, scope, String(session.activity_id), { lockSources: true }) : null;
+  if (courseSpan && (!attempt || courseSpan.sessionId !== input.sessionId || input.retestId
+    || !isDeepStrictEqual([...new Set(input.sourceIds)].sort(), [...session.source_ids as string[]].sort()))) {
+    throw Object.assign(learningError("CONFLICT", "课程 span 记录须使用本会话的原始绑定作答。"), { reasonCode: "SPAN_COURSE_BINDING_CHANGED" });
+  }
+  if (attempt) await readOpeningSpanCourseAttempt(tx, scope, attempt, courseSpan);
   const retestActivities = input.retestId ? await tx`SELECT id, candidate_id, course_id, skill_label, requirement_key, task_id, status,
     not_before_at, recommended_at, scheduled_start_at
     FROM opening_retest_activities
@@ -113,8 +138,6 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     throw learningError("CONFLICT", "paused or completed span lesson cannot accept an answer");
   }
   const boundRetestId = (spanActivities[0]?.checkpoint_json as { spanLesson?: { retestId?: string | null } } | undefined)?.spanLesson?.retestId;
-  const [routeActivity] = await tx`SELECT goal_json FROM opening_teaching_activities WHERE id=${String(session.activity_id)}
-    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   const rawRoute = (routeActivity?.goal_json as { courseRoute?: unknown } | undefined)?.courseRoute;
   const route = rawRoute === undefined ? null : courseRouteActivityContextSchema.parse(rawRoute);
   if (route?.retestId) {

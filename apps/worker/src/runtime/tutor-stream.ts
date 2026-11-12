@@ -1,5 +1,5 @@
 import type IORedis from "ioredis";
-import { parseContextSourceRefs, type ContextSourceRef } from "@aistudy/database";
+import { parseContextSourceRefs, tutorAttemptFenceSchema, type TutorAttemptFence, type ContextSourceRef } from "@aistudy/database";
 import { uuidSchema } from "@aistudy/contracts";
 
 export type TutorStreamContext = {
@@ -8,6 +8,7 @@ export type TutorStreamContext = {
   exposureReceiptId: string | null;
   claimToken?: string;
   executionId?: string;
+  attemptFence?: TutorAttemptFence;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -53,7 +54,8 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     || !(context.exposureReceiptId === null || typeof context.exposureReceiptId === "string")
     || (context.claimToken !== undefined && typeof context.claimToken !== "string")
     || (context.executionId !== undefined && !uuidSchema.safeParse(context.executionId).success)) throw new Error("invalid tutor stream cache");
-  return { ...context, contextSourceRefs: refs, text: row.text, sequence };
+  const fence = context.attemptFence === undefined ? undefined : tutorAttemptFenceSchema.parse(context.attemptFence);
+  return { ...context, ...(fence ? { attemptFence: fence } : {}), contextSourceRefs: refs, text: row.text, sequence };
 }
 
 export function createTutorStreamReader(redis: IORedis) {

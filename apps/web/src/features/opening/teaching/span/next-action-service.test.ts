@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createSpanNextActionService } from "./next-action-service";
+import { readSpanNextResult, readSpanPrerequisiteReturnResult } from "./span-next-action-control";
 const dependency = vi.hoisted(() => ({ next: vi.fn() }));
 vi.mock("@aistudy/database", async importOriginal => ({ ...await importOriginal<object>(), createOpeningSpanTutorNextRepository: () => dependency }));
 const id = "00000000-0000-4000-8000-000000000001", courseId = "00000000-0000-4000-8000-000000000002";
@@ -44,4 +45,36 @@ it("points a stale derived receipt at the current owned origin and leaves its hi
     secondary: { href: `/opening/courses/${courseId}/study/span?lesson=${id}` } });
   dependency.next.mockResolvedValue({ kind: "choice", reason: "evidence_changed", courseId, originSession: null, historicalSession: session });
   expect(await createSpanNextActionService({} as Sql).next(scope, body)).toMatchObject({ primary: { href: `/opening/courses/${courseId}#course-learning-records` } });
+});
+
+const returnBody = { ...body, prerequisiteRepairVersion: 1, observationId: id };
+it.each([2, "1", null, false])("rejects unsupported B discriminator %s before repository execution", async version => {
+  await expect(createSpanNextActionService({} as Sql).next(scope, { ...returnBody, prerequisiteRepairVersion: version })).rejects.toThrow();
+  expect(dependency.next).not.toHaveBeenCalled();
+});
+it.each([{ repairVersion: 1 }, { returnToRequirementId: id }, { observationId: null }, { trusted: true }])("keeps B public return input strict: %j", async extra => {
+  await expect(createSpanNextActionService({} as Sql).next(scope, { ...returnBody, ...extra })).rejects.toThrow();
+  expect(dependency.next).not.toHaveBeenCalled();
+});
+it("maps only typed server course-return to the actual T course activity href, not a span session", async () => {
+  const target = "00000000-0000-4000-8000-000000000003", href = `/opening/courses/${courseId}/study?activity=${target}`;
+  dependency.next.mockResolvedValue({ kind: "course_return", activity: { id: target }, courseId, href, resumed: false, requirementId: target });
+  const result = await createSpanNextActionService({} as Sql).next(scope, returnBody);
+  expect(result).toMatchObject({ kind: "ready", activityId: target, href, courseId, resumed: false });
+  expect(result).not.toHaveProperty("sessionId");
+  expect(readSpanPrerequisiteReturnResult(result, courseId)).toEqual(result);
+  expect(() => readSpanNextResult(result, courseId)).toThrow();
+  expect(dependency.next).toHaveBeenCalledExactlyOnceWith(scope, returnBody);
+});
+it("keeps failed B return at the original activity without ordinary-practice fallback", async () => {
+  dependency.next.mockResolvedValue({ kind: "choice", reason: "unseen_unavailable", courseId, originSession: session });
+  const result = await createSpanNextActionService({} as Sql).next(scope, returnBody);
+  expect(result).toMatchObject({ kind: "choice", primary: { href: `/opening/courses/${courseId}/study/span?lesson=${id}` } });
+  expect(JSON.stringify(result)).not.toContain("mode=practice");
+  expect(readSpanPrerequisiteReturnResult(result, courseId)).toEqual(result);
+});
+it("propagates typed refusal and dependency failure rather than pretending to return successfully", async () => {
+  const failure = Object.assign(new Error("relationship changed"), { code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_RELATION_CHANGED" });
+  dependency.next.mockRejectedValue(failure);
+  await expect(createSpanNextActionService({} as Sql).next(scope, returnBody)).rejects.toBe(failure);
 });

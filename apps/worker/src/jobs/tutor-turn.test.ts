@@ -36,6 +36,10 @@ describe("tutor turn handler", () => {
       get: vi.fn(async () => claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
+      readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId },
+        originalQuestion: "saved question", originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null,
+        workSource: null, effectiveGrading: null, sourceRefs: [] })),
+      assertAttemptContext: vi.fn(async () => {}),
       loadHistoryContext: vi.fn(async () => ({ history: [{ role: "user" as const, text: "yesterday" }, { role: "assistant" as const, text: "step two" }], sourceRefs: [] as Array<{ sourceId: string; sourceVersion: number }> })),
       completeTurn: vi.fn(async () => undefined),
       canAppendCompletedTurnCandidates: vi.fn(async () => true),
@@ -55,7 +59,7 @@ describe("tutor turn handler", () => {
       reserve: vi.fn(async (): Promise<{ id: string; state?: string; resultRef?: string | null }> => ({ id: "res-1" })),
       release: vi.fn(async () => ({})),
       settle: vi.fn(async () => ({})),
-      claimExecution: async () => true, markUnknown: vi.fn(async () => ({})),
+      claimExecution: vi.fn(async () => true), markUnknown: vi.fn(async () => ({})),
     };
     const provider = { complete: vi.fn(overrides.provider ?? (async () => ({ text: "F = ma", citedChunkIds: [chunkA.id], requestId: null, candidates: [{ kind: "memory", text: "Learner asked about Newton", temporary: false }], inputTokens: 100, outputTokens: 50 }))) };
     // Unit adapter only; real admission and pin persistence are covered by purpose PG.

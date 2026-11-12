@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema } from "./ai-evaluation";
+import { aiEvaluationSchema, aiGradingInputSchema, aiGradingProposalSchema, aiGradingStatusSchema } from "./ai-evaluation";
 import { learningAttemptSubmitInputSchema } from "./learning-attempts";
 import { observationInputSchema } from "./learning";
 import { observationReplacementSchema } from "./learning-revisions";
@@ -7,6 +7,12 @@ import { observationReplacementSchema } from "./learning-revisions";
 const id = "11111111-1111-4111-8111-111111111111";
 const proposal = { outcome: "correct", confidence: 0.9, questionMatch: true, feedback: "计算正确。",
   criteria: [{ label: "结果", verdict: "correct", feedback: "1 + 1 = 2。" }] };
+
+it("accepts an explicit automatic-disabled reason and rejects unknown reasons", () => {
+  const status = { rootObservationId: id, headObservationId: id, answerRevision: 1, status: "needs_manual", retryable: true, jobId: null, workSource: null };
+  expect(aiGradingStatusSchema.parse({ ...status, autoGradeSkipped: "auto_disabled" }).autoGradeSkipped).toBe("auto_disabled");
+  expect(aiGradingStatusSchema.safeParse({ ...status, autoGradeSkipped: "invented" }).success).toBe(false);
+});
 
 it("accepts text and pinned photos, and rejects incomplete photo identity", () => {
   expect(aiGradingInputSchema.parse({ observationId: id })).toEqual({ observationId: id });

@@ -471,3 +471,66 @@ it("keeps an open scope draft and re-reads the route only after it is confirmed"
     expect([...host.querySelectorAll("li h3")].map(heading => heading.textContent)).toContain(`${edited.title} · 必修`);
   } finally { vi.useRealTimers(); }
 });
+
+
+const publicSpanOption = { id: "span-example-2d", version: "1" as const, familyId: "span:independent-2d", dimension: 2 as const,
+  supportedScope: "span:independent-2d 的有限版本范围" };
+const publicBindingCheck = () => [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].filter(node => node.parentElement?.textContent?.includes("平面内两独立向量"));
+it("confirms a newly added span row only after explicit public selection, preserving old identity and CAS", async () => {
+  sessionStorage.clear();
+  const api = client({ ...confirmed, spanBindingOptions: [publicSpanOption] });
+  await render(api, { goals: selectedGoal }); await act(async () => button("检查与确认课程范围").click());
+  expect(host.textContent).toContain("已有要求保留原身份"); expect(publicBindingCheck()).toHaveLength(0);
+  await act(async () => button("添加课程要求").click());
+  const titles = [...host.querySelectorAll<HTMLInputElement>("fieldset input:not([type])")], title = titles.at(-1)!;
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(title, "新的先修线性组合"); title.dispatchEvent(new Event("input", { bubbles: true })); });
+  expect(publicBindingCheck()).toHaveLength(1); expect(publicBindingCheck()[0]!.checked).toBe(false);
+  expect(host.textContent).toContain("2 维 · 版本 1"); expect(host.textContent).not.toContain(publicSpanOption.familyId); expect(host.textContent).not.toContain(publicSpanOption.id);
+  expect(host.textContent).toContain("确认不表示掌握");
+  await act(async () => publicBindingCheck()[0]!.click());
+  await act(async () => button("确认这份全课范围").click());
+  expect(api.confirm).toHaveBeenCalledTimes(1);
+  const input = vi.mocked(api.confirm).mock.calls[0]![1], added = input.requirements[1]!;
+  expect(input.expectedRevisions).toEqual([{ id, revision: 1 }]); expect(input.requirements[0]).toEqual(requirement);
+  expect(added).toMatchObject({ title: "新的先修线性组合", requirementKey: "span:linear-combination:v1", verification: { kind: "exact", exerciseKeys: [] } });
+  expect(added.id).not.toBe(id); expect(added.stableSkillId).not.toBe(requirement.stableSkillId);
+  expect(input.spanBindings).toEqual([{ requirementId: added.id, exerciseKeys: [publicSpanOption.id], confirmContent: true }]);
+});
+it.each([false, true])("never upgrades old scope from stored hidden keys, explicit existing-span reconfirm=%s", async select => {
+  sessionStorage.clear();
+  const old = { ...confirmed.requirements[0]!, requirement: { ...confirmed.requirements[0]!.requirement,
+    requirementKey: "span:linear-combination:v1", verification: { kind: "exact" as const, status: "ready" as const, exerciseKeys: ["span-reserved-generated-hidden"], rubric: null, missingReasons: [] } } };
+  const api = client({ ...confirmed, requirements: [old], spanBindingOptions: [publicSpanOption] });
+  await render(api); await act(async () => button("检查与确认课程范围").click());
+  expect(publicBindingCheck()[0]!.checked).toBe(false); expect(host.textContent).not.toContain("span-reserved-generated-hidden");
+  if (select) {
+    await act(async () => publicBindingCheck()[0]!.click());
+    await act(async () => button("取消编辑").click()); await act(async () => button("检查与确认课程范围").click());
+    expect(publicBindingCheck()[0]!.checked).toBe(false);
+    await act(async () => publicBindingCheck()[0]!.click());
+  }
+  await act(async () => button("确认这份全课范围").click());
+  const input = vi.mocked(api.confirm).mock.calls[0]![1];
+  expect(input.requirements[0]).toMatchObject({ id, stableSkillId: id, requirementKey: old.requirement.requirementKey, verification: old.requirement.verification });
+  if (select) expect(input.spanBindings).toEqual([{ requirementId: id, exerciseKeys: [publicSpanOption.id], confirmContent: true }]);
+  else expect(input).not.toHaveProperty("spanBindings");
+});
+
+
+it("retains the exact explicit public binding command through uncertain confirmation and reload", async () => {
+  sessionStorage.clear();
+  const old = { ...confirmed.requirements[0]!, requirement: { ...confirmed.requirements[0]!.requirement, requirementKey: "span:linear-combination:v1" } };
+  const api = client({ ...confirmed, requirements: [old], spanBindingOptions: [publicSpanOption] });
+  vi.mocked(api.confirm).mockRejectedValueOnce(new Error("confirmation response lost"));
+  await render(api); await act(async () => button("检查与确认课程范围").click());
+  await act(async () => publicBindingCheck()[0]!.click()); await act(async () => button("确认这份全课范围").click());
+  const original = structuredClone(vi.mocked(api.confirm).mock.calls[0]![1]);
+  expect(original.spanBindings).toEqual([{ requirementId: id, exerciseKeys: [publicSpanOption.id], confirmContent: true }]);
+  expect(JSON.parse(sessionStorage.getItem(`aistudy:route-command:${courseId}`)!)).toEqual({ kind: "confirm", input: original });
+  expect(button("重新读取课程路线").disabled).toBe(true);
+  await act(async () => root.unmount()); root = createRoot(host); await render(api);
+  expect(api.confirm).toHaveBeenCalledTimes(1);
+  await act(async () => button("重新确认这次安排").click());
+  expect(vi.mocked(api.confirm).mock.calls[1]).toEqual([courseId, original]);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
+});

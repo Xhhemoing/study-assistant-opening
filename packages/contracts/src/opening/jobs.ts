@@ -1,11 +1,17 @@
 import { z } from "zod";
 import { apiFailureSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
+import { aiGradingWorkSourceSchema } from "./ai-evaluation";
 
 export const jobKindSchema = z.enum(["parse", "tutor", "retest", "remind", "build-course-knowledge", "parse-media", "extract-study-actions", "index-source", "tutor-metadata", "recognize-photo-question", "grade-observation"]);
 export const gradeObservationJobPayloadSchema = z.object({
   observationId: uuidSchema,
   rootObservationId: uuidSchema,
   answerRevision: z.number().int().positive(),
+  regrade: z.object({
+    requestId: uuidSchema, operationId: z.string().min(1), ownerUserId: uuidSchema,
+    privacyEpoch: z.number().int().nonnegative(), gradingVersion: z.number().int().positive(),
+    workSource: aiGradingWorkSourceSchema.nullable(),
+  }).strict().optional(),
 }).strict();
 export type GradeObservationJobPayload = z.infer<typeof gradeObservationJobPayloadSchema>;
 export const tutorMetadataJobPayloadSchema = z.object({

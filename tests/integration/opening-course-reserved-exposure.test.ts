@@ -156,7 +156,7 @@ it.each([["137*19", "+137*19"], ["+137*19", "137*19"], ["1*2", "1*+2"], ["1*+2",
       expressions: [candidate.startsWith("1*") ? "1*2" : "137*19"], families: ["arithmetic:*"] } });
     expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
   });
-it.each([[], ["137*19"], ["+137*19"]])("keeps immutable v2 descriptor %j unknown after a real rescan", async expressions => {
+it.each([[], ["137*19"], ["+137*19"]].map(expressions => ({ expressions })))("keeps immutable v2 descriptor $expressions unknown after a real rescan", async ({ expressions }) => {
   const sourceId = await backupRows(f.sql, f.scope).source();
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
     VALUES(${randomUUID()},${sourceId},1,1,'Example: +137*19')`;

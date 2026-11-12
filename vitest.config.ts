@@ -5,7 +5,7 @@ import { defineConfig, defineProject } from "vitest/config";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const openingDbSetup = path.resolve(root, "scripts/opening-test-db.mjs");
 
-const alias = {
+const alias = Object.entries({
   "@aistudy/domain/span-heldout-catalog": path.resolve(root, "packages/domain/src/opening/span-heldout-catalog.ts"),
   "@aistudy/domain/exam-sprint-catalog": path.resolve(root, "packages/domain/src/opening/exam-sprint/catalog.ts"),
   "@aistudy/domain/measurement-catalog": path.resolve(root, "packages/domain/src/opening/measurement/catalog.ts"),
@@ -27,7 +27,10 @@ const alias = {
   "server-only": path.resolve(root, "node_modules/server-only/empty.js"),
   "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
   "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
-};
+}).map(([find, replacement]) => ({
+  find: find === "@aistudy/domain" ? /^@aistudy\/domain$/ : find,
+  replacement,
+}));
 
 const sharedExclude = [
   "**/node_modules/**",

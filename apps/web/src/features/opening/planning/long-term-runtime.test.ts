@@ -3,6 +3,7 @@ import type { Sql } from "postgres";
 import { createOpeningLongTermPlanningRepository } from "@aistudy/database";
 import { createLongTermPlanningService } from "./long-term-service";
 import { getLongTermPlanningService } from "./long-term-runtime";
+import { compilerFlagMatrix } from "../../../../../../tests/fixtures/opening/teaching/compiler-flag-matrix";
 
 vi.mock("@aistudy/database", () => ({
   createOpeningLongTermPlanningRepository: vi.fn(() => ({})),
@@ -18,15 +19,7 @@ afterEach(() => {
 });
 
 describe("long-term planning runtime compiler and exact verification switches", () => {
-  it.each([
-    { name: "opening enabled", opening: "1", legacy: undefined, enabled: true },
-    { name: "opening disabled", opening: "0", legacy: undefined, enabled: false },
-    { name: "legacy enabled", opening: undefined, legacy: "1", enabled: true },
-    { name: "legacy disabled", opening: undefined, legacy: "0", enabled: false },
-    { name: "both unset default enabled", opening: undefined, legacy: undefined, enabled: true },
-    { name: "opening off overrides legacy on", opening: "0", legacy: "1", enabled: false },
-    { name: "opening on overrides legacy off", opening: "1", legacy: "0", enabled: true },
-  ])("wires real process environment semantics: $name", ({ opening, legacy, enabled }) => {
+  it.each(compilerFlagMatrix)("wires real process environment semantics: $name", ({ opening, legacy, enabled }) => {
     vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", opening);
     vi.stubEnv("TEACHING_COMPILER_ENABLED", legacy);
     const now = new Date("2026-01-01T10:00:00Z");

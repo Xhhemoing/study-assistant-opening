@@ -25,6 +25,7 @@ export async function readOpeningAutoGradeSkip(sql: Sql | TransactionSql, scope:
   if (!policy.enabled) return "disabled" as const;
   const [preferences] = await sql`SELECT auto_grade_on_save,planning_settings FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
   if (preferences?.auto_grade_on_save === false) return "disabled" as const;
+  if (policy.dailyCap === 0) return "auto_disabled" as const;
   if (!policy.modelAvailable) return policy.modelUnavailableReason ?? "no_model";
   const day = resolveBudgetLocalDay(admissionAt ?? await readOpeningAutoGradeAdmissionTime(sql),
     resolveBudgetTimeZone(preferences?.planning_settings?.timeZone));

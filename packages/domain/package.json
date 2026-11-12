@@ -25,6 +25,14 @@
     "./span-heldout-catalog": {
       "types": "./src/opening/span-heldout-catalog.ts",
       "default": "./src/opening/span-heldout-catalog.ts"
+    },
+    "./material-course-package-adapter": {
+      "types": "./src/opening/material-course-package-adapter.ts",
+      "default": "./src/opening/material-course-package-adapter.ts"
+    },
+    "./material-source-locator": {
+      "types": "./src/opening/material-source-locator.ts",
+      "default": "./src/opening/material-source-locator.ts"
     }
   },
   "scripts": {

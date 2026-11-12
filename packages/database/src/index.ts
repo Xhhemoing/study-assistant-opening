@@ -1,4 +1,6 @@
 export const DATABASE_PACKAGE = "@aistudy/database" as const;
+export { createOpeningMaterialImportBindingsRepository, type OpeningMaterialImportBindingsRepository,
+  type OpeningMaterialImportBinding, type OpeningMaterialImportReceipt } from "./repositories/opening-material-import-bindings";
 export { saveOpeningReservedCandidates, admitOpeningReservedCandidate, type OpeningReservedCandidate, type OpeningReservedPinnedContext,
   type OpeningReservedExposureInput, type OpeningReservedExposureResult, type OpeningReservedExposureReader, type OpeningReservedPorts } from "./repositories/opening-course-reserved-selection";
 export * from "./schema/library";
@@ -139,6 +141,7 @@ export {
 
 
 export * from "./schema/opening-teaching-activities";
+export { assertPublicTeachingActivityIntent, readOpeningSpanCourseBinding } from "./repositories/opening-span-course-binding";
 export * from "./schema/opening-teaching-content";
 export { openingCourseReservedQuestions, openingCourseQuestionExposures, openingCourseQuestionExposureCoverage } from "./schema/opening-course-reserved-questions";
 export {
@@ -266,6 +269,8 @@ export { createOpeningExamSprintRepository, OpeningExamSprintRepositoryError, ty
 export * from "./schema/opening-exam-integration";
 export { createOpeningExamIntegrationRepository } from "./repositories/opening-exam-integration";
 export { createOpeningAiGradingRepository, type OpeningAiGradingContext } from "./repositories/opening-ai-grading";
+export * from "./schema/opening-explicit-regrade-requests";
+export { createOpeningExplicitRegradeRequestRepository } from "./repositories/opening-explicit-regrade-requests";
 export { createOpeningAiGradingJobRepository, readOpeningAttemptGradingUsesVision, readOpeningObservationGradingUsesVision } from "./repositories/opening-ai-grading-jobs";
 export { createOpeningParserHealthRepository, parseParserOcrHealth, PARSER_OCR_FILES, PARSER_HEALTH_TTL_MS,
   type ParserOcrHealth, type ParserOcrObservation, type ParserOcrStatus } from "./repositories/opening-parser-health";
@@ -305,6 +310,7 @@ export * from "./repositories/opening-today-courses";
 
 export * from "./repositories/opening-span-session";
 export * from "./repositories/opening-span-repair";
+export { readOpeningSpanPrerequisiteRepair } from "./repositories/opening-span-prerequisite-runtime";
 
 export { openingSourceEmbeddings } from "./schema/opening-source-embeddings";
 export { createOpeningSourceEmbeddingsRepository, enqueueOpeningSourceIndex, type OpeningSourceEmbeddingsRepository, type SourceIndexSnapshot } from "./repositories/opening-source-embeddings";
@@ -338,3 +344,4 @@ export * from "./repositories/opening-learning-asset-links";
 export * from "./repositories/opening-study-notes";
 export * from "./repositories/opening-answer-interpretation";
 export * from "./repositories/opening-source-visual-recognitions";
+export { createOpeningLearningAdviceContextRepository } from './repositories/opening-learning-advice-context';

@@ -9,6 +9,7 @@ import type {
   TeachingActivityCreateInput,
 } from "@aistudy/contracts";
 import { teachingLearnerFocusSchema } from "@aistudy/contracts";
+import { assertPublicTeachingActivityIntent, hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
 import { readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
 import {
   admitLearningSources,
@@ -348,6 +349,9 @@ function checkTeachingAssociation(
   current: Record<string, unknown> | undefined, input: TeachingActivityAssociateCourseInput,
 ): asserts current is Record<string, unknown> {
   if (!current) throw learningError("NOT_FOUND", "teaching activity not found");
+  if (hasOpeningSpanCourseBinding(current.goal_json, current.create_intent) && !("auto" in input) && input.courseId !== current.course_id) {
+    throw learningError("CONFLICT", "课程 span 活动不能通过通用接口更换或解除课程绑定。");
+  }
   if ("auto" in input) {
     if (!current.course_id && current.status === "completed") {
       throw learningError("CONFLICT", "已结束的学习不能自动更换课程");
@@ -502,6 +506,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
       input: TeachingActivityCreateInput,
       options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
     ): Promise<TeachingActivity> {
+      assertPublicTeachingActivityIntent(input);
       return sql.begin(tx => createOpeningTeachingActivityInTransaction(tx, scope, input, options)) as Promise<TeachingActivity>;
     },
 
@@ -540,6 +545,9 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         }
         if (input.status !== "active" && input.status !== "paused" && input.status !== "completed") {
           throw learningError("VALIDATION", "status must be active|paused|completed");
+        }
+        if (hasOpeningSpanCourseBinding(current.goal_json, current.create_intent) && input.status !== "paused" && input.status !== current.status) {
+          throw learningError("CONFLICT", "课程 span 活动只能通过原步骤推进或恢复；通用接口仅允许暂停。");
         }
         if (current.status === "completed" && input.status !== "completed") {
           throw learningError("CONFLICT", "completed teaching activity cannot be reopened");
@@ -663,6 +671,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
     ): Promise<{ activity: TeachingActivity; jobId: string }> {
       const check = (row: Record<string, unknown> | undefined) => {
         if (!row) throw learningError("NOT_FOUND", "teaching activity not found");
+        if (hasOpeningSpanCourseBinding(row.goal_json, row.create_intent)) throw learningError("CONFLICT", "课程 span 活动不能通过通用 compiler 改写内容。");
         const current = mapTeachingActivity(row);
         if (current.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot generate new content");
         if (current.generateStatus === "queued" || current.generateStatus === "generating") {

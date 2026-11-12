@@ -507,6 +507,7 @@ export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition } from "./opening/kn
 
 export * from "./opening/span-verifier";
 export * from "./opening/span-repair";
+export * from "./opening/span-prerequisite-repair";
 
 export * from "./opening/span-teaching";
 

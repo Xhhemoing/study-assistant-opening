@@ -45,6 +45,29 @@ export function readSpanNextResult(body: unknown, courseId: string): Result {
   }
   return result;
 }
+/** B returns to a real course activity, never to a fabricated span session. */
+const prerequisiteResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ready"), href: z.string(), activityId: z.string().uuid(), courseId: z.string().uuid(), label: z.string().min(1).max(200), resumed: z.boolean() }).strict(),
+  z.object({ kind: z.literal("choice"), reason: z.enum(["unknown_evidence", "evidence_changed", "source_unavailable", "authorization_required", "cancelled", "expired", "unseen_unavailable", "remediation_limit"]), message: z.string().min(1).max(3000), primary: linkSchema.strict(), secondary: linkSchema.strict().optional() }).strict(),
+]);
+export function readSpanPrerequisiteReturnResult(body: unknown, courseId: string) {
+  const result = prerequisiteResultSchema.parse(body);
+  if (result.kind === "ready") {
+    const url = localCourseHref(result.href, courseId);
+    if (result.courseId !== courseId || result.href !== `/opening/courses/${courseId}/study?activity=${result.activityId}`
+      || url.hash || url.searchParams.getAll("activity").length !== 1) throw new Error("返回入口尚未确认，原学习位置保留。");
+  } else {
+    for (const action of [result.primary, result.secondary].filter((value): value is z.infer<typeof linkSchema> => Boolean(value))) {
+      const url = localCourseHref(action.href, courseId);
+      const base = `/opening/courses/${courseId}`;
+      const records = action.href === base || action.href === `${base}#course-learning-records` || action.href === `${base}?tab=units#course-learning-route`;
+      const lesson = url.pathname === `${base}/study/span` && !url.hash && url.searchParams.getAll("lesson").length === 1
+        && z.string().uuid().safeParse(url.searchParams.get("lesson")).success && [...url.searchParams.keys()].every(key => key === "lesson");
+      if (!records && !lesson) throw new Error("返回条件需要核对，未改为普通练习。");
+    }
+  }
+  return result;
+}
 export function SpanNextActionControl({ session, observationId, onNavigate, onReload, onChangeExplanation, onPause, disabled = false }: {
   session: Session; observationId: string | null; onNavigate?: (href: string) => void; onReload?: () => void; disabled?: boolean;
   onChangeExplanation?: () => Promise<boolean | void>; onPause?: () => Promise<boolean | void>;

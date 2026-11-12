@@ -13,7 +13,8 @@ const readSettings = vi.hoisted(() => vi.fn());
 
 vi.mock("../planning/learner-snapshot-runtime", () => ({ createSqlLearnerSnapshotService: () => ({ read: readSnapshot }) }));
 
-vi.mock("@aistudy/database", () => ({
+vi.mock("@aistudy/database", async () => ({
+  assertPublicTeachingActivityIntent: (await import("../../../../../../packages/database/src/repositories/opening-span-course-binding")).assertPublicTeachingActivityIntent,
   createOpeningTeachingActivitiesRepository: vi.fn(() => ({ create, get, requestCompile })),
   createOpeningPlanningSettingsRepository: vi.fn(() => ({ get: readSettings })),
   readOpeningTeachingTaskFocus: readTask,
@@ -47,6 +48,15 @@ beforeEach(() => {
 });
 
 describe("teaching activity service: compile enqueue seam", () => {
+  it.each(["spanCourseBinding", "spanPrerequisiteRepair", "courseRoute", "spanRepair", "tutorBudget"])("rejects client execution domain %s even when disabled", async key => {
+    await expect(createOpeningTeachingActivityService(sql, { OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope,
+      { ...input, goalJson: { [key]: {} } })).rejects.toMatchObject({ code: "VALIDATION", status: 400 });
+    expect(create).not.toHaveBeenCalled();
+  });
+  it.each([{ protocol: "span-lesson-v1" }, { kind: "course_route" }, { courseSpanRequest: {} }])("rejects client server create intent %j", async createIntent => {
+    await expect(createOpeningTeachingActivityService(sql, {}).create(scope, { ...input, createIntent })).rejects.toMatchObject({ code: "VALIDATION", status: 400 });
+    expect(create).not.toHaveBeenCalled();
+  });
   it("rejects a client-forged card variant before creating any activity", async () => {
     await expect(createOpeningTeachingActivityService(sql, {}).create(scope, { ...input,
       createIntent: { kind: "card_review_variant", cardId: activityId, variantBlockId: activityId, reviewReps: 0 },

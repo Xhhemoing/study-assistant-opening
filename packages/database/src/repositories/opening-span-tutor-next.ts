@@ -1,4 +1,4 @@
-import type { Scope, SpanLessonSnapshot } from "@aistudy/contracts";
+import { spanPrerequisiteReturnInputSchema, type Scope, type SpanLessonSnapshot, type SpanPrerequisiteReturnInput, type TeachingActivity } from "@aistudy/contracts";
 import { nextLearningStep, type NextLearningStep } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory, probeLearningSourcesAvailability } from "./opening-learning-facts";
@@ -6,11 +6,14 @@ import { createOpeningSpanSessionRepository } from "./opening-span-session";
 import { createOpeningSpanTutorContextRepository, spanTutorReceiptDecision } from "./opening-span-tutor-context";
 import { readOpeningLearningDecisionByClientKey } from "./opening-learning-decisions";
 import { readOpeningSpanTutorOrigin, readOpeningSpanTutorOriginChange, type OpeningSpanTutorOriginReference } from "./opening-span-tutor-origin";
+import { createOpeningCourseRouteActions } from "./opening-course-route-actions";
+import { readOpeningSpanPrerequisiteRepair } from "./opening-span-prerequisite-runtime";
 import { readSpanTutorAuthorization } from "./opening-span-tutor-grant";
 
 export type OpeningSpanNextInput = OpeningSpanTutorOriginReference & { clientKey: string };
 export type OpeningSpanNextChoiceReason = "unknown_evidence" | "source_unavailable" | "authorization_required" | "cancelled" | "expired" | "unseen_unavailable" | "evidence_changed" | "remediation_limit";
 export type OpeningSpanNextResult = { kind: "ready"; session: SpanLessonSnapshot; decision: NextLearningStep | null; replayed: boolean }
+  | { kind: "course_return"; activity: TeachingActivity; href: string; courseId: string; resumed: boolean; requirementId: string }
   | { kind: "choice"; reason: OpeningSpanNextChoiceReason; courseId: string; originSession: SpanLessonSnapshot | null; historicalSession?: SpanLessonSnapshot };
 function transactionClient(tx: TransactionSql): Sql {
   return new Proxy(tx, { get(target, key, receiver) {
@@ -20,8 +23,23 @@ function transactionClient(tx: TransactionSql): Sql {
   } }) as unknown as Sql;
 }
 /** Explicit continuation closes only its own origin. The old retest/task remains historical fact. */
-export function createOpeningSpanTutorNextRepository(sql: Sql) {
-  return { async next(scope: Scope, input: OpeningSpanNextInput): Promise<OpeningSpanNextResult> {
+export function createOpeningSpanTutorNextRepository(sql: Sql, options = { compilerEnabled: false, exactVerificationEnabled: false }) {
+  return { async next(scope: Scope, input: OpeningSpanNextInput | SpanPrerequisiteReturnInput): Promise<OpeningSpanNextResult> {
+    if ("prerequisiteRepairVersion" in input) {
+      const parsed = spanPrerequisiteReturnInputSchema.parse(input);
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const original = await createOpeningSpanSessionRepository(tx as unknown as Sql).get(scope, parsed.activityId);
+        if (!original) throw learningError("NOT_FOUND", "原补讲活动不存在。");
+        const result = await createOpeningCourseRouteActions(transactionClient(tx), options).returnFromPrerequisiteInTx(tx, scope, parsed);
+        if (result.kind === "choice") return { kind: "choice" as const, reason: "evidence_changed" as const,
+          courseId: original.courseId, originSession: original };
+        return { kind: "course_return" as const, activity: result.activity, href: result.href,
+          courseId: original.courseId, resumed: result.resumed, requirementId: result.requirementId };
+      }) as Promise<OpeningSpanNextResult>;
+    }
+    return this.ordinaryNext(scope, input);
+  }, async ordinaryNext(scope: Scope, input: OpeningSpanNextInput): Promise<OpeningSpanNextResult> {
     return sql.begin(async tx => {
       await lockWorkspaceLearningHistory(tx, scope);
       const db = transactionClient(tx), sessions = createOpeningSpanSessionRepository(db);
@@ -42,6 +60,8 @@ export function createOpeningSpanTutorNextRepository(sql: Sql) {
       }
       const original = await sessions.get(scope, input.activityId);
       if (!original) throw learningError("NOT_FOUND", "原学习活动不存在。");
+      if (await readOpeningSpanPrerequisiteRepair(tx, scope, original.activityId))
+        throw learningError("CONFLICT", "先修补讲必须明确返回原要求，不能继续通用补讲。");
       if (original.revision !== input.expectedRevision) throw learningError("CONFLICT", "原学习进度已更新，请重新读取后选择下一步。");
       const changed = await readOpeningSpanTutorOriginChange(db, scope, original.activityId);
       if (changed) return { kind: "choice", reason: changed.reason, courseId: original.courseId, originSession: changed.originSession, historicalSession: original };

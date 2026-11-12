@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { courseRouteConfirmSchema, courseRouteNextSchema, courseRequirementSchema, courseRequirementProgressSchema } from "./course-route";
+import { COURSE_SPAN_PUBLIC_TEACHING_LIMIT, courseSpanBindingOptionSchema, courseRouteConfirmSchema, courseRouteNextSchema, courseRequirementSchema, courseRequirementProgressSchema } from "./course-route";
 const id = "00000000-0000-4000-8000-000000000001";
 const progress = {
   requirement: { id, courseId: id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "coverage", title: "Coverage",
@@ -38,6 +38,29 @@ describe("course citation coverage boundary", () => {
         { ...coverage, byRole: { ...coverage.byRole, answer_key: { ...counts, [privateField]: "private" } } },
       ]) expect(courseRequirementProgressSchema.safeParse({ ...progress, citationCoverage }).success).toBe(false);
     }
+  });
+});
+
+describe("course route span confirmation boundary", () => {
+  const { courseId: _course, revision: _revision, lifecycle: _lifecycle, approvedAt: _approved, ...requirement } = progress.requirement;
+  const input = { expectedRevisions: [], requirements: [requirement], confirmScope: true };
+  const binding = { requirementId: id, exerciseKeys: ["span-example-2d"], confirmContent: true };
+  it("keeps old manifests valid and accepts explicit public identity confirmation", () => {
+    expect(courseRouteConfirmSchema.safeParse(input).success).toBe(true);
+    expect(courseRouteConfirmSchema.parse({ ...input, spanBindings: [binding] }).spanBindings).toEqual([binding]);
+  });
+  it("rejects duplicates, foreign requirements, authority fields and unbounded content", () => {
+    for (const spanBindings of [[binding, binding], [{ ...binding, requirementId: "00000000-0000-4000-8000-000000000002" }],
+      [{ ...binding, exerciseKeys: [] }], [{ ...binding, exerciseKeys: ["same", "same"] }],
+      [{ ...binding, exerciseKeys: Array.from({ length: COURSE_SPAN_PUBLIC_TEACHING_LIMIT + 1 }, (_, i) => String(i)) }],
+      [{ ...binding, status: "ready" }], [{ ...binding, confirmContent: false }]])
+      expect(courseRouteConfirmSchema.safeParse({ ...input, spanBindings }).success).toBe(false);
+  });
+  it("permits metadata, never candidate bodies or answers", () => {
+    const option = { id: "span-example-2d", version: "1", familyId: "span:independent-2d", dimension: 2, supportedScope: "两向量线性组合" };
+    expect(courseSpanBindingOptionSchema.parse(option)).toEqual(option);
+    for (const field of ["vectors", "target", "answer", "validationIds", "stem"])
+      expect(courseSpanBindingOptionSchema.safeParse({ ...option, [field]: "private" }).success).toBe(false);
   });
 });
 
