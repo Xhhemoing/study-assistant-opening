@@ -65,6 +65,20 @@ describe("attempt submit: server-side retest timing + independence (PR-B §4.1)"
     expect(insertObservation).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["missing retest association", []],
+    ["ambiguous retest association", [
+      { not_before_at: hourAgo(), recommended_at: hourAgo(), scheduled_start_at: null },
+      { not_before_at: hourAgo(), recommended_at: hourAgo(), scheduled_start_at: null },
+    ]],
+  ])("%s retest-linked submit is rejected without writing an observation", async (_label, rows) => {
+    retestRows.mockReturnValue(rows);
+    const { createOpeningAttemptService } = await import("./attempt-service");
+    await expect(createOpeningAttemptService(sql).submit(scope, ATTEMPT, { ...body, retestId: RETEST }))
+      .rejects.toMatchObject({ code: "VALIDATION", message: "retest activity is missing or ambiguous" });
+    expect(insertObservation).not.toHaveBeenCalled();
+  });
+
   it("voluntary early practice (no retestId) is saved but carries no retest link or skill evidence", async () => {
     const { createOpeningAttemptService } = await import("./attempt-service");
     await createOpeningAttemptService(sql).submit(scope, ATTEMPT, body);
