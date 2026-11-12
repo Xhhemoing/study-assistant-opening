@@ -241,6 +241,12 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   if (cycles?.completedCycles.length) decisionInput.remediationCycles = cycles;
   return { sourceRefs, decisionInput };
 }
+/** Read-only advice seam. Caller proves current binding, persisted intent and due priority in this tx. */
+export async function readOpeningSpanAdviceDecisionInTx(tx: TransactionSql, scope: Scope, binding: SpanCourseBinding,
+  sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent, dueRetestId: string | null) {
+  const projection = await facts(tx, scope, binding.courseId, sourceIds, sourceVersions, intent, dueRetestId, undefined, binding);
+  return { ...projection, decision: nextLearningStep(projection.decisionInput) };
+}
 /** R1 explicit-root entry uses the same rule over only this exact requirement's trusted evidence. */
 export async function readOpeningCourseSpanDecisionInTx(tx: TransactionSql, scope: Scope, binding: SpanCourseBinding,
   sourceIds: string[], sourceVersions: Record<string, number>, intent: StudySessionIntent) {
