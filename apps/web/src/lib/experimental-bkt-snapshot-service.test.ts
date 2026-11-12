@@ -301,7 +301,7 @@ describe("experimental BKT host snapshot seam", () => {
     const f = fixture(), wrapper = vi.fn<ExperimentalBktSnapshotWrapper>();
     const service = createExperimentalBktSnapshotService({ ...f, ruleDecision, wrapper });
     expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
-      port: { ruleDecision: { activityKind: ruleDecision.activityKind, reasonCode: ruleDecision.reasonCode },
+      port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" },
         status: "disabled", experimentalAdvice: null } });
     expect(f.repository.read).not.toHaveBeenCalled(); expect(wrapper).not.toHaveBeenCalled();
   });
@@ -535,6 +535,10 @@ describe("service with exact snapshot R2 repository (typed SQL fake, NOT PG)", (
     const ruleDecision = { activityKind: "transfer_check", focusObservationId: uuid(10), reasonCode: "independent" } satisfies NextLearningStep;
     Object.assign(ruleDecision, { activityKind });
     const service = createExperimentalBktSnapshotService({ host: f.host, repository: f.repository, wrapper, ruleDecision });
+    expect(await service.readPort()).toEqual({ comparisonReady: false, reason: "disabled",
+      port: { ruleDecision: { activityKind, reasonCode: "independent" },
+        status: "disabled", experimentalAdvice: null } });
+    expect(f.queries).toHaveLength(0);
     expect(await service.readPort({ enabled: true })).toEqual({ comparisonReady: false, reason: "insufficient_samples",
       port: { ruleDecision: { activityKind: "transfer_check", reasonCode: "independent" }, status: "fallback", reason: "insufficient_samples", experimentalAdvice: null } });
     expect(wrapper).not.toHaveBeenCalled(); expect(f.queries).toHaveLength(3);
