@@ -40,6 +40,27 @@ test("local execution keeps the occupied-host lock by default", (t) => {
   assert.match(result.stderr, /refusing to overlap/);
 });
 
+test("reclaims an isolated lock owned by an exited local Node process", (t) => {
+  const ownerProcess = spawnSync(process.execPath, ["-e", "process.exit(0)"], { encoding: "utf8" });
+  assert.equal(ownerProcess.status, 0, ownerProcess.stderr);
+  assert.ok(ownerProcess.pid > 0);
+
+  const { env, lockPath } = lockedEnvironment(t);
+  writeFileSync(path.join(`${lockPath}.d`, "owner.json"), JSON.stringify({
+    pid: ownerProcess.pid, host: os.hostname(), token: "exited-node-owner",
+  }));
+  const result = spawnSync(process.execPath, [wrapper, process.execPath, "-e", "console.log('ran-after-recovery')"], {
+    cwd: root,
+    env: { ...env, HERMES_HEAVY_MIN_FREE_MB: "0", HERMES_HEAVY_LOCK_TIMEOUT: "5" },
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "ran-after-recovery");
+  assert.equal(existsSync(`${lockPath}.d`), false);
+});
+
 test("lock holder refuses to start without memory headroom and releases the slot", (t) => {
   const { dir, env } = lockedEnvironment(t);
   const lockPath = path.join(dir, "free.lock");
