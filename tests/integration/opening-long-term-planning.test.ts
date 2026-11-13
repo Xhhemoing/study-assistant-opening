@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { createOpeningLongTermPlanningRepository, createOpeningPlanningSettingsRepository, createOpeningPlansRepository, createLearningGoalInTx,
-  readLearningGoal, reserveOpeningLearningActivityBudget, readOpeningLearningCapacity, createCardRepository, writeLearningCardSession } from "@aistudy/database";
+  createOpeningSpanSessionRepository, readLearningGoal, reserveOpeningLearningActivityBudget, readOpeningLearningCapacity, createCardRepository, writeLearningCardSession } from "@aistudy/database";
 import { lockWorkspaceLearningHistory } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createLongTermMaintenanceService } from "../../apps/web/src/features/opening/planning/long-term-maintenance-service";
+import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
+import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { backupRows } from "./opening-backup-records-fixture";
 
 let f: OpeningFixture;
@@ -104,6 +106,39 @@ it("shares the stable course selector for recovery and ignores newer placeholder
   expect(overview.recovery.activityId).toBe(ids[1]);
   expect(overview.recovery.href).toBe(`/opening/courses/${c.id}/study?activity=${ids[1]}`);
   expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
+});
+async function delayedLesson(courseId: string) {
+  const rows = backupRows(f.sql, f.scope), sourceId = await rows.source(), retestId = randomUUID();
+  await rows.chunk(sourceId);
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const lesson = await createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT, retestId });
+  return { ...lesson, retestId };
+}
+it.each(["cancelled", "completed"] as const)("offers the older usable activity href after the newer delayed retest is %s", async retestStatus => {
+  const c = await course(), older = randomUUID();
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,content_version,client_key,create_intent,updated_at)
+    VALUES(${older},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},'paused','goal','Older usable activity',1,${randomUUID()},'{}'::jsonb,'2026-11-01T00:00:00Z')`;
+  const lesson = await delayedLesson(c.id);
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-03T00:00:00Z' WHERE id=${lesson.activityId}`;
+  await f.sql`UPDATE opening_retest_activities SET status=${retestStatus} WHERE id=${lesson.retestId}`;
+  const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
+  const overview = await repo().read(f.scope, date);
+  expect(overview.recovery).toMatchObject({ activityId: older, href: `/opening/courses/${c.id}/study?activity=${older}` });
+  expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
+  await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${older}`;
+  const exhausted = await repo().read(f.scope, date);
+  expect(exhausted.recovery).toMatchObject({ activityId: null, href: null, agenda: null });
+});
+it.each(["accepted", "in_progress"] as const)("keeps the actual delayed lesson target reachable while its retest is %s", async status => {
+  const c = await course(), lesson = await delayedLesson(c.id);
+  await f.sql`UPDATE opening_retest_activities SET status=${status} WHERE id=${lesson.retestId}`;
+  const overview = await repo().read(f.scope, date);
+  expect(overview.recovery).toMatchObject({ activityId: lesson.activityId, href: `/opening/courses/${c.id}/study/span?lesson=${lesson.activityId}&retest=${lesson.retestId}` });
+  const params = new URL(overview.recovery.href!, "https://opening.test").searchParams;
+  expect((await createSpanLessonSessionService(f.sql).read(f.scope, c.id, params.get("lesson"), params.get("retest"))).session).toMatchObject({ activityId: lesson.activityId, sessionId: lesson.sessionId, retestId: lesson.retestId });
 });
 it("does not let one archived linked course block the active course or receive new candidate blocks", async () => {
   const a = await course(), b = await course(); await budget();
