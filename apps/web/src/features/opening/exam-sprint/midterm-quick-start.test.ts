@@ -122,4 +122,28 @@ describe("midterm preparation", () => {
     expect(await startMidtermSprint(runtime, principal, directory)).toHaveProperty("courseId", course.id);
     expect(deps.act).not.toHaveBeenCalled();
   });
+
+  it("returns the course target gracefully when topic-1 has no unseen questions left", async () => {
+    names.forEach((name, index) => saved.push(sourceRecord(`existing-${index}`, name)));
+    deps.sprintRead.mockResolvedValue({ pack: EXAM_SPRINT_PACK, activeRun: null });
+    deps.act.mockRejectedValueOnce(Object.assign(new Error("本章没有新的针对题；请先串讲、做原题或练习其他章节，不自动重复旧题。"), { code: "CONFLICT" }));
+    expect(await startMidtermSprint(runtime, principal, directory)).toEqual({ courseId: course.id, href: `/opening/courses/${course.id}?mode=sprint` });
+  });
+
+  it("skips starting topic-1 when existing attempts already cover every topic-1 training question", async () => {
+    names.forEach((name, index) => saved.push(sourceRecord(`existing-${index}`, name)));
+    const topic1Attempts = EXAM_SPRINT_PACK.questions
+      .filter(question => question.pool === "training" && question.topicId === "topic-1")
+      .map(question => ({ questionId: question.id }));
+    deps.sprintRead.mockResolvedValue({ pack: EXAM_SPRINT_PACK, activeRun: null, attempts: topic1Attempts });
+    expect(await startMidtermSprint(runtime, principal, directory)).toEqual({ courseId: course.id, href: `/opening/courses/${course.id}?mode=sprint` });
+    expect(deps.act).not.toHaveBeenCalled();
+  });
+
+  it("still surfaces unexpected non-exhausted conflicts from sprint.act", async () => {
+    names.forEach((name, index) => saved.push(sourceRecord(`existing-${index}`, name)));
+    deps.sprintRead.mockResolvedValue({ pack: EXAM_SPRINT_PACK, activeRun: null });
+    deps.act.mockRejectedValueOnce(Object.assign(new Error("冲刺材料版本无法校验"), { code: "CONFLICT" }));
+    await expect(startMidtermSprint(runtime, principal, directory)).rejects.toMatchObject({ code: "CONFLICT" });
+  });
 });

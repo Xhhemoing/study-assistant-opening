@@ -225,3 +225,96 @@ it.each(["pending", "unknown"] as const)("replays a removed source's %s request,
   expect(JSON.parse(fetchMock.mock.calls[3]![1].body)).toMatchObject({ sourceId: otherSource });
   expect(JSON.parse(fetchMock.mock.calls[3]![1].body).clientKey).not.toBe(original.clientKey);
 });
+
+async function setPageInput(labelText: string, value: string) {
+  const label = [...container.querySelectorAll("label")].find(item => item.textContent?.startsWith(labelText));
+  const input = label?.querySelector("input") as HTMLInputElement | null;
+  expect(input).toBeTruthy();
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+    input!.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+it("validates page range and positive integer pages pre-POST without locking the form", async () => {
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await setPageInput("起始页", "5");
+  await setPageInput("结束页", "2");
+  await click("分析考点并组卷");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(window.sessionStorage.length).toBe(0);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("起始页不能大于结束页");
+  expect([...container.querySelectorAll("select,input")].every(el => !(el as HTMLInputElement).disabled)).toBe(true);
+
+  await setPageInput("起始页", "0");
+  await click("分析考点并组卷");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("起始页必须是大于 0 的整数");
+
+  await setPageInput("起始页", "");
+  await setPageInput("结束页", "3");
+  await click("分析考点并组卷");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("先填写起始页");
+
+  await setPageInput("起始页", "1");
+  await setPageInput("结束页", "1.5");
+  await click("分析考点并组卷");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("结束页必须是大于 0 的整数");
+
+  fetchMock.mockResolvedValueOnce(Response.json(initial));
+  await setPageInput("结束页", "3");
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({ sourceId: source, firstPage: 1, lastPage: 3 });
+});
+
+it("rejects non-UUID sourceId pre-POST without issuing POST", async () => {
+  const invalidInitial: CourseExamOverview = { ...initial, sources: [{ id: "not-a-uuid", title: "无效ID", version: 1 }] };
+  await act(async () => root.render(createElement(CourseExamView, { initial: invalidInitial })));
+  await click("分析考点并组卷");
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("选择有效的真题");
+});
+
+it.each([
+  { status: 400, body: { error: { code: "VALIDATION", message: "试卷内容较长，请指定较小的页码范围后再组卷。" } }, expectedText: "较小的页码范围" },
+  { status: 409, body: { error: { code: "CONFLICT", message: "所选试卷还没有可读取文字，请等待解析完成或调整页码。" } }, expectedText: "调整页码" },
+])("unlocks cleanly on deterministic $status responses so the learner can edit and resubmit", async ({ status, body, expectedText }) => {
+  fetchMock
+    .mockResolvedValueOnce(Response.json(body, { status }))
+    .mockResolvedValueOnce(Response.json(initial));
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await setPageInput("起始页", "1");
+  await setPageInput("结束页", "20");
+  await click("分析考点并组卷");
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(expectedText);
+  expect(window.sessionStorage.length).toBe(0);
+  expect([...container.querySelectorAll("select,input")].every(el => !(el as HTMLInputElement).disabled)).toBe(true);
+  expect([...container.querySelectorAll("button")].some(btn => btn.textContent === "分析考点并组卷" && !btn.disabled)).toBe(true);
+  const firstKey = JSON.parse(fetchMock.mock.calls[0]![1].body).clientKey;
+
+  await setPageInput("结束页", "5");
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const secondBody = JSON.parse(fetchMock.mock.calls[1]![1].body);
+  expect(secondBody.clientKey).not.toBe(firstKey);
+  expect(secondBody).toMatchObject({ firstPage: 1, lastPage: 5 });
+});
+
+it.each([
+  { label: "408", response: () => Response.json({ error: { message: "请求超时，请稍后重试。" } }, { status: 408 }) },
+  { label: "503", response: () => Response.json({ error: { message: "服务暂不可用，请重试。" } }, { status: 503 }) },
+  { label: "pending 409", response: () => Response.json({ error: { code: "CONFLICT", message: "正在生成中，请稍后查看。" }, status: "pending" }, { status: 409 }) },
+])("preserves same-key retry protection on $label", async ({ response }) => {
+  fetchMock.mockResolvedValueOnce(response()).mockResolvedValueOnce(Response.json(initial));
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await click("分析考点并组卷");
+  expect(window.sessionStorage.length).toBe(1);
+  expect([...container.querySelectorAll("select,input")].every(el => (el as HTMLInputElement).disabled)).toBe(true);
+  const firstBody = JSON.parse(fetchMock.mock.calls[0]![1].body);
+  await click("查看这次组卷结果");
+  expect(JSON.parse(fetchMock.mock.calls[1]![1].body)).toEqual(firstBody);
+});

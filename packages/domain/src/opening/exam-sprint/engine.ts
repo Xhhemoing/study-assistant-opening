@@ -122,7 +122,7 @@ function skillSummaries(state: ExamSprintState, pack: ExamPack, context?: ExamSe
         : status === "secure" ? "至少两个未见题族独立答对，且成功证据间隔至少 24 小时。"
           : status === "usable" ? "已有未见题族独立正确证据；还需不同题族的隔日独立成功。"
             : "尚无未见题族的独立成功证据；看解析或重复答对不提升掌握等级。")
-        + (recheck.has(question.skillId) ? "部分原始记录的当前资格已修订、撤回或不可用；历史答案保留，但不再作为当前掌握证明。" : ""),
+        + (recheck.has(question.skillId) ? "部分原始记录状态已修订、撤回或暂不可用；历史答案保留，但不再作为当前掌握证明。" : ""),
       lessonId: question.lessonId,
     };
   });
@@ -290,8 +290,8 @@ function selectQuestions(state: ExamSprintState, pack: ExamPack, mode: ExamMode,
   const note = `练习目标为 6 道基础、3 道薄弱或待确认、1 道迁移；本轮对应配额 ${foundation}/${targeted}/${transfer}。`
     + (short ? `新题或对应题型不足，本轮仅使用未展示训练题，共 ${picked.length} 题；不能视为完整覆盖。` : "优先薄弱、低信心与待确认技能，再补基础覆盖。")
     + (exhaustedWeak ? "部分薄弱或低信心技能已无新题，未以旧题补足；请先串讲或做原题。" : "")
-    + (sourcePrioritySkills(state, pack, context).size ? "已映射的纸笔自评错误或求助仅提高相关题的练习优先级，不作为掌握或BKT证据。" : "")
-    + (recheck.size ? "资格变化后尚未重新证明的技能纳入定向练习；原始题族仍算已见。" : "")
+    + (sourcePrioritySkills(state, pack, context).size ? "已关联的纸笔自评错误或求助仅提高相关题的练习优先级，不作为掌握证明。" : "")
+    + (recheck.size ? "记录变化后尚未重新证明的技能纳入定向练习；原始题族仍算已见。" : "")
     + practiceExposureNote(picked, state, pack);
   picked.sort((left, right) => priorities.get(left.skillId)! - priorities.get(right.skillId)!);
   return { ids: picked.map(question => question.id), note };
@@ -356,7 +356,7 @@ function openLesson(state: ExamSprintState, command: Extract<ExamSprintCommand, 
   const mapping = validExamLessonExposure(lesson);
   if (!mapping) fail("CONFLICT", "此题包版本没有已审核的串讲曝光映射，暂不可打开；请保留原题包记录。");
   if (command.packVersion !== pack.version || command.contentFingerprint !== mapping.contentFingerprint || command.mappingVersion !== mapping.mappingVersion) {
-    fail("CONFLICT", "串讲内容版本已改变，请重新载入后再打开。");
+    fail("CONFLICT", "串讲版本已改变，请重新载入后再打开。");
   }
   const exposures = state.lessonExposures ??= [];
   const existing = exposures.find(exposure => exposure.packId === pack.id && exposure.packVersion === pack.version
@@ -377,13 +377,16 @@ function switchToTeaching(state: ExamSprintState, command: Extract<ExamSprintCom
     || attempt.id !== command.expectedAttemptId || attempt.answeredAt !== null) {
     fail("CONFLICT", "模拟或当前未提交题已改变，请重新载入；已提交答案不能转为受助作答。");
   }
+  if (run.deadlineAt && at(now) >= at(run.deadlineAt)) {
+    fail("CONFLICT", "模拟时间已到，不能转为教学；请先交卷查看结果。");
+  }
   const question = questionFor(pack, attempt.questionId);
-  if (command.lessonId !== question.lessonId || at(now) < at(attempt.presentedAt)) fail("CONFLICT", "转教学的题目或时间无法校验。");
+  if (command.lessonId !== question.lessonId || at(now) < at(attempt.presentedAt)) fail("CONFLICT", "转教学的题目或作答时间无效，请重新载入后再试。");
   const lesson = pack.lessons.find(item => item.id === command.lessonId);
   const mapping = lesson ? validExamLessonExposure(lesson) : null;
   if (!mapping || command.packVersion !== pack.version || command.contentFingerprint !== mapping.contentFingerprint
     || command.mappingVersion !== mapping.mappingVersion || command.confirmedEndScoredMock !== true) {
-    fail("CONFLICT", "串讲内容版本或已审核曝光映射无法校验，请重新载入。");
+    fail("CONFLICT", "串讲版本或已审核曝光映射未能确认，请重新载入。");
   }
   const exposures = state.lessonExposures ??= [];
   const exposureId = `lesson-exposure-${exposures.length + 1}-${command.clientKey.slice(0, 60)}`;

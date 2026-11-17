@@ -128,6 +128,14 @@ describe("atomic mock to teaching", () => {
     expect(() => applyExamSprintCommand(practice, input, selectedPack, NOW)).toThrow("已改变");
     expect(state).toEqual(before);
   });
+  it("rejects switch_to_teaching once the mock deadline has been reached or passed without mutating state", () => {
+    const state = pending(), input = command(state), before = structuredClone(state);
+    const deadline = state.runs[0]!.deadlineAt!;
+    const afterDeadline = new Date(Date.parse(deadline) + 1000).toISOString();
+    expect(() => applyExamSprintCommand(state, input, selectedPack, deadline)).toThrow(expect.objectContaining({ code: "CONFLICT" }));
+    expect(() => applyExamSprintCommand(state, input, selectedPack, afterDeadline)).toThrow("模拟时间已到");
+    expect(state).toEqual(before);
+  });
 });
 
 describe("exam sprint sessions and selection", () => {
@@ -461,6 +469,7 @@ describe("source self-report and workload", () => {
     expect(overview.skills.every(skill => skill.status === "untested")).toBe(true);
     expect(prioritized.attempts[0]!.prediction!.historyAttemptIds).toEqual([]);
     expect(examSprintOverview(failed, pack, LATER).recommendations.at(-1)!.reason).toContain("仅提高相关题");
+    expect(examSprintOverview(failed, pack, LATER).recommendations.at(-1)!.reason).not.toContain("BKT证据");
     const unmapped = { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item, skills: [] })) };
     expect(start(failed, "practice", LATER, unmapped).runs[0]!.questionIds).toEqual(start(initial, "practice", LATER, unmapped).runs[0]!.questionIds);
     const recovered = source(failed, { sourceId: "source-c", phase: "blind", outcome: "correct", assistance: "none" }, LATER);
@@ -541,6 +550,8 @@ describe("current formal qualification and retained sprint history", () => {
     expect(view.attempts).toHaveLength(2);
     expect(view.attempts.every(attempt => attempt.correct === true && attempt.independent === false)).toBe(true);
     expect(view.recommendations.some(item => item.title === "重新确认：s3" && item.mode === "practice")).toBe(true);
+    expect(view.skills.find(skill => skill.skillId === "s3")!.reason).not.toContain("资格");
+    expect(view.recommendations.at(-1)!.reason).not.toContain("资格");
     const practice = applyExamSprintCommand(state, { action: "start", clientKey: key, mode: "practice" }, pack, LATER, context);
     expect(practice.runs.at(-1)!.questionIds).toEqual(expect.arrayContaining(["s3-2", "s3-3"]));
     expect(practice.runs.at(-1)!.questionIds.filter(id => id.startsWith("s3-"))).toEqual(["s3-2", "s3-3"]);

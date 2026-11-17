@@ -60,7 +60,8 @@ export function ActiveRun({ overview, disabled, send, onOpenLesson }: { overview
   return <section className={`${ui.panel} space-y-5 p-5`} aria-labelledby="current-sprint-title">
     <div className="flex flex-wrap items-start justify-between gap-2"><div><h2 id="current-sprint-title" className="font-semibold">{modeLabels[run.mode]} · {answered} / {run.questionIds.length} 题已答</h2><p className="mt-1 text-xs text-text-3">{mock ? "20–30 分钟短模拟 · 不是完整考试卷" : "作答 → 看解析 → 归因 → 独立复测"}</p></div><RunClock startedAt={run.startedAt} deadlineAt={run.deadlineAt} now={now} /></div>
     {attempt ? <QuestionForm key={`${attempt.id}-${attempt.answer ?? "pending"}`} attempt={attempt} mock={mock} disabled={disabled || expired} send={send} /> : <p className="text-sm text-text-2">本轮题目已完成，请结束本轮查看结果。</p>}
-    {attempt && onOpenLesson ? <LessonButton overview={overview} lessonId={attempt.question.lessonId} onOpenLesson={onOpenLesson} disabled={disabled} returnTarget={{ id: attemptElementId(attempt.id), label: "返回原题", runId: run.id, attemptId: attempt.id }} /> : null}
+    {mock && expired ? <p role="status" className="text-xs leading-6 text-warn">模拟时间已到，不能再作答或转教学；请先交卷并查看解析。</p> : null}
+    {attempt && onOpenLesson ? <LessonButton overview={overview} lessonId={attempt.question.lessonId} onOpenLesson={onOpenLesson} disabled={disabled || (mock && expired)} returnTarget={{ id: attemptElementId(attempt.id), label: "返回原题", runId: run.id, attemptId: attempt.id }} /> : null}
     <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
       {attempt?.answeredAt && !isLast && !expired ? <button type="button" className={ui.primary} disabled={disabled} onClick={() => send({ action: "next", runId: run.id })}>下一题</button> : null}
       {!attempt || (isLast && attempt.answeredAt) || expired ? <button type="button" className={ui.primary} disabled={disabled} onClick={() => send({ action: "finish", runId: run.id })}>{mock ? "交卷并查看解析" : "结束本轮"}</button> : null}
