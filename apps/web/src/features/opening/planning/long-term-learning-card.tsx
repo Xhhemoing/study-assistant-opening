@@ -11,6 +11,23 @@ const pendingSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("
 type Pending = z.infer<typeof pendingSchema>;
 function storageKey(namespace: string, date: string) { return `aistudy:long-term-command:${namespace}:${date}`; }
 function restore(namespace: string | null, date: string): Pending | null { if (!namespace) return null; try { const raw = sessionStorage.getItem(storageKey(namespace, date)); const parsed = raw ? pendingSchema.safeParse(JSON.parse(raw)) : null; return parsed?.success ? parsed.data : null; } catch { return null; } }
+function recoveryBlockedReason(agenda: NonNullable<LearningManagementOverview["recovery"]["agenda"]>): string {
+  const mapped = agenda.invalidationReasons.map((reason): string | null => {
+    if (reason === "retest_deferred") return "对应的复测尚未到可继续时间";
+    if (reason === "retest_cancelled_or_unavailable") return "对应的复测已取消或暂不可用";
+    if (reason === "course_unavailable") return "所属课程已归档或暂不可用";
+    if (reason === "source_unavailable") return "原学习材料暂不可用";
+    if (reason === "goal_requirement_or_source_changed" || reason === "goal_changed" || reason === "source_changed") return "课程目标或材料已更新";
+    if (reason.startsWith("permission:")) return "辅导方式或权限已变化";
+    if (reason === "policy_version_not_revalidated") return "学习安排依据已更新";
+    return null;
+  }).filter((item): item is string => Boolean(item));
+  if (mapped.length) return [...new Set(mapped)].join("、");
+  if (agenda.status === "cancelled") return "原活动已取消";
+  if (agenda.status === "completed") return "原活动已完成";
+  if (agenda.status === "deferred") return "原活动尚未到继续时间";
+  return "原学习位置需要重新确认";
+}
 export function LongTermLearningCard(props: { date: string; client?: LearningManagementClient; onChanged?: () => void }) { return <ManagementCard key={props.date} {...props} />; }
 function ManagementCard({ date, client: suppliedClient, onChanged }: { date: string; client?: LearningManagementClient; onChanged?: () => void }) {
   const client = useMemo(() => suppliedClient ?? createLearningManagementClient(), [suppliedClient]);
@@ -68,7 +85,11 @@ function ManagementCard({ date, client: suppliedClient, onChanged }: { date: str
       {overview.warnings.map((warning, index) => <p className="text-xs leading-6 text-warn" role="status" key={index}>{warning}</p>)}
       {(overview.maintenanceTasks ?? []).map(task => <div className="space-y-2 border-t border-line pt-3" key={task.taskId}><p className="text-sm text-text-2">{overview.tasks.find(row => row.id === task.taskId)?.title ?? "到期保持抽查"}</p><button type="button" className={ui.secondary} disabled={locked} onClick={() => void execute({ kind: "maintenance", input: { taskId: task.taskId, expectedVersion: task.version, clientKey: `maintenance-start:${crypto.randomUUID()}` } })}>开始这项保持抽查</button></div>)}
       {routeChoice?.kind === "choice" ? <div className="space-y-2"><p role="status" className="text-sm text-text-2">{routeChoice.message}</p><a className={ui.secondary} href={routeChoice.href}>核对抽查选择</a></div> : null}
-      {overview.recovery.kind !== "none" ? <section className="space-y-2 border-t border-line pt-3" aria-label="缺席后恢复"><h3 className="text-sm font-medium">从上次继续</h3><p className="text-xs text-text-3">可以继续原活动，或先预览剩余时间的新安排。已有答案、受助记录与已接受任务保留。</p><div className="flex flex-wrap gap-2">{overview.recovery.href ? <a className={ui.secondary} href={overview.recovery.href}>继续原活动</a> : null}<button type="button" className={ui.secondary} disabled={locked || !overview.budget} onClick={() => recover("replan")}>预览缺席后的安排</button></div>{overview.recovery.activityId ? <div className="flex flex-wrap items-end gap-2"><label className="space-y-1"><span className={ui.label}>这次只学几分钟</span><input className={ui.input} type="number" min={5} max={240} value={shortMinutes} disabled={locked} onChange={event => setShortMinutes(event.target.value)} /></label><button type="button" className={ui.secondary} disabled={locked || !overview.budget} onClick={() => recover("shorten")}>选择更短的本次活动</button></div> : null}</section> : null}
+      {overview.recovery.kind !== "none" ? (() => {
+        const agenda = overview.recovery.agenda;
+        const resumable = !agenda || agenda.resumable;
+        return <section className="space-y-2 border-t border-line pt-3" aria-label="缺席后恢复"><h3 className="text-sm font-medium">从上次继续</h3>{agenda && !agenda.resumable ? <p role="status" className="text-xs text-warn">原活动暂不可继续或缩短：{recoveryBlockedReason(agenda)}。已有答案、受助记录与已接受任务保留，可先预览剩余时间的新安排。</p> : <p className="text-xs text-text-3">可以继续原活动，或先预览剩余时间的新安排。已有答案、受助记录与已接受任务保留。</p>}<div className="flex flex-wrap gap-2">{overview.recovery.href && resumable ? <a className={ui.secondary} href={overview.recovery.href}>继续原活动</a> : null}<button type="button" className={ui.secondary} disabled={locked || !overview.budget} onClick={() => recover("replan")}>预览缺席后的安排</button></div>{overview.recovery.activityId && resumable ? <div className="flex flex-wrap items-end gap-2"><label className="space-y-1"><span className={ui.label}>这次只学几分钟</span><input className={ui.input} type="number" min={5} max={240} value={shortMinutes} disabled={locked} onChange={event => setShortMinutes(event.target.value)} /></label><button type="button" className={ui.secondary} disabled={locked || !overview.budget} onClick={() => recover("shorten")}>选择更短的本次活动</button></div> : null}</section>;
+      })() : null}
       <button type="button" className={ui.secondary} disabled={locked || !overview.budget} onClick={preview}>预览共同安排</button>
       {draft && diff ? <section className="space-y-3 border-l-2 border-accent pl-3" aria-label="安排草案"><h3 className="text-sm font-medium">安排草案 · 尚未接受</h3><p className="text-xs leading-6 text-text-2">保留 {diff.preserved} 项，新增或调整 {diff.added.length} 项，移除或调整 {diff.removed.length} 项。确认前当前安排继续保留。</p>{diff.removed.length ? <div><p className="text-xs font-medium">将移除或调整</p><ul className="space-y-1 text-xs text-text-2">{diff.removed.map((block, index) => <li key={index}>{blockLabel(block)}</li>)}</ul></div> : null}<ul className="space-y-2 text-sm text-text-2">{draft.blocks.map((block, index) => <li key={index}>{blockLabel(block)}<p className="text-xs text-text-3">{block.reason}</p></li>)}</ul>{draft.unscheduledTaskIds.length ? <p className="text-xs text-warn">仍有 {draft.unscheduledTaskIds.length} 项未排入。时间不足时可减少范围、调整日期或维持原安排。</p> : null}<div className="flex flex-wrap gap-2"><button className={ui.secondary} type="button" disabled={locked} onClick={() => void execute({ kind: "command", input: { action: "confirm", draftId: draft.id, expectedBaseVersion: draft.baseVersion, clientKey: `long-term-confirm:${crypto.randomUUID()}` } })}>确认这份安排</button><button className={ui.quiet} type="button" disabled={locked} onClick={() => setDraft(null)}>保留当前安排</button></div></section> : null}
       {overview.acceptedBlocks.length ? <details><summary className="cursor-pointer text-xs text-text-2">当前已接受安排 · {overview.acceptedBlocks.length}</summary><ul className="mt-2 space-y-2 text-xs">{overview.acceptedBlocks.map((block, index) => <li key={index}>{blockLabel(block)}</li>)}</ul></details> : null}

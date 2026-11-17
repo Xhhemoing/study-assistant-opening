@@ -21,3 +21,23 @@ it("keeps the legacy two-argument call and rejects invalid explicit references w
   expect(currentCourseActivity(rows, "course", ["old"])?.id).toBe("old");
   for (const refs of [["missing"], ["old", "new"], ["done"], ["shell"]]) expect(currentCourseActivity(rows, "course", refs)).toBeNull();
 });
+it("marks unavailable static retests and sessionless span-lesson shells as placeholders so valid activities are not shadowed", () => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  const valid = activity("valid", { updatedAt: "2026-11-01T00:00:00Z" });
+  const deadRetest = activity("dead-retest", {
+    intentKind: "goal",
+    contentVersion: 0,
+    staticLessonUnavailable: "retest_unavailable",
+    updatedAt: "2026-11-03T00:00:00Z",
+  });
+  const sessionlessSpan = activity("sessionless-span", {
+    intentKind: "goal",
+    contentVersion: 0,
+    checkpointJson: { spanLesson: { sessionId } },
+    updatedAt: "2026-11-04T00:00:00Z",
+  });
+  expect(currentCourseActivity([valid, deadRetest, sessionlessSpan], "course")).toEqual(valid);
+  expect(courseStudyActivities([valid, deadRetest, sessionlessSpan], "course")).toEqual([valid]);
+  expect(currentCourseActivity([deadRetest, sessionlessSpan], "course")).toBeNull();
+  expect(currentCourseActivity([deadRetest], "course", ["dead-retest"])).toBeNull();
+});

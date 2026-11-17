@@ -297,6 +297,19 @@ export function assistantContextScope(context?: StudyConversationContext): strin
   return JSON.stringify([studyConversationIdentity(context), context?.purpose ?? "learning_help"]);
 }
 
+export function boundConversationContextChanged(
+  verifiedContext: StudyConversationContext | undefined,
+  prepared: StudyConversationContext | undefined,
+): boolean {
+  if (!prepared) return studyConversationIdentity(verifiedContext) !== studyConversationIdentity(prepared);
+  const normalizedPrepared: StudyConversationContext = {
+    ...prepared,
+    ...(prepared.sourceVersion == null && verifiedContext?.sourceVersion != null ? { sourceVersion: verifiedContext.sourceVersion } : {}),
+    ...(prepared.page == null && verifiedContext?.page != null ? { page: verifiedContext.page } : {}),
+  };
+  return studyConversationIdentity(verifiedContext) !== studyConversationIdentity(normalizedPrepared);
+}
+
 export function AssistantView(props: Props) {
   const identity = `${assistantContextScope(props.studyContext)}:${props.initialCourseId ?? ""}:${props.initialConversationId ?? ""}:${[...(props.initialSourceIds ?? [])].sort().join(",")}:${props.initialPage ?? ""}:${JSON.stringify(props.learningAttempt ? [props.learningAttempt.id, props.learningAttempt.sessionId, props.learningAttempt.courseId, props.learningAttempt.itemVersionId, props.learningAttempt.observationId, props.learningAttempt.historyRevision, props.learningAttempt.contextAnchor] : null)}`;
   const [sessionState, setSession] = useState({ identity, count: 0 });
@@ -577,8 +590,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       if (resumeBoundConversation) {
         const prepared = boundResumeContext.current;
         const verified = resolveBoundConversationContext(nextTurns, prepared);
-        const contextChanged = studyConversationIdentity(verified.context) !== studyConversationIdentity(prepared);
-        if (verified.error || contextChanged) {
+        if (verified.error || boundConversationContextChanged(verified.context, prepared)) {
           setError(verified.error ?? "这段对话的提问背景刚刚变化，请重新打开后再继续。");
           setRecoveryRequired(true);
           return true;
@@ -586,7 +598,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       }
       const last = nextTurns.at(-1);
       if (guard.receipt && !last) {
-        setPendingHint("原会话暂未读到这次请求。现有 API 无请求键 GET 查询，不能确认未发送；不会换键重发。");
+        setPendingHint("原对话暂未读到这次提问，暂时无法确认是否已收到；为避免重复收费，不会自动重发。");
       }
       const previous = observedTurns.current.at(-1);
       if (last?.status === "failed" && last.id === previous?.id && previous.status === "pending") {
@@ -1201,7 +1213,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         </TopBarTools>} /> : null}
       {!start && !embedded && !loading && !turns.length && !ephemeralMessages.length ? <div className="px-4 py-3 sm:px-5"><LearnerStateCard courseId={boundCourseId ?? undefined} proactive /></div> : null}
       {studyContext ? <div className="space-y-1 border-b border-line px-4 py-2 text-xs leading-5 text-text-2 sm:px-5">
-        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option><option value="language_support">仅忠实翻译与术语解释</option></select><span>只做翻译和术语解释，不给列式或解题步骤。</span></label> : null}
+        {learningAttempt ? <label className="flex flex-wrap items-center gap-2">帮助范围<select className="min-h-9 rounded border border-text-3 bg-surface px-2 py-1" value={supportPurpose} disabled={pending} onChange={event => setSupportPurpose(event.target.value as typeof supportPurpose)}><option value="learning_help">数学思路或解答帮助</option>{supportPurpose === "exam_help" || studyContext?.purpose === "exam_help" ? <option value="exam_help">考前练习答疑</option> : null}<option value="language_support">仅忠实翻译与术语解释</option></select><span>只做翻译和术语解释，不给列式或解题步骤。</span></label> : null}
         <p>提问背景：{studyContext.label || (studyContext.activityId ? "当前学习单元" : studyContext.sourceId ? "指定材料" : "已绑定的课程")}{studyContext.page ? ` · 第 ${studyContext.page} 页` : ""}</p>
         <p>{studyContext.activityId || studyContext.fragment ? "发送时会附上你正在看的内容，方便理解你的问题。" : studyContext.sourceId ? "会参考你指定的材料和位置。" : "继续在这门课里提问。"}</p>
         {returnHref && !embedded ? <a href={returnHref} className="text-accent underline">返回原内容</a> : null}

@@ -161,3 +161,27 @@ it("materials gate is unavailable when activity requests one missing source", ()
   expect(gate.materials).not.toBe("available");
   expect(gate.unavailableSourceIds).toEqual([sourceId]);
 });
+
+it("excludes card sessions, legacy activities, empty course_continue shells, sessionless span shells, and unavailable retests from pickCurrentTeachingActivity", () => {
+  const usable = { ...base, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", updatedAt: "2026-10-11T01:00:00.000Z" };
+  const newer = "2026-10-11T05:00:00.000Z";
+  const cardByKey = { ...base, id: "11111111-1111-4111-8111-111111111112", clientKey: "card-session:abc", intentKind: "course_continue" as const, intentSummary: "有界卡片复习", updatedAt: newer };
+  const cardByCheckpoint = { ...base, id: "11111111-1111-4111-8111-111111111113", checkpointJson: { cardReviewSession: { elapsedSeconds: 0 } }, updatedAt: newer };
+  const legacy = { ...base, id: "11111111-1111-4111-8111-111111111114", clientKey: "legacy-course-continue:c1", courseId: "44444444-4444-4444-8444-444444444444", intentKind: "course_continue" as const, contentVersion: 1, updatedAt: newer };
+  const emptyContinue = { ...base, id: "11111111-1111-4111-8111-111111111115", courseId: "44444444-4444-4444-8444-444444444444", intentKind: "course_continue" as const, contentVersion: 0, updatedAt: newer };
+  const deadRetest = { ...base, id: "11111111-1111-4111-8111-111111111116", courseId: "44444444-4444-4444-8444-444444444444", intentKind: "goal" as const, contentVersion: 0, staticLessonUnavailable: "retest_unavailable" as const, updatedAt: newer };
+  const sessionlessSpan = { ...base, id: "11111111-1111-4111-8111-111111111117", courseId: "44444444-4444-4444-8444-444444444444", intentKind: "goal" as const, contentVersion: 0, checkpointJson: { spanLesson: { sessionId: "missing" } }, updatedAt: newer };
+  expect(pickCurrentTeachingActivity([usable, cardByKey, cardByCheckpoint, legacy, emptyContinue, deadRetest, sessionlessSpan])?.id).toBe(usable.id);
+  expect(pickCurrentTeachingActivity([cardByKey, cardByCheckpoint, legacy, emptyContinue, deadRetest, sessionlessSpan])).toBeNull();
+
+  const validStaticLesson = {
+    ...base,
+    id: "11111111-1111-4111-8111-111111111118",
+    courseId: "44444444-4444-4444-8444-444444444444",
+    intentKind: "course_continue" as const,
+    contentVersion: 0,
+    staticLesson: { protocol: "span-lesson-v1" as const, sessionId: "99999999-9999-4999-8999-999999999999" },
+    updatedAt: newer,
+  };
+  expect(pickCurrentTeachingActivity([usable, validStaticLesson])?.id).toBe(validStaticLesson.id);
+});

@@ -2,6 +2,25 @@ import type { TaskItem, TeachingActivity, TeachingActivityCreateInput } from "@a
 import { compareCurrentLearningActivities, selectCurrentLearningActivity } from "@aistudy/domain";
 
 function courseStudyPlaceholder(row: TeachingActivity): boolean {
+  const createIntent = (row as { createIntent?: { protocol?: unknown; legacy?: unknown } }).createIntent;
+  if (row.staticLessonUnavailable) return true;
+  if (
+    createIntent?.protocol === "card-review-session-v1"
+    || row.clientKey?.startsWith("card-session:")
+    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "cardReviewSession" in row.checkpointJson)
+  ) {
+    return true;
+  }
+  if (createIntent?.legacy === true || row.clientKey?.startsWith("legacy-course-continue:")) {
+    return true;
+  }
+  if (!row.staticLesson && (
+    createIntent?.protocol === "span-lesson-v1"
+    || row.clientKey?.startsWith("span-lesson:")
+    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "spanLesson" in row.checkpointJson)
+  )) {
+    return true;
+  }
   return row.intentKind === "course_continue" && row.contentVersion === 0 && !row.staticLesson;
 }
 

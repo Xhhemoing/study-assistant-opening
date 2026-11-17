@@ -148,6 +148,8 @@ describe("atomic course-bound mock conversion", () => {
     expect(await f.sql`SELECT dimension FROM opening_skill_evidence WHERE observation_id=${String(record.id)}`).toEqual([{ dimension: "timed" }]);
     expect(await eligibility(String(record.id))).toMatchObject({ independentAttempt: "yes" });
     const pendingLink = await linkFor(pending.id);
+    const pendingActivities = await f.sql`SELECT status FROM opening_teaching_activities WHERE id=${String(pendingLink.activity_id)}`;
+    expect(pendingActivities[0]!.status).toBe("completed");
     const receipts = await f.sql`SELECT * FROM opening_exam_help_receipts WHERE attempt_link_id=${String(pendingLink.id)}`;
     expect(receipts).toHaveLength(1); expect(iso(receipts[0]!.delivered_at)).toBe(conversion.convertedAt);
     expect(await f.sql`SELECT id FROM opening_exam_help_receipts WHERE attempt_link_id=${String(published.id)}`).toHaveLength(0);
@@ -784,5 +786,22 @@ describe("course-bound exam sprint canonical bridge", () => {
     expect(await createOpeningLearningAttemptRepository(f.sql).get(f.otherScope, String(link.learning_attempt_id))).toBeNull();
     expect(await integration.read(f.otherScope)).toMatchObject({ binding: null, links: [], bkt: { eligible: 0 } });
     expect(await factsCount()).toEqual({ sessions: 1, attempts: 1, observations: 0, evidence: 0 });
+  });
+
+  it("closes unanswered exam-activity rows when a run finishes without answering", async () => {
+    const bound = await bind(), view = await start("diagnostic");
+    const activeRows = await f.sql`SELECT id,status,client_key FROM opening_teaching_activities
+      WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId} AND course_id=${courseId}
+        AND client_key LIKE ${`exam-activity:${bound.binding!.sprintId}:%`}`;
+    expect(activeRows).toHaveLength(1);
+    expect(activeRows[0]!.status).toBe("active");
+
+    await finish(view);
+
+    const closedRows = await f.sql`SELECT id,status FROM opening_teaching_activities
+      WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId} AND course_id=${courseId}
+        AND client_key LIKE ${`exam-activity:${bound.binding!.sprintId}:%`}`;
+    expect(closedRows).toHaveLength(1);
+    expect(closedRows[0]!.status).toBe("completed");
   });
 });
