@@ -4,10 +4,21 @@ import json
 import os
 from pathlib import PurePosixPath
 import subprocess
+import tempfile
+
+_GIT_HOME = tempfile.TemporaryDirectory(prefix='sm95-ci-git-home-')
+
+
+def git_environment():
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    env.update(HOME=_GIT_HOME.name, XDG_CONFIG_HOME=_GIT_HOME.name,
+               GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
+               GIT_TEMPLATE_DIR='', GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.hooksPath', GIT_CONFIG_VALUE_0='/dev/null')
+    return env
 
 
 def git(*args):
-    return subprocess.check_output(["git", *args])
+    return subprocess.check_output(["git", *args], env=git_environment())
 
 
 def allowed_doc(path):
@@ -91,7 +102,7 @@ def main():
     else:
         if not docs_only(base, head):
             raise ValueError("Light check contains a non-allowlisted change or empty diff")
-        subprocess.run(["git", "diff", "--check", base, head], check=True)
+        subprocess.run(["git", "diff", "--check", base, head], check=True, env=git_environment())
         print("Documentation allowlist and diff whitespace checks passed")
 
 

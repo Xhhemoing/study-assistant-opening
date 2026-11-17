@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { gitFixture, cleanGitEnvironment } from '../tests/tooling/hermes-git-fixture.mjs';
 import { addedFixedColors, checkNewFixedColors, isUiSource } from "./check-new-fixed-colors.mjs";
 
 const hunk = (...lines) => `@@ -1,2 +1,2 @@\n${lines.join("\n")}\n`;
@@ -26,11 +27,11 @@ test("limits the check to app and UI TSX excluding test fixtures", () => {
 });
 test("compares a real commit with committed/staged/unstaged and untracked UI changes", () => {
   const cwd = mkdtempSync(path.join(os.tmpdir(), "study-fixed-colors-"));
-  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const isolated=gitFixture(cwd), git=isolated.run;
   const shallow = mkdtempSync(path.join(os.tmpdir(), "study-fixed-colors-shallow-"));
   const write = (file, contents) => { mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true }); writeFileSync(path.join(cwd, file), contents); };
   try {
-    git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
+    git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.test");
     write("apps/web/src/old.tsx", '<p className="text-blue-600">old</p>\n');
     git("add", "."); git("commit", "-qm", "fixture base");
     const base = git("rev-parse", "HEAD");
@@ -42,8 +43,8 @@ test("compares a real commit with committed/staged/unstaged and untracked UI cha
     write("apps/web/src/untracked.tsx", '<p className="fill-green-500" />\n');
     write("apps/web/src/ignored.test.tsx", '<p className="bg-white" />\n');
     assert.deepEqual(checkNewFixedColors({ cwd, base }).violations.map(row => row.token).sort(), ["bg-red-100", "fill-green-500", "ring-blue-600", "text-zinc-900"]);
-    execFileSync("git", ["clone", "--quiet", "--depth=2", pathToFileURL(cwd).href, shallow], { stdio: ["ignore", "pipe", "pipe"] });
-    assert.equal(execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: shallow, encoding: "utf8" }).trim(), "true");
+    execFileSync("git", ["clone", "--quiet", "--depth=2", pathToFileURL(cwd).href, shallow], { env: cleanGitEnvironment({...isolated.env}), stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(execFileSync("git", ["rev-parse", "--is-shallow-repository"], { cwd: shallow, env: cleanGitEnvironment(isolated.env), encoding: "utf8" }).trim(), "true");
     assert.deepEqual(checkNewFixedColors({ cwd: shallow, base: "HEAD^1" }).violations.map(row => row.token), ["bg-red-100"]);
     assert.deepEqual(checkNewFixedColors({ cwd }).violations.map(row => row.token).sort(), ["fill-green-500", "ring-blue-600", "text-zinc-900"]);
     assert.throws(() => checkNewFixedColors({ cwd, base: "missing-ref" }));

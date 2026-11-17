@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { gitFixture } from './hermes-git-fixture.mjs';
 import { BRANCH, REPOSITORY, extract, pack, platform, tree, verifyRunBinding, verifySource, verifyTree } from '../../infra/deploy/verify-release-artifact.mjs';
 
 const sha = 'a'.repeat(40);
@@ -60,11 +61,8 @@ test('pack uses committed source, materializes workspace dependencies, excludes 
     writeFileSync(join(f.source, path), body);
   }
   // Commit only sources; dependencies and Next output belong to the builder.
-  const git = (...args) => {
-    const result = spawnSync('git', ['-C', f.source, ...args], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
-  };
-  git('init', '-b', BRANCH);
+  const git = gitFixture(f.source).run;
+  git('checkout', '-b', BRANCH);
   git('add', 'packages', 'infra', 'scripts', 'services', 'apps/worker', 'apps/web/package.json', 'apps/web/next.config.mjs', 'package.json', 'package-lock.json', 'tsconfig.json', '.worker-protocol');
   git('-c', 'user.name=Artifact Test', '-c', 'user.email=artifact@example.test', 'commit', '-m', 'fixture');
   const commit = git('rev-parse', 'HEAD');

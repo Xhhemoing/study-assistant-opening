@@ -33,10 +33,11 @@ DEGRADED=0
 FORWARD_ONLY=0
 ACTIVATION_BEGUN=0
 SUCCESS_REQUESTED=0
+REPAIR_ADOPTED=0
 FORWARD_GUARD="$STATE/migration-forward-only"
 managed() {
   local session_target='' exact_target=''
-  if [[ "$ACTION" == deploy ]]; then session_target=$RELEASE; fi
+  if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration || "$ACTION" == complete-postmigration ]]; then session_target=$RELEASE; fi
   case "$1" in activate|success|query-success) exact_target=$(current_target) || return 1;; esac
   HERMES_TRANSITION="$TRANSITION" HERMES_RELEASE="$session_target" HERMES_TARGET="$exact_target" HERMES_WORKER_REQUIRED="$WORKER_REQUIRED" HERMES_STATE="$STATE" HERMES_CURRENT="$CURRENT" node "$HERMES_SUPERVISOR_HELPER" request "$1"
 }
@@ -114,6 +115,11 @@ worker_paused() {
   marker=$(worker_pause_file "$1") || return 1
   [[ -f "$marker" ]]
 }
+reload_manager() {
+  if [[ "$ACTION" == complete-postmigration ]]; then
+    node --input-type=module -e 'const {systemctlCommand}=await import(process.argv[1]); if(!systemctlCommand(["daemon-reload"]).ok) process.exit(1)' "file://$CONTROL_DIR/hermes-writer-control.mjs"
+  else systemctl daemon-reload; fi
+}
 install_worker_guard() {
   local marker temporary="$WORKER_GUARD.next.$$"
   marker=$(worker_pause_file "$1") || return 1
@@ -123,7 +129,7 @@ install_worker_guard() {
   printf '[Unit]\nConditionPathExists=!%s\n' "$marker" > "$temporary" || return 1
   chmod 644 -- "$temporary" || return 1
   mv -Tf -- "$temporary" "$WORKER_GUARD" || return 1
-  systemctl daemon-reload || return 1
+  reload_manager || return 1
 }
 pause_worker() {
   local marker temporary
@@ -206,14 +212,41 @@ restart_services() {
   managed activate || return 1
   return 0
 }
+completion_health() {
+  local required=$1 expected=$2 body remaining limit
+  local deadline=$((SECONDS + 1000))
+  # A time window, not an attempt count: fast connection/identity failures must
+  # leave cold parser/OCR its full startup opportunity. Each leaf uses only the
+  # remaining window, so no final 30s probe runs past the readiness deadline.
+  while (( (remaining = deadline - SECONDS) > 0 )); do
+    limit=$((remaining < 5 ? remaining : 5))
+    body=$(timeout --signal=KILL "${limit}s" curl -fsS --max-time "$limit" http://127.0.0.1:18090/api/health 2>/dev/null || true)
+    if [[ "$body" == *'"status":"ok"'* ]]; then
+      remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+      limit=$((remaining < 15 ? remaining : 15))
+      if [[ "$required" == 0 ]] || timeout --signal=KILL "${limit}s" systemctl is-active --quiet aistudy-worker.service; then
+        [[ -f "$STATE/runtime-identity.mjs" ]] || { echo 'Runtime identity inspector is missing.' >&2; return 1; }
+        remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+        limit=$((remaining < 30 ? remaining : 30))
+        if timeout --signal=KILL "${limit}s" node "$STATE/runtime-identity.mjs" "$CONFIG" "$expected" "$required"; then return 0; fi
+      fi
+    fi
+    remaining=$((deadline - SECONDS)); ((remaining > 0)) || break
+    limit=$((remaining < 2 ? remaining : 2))
+    sleep "$limit"
+  done
+  echo 'Completion readiness deadline expired; no automatic completion reentry.' >&2
+  return 1
+}
 health() {
   local required=$1 expected=$2 profile=${3:-}
-  local body attempt
+  if [[ "$ACTION" == complete-postmigration ]]; then completion_health "$required" "$expected"; return; fi
+  local body attempt attempts=120
   local -a identity_args=("$CONFIG" "$expected" "$required")
   if [[ -n "$profile" ]]; then identity_args+=("$profile"); fi
   # Cold parser imports + OCR probe can exceed two minutes. Readiness, not
   # systemd active, controls success; a bounded retry also covers startup backoff.
-  for attempt in {1..120}; do
+  for ((attempt=1; attempt<=attempts; attempt++)); do
     body=$(curl -fsS --max-time 5 http://127.0.0.1:18090/api/health 2>/dev/null || true)
     if [[ "$body" == *'"status":"ok"'* ]]; then
       if [[ "$required" == 1 ]] && ! systemctl is-active --quiet aistudy-worker.service; then return 1; fi
@@ -227,7 +260,12 @@ health() {
 }
 finish() {
   local result=$1 rollback_result=0 restored_required can_restore=1
-  trap - EXIT INT TERM
+  trap - EXIT
+  # Result/cancellation is fixed. Drain every launched child before any finish
+  # effect, including a Node whose $! assignment has not run. Repeated signals
+  # cannot interrupt this wait; an UNKNOWN owner must stay owned, not be killed.
+  trap '' INT TERM HUP
+  wait || true
   if [[ "$result" != 0 && "$SUCCESS_REQUESTED" == 1 ]]; then
     # Lost ACK is not failed commit. One authenticated read; never replay success/start.
     if managed query-success; then
@@ -240,7 +278,7 @@ finish() {
       echo "Commit fenced or unprovable; forward repair required (health is not commit proof)." >&2
     fi
   fi
-  if [[ "$ACTION" != status && "$ACTION" != logs && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ) ]]; then
+  if [[ "$ACTION" != status && "$ACTION" != logs && ( "$ACTION" != repair-pre-migration || "$REPAIR_ADOPTED" == 1 ) && "$result" != 0 && ( "$FORWARD_ONLY" == 1 || -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ) ]]; then
     echo 'FORWARD FIX REQUIRED: unknown/partial migration or activation; preserve pointer/configuration/database and stop both writers.' >&2
     managed refence || echo 'UNCONFIRMED: refence persistence failed; old writers must not be restored.' >&2
     managed stop || echo 'UNCONFIRMED: one or both writers may still exist.' >&2
@@ -293,11 +331,36 @@ finish() {
   [[ -z "$CONTROL_ROOT" ]] || rm -rf -- "$CONTROL_ROOT"
   exit "$result"
 }
+# Cancellation must not let Bash finish race the Python owner's fixed restore.
+# Node records group signals while its owned Python child drains; Bash waits for
+# that boundary before refence/stop/quiescence or any next deployment step.
+COMPLETION_NODE_PID=''
+completion_cancel() {
+  local result=$1
+  trap '' INT TERM HUP
+  if [[ -n "$COMPLETION_NODE_PID" ]]; then
+    wait "$COMPLETION_NODE_PID" || true
+  else
+    # The child can run before the shell publishes $!. Bare wait also covers
+    # that launched-but-unpublished child; never enter finish ahead of it.
+    wait || true
+  fi
+  exit "$result"
+}
+completion_node() {
+  local result=0
+  node "$@" &
+  COMPLETION_NODE_PID=$!
+  wait "$COMPLETION_NODE_PID" || result=$?
+  COMPLETION_NODE_PID=''
+  return "$result"
+}
 trap 'finish $?' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'completion_cancel 130' INT
+trap 'completion_cancel 143' TERM
+trap 'completion_cancel 129' HUP
 
-case "$ACTION" in deploy|restart|rollback) ;;
+case "$ACTION" in deploy|restart|rollback|repair-pre-migration|complete-postmigration) ;;
   status)
     if [[ -e "$FORWARD_GUARD" || -e "$STATE/writers-fenced" ]]; then echo 'FORWARD FIX REQUIRED: active migration guard; writer state must be inspected.' >&2; exit 3; fi
     target=$(current_target); validate_target "$target"
@@ -318,10 +381,60 @@ case "$ACTION" in deploy|restart|rollback) ;;
   *) fail 'Unknown remote deployment action.' ;;
 esac
 
+if [[ "$ACTION" == complete-postmigration ]]; then
+  # Independent supervisor admission and exclusive claim have already completed.
+  # Reuse the same extracted signed e5 payload and incident, NEVER migrate/backup.
+  RELEASE=$ARCHIVE
+  ARCHIVE=''
+  TRANSITION="$STATE/releases/20261110T081511-846613"
+  CONTROL_DIR="$(dirname -- "$HERMES_SUPERVISOR_HELPER")"
+  FORWARD_ONLY=1
+  WORKER_REQUIRED=$(cat "$TRANSITION/worker-required")
+  [[ "$WORKER_REQUIRED" == 1 ]] || fail 'Incident requires both writers.'
+  # This helper remains payload-owned e5 bytes already verified in full.
+  WORKER_HELPER="$RELEASE/infra/deploy/provision-worker.sh"
+  # New reviewed control helper owns parser deadline AND escaped descendants.
+  completion_node "$CONTROL_DIR/hermes-db.mjs" parser-owned "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
+  managed prepare || fail 'Completion trusted boundary preparation failed.'
+  printf '%s\n' "$COMMIT" > "$RELEASE/.release-sha"
+  # Run the verified immutable e5 Python helper without rewriting its bytes.
+  # Its internal reload receives the same 60s leaf budget, and the whole helper
+  # tree stays bounded: leaves300 (includes failure restore reload60) + IO180.
+  completion_node --input-type=module -e 'const {provisionCompletion,ownedNodeCLI}=await import(process.argv[1]); await ownedNodeCLI(()=>provisionCompletion(process.argv[2],process.argv.slice(3)))' "file://$CONTROL_DIR/hermes-writer-control.mjs" "$RELEASE/infra/deploy/provision-worker.py" --app-dir "$CURRENT" --release-dir "$RELEASE" --legacy-app-dir "$DIR" \
+    --config-file "$CONFIG" --state-dir "$TRANSITION" --systemd-dir "$SYSTEMD" --config-dir "$WORKER_CONFIG" \
+    --parser-python "$DIR/.local/docling-venv/bin/python" --writer-state-dir "$STATE"
+  mkdir -p -- "$(dirname -- "$WEB_OVERRIDE")"
+  printf '[Service]\nWorkingDirectory=%s\nEnvironmentFile=%s\nExecStart=\nExecStart=/usr/bin/python3 -I -S -B %s/writer-controls/hermes-trusted-loader.py exec %s aistudy-web.service\n' \
+    "$CURRENT" "$CONFIG" "$STATE" "$STATE" > "$WEB_OVERRIDE"
+  chmod 644 -- "$WEB_OVERRIDE"
+  reload_manager
+  cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
+  mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
+  atomic_link "$RELEASE" "$CURRENT"
+  restart_services "$WORKER_REQUIRED" "$RELEASE"
+  health "$WORKER_REQUIRED" "$RELEASE"
+  printf '%s\n' "$RELEASE" > "$TRANSITION/to-target"
+  touch "$TRANSITION/succeeded"
+  atomic_link "$TRANSITION" "$STATE/last-transition"
+  SUCCESS_REQUESTED=1
+  managed success
+  SUCCESS_REQUESTED=0
+  FORWARD_ONLY=0
+  exit
+fi
+
 mkdir -p -- "$STATE"
 chmod 700 -- "$STATE"
 # The managed supervisor holds deploy.lock through owner exit and crash fencing.
-[[ ! -e "$FORWARD_GUARD" && ! -e "$STATE/writers-fenced" ]] || { echo 'FORWARD FIX REQUIRED: active migration guard.' >&2; exit 3; }
+if [[ "$ACTION" == repair-pre-migration ]]; then
+  # The supervisor already checked the exact incident under deploy.lock. No
+  # deletion/replacement of its guards or activation marker is authorized here.
+  [[ -e "$FORWARD_GUARD" && -e "$STATE/writers-fenced" && -L "$CURRENT" ]] || fail 'Repair requires the retained fenced incident.'
+  [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ && -n "$CONTROL_ARCHIVE" ]] || fail 'Repair requires same-commit attested artifact and controls.'
+  FORWARD_ONLY=1
+else
+  [[ ! -e "$FORWARD_GUARD" && ! -e "$STATE/writers-fenced" ]] || { echo 'FORWARD FIX REQUIRED: active migration guard.' >&2; exit 3; }
+fi
 if [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]]; then
   validate_target "$DIR"
   atomic_link "$DIR" "$CURRENT"
@@ -440,6 +553,10 @@ else
   [[ -n "$(find apps/web/.next/standalone/apps/web/.next/static -type f -print -quit)" ]] || fail 'Standalone static assets are missing.'
   cp -- "$(dirname -- "$HERMES_SUPERVISOR_HELPER")/hermes-health.mjs" "$STATE/runtime-identity.mjs.next"
   mv -Tf -- "$STATE/runtime-identity.mjs.next" "$STATE/runtime-identity.mjs"
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    managed adopt-repair || fail 'One-shot repair adoption failed; no automatic retry is permitted.'
+    REPAIR_ADOPTED=1
+  fi
   node "$CONTROL_DIR/hermes-db.mjs" parser "$CONFIG" "$RELEASE" "$DIR/.local/docling-venv/bin/python" "$DIR"
   BACKUP="$BACKUPS/$(basename -- "$RELEASE").dump"
   if [[ -n "$ARTIFACT_DIGEST" ]]; then
@@ -473,6 +590,21 @@ PREFLIGHT
   stop_worker
   node "$CONTROL_DIR/hermes-db.mjs" quiescence "$CONFIG" "$RELEASE" > "$TRANSITION/quiescence.json"
   node "$CONTROL_DIR/hermes-db.mjs" plan "$CONFIG" "$RELEASE" > "$TRANSITION/migration-plan.json"
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    node --input-type=module - "$CONTROL_DIR/hermes-writer-control.mjs" "$TRANSITION/migration-plan.json" "$RELEASE/packages/database/src/migrations" <<'REPAIRPLAN'
+import { readFileSync, readdirSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [module, plan, directory] = process.argv.slice(2);
+const { validateRepairPlan } = await import(pathToFileURL(module));
+validateRepairPlan(JSON.parse(readFileSync(plan)), readdirSync(directory).filter(id => /^\d{4}_.+\.sql$/.test(id)).sort());
+REPAIRPLAN
+    node --input-type=module - "$CONTROL_DIR/hermes-writer-control.mjs" "$CONFIG" "$RELEASE" <<'REPAIRLEDGER'
+import { pathToFileURL } from 'node:url';
+const [module, config, release] = process.argv.slice(2);
+const { verifyRepairLedger } = await import(pathToFileURL(module));
+verifyRepairLedger(config, release);
+REPAIRLEDGER
+  fi
   if node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1])); process.exit(p.readOnly===true && p.registryReadyWithoutWrites===true && Array.isArray(p.pending) && p.pending.length===0 ? 0 : 1)' "$TRANSITION/migration-plan.json"; then
     echo 'Registry ready and no pending migrations proven; write runner skipped.'
   else

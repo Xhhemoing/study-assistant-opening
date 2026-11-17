@@ -327,6 +327,52 @@ describe("private identity consumer", () => {
   });
 });
 
+describe("real evaluator arithmetic and corrupted-reference matrix", () => {
+  const arithmetic = [
+    { prompt: "2+2", correct: "4", wrong: "5" },
+    { prompt: "7-3", correct: "4", wrong: "3" },
+    { prompt: "2-5", correct: "-3", wrong: "3" },
+    { prompt: "0+0", correct: "0", wrong: "1" },
+    { prompt: "10/2", correct: "5", wrong: "2" },
+    { prompt: "1/4+1/4", correct: "1/2", wrong: "1/4" },
+    { prompt: "1/6+1/6", correct: "1/3", wrong: "1/6" },
+    { prompt: "2+3+4", correct: "9", wrong: "8" },
+  ];
+  for (const { prompt, correct, wrong } of arithmetic) {
+    it.each([
+      { name: "valid key/correct submission", key: correct, answer: correct, decision: "correct" },
+      { name: "valid key/wrong submission", key: correct, answer: wrong, decision: "incorrect" },
+      { name: "wrong key/correct submission", key: wrong, answer: correct, decision: null },
+      { name: "wrong key/same wrong submission", key: wrong, answer: wrong, decision: null },
+    ])(`${prompt}: $name`, async ({ key: reference, answer, decision }) => {
+      const f = setup({ blocks: [block({ text: prompt, interaction: numeric }), key(reference)] });
+      const result = await f.run(answer);
+      if (decision === null) {
+        expect(result).toBeNull();
+        expect(f.tx.mock.calls.some(([parts]) => parts.join(" ").includes("SELECT o.id"))).toBe(false);
+      } else {
+        expect(result).toEqual({ evaluatorVersion: "teaching-key-exact-v1", specVersion: "teaching-key-v1",
+          outcome: decision, decision, reasonCodes: [decision === "correct" ? "teaching_key_match" : "teaching_key_mismatch"], priorFeedback: false });
+      }
+      expect(f.tx.mock.calls.map(([parts]) => parts.join(" ")).join(" ")).not.toMatch(/\b(?:INSERT|UPDATE|DELETE)\b/i);
+    });
+  }
+});
+
+describe("real evaluator prior-feedback course boundary", () => {
+  it.each([id(30), id(31), id(32)])("binds history to the attempt course %s", async courseId => {
+    const f = setup();
+    expect(await f.evaluate("2", { ...attempt, course_id: courseId })).toMatchObject({ decision: "correct", priorFeedback: false });
+    const call = f.tx.mock.calls.find(([parts]) => parts.join(" ").includes("SELECT o.id"))!;
+    const query = call[0].join("?");
+    expect(query).toMatch(/o\.workspace_id=\?/);
+    expect(query).toMatch(/o\.owner_user_id=\?/);
+    expect(query).toMatch(/o\.course_id=\?/);
+    expect(call.slice(1, 4)).toEqual([scope.workspaceId, scope.ownerUserId, courseId]);
+    expect(call.slice(1)).not.toContain(attempt.course_id);
+  });
+});
+
 describe("teaching question text", () => {
   it.each(["text", "markdown", "prompt", "question", "answer", "solution"])("extracts %s as body", field => {
     expect(teachingQuestionBody({ [field]: " 1+1 " })).toBe(" 1+1 ");

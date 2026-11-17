@@ -625,11 +625,114 @@ class RawManagerTests(unittest.TestCase):
         self.single = '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B /controls/hermes-trusted-loader.py exec /state aistudy-web.service ; flags=no-setuid ; }'
         self.values.update(Id=self.unit, NeedDaemonReload='no', ExecStartEx=self.single)
 
-    def properties(self, extra=''):
+    def properties(self, extra='', proof='{"type":"a(sasbttttuii)","data":[]}', mode='properties'):
         raw = '\n'.join(key + '=' + value for key, value in self.values.items()) + extra
-        response = type('Response', (), {'stdout': raw})()
-        with patch.object(peer.subprocess, 'run', return_value=response):
-            return peer.SystemdManager()._properties(self.unit)
+        self.commands = []
+        def run(command, **options):
+            self.commands.append(command)
+            self.assertEqual(options, dict(check=True, capture_output=True, text=True, timeout=5))
+            path = '/org/freedesktop/systemd1/unit/' + self.unit.replace('-', '_2d').replace('.', '_2e')
+            if command[0] == '/usr/bin/systemctl':
+                stdout = raw
+            elif command[3] == 'call':
+                stdout = json.dumps({'type': 'o', 'data': [path]})
+            else:
+                self.assertEqual(command[:7], ['/usr/bin/busctl', '--system', '--json=short', 'get-property',
+                    'org.freedesktop.systemd1', path, 'org.freedesktop.systemd1.Service'])
+                if isinstance(proof, Exception):
+                    raise proof
+                stdout = proof
+            return subprocess.CompletedProcess(command, 0, stdout, '')
+        with patch.object(peer.subprocess, 'run', side_effect=run):
+            manager = peer.SystemdManager()
+            if mode == 'snapshot':
+                return manager.snapshot(42, self.unit)
+            if mode == 'configuration':
+                return manager.configuration(self.unit)
+            return manager._properties(self.unit)
+
+    def test_typed_empty_hooks_for_both_units_and_shared_configuration_snapshot(self):
+        hooks = ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')
+        for unit in peer.UNITS:
+            self.unit = unit
+            self.values['Id'] = unit
+            complete = dict(self.values)
+            for missing in ((hooks[0],), hooks):
+                for mode in ('properties', 'configuration', 'snapshot'):
+                    with self.subTest(unit=unit, missing=missing, mode=mode):
+                        self.values = {key: value for key, value in complete.items() if key not in missing}
+                        observed = self.properties(mode=mode)
+                        expected = {key: value for key, value in complete.items()
+                                    if mode != 'configuration' or key != 'ControlGroup'}
+                        self.assertEqual(observed, expected)
+                        self.assertEqual([cmd[-1] for cmd in self.commands if 'get-property' in cmd], list(missing))
+            self.values = complete
+            self.properties()
+            self.assertEqual(len(self.commands), 1, 'complete show must not use D-Bus fallback')
+
+    def test_omitted_hook_requires_exact_complete_typed_array_and_successful_api(self):
+        del self.values['ExecStartPre']
+        for proof in ('{}', '[]', 'null', '{', '{"type":"as","data":[]}',
+                      '{"type":"a(sasasttttuii)","data":[]}',
+                      '{"type":"a(sasbttttuii)","data":null}',
+                      '{"type":"a(sasbttttuii)","data":false}',
+                      '{"type":"a(sasbttttuii)","data":{}}',
+                      '{"type":"a(sasbttttuii)","data":[[]]}',
+                      '{"type":"a(sasbttttuii)","data":[["/evil",["/evil"],false,0,0,0,0,0,0,0]]}',
+                      '{"type":"a(sasbttttuii)","data":[],"unknown":0}',
+                      '{"type":"as","type":"a(sasbttttuii)","data":[]}',
+                      '{"type":"a(sasbttttuii)","data":[1],"data":[]}',
+                      '{"type":"a(sasbttttuii)","data":[]} trailing',
+                      subprocess.CalledProcessError(1, 'busctl', stderr='UnknownProperty'),
+                      subprocess.TimeoutExpired('busctl', 5)):
+            with self.subTest(proof=proof), self.assertRaises((PermissionError, ValueError, subprocess.SubprocessError)):
+                self.properties(proof=proof)
+
+    def test_each_original_hook_rejects_complete_nonempty_array(self):
+        original = dict(self.values)
+        for unit in peer.UNITS:
+            for hook in ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload'):
+                self.unit = unit
+                self.values = {key: value for key, value in original.items() if key != hook}
+                self.values['Id'] = unit
+                proof = json.dumps({'type': 'a(sasbttttuii)',
+                                    'data': [['/evil', ['/evil'], False, 0, 0, 0, 0, 0, 0, 0]]})
+                with self.subTest(unit=unit, hook=hook), self.assertRaises(PermissionError):
+                    self.properties(proof=proof)
+
+    def test_worker_sandbox_and_credential_only_capabilities_remain_required(self):
+        wrapper = '/controls/hermes-trusted-loader.py'
+        unit = peer.UNITS[1]
+        values = {**self.values, 'FragmentPath': '/etc/systemd/system/' + unit,
+                  'User': 'aistudy-worker', 'Group': 'aistudy-worker',
+                  'NoNewPrivileges': 'yes', 'ProtectSystem': 'strict', 'PrivateTmp': 'yes',
+                  'CapabilityBoundingSet': 'cap_setuid cap_setgid',
+                  'ExecStartEx': '{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I -S -B '
+                    + wrapper + ' exec /state ' + unit + ' ; flags=no-setuid ; }'}
+        plan = {'unit': unit, 'systemd': '/etc/systemd/system', 'state': '/state', 'effective': values}
+        broker = type('PlanOnly', (), {'wrapper': wrapper})()
+        peer.Broker.validate_plan(broker, plan)
+        for key, bad in (('NoNewPrivileges', 'no'), ('CapabilityBoundingSet', ''),
+                         ('CapabilityBoundingSet', 'cap_setuid cap_setgid cap_sys_admin'),
+                         ('CapabilityBoundingSet', 'cap_setuid'), ('User', 'root'), ('Group', 'root'),
+                         ('ProtectSystem', 'no'), ('PrivateTmp', 'no'),
+                         ('ExecStartEx', values['ExecStartEx'].replace('no-setuid', 'privileged'))):
+            candidate = {**plan, 'effective': {**values, key: bad}}
+            with self.subTest(key=key, bad=bad), self.assertRaises(PermissionError):
+                peer.Broker.validate_plan(broker, candidate)
+
+    def test_other_missing_or_unknown_keys_never_use_hook_fallback(self):
+        original = dict(self.values)
+        hooks = ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')
+        for missing in set(original) - set(hooks):
+            self.values = {key: value for key, value in original.items() if key not in (*hooks, missing)}
+            with self.subTest(missing=missing), self.assertRaises(PermissionError):
+                self.properties()
+            self.assertEqual(len(self.commands), 1)
+        self.values = {key: value for key, value in original.items() if key not in hooks}
+        with self.assertRaises(PermissionError):
+            self.properties('\nUnknown=')
+        self.assertEqual(len(self.commands), 1)
 
     def test_only_environment_files_may_repeat_and_preserve_order(self):
         self.values['EnvironmentFiles'] = '/opt/aistudy/.env.production (ignore_errors=no)'
@@ -671,7 +774,7 @@ class RawManagerTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.properties()
         self.values['NeedDaemonReload'] = 'no'
-        del self.values['ExecStartPre']
+        del self.values['MemoryHigh']
         with self.assertRaises(PermissionError):
             self.properties()
 

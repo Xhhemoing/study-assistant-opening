@@ -1,4 +1,5 @@
 import { rankPedagogy } from "../../../../tests/fixtures/opening/teaching/rank-pedagogy";
+import { compilerFlagMatrix } from "../../../../tests/fixtures/opening/teaching/compiler-flag-matrix";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivitySpecPublishInput, SourceChunk, TeachingLearnerFocus, TeachingPartialHints } from "@aistudy/contracts";
 import { OpeningBudgetError, type OpeningJobRecord } from "@aistudy/database";
@@ -175,6 +176,47 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+
+describe("compiler flag matrix through real worker dependency factory", () => {
+  it.each(compilerFlagMatrix)("matches web semantics: $name", ({ opening, legacy, enabled }) => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", opening);
+    vi.stubEnv("TEACHING_COMPILER_ENABLED", legacy);
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, shared());
+    expect(deps.enabled).toBe(enabled);
+    for (const callback of [deps.callModel, deps.buildProviderInput, deps.buildPublishInput]) {
+      expect(typeof callback).toBe(enabled ? "function" : "undefined");
+    }
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("independent compiler/validation configuration at real worker factory", () => {
+  const validationCases = [
+    { name: "validation default off", opening: undefined, legacy: undefined, enabled: false },
+    { name: "explicit validation", opening: "1", legacy: undefined, enabled: true },
+    { name: "case-normalized validation", opening: "TrUe", legacy: undefined, enabled: true },
+    { name: "legacy validation", opening: undefined, legacy: "yes", enabled: true },
+    { name: "empty opening blocks legacy", opening: "", legacy: "1", enabled: false },
+    { name: "validation does not trim", opening: " true ", legacy: "1", enabled: false },
+    { name: "opening validation off overrides legacy", opening: "0", legacy: "1", enabled: false },
+    { name: "compiler does not grant validation", opening: "invalid", legacy: "true", enabled: false },
+  ];
+  for (const compiler of [false, true]) it.each(validationCases)(`compiler=${compiler}: $name`, ({ opening, legacy, enabled }) => {
+    vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", compiler ? "1" : "0");
+    vi.stubEnv("TEACHING_COMPILER_ENABLED", undefined);
+    vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", opening);
+    vi.stubEnv("TEACHING_VALIDATION_ENABLED", legacy);
+    const dependencies = shared();
+    const deps = createCompileTeachingUnitWorkerDeps(jobStateSql, dependencies);
+    expect(deps.enabled).toBe(compiler);
+    expect(typeof deps.callModel).toBe(compiler ? "function" : "undefined");
+    expect(typeof deps.verifyAfterPublish).toBe(enabled ? "function" : "undefined");
+    expect(dependencies.budget.reserve).not.toHaveBeenCalled();
+    expect(model.complete).not.toHaveBeenCalled();
+    expect(content.publishCompiledActivity).not.toHaveBeenCalled();
+  });
 });
 
 const rankHints: TeachingPartialHints = {

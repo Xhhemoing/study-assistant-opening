@@ -3,6 +3,9 @@
 
 The production adapter is mandatory in the CLI. Tests inject adapters through
 Python objects only; there is no environment variable or CLI fake-manager mode.
+Production systemd 249 may omit empty hooks even with show --all. Only those
+four omissions receive typed D-Bus empty-array proof, shared by admission and
+read-only repair-check; this changes reviewed broker bytes, not writer/DAC policy.
 """
 import ctypes
 import errno
@@ -78,15 +81,38 @@ class SystemdManager:
                 'MemoryMax', 'MemoryHigh')
         result = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=' + ','.join(keys)],
                                 check=True, capture_output=True, text=True, timeout=5)
+        hooks = ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')
         values = {}
         for line in result.stdout.splitlines():
             key, separator, value = line.partition('=')
-            if not separator or not key or (key in values and key != 'EnvironmentFiles'):
+            if not separator or key not in keys or (key in values and key != 'EnvironmentFiles'):
                 raise PermissionError('Malformed or duplicate manager property')
             if key == 'EnvironmentFiles' and key in values:
                 values[key] += ' ' + value
             else:
                 values[key] = value
+        if set(keys) - set(values) - set(hooks):
+            raise PermissionError('Incomplete manager configuration')
+        def unique_object(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise PermissionError('Duplicate typed manager property')
+                obj[key] = value
+            return obj
+        for hook in hooks:
+            if hook in values:
+                continue
+            path = '/org/freedesktop/systemd1/unit/' + unit.replace('-', '_2d').replace('.', '_2e')
+            proof = subprocess.run(['/usr/bin/busctl', '--system', '--json=short', 'get-property',
+                                    'org.freedesktop.systemd1', path,
+                                    'org.freedesktop.systemd1.Service', hook],
+                                   check=True, capture_output=True, text=True, timeout=5)
+            # v249 dbus-execute.h BUS_EXEC_COMMAND_LIST_VTABLE and busctl.c
+            # get_property/json_transform_variant: original (not Ex) signature.
+            if json.loads(proof.stdout, object_pairs_hook=unique_object) != {'type': 'a(sasbttttuii)', 'data': []}:
+                raise PermissionError('Unproved empty executable hook')
+            values[hook] = ''
         # Count and parse ORIGINAL bytes before normalization. A second record,
         # path/argv/flags field or unknown tail must never disappear into .*. The
         # optional runtime fields are synthetic-format tested, not manager proof.
@@ -102,7 +128,7 @@ class SystemdManager:
         values['ExecStartEx'] = '{ path=' + launch[1].strip() + ' ; argv[]=' + launch[2] + ' ; flags=' + launch[3].strip() + ' ; }'
         if set(values) != set(keys) or values['Id'] != unit or values['NeedDaemonReload'] != 'no':
             raise PermissionError('Incomplete or stale manager configuration')
-        if any(values[key] for key in ('ExecStartPre', 'ExecStartPost', 'ExecCondition', 'ExecReload')):
+        if any(values[key] for key in hooks):
             raise PermissionError('Unreviewed executable hook')
         return values
 

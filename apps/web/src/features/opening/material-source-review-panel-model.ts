@@ -1,5 +1,5 @@
-import { materialCourseFullPackageSchema, type MaterialCourseFullPackage } from "../../../../../packages/domain/src/opening/material-course-package-adapter";
-import { createMaterialSourceLocator, type MaterialSourceLocatorRequest, type MaterialSourceLocatorResult } from "../../../../../packages/domain/src/opening/material-source-locator";
+import { materialCourseFullPackageSchema, type MaterialCourseFullPackage } from "@aistudy/domain/material-course-package-adapter";
+import { createMaterialSourceLocator, type MaterialSourceLocatorRequest, type MaterialSourceLocatorResult } from "@aistudy/domain/material-source-locator";
 
 /** Current raw metadata input, NOT an adapter candidate or its private postAttemptMetadata. */
 export type MaterialSourceReviewInput = MaterialCourseFullPackage;
