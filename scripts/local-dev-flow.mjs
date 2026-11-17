@@ -36,7 +36,7 @@ function safeRelative(value) {
   if (!string(value)) return false;
   return allowedPathKey(value).split("/").every(segment =>
     segment && segment !== "." && segment !== ".." && segment !== ".git"
-    && !/[<>:"|?*\u0000-\u001f]/.test(segment) && !/[. ]$/.test(segment)
+    && ![...segment].some(char => char.charCodeAt(0) < 0x20 || '<>:"|?*'.includes(char)) && !/[. ]$/.test(segment)
     && !/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/.test(segment));
 }
 
@@ -241,18 +241,20 @@ async function requireUnused(file) {
 async function replaceOwnedCard(file, expectedSource, contents) {
   const temporary = file + "." + randomUUID() + ".tmp";
   const updated = JSON.stringify(contents, null, 2) + "\n";
+  let result = null;
+  let completed = false;
   try {
     await writeFile(temporary, updated, { encoding: "utf8", flag: "wx" });
-    if (await readFile(file, "utf8") !== expectedSource) return null;
-    await rename(temporary, file);
-    return updated;
-  } finally {
-    try {
-      await unlink(temporary);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+    if (await readFile(file, "utf8") === expectedSource) {
+      await rename(temporary, file);
+      result = updated;
     }
+    completed = true;
+  } finally {
+    if (!completed) await unlink(temporary).catch(() => {});
   }
+  await unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; });
+  return result;
 }
 
 function changedActiveCard(id, phase, workerResult) {
@@ -404,11 +406,12 @@ export async function runLocalFlow({
   } finally {
     if (lock) {
       try {
-        if (lock.written) {
-          if (await readFile(lock.ownerFile, "utf8") !== lock.source) throw new Error("Lock owner record changed");
-          await unlink(lock.ownerFile);
+        if (lock.written && await readFile(lock.ownerFile, "utf8") !== lock.source) {
+          report.errors.push({ code: "lock_cleanup_failed", message: "Lock owner record changed" });
+        } else {
+          if (lock.written) await unlink(lock.ownerFile);
+          await rmdir(lock.dir);
         }
-        await rmdir(lock.dir);
       } catch (error) {
         report.errors.push({ code: "lock_cleanup_failed", message: errorMessage(error) });
       }
