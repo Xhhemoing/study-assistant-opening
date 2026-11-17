@@ -22,7 +22,7 @@ export async function readOpeningAttemptGradingUsesVision(sql: Sql, scope: Scope
     WHERE a.id=${attemptId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}`;
   if (!item) throw learningError("NOT_FOUND", "找不到这次作答的原题");
   try {
-    const teaching = await readTeachingQuestionForGrading(sql as unknown as TransactionSql, scope, item);
+    const teaching = await readTeachingQuestionForGrading(sql as unknown as TransactionSql, scope, item, { readOnly: true });
     const versions = item.attempt_source_versions as Record<string, number>;
     const refs = teaching?.sourceRefs ?? (item.source_id ? [{ sourceId: String(item.source_id),
       version: versions?.[String(item.source_id)], chunkId: item.chunk_id == null ? null : String(item.chunk_id),

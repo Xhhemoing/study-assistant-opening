@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { repairDecodedLatexInJson } from "@aistudy/ai";
 import { courseSourcePurposeAllows, teachingHintResponseSchema, teachingPartialHintsSchema, type CourseSourcePurpose, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";
 import { generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
 
 type Question = {
@@ -30,6 +31,7 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=${scope.ownerUserId}
     WHERE a.id=${activityId} AND a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} FOR SHARE OF a`;
   if (!activity) throw learningError("NOT_FOUND", "teaching activity not found");
+  await assertOpeningCourseExamSourceCurrent(tx, scope, { id: activityId, clientKey: String(activity.client_key) }, { readOnly });
   if (Number(activity.content_version) !== contentVersion) throw learningError("CONFLICT", "teaching content changed; the attempt belongs to an earlier version");
   const admitted = await admitLearningSources(tx, scope, activity.source_ids as string[], { recordVersions: !readOnly });
   const currentVersions = new Map(admitted.map(source => [String(source.id), Number(source.version)]));

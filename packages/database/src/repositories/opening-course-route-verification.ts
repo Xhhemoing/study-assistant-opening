@@ -5,7 +5,7 @@ import { assertLearningGoalAction } from "./opening-learning-goals";
 import { assertCourseRouteCourse,readCourseRequirements,readOpeningCourseRoute } from "./opening-course-route-read";
 import { readTeachingQuestionForGrading } from "./opening-teaching-question";
 
-async function read(db:TransactionSql,scope:Scope,courseId:string,activityId:string,exactVerificationEnabled?:boolean):Promise<CourseRouteVerificationRead>{
+async function read(db:TransactionSql,scope:Scope,courseId:string,activityId:string,exactVerificationEnabled?:boolean,readOnly=false):Promise<CourseRouteVerificationRead>{
   await assertCourseRouteCourse(db,scope,courseId);
   const [activity]=await db`SELECT content_version,goal_json FROM opening_teaching_activities WHERE id=${activityId} AND workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
@@ -23,13 +23,13 @@ async function read(db:TransactionSql,scope:Scope,courseId:string,activityId:str
   const route=await readOpeningCourseRoute(db,scope,courseId,activityId,exactVerificationEnabled),available=route.requirements.find(row=>row.requirement.id===requirement.id)?.sourcesAvailable===true
     &&context.requirementRevision===requirement.revision&&context.stableSkillId===requirement.stableSkillId&&context.requirementKey===requirement.requirementKey
     &&rows.length>0&&!!requirement.verification.rubric?.trim()&&Number(activity.content_version)>0;
-  const items=[];for(const row of rows){const reference=await readTeachingQuestionForGrading(db,scope,row);
+  const items=[];for(const row of rows){const reference=await readTeachingQuestionForGrading(db,scope,row,{readOnly});
     items.push({itemVersionId:String(row.id),prompt:String(row.stem_snapshot),...(reference?{referenceText:reference.referenceText}:{})});}
   return {courseId,activityId,contentVersion:Number(activity.content_version),requirementId:requirement.id,requirementRevision:requirement.revision,rubric:requirement.verification.rubric,
     items,available,reason:available?null:"请先保存判定标准、完成一份本要求的真实题目，并核对其材料是否仍可用。"};
 }
 export function createOpeningCourseRouteVerificationRepository(sql:Sql,options:{exactVerificationEnabled?:boolean}={}){return {
-  read:(scope:Scope,courseId:string,activityId:string)=>sql.begin("isolation level repeatable read read only",tx=>read(tx,scope,courseId,activityId,options.exactVerificationEnabled)),
+  read:(scope:Scope,courseId:string,activityId:string)=>sql.begin("isolation level repeatable read read only",tx=>read(tx,scope,courseId,activityId,options.exactVerificationEnabled,true)),
   async confirm(scope:Scope,courseId:string,raw:CourseRouteVerificationConfirm){
     const input=courseRouteVerificationConfirmSchema.parse(raw);
     return sql.begin(async tx=>{
@@ -54,7 +54,7 @@ export function createOpeningCourseRouteVerificationRepository(sql:Sql,options:{
       if(!current.available)throw learningError("CONFLICT",current.reason!);
       for(const id of input.itemVersionIds){const [item]=await tx`SELECT * FROM opening_learning_item_versions WHERE id=${id} AND workspace_id=${scope.workspaceId}
         AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND activity_id=${input.activityId}`;
-        if(!item||!(await readTeachingQuestionForGrading(tx,scope,item))?.referenceText.trim())throw learningError("VALIDATION","保存的题目缺少可核对的参考解答或判定标准。");}
+        if(!item||!(await readTeachingQuestionForGrading(tx,scope,item,{readOnly:false}))?.referenceText.trim())throw learningError("VALIDATION","保存的题目缺少可核对的参考解答或判定标准。");}
       const verification={kind:"rubric",status:"ready",exerciseKeys:keys,rubric:requirement.verification.rubric,missingReasons:[]};
       await tx`UPDATE course_requirements SET verification=${tx.json(verification)},revision=revision+1,approved_at=now(),updated_at=now()
         WHERE id=${requirement.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;

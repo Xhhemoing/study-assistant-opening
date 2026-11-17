@@ -153,4 +153,19 @@ describe("readStatus with 0111 explicit regrade", () => {
     const status = await createOpeningAiGradingJobRepository(sql).read(scope, { observationId: headId });
     expect(status).toMatchObject({ status: "needs_manual", jobId: null, retryable: false, autoGradeSkipped: null });
   });
+
+  it("forwards readOnly=true to readOpeningAiGradingContext during repeatable-read-only policy checks", async () => {
+    mocks.context.mockResolvedValue({
+      stem: "1+1=?",
+      observation: { answer: "2" },
+      referenceText: "2",
+      misconceptions: [],
+      workSourceMetadata: null,
+      referenceSourceMetadata: [],
+    });
+    const { sql } = makeDb({});
+    const status = await createOpeningAiGradingJobRepository(sql).read(scope, { observationId: headId }, {} as never);
+    expect(status).toMatchObject({ status: "needs_manual", retryable: true, autoGradeSkipped: null });
+    expect(mocks.context).toHaveBeenCalledWith(sql, scope, { observationId: headId }, { readOnly: true });
+  });
 });

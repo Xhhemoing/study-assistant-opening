@@ -3,10 +3,21 @@ import type { Sql } from "postgres";
 import { teachingHintResponseSchema } from "@aistudy/contracts";
 
 const exposure = vi.hoisted(() => ({ generate: vi.fn(), release: vi.fn() }));
+const examOrigin = vi.hoisted(() => ({
+  assertCurrent: vi.fn(),
+  impl: null as null | typeof import("./opening-course-exam-origin").assertOpeningCourseExamSourceCurrent,
+}));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), generateOpeningStudyExposure: exposure.generate, releaseOpeningStudyExposure: exposure.release }));
+vi.mock("./opening-course-exam-origin", async original => {
+  const actual = await original<typeof import("./opening-course-exam-origin")>();
+  examOrigin.impl = actual.assertOpeningCourseExamSourceCurrent;
+  examOrigin.assertCurrent.mockImplementation(actual.assertOpeningCourseExamSourceCurrent);
+  return { ...actual, assertOpeningCourseExamSourceCurrent: examOrigin.assertCurrent };
+});
 import { createOpeningTeachingHintRepository, readOpeningTeachingAnswerKey } from "./opening-teaching-hints";
 
 const id = "11111111-1111-4111-8111-111111111111", blockId = "22222222-2222-4222-8222-222222222222", answerId = "33333333-3333-4333-8333-333333333333";
+const chunkId = "44444444-4444-4444-8444-444444444444", requestId = "55555555-5555-4555-8555-555555555555";
 const scope = { workspaceId: id, ownerUserId: id };
 const hints = { direction: "检查线性约束。", concept: "秩是线性无关列的数量。", firstStep: "把第一列写作一个列向量。" };
 const now = "2026-10-21T00:00:00.000Z";
@@ -14,18 +25,57 @@ function database(options: {
   submitted?: boolean; version?: number; sourceVersion?: number; missing?: boolean; hints?: unknown; answer?: string | null;
   releasedRows?: Record<string, unknown>[]; courseId?: string | null; purpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
   memberships?: Array<{ asset_id: string; purpose: string | null }>; sourceIds?: string[]; sourceRefs?: Array<{ sourceId: string; version: number }>;
+  clientKey?: string; examOnlyOrigin?: boolean; examSourceCurrent?: boolean; examChunksCurrent?: boolean;
 } = {}) {
   const queries: string[] = [];
   const sourceIds = options.sourceIds ?? [id];
   const sourceRefs = options.sourceRefs ?? [{ sourceId: id, version: 1 }];
   const sql = ((strings: TemplateStringsArray, ..._values: unknown[]) => {
     const query = strings.join("?"); queries.push(query);
+    if (query.includes("FROM opening_exam_sprints")) {
+      if (!options.examOnlyOrigin) return Promise.resolve([]);
+      return Promise.resolve([{
+        course_id: id,
+        activity_id: id,
+        activity_course_id: id,
+        pack_snapshot: {
+          format: "course-exam-v1",
+          requests: [{
+            id: requestId,
+            input: { clientKey: "course-exam-req-1", sourceId: id, questionCount: 3 },
+            sourceVersion: 1,
+            sourceTitle: "期末模拟卷",
+            referenceMode: "exam-only",
+            privacyEpoch: 0,
+            createdAt: now,
+            status: "ready",
+            proposal: {
+              title: "线性代数模拟练习",
+              topics: [{ label: "矩阵秩", evidenceChunkIds: [chunkId] }],
+              questions: [1, 2, 3].map(index => ({
+                topic: "矩阵秩",
+                prompt: `第${index}题：计算二阶单位矩阵的秩并说明理由。`,
+                referenceAnswer: "两列线性无关，因此秩等于2。",
+                rubric: ["秩等于2"],
+                hints,
+                evidenceChunkIds: [chunkId],
+                estimatedMinutes: 5,
+              })),
+            },
+            activityId: id,
+            modelLabel: "fixture",
+          }],
+        },
+      }]);
+    }
+    if (query.includes("FROM courses c")) return Promise.resolve(options.examSourceCurrent === false ? [] : [{ id }]);
+    if (query.includes("FROM opening_source_chunks\n")) return Promise.resolve(options.examChunksCurrent === false ? [] : [{ id: chunkId }]);
     if (query.includes("FROM workspaces")) return Promise.resolve([{ id }]);
     if (query.includes("FROM opening_help_exposures")) return Promise.resolve(options.releasedRows ?? []);
     if (query.includes("FROM opening_learning_attempts")) return Promise.resolve(options.missing ? [] : [{ id, activity_id: id, course_id: id, session_id: id, item_version_id: id,
       submitted_at: options.submitted ? now : null, source_versions: Object.fromEntries(sourceIds.map(sid => [sid, 1])), create_intent: { teachingBlock: { blockId, contentVersion: 1 } } }]);
     if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{
-      content_version: options.version ?? 1, course_id: options.courseId === undefined ? id : options.courseId, source_ids: sourceIds,
+      client_key: options.clientKey ?? id, content_version: options.version ?? 1, course_id: options.courseId === undefined ? id : options.courseId, source_ids: sourceIds,
     }]);
     if (query.includes("FROM opening_sources")) return Promise.resolve(sourceIds.map(sid => ({ id: sid, version: options.sourceVersion ?? 1 })));
     if (query.includes("FROM course_asset_memberships")) return Promise.resolve(
@@ -43,6 +93,7 @@ function database(options: {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  if (examOrigin.impl) examOrigin.assertCurrent.mockImplementation(examOrigin.impl);
   exposure.generate.mockImplementation(async (_tx, _scope, input) => ({ id, ...input }));
   exposure.release.mockImplementation(async () => {
     const input = exposure.generate.mock.lastCall![2];
@@ -128,5 +179,35 @@ describe("teaching hint delivery", () => {
     await expect(createOpeningTeachingHintRepository(examOnly.sql).read(scope, { attemptId: id, level: 4 }))
       .resolves.toMatchObject({ text: "完整解答" });
     expect(examOnly.queries.some(query => query.includes("course_asset_memberships"))).toBe(false);
+  });
+  it("checks exam-only course-exam origin with forwarded readOnly and fails closed across all readers when unavailable", async () => {
+    const clientKey = `course-exam:${requestId}`;
+    const current = database({ submitted: true, sourceIds: [], sourceRefs: [], releasedRows: [releasedRow(1), releasedRow(4)], clientKey, examOnlyOrigin: true });
+    const repo = createOpeningTeachingHintRepository(current.sql);
+    for (const level of [1, 2, 3, 4] as const) {
+      await expect(repo.read(scope, { attemptId: id, level })).resolves.toMatchObject({ level });
+      expect(examOrigin.assertCurrent).toHaveBeenLastCalledWith(current.sql, scope, { id, clientKey }, { readOnly: false });
+    }
+    expect(current.queries).toContain("FOR SHARE OF c,w,m,s,v");
+    await expect(current.sql.begin(tx => readOpeningTeachingAnswerKey(tx, scope, id, blockId, id))).resolves.toMatchObject({ answer: "完整解答" });
+    expect(examOrigin.assertCurrent).toHaveBeenLastCalledWith(current.sql, scope, { id, clientKey }, { readOnly: false });
+
+    const readonly = database({ submitted: true, sourceIds: [], sourceRefs: [], releasedRows: [releasedRow(1), releasedRow(4)], clientKey, examOnlyOrigin: true });
+    await expect(createOpeningTeachingHintRepository(readonly.sql).readReleased(scope, { attemptId: id })).resolves.toHaveLength(2);
+    expect(examOrigin.assertCurrent).toHaveBeenLastCalledWith(readonly.sql, scope, { id, clientKey }, { readOnly: true });
+    expect(readonly.queries).not.toContain("FOR SHARE OF c,w,m,s,v");
+
+    for (const patch of [{ examSourceCurrent: false }, { examChunksCurrent: false }] as const) {
+      vi.clearAllMocks();
+      const broken = database({ submitted: true, sourceIds: [], sourceRefs: [], releasedRows: [releasedRow(1), releasedRow(4)], clientKey, examOnlyOrigin: true, ...patch });
+      const brokenRepo = createOpeningTeachingHintRepository(broken.sql);
+      for (const level of [1, 2, 3, 4] as const) {
+        await expect(brokenRepo.read(scope, { attemptId: id, level })).rejects.toMatchObject({ code: "CONFLICT" });
+      }
+      await expect(brokenRepo.readReleased(scope, { attemptId: id })).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(broken.sql.begin(tx => readOpeningTeachingAnswerKey(tx, scope, id, blockId, id))).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(exposure.generate).not.toHaveBeenCalled();
+      expect(exposure.release).not.toHaveBeenCalled();
+    }
   });
 });
