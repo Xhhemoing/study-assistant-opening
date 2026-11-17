@@ -27,7 +27,7 @@ export function courseSection(tab: CourseTab): CourseTab {
 
 export function readCourseTab(search: string, hash = ""): CourseTab {
   if (hash === "#course-learning-records") return "progress";
-  if (hash === "#course-assets" || hash === "#course-media") return "materials";
+  if (hash === "#course-assets" || hash === "#course-media" || hash === "#course-settings-heading") return "materials";
   if (hash === "#course-knowledge" || hash === "#course-units" || hash === "#course-learning-route") return "units";
   const params = new URLSearchParams(search);
   const section = params.get("section");

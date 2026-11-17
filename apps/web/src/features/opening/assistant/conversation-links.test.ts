@@ -10,6 +10,23 @@ describe("explicit object conversation links", () => {
   it.each(["https://example.com/opening/library", "//example.com/opening/library", "/api/opening/conversations", "/opening/settings", "/opening/assistant", "/opening/\\evil"])("does not carry identity into unsupported destinations %s", href => {
     expect(conversationObjectHref(href, id)).toBe(href);
   });
+  it("preserves conversation identity on course handout routes while rejecting incomplete or extra paths", () => {
+    const courseId = "22222222-2222-4222-8222-222222222222";
+    const activityId = "33333333-3333-4333-8333-333333333333";
+    const result = new URL(conversationObjectHref(`/opening/courses/${courseId}/handouts/${activityId}?view=read#section`, id), "https://study.invalid");
+    expect(result.pathname).toBe(`/opening/courses/${courseId}/handouts/${activityId}`);
+    expect(result.searchParams.get("view")).toBe("read");
+    expect(result.searchParams.get("conversation")).toBe(id);
+    expect(result.hash).toBe("#section");
+    for (const bad of [
+      `/opening/courses/${courseId}/handouts`,
+      `/opening/courses/${courseId}/handouts/not-a-uuid`,
+      `/opening/courses/${courseId}/handouts/${activityId}/extra`,
+      `/opening/courses/${courseId}/handouts/${activityId}/../study`,
+    ]) {
+      expect(conversationObjectHref(bad, id)).toBe(bad);
+    }
+  });
   it("does not invent an identity for a new photo task", () => {
     expect(conversationObjectHref("/opening/practice?sourceId=photo")).toBe("/opening/practice?sourceId=photo");
     expect(conversationObjectHref("/opening/practice?sourceId=photo", "invalid")).toBe("/opening/practice?sourceId=photo");

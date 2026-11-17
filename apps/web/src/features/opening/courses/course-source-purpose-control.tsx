@@ -23,12 +23,12 @@ export function CourseSourcePurposeSelect({ value, disabled, onChange }: {
 
 /** Keyed by course/source so an outstanding request cannot populate another course. */
 export function CourseSourcePurposeControl(props: {
-  courseId: string; sourceId: string; sourceName: string; client?: CourseSourcePurposeClient;
+  courseId: string; sourceId: string; sourceName: string; client?: CourseSourcePurposeClient; onChanged?: () => void;
 }) {
   return <PurposeControl key={`${props.courseId}:${props.sourceId}`} {...props} />;
 }
-function PurposeControl({ courseId, sourceId, sourceName, client }: {
-  courseId: string; sourceId: string; sourceName: string; client?: CourseSourcePurposeClient;
+function PurposeControl({ courseId, sourceId, sourceName, client, onChanged }: {
+  courseId: string; sourceId: string; sourceName: string; client?: CourseSourcePurposeClient; onChanged?: () => void;
 }) {
   const api = useRef(client ?? createCourseSourcePurposeClient()).current;
   const [current, setCurrent] = useState<CourseSourceMembership | null>(null);
@@ -58,7 +58,7 @@ function PurposeControl({ courseId, sourceId, sourceName, client }: {
     inFlight.current = true; setBusy(true); setError(""); setNotice("");
     try {
       const row = await api.update(courseId, current, draft);
-      if (active.current) { setCurrent(row); setEditing(false); setNotice("本课程用途已保存。"); }
+      if (active.current) { setCurrent(row); setEditing(false); setNotice("本课程用途已保存。"); onChanged?.(); }
     } catch (reason) {
       if (!active.current) return;
       setNeedsRefresh(true); setEditing(false);

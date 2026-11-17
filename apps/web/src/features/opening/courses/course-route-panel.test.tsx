@@ -556,3 +556,67 @@ it("keeps the original conversation on the choice returned by starting a route",
   const link = [...host.querySelectorAll("a")].find(item => item.textContent === "处理这项选择");
   expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + "?conversation=" + conversation + "#course-learning-route");
 });
+
+it("keeps originalConversationId on saved handout links and checklist links", async () => {
+  sessionStorage.clear();
+  const saved = { activityId: id, generateStatus: "ready" as const, contentVersion: 1, saved: true, documentId: id, revisionNumber: 1, verificationStatus: "needs_check" as const };
+  const value: CourseRouteSnapshot = {
+    ...confirmed,
+    materials: [{ sourceId: id, sourceVersion: 1, title: "讲义", available: false }],
+    requirements: [{ ...confirmed.requirements[0]!, compilation: saved }],
+  };
+  await render(client(value), { goals: selectedGoal, originalConversationId: conversation });
+  const handout = [...host.querySelectorAll("a")].find(item => item.textContent === "打开已保存讲义");
+  expect(handout?.getAttribute("href")).toBe(`/opening/courses/${courseId}/handouts/${id}?conversation=${conversation}`);
+  const materialsLink = [...host.querySelectorAll("a")].find(item => item.textContent === "去资料页");
+  expect(materialsLink?.getAttribute("href")).toBe(`/opening/courses/${courseId}?tab=materials&conversation=${conversation}#course-assets`);
+});
+
+it("unlocks pending route state after a 409 conflict triggers a reread showing a newer revision", async () => {
+  sessionStorage.clear();
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const advanced: CourseRouteSnapshot = {
+    ...confirmed,
+    requirements: [{ ...confirmed.requirements[0]!, requirement: { ...confirmed.requirements[0]!.requirement, revision: 2 } }],
+  };
+  const api = client(confirmed);
+  vi.mocked(api.read).mockResolvedValueOnce(confirmed).mockResolvedValue(advanced);
+  vi.mocked(api.start)
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("版本已更新", 409));
+
+  await render(api, { goals: selectedGoal });
+  await act(async () => button("学习这一项").click());
+  expect(host.textContent).toContain("安排结果尚未确认");
+  expect(button("学习这一项").disabled).toBe(true);
+  expect(button("重新读取课程路线").disabled).toBe(true);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次安排").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
+  expect(host.textContent).not.toContain("安排结果尚未确认");
+  expect(host.textContent).toContain("已不能应用");
+  expect(button("学习这一项").disabled).toBe(false);
+  expect(button("检查与确认课程范围").disabled).toBe(false);
+  expect(button("重新读取课程路线").disabled).toBe(false);
+});
+
+it("rereads the route cleanly on an initial 409 conflict without leaving the panel empty", async () => {
+  sessionStorage.clear();
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const updated: CourseRouteSnapshot = {
+    ...confirmed,
+    requirements: [{ ...confirmed.requirements[0]!, requirement: { ...confirmed.requirements[0]!.requirement, title: "最新要求", revision: 2 } }],
+  };
+  const api = client(confirmed);
+  vi.mocked(api.read).mockResolvedValueOnce(confirmed).mockResolvedValue(updated);
+  vi.mocked(api.start).mockRejectedValueOnce(new CourseRouteRequestError("课程要求已更新", 409));
+
+  await render(api, { goals: selectedGoal });
+  await act(async () => button("学习这一项").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toContain("最新要求");
+  expect(button("学习这一项").disabled).toBe(false);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
+});

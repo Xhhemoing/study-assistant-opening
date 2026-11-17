@@ -83,3 +83,16 @@ it("re-reads the knowledge graph when the route reloads and skips it for archive
   expect(item("知识已整理").textContent).toContain("课程已归档，恢复课程后可整理知识点。");
   expect(host.querySelector("li button")).toBeNull();
 });
+
+it("preserves a valid originalConversationId on material and goal checklist links", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  await render(props({ originalConversationId: conversation }));
+  expect(control(item("资料已解析"), "去资料页").getAttribute("href"))
+    .toBe(`/opening/courses/${courseId}?tab=materials&conversation=${conversation}#course-assets`);
+  expect(control(item("已选目标"), "去目标与成功标准").getAttribute("href"))
+    .toBe(`/opening/courses/${courseId}?tab=overview&conversation=${conversation}#course-goals`);
+
+  await render(props({ originalConversationId: "invalid" }));
+  expect(control(item("资料已解析"), "去资料页").getAttribute("href")).toBe("?tab=materials#course-assets");
+  expect(control(item("已选目标"), "去目标与成功标准").getAttribute("href")).toBe("?tab=overview#course-goals");
+});

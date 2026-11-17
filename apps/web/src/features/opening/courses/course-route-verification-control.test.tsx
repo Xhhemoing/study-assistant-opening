@@ -17,3 +17,30 @@ it("confirms exact selected saved items and current goal revision without upgrad
 it("keeps missing material or standard unavailable and never posts", async () => { const api = client(); vi.mocked(api.verification).mockResolvedValue({ ...review, available: false, reason: "资料缺失，请补齐。" }); await render(api); await act(async () => button("核对已提交题目与评分标准").click()); expect(host.textContent).toContain("资料缺失"); expect(button("确认所选题目与标准可用于后续验证").disabled).toBe(true); expect(api.confirmVerification).not.toHaveBeenCalled(); });
 it.each(["network", "timeout"])("retains verification intent after %s across remount and a rejected retry", async mode => { const { CourseRouteRequestError } = await import("./course-route-client"); const api = client(); vi.mocked(api.confirmVerification).mockRejectedValueOnce(mode === "timeout" ? new CourseRouteRequestError("请求超时", 408) : new TypeError("lost")).mockRejectedValueOnce(new CourseRouteRequestError("需要恢复登录", 401)); await render(api); await act(async () => button("核对已提交题目与评分标准").click()); await act(async () => (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click()); await act(async () => button("确认所选题目与标准可用于后续验证").click()); const original = vi.mocked(api.confirmVerification).mock.calls[0]; await act(async () => root.unmount()); root = createRoot(host); await render(api); await act(async () => button("重新确认这次标准核对").click()); expect(host.textContent).toContain("标准确认结果待核对"); await act(async () => button("重新确认这次标准核对").click()); expect(vi.mocked(api.confirmVerification).mock.calls[2]).toEqual(original); });
 it("shows the saved question's actual reference separately from the current requirement rubric", async () => { const api = client(); vi.mocked(api.verification).mockResolvedValue({ ...review, rubric: "当前课程要求标准", items: [{ itemVersionId: id, prompt: "真实已提交题目", referenceText: "原题保存的实际参考解答" }] }); await render(api); await act(async () => button("核对已提交题目与评分标准").click()); expect(host.textContent).toContain("当前课程要求标准"); expect(host.textContent).toContain("原题保存的实际参考解答"); expect(host.textContent).toContain("这道题保存的参考解答或评分标准"); });
+
+it("unlocks pending verification after a 409 conflict triggers a reread with an advanced goal or content version", async () => {
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const api = client();
+  vi.mocked(api.read)
+    .mockResolvedValueOnce({ currentActivity: { id }, currentRoute: { goalId: id, goalRevision: 4 } } as never)
+    .mockResolvedValueOnce({ currentActivity: { id }, currentRoute: { goalId: id, goalRevision: 5 } } as never);
+  vi.mocked(api.confirmVerification)
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("版本已更新", 409));
+
+  await render(api);
+  await act(async () => button("核对已提交题目与评分标准").click());
+  await act(async () => (host.querySelector('input[type="checkbox"]') as HTMLInputElement).click());
+  await act(async () => button("确认所选题目与标准可用于后续验证").click());
+  expect(host.textContent).toContain("标准确认结果待核对");
+  expect(button("确认所选题目与标准可用于后续验证").disabled).toBe(true);
+  expect(sessionStorage.getItem(`aistudy:route-verification:${courseId}:${id}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次标准核对").click());
+  expect(api.verification).toHaveBeenCalledTimes(2);
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-verification:${courseId}:${id}`)).toBeNull();
+  expect(host.textContent).not.toContain("标准确认结果待核对");
+  expect(host.textContent).toContain("先前的确认不能直接应用");
+  expect((host.querySelector('input[type="checkbox"]') as HTMLInputElement).disabled).toBe(false);
+});

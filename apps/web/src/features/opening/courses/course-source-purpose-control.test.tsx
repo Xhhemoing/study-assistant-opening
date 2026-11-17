@@ -114,3 +114,24 @@ it("late acknowledgement from course A cannot populate course B for the same sou
   expect(host.textContent).toContain("用途：仅作引用"); expect(host.textContent).not.toContain("已保存");
   expect(api.update).toHaveBeenCalledTimes(1);
 });
+
+it("calls onChanged only when purpose update succeeds", async () => {
+  const api = client();
+  const onChanged = vi.fn();
+  await act(async () => root.render(<CourseSourcePurposeControl courseId={courseId} sourceId={sourceId} sourceName="材料" client={api} onChanged={onChanged} />));
+  await act(async () => button("修改用途").click());
+  await choose("practice");
+  await act(async () => button("取消").click());
+  expect(onChanged).not.toHaveBeenCalled();
+
+  await act(async () => button("修改用途").click());
+  await choose("practice");
+  await act(async () => button("确认修改用途").click());
+  expect(onChanged).toHaveBeenCalledTimes(1);
+
+  vi.mocked(api.update).mockRejectedValueOnce(new CourseSourcePurposeError(409, "CONFLICT"));
+  await act(async () => button("修改用途").click());
+  await choose("reference");
+  await act(async () => button("确认修改用途").click());
+  expect(onChanged).toHaveBeenCalledTimes(1);
+});

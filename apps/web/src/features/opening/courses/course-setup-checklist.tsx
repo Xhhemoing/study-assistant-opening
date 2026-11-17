@@ -4,10 +4,19 @@ import type { CourseRouteSnapshot } from "@aistudy/contracts";
 import { CircleCheck, CircleDashed } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { tone, ui } from "../design/ui";
+import { conversationObjectHref, validConversationId } from "../assistant/conversation-links";
 import { KnowledgeRebuildControl } from "../knowledge/knowledge-rebuild-control";
 import { createKnowledgeRebuildClient, type CourseKnowledgeRecord, type KnowledgeRebuildClient } from "../knowledge/knowledge-rebuild-client";
 
 type KnowledgeStatus = { status: "loading" } | { status: "unavailable" } | { status: "ready"; nodeCount: number };
+
+function courseChecklistHref(courseId: string, href: string, originalConversationId?: string | null): string {
+  if (!originalConversationId || !validConversationId(originalConversationId)) return href;
+  if (href.startsWith("?") || href.startsWith("#")) {
+    return conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}${href}`, originalConversationId);
+  }
+  return conversationObjectHref(href, originalConversationId);
+}
 
 function SetupItem({ done, title, detail, children }: { done: boolean; title: string; detail: string; children?: ReactNode }) {
   const Icon = done ? CircleCheck : CircleDashed;
@@ -21,7 +30,7 @@ function SetupItem({ done, title, detail, children }: { done: boolean; title: st
   </li>;
 }
 
-export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsUnavailable, goalsHref, archived = false, scopeActionDisabled = false, reloadToken = 0, knowledgeClient, onReviewScope, onKnowledgeRebuilt }: {
+export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsUnavailable, goalsHref, archived = false, scopeActionDisabled = false, reloadToken = 0, originalConversationId, knowledgeClient, onReviewScope, onKnowledgeRebuilt }: {
   courseId: string;
   snapshot: Pick<CourseRouteSnapshot, "materials" | "scopeState" | "suggestions" | "summary">;
   /** Goals linked to this course; null until the goal list has been read. */
@@ -32,6 +41,7 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
   archived?: boolean;
   scopeActionDisabled?: boolean;
   reloadToken?: number;
+  originalConversationId?: string | null;
   knowledgeClient?: KnowledgeRebuildClient;
   onReviewScope: () => void;
   onKnowledgeRebuilt: () => void;
@@ -69,12 +79,15 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
     : snapshot.scopeState === "unconfirmed" ? "有课程要求尚未确认，请对照大纲核对后确认。"
     : snapshot.suggestions.length ? `已整理出 ${snapshot.suggestions.length} 项要求建议，核对后确认全课范围。` : "还没有课程要求；可以先整理知识点获得建议，也可以手动添加。";
 
+  const materialsHref = courseChecklistHref(courseId, "?tab=materials#course-assets", originalConversationId);
+  const resolvedGoalsHref = courseChecklistHref(courseId, goalsHref, originalConversationId);
+
   return <section aria-labelledby="course-setup-heading" className="space-y-1">
     <h3 id="course-setup-heading" className="text-sm font-semibold">建课清单</h3>
     <ol className="divide-y divide-line border-y border-line">
-      <SetupItem done={materialsDone} title="资料已解析" detail={materialsDetail}>{materialsDone ? null : <a className={ui.quiet} href="?tab=materials#course-assets">去资料页</a>}</SetupItem>
+      <SetupItem done={materialsDone} title="资料已解析" detail={materialsDetail}>{materialsDone ? null : <a className={ui.quiet} href={materialsHref}>去资料页</a>}</SetupItem>
       <SetupItem done={knowledgeDone} title="知识已整理" detail={knowledgeDetail}>{archived ? null : <KnowledgeRebuildControl courseId={courseId} client={client} organized={knowledgeDone} onRebuilt={rebuilt} />}</SetupItem>
-      <SetupItem done={Boolean(goal)} title="已选目标" detail={goalDetail}>{goal ? null : <a className={ui.quiet} href={goalsHref}>去目标与成功标准</a>}</SetupItem>
+      <SetupItem done={Boolean(goal)} title="已选目标" detail={goalDetail}>{goal ? null : <a className={ui.quiet} href={resolvedGoalsHref}>去目标与成功标准</a>}</SetupItem>
       <SetupItem done={scopeDone} title="范围已确认" detail={scopeDetail}>{scopeDone || archived ? null : <button type="button" className={ui.quiet} disabled={scopeActionDisabled} onClick={onReviewScope}>去确认全课范围</button>}</SetupItem>
     </ol>
   </section>;

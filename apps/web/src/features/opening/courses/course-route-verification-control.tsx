@@ -7,6 +7,13 @@ import { userFacingMessage } from "../../../lib/user-facing-error";
 import { conversationObjectHref } from "../assistant/conversation-links";
 const key = (courseId: string, activityId: string) => `aistudy:route-verification:${courseId}:${activityId}`;
 function restore(courseId: string, activityId: string): CourseRouteVerificationConfirm | null { try { const raw = sessionStorage.getItem(key(courseId, activityId)); const value = raw ? courseRouteVerificationConfirmSchema.safeParse(JSON.parse(raw)) : null; return value?.success && value.data.activityId === activityId ? value.data : null; } catch { return null; } }
+function isVerificationPendingStale(pending: CourseRouteVerificationConfirm, activityId: string, value: CourseRouteVerificationRead, route: CourseRouteSnapshot): boolean {
+  if (!route.currentRoute || route.currentActivity?.id !== activityId) return true;
+  if (route.currentRoute.goalId !== pending.goalId || route.currentRoute.goalRevision !== pending.expectedGoalRevision) return true;
+  if (value.requirementId !== pending.requirementId || value.requirementRevision !== pending.expectedRequirementRevision) return true;
+  if (value.contentVersion !== pending.expectedContentVersion) return true;
+  return false;
+}
 export function CourseRouteVerificationControl(props: { courseId: string; activityId: string; originalConversationId?: string | null; client?: CourseRouteClient; disabled?: boolean; onConfirmed?: () => void }) { return <VerificationControl key={`${props.courseId}:${props.activityId}`} {...props} />; }
 function VerificationControl({ courseId, activityId, originalConversationId, client: suppliedClient, disabled = false, onConfirmed }: { courseId: string; activityId: string; originalConversationId?: string | null; client?: CourseRouteClient; disabled?: boolean; onConfirmed?: () => void }) {
   const client = useMemo(() => suppliedClient ?? createCourseRouteClient(), [suppliedClient]);
@@ -21,9 +28,12 @@ function VerificationControl({ courseId, activityId, originalConversationId, cli
     writing.current = true; setBusy(true); setError("");
     try { const [value, route] = await Promise.all([client.verification(courseId, activityId), client.read(courseId, activityId)]);
       if (!active.current) return;
-      if (!route.currentRoute || route.currentActivity?.id !== activityId) throw new Error("当前活动的课程要求不可读取，请回到课程核对。");
+      if (!route.currentRoute || route.currentActivity?.id !== activityId) {
+        if (pending) { remember(null); setPending(null); }
+        throw new Error("当前活动的课程要求不可读取，请回到课程核对。");
+      }
       setReview(value); setContext(route.currentRoute); setSelected([]);
-      if (pending && value.requirementId === pending.requirementId && value.requirementRevision > pending.expectedRequirementRevision) { remember(null); setPending(null); setMessage("课程要求已更新，先前的确认不能直接应用。请核对当前题目与标准，原答案不会因此升级。"); }
+      if (pending && isVerificationPendingStale(pending, activityId, value, route)) { remember(null); setPending(null); setMessage("课程要求或题目已更新，先前的确认不能直接应用。请核对当前题目与标准，原答案不会因此升级。"); }
     } catch (reason) { if (active.current) setError(userFacingMessage(reason, "已提交题目与标准暂不可读取，请稍后重试。")); }
     finally { writing.current = false; if (active.current) setBusy(false); }
   }
@@ -34,7 +44,36 @@ function VerificationControl({ courseId, activityId, originalConversationId, cli
     const retryingUnknown = pending !== null;
     writing.current = true; setBusy(true); setError(""); setMessage(""); setPending(command); setStorageWarning(!remember(command));
     try { await client.confirmVerification(courseId, command); remember(null); if (active.current) { setPending(null); setReview(null); setSelected([]); setMessage("题目与评分标准已确认可用于后续验证。要求版本已更新；已有答案和评价没有升级。请返回课程路线，明确开始新版本的题目。"); onConfirmed?.(); } }
-    catch (reason) { if (!retryingUnknown && reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408) { remember(null); if (active.current) { setPending(null); setReview(null); } } if (active.current) setError(userFacingMessage(reason, "标准确认结果待核对，请保留本页并重新确认先前选择的题目。")); }
+    catch (reason) {
+      const isClientRejection = !retryingUnknown && reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408;
+      const isConflict = reason instanceof CourseRouteRequestError && reason.status === 409;
+      if (isClientRejection) { remember(null); if (active.current) { setPending(null); if (!isConflict) setReview(null); } }
+      if (isConflict) {
+        try {
+          const [value, route] = await Promise.all([client.verification(courseId, activityId), client.read(courseId, activityId)]);
+          if (!active.current) return;
+          if (!route.currentRoute || route.currentActivity?.id !== activityId) {
+            remember(null); setPending(null); setReview(null);
+            setError("当前活动的课程要求不可读取，请回到课程核对。");
+            return;
+          }
+          setReview(value); setContext(route.currentRoute); setSelected([]);
+          if (retryingUnknown && isVerificationPendingStale(command, activityId, value, route)) {
+            remember(null); setPending(null);
+            setMessage("课程要求或题目已更新，先前的确认不能直接应用。请核对当前题目与标准，原答案不会因此升级。");
+            return;
+          }
+          if (!retryingUnknown) {
+            setError(userFacingMessage(reason, "课程要求或题目已更新，请核对最新情况后再确认。"));
+            return;
+          }
+        } catch {
+          if (!active.current) return;
+          if (!retryingUnknown) setReview(null);
+        }
+      }
+      if (active.current) setError(userFacingMessage(reason, "标准确认结果待核对，请保留本页并重新确认先前选择的题目。"));
+    }
     finally { writing.current = false; if (active.current) setBusy(false); }
   }
   const locked = busy || disabled || Boolean(pending);

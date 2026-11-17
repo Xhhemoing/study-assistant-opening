@@ -42,3 +42,28 @@ it.each([undefined, conversation])("keeps the original conversation %s on a next
   const link = [...host.querySelectorAll("a")].find(item => item.textContent === "查看并处理下一步");
   expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + (originalConversationId ? "?conversation=" + originalConversationId : "") + "#course-learning-route");
 });
+
+it("unlocks pending next command after a 409 conflict triggers a reread with a newer version", async () => {
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const api = client();
+  vi.mocked(api.read)
+    .mockResolvedValueOnce(snapshot as never)
+    .mockResolvedValueOnce({ ...snapshot, currentRoute: { goalId: id, goalRevision: 5 } } as never);
+  vi.mocked(api.next)
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("版本已更新", 409));
+
+  await render(api);
+  await act(async () => button("核对结果并安排下一步").click());
+  expect(host.textContent).toContain("下一步结果尚未确认");
+  expect(button("安排3天后复测").disabled).toBe(true);
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次下一步").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).toBeNull();
+  expect(host.textContent).not.toContain("下一步结果尚未确认");
+  expect(host.textContent).toContain("已不能应用");
+  expect(button("核对结果并安排下一步").disabled).toBe(false);
+  expect(button("安排3天后复测").disabled).toBe(false);
+});

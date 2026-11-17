@@ -7,7 +7,7 @@ export function conversationObjectHref(href: string, conversationId?: string | n
   const url = new URL(href, "https://study.invalid");
   const supported = ["/opening/library", "/opening/practice", "/opening/cards", "/opening/review", "/opening/sprint"].includes(url.pathname)
     || /^\/opening\/library\/[0-9a-f-]{36}$/.test(url.pathname)
-    || /^\/opening\/courses\/[0-9a-f-]{36}(?:\/study(?:\/span|\/matrix)?|\/exam)?$/.test(url.pathname);
+    || /^\/opening\/courses\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/study(?:\/span|\/matrix)?|\/exam|\/handouts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/i.test(url.pathname);
   if (!supported || url.origin !== "https://study.invalid") return href;
   url.searchParams.set("conversation", conversationId);
   return `${url.pathname}${url.search}${url.hash}`;
