@@ -59,8 +59,8 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
     const [retest] = await tx`SELECT r.*,t.status AS task_status,t.not_before FROM opening_retest_activities r
       LEFT JOIN opening_tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.owner_user_id=r.owner_user_id
       WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.course_id=${courseId}
-        AND (r.id=${retestId} OR r.candidate_id=${retestId} OR r.candidate_reference_id=${retestId})`;
-    if (!retest || ["cancelled","expired","invalidated"].includes(String(retest.status)) || retest.task_status === "skipped") { status = "cancelled"; reasons.push("retest_cancelled_or_unavailable"); }
+        AND lower(${retestId})=ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])`;
+    if (!retest || ["cancelled","declined","expired","invalidated","superseded"].includes(String(retest.status)) || retest.task_status === "skipped") { status = "cancelled"; reasons.push("retest_cancelled_or_unavailable"); }
     else if ([retest.snoozed_until,retest.not_before_at,retest.not_before,retest.scheduled_start_at ?? retest.recommended_at].some(value => value && new Date(value).getTime() > Date.now())) { status = "deferred"; reasons.push("retest_deferred"); }
     else if (retest.status === "completed" || retest.task_status === "done") status = "completed";
     else dueRetest = ["accepted", "in_progress"].includes(String(retest.status)) && retest.task_status === "pending"

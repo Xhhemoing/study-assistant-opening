@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, createOpeningLearningRepository, readOpeningCurrentLearningActivity } from "@aistudy/database";
+import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, createOpeningLearningRepository, readOpeningCurrentLearningActivity, readOpeningCurrentLearningRecovery, readOpeningLearningAgenda } from "@aistudy/database";
 import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
@@ -25,22 +25,81 @@ async function activity(options: { id?: string; course?: string; status?: string
       ${f.sql.json(options.taskId ? { source: "task", taskId: options.taskId } : {})},${options.at ?? "2026-11-01T00:00:00Z"})`;
   return id;
 }
-async function staticLesson(retestId?: string) {
+async function staticLesson(retestId?: string, lessonCourseId = courseId) {
   const seeds = backupRows(f.sql, f.scope), sourceId = await seeds.source();
   await seeds.chunk(sourceId);
   await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-    VALUES(${f.scope.workspaceId},${courseId},'source',${sourceId},'core','course')`;
-  return createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT, ...(retestId ? { retestId } : {}) });
+    VALUES(${f.scope.workspaceId},${lessonCourseId},'source',${sourceId},'core','course')`;
+  return createOpeningSpanSessionRepository(f.sql).create(f.scope, { courseId: lessonCourseId, sourceIds: [sourceId], clientKey: randomUUID(), intent: DEFAULT_STUDY_SESSION_INTENT, ...(retestId ? { retestId } : {}) });
 }
 async function readFootprint() {
   return {
     activities: await f.sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
+    retests: await f.sql`SELECT * FROM opening_retest_activities WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
     sessions: await f.sql`SELECT * FROM opening_learning_sessions WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
     jobs: await f.sql`SELECT * FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
     outbox: await f.sql`SELECT * FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId} ORDER BY id`,
     preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
   };
 }
+const terminalRetestRecoveryCases = (["cancelled", "completed"] as const).flatMap(retestStatus =>
+  (["active", "paused"] as const).flatMap(status => (["same", "other"] as const).map(course => ({ retestStatus, status, course }))));
+it.each(terminalRetestRecoveryCases)("recovers older $course-course progress past a newer $status lesson with $retestStatus retest", async ({ retestStatus, status, course }) => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const broken = await staticLesson(retestId);
+  const fallbackCourseId = course === "same" ? courseId : randomUUID();
+  if (course === "other") await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${fallbackCourseId},${f.scope.workspaceId},'Older course',${fallbackCourseId})`;
+  const fallback = status === "active" ? await staticLesson(undefined, fallbackCourseId) : null;
+  const fallbackId = fallback?.activityId ?? await activity({ course: fallbackCourseId, status: "paused" });
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-01T00:00:00Z' WHERE id=${fallbackId}`;
+  await f.sql`UPDATE opening_teaching_activities SET status=${status},updated_at='2026-11-03T00:00:00Z' WHERE id=${broken.activityId}`;
+  await f.sql`UPDATE opening_retest_activities SET status=${retestStatus} WHERE id=${retestId}`;
+  const before = await readFootprint();
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({ activityId: fallbackId, sessionId: fallback?.sessionId ?? null, courseId: fallbackCourseId });
+  // Explicit identities remain the original activity; availability is owned by its reader.
+  for (const reference of [{ activityId: broken.activityId }, { sessionId: broken.sessionId }]) {
+    expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, reference, { spanOnly: true, retestId })).toEqual({ activityId: broken.activityId, sessionId: broken.sessionId, courseId });
+  }
+  const agenda = await f.sql.begin(tx => readOpeningLearningAgenda(tx, f.scope, courseId, broken.activityId));
+  expect(agenda).toMatchObject({ activityId: broken.activityId, sessionId: broken.sessionId, pendingRetestId: retestId, status: retestStatus, resumable: false });
+  const details = await createSpanLessonSessionService(f.sql).read(f.scope, courseId, broken.activityId, retestId);
+  expect(details.session).toMatchObject({ activityId: broken.activityId, sessionId: broken.sessionId, retestId, status });
+  await expect(createOpeningTeachingActivitiesRepository(f.sql).assertOwnedActivity(f.scope, broken.activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await readFootprint()).toEqual(before);
+});
+it.each(["cancelled", "completed"] as const)("has no automatic recovery when the only lesson's retest is %s", async retestStatus => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'accepted',2)`;
+  const lesson = await staticLesson(retestId);
+  await f.sql`UPDATE opening_retest_activities SET status=${retestStatus} WHERE id=${retestId}`;
+  const before = await readFootprint();
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toBeNull();
+  expect((await createOpeningSpanSessionRepository(f.sql).get(f.scope, lesson.activityId))?.retestId).toBe(retestId);
+  expect(await readFootprint()).toEqual(before);
+});
+it.each([
+  { retestStatus: "cancelled", reference: "canonical", expected: "older" },
+  { retestStatus: "completed", reference: "alias", expected: "older" },
+  { retestStatus: "accepted", reference: "canonical", expected: "newer" },
+  { retestStatus: "in_progress", reference: "alias", expected: "newer" },
+] as const)("selects $expected activity for compiled route $reference reference with $retestStatus retest", async ({ retestStatus, reference, expected }) => {
+  const retestId = randomUUID(), alias = randomUUID(), older = await activity({ status: "paused" });
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version,candidate_reference_id)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'Route skill','route-skill',${randomUUID()},${retestStatus},2,${alias})`;
+  const newer = await activity({ at: "2026-11-03T00:00:00Z" });
+  // The route start owner persists this context in goal_json, not spanLesson.
+  const context = { goalId: randomUUID(), goalRevision: 1, requirementId: randomUUID(), requirementRevision: 1,
+    stableSkillId: randomUUID(), requirementKey: "route-skill", action: "transfer_check", retestId: reference === "canonical" ? retestId : alias };
+  await f.sql`UPDATE opening_teaching_activities SET create_intent=${f.sql.json({ kind: "course_route", goalId: context.goalId, requirementId: context.requirementId })},
+    goal_json=${f.sql.json({ courseRoute: context })} WHERE id=${newer}`;
+  const before = await readFootprint();
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({ activityId: expected === "older" ? older : newer, sessionId: null, courseId });
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: newer })).toEqual({ activityId: newer, sessionId: null, courseId });
+  expect(await readFootprint()).toEqual(before);
+});
 it.each(["active", "paused"] as const)("restores a real %s delayed retest via DTO href and the actual lesson target reader", async status => {
   const retestId = randomUUID();
   await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
@@ -52,6 +111,7 @@ it.each(["active", "paused"] as const)("restores a real %s delayed retest via DT
   const teaching = createOpeningTeachingActivitiesRepository(f.sql), dto = teachingActivitySchema.parse(await teaching.assertOwnedActivity(f.scope, lesson.activityId));
   expect(dto.staticLesson).toEqual({ protocol: "span-lesson-v1", sessionId: lesson.sessionId, retestId });
   const before = await readFootprint();
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({ activityId: lesson.activityId, sessionId: lesson.sessionId, courseId });
   const api = { listTasks: vi.fn(async () => ({ tasks: [] })), listTeachingActivities: () => teaching.listByOwner(f.scope), getTeachingActivity: vi.fn(), createTeachingActivity: vi.fn() };
   const entry = await openCourseStudy(api, { courseId, courseTitle: "Delayed", compilerEnabled: true, archived: false, sourceIds: [] });
   const href = `/opening/courses/${courseId}/study/span?lesson=${lesson.activityId}&retest=${retestId}`;
