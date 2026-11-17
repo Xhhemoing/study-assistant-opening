@@ -37,6 +37,19 @@ describe("private Math I midterm quick start", () => {
     expect(deps.quickStart).not.toHaveBeenCalled();
   });
 
+  it("normalizes whitespace and case when matching the allowlisted account email", async () => {
+    vi.stubEnv("AISTUDY_MIDTERM_QUICK_START_EMAIL", "  Learner@Example.Test ");
+    deps.findUserById.mockResolvedValue({ email: " LEARNER@example.TEST " });
+    deps.quickStart.mockResolvedValueOnce({ pending: true });
+    expect(await (await GET(request())).json()).toEqual({ available: true });
+    expect(await (await POST(request({}))).json()).toEqual({ pending: true });
+    expect(deps.quickStart).toHaveBeenCalledTimes(1);
+
+    deps.findUserById.mockResolvedValue({ email: null });
+    expect(await (await GET(request())).json()).toEqual({ available: false });
+    expect((await POST(request({}))).status).toBe(404);
+  });
+
   it("leaves the launcher disabled without private process configuration", async () => {
     vi.stubEnv("AISTUDY_MIDTERM_QUICK_START_DIR", "");
     expect(await (await GET(request())).json()).toEqual({ available: false });

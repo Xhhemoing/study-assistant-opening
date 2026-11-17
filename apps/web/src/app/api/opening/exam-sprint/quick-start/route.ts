@@ -15,7 +15,7 @@ async function getAccess(request: Request) {
   if (!email || !directory || !isAbsolute(directory)) return null;
   const context = await requireOpeningScope(request);
   const account = await context.runtime.identity.findUserById(context.principal.userId);
-  return account?.email === email ? { ...context, directory } : null;
+  return account?.email?.trim().toLowerCase() === email ? { ...context, directory } : null;
 }
 
 export const GET = (request: Request) => examSprintResponse(async () => ({ available: Boolean(await getAccess(request)) }));
