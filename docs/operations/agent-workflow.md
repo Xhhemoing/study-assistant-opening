@@ -1,5 +1,7 @@
 # 多工具并行开发与集成规则
 
+> **Antigravity 单主控 Autopilot 入口**：若在 Antigravity 会话中使用多并发 Subagent 全自动持续推进（隔离 `share` worker + 只读 `inherit` 审计/审查 + 精确 head CI 合入），请先加载 [`.agents/skills/aistudy-autopilot/SKILL.md`](../../.agents/skills/aistudy-autopilot/SKILL.md)。下文原有的 v2 风险分级、唯一集成者合入边界、U 级逐次审批与浏览器验收分工约束依然完整生效。
+
 本规则取代 [codex-team.md](../archive/operations/codex-team.md) 与 [project-lead-prompt.md](../archive/operations/project-lead-prompt.md) 中的旧角色、模型路由和派单流程；两者仅作历史。与根 `AGENTS.md` 共同约束执行，不因任务小或文档风险低豁免正式 PR 审查。最新明确授权优先，但本文不能覆盖平台或更高层仍有效的执行配额。
 
 ## 职责与车道
@@ -147,6 +149,7 @@ Agent 不自行或委派本地浏览器、Playwright、截图、真机验收；�
 - 单次 CLI 审查运行不假设已加载 `AGENTS.md`。派单 brief 必须写全目标、允许路径／只读要求、生产与真数据禁区、本地浏览器禁令、模型／费用授权和 Git 操作边界；不得仅给文档链接代替红线。
 - 指定审查绑定精确、稳定的 PR head，使用该提交的独立干净快照；送审期间不改候选。审查开始记录完整 SHA 与干净状态，结束核对 SHA 未变、检出及暂存区未被修改（包括非预期新增文件）；有变化先报告，不能把它当作原候选的只读批准。其他互斥工作可继续，但不共享该审查快照写权。
 - 工具只按当前获准且实际可用的能力运行，不恢复历史工具名单或旧路由。模型与网关配置、密钥保留在仓库外私有授权位置，凭据仅经获准环境或秘密存储注入，不写入 brief、公开日志或仓库。
+- 本地文件卡片队列如需只读契约校验与隔离派单，可选用 `scripts/local-dev-flow.mjs`、`scripts/local-dev-watch.mjs` 与 `scripts/local-dev-worker.mjs`（各自严格执行路径白名单与 symlink 拒绝校验）；在 Antigravity Autopilot 模式下优先使用平台原生 `share` / `inherit` Subagent 隔离，不与文件队列工具并发修改同一目录。
 
 ### 图谱按需维护
 
