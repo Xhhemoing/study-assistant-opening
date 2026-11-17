@@ -184,6 +184,8 @@ export const ENV_REGISTRY: readonly EnvVarSpec[] = [
   { name: "OPENING_TEST_DATABASE_URL", group: "e2e", doc: "Loopback aistudy_opening_test only.", consumers: ["tests"], kind: "string", secret: true },
   { name: "OPENING_E2E", group: "e2e", doc: "Build switch for the E2E dist dir (next.config).", consumers: ["tests"], kind: "bool", secret: false },
   { name: "AISTUDY_WEB_PREVIEW", group: "e2e", doc: "Build switch for local preview dist dir (next.config).", consumers: ["scripts"], kind: "bool", secret: false },
+  { name: "AISTUDY_MIDTERM_QUICK_START_EMAIL", group: "e2e", doc: "Preview-only allowlisted learner email for midterm sprint quick-start.", consumers: ["web"], kind: "string", secret: true },
+  { name: "AISTUDY_MIDTERM_QUICK_START_DIR", group: "e2e", doc: "Preview-only local directory path for midterm sprint quick-start PDFs.", consumers: ["web"], kind: "string", secret: false },
   { name: "MIGRATION_LEGACY_0003_ATTESTATION_FILE", group: "e2e", doc: "db:migrate legacy 0003 attestation file.", consumers: ["scripts"], kind: "string", secret: false },
   { name: "OPENING_OWNER_EMAIL", group: "e2e", doc: "Owner bootstrap script.", consumers: ["scripts"], kind: "string", secret: false },
   { name: "OPENING_OWNER_DISPLAY_NAME", group: "e2e", doc: "Owner bootstrap script.", consumers: ["scripts"], kind: "string", secret: false },

@@ -52,6 +52,24 @@ describe("putPrivateBytes", () => {
     );
     expect(seen).toEqual([0.5, 1]);
   });
+
+  it("maps 400 UPLOAD_MISMATCH JSON responses to a localized user error without altering other 400 errors", async () => {
+    const mismatchXhr = new FakeXhr();
+    mismatchXhr.status = 400;
+    mismatchXhr.responseText = JSON.stringify({ error: { code: "UPLOAD_MISMATCH", message: "stored object magic bytes do not match declared MIME" } });
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(mismatchXhr), uploadTestIdentity))
+      .rejects.toMatchObject({
+        name: "UploadUserError",
+        code: "UPLOAD_MISMATCH",
+        message: "文件内容与扩展名不匹配，请确认未损坏或改名后重试。",
+      });
+
+    const plainXhr = new FakeXhr();
+    plainXhr.status = 400;
+    plainXhr.responseText = "Bad Request";
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(plainXhr), uploadTestIdentity))
+      .rejects.toThrow("上传对象失败 (400)");
+  });
 });
 
 

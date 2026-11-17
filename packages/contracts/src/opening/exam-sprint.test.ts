@@ -25,6 +25,18 @@ describe("exam sprint HTTP commands", () => {
     expect(examSprintCommandSchema.safeParse({ action: "configure", clientKey, examDate, dailyMinutes: 90 }).success).toBe(false);
   });
 
+  it("accepts an optional topic only when starting practice", () => {
+    const command = { action: "start", clientKey, mode: "practice" };
+    expect(examSprintCommandSchema.parse({ ...command, topicId: "topic-2" })).toEqual({ ...command, topicId: "topic-2" });
+    expect(examSprintCommandSchema.parse(command)).toEqual(command);
+    for (const mode of ["diagnostic", "retest", "mock-a", "mock-b"]) {
+      expect(examSprintCommandSchema.safeParse({ ...command, mode, topicId: "topic-2" }).success).toBe(false);
+    }
+    for (const topicId of ["", "x".repeat(101), null, 2]) {
+      expect(examSprintCommandSchema.safeParse({ ...command, topicId }).success).toBe(false);
+    }
+  });
+
   it("rejects answer injection, unknown properties, invalid confidence, ids and unbounded inputs", () => {
     const valid = { action: "answer", clientKey, attemptId: "attempt-1", answer: "A", confidence: 3 };
     for (const invalid of [

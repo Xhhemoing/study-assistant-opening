@@ -10,19 +10,30 @@ const id = "11111111-1111-4111-8111-111111111111", blockId = "22222222-2222-4222
 const scope = { workspaceId: id, ownerUserId: id };
 const hints = { direction: "检查线性约束。", concept: "秩是线性无关列的数量。", firstStep: "把第一列写作一个列向量。" };
 const now = "2026-10-21T00:00:00.000Z";
-function database(options: { submitted?: boolean; version?: number; sourceVersion?: number; missing?: boolean; hints?: unknown; answer?: string | null; releasedRows?: Record<string, unknown>[] } = {}) {
+function database(options: {
+  submitted?: boolean; version?: number; sourceVersion?: number; missing?: boolean; hints?: unknown; answer?: string | null;
+  releasedRows?: Record<string, unknown>[]; courseId?: string | null; purpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
+  memberships?: Array<{ asset_id: string; purpose: string | null }>; sourceIds?: string[]; sourceRefs?: Array<{ sourceId: string; version: number }>;
+} = {}) {
   const queries: string[] = [];
+  const sourceIds = options.sourceIds ?? [id];
+  const sourceRefs = options.sourceRefs ?? [{ sourceId: id, version: 1 }];
   const sql = ((strings: TemplateStringsArray, ..._values: unknown[]) => {
     const query = strings.join("?"); queries.push(query);
     if (query.includes("FROM workspaces")) return Promise.resolve([{ id }]);
     if (query.includes("FROM opening_help_exposures")) return Promise.resolve(options.releasedRows ?? []);
     if (query.includes("FROM opening_learning_attempts")) return Promise.resolve(options.missing ? [] : [{ id, activity_id: id, course_id: id, session_id: id, item_version_id: id,
-      submitted_at: options.submitted ? now : null, source_versions: { [id]: 1 }, create_intent: { teachingBlock: { blockId, contentVersion: 1 } } }]);
-    if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{ content_version: options.version ?? 1, source_ids: [id] }]);
-    if (query.includes("FROM opening_sources")) return Promise.resolve([{ id, version: options.sourceVersion ?? 1 }]);
+      submitted_at: options.submitted ? now : null, source_versions: Object.fromEntries(sourceIds.map(sid => [sid, 1])), create_intent: { teachingBlock: { blockId, contentVersion: 1 } } }]);
+    if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([{
+      content_version: options.version ?? 1, course_id: options.courseId === undefined ? id : options.courseId, source_ids: sourceIds,
+    }]);
+    if (query.includes("FROM opening_sources")) return Promise.resolve(sourceIds.map(sid => ({ id: sid, version: options.sourceVersion ?? 1 })));
+    if (query.includes("FROM course_asset_memberships")) return Promise.resolve(
+      options.memberships ?? sourceIds.map(sid => ({ asset_id: sid, purpose: options.purpose === undefined ? null : options.purpose })),
+    );
     if (query.includes("FROM opening_teaching_activity_specs")) return Promise.resolve([{ version: 1, document_id: id, revision_number: 1,
       block_order: [{ blockId, blockType: "prompt", role: "prompt", position: 0 }, { blockId: answerId, blockType: "answer_key", role: "answer_key", position: 1 }],
-      source_refs: [{ sourceId: id, version: 1 }] }]);
+      source_refs: sourceRefs }]);
     if (query.includes("FROM library_revisions")) return Promise.resolve([{ blocks: [{ id: answerId, content: { answer: options.answer === undefined ? "完整解答" : options.answer,
       hints: Object.hasOwn(options, "hints") ? options.hints : hints } }] }]);
     return Promise.resolve([]);
@@ -96,5 +107,26 @@ describe("teaching hint delivery", () => {
     await expect(sql.begin(tx => readOpeningTeachingAnswerKey(tx, scope, id, answerId, id))).rejects.toMatchObject({ code: "VALIDATION" });
     await expect(createOpeningTeachingHintRepository(database({ missing: true }).sql).read(scope, { attemptId: id, level: 1 })).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(exposure.generate).not.toHaveBeenCalled();
+  });
+  it.each(["mock_exam", "reference"] as const)("blocks %s materials on hint read, level 4, answer key, and released replay", async purpose => {
+    const db = database({ submitted: true, purpose, releasedRows: [releasedRow(1), releasedRow(4)] });
+    const repo = createOpeningTeachingHintRepository(db.sql);
+    await expect(repo.read(scope, { attemptId: id, level: 1 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.read(scope, { attemptId: id, level: 4 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.readReleased(scope, { attemptId: id })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(db.sql.begin(tx => readOpeningTeachingAnswerKey(tx, scope, id, blockId, id))).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(exposure.generate).not.toHaveBeenCalled();
+  });
+  it("blocks unlinked course sources and allows practice/teaching/null or exam-only empty source refs", async () => {
+    await expect(createOpeningTeachingHintRepository(database({ memberships: [] }).sql).read(scope, { attemptId: id, level: 1 }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    for (const purpose of [null, "teaching", "practice"] as const) {
+      await expect(createOpeningTeachingHintRepository(database({ submitted: true, purpose }).sql).read(scope, { attemptId: id, level: 4 }))
+        .resolves.toMatchObject({ text: "完整解答" });
+    }
+    const examOnly = database({ submitted: true, sourceIds: [], sourceRefs: [] });
+    await expect(createOpeningTeachingHintRepository(examOnly.sql).read(scope, { attemptId: id, level: 4 }))
+      .resolves.toMatchObject({ text: "完整解答" });
+    expect(examOnly.queries.some(query => query.includes("course_asset_memberships"))).toBe(false);
   });
 });

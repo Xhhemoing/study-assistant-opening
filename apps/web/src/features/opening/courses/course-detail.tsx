@@ -284,7 +284,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="units">
           {grouped ? <><h2 className="text-base font-semibold">章节路线</h2><CourseContents courseId={id} assets={assets} /></> : null}
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
-          <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} grouped={grouped} />
+          <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} grouped={grouped} originalConversationId={conversationId} />
           <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
           {builtInLessonsForCourse(id, course).length ? <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">现成的线性代数课</h2><p className="text-sm leading-6 text-text-2">图示、思考与独立练习都已备好，不会替换本课程的任务或学习进度。</p><div className="flex flex-wrap gap-2">{builtInLessonsForCourse(id, course).map(lesson => <Link key={lesson.id} className={ui.secondary} href={objectHref(lesson.href)}>{lesson.label}</Link>)}</div></section> : null}
         </CoursePanel>

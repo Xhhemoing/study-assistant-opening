@@ -160,6 +160,91 @@ function rankedQuestions(questions: ExamQuestion[], state: ExamSprintState, pack
   return [...questions].sort((left, right) => score(left) - score(right));
 }
 
+function practicePriorities(state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): Map<string, number> {
+  const recheck = recheckSkills(state, pack, context);
+  const source = sourcePrioritySkills(state, pack, context);
+  const latest = new Map(visibleEvidence(state, context).map(attempt => [questionFor(pack, attempt.questionId).skillId, attempt]));
+  return new Map(skillSummaries(state, pack, context).map(skill => {
+    const confidence = latest.get(skill.skillId)?.confidence;
+    const urgent = skill.status === "weak" || skill.status !== "secure" && recheck.has(skill.skillId) || source.has(skill.skillId)
+      || confidence !== null && confidence !== undefined && confidence <= 2;
+    return [skill.skillId, urgent ? 0 : skill.status === "untested" ? 1 : skill.status === "usable" ? 2 : 3];
+  }));
+}
+
+function practiceFamilies(state: ExamSprintState, pack: ExamPack): Set<string> {
+  const families = new Set(state.attempts.map(attempt => questionFor(pack, attempt.questionId).familyId));
+  for (const exposure of state.lessonExposures ?? []) {
+    if (exposure.packId !== pack.id) continue;
+    for (const familyId of [...exposure.displayedFamilyIds, ...(exposure.partialFamilyIds ?? [])]) families.add(familyId);
+  }
+  return families;
+}
+
+function practiceQuestions(state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): ExamQuestion[] {
+  const seen = new Set(state.attempts.map(attempt => attempt.questionId));
+  const families = practiceFamilies(state, pack);
+  const priorities = practicePriorities(state, pack, context);
+  // Allocation is only a rotation hint. Unpresented questions remain fresh evidence.
+  const scheduled = new Map<string, number>();
+  state.runs.forEach((run, index) => {
+    if (run.mode === "practice") run.questionIds.forEach(id => scheduled.set(id, index));
+  });
+  return pack.questions.filter(question => question.pool === "training" && !seen.has(question.id)).sort((left, right) =>
+    priorities.get(left.skillId)! - priorities.get(right.skillId)!
+    || Number(families.has(left.familyId)) - Number(families.has(right.familyId))
+    || (scheduled.get(left.id) ?? -1) - (scheduled.get(right.id) ?? -1));
+}
+
+function practiceExposureNote(questions: ExamQuestion[], state: ExamSprintState, pack: ExamPack): string {
+  const families = practiceFamilies(state, pack);
+  return questions.some(question => families.has(question.familyId))
+    ? "含已见题族或串讲例题的变式，不计独立新证据。" : "";
+}
+
+function activePracticeNote(run: ExamRun, state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): string {
+  const questions = run.questionIds.map(id => questionFor(pack, id));
+  const foundation = questions.filter(question => question.difficulty === "foundation").length;
+  const chapters = [...new Set(questions.map(question => question.topicId))]
+    .map(id => pack.topics.find(topic => topic.id === id)?.title ?? id);
+  const presented = new Map(state.attempts.filter(attempt => attempt.runId === run.id).map(attempt => [attempt.questionId, attempt]));
+  const families = practiceFamilies({ ...state, attempts: state.attempts.filter(attempt => attempt.runId !== run.id) }, pack);
+  let variants = false;
+  for (const question of questions) {
+    const attempt = presented.get(question.id);
+    const exposure = attempt ? examAttemptExposureQualification(attempt, state, pack) : null;
+    variants ||= exposure ? exposure.firstFamilyExposure === false || exposure.seenExample === true || exposure.partialExample === true
+      : families.has(question.familyId);
+    families.add(question.familyId);
+  }
+  const arrangedSkills = new Set(questions.map(question => question.skillId));
+  const missingWeak = [...practicePriorities(state, pack, context)].some(([skillId, priority]) => priority === 0 && !arrangedSkills.has(skillId));
+  return `本轮共 ${questions.length} 题：基础 ${foundation} 题、迁移 ${questions.length - foundation} 题。章节：${chapters.join("、")}。`
+    + (questions.length < 3 ? "本轮不足 3 题，可继续串讲、做原题或练习其他章节。" : "")
+    + (variants ? "安排含同类变式。" : "")
+    + (missingWeak ? "本轮未安排部分薄弱或低信心知识点，可先串讲或做原题。" : "");
+}
+function selectTopicPracticeQuestions(state: ExamSprintState, pack: ExamPack, topicId: string, context?: ExamSelectionContext) {
+  const candidates = practiceQuestions(state, pack, context).filter(question => question.topicId === topicId);
+  const priorities = practicePriorities(state, pack, context);
+  const families = practiceFamilies(state, pack);
+  const scheduled = new Map<string, number>();
+  state.runs.forEach((run, index) => {
+    if (run.mode === "practice") run.questionIds.forEach(id => scheduled.set(id, index));
+  });
+  const picked: ExamQuestion[] = [];
+  while (picked.length < 3 && candidates.length) {
+    candidates.sort((left, right) => priorities.get(left.skillId)! - priorities.get(right.skillId)!
+      || Number(families.has(left.familyId)) - Number(families.has(right.familyId))
+      || (scheduled.get(left.id) ?? -1) - (scheduled.get(right.id) ?? -1));
+    const selected = candidates.shift()!;
+    picked.push(selected);
+    families.add(selected.familyId);
+  }
+  return { ids: picked.map(question => question.id), note: picked.length
+    ? `本轮共 ${picked.length} 题。` + (picked.length < 3 ? "本章新题不足，已缩短本轮；可串讲、做原题或练习其他章节。" : "") + practiceExposureNote(picked, state, pack)
+    : "本章没有新的针对题；请先串讲、做原题或练习其他章节，不自动重复旧题。" };
+}
 function selectQuestions(state: ExamSprintState, pack: ExamPack, mode: ExamMode, now: string, context?: ExamSelectionContext): { ids: string[]; note: string } {
   if (isMock(mode)) return { ids: pack.questions.filter(question => question.pool === mode).map(question => question.id), note: "专用保留题池，交卷后统一反馈。" };
   const questions = rankedQuestions(pack.questions.filter(question => question.pool === "training"), state, pack, context);
@@ -174,7 +259,6 @@ function selectQuestions(state: ExamSprintState, pack: ExamPack, mode: ExamMode,
     return { ids: chosen.map(question => question.id), note: "每章抽取 1–2 题；小样本诊断只用于安排练习。" };
   }
   const skills = skillSummaries(state, pack, context);
-  const weak = skills.filter(skill => skill.status === "weak");
   if (mode === "retest") {
     const due = skills.filter(skill => (skill.status === "weak" || skill.status === "usable") && skill.dueAt !== null && at(skill.dueAt) <= at(now));
     const seen = new Set(state.attempts.map(attempt => attempt.questionId));
@@ -188,27 +272,30 @@ function selectQuestions(state: ExamSprintState, pack: ExamPack, mode: ExamMode,
         : "暂无已满 24 小时的薄弱或初步可用技能，请到期后复测。" };
   }
   const recheck = recheckSkills(state, pack, context);
-  const weakSkills = new Set([...weak.map(skill => skill.skillId), ...skills.filter(skill => skill.status !== "secure" && recheck.has(skill.skillId)).map(skill => skill.skillId)]);
+  const priorities = practicePriorities(state, pack, context);
+  const candidates = practiceQuestions(state, pack, context);
   const picked: ExamQuestion[] = [];
   const take = (predicate: (question: ExamQuestion) => boolean, count: number) => {
-    const selected = questions.filter(question => predicate(question) && !picked.some(item => item.id === question.id)).slice(0, count);
+    const selected = candidates.filter(question => predicate(question) && !picked.some(item => item.id === question.id)).slice(0, count);
     picked.push(...selected);
     return selected.length;
   };
-  const targeted = take(question => weakSkills.has(question.skillId) && question.difficulty === "foundation", 3);
+  const targeted = take(question => priorities.get(question.skillId)! <= 1 && question.difficulty === "foundation", 3);
   const foundation = take(question => question.difficulty === "foundation", 6);
   const transfer = take(question => question.difficulty === "transfer", 1);
   const short = targeted < 3 || foundation < 6 || transfer < 1;
   if (picked.length < 10) take(() => true, 10 - picked.length);
-  const note = `练习目标为 6 道基础、3 道薄弱、1 道迁移；本轮对应配额 ${foundation}/${targeted}/${transfer}。`
-    + (short ? `题池或已识别薄弱点不足，使用其他训练题补足，共 ${picked.length} 题；不能视为完整覆盖。` : "优先近期错因与未见题族。")
+  if (!picked.length) return { ids: [], note: "没有新的针对题；请先串讲、做原题或练习其他章节，不自动重复旧题。" };
+  const exhaustedWeak = [...priorities].some(([skillId, priority]) => priority === 0 && !candidates.some(question => question.skillId === skillId));
+  const note = `练习目标为 6 道基础、3 道薄弱或待确认、1 道迁移；本轮对应配额 ${foundation}/${targeted}/${transfer}。`
+    + (short ? `新题或对应题型不足，本轮仅使用未展示训练题，共 ${picked.length} 题；不能视为完整覆盖。` : "优先薄弱、低信心与待确认技能，再补基础覆盖。")
+    + (exhaustedWeak ? "部分薄弱或低信心技能已无新题，未以旧题补足；请先串讲或做原题。" : "")
     + (sourcePrioritySkills(state, pack, context).size ? "已映射的纸笔自评错误或求助仅提高相关题的练习优先级，不作为掌握或BKT证据。" : "")
     + (recheck.size ? "资格变化后尚未重新证明的技能纳入定向练习；原始题族仍算已见。" : "")
-    + (picked.some(question => state.attempts.some(attempt => attempt.questionId === question.id)) ? "含已见题，重复正确不计独立新证据。" : "");
-  // Keep foundation work before targeted work and transfer, without changing the quota allocation.
-  return { ids: [...picked.slice(targeted, targeted + foundation), ...picked.slice(0, targeted), ...picked.slice(targeted + foundation)].map(question => question.id), note };
+    + practiceExposureNote(picked, state, pack);
+  picked.sort((left, right) => priorities.get(left.skillId)! - priorities.get(right.skillId)!);
+  return { ids: picked.map(question => question.id), note };
 }
-
 function newAttempt(run: ExamRun, questionId: string, state: ExamSprintState, pack: ExamPack, clientKey: string, now: string, context?: ExamSelectionContext): ExamAttempt {
   const attempt: ExamAttempt = {
     id: `attempt-${state.attempts.length + 1}-${clientKey.slice(0, 65)}`, questionId, runId: run.id,
@@ -331,9 +418,15 @@ export function applyExamSprintCommand(state: ExamSprintState, command: ExamSpri
   }
   const active = activeRun(result);
   if (command.action === "start") {
+    const topicId = command.topicId;
+    if (topicId !== undefined && (command.mode !== "practice" || !pack.topics.some(topic => topic.id === topicId))) {
+      fail("VALIDATION", "只能为针对练习选择当前题包中的有效章节。");
+    }
     if (active) fail("CONFLICT", "请先完成或交卷当前练习，再开始下一轮。");
     if (isMock(command.mode) && result.runs.some(run => run.mode === command.mode)) fail("CONFLICT", "这套保留模拟已经开启过，不能重复用同一套题证明考前水平；请选择另一套或转入练习。");
-    const selection = selectQuestions(result, pack, command.mode, now, context);
+    const selection = topicId === undefined
+      ? selectQuestions(result, pack, command.mode, now, context)
+      : selectTopicPracticeQuestions(result, pack, topicId, context);
     const first = selection.ids[0];
     if (!first) fail("CONFLICT", selection.note || "当前模式没有可用题目。");
     const minutes = selection.ids.reduce((sum, id) => sum + questionFor(pack, id).estimatedMinutes, 0);
@@ -457,8 +550,9 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   });
   const { attempts: _attempts, ...publicState } = state;
   const distinctSources = (predicate: (record: ExamSourceRecord) => boolean) => new Set(currentSourceRecords(state, context).filter(predicate).map(record => record.sourceId)).size;
-  const selectionState = active ? { ...state, attempts: state.attempts.filter(attempt => attempt.runId !== active.id) } : state;
-  const selection = selectQuestions(selectionState, pack, active?.mode ?? "practice", now, context);
+  const arrangementNote = active?.mode === "practice" ? activePracticeNote(active, state, pack, context)
+    : selectQuestions(active ? { ...state, runs: state.runs.filter(run => run.id !== active.id),
+      attempts: state.attempts.filter(attempt => attempt.runId !== active.id) } : state, pack, active?.mode ?? "practice", now, context).note;
   const recheck = recheckSkills(state, pack, context);
   const recommendations: ExamSprintOverview["recommendations"] = skills.filter(skill => skill.status === "weak" || skill.status === "usable").map(skill => ({
     title: `${skill.status === "weak" ? "补齐" : "验证保持"}：${skill.title}`, reason: skill.reason + (skill.dueAt ? ` 复测不早于 ${skill.dueAt}。` : ""), lessonId: skill.lessonId,
@@ -467,7 +561,9 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
   for (const skill of skills.filter(skill => skill.status === "untested" && recheck.has(skill.skillId))) {
     recommendations.push({ title: `重新确认：${skill.title}`, reason: skill.reason, lessonId: skill.lessonId, mode: "practice" });
   }
-  recommendations.push({ title: active ? "本轮题目安排" : "下一轮练习安排", reason: selection.note, lessonId: null, mode: "practice" });
+  recommendations.push({ title: active ? "本轮题目安排" : "下一轮练习安排",
+    reason: arrangementNote,
+    lessonId: null, mode: "practice" });
   return {
     pack: structuredClone(publicPack), state: { ...structuredClone(publicState), lessonExposures: structuredClone(state.lessonExposures ?? []) }, attempts, lessonContents,
     activeRun: active ? structuredClone(active) : null,

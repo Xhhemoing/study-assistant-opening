@@ -58,6 +58,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
   const cancelled = new Set<string>();
   const controllers = new Map<string, AbortController>();
   const attempted = new Set<string>();
+  const dismissible = new Set<string>();
 
   const add = (files: LocalUploadFile[]): UploadQueueItem[] => {
     assertRoom(files.map(file => ({ size: file.bytes.byteLength })));
@@ -94,6 +95,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       return;
     }
     item.state = "uploading";
+    dismissible.delete(item.id);
     const controller = new AbortController();
     controllers.set(item.id, controller);
     item.message = undefined;
@@ -141,6 +143,8 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       if (!stillActive(item.id)) return;
       item.state = "failed";
       item.message = uploadErrorMessage(error, "上传未完成，原件仍在本地，请重试。");
+      if (error instanceof UploadUserError && error.code === "UPLOAD_MISMATCH") dismissible.add(item.id);
+      else dismissible.delete(item.id);
       update?.(snapshot());
       return;
     } finally { controllers.delete(item.id); }
@@ -150,6 +154,8 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       item.message = result.message;
       item.ticket = result.ticket ?? item.ticket;
       item.completionPending = result.completionPending;
+      if (result.dismissible && !item.completionPending) dismissible.add(item.id);
+      else dismissible.delete(item.id);
       update?.(snapshot());
       return;
     }
@@ -160,6 +166,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     item.file = { name: item.file.name, type: item.file.type, bytes: new Uint8Array() };
     item.ticket = undefined;
     item.completionPending = undefined;
+    dismissible.delete(item.id);
     item.progress = 100;
     update?.(snapshot());
   };
@@ -185,6 +192,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
     const item = items.find((candidate) => candidate.id === id);
     if (!item || item.state !== "failed" || isSessionExpired()) return;
     cancelled.delete(id);
+    dismissible.delete(id);
     item.state = "idle";
     await start(update);
   };
@@ -200,13 +208,14 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       update?.(snapshot());
       return;
     }
-    if (item.state !== "saved" && (item.completionPending || item.ticket || attempted.has(id))) {
+    if (item.state !== "saved" && !dismissible.has(id) && (item.completionPending || item.ticket || attempted.has(id))) {
       item.message = item.completionPending ? "可能已保存，待核对。请重试核对同一材料。" : "上传准备或暂存记录待核对，可重试；尚未清理记录。";
       update?.(snapshot());
       return;
     }
     cancelled.add(id);
     attempted.delete(id);
+    dismissible.delete(id);
     unreadFiles.delete(id);
     items.splice(index, 1);
     update?.(snapshot());

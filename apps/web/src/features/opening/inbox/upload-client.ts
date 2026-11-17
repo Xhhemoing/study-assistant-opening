@@ -1,6 +1,7 @@
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
+import { OpeningApiError } from "../client/api";
 import { resolveUploadMime, unsupportedUploadMessage } from "./upload-state";
-import { uploadErrorMessage } from "./upload-error";
+import { UploadUserError, uploadErrorMessage } from "./upload-error";
 import type { SessionIdentity } from "../../auth/session-identity";
 
 export type LocalUploadFile = {
@@ -25,6 +26,7 @@ export type UploadRejected = {
   ticket?: UploadTicket;
   keptLocal: true;
   completionPending?: boolean;
+  dismissible?: boolean;
   message: string;
 };
 
@@ -56,6 +58,43 @@ function rejectionDetail(error: unknown): string {
   return message ? `（${message}）` : "";
 }
 
+function isUncertainCompleteFailure(error: unknown): boolean {
+  if (!(error instanceof OpeningApiError)) return true;
+  return error.status === 408 || error.status === 409 || error.status >= 500 || error.status < 400;
+}
+
+function isDeterministicRejection(error: unknown): boolean {
+  if (error instanceof UploadUserError) return error.code === "UPLOAD_MISMATCH";
+  return error instanceof OpeningApiError
+    && (error.status === 400 || error.status === 404 || error.status === 413 || error.status === 422);
+}
+
+function completeFailureResult(
+  sourceId: string,
+  ticket: UploadTicket | undefined,
+  error: unknown,
+): UploadRejected {
+  const detail = rejectionDetail(error);
+  if (isUncertainCompleteFailure(error)) {
+    return {
+      phase: "interrupted",
+      sourceId,
+      ticket,
+      keptLocal: true,
+      completionPending: true,
+      message: `可能已保存，待核对。请重试核对同一材料。${detail}`,
+    };
+  }
+  return {
+    phase: "interrupted",
+    sourceId,
+    ticket,
+    keptLocal: true,
+    ...(isDeterministicRejection(error) ? { dismissible: true } : {}),
+    message: detail ? `上传未完成，原件仍在本地。${detail}` : "上传确认未通过，原件仍在本地，请检查原文件后重试。",
+  };
+}
+
 /** begin → private PUT → complete. Byte callbacks are upload progress only. */
 export function createUploadClient(deps: UploadClientDeps) {
   // Direct callers also retain the identity after an unknown begin response.
@@ -81,9 +120,7 @@ export function createUploadClient(deps: UploadClientDeps) {
           return result;
         }
         catch (error) {
-          return { phase: "interrupted", sourceId: progress.resumeSourceId, ticket: progress.ticket,
-            completionPending: true, keptLocal: true,
-            message: `可能已保存，待核对。请重试核对同一材料。${rejectionDetail(error)}` };
+          return completeFailureResult(progress.resumeSourceId, progress.ticket, error);
         }
       }
       const mime = resolveUploadMime({ name: file.name, type: file.type });
@@ -92,6 +129,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         return {
           phase: "unsupported",
           keptLocal: true,
+          dismissible: true,
           message: unsupportedUploadMessage({ name: file.name, type: file.type }),
         };
       }
@@ -121,6 +159,7 @@ export function createUploadClient(deps: UploadClientDeps) {
           phase: "interrupted",
           sourceId: progress.resumeSourceId ?? progress.uploadId ?? pendingBegins.get(file),
           keptLocal: true,
+          ...(isDeterministicRejection(error) ? { dismissible: true } : {}),
           message: progress.resumeSourceId
             ? `上传票据刷新失败，原件仍在本地。未创建第二份材料。${detail}`
             : `上传准备结果待核对，原件仍在本地；重试将沿用同一上传标识。${detail}`,
@@ -147,6 +186,7 @@ export function createUploadClient(deps: UploadClientDeps) {
           sourceId: ticket.source.id,
           ticket,
           keptLocal: true,
+          ...(isDeterministicRejection(error) ? { dismissible: true } : {}),
           message: `上传中断，原件仍在本地。未标记为已上传。${detail}`,
         };
       }
@@ -157,14 +197,7 @@ export function createUploadClient(deps: UploadClientDeps) {
         pendingBegins.delete(file);
         return result;
       } catch (error) {
-        return {
-          phase: "interrupted",
-          sourceId: ticket.source.id,
-          ticket,
-          keptLocal: true,
-          completionPending: true,
-          message: `可能已保存，待核对。请重试核对同一材料。${rejectionDetail(error)}`,
-        };
+        return completeFailureResult(ticket.source.id, ticket, error);
       }
     },
     retryComplete(sourceId: string, expectedIdentity?: SessionIdentity | null): Promise<SourceRecord> {

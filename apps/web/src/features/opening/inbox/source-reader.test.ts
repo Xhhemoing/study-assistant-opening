@@ -109,6 +109,36 @@ describe("dedicated material reader", () => {
     expect(html).toContain("重新解析");
     expect(html).toContain("<canvas");
   });
+  it("surfaces PARSE_PARTIAL warnings on ready sources and enables retry only when retryable=true on the latest version", async () => {
+    const onRetry = vi.fn().mockRejectedValueOnce(new Error("raw english error")).mockResolvedValueOnce(undefined);
+    const reader = await render({
+      record: { ...record, parseState: "ready", error: { code: "PARSE_PARTIAL", message: "第 2 页未能识别，可以重新解析", retryable: true } },
+      onRetry,
+    });
+    expect(reader.textContent).toContain("第 2 页未能识别，可以重新解析");
+    const retry = Array.from(reader.querySelectorAll("button")).find(button => button.textContent === "重新解析");
+    expect(retry).toBeTruthy();
+    await click(retry!);
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(reader.textContent).toContain("重新解析未能完成，请重试。");
+    expect(reader.textContent).not.toContain("raw english error");
+
+    const nonRetryable = await render({
+      record: { ...record, parseState: "ready", error: { code: "PARSE_PARTIAL", message: "第 1 页识别质量低", retryable: false } },
+      onRetry,
+    });
+    expect(nonRetryable.textContent).toContain("第 1 页识别质量低");
+    expect(Array.from(nonRetryable.querySelectorAll("button")).some(button => button.textContent === "重新解析")).toBe(false);
+
+    const historical = await render({
+      requestedVersion: 1,
+      record: { ...record, version: 1 },
+      latestRecord: { ...record, parseState: "ready", error: { code: "PARSE_PARTIAL", message: "第 2 页未能识别，可以重新解析", retryable: true } },
+      onRetry,
+    });
+    expect(historical.textContent).not.toContain("第 2 页未能识别，可以重新解析");
+    expect(Array.from(historical.querySelectorAll("button")).some(button => button.textContent === "重新解析")).toBe(false);
+  });
   it("starts reading extracted content for parsed formats without an inline original viewer", async () => {
     const html = (await render({ record: { ...record, name: "slides.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" } })).outerHTML;
     expect(html).toContain('aria-label="解析正文"');

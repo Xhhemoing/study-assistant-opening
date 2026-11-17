@@ -4,6 +4,8 @@ import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 beforeEach(() => { setupUploadIdentity(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 import type { SourceRecord, UploadTicket } from "@aistudy/contracts";
+import { OpeningApiError } from "../client/api";
+import { UploadUserError } from "./upload-error";
 import { createUploadQueue } from "./upload-queue";
 import { createUploadClient, type LocalUploadFile } from "./upload-client";
 
@@ -432,4 +434,50 @@ it("drains a batch added while an empty start is settling", async () => {
   await queue.start(); await emptyStart;
   expect(client).toHaveBeenCalledOnce();
   expect(queue.snapshot()[0]?.state).toBe("saved");
+});
+
+it("allows immediate dismiss on deterministic 400 rejections while retaining uncertain failures", async () => {
+  const ticket: UploadTicket = {
+    source: { ...source, uploadState: "pending" as const, parseState: "not_started" as const },
+    uploadUrl: "/api/opening/sources/11111111-1111-4111-8111-111111111111/staging",
+    expiresAt: source.createdAt,
+  };
+  const completeMismatch = createUploadQueue(createUploadClient({
+    begin: async () => ticket,
+    put: async () => undefined,
+    complete: async () => { throw new OpeningApiError(400, "stored object magic bytes do not match declared MIME", "UPLOAD_MISMATCH"); },
+  }), [file("bad-complete.pdf")]);
+  await completeMismatch.start();
+  expect(completeMismatch.snapshot()[0]).toMatchObject({ state: "failed", ticket, completionPending: undefined });
+  completeMismatch.dismiss(completeMismatch.snapshot()[0]!.id);
+  expect(completeMismatch.snapshot()).toEqual([]);
+
+  const putMismatch = createUploadQueue(createUploadClient({
+    begin: async () => ticket,
+    put: async () => { throw new UploadUserError("文件内容与扩展名不匹配，请确认未损坏或改名后重试。", "UPLOAD_MISMATCH"); },
+    complete: async () => source,
+  }), [file("bad-put.pdf")]);
+  await putMismatch.start();
+  expect(putMismatch.snapshot()[0]).toMatchObject({ state: "failed", ticket });
+  expect(putMismatch.snapshot()[0]?.message).toContain("文件内容与扩展名不匹配");
+  putMismatch.dismiss(putMismatch.snapshot()[0]!.id);
+  expect(putMismatch.snapshot()).toEqual([]);
+
+  const completeUncertain = vi.fn()
+    .mockRejectedValueOnce(new OpeningApiError(503, "storage down"))
+    .mockRejectedValueOnce(new OpeningApiError(400, "stored object magic bytes do not match declared MIME", "UPLOAD_MISMATCH"));
+  const reconciled = createUploadQueue(createUploadClient({
+    begin: async () => ticket,
+    put: async () => undefined,
+    complete: completeUncertain,
+  }), [file("uncertain-then-bad.pdf")]);
+  await reconciled.start();
+  const id = reconciled.snapshot()[0]!.id;
+  reconciled.dismiss(id);
+  expect(reconciled.snapshot()).toHaveLength(1);
+  expect(reconciled.snapshot()[0]?.completionPending).toBe(true);
+  await reconciled.retry(id);
+  expect(reconciled.snapshot()[0]?.completionPending).toBeUndefined();
+  reconciled.dismiss(id);
+  expect(reconciled.snapshot()).toEqual([]);
 });

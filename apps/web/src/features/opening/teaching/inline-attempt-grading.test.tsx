@@ -2,8 +2,9 @@
 import { act, createElement, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AiGradingStatus, LearningAttempt, LearningObservation } from "@aistudy/contracts";
+import { EXPLICIT_REGRADE_CONFIRMATION_TEXT, EXPLICIT_REGRADE_CONFIRMATION_VERSION, type AiGradingStatus, type ExplicitRegradeRequest, type LearningAttempt, type LearningObservation } from "@aistudy/contracts";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+import { getVerifiedSessionNamespace, publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 const api = vi.hoisted(() => ({
   getSubmittedAttempt: vi.fn(), getSummary: vi.fn(), getCourseKnowledge: vi.fn(), listSources: vi.fn(),
@@ -270,4 +271,53 @@ it("offers completion for a known learner correction without regrading or claimi
   expect(container.textContent).not.toContain("重试批改");
   expect(container.querySelector('[data-feedback-verdict="unverified"]')).not.toBeNull();
   expect(api.gradeObservation).not.toHaveBeenCalled();
+});
+
+it("mounts a single ExplicitRegradeHttpOwner in InlineAttemptForm and rereads comparison when 0111 settles", async () => {
+  const clearIdentity = publishVerifiedSessionIdentity({ id: crypto.randomUUID(), workspaceId: record.workspaceId });
+  const identity = JSON.parse(getVerifiedSessionNamespace()!);
+  const requestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const regradeRequest: ExplicitRegradeRequest = {
+    requestId, rootObservationId: record.id, expectedHead: record.id, answerRevision: 1, privacyEpoch: 0,
+    previousGradingVersion: 0, gradingVersion: 1, previousOperationId: "old-op", operationId: "new-op",
+    state: "prepared", confirmedAt: null, confirmationVersion: EXPLICIT_REGRADE_CONFIRMATION_VERSION,
+    confirmationText: EXPLICIT_REGRADE_CONFIRMATION_TEXT, workSource: null, jobId: null, resultObservationId: null,
+  };
+  const snapshot = { rootObservationId: record.id, expectedHead: record.id, answerRevision: 1, privacyEpoch: 0, previousGradingVersion: 0, oldStatus: "unknown_cost" as const };
+  const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+    const path = String(url);
+    if (path === "/api/auth/me") return Response.json({ user: { id: identity[0], workspaceId: identity[1] } });
+    if (path.startsWith("/api/opening/observations/regrade/confirm") && init?.method === "POST") {
+      head = graded;
+      return Response.json({
+        kind: "progress",
+        progress: {
+          request: { ...regradeRequest, state: "confirmed", confirmedAt: "2026-11-17T00:00:00.000Z", jobId, resultObservationId: graded.id },
+          status: gradingStatus({ headObservationId: graded.id, status: "graded", retryable: false, jobId }),
+        },
+        snapshot: { ...snapshot, expectedHead: graded.id, previousGradingVersion: 1, oldStatus: "graded" },
+      }, { status: 202 });
+    }
+    if (path === "/api/opening/observations/regrade" && init?.method === "POST") {
+      return Response.json({ kind: "prepared", request: regradeRequest, estimate: "¥0.05", estimateCents: 5, snapshot });
+    }
+    if (path.startsWith("/api/opening/observations/regrade?")) return Response.json({ snapshot });
+    throw new Error(`Unexpected fetch: ${path}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  api.getSubmittedAttempt.mockResolvedValue({ attempt, observation: record });
+  api.getGradingStatus.mockResolvedValue(gradingStatus({ status: "unknown_cost", retryable: false }));
+  try {
+    await render();
+    expect(container.querySelectorAll('section[aria-label="新建 AI 评改版本"]')).toHaveLength(1);
+    await click("新建一次AI评改版本");
+    await click("确认新建 AI 评改（这次另收费，旧未知费用不释放）");
+    expect(api.getObservationHistory).toHaveBeenCalledWith(record.id);
+    expect(context.onObservationReady).toHaveBeenLastCalledWith(blockId, graded);
+    expect(container.textContent).toContain("AI 批改 · 正确");
+  } finally {
+    clearIdentity();
+    vi.unstubAllGlobals();
+  }
 });

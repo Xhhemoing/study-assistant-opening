@@ -16,7 +16,7 @@ beforeAll(async () => {
   await import("../teaching/span/next-action-service");
   await import("../teaching/span/span-next-action-control");
 }, 30_000);
-const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const id = "11111111-1111-4111-8111-111111111111", courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", conversation = "66666666-6666-4666-8666-666666666666";
 const requirement: CourseRouteRequirementInput = { id, stableSkillId: id, knowledgeNodeId: null, requirementKey: "concept-one", title: "概念一", position: 0, mandatory: true, goalIds: [], prerequisiteIds: [], sourceRefs: [], verification: { kind: "manual", status: "needs_check", exerciseKeys: [], rubric: "独立解释概念", missingReasons: [] }, origin: "confirmed" };
 const snapshot: CourseRouteSnapshot = { courseId, scopeState: "unconfirmed", requirements: [], suggestions: [requirement], summary: { total: 0, mandatory: 0, verified: 0, blocked: 0 }, materials: Array.from({ length: 33 }, (_, index) => ({ sourceId: id, sourceVersion: index, title: `资料 ${index + 1}`, available: true })), currentActivity: null, currentRoute: null, observationId: null };
 let host: HTMLDivElement, root: Root;
@@ -27,7 +27,7 @@ function button(text: string) { const node = [...host.querySelectorAll("button")
 const noGoals: LearningGoalList = { goals: [], selectedGoalIds: {}, legacyConflicts: [] };
 function knowledgeRecord(version: number, nodes = 0) { return { version, sourceVersions: {}, snapshot: { courseId, version, edges: [], nodes: Array.from({ length: nodes }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, courseId, label: `知识点${index}`, kind: "concept" as const, evidenceChunkIds: [], status: "suggested" as const })) } }; }
 function knowledgeClient(): KnowledgeRebuildClient { return { read: vi.fn(async () => knowledgeRecord(1)), rebuild: vi.fn() }; }
-async function render(api: CourseRouteClient, options: { grouped?: boolean; archived?: boolean; goals?: LearningGoalList; knowledge?: KnowledgeRebuildClient } = {}) { await act(async () => root.render(<CourseRoutePanel courseId={courseId} archived={options.archived} grouped={options.grouped} client={api} knowledgeClient={options.knowledge ?? knowledgeClient()} goalsClient={{ list: vi.fn(async () => options.goals ?? noGoals) }} />)); }
+async function render(api: CourseRouteClient, options: { grouped?: boolean; archived?: boolean; goals?: LearningGoalList; knowledge?: KnowledgeRebuildClient; originalConversationId?: string; onNavigate?: (href: string) => void } = {}) { await act(async () => root.render(<CourseRoutePanel courseId={courseId} archived={options.archived} grouped={options.grouped} originalConversationId={options.originalConversationId} onNavigate={options.onNavigate} client={api} knowledgeClient={options.knowledge ?? knowledgeClient()} goalsClient={{ list: vi.fn(async () => options.goals ?? noGoals) }} />)); }
 it.each(["unchecked", "structure_ok", "needs_check"] as const)("renders strict client compilation facts separately from learning for %s", async verificationStatus => {
   const base = { requirement: { ...requirement, courseId, revision: 1, lifecycle: "active" as const, approvedAt: null }, status: "unobserved" as const, observationId: null, sourcesAvailable: true, missingReasons: [] };
   const missing = { activityId: null, generateStatus: null, contentVersion: 0, saved: false, documentId: null, revisionNumber: null, verificationStatus: null };
@@ -409,6 +409,17 @@ it("offers the start without a reason once a goal is selected and the scope is c
   expect(start.hasAttribute("aria-describedby")).toBe(false);
   expect(host.textContent).not.toContain("暂不能开始");
 });
+it("keeps the original conversation on an existing activity link and a newly started route", async () => {
+  const activeActivity = { id, courseId, routeManaged: true, status: "active", intentSummary: "概念一" } as NonNullable<CourseRouteSnapshot["currentActivity"]>;
+  const api = client({ ...confirmed, currentActivity: activeActivity });
+  const navigate = vi.fn();
+  vi.mocked(api.start).mockResolvedValue({ kind: "ready", activity: activeActivity, resumed: false, requirementId: id, action: "diagnose", href: `/opening/courses/${courseId}/study?activity=${id}#lesson` });
+  await render(api, { goals: selectedGoal, originalConversationId: conversation, onNavigate: navigate });
+  const resumeLink = [...host.querySelectorAll("a")].find(link => link.textContent === "继续已有活动：概念一");
+  expect(resumeLink?.getAttribute("href")).toBe(`/opening/courses/${courseId}/study?activity=${id}&conversation=${conversation}`);
+  await act(async () => button("学习这一项").click());
+  expect(navigate).toHaveBeenCalledWith(`/opening/courses/${courseId}/study?activity=${id}&conversation=${conversation}#lesson`);
+});
 it("warns that a requirement without a checked material will be marked blocked", async () => {
   await render(client({ ...snapshot, materials: [{ sourceId: id, sourceVersion: 0, title: "资料 A", available: true }] }));
   await act(async () => button("检查与确认课程范围").click());
@@ -533,4 +544,15 @@ it("retains the exact explicit public binding command through uncertain confirma
   await act(async () => button("重新确认这次安排").click());
   expect(vi.mocked(api.confirm).mock.calls[1]).toEqual([courseId, original]);
   expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
+});
+it("keeps the original conversation on the choice returned by starting a route", async () => {
+  const api = client(confirmed);
+  vi.mocked(api.start).mockResolvedValue({
+    kind: "choice", reason: "source_unavailable", message: "请核对资料", courseId,
+    href: "/opening/courses/" + courseId + "#course-learning-route", requirementIds: [id],
+  });
+  await render(api, { goals: selectedGoal, originalConversationId: conversation });
+  await act(async () => button("学习这一项").click());
+  const link = [...host.querySelectorAll("a")].find(item => item.textContent === "处理这项选择");
+  expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + "?conversation=" + conversation + "#course-learning-route");
 });

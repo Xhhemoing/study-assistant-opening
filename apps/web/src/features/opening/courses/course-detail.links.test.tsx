@@ -20,7 +20,7 @@ vi.mock("../library/library-document-list", () => ({ LibraryDocumentList: () => 
 vi.mock("./course-settings-panel", () => ({ CourseSettingsPanel: () => null }));
 vi.mock("./course-add-materials", () => ({ CourseAddMaterials: () => null }));
 vi.mock("./course-space", () => ({ CourseSpaceHeader: () => null }));
-vi.mock("./course-route-panel", () => ({ CourseRoutePanel: ({ grouped }: { grouped?: boolean }) => createElement("p", { "data-route-panel": grouped ? "grouped" : "plain" }) }));
+vi.mock("./course-route-panel", () => ({ CourseRoutePanel: ({ grouped, originalConversationId }: { grouped?: boolean; originalConversationId?: string }) => createElement("p", { "data-route-panel": grouped ? "grouped" : "plain", "data-route-conversation": originalConversationId }) }));
 vi.mock("../knowledge/course-knowledge", () => ({ CourseKnowledge: () => null }));
 vi.mock("../exam-sprint/course-exam-progress", () => ({ CourseExamProgress: () => null }));
 vi.mock("../teaching/learner-state-card", () => ({ LearnerStateCard: () => null }));
@@ -83,4 +83,5 @@ it.each([[false, "plain"], [true, "grouped"]] as const)("links 学习安排 to t
   const route = [...(overview?.querySelectorAll("a") ?? [])].find(link => link.textContent === "全课路线");
   expect(route?.getAttribute("href")).toBe(`/opening/courses/${courseId}?tab=units&conversation=${conversation}#course-learning-route`);
   expect(host.querySelector("[data-route-panel]")?.getAttribute("data-route-panel")).toBe(mode);
+  expect(host.querySelector("[data-route-panel]")?.getAttribute("data-route-conversation")).toBe(conversation);
 });

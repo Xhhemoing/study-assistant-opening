@@ -198,7 +198,7 @@ async function defaultExtract(
     instruction: EXTRACTION_INSTRUCTION,
     text: batch.chapter ? `提取本章节知识结构：${batch.chapter}` : "提取当前资料片段的知识结构",
     history: [],
-    chunks: batch.chunks,
+    chunks: batch.chunks.map(({ courseId: _courseId, ...chunk }) => chunk),
     mode: "explain",
     maxOutputTokens: 4096,
     mediaCapability: "text_only",

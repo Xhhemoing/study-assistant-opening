@@ -166,16 +166,184 @@ describe("exam sprint sessions and selection", () => {
     expect(selected.filter(id => id.startsWith("s1-"))).toHaveLength(3);
     expect(selected).not.toContain("s1-0");
     expect(selected).toContain("transfer");
-    expect(examSprintOverview(state, pack, NOW).recommendations.at(-1)!.reason).toContain("6/3/1");
+    expect(examSprintOverview(previous, pack, NOW).recommendations.at(-1)!.reason).toContain("6/3/1");
   });
 
   it("discloses insufficient practice quota instead of pretending complete coverage", () => {
     const smallPack = { ...pack, questions: [question("only")] };
     const state = start(undefined, "practice", NOW, smallPack);
     expect(state.runs[0]!.questionIds).toEqual(["only"]);
-    expect(examSprintOverview(state, smallPack, NOW).recommendations.at(-1)!.reason).toContain("不足");
+    expect(examSprintOverview(createExamSprintState(NOW), smallPack, NOW).recommendations.at(-1)!.reason).toContain("不足");
   });
 
+  it.each(EXAM_SPRINT_PACK.topics)("starts up to three training questions only from $title", ({ id, title }) => {
+    const initial = createExamSprintState(NOW);
+    const command = { action: "start", mode: "practice", topicId: id, clientKey: key } as const;
+    const started = applyExamSprintCommand(initial, command, EXAM_SPRINT_PACK, NOW);
+    const run = started.runs[0]!;
+    expect(run.questionIds).toHaveLength(3);
+    expect(run.questionIds.map(id => EXAM_SPRINT_PACK.questions.find(question => question.id === id)))
+      .toEqual(Array.from({ length: 3 }, () => expect.objectContaining({ topicId: id, pool: "training" })));
+    expect(run.deadlineAt).toBeNull();
+    const note = examSprintOverview(started, EXAM_SPRINT_PACK, NOW).recommendations.at(-1)!.reason;
+    expect(note).toContain("本轮共 3 题");
+    expect(note).toContain(title);
+    expect(initial.runs).toEqual([]);
+    expect(() => applyExamSprintCommand(started, command, EXAM_SPRINT_PACK, NOW)).toThrow(expect.objectContaining({ code: "CONFLICT" }));
+  });
+
+  it("prioritizes weak skills before fresh families while keeping questions unseen", () => {
+    const selectedPack = { ...pack, questions: [
+      question("unseen-strong", "s2"), question("weak-seen", "s1", { familyId: "seen-family" }),
+      question("weak-new-same-family", "s1", { familyId: "seen-family" }), question("weak-fresh", "s1"),
+      question("outside", "s3"), question("reserved", "s1", { pool: "mock-a" }),
+    ] };
+    const previous = addEvidence(createExamSprintState(NOW), "weak-seen", NOW, { correct: false, answer: "B" });
+    const started = applyExamSprintCommand(previous, { action: "start", mode: "practice", topicId: "t1", clientKey: key }, selectedPack, NOW);
+    expect(started.runs.at(-1)!.questionIds).toEqual(["weak-fresh", "weak-new-same-family", "unseen-strong"]);
+  });
+
+  it.each(["weak", "low-confidence"] as const)("puts a %s skill variant before a secure skill with a fresh family in chapter practice", status => {
+    const selectedPack = { ...pack, questions: [
+      question("secure-old-1", "s2"), question("secure-old-2", "s2"), question("secure-new", "s2"),
+      question("priority-old", "s1", { familyId: "priority-family" }),
+      question("priority-variant", "s1", { familyId: "priority-family" }),
+    ] };
+    let previous = addEvidence(createExamSprintState(NOW), "secure-old-1", NOW, { confidence: 5 });
+    previous = addEvidence(previous, "secure-old-2", LATER, { confidence: 5 });
+    previous = addEvidence(previous, "priority-old", LATER, { correct: status === "weak" ? false : true, confidence: status === "weak" ? 5 : 1 });
+    const started = applyExamSprintCommand(previous, { action: "start", mode: "practice", topicId: "t1", clientKey: key }, selectedPack, LATER);
+    expect(started.runs.at(-1)!.questionIds).toEqual(["priority-variant", "secure-new"]);
+    expect(started.attempts.at(-1)!.firstFamilyExposure).toBe(false);
+  });
+
+  it("describes the fixed current practice question mix and chapters after a new answer", () => {
+    const started = start(undefined, "practice");
+    const fixedIds = [...started.runs[0]!.questionIds];
+    const answered = answer(started, "B");
+    const view = examSprintOverview(answered, pack, NOW);
+    const note = view.recommendations.at(-1)!.reason;
+    expect(view.activeRun!.questionIds).toEqual(fixedIds);
+    expect(note).toContain("本轮共 10 题");
+    expect(note).toContain("基础 9 题");
+    expect(note).toContain("迁移 1 题");
+    expect(note).toContain("Limits");
+    expect(note).toContain("Calculus");
+    expect(note).not.toContain("6/3/1");
+    expect(note).toBe(examSprintOverview(started, pack, NOW).recommendations.at(-1)!.reason);
+  });
+
+  it("warns about same-family variants in the fixed chapter arrangement without presenting them early", () => {
+    const selectedPack = { ...pack, questions: [
+      question("same-1", "s1", { familyId: "shared" }), question("same-2", "s1", { familyId: "shared" }), question("other", "s1"),
+    ] };
+    const started = applyExamSprintCommand(createExamSprintState(NOW), { action: "start", mode: "practice", topicId: "t1", clientKey: key }, selectedPack, NOW);
+    const view = examSprintOverview(started, selectedPack, NOW);
+    expect(view.activeRun!.questionIds).toEqual(["same-1", "other", "same-2"]);
+    expect(view.recommendations.at(-1)!.reason).toContain("同类变式");
+    expect(started.attempts).toHaveLength(1);
+    expect(started.attempts[0]!.firstFamilyExposure).toBe(true);
+    expect(view.currentAttempt!.question.id).toBe("same-1");
+  });
+  it("stays in a short or empty chapter and rejects forged scope on other modes", () => {
+    const initial = createExamSprintState(NOW);
+    const smallPack = { ...pack, questions: [question("only"), question("outside", "s3", { pool: "mock-b" })] };
+    const practice = { action: "start", mode: "practice", topicId: "t1", clientKey: key } as const;
+    expect(applyExamSprintCommand(initial, practice, smallPack, NOW).runs[0]!.questionIds).toEqual(["only"]);
+    expect(() => applyExamSprintCommand(initial, { ...practice, topicId: "t2" }, smallPack, NOW)).toThrow(expect.objectContaining({ code: "CONFLICT" }));
+    expect(() => applyExamSprintCommand(initial, { ...practice, topicId: "unknown" }, smallPack, NOW)).toThrow(expect.objectContaining({ code: "VALIDATION" }));
+    for (const mode of ["diagnostic", "retest", "mock-a", "mock-b"] as const) {
+      expect(() => applyExamSprintCommand(initial, { ...practice, mode }, pack, NOW)).toThrow(expect.objectContaining({ code: "VALIDATION" }));
+    }
+    const sealed = start(initial, "mock-b");
+    expect(() => applyExamSprintCommand(sealed, practice, pack, NOW)).toThrow(expect.objectContaining({ code: "CONFLICT" }));
+    expect(examSprintOverview(sealed, pack, NOW).currentAttempt?.feedback).toBeNull();
+  });
+
+  it("starts default practice with weak skills even without a recorded error cause", () => {
+    const previous = addEvidence(createExamSprintState(NOW), "s4-0", NOW, { correct: false, answer: "B" });
+    const selected = start(previous, "practice").runs.at(-1)!.questionIds;
+    expect(selected.slice(0, 3)).toEqual(["s4-1", "s4-2", "s4-3"]);
+    expect(selected).not.toContain("s4-0");
+  });
+
+  it("prioritizes current low confidence and untested skills over secure skills without changing mastery", () => {
+    const selectedPack = { ...pack, questions: [
+      ...Array.from({ length: 12 }, (_, index) => question(`secure-${index}`, "s1")),
+      question("uncertain-old", "s2"), question("uncertain-new", "s2"), question("untested", "s3"),
+    ] };
+    let previous = addEvidence(createExamSprintState(NOW), "secure-0", NOW, { confidence: 5 });
+    previous = addEvidence(previous, "secure-1", LATER, { confidence: 5 });
+    previous = addEvidence(previous, "uncertain-old", LATER, { confidence: 1 });
+    const started = start(previous, "practice", LATER, selectedPack);
+    expect(started.runs.at(-1)!.questionIds.slice(0, 2)).toEqual(["uncertain-new", "untested"]);
+    expect(examSprintOverview(started, selectedPack, LATER).skills.find(skill => skill.skillId === "s2")!.status).toBe("usable");
+  });
+
+  it("keeps recovered secure skills behind untested skills despite a withdrawn historical success", () => {
+    const selectedPack = { ...pack, questions: [
+      ...Array.from({ length: 4 }, (_, index) => question(`recovered-${index}`, "s1")), question("untested", "s2"),
+    ] };
+    let previous = addEvidence(createExamSprintState(NOW), "recovered-0", NOW, { confidence: 5 });
+    previous = addEvidence(previous, "recovered-1", NOW, { confidence: 5 });
+    previous = addEvidence(previous, "recovered-2", LATER, { confidence: 5 });
+    const context: ExamSelectionContext = { ruleEvidence: {
+      [previous.attempts[0]!.id]: { usable: false, correct: null, independent: false, assisted: false },
+    } };
+    expect(examSprintOverview(previous, selectedPack, LATER, context).skills.find(skill => skill.skillId === "s1")!.status).toBe("secure");
+    const started = applyExamSprintCommand(previous, { action: "start", clientKey: key, mode: "practice" }, selectedPack, LATER, context);
+    expect(started.runs.at(-1)!.questionIds).toEqual(["untested", "recovered-3"]);
+  });
+  it("rotates unpresented questions from an ended practice instead of scheduling the same batch", () => {
+    const initial = start(undefined, "practice");
+    const closed = finish(initial);
+    const next = start(closed, "practice");
+    const unallocated = pack.questions.filter(question => question.pool === "training" && !initial.runs[0]!.questionIds.includes(question.id));
+    expect(unallocated.every(question => next.runs.at(-1)!.questionIds.includes(question.id))).toBe(true);
+    expect(next.runs.at(-1)!.questionIds).not.toContain(initial.attempts[0]!.questionId);
+    expect(next.attempts[1]!.firstFamilyExposure).toBe(true);
+  });
+
+  it("shortens practice to unseen questions and reports exhausted training instead of repeating old questions", () => {
+    const selectedPack = { ...pack, questions: [question("old"), question("new")] };
+    const previous = addEvidence(createExamSprintState(NOW), "old", NOW);
+    const started = start(previous, "practice", LATER, selectedPack);
+    expect(started.runs.at(-1)!.questionIds).toEqual(["new"]);
+    expect(examSprintOverview(started, selectedPack, LATER).recommendations.at(-1)!.reason).toContain("不足");
+    const exhausted = finish(started, LATER, selectedPack);
+    expect(() => start(exhausted, "practice", LATER, selectedPack)).toThrow("没有新的");
+    expect(() => applyExamSprintCommand(exhausted, { action: "start", mode: "practice", topicId: "t1", clientKey: key }, selectedPack, LATER)).toThrow("没有新的");
+  });
+
+  it("puts a weak transfer question before general foundation coverage", () => {
+    const selectedPack = { ...pack, questions: [...pack.questions,
+      question("transfer-old", "s4", { difficulty: "transfer" }),
+      question("transfer-new", "s4", { difficulty: "transfer" }),
+    ].filter(question => question.skillId !== "s4" || question.difficulty === "transfer") };
+    const previous = addEvidence(createExamSprintState(NOW), "transfer-old", NOW, { correct: false });
+    expect(start(previous, "practice", LATER, selectedPack).runs.at(-1)!.questionIds[0]).toBe("transfer-new");
+  });
+
+  it("discloses missing new weak-skill questions while keeping other practice available", () => {
+    const selectedPack = { ...pack, questions: [question("weak-old", "s4"), ...pack.questions.filter(question => question.skillId !== "s4")] };
+    const previous = addEvidence(createExamSprintState(NOW), "weak-old", NOW, { correct: false });
+    const started = start(previous, "practice", LATER, selectedPack);
+    expect(started.runs.at(-1)!.questionIds).not.toContain("weak-old");
+    expect(examSprintOverview(previous, selectedPack, LATER).recommendations.at(-1)!.reason).toContain("技能已无新题");
+    expect(examSprintOverview(started, selectedPack, LATER).recommendations.at(-1)!.reason).toContain("本轮未安排");
+  });
+  it("ends a run with pending work while preserving answers and keeping a used mock consumed", () => {
+    const answered = answer(start(undefined, "mock-a"));
+    const pending = applyExamSprintCommand(answered, { action: "next", clientKey: key, runId: answered.runs[0]!.id }, pack, NOW);
+    const closed = finish(pending);
+    expect(closed.attempts).toEqual(pending.attempts);
+    expect(closed.attempts[0]).toMatchObject({ answer: "A", correct: true });
+    expect(closed.attempts[1]).toMatchObject({ answeredAt: null, answer: null, correct: null, errorCause: null });
+    expect(examSprintOverview(closed, pack, NOW).summary.onlineAnswered).toBe(1);
+    expect(examSprintOverview(closed, pack, NOW).skills.some(skill => skill.status === "weak")).toBe(false);
+    expect(start(closed, "practice").runs.at(-1)!.mode).toBe("practice");
+    expect(() => start(closed, "mock-a")).toThrow("已经开启过");
+  });
   it("requires 24 hours after a failure and selects a different unseen family for retests", () => {
     const previous = addEvidence(createExamSprintState(NOW), "s1-0", NOW, { correct: false, answer: "B" });
     expect(() => start(previous, "retest", "2026-10-18T07:59:59.000Z")).toThrow("24 小时");
@@ -292,7 +460,7 @@ describe("source self-report and workload", () => {
     const overview = examSprintOverview(prioritized, pack, LATER);
     expect(overview.skills.every(skill => skill.status === "untested")).toBe(true);
     expect(prioritized.attempts[0]!.prediction!.historyAttemptIds).toEqual([]);
-    expect(overview.recommendations.at(-1)!.reason).toContain("仅提高相关题");
+    expect(examSprintOverview(failed, pack, LATER).recommendations.at(-1)!.reason).toContain("仅提高相关题");
     const unmapped = { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item, skills: [] })) };
     expect(start(failed, "practice", LATER, unmapped).runs[0]!.questionIds).toEqual(start(initial, "practice", LATER, unmapped).runs[0]!.questionIds);
     const recovered = source(failed, { sourceId: "source-c", phase: "blind", outcome: "correct", assistance: "none" }, LATER);
@@ -375,7 +543,7 @@ describe("current formal qualification and retained sprint history", () => {
     expect(view.recommendations.some(item => item.title === "重新确认：s3" && item.mode === "practice")).toBe(true);
     const practice = applyExamSprintCommand(state, { action: "start", clientKey: key, mode: "practice" }, pack, LATER, context);
     expect(practice.runs.at(-1)!.questionIds).toEqual(expect.arrayContaining(["s3-2", "s3-3"]));
-    expect(practice.runs.at(-1)!.questionIds.filter(id => id.startsWith("s3-"))).toHaveLength(3);
+    expect(practice.runs.at(-1)!.questionIds.filter(id => id.startsWith("s3-"))).toEqual(["s3-2", "s3-3"]);
     expect(state).toEqual(before);
   });
 
