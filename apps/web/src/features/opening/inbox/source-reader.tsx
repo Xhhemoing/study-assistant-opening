@@ -87,6 +87,13 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
   const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState("");
   const latest = requestedVersion === latestRecord.version;
+  const partialWarning = latest && latestRecord.parseState === "ready" && latestRecord.error?.code === "PARSE_PARTIAL"
+    ? latestRecord.error.message
+    : "";
+  const canRetryParse = latest && Boolean(onRetry) && (
+    (latestRecord.parseState === "failed" && latestRecord.error?.retryable !== false)
+    || (latestRecord.parseState === "ready" && latestRecord.error?.code === "PARSE_PARTIAL" && latestRecord.error.retryable === true)
+  );
   const context = { courseId: courseId ?? undefined, sourceId: record.id, sourceVersion: requestedVersion,
     page: questionPage, label: latestRecord.name, fragment: excerpt || undefined };
   function explain(selectedPage: number) {
@@ -150,7 +157,8 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
       </div> : null}
       <div className="mt-2 shrink-0 space-y-1">{selectionNotice ? <p role="status" className="text-xs leading-6 text-text-2">{selectionNotice}</p> : null}{questionPage ? <p className="text-xs leading-6 text-text-3">提问定位：物理第 {questionPage} 页 · v{requestedVersion}。</p> : null}</div>
     </div>
-    {latest && latestRecord.parseState === "failed" && latestRecord.error?.retryable !== false && onRetry ? <button type="button" className={ui.secondary} disabled={retrying} onClick={() => void retry()}>{retrying ? "正在重新解析…" : "重新解析"}</button> : null}
+    {partialWarning ? <p role="status" className="text-xs text-warn">{partialWarning}</p> : null}
+    {canRetryParse ? <button type="button" className={ui.secondary} disabled={retrying} onClick={() => void retry()}>{retrying ? "正在重新解析…" : "重新解析"}</button> : null}
     {error ? <p role="alert" className="text-sm text-danger">{error}</p> : null}
   </SourceReaderFrame>;
 }

@@ -226,6 +226,44 @@ it("keeps internal server failures generic and preserves completion rejection de
   const complete = vi.fn(async () => { throw new OpeningApiError(400, "文件内容与声明的格式不一致，请检查原文件。", "VALIDATION"); });
   const result = await createUploadClient({ begin: async () => ticket(), complete, put: async () => undefined }).uploadFile(file);
   expect(result).toMatchObject({ sourceId: ID, ticket: ticket(), message: expect.stringContaining("文件内容与声明的格式不一致") });
+  expect("completionPending" in result ? result.completionPending : undefined).toBeUndefined();
+  expect("dismissible" in result ? result.dismissible : undefined).toBe(true);
+});
+
+it("marks completionPending only for uncertain complete failures and filters raw English 400 rejections", async () => {
+  const file = { name: "notes.pdf", type: "application/pdf", bytes: pdfBytes() };
+  for (const uncertain of [
+    new TypeError("Failed to fetch"),
+    new OpeningApiError(408, "request timeout"),
+    new OpeningApiError(409, "Upload is no longer pending", "CONFLICT"),
+    new OpeningApiError(500, "internal error", "INTERNAL"),
+    new OpeningApiError(503, "storage unavailable"),
+  ]) {
+    const client = createUploadClient({
+      begin: async () => ticket(),
+      put: async () => undefined,
+      complete: async () => { throw uncertain; },
+    });
+    const res = await client.uploadFile(file);
+    expect(res).toMatchObject({ phase: "interrupted", completionPending: true, sourceId: ID });
+    expect("dismissible" in res ? res.dismissible : undefined).toBeUndefined();
+  }
+
+  for (const deterministic of [
+    new OpeningApiError(400, "stored object magic bytes do not match declared MIME", "UPLOAD_MISMATCH"),
+    new OpeningApiError(400, "Invalid request body", "VALIDATION"),
+  ]) {
+    const client = createUploadClient({
+      begin: async () => ticket(),
+      put: async () => undefined,
+      complete: async () => { throw deterministic; },
+    });
+    const res = await client.uploadFile(file);
+    expect(res).toMatchObject({ phase: "interrupted", sourceId: ID, ticket: ticket(), dismissible: true });
+    expect("completionPending" in res ? res.completionPending : undefined).toBeUndefined();
+    expect("message" in res ? res.message : "").not.toContain("可能已保存");
+    expect("message" in res ? res.message : "").not.toMatch(/magic bytes|Invalid request/i);
+  }
 });
 
 it("does not expose unexpected private PUT exceptions", async () => {

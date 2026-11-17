@@ -5,6 +5,19 @@ import { uploadIdentityHeaders } from "./upload-identity";
 
 export type PutProgress = (loaded: number, total: number) => void;
 
+function parseJsonSafely(raw: string): unknown {
+  if (!raw) return null;
+  try { return JSON.parse(raw); }
+  catch { return null; }
+}
+
+function isUploadMismatchBody(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  if ("code" in body && body.code === "UPLOAD_MISMATCH") return true;
+  if (!("error" in body) || !body.error || typeof body.error !== "object") return false;
+  return "code" in body.error && body.error.code === "UPLOAD_MISMATCH";
+}
+
 /** Private object PUT. Progress counts uploaded bytes, never server parse percent. */
 export function putPrivateBytes(
   url: string,
@@ -34,10 +47,11 @@ export function putPrivateBytes(
       cleanup();
       if (xhr.status >= 200 && xhr.status < 300) resolve();
       else {
-        if (xhr.status === 401) {
-          let body: unknown = null;
-          try { body = JSON.parse(xhr.responseText); } catch { /* Non-JSON gateway errors retain upload error handling. */ }
-          guard.inspectFailure(xhr.status, body);
+        const body = xhr.status === 400 || xhr.status === 401 ? parseJsonSafely(xhr.responseText) : null;
+        if (xhr.status === 401) guard.inspectFailure(xhr.status, body);
+        if (xhr.status === 400 && isUploadMismatchBody(body)) {
+          reject(new UploadUserError("文件内容与扩展名不匹配，请确认未损坏或改名后重试。", "UPLOAD_MISMATCH"));
+          return;
         }
         reject(new UploadUserError(`上传对象失败 (${xhr.status})`));
       }
