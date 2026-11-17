@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ExplicitRegradeRequest } from "@aistudy/contracts";
 import { getVerifiedSessionNamespace } from "../../auth/session-identity";
 import { createSessionFetch } from "../../auth/session-expiry";
@@ -10,7 +10,8 @@ import { ExplicitRegradeControl } from "./explicit-regrade-control";
 import { ui } from "../design/ui";
 
 type Entry = { owner: ExplicitRegradeOwner | null; live: RegradeServerSnapshot | null; request?: ExplicitRegradeRequest;
-  error: number | null; loading: boolean; epoch: number; load: () => Promise<void>; listeners: Set<() => void> };
+  error: number | null; loading: boolean; epoch: number; load: () => Promise<void>; listeners: Set<() => void>;
+  session: ReturnType<typeof createExplicitRegradeSession>; settledNotified: string | null };
 type Tab = { namespace: string; entries: Map<string, Entry> };
 const tabs = new WeakMap<Window, Tab>();
 
@@ -36,7 +37,7 @@ function successor(live: RegradeServerSnapshot, base: ExplicitRegradeSnapshot, r
 function entryFor(tab: Tab, observationId: string): Entry {
   const cached = tab.entries.get(observationId);
   if (cached) return cached;
-  const entry: Entry = { owner: null, live: null, error: null, loading: false, epoch: 0, listeners: new Set(), load: async () => undefined };
+  const entry: Entry = { owner: null, live: null, error: null, loading: false, epoch: 0, listeners: new Set(), load: async () => undefined, session: null as never, settledNotified: null };
   const active = () => currentTab() === tab;
   const emit = () => entry.listeners.forEach(listener => listener());
   async function authorize() {
@@ -79,6 +80,7 @@ function entryFor(tab: Tab, observationId: string): Entry {
       && same(current, snapshot) && (current.oldStatus === snapshot.oldStatus
         || Boolean(entry.live && successor(entry.live, snapshot, entry.request))));
   });
+  entry.session = session;
   entry.load = async () => {
     if (entry.loading || !active()) return;
     entry.loading = true; entry.error = null; emit();
@@ -90,16 +92,34 @@ function entryFor(tab: Tab, observationId: string): Entry {
   return entry;
 }
 
-export function ExplicitRegradeHttpOwner({ observationId, disabled = false }: { observationId: string; disabled?: boolean }) {
+export function ExplicitRegradeHttpOwner({ observationId, disabled = false, onSettled }: {
+  observationId: string;
+  disabled?: boolean;
+  onSettled?: (resultObservationId: string | null) => void;
+}) {
   const [, render] = useState(0);
+  const onSettledRef = useRef(onSettled);
+  onSettledRef.current = onSettled;
   const tab = currentTab();
   const entry = tab ? entryFor(tab, observationId) : null;
   useEffect(() => {
     if (!entry) return;
-    const listener = () => render(value => value + 1);
+    const notifyIfSettled = () => {
+      const snapshot = entry.owner ? (entry.owner.operationSnapshot ?? entry.owner.snapshot) : null;
+      const state = snapshot ? entry.session.get(snapshot) : null;
+      if (state && (state.phase === "graded" || state.phase === "manual") && state.request) {
+        const settledKey = `${state.request.requestId}:${state.phase}:${state.request.resultObservationId ?? ""}`;
+        if (entry.settledNotified !== settledKey) {
+          entry.settledNotified = settledKey;
+          onSettledRef.current?.(state.request.resultObservationId ?? null);
+        }
+      }
+    };
+    const listener = () => { notifyIfSettled(); render(value => value + 1); };
     entry.listeners.add(listener);
+    const unsubscribe = entry.session.subscribe(listener);
     void entry.load(); // Initial/remount reads do not create, confirm or enqueue anything.
-    return () => { entry.listeners.delete(listener); };
+    return () => { entry.listeners.delete(listener); unsubscribe(); };
   }, [entry]);
   if (!entry) return null;
   return <>

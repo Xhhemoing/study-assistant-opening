@@ -142,3 +142,33 @@ it("HTTP boundary validates payloads and never manufactures a price or serialize
   readBody = { ...prepared(), request: { ...request, operationId: null } };
   await expect(http.adapter.read({ observationId: id, clientKey: "recover", requestId: null })).rejects.toThrow();
 });
+
+it.each([
+  { status: "graded" as const, expectedId: rid },
+  { status: "needs_manual" as const, expectedId: null as string | null },
+])("notifies onSettled once when 0111 settles to $status and skips duplicate remount/refresh notifications", async ({ status, expectedId }) => {
+  const onSettled = vi.fn();
+  const baseProgress = progress(status);
+  const settledBody = expectedId === null
+    ? {
+        ...baseProgress,
+        progress: {
+          ...baseProgress.progress,
+          request: { ...baseProgress.progress.request, resultObservationId: null },
+          status: { ...baseProgress.progress.status!, headObservationId: id },
+        },
+        snapshot: { ...baseProgress.snapshot, expectedHead: id },
+      }
+    : baseProgress;
+  readBody = settledBody;
+  await act(async () => root.render(<StrictMode><ExplicitRegradeHttpOwner observationId={id} onSettled={onSettled} /></StrictMode>));
+  await click(begin); await click(charge);
+  expect(onSettled).not.toHaveBeenCalled();
+  await click(refresh);
+  expect(onSettled).toHaveBeenCalledExactlyOnceWith(expectedId);
+  await click(refresh);
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  await act(async () => root.render(<StrictMode><ExplicitRegradeHttpOwner observationId={id} onSettled={onSettled} /></StrictMode>));
+  expect(onSettled).toHaveBeenCalledTimes(1);
+});

@@ -404,7 +404,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           disabled: !ready || Boolean(draftConflict) || pending || !context.courseId || !skillLabel.trim() || (!answer.trim() && (!photo.workSourceId || photoCapacityReached)) || context.status === "completed" }} />
     </form> : <FeedbackPanel verdict={feedbackVerdict} title={studentCopy.saved} evidence={recorded.aiEvaluation ? "批改结果已记录，可以查看评分要点，或纠正不准确的判断。" : canGradeObservation(recorded) ? "答案保存后可自动批改，也可以手动记录自己的判断。" : checked ? "已保留你的核对结果，尚未经独立评分。" : "先对照参考，再记录自己的判断。"}>
       <LearnerStatePanel observation={recorded} />
-      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard record={recorded} autoGrade={autoGrade} gradingPhoto={submission.current && !photoCapacityReached && photo.workSourceId ? photo : undefined} completionAction={context.completionAction}
+      {context.status !== "completed" && (canGradeObservation(recorded) || recorded.aiEvaluation) ? <ObservationRevisionCard explicitRegradeHandled record={recorded} autoGrade={autoGrade} gradingPhoto={submission.current && !photoCapacityReached && photo.workSourceId ? photo : undefined} completionAction={context.completionAction}
         onUpdated={observation => { revisionReturnedHead.current = true; updatedObservation(observation); }} onChanged={() => {
           // Successful edits already returned the current head. Only withdrawal or
           // unavailability needs a read; a second read could overwrite a later edit.
@@ -417,7 +417,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
         && context.explicitRegrade.snapshot.rootObservationId === (recorded.rootObservationId ?? recorded.id)
         ? <ExplicitRegradeControl owner={context.explicitRegrade} disabled={pending || rereadNeeded} />
         : context.status !== "completed" && !context.explicitRegrade
-          ? <ExplicitRegradeHttpOwner key={recorded.id} observationId={recorded.id} disabled={pending || rereadNeeded} /> : null}
+          ? <ExplicitRegradeHttpOwner key={recorded.id} observationId={recorded.id} disabled={pending || rereadNeeded} onSettled={() => void rereadComparison()} /> : null}
       {context.status !== "completed" && !canGradeObservation(recorded) && !recorded.aiEvaluation && canCompleteObservation(recorded) ? <StageActionBar stage={observationStage(recorded)} primary={context.completionAction} /> : null}
       {answerKey ? <div className="rounded-lg bg-surface p-3 ring-1 ring-line"><p className="mb-2 text-xs font-medium text-text-2">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-text-3">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <p className="text-xs text-text-2">{studentCopy.referenceAvailable}</p>}
       {context.status !== "completed" && !assessed && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}

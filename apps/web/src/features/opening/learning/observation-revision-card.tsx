@@ -8,9 +8,10 @@ import { createOpeningCardsClient } from "../cards/cards-client";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { ObservationRevisionFields } from "./observation-revision-fields";
 import { currentHistoryRecord, observationRevisionCommand, observationRevisionDraft, observationRevisionFailure, reloadObservationRevisionEditor, type ObservationRevisionEditor } from "./observation-revision-model";
-import { AiGradingCard, aiOutcomeLabels } from "./ai-grading-card";
+import { AiGradingCard, aiOutcomeLabels, canGradeObservation } from "./ai-grading-card";
 import type { GradingPhotoSelection } from "./ai-grading-photo";
 import type { AttemptPrimaryAction } from "./stage-action-bar";
+import { ExplicitRegradeHttpOwner } from "../teaching/explicit-regrade-owner";
 
 const outcomeLabels = { correct: "自报正确", incorrect: "自报错误", unverified: "尚未评分" };
 function outcomeLabel(record: LearningObservation): string {
@@ -36,13 +37,14 @@ type ObservationRevisionCardProps = {
   record: LearningObservation; onChanged: () => void; onUpdated?: (record: LearningObservation) => void;
   autoGrade?: boolean; gradingPhoto?: GradingPhotoSelection;
   completionAction?: AttemptPrimaryAction;
+  explicitRegradeHandled?: boolean;
 };
 
 export function ObservationRevisionCard(props: ObservationRevisionCardProps) {
   return <RevisionCard key={props.record.id} {...props} />;
 }
 
-function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, gradingPhoto, completionAction }: ObservationRevisionCardProps) {
+function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, gradingPhoto, completionAction, explicitRegradeHandled = false }: ObservationRevisionCardProps) {
   const diagnostics = useDiagnosticsEnabled();
   const [{ history, open: historyOpen }, updateHistory] = useReducer(observationHistoryPanelReducer, { history: null, open: false });
   const [editor, setEditor] = useState<ObservationRevisionEditor | null>(null);
@@ -142,6 +144,21 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     } catch (error) { if (isCurrent()) fail(error); } finally { if (isCurrent()) setBusy(false); }
   }
 
+  async function handleExplicitRegradeSettled(resultObservationId: string | null) {
+    if (!resultObservationId) { onChanged(); return; }
+    const request = ++historyRequest.current;
+    const isCurrent = () => request === historyRequest.current && recordId.current === record.id;
+    try {
+      const next = await client.getObservationHistory(current.rootObservationId ?? current.id);
+      if (!isCurrent()) return;
+      const head = currentHistoryRecord(next);
+      if (head.id !== current.id) updated(head);
+      else onChanged();
+    } catch {
+      if (isCurrent()) onChanged();
+    }
+  }
+
   if (unavailable) return <p role="status" className="text-sm text-text-3">{message}</p>;
   return <article className="space-y-3 rounded-lg border border-line p-4">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -151,6 +168,8 @@ function RevisionCard({ record, onChanged, onUpdated, autoGrade = false, grading
     <p className="text-xs font-medium text-text-2">我的解答 · 原答案</p>
     <p className="whitespace-pre-wrap break-words text-sm text-text">{current.answer || "（未填写回答）"}</p>
     {current.revisionKind !== "retract" ? <AiGradingCard hideDisputeAction record={current} autoGrade={autoGrade} photo={gradingPhoto} completionAction={completionAction} disabled={busy || Boolean(editor)} onGraded={updated} onPendingChange={setGradingPending} onDispute={() => void load("replace", true)} onCorrectAnswer={() => void load("replace", false, true)} /> : null}
+    {current.revisionKind !== "retract" && !explicitRegradeHandled && (canGradeObservation(current) || Boolean(current.aiEvaluation))
+      ? <ExplicitRegradeHttpOwner key={current.id} observationId={current.id} disabled={busy || Boolean(editor)} onSettled={resultObservationId => void handleExplicitRegradeSettled(resultObservationId)} /> : null}
     <p className="text-xs text-text-3">作答时间：<time dateTime={current.occurredAt}>{new Date(current.occurredAt).toLocaleString("zh-CN")}</time>{diagnostics && current.requirementKey ? ` · 要求：${current.requirementKey}` : ""}</p>
     <details className="relative"><summary aria-label="更多作答操作" className="inline-flex min-h-11 min-w-11 cursor-pointer list-none items-center justify-center rounded-md text-lg focus-visible:ring-2 focus-visible:ring-accent">…</summary><div className="flex flex-wrap gap-2 rounded-lg border border-line bg-surface p-2">
       {current.outcome === "incorrect" && current.revisionKind !== "retract" && (!current.aiEvaluation || current.verdictSource !== "ai_graded" || current.aiEvaluation.questionMatch) ? <button type="button" className={buttonClass} disabled={busy || gradingPending || !!editor} onClick={() => void makeCard()}>做成记忆卡片</button> : null}

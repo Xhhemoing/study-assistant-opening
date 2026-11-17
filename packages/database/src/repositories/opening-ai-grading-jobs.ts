@@ -78,24 +78,35 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
   if (!head) throw learningError("NOT_FOUND", "找不到这次作答");
   const record = await qualifyObservationRevision(tx, scope, head);
   const input = { observationId: String(head.id), rootObservationId: String(head.root_id), answerRevision: Number(head.answer_revision) };
-  const [job] = await tx`SELECT * FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-    AND key=${openingAiGradingJobKey(scope, input)} AND kind=${kind}`;
-  const operationId = String(head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${head.id}`);
+  const [regrade] = await tx`SELECT id,expected_head_id,operation_id,job_id,result_observation_id FROM opening_explicit_regrade_requests
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND root_observation_id=${input.rootObservationId} AND answer_revision=${input.answerRevision}
+      AND confirmed_at IS NOT NULL ORDER BY grading_version DESC LIMIT 1`;
+  const [job] = regrade
+    ? regrade.job_id != null
+      ? await tx`SELECT * FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND id=${regrade.job_id} AND kind=${kind}`
+      : []
+    : await tx`SELECT * FROM opening_jobs WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND key=${openingAiGradingJobKey(scope, input)} AND kind=${kind}`;
+  const operationId = String(regrade?.operation_id ?? head.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${head.id}`);
   const ledger = await readOpeningAiGradingLedger(tx, scope, operationId);
-  const interpretationCostUnresolved=await openingAnswerInterpretationPriorCostUnresolved(tx,scope,String(head.id));
+  const interpretationCostUnresolved = !regrade && await openingAnswerInterpretationPriorCostUnresolved(tx, scope, String(head.id));
   const usable = record.revisionKind !== "retract" && record.eligibility?.usableForCurrentVersion === "yes";
   const evaluated = Boolean(record.aiEvaluation || record.serverEvaluation);
-  const canGrade = usable && !evaluated && !isOpeningManualGradingRevision(head) && Boolean(record.attemptId && record.problemId && record.itemVersionId
+  const regradePendingHead = Boolean(regrade && !regrade.result_observation_id && head.id === regrade.expected_head_id);
+  const canGrade = usable && !evaluated && (!isOpeningManualGradingRevision(head) || regradePendingHead) && Boolean(record.attemptId && record.problemId && record.itemVersionId
     && (record.answer.trim() || head.grading_work_source));
-  const matchingJob = job && (job.payload as GradeObservationJobPayload).observationId === head.id;
+  const matchingJob = job && (job.payload as GradeObservationJobPayload).observationId === head.id
+    && (!regrade || !regrade.result_observation_id && (job.payload as GradeObservationJobPayload).regrade?.requestId === regrade.id);
   const currentJob = matchingJob && Number(job.privacy_epoch) === Number(head.current_epoch);
-  const status = interpretationCostUnresolved||ledger === "unknown" || ledger === "in_flight" && (!currentJob || job.state !== "running") ? "unknown_cost"
+  const status = interpretationCostUnresolved || ledger === "unknown" || ledger === "in_flight" && (!currentJob || job.state !== "running") ? "unknown_cost"
     : evaluated && usable ? record.outcome === "unverified" ? "needs_manual" : "graded"
       : canGrade && currentJob && job.state === "running" ? "grading"
         : canGrade && currentJob && job.state === "queued" ? "queued" : "needs_manual";
-  let autoGradeSkipped: AiGradingStatus["autoGradeSkipped"] = !job && canGrade ? input.answerRevision > 1 ? "answer_changed" as const
+  let autoGradeSkipped: AiGradingStatus["autoGradeSkipped"] = !regrade && !job && canGrade ? input.answerRevision > 1 ? "answer_changed" as const
     : policy ? await readOpeningAutoGradeSkip(tx, scope, policy) : null : null;
-  if (!job && canGrade && ledger === "unsent" && !autoGradeSkipped && policy) {
+  if (!regrade && !job && canGrade && ledger === "unsent" && !autoGradeSkipped && policy) {
     const context = await readOpeningAiGradingContext(tx, scope, { observationId: String(head.id) }, { readOnly: true });
     const budget = await checkOpeningAutoGradeBudget(tx, scope, policy, {
       question: context.stem, answer: context.observation.answer, referenceText: context.referenceText,
@@ -106,7 +117,7 @@ async function readStatus(tx: TransactionSql, scope: Scope, observationId: strin
   return aiGradingStatusSchema.parse({ rootObservationId: input.rootObservationId, headObservationId: head.id,
     autoGradeSkipped,
     answerRevision: input.answerRevision, jobId: job?.id ?? null, status,
-    retryable: !interpretationCostUnresolved&&canGrade && ledger === "unsent" && (!job || matchingJob && ["failed", "cancelled", "outcome_unknown"].includes(String(job.state))),
+    retryable: !regrade && !interpretationCostUnresolved && canGrade && ledger === "unsent" && (!job || matchingJob && ["failed", "cancelled", "outcome_unknown"].includes(String(job.state))),
     workSource: head.grading_work_source ?? null });
 }
 

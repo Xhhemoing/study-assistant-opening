@@ -3,8 +3,10 @@ import { createElement, StrictMode } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { AiEvaluation, AiGradingStatus, LearningObservation, ObservationHistory } from "@aistudy/contracts";
+import type { AiEvaluation, AiGradingStatus, ExplicitRegradeRequest, LearningObservation, ObservationHistory } from "@aistudy/contracts";
+import { EXPLICIT_REGRADE_CONFIRMATION_TEXT, EXPLICIT_REGRADE_CONFIRMATION_VERSION } from "@aistudy/contracts";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
+import { getVerifiedSessionNamespace, publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 // React interactions against mocked HTTP boundaries, not a browser/live service.
 const api = vi.hoisted(() => ({ observationDraft: vi.fn(), gradeObservation: vi.fn(), getGradingStatus: vi.fn(),
@@ -385,4 +387,61 @@ it("discards a card draft generated from an answer superseded by a correction", 
   api.getGradingStatus.mockResolvedValue(status({ headObservationId: corrected.id }));
   await act(async () => root.render(createElement(ObservationRevisionCard, { record: corrected, onChanged() {} })));
   await act(async () => draft.resolve({ question: "旧错因" } as never)); expect(container.querySelector("[data-card-draft]")).toBeNull();
+});
+
+it.each(["graded", "needs_manual"] as const)("mounts explicit regrade on unknown_cost inside ObservationRevisionCard, honors explicitRegradeHandled, and refreshes when settled to %s", async settledStatus => {
+  const clearIdentity = publishVerifiedSessionIdentity({ id: crypto.randomUUID(), workspaceId: record.workspaceId });
+  const identity = JSON.parse(getVerifiedSessionNamespace()!);
+  const requestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const regradeRequest: ExplicitRegradeRequest = {
+    requestId, rootObservationId: record.id, expectedHead: record.id, answerRevision: 1, privacyEpoch: 0,
+    previousGradingVersion: 0, gradingVersion: 1, previousOperationId: "old-op", operationId: "new-op",
+    state: "prepared", confirmedAt: null, confirmationVersion: EXPLICIT_REGRADE_CONFIRMATION_VERSION,
+    confirmationText: EXPLICIT_REGRADE_CONFIRMATION_TEXT, workSource: null, jobId: null, resultObservationId: null,
+  };
+  const snapshot = { rootObservationId: record.id, expectedHead: record.id, answerRevision: 1, privacyEpoch: 0, previousGradingVersion: 0, oldStatus: "unknown_cost" as const };
+  let revisions = [record];
+  const fetchMock = vi.fn<typeof fetch>(async (url, init) => {
+    const path = String(url);
+    if (path === "/api/auth/me") return Response.json({ user: { id: identity[0], workspaceId: identity[1] } });
+    if (path.startsWith("/api/opening/observations/regrade/confirm") && init?.method === "POST") {
+      const resultObservationId = settledStatus === "graded" ? graded.id : null;
+      if (resultObservationId) revisions = [record, graded];
+      return Response.json({
+        kind: "progress",
+        progress: {
+          request: { ...regradeRequest, state: "confirmed", confirmedAt: "2026-11-17T00:00:00.000Z", jobId, resultObservationId },
+          status: status({ headObservationId: resultObservationId ?? record.id, status: settledStatus, retryable: false, jobId }),
+        },
+        snapshot: { ...snapshot, expectedHead: resultObservationId ?? record.id, previousGradingVersion: 1, oldStatus: settledStatus },
+      }, { status: 202 });
+    }
+    if (path === "/api/opening/observations/regrade" && init?.method === "POST") {
+      return Response.json({ kind: "prepared", request: regradeRequest, estimate: "¥0.05", estimateCents: 5, snapshot });
+    }
+    if (path.startsWith("/api/opening/observations/regrade?")) return Response.json({ snapshot });
+    throw new Error(`Unexpected fetch: ${path}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  api.getGradingStatus.mockResolvedValue(status({ status: "unknown_cost", retryable: false }));
+  api.getObservationHistory.mockImplementation(async () => ({ rootObservationId: record.id, headObservationId: revisions.at(-1)!.id, revisions }));
+  const onChanged = vi.fn(), onUpdated = vi.fn();
+  try {
+    await act(async () => root.render(createElement(ObservationRevisionCard, { record, explicitRegradeHandled: true, onChanged, onUpdated })));
+    expect(container.textContent).not.toContain("新建一次AI评改版本");
+    await act(async () => root.render(createElement(ObservationRevisionCard, { record, onChanged, onUpdated })));
+    expect(container.textContent).toContain("新建一次AI评改版本");
+    await click("新建一次AI评改版本");
+    await click("确认新建 AI 评改（这次另收费，旧未知费用不释放）");
+    expect(onChanged).toHaveBeenCalled();
+    if (settledStatus === "graded") {
+      expect(onUpdated).toHaveBeenCalledWith(graded);
+      expect(container.textContent).toContain("AI 批改 · 正确");
+    } else {
+      expect(onUpdated).not.toHaveBeenCalled();
+    }
+  } finally {
+    clearIdentity();
+  }
 });
