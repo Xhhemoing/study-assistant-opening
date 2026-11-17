@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
-import { readOpeningCurrentLearningActivity, readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
+import { readOpeningCurrentLearningActivity, readOpeningCurrentLearningRecovery, readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const row = (id: string, extra = {}) => ({ id, course_id: "course", status: "active", updated_at: "2026-11-01T00:00:00Z", content_version: 1, intent_kind: "topic", create_intent: {}, ...extra });
 function db(...results: unknown[][]) {
@@ -55,4 +55,15 @@ it("rejects content-zero legacy placeholders but preserves static lesson session
   const span = { ...shell, id: "span", create_intent: { protocol: "span-lesson-v1" }, session_id: "session" };
   expect(await readOpeningCurrentLearningActivity(db([span]), scope, "course")).toMatchObject({ activityId: "span", sessionId: "session" });
   expect(await readOpeningCurrentLearningActivity(db([{ ...span, session_id: null }]), scope, "course")).toBeNull();
+});
+it("prefers live recovery candidates and falls back only to decision-bearing activities", async () => {
+  const selectCount = (sql: Sql) => (sql as unknown as ReturnType<typeof vi.fn>).mock.calls
+    .filter(([strings]: [TemplateStringsArray]) => strings.join("").trimStart().startsWith("SELECT")).length;
+  const liveSql = db([row("live")]);
+  expect(await readOpeningCurrentLearningRecovery(liveSql, scope)).toEqual({ activityId: "live", courseId: "course", sessionId: null });
+  expect(selectCount(liveSql)).toBe(1);
+  const fallbackSql = db([], [row("decided")]);
+  expect(await readOpeningCurrentLearningRecovery(fallbackSql, scope)).toEqual({ activityId: "decided", courseId: "course", sessionId: null });
+  expect(selectCount(fallbackSql)).toBe(2);
+  expect(await readOpeningCurrentLearningRecovery(db([], []), scope)).toBeNull();
 });

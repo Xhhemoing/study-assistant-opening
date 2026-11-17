@@ -67,7 +67,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
     acceptedBlocks: accepted?.blocks ?? [], committedMinutes: state.usedMinutes,
     remainingMinutes: state.budget ? Math.max(0, state.budget.dailyMinutes - state.budget.bufferMinutes - state.usedMinutes) : 0,
     overcommittedMinutes: state.budget ? Math.max(0, state.usedMinutes + state.budget.bufferMinutes - state.budget.dailyMinutes) : 0,
-    tasks, recovery: { ...recovery, agenda, href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
+    tasks, recovery: { ...recovery, agenda, href: activity && (!agenda || agenda.resumable) ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
     maintenanceTasks: maintenance.flatMap(row => { const match = /^planner:\d{4}-\d{2}-\d{2}:maintenance:([a-f0-9-]{36}):([a-f0-9-]{36})$/.exec(String(row.client_key));
       return match ? [{ taskId: row.id, version: Number(row.version), goalId: match[1], requirementId: match[2] }] : []; }) });
 }
