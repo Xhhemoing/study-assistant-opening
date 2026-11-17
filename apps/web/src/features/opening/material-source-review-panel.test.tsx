@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { materialCourseFullPackageSchema } from "../../../../../packages/domain/src/opening/material-course-package-adapter";
 import { MaterialSourceReviewPanel } from "./material-source-review-panel";
+import { syntheticReviewBindings, syntheticReviewInput } from "./material-source-review-panel-synthetic.fixture";
 
 function load() {
   const bytes = readFileSync(process.env.MATERIAL_COURSE_REAL_FULL_INPUT!);
@@ -26,6 +27,98 @@ it("renders only a generic safe error on invalid input", () => {
   const html = renderToStaticMarkup(<MaterialSourceReviewPanel input={null} />);
   expect(html).toContain('role="alert"'); expect(html).not.toContain("PRIVATE_BODY_ANSWER"); expect(html).not.toContain("href=");
 });
+describe("synthetic DOM source panel (always runs, no real-input evidence)", () => {
+  it("renders native selection and actual change interactions with metadata-only unbound details", () => {
+    const input = syntheticReviewInput(), before = JSON.stringify(input);
+    act(() => root.render(<MaterialSourceReviewPanel input={input} />));
+    expect(host.querySelectorAll("option")).toHaveLength(5);
+    const select = host.querySelector("select")!;
+    expect(host.querySelector(`label[for="${select.id}"]`)!.textContent).toContain("选择题目或技能");
+    expect(select.getAttribute("aria-controls")).toBe(detail().id);
+    select.focus(); choose("skill:synthetic-s1");
+    expect(document.activeElement).toBe(select);
+    expect(host.querySelector('[role="status"]')!.textContent).toContain("synthetic-s1");
+    expect(detail().textContent).toContain("物理页 1 / 4"); expect(detail().textContent).toContain("物理页 4 / 4");
+    choose("question:synthetic-q2"); expect(detail().textContent).toContain("待视觉确认，排除诊断");
+    choose("skill:synthetic-s2"); expect(detail().textContent).toContain("synthetic-q1：");
+    expect(detail().textContent).toContain("synthetic-q2：");
+    expect(detail().textContent).toContain("未绑定（unbound）");
+    expect(host.querySelectorAll("a, iframe, object, embed, form, input, button")).toHaveLength(0);
+    expect(host.textContent).toContain("仅元数据，无题干答案"); expect(host.textContent).not.toContain("PRIVATE_");
+    expect(JSON.stringify(input)).toBe(before);
+  });
+  it("clicks only exact host-provided PDF links without fetch/embedding or creating attempt data", () => {
+    const input = syntheticReviewInput(), bindings = syntheticReviewBindings(input), before = JSON.stringify(input);
+    const fetchSpy = vi.fn(() => { throw new Error("Network is forbidden in this unit test"); }); vi.stubGlobal("fetch", fetchSpy);
+    act(() => root.render(<MaterialSourceReviewPanel input={input} providedSources={bindings} />));
+    choose("question:synthetic-q2");
+    const link = detail().querySelector("a")!;
+    expect(link.getAttribute("href")).toBe(`${bindings[1]!.pdfUrl}#page=7`);
+    expect(link.target).toBe("_blank"); expect(link.rel).toBe("noopener noreferrer");
+    expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+    const clicked = vi.fn((event: MouseEvent) => event.preventDefault()); link.addEventListener("click", clicked);
+    act(() => link.click()); expect(clicked).toHaveBeenCalledOnce();
+    expect(fetchSpy).not.toHaveBeenCalled(); expect(host.querySelectorAll("iframe, object, embed, script, form")).toHaveLength(0);
+    expect(detail().textContent).toContain("此处不可作答、施测、评分或用于 BKT");
+    expect(detail().textContent).toContain("sourceID 不等于 canonical family");
+    expect(JSON.stringify(input)).toBe(before);
+  });
+  it("preserves selection with the same input and binding replacement, but clears it on a new equal input reference", () => {
+    const input = syntheticReviewInput(), bindings = syntheticReviewBindings(input);
+    act(() => root.render(<MaterialSourceReviewPanel input={input} providedSources={bindings} />));
+    choose("question:synthetic-q2");
+    act(() => root.render(<MaterialSourceReviewPanel input={input} providedSources={bindings} purpose="post-attempt" />));
+    expect(host.querySelector("select")!.value).toBe("question:synthetic-q2");
+    const updated = bindings.map(b => ({ ...b, sourceVersion: b.sourceVersion + 1, pdfUrl: b.pdfUrl.replace("host-only", "updated") }));
+    act(() => root.render(<MaterialSourceReviewPanel input={input} providedSources={updated} />));
+    expect(host.querySelector("select")!.value).toBe("question:synthetic-q2");
+    expect(detail().querySelector("a")!.getAttribute("href")).toBe(`${updated[1]!.pdfUrl}#page=7`);
+    act(() => root.render(<MaterialSourceReviewPanel input={structuredClone(input)} providedSources={updated} />));
+    expect(host.querySelector("select")!.value).toBe("question:synthetic-q1");
+  });
+  it.each(["replacement", "null"] as const)("clears prior selection across %s and return to the original reference", transition => {
+    const input = syntheticReviewInput();
+    act(() => root.render(<MaterialSourceReviewPanel input={input} />)); choose("skill:synthetic-s2");
+    act(() => root.render(<MaterialSourceReviewPanel input={transition === "null" ? null : structuredClone(input)} />));
+    act(() => root.render(<MaterialSourceReviewPanel input={input} />));
+    expect(host.querySelector("select")!.value).toBe("question:synthetic-q1");
+    expect(detail().querySelector("h3")!.textContent).toBe("题目 synthetic-q1");
+  });
+  it("removes stale links on absent/missing/wrong-hash bindings and validates same-object mutations every render", () => {
+    const input = syntheticReviewInput(), bindings = syntheticReviewBindings(input);
+    const render = (providedSources: unknown) => act(() => root.render(<MaterialSourceReviewPanel input={input} providedSources={providedSources} />));
+    render(bindings); expect(detail().querySelector("a")).not.toBeNull();
+    for (const absent of [undefined, []]) {
+      render(absent); expect(host.querySelector("a")).toBeNull(); expect(detail().textContent).toContain("未绑定（unbound）");
+    }
+    for (const bad of [[{ file: bindings[0]!.file }], [{ ...bindings[0], pdfSha256: "0".repeat(64) }]]) {
+      render(bindings); expect(host.querySelector("a")).not.toBeNull();
+      render(bad); expect(host.querySelector('[role="alert"]')).not.toBeNull(); expect(host.querySelector("select, a")).toBeNull();
+    }
+    render(bindings); input.skills[1]!.sourceRefs[0]!.file = "PRIVATE_UNKNOWN_TAIL.pdf";
+    render(bindings); expect(host.querySelector('[role="alert"]')).not.toBeNull(); expect(host.querySelector("select, a")).toBeNull();
+    expect(host.textContent).not.toContain("PRIVATE_");
+  });
+  it.each(["review", "post-attempt"] as const)("isolates feedback/objectives/errors in %s context and rejects prompt/answer pollution", purpose => {
+    const input = syntheticReviewInput(), before = JSON.stringify(input);
+    act(() => root.render(<MaterialSourceReviewPanel input={input} purpose={purpose} />));
+    for (const key of ["question:synthetic-q1", "question:synthetic-q3", "skill:synthetic-s1", "skill:synthetic-s2"]) {
+      choose(key); expect(host.textContent).not.toContain("PRIVATE_");
+      expect(host.innerHTML).not.toMatch(/PRIVATE_|postAttemptNotes|postAttemptMetadata|learningObjectives|commonErrors/);
+    }
+    expect(host.textContent).toContain(purpose === "review" ? "当前用途：资料审阅" : "不代表已验证作答");
+    expect(host.textContent).toContain("不是首答界面"); expect(host.textContent).toContain("计为帮助（help）");
+    expect(host.textContent).toContain("不能作为无帮助首答证据"); expect(JSON.stringify(input)).toBe(before);
+    for (const field of ["prompt", "answer"] as const) {
+      // Deliberately untrusted JSON input at the runtime boundary; no product type/API change.
+      const polluted = { ...input, questions: [{ ...input.questions[0]!, [field]: "PRIVATE_BODY_ANSWER" }] };
+      act(() => root.render(<MaterialSourceReviewPanel input={polluted} purpose={purpose} />));
+      expect(host.querySelector('[role="alert"]')).not.toBeNull(); expect(host.textContent).not.toContain("PRIVATE_");
+      expect(host.querySelector("select, a")).toBeNull();
+    }
+  });
+});
+
 describe.skipIf(!process.env.MATERIAL_COURSE_REAL_FULL_INPUT)("real metadata source panel", () => {
   it("selects all actual questions and skills; default bindings remain unbound without invented URLs", () => {
     const input = load(), before = JSON.stringify(input);
