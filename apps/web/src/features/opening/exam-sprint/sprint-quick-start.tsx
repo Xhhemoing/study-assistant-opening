@@ -14,13 +14,23 @@ const waitLimitMs = 120_000;
 const uncertain = "未能确认开启结果，请重试。";
 type Status = "idle" | "starting" | "preparing" | "opening" | "retry" | "continue";
 
-export function SprintQuickStart() {
+export function SprintQuickStart({ courseId }: { courseId?: string }) {
   const router = useTransitionRouter();
   const objectHref = useConversationObjectHref();
   const request = useRef<AbortController | null>(null);
+  const previousCourseId = useRef(courseId);
   const [available, setAvailable] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (previousCourseId.current === courseId) return;
+    previousCourseId.current = courseId;
+    request.current?.abort();
+    request.current = null;
+    setStatus("idle");
+    setError("");
+  }, [courseId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -56,6 +66,7 @@ export function SprintQuickStart() {
     }, waitLimitMs);
 
     function fail(message: string, nextStatus: "retry" | "continue" = "retry") {
+      if (request.current !== controller) return;
       controller.abort();
       request.current = null;
       setError(message);
@@ -74,7 +85,7 @@ export function SprintQuickStart() {
           signal: controller.signal,
         });
         const body: unknown = await response.json().catch(() => null);
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || request.current !== controller) return;
         if (!response.ok) {
           const detail = body && typeof body === "object" && "error" in body ? body.error : null;
           const message = detail && typeof detail === "object" && "message" in detail ? detail.message : null;
@@ -89,14 +100,23 @@ export function SprintQuickStart() {
             nextPoll = window.setTimeout(() => void check(), retryDelayMs);
             return;
           }
-          const courseId = "courseId" in body && typeof body.courseId === "string" ?
+          const resolvedCourseId = "courseId" in body && typeof body.courseId === "string" ?
             sprintCourseId({ courseId: body.courseId }) : null;
-          if (courseId) {
-            const href = "/opening/courses/" + courseId + "?mode=sprint";
+          if (resolvedCourseId) {
+            const href = "/opening/courses/" + resolvedCourseId + "?mode=sprint";
             if ("href" in body && body.href === href) {
               window.clearTimeout(deadline);
+              window.clearTimeout(nextPoll);
+              request.current = null;
               setStatus("opening");
-              router.push(objectHref(href));
+              try {
+                router.push(objectHref(href));
+              } catch {
+                if (!controller.signal.aborted) {
+                  setError(uncertain);
+                  setStatus("retry");
+                }
+              }
               return;
             }
           }

@@ -8,9 +8,9 @@ import { sprintSkillSupport } from "./skill-priorities";
 import { SkillsAndLessons } from "./learning-plan";
 
 const client = vi.hoisted(() => ({
-  snapshot: {} as { overview: ExamSprintOverview; integration: { binding: null }; busy: boolean; uncertain: boolean },
+  snapshot: {} as { overview: ExamSprintOverview; integration: { binding: null }; busy: boolean; uncertain: boolean; error?: string | null },
   listeners: new Set<() => void>(),
-  send: vi.fn(), load: vi.fn(), loadIntegration: vi.fn(), dispose: vi.fn(),
+  send: vi.fn(), load: vi.fn(), loadIntegration: vi.fn(), loadForecast: vi.fn(), dispose: vi.fn(),
   subscribe(listener: () => void) { client.listeners.add(listener); return () => client.listeners.delete(listener); },
   getSnapshot: () => client.snapshot,
 }));
@@ -275,4 +275,27 @@ it("offers same-page knowledge and source routes even before starting practice",
   await act(async () => sources.click());
   expect(host.querySelector('#sprint-tab-sources')!.getAttribute('aria-selected')).toBe("true");
   expect(client.send).not.toHaveBeenCalled();
+});
+
+it("keeps the lesson open on the lessons tab when starting practice fails or is still in flight", async () => {
+  await openPriorityLesson();
+  let resolveStart!: (value: ExamSprintOverview | null) => void;
+  client.send.mockImplementationOnce(() => new Promise<ExamSprintOverview | null>(resolve => { resolveStart = resolve; }));
+  const practice = findButton(host.querySelector('#sprint-lesson-next-step')!, "练本章新题");
+  await act(async () => practice.click());
+  expect(host.querySelector('#sprint-tab-lessons')!.getAttribute('aria-selected')).toBe("true");
+  expect(host.querySelector<HTMLDetailsElement>('#lesson-lesson-1')!.open).toBe(true);
+
+  await act(async () => {
+    client.snapshot = { ...client.snapshot, error: "本章没有新的针对题" };
+    for (const listener of client.listeners) listener();
+    resolveStart(null);
+  });
+  expect(host.querySelector('#sprint-tab-lessons')!.getAttribute('aria-selected')).toBe("true");
+  expect(host.querySelector<HTMLDetailsElement>('#lesson-lesson-1')!.open).toBe(true);
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("本章没有新的针对题");
+
+  client.send.mockResolvedValueOnce(client.snapshot.overview);
+  await act(async () => practice.click());
+  expect(host.querySelector('#sprint-tab-practice')!.getAttribute('aria-selected')).toBe("true");
 });

@@ -166,6 +166,7 @@ describe("exam sprint UI boundaries", () => {
 
   it("offers only explicit conversion for the current pending mock question with a trusted mapping, without exposing cached content", () => {
     const overview = fixture();
+    overview.activeRun = { ...overview.activeRun!, deadlineAt: new Date(Date.now() + 60_000).toISOString() };
     overview.pack.lessons = [metadata];
     overview.currentAttempt = { ...attempt, answeredAt: null, answer: null, correct: null, confidence: null, durationSeconds: null, independent: false };
     overview.attempts = [overview.currentAttempt];

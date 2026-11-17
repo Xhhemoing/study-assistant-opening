@@ -143,11 +143,21 @@ async function prepare(runtime: AuthRuntime, principal: Principal, directory: st
     clientKey: randomUUID(), milestoneId: null, createKnowledgeNodes: true, skills: [],
   }, { addMissingMaterials: true });
   // Re-read after import and binding to avoid starting over a round opened meanwhile.
-  if (!(await sprint.read(scope)).activeRun) {
+  const current = await sprint.read(scope);
+  const topic1Questions = EXAM_SPRINT_PACK.questions.filter(question => question.pool === "training" && question.topicId === "topic-1");
+  const attemptedIds = Array.isArray(current.attempts) ? new Set(current.attempts.map(attempt => attempt.questionId)) : null;
+  const hasUnseenTopic1 = current.pack.topics.some(topic => topic.id === "topic-1")
+    && (attemptedIds === null || topic1Questions.some(question => !attemptedIds.has(question.id)));
+  if (!current.activeRun && hasUnseenTopic1) {
     try {
       await sprint.act(scope, { action: "start", mode: "practice", topicId: "topic-1", clientKey: `math-i-midterm:${course.id}` });
     } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "CONFLICT") || !(await sprint.read(scope)).activeRun) throw error;
+      if (!(error instanceof Error && "code" in error && error.code === "CONFLICT")) throw error;
+      const latest = await sprint.read(scope);
+      const latestAttempted = Array.isArray(latest.attempts) ? new Set(latest.attempts.map(attempt => attempt.questionId)) : null;
+      const exhausted = error.message.includes("没有新的") || error.message.includes("没有可用题目")
+        || (latestAttempted !== null && topic1Questions.length > 0 && topic1Questions.every(question => latestAttempted.has(question.id)));
+      if (!latest.activeRun && !exhausted) throw error;
     }
   }
   return { courseId: course.id, href: `/opening/courses/${course.id}?mode=sprint` };

@@ -57,3 +57,34 @@ it("locks cancellation and its confirmation while the client is resolving an ope
   await act(async () => button("确认结束本轮").click());
   expect(send).not.toHaveBeenCalled();
 });
+
+it("disables converting an expired mock to teaching and shows expiration guidance", async () => {
+  const overview = fixture("mock-a");
+  overview.activeRun!.deadlineAt = "2020-01-01T00:00:00.000Z";
+  overview.pack.lessons = [{ id: "lesson", topicId: "topic", title: "串讲", summary: "",
+    exposureIdentity: { packVersion: "1", contentFingerprint: "fp", mappingVersion: "mv" } }];
+  const onOpenLesson = vi.fn();
+  await act(async () => root.render(createElement(ActiveRun, { overview, disabled: false, send: vi.fn(), onOpenLesson })));
+  const lessonButton = button("结束本次计分模拟并转教学");
+  expect(lessonButton).toBeDefined();
+  expect(lessonButton.disabled).toBe(true);
+  expect(host.querySelector('[role="status"]')?.textContent).toContain("模拟时间已到");
+  expect(button("交卷并查看解析").disabled).toBe(false);
+  await act(async () => lessonButton.click());
+  expect(host.querySelector('[role="group"][aria-label="确认转教学"]')).toBeNull();
+  expect(onOpenLesson).not.toHaveBeenCalled();
+});
+
+it("keeps lesson conversion enabled for an unexpired mock and untimed practice", async () => {
+  const mockOverview = fixture("mock-a");
+  mockOverview.activeRun!.deadlineAt = "2099-01-01T00:00:00.000Z";
+  mockOverview.pack.lessons = [{ id: "lesson", topicId: "topic", title: "串讲", summary: "",
+    exposureIdentity: { packVersion: "1", contentFingerprint: "fp", mappingVersion: "mv" } }];
+  await act(async () => root.render(createElement(ActiveRun, { overview: mockOverview, disabled: false, send: vi.fn(), onOpenLesson: vi.fn() })));
+  expect(button("结束本次计分模拟并转教学").disabled).toBe(false);
+
+  const practiceOverview = fixture("practice");
+  practiceOverview.pack.lessons = mockOverview.pack.lessons;
+  await act(async () => root.render(createElement(ActiveRun, { overview: practiceOverview, disabled: false, send: vi.fn(), onOpenLesson: vi.fn() })));
+  expect(button("查看对应串讲").disabled).toBe(false);
+});
