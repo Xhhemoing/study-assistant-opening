@@ -139,7 +139,7 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
         await lockLearningOwner(tx, scope);
         const current = await snapshot(tx, scope, target);
         const sourceIds = [...new Set([...(current.row.source_ids as string[]), ...current.sourceRefs.map(ref => ref.sourceId)])].sort();
-        const purposePin = await purposes.readMaterialPurposePin(scope, { courseId: current.row.course_id as string | null, sourceIds, materialUse: "teaching" });
+        const purposePin = await purposes.readMaterialPurposePin(scope, { courseId: current.row.course_id as string | null, sourceIds, materialUse: "teaching" }, tx);
         return { ...current, purposePin };
       });
     },

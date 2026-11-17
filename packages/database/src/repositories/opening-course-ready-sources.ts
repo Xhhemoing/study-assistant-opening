@@ -18,7 +18,7 @@ export type OpeningCourseReadySourcesRepository = {
   readSourcePurposePin(scope: OpeningScope, input: { activityId: string; sourceIds?: readonly string[]; materialUse?: CourseSourceUse }): Promise<OpeningSourcePurposePin>;
   /** Pass the publication transaction; locks remain held until that transaction commits. */
   assertSourcePurposePin(scope: OpeningScope, pin: OpeningSourcePurposePin, tx?: Sql | TransactionSql): Promise<void>;
-  readMaterialPurposePin(scope: OpeningScope, input: MaterialPurposeSelection): Promise<OpeningMaterialPurposePin>;
+  readMaterialPurposePin(scope: OpeningScope, input: MaterialPurposeSelection, tx?: Sql | TransactionSql): Promise<OpeningMaterialPurposePin>;
   assertMaterialPurposePin(scope: OpeningScope, pin: OpeningMaterialPurposePin, tx?: Sql | TransactionSql): Promise<void>;
 };
 
@@ -156,7 +156,9 @@ export function createOpeningCourseReadySourcesRepository(
   return {
     listReadySourceIdsForCourse: (scope, courseId, use) =>
       listReadySourceIdsForCourse(sql, scope, courseId, use),
-    readMaterialPurposePin: (scope, input) => sql.begin(tx => readMaterialPurposePinInTx(tx, scope, input)) as Promise<OpeningMaterialPurposePin>,
+    readMaterialPurposePin: (scope, input, tx) => tx
+      ? readMaterialPurposePinInTx(tx, scope, input)
+      : sql.begin(db => readMaterialPurposePinInTx(db, scope, input)) as Promise<OpeningMaterialPurposePin>,
     async assertMaterialPurposePin(scope, pin, tx) {
       const check = async (db: Sql | TransactionSql) => {
         const current = await readMaterialPurposePinInTx(db, scope, { ...pin, sourceIds: pin.sources.map(source => source.sourceId) });
