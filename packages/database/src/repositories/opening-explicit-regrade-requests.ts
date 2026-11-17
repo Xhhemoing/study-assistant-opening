@@ -9,6 +9,7 @@ import {
 import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningExplicitRegradeCandidateContext } from "./opening-ai-grading-context";
 import { readOpeningAiGradingLedger } from "./opening-ai-grading-ledger";
+import { openingAnswerInterpretationPriorCostUnresolved } from "./opening-answer-interpretation-ledger";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { checkOpeningAutoGradeBudget, type OpeningAutoGradePolicy } from "./opening-auto-grade-policy";
 
@@ -39,13 +40,15 @@ async function snapshot(tx: TransactionSql, scope: Scope, observationId: string)
   const root = observation.rootObservationId ?? observation.id;
   const prior = await latest(tx, scope, root, Number(row.answer_revision));
   const ledger = await readOpeningAiGradingLedger(tx, scope, String(prior?.operation_id ?? row.grading_operation_id));
+  const interpretationUnresolved = !prior && ledger === "unsent"
+    && await openingAnswerInterpretationPriorCostUnresolved(tx, scope, observation.id);
   const [job] = await tx`SELECT state FROM opening_jobs
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND kind='grade-observation'
       AND privacy_epoch=${Number(row.privacy_epoch)}
       AND ${prior ? tx`id=${prior.job_id}` : tx`key=${`ai-grade:${scope.workspaceId}:${root}:${Number(row.answer_revision)}`}`}`;
   return { rootObservationId: root, expectedHead: observation.id, answerRevision: Number(row.answer_revision),
     privacyEpoch: Number(row.privacy_epoch), previousGradingVersion: Number(prior?.grading_version ?? 0),
-    oldStatus: ledger === "unknown" || ledger === "in_flight" && job?.state !== "running" ? "unknown_cost" as const
+    oldStatus: interpretationUnresolved || ledger === "unknown" || ledger === "in_flight" && job?.state !== "running" ? "unknown_cost" as const
       : observation.aiEvaluation ? observation.outcome === "unverified" ? "needs_manual" as const : "graded" as const : job?.state === "running" ? "grading" as const
         : job?.state === "queued" ? "queued" as const : "needs_manual" as const };
 }
@@ -154,7 +157,9 @@ export function createOpeningExplicitRegradeRequestRepository(sql: Sql) {
         if (input.expectedGradingVersion !== previousVersion) throw conflict();
         const previousOperation = String(prior?.operation_id ?? context.operationId);
         const ledger = await readOpeningAiGradingLedger(tx, scope, previousOperation);
-        if (ledger !== "unknown") throw learningError("CONFLICT", "只有费用未决的原批改可准备显式重新批改");
+        const interpretationUnresolved = !prior && ledger === "unsent"
+          && await openingAnswerInterpretationPriorCostUnresolved(tx, scope, context.observation.id);
+        if (ledger !== "unknown" && !interpretationUnresolved) throw learningError("CONFLICT", "只有费用未决的原批改可准备显式重新批改");
         const id = randomUUID();
         const [created] = await tx`INSERT INTO opening_explicit_regrade_requests
           (id,workspace_id,owner_user_id,root_observation_id,expected_head_id,answer_revision,privacy_epoch,
@@ -188,7 +193,9 @@ export function createOpeningExplicitRegradeRequestRepository(sql: Sql) {
         // The original may have settled since prepare. Do not silently broaden B
         // into regrading a known result, or rely on stale consent to an unknown fee.
         const ledger = await readOpeningAiGradingLedger(tx, scope, String(request.previous_operation_id));
-        if (ledger !== "unknown") throw conflict();
+        const interpretationUnresolved = !prior && ledger === "unsent"
+          && await openingAnswerInterpretationPriorCostUnresolved(tx, scope, String(request.expected_head_id));
+        if (ledger !== "unknown" && !interpretationUnresolved) throw conflict();
         if (policy && await estimate(tx, scope, String(request.expected_head_id), policy) === null) {
           throw learningError("CONFLICT", "当前模型或预算无法估价，请检查 AI 设置后重新确认");
         }

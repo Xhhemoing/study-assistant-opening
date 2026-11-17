@@ -194,4 +194,24 @@ describe("generic teaching hint ledger", () => {
     const rows = await fixture.sql`SELECT id FROM opening_help_exposures WHERE attempt_id=${f.attempt.id}`;
     expect(rows.map(row => row.id)).toEqual([first.exposureReceipt.id]);
   });
+
+  it("rejects hints, level 4, answer key, and released replay once a course source is marked mock_exam or reference", async () => {
+    const f = await seed(), repo = createOpeningTeachingHintRepository(fixture.sql);
+    const first = await f.read(1);
+    await f.submit();
+    await fixture.sql`UPDATE course_asset_memberships SET purpose='practice',updated_at=now()
+      WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${f.courseId} AND asset_id=${f.sourceId}`;
+    expect((await repo.read(fixture.scope, { attemptId: f.attempt.id, level: 2 })).text).toBe(generatedHints.concept);
+    for (const disallowed of ["mock_exam", "reference"] as const) {
+      await fixture.sql`UPDATE course_asset_memberships SET purpose=${disallowed},updated_at=now()
+        WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${f.courseId} AND asset_id=${f.sourceId}`;
+      await expect(repo.read(fixture.scope, { attemptId: f.attempt.id, level: 3 })).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(repo.read(fixture.scope, { attemptId: f.attempt.id, level: 4 })).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(repo.readReleased(fixture.scope, { attemptId: f.attempt.id })).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(f.content.getSubmittedAnswerKey(fixture.scope, f.activity.id, f.blockId, f.attempt.id))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    const rows = await fixture.sql`SELECT release_key FROM opening_help_exposures WHERE attempt_id=${f.attempt.id} ORDER BY release_key`;
+    expect(rows.map(row => row.release_key)).toEqual([first.exposureReceipt.releaseKey, `teaching-hint-v1:${f.attempt.id}:2`]);
+  });
 });

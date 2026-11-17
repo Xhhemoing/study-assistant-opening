@@ -241,7 +241,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
       setHelpOpen(false); setHelpOpenedOnce(false);
       onRecorded();
     } catch (reason) {
-      if (!usePhotoShell && isWorkSourceRejection(reason) && readPracticeDraft(scope, null, draft.id)?.submission?.input.clientKey === submission.input.clientKey) {
+      if (isWorkSourceRejection(reason) && readPracticeDraft(scope, null, draft.id)?.submission?.input.clientKey === submission.input.clientKey) {
         patch({ submission: null });
         setError(`${formatRetestSubmitError(reason)} 可以改页码、换照片或移除照片后再提交。`);
       } else setError(formatRetestSubmitError(reason));
@@ -478,7 +478,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
                 className="mt-1 min-h-24 w-full rounded border border-line bg-surface px-3 py-2"
               />
             </label>
-            {attempt.problemId ? <AiGradingPhotoFields sources={usePhotoShell ? sources : sources.filter(source => !attempt.sourceIds.includes(source.id))} value={gradingPhoto} onChange={next => patch({ fields: { workSourceId: next.workSourceId, workSourceVersion: next.workSourceVersion, workPhysicalPage: next.physicalPage } })} disabled={pending || Boolean(draft.submission)} onRefresh={() => void refreshSources()} /> : null}
+            {attempt.problemId ? <AiGradingPhotoFields sources={sources.filter(source => !attempt.sourceIds.includes(source.id))} value={gradingPhoto} onChange={next => patch({ fields: { workSourceId: next.workSourceId, workSourceVersion: next.workSourceVersion, workPhysicalPage: next.physicalPage } })} disabled={pending || Boolean(draft.submission)} onRefresh={() => void refreshSources()} /> : null}
             <label className="block text-sm text-text">
               自报结果
               <select

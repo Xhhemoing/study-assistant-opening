@@ -58,7 +58,7 @@ async function setup() {
   };
   return { sourceId, chunkId, courseId, requirement, activityId: activity.activity.id, input, admit, admission, goal, definition };
 }
-const candidate = { text: "137*19", interaction: { kind: "numeric" as const }, answer: "2603" };
+const candidate = { text: "1009*1013", interaction: { kind: "numeric" as const }, answer: "1022117" };
 // Like the reserved-start privacy test, exempt only semantic ID paths AND a
 // complete UUID. Never skip create_intent, context, receipts or body text.
 function assertNoPrivateAnswer(value: unknown, answer: string, path: readonly string[] = []): void {
@@ -89,7 +89,7 @@ function assertNoPrivateAnswer(value: unknown, answer: string, path: readonly st
   }
 }
 it("ignores answer digits only in UUID backup row IDs and context references", () => {
-  const id = "9827300d-2603-4ad7-89cb-e5b00c25d4cb";
+  const id = "9827300d-4ad7-49cb-8b00-01022117abcd";
   const backup = { tables: {
     opening_learning_attempts: [{ id, context_anchor: { attemptId: id, purpose: "learning_help" },
       create_intent: { contextAnchor: { attemptId: id }, problem: null } }],
@@ -101,7 +101,7 @@ it("ignores answer digits only in UUID backup row IDs and context references", (
   expect(() => assertNoPrivateAnswer(JSON.stringify(backup), candidate.answer)).not.toThrow();
 });
 it("still detects private answers in backup text, nested JSON and stringified receipts", () => {
-  const id = "9827300d-2603-4ad7-89cb-e5b00c25d4cb";
+  const id = "9827300d-4ad7-49cb-8b00-01022117abcd";
   for (const row of [
     { id: candidate.answer }, { id: `prefix-${id}` }, { id: `${id}-suffix` },
     { text: `The answer is ${candidate.answer}.` }, { text: id },
@@ -116,7 +116,7 @@ it("still detects private answers in backup text, nested JSON and stringified re
     { receipt: { nested: [{ answer: Number(candidate.answer) }] } },
     { receipt: JSON.stringify({ nested: { answer: candidate.answer } }) },
     { receipt: JSON.stringify({ nested: { text: id } }) },
-    { receipt: '{"answer":"\\u0032\\u0036\\u0030\\u0033"}' },
+    { receipt: '{"answer":"\\u0031\\u0030\\u0032\\u0032\\u0031\\u0031\\u0037"}' },
     { receipt: `invalid JSON { answer: ${candidate.answer}` },
     { [candidate.answer]: "unexpected field" },
   ]) {
@@ -329,9 +329,9 @@ it("ordinary saved handout and card variant replay do not consume available priv
   }
 });
 it.each([
-  ["137*19", "Example: 137 · 19"], ["$137*19$", "137*19"], ["137*19", "$137*19$"],
-  ["\\(137 \\times 19\\)", "137*19"],
-  ["$137*19 = ?$", "137*19"], ["137*19", "$137*19 = ?$"],
+  ["1009*1013", "Example: 1009 · 1013"], ["$1009*1013$", "1009*1013"], ["1009*1013", "$1009*1013$"],
+  ["\\(1009 \\times 1013\\)", "1009*1013"],
+  ["$1009*1013 = ?$", "1009*1013"], ["1009*1013", "$1009*1013 = ?$"],
 ])("real consumer never reserves exposed alias %s from %s", async (text, history) => {
   const x = await setup(), sql = lockDiagnosedSql(f.sql);
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify({ ...candidate, text }), admitAndPersist: x.admit });
@@ -392,7 +392,7 @@ it.each(["opening_learning_observations", "opening_teaching_activities"] as cons
     expect(await f.sql`SELECT id FROM opening_course_reserved_questions WHERE workspace_id=${f.scope.workspaceId} AND state<>'available'`).toHaveLength(0);
   } finally { release(); await holder; }
 });
-it.each(["Example: 137 · 19 +", "137*19 if x>0", "See (137+2)*19 in figure", "Example: x+1"])("keeps unresolved history unknown with zero reservation: %s", async history => {
+it.each(["Example: 1009 · 1013 +", "1009*1013 if x>0", "See (1009+2)*1013 in figure", "Example: x+1"])("keeps unresolved history unknown with zero reservation: %s", async history => {
   const x = await setup(), sql = lockDiagnosedSql(f.sql);
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
@@ -405,10 +405,10 @@ it.each(["Example: 137 · 19 +", "137*19 if x>0", "See (137+2)*19 in figure", "E
 it("does not launder a legacy incomplete descriptor through a successful current rescan", async () => {
   const x = await setup();
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify(candidate), admitAndPersist: x.admit });
-  // Actual old grammar's output for Example: 137 · 19. Original history remains
+  // Actual old grammar's output for Example: 1009 · 1013. Original history remains
   // present for a real rescan; the immutable legacy omission must still fail closed.
   await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
-    VALUES(${randomUUID()},${x.sourceId},1,2,'Example: 137 · 19')`;
+    VALUES(${randomUUID()},${x.sourceId},1,2,'Example: 1009 · 1013')`;
   await f.sql`INSERT INTO opening_course_question_exposures(id,workspace_id,owner_user_id,surface_key,kind,exact_content,source_versions,history_revision)
     VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},'legacy-middle-dot','teaching',
       ${f.sql.json({ complete: true, expressions: [], families: [] })},'{}',0)`;
@@ -535,7 +535,7 @@ it("proves real generated supply through coverage, racing reservation, issued ow
   expect(await f.sql`SELECT id FROM opening_course_question_exposures WHERE workspace_id=${f.scope.workspaceId}
     AND item_version_id=${issued!.issued_item_version_id} AND kind='presented'`).toHaveLength(1);
   expect(await readCourseQuestionExposure(f.sql, f.scope, { ...x.input, reservedQuestionId: randomUUID(), identityRefId: randomUUID(),
-    text: "计算 137 × 19", interaction: candidate.interaction, familyId: "arithmetic:*" }))
+    text: "计算 1009 × 1013", interaction: candidate.interaction, familyId: "arithmetic:*" }))
     .toMatchObject({ coverage: "complete", exactExposed: true, familyExposed: true });
   await produceReservedQuestion(x.input, { generate: async () => JSON.stringify({ ...candidate, text: "139*23", answer: "3197" }), admitAndPersist: x.admit });
   expect(await readOpeningReservedSupply(f.sql, f.scope, x.requirement, { kind: "same_family", familyId: "arithmetic:*" }))

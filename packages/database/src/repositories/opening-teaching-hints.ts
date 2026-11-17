@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { repairDecodedLatexInJson } from "@aistudy/ai";
-import { teachingHintResponseSchema, teachingPartialHintsSchema, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
+import { courseSourcePurposeAllows, teachingHintResponseSchema, teachingPartialHintsSchema, type CourseSourcePurpose, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
 
@@ -43,6 +43,16 @@ async function readQuestion(tx: TransactionSql, scope: Scope,
     const version = ref.version == null ? NaN : Number(ref.version);
     if (Number.isInteger(version) && (currentVersions.get(ref.sourceId) !== version || capturedVersions[ref.sourceId] !== version)) {
       throw learningError("CONFLICT", "teaching reference material version changed; reread the teaching content");
+    }
+  }
+  const referencedSourceIds = [...new Set([...(activity.source_ids as string[]), ...sourceRefs.map(ref => ref.sourceId)])].sort();
+  if (activity.course_id && referencedSourceIds.length) {
+    const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
+      WHERE workspace_id=${scope.workspaceId} AND course_id=${String(activity.course_id)}
+        AND asset_type='source' AND asset_id=ANY(${referencedSourceIds}::uuid[]) FOR SHARE`;
+    const bySource = new Map(memberships.map(row => [String(row.asset_id), row.purpose as CourseSourcePurpose | null]));
+    if (referencedSourceIds.some(id => !bySource.has(id) || !courseSourcePurposeAllows(bySource.get(id) ?? null, "practice"))) {
+      throw learningError("CONFLICT", "教学材料用途已变化，不能用于练习提示或查看参考答案");
     }
   }
   const ordered = [...spec.block_order as TeachingBlockRef[]].sort((a, b) => a.position - b.position);
