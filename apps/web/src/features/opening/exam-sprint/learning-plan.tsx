@@ -8,6 +8,7 @@ import { practiceModeForDueAt } from "./labels";
 
 import { LessonButton } from "./lesson-button";
 import { lessonElementId, sprintLessonUnavailableReason, type OpenSprintLesson } from "./lesson-navigation";
+import { sprintSkillSupport } from "./skill-priorities";
 
 export function SprintSettings({ overview, disabled, send }: { overview: ExamSprintOverview; disabled: boolean; send: (command: ExamSprintIntent) => void }) {
   const [date, setDate] = useState(overview.state.examDate ?? "");
@@ -35,13 +36,16 @@ export function SkillsAndLessons({ overview, disabled, send, onOpenLesson, lesso
     <section className={`${ui.panel} p-5`} aria-labelledby="sprint-skills-title">
       <h2 id="sprint-skills-title" className="font-semibold">技能状态</h2>
       <p className="mt-1 text-xs leading-6 text-text-3">状态仅反映本题包客观题表现。完整推导、证明与综合题能力仍需原题过程自评或复核；来源自评、阅读解析与提示后答对不等于掌握。</p>
-      <div className="mt-4 divide-y divide-line">{overview.skills.map(skill => <details key={skill.skillId} className="py-3">
+      <div className="mt-4 divide-y divide-line">{[...overview.skills].sort((left, right) => (sprintSkillSupport(overview, left)?.priority ?? 3) - (sprintSkillSupport(overview, right)?.priority ?? 3)).map(skill => {
+        const topic = overview.pack.topics.find(item => item.id === skill.topicId);
+        return <div key={skill.skillId} className="py-3"><details>
         <summary id={`sprint-skill-${skill.skillId}`} className="scroll-mt-24 min-h-11 py-2 flex cursor-pointer flex-wrap items-center justify-between gap-2 text-sm"><span>{skill.title}</span><span className={`${ui.badge} ${statusTone[skill.status]}`}>{statusLabels[skill.status]}</span></summary>
         <div className="mt-3 space-y-2 text-xs leading-6 text-text-2"><p className="font-medium text-text">为什么</p><p>{skill.reason}</p><p>独立正确 {skill.independentCorrect} / 已尝试 {skill.attempted}{skill.dueAt ? ` · 复测时间 ${new Date(skill.dueAt).toLocaleString("zh-CN")}` : ""}</p><p className="font-medium text-text">怎么改善</p><div className="flex flex-wrap gap-2">
-          {onOpenLesson ? <LessonButton overview={overview} lessonId={skill.lessonId} onOpenLesson={onOpenLesson} disabled={disabled} returnTarget={{ id: `sprint-skill-${skill.skillId}`, label: "返回技能状态" }} label="阅读对应串讲" /> : null}
-          <button className={ui.secondary} type="button" disabled={disabled || !!overview.activeRun} onClick={() => send({ action: "start", mode: practiceModeForDueAt(skill.dueAt) })}>进入{practiceModeForDueAt(skill.dueAt) === "retest" ? "复测" : "练习"}队列</button>
+          <button className={ui.secondary} type="button" disabled={disabled || !!overview.activeRun || !topic} onClick={() => { if (topic && !disabled && !overview.activeRun) send({ action: "start", mode: "practice", topicId: topic.id }); }}>练本章新题</button>
+          {practiceModeForDueAt(skill.dueAt) === "retest" ? <button className={ui.secondary} type="button" disabled={disabled || !!overview.activeRun} onClick={() => { if (!disabled && !overview.activeRun) send({ action: "start", mode: "retest" }); }}>到期复测（全局）</button> : null}
         </div></div>
-      </details>)}</div>
+      </details>{onOpenLesson ? <div className="mt-2"><LessonButton overview={overview} lessonId={skill.lessonId} onOpenLesson={onOpenLesson} disabled={disabled} returnTarget={{ id: `sprint-skill-${skill.skillId}`, label: "返回技能状态" }} label={sprintSkillSupport(overview, skill)?.priority === 1 ? "梳理不确定点" : "阅读对应串讲"} /></div> : null}{!topic ? <p className="mt-1 text-xs leading-6 text-text-3">章节暂不可用，可先阅读串讲或查看原题。</p> : null}</div>;
+      })}</div>
     </section>
     <section className={`${ui.panel} min-w-0 p-5`} aria-labelledby="sprint-lessons-title">
       <h2 id="sprint-lessons-title" tabIndex={-1} className="scroll-mt-24 font-semibold">预置串讲与例题</h2>

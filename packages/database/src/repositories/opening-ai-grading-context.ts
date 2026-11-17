@@ -9,6 +9,7 @@ import { readOpeningAnswerInterpretationMetadata } from "./opening-answer-interp
 import type { AnswerInterpretationMetadata } from "@aistudy/contracts";
 import { openingAnswerInterpretationPriorCostUnresolved } from "./opening-answer-interpretation-ledger";
 import { readOpeningPinnedTeachingChunks } from "./opening-grading-visual-references";
+import { readOpeningCourseExamOrigin } from "./opening-course-exam-origin";
 
 export interface OpeningAiGradingContext {
   observation: LearningObservation;
@@ -141,9 +142,11 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (observation.revisionKind === "retract" || (!options.photoAdmissionOnly && observation.verdictSource === "deterministic") || observation.aiEvaluation) {
     throw learningError("CONFLICT", "请查看已有结果，或先更正作答后再批改");
   }
-  const [item] = await tx`SELECT v.*,a.source_ids AS attempt_source_ids FROM opening_learning_item_versions v
+  const [item] = await tx`SELECT v.*,a.source_ids AS attempt_source_ids,activity.client_key AS activity_client_key FROM opening_learning_item_versions v
     JOIN opening_learning_attempts a ON a.item_version_id=v.id AND a.problem_id=v.problem_id
       AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
+    LEFT JOIN opening_teaching_activities activity ON activity.id=v.activity_id
+      AND activity.workspace_id=v.workspace_id AND activity.owner_user_id=v.owner_user_id
     WHERE v.id=${observation.itemVersionId} AND a.id=${observation.attemptId}
       AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND a.session_id=${observation.sessionId} AND a.submitted_at IS NOT NULL`;
@@ -169,9 +172,12 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
     ? { id: input.workSourceId, version: input.workSourceVersion!, physicalPage: input.physicalPage! } : null;
   if (options.photoAdmissionOnly && !workSource) throw learningError("VALIDATION", "缺少已封存的作答照片");
   if (workSource) {
+    const exam = await readOpeningCourseExamOrigin(tx, scope, {
+      id: String(item.activity_id), clientKey: String(item.activity_client_key),
+    });
     // Classroom items have no synthetic material source. Their attempt sealed the original
     // teaching materials; a later student photo is added only to observation provenance.
-    if (workSource.id === item.source_id || observation.referenceSourceId === workSource.id
+    if (workSource.id.toLowerCase() === exam?.sourceId.toLowerCase() || workSource.id === item.source_id || observation.referenceSourceId === workSource.id
       || item.teaching_revision_id != null && (item.attempt_source_ids as string[]).includes(workSource.id)) throw learningError("VALIDATION", "请选择自己的作答照片，不要选择原题或参考答案");
     const [photo] = await tx`SELECT id,mime,version,bytes,sha256,parse_state FROM opening_sources s
       WHERE s.id=${workSource.id} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
@@ -195,7 +201,7 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
   if (options.photoAdmissionOnly) return { observation, stem: item.stem_snapshot, referenceText: "", misconceptions: [],
     sourceIds, sourceVersions, workSource, workSourceMetadata, referenceSources: [], referenceSourceMetadata: [], existing: null,
     answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`) };
-  const teaching = await readTeachingQuestionForGrading(tx, scope, item);
+  const teaching = await readTeachingQuestionForGrading(tx, scope, item, options);
   const referenceIds = sourceIds.filter(id => id !== input.workSourceId);
   const teachingRefs = teaching?.sourceRefs ?? (item.source_id ? [{ sourceId: String(item.source_id),
     version: sourceVersions[String(item.source_id)], chunkId: item.chunk_id == null ? null : String(item.chunk_id),

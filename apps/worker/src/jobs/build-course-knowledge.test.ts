@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { KnowledgeSnapshot, SourceChunk } from "@aistudy/contracts";
+import { providerInputSchema, type KnowledgeSnapshot, type ProviderInput, type SourceChunk } from "@aistudy/contracts";
 import {
   createBuildCourseKnowledgeHandler,
   reconcileExtractedSnapshot,
@@ -221,23 +221,30 @@ describe("createBuildCourseKnowledgeHandler", () => {
     expect(replace).not.toHaveBeenCalled();
   });
 
-  it("resolves the live provider per job so the extraction call has its own ledger key", async () => {
-    const complete = vi.fn(async () => ({
-      text: JSON.stringify({ nodes: [{ label: "定义域", kind: "concept", evidenceChunkIds: [chunkId] }], edges: [] }),
-      citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1,
-    }));
+  it("sends valid provider chunks while retaining the job's scoped evidence", async () => {
+    const owned = chunk({ sourceId: "00000000-0000-4000-8000-0000000000b1" });
+    const otherCourse = chunk({ id: foreignChunkId, courseId: "00000000-0000-4000-8000-0000000000c2" });
+    const complete = vi.fn(async (input: ProviderInput) => {
+      expect(providerInputSchema.parse(input).chunks).toEqual([
+        expect.objectContaining({ id: chunkId, sourceId: owned.sourceId, text: owned.text }),
+      ]);
+      return {
+        text: JSON.stringify({ nodes: [{ label: "定义域", kind: "concept", evidenceChunkIds: [chunkId, foreignChunkId] }], edges: [] }),
+        citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1, outputTokens: 1,
+      };
+    });
     const resolveProvider = vi.fn(async () => ({ complete }));
     const handler = createBuildCourseKnowledgeHandler({
-      listAuthorizedChunks: async () => [chunk()],
+      listAuthorizedChunks: async () => [owned, otherCourse],
       get: async () => null,
-      validateSnapshot: (snapshot) => snapshot,
       replace: async (_s, _c, input) => ({ version: input.expectedVersion + 1, snapshot: input.snapshot }),
       resolveProvider,
     });
-    await handler(job as never, { courseId });
+    const { snapshot } = await handler(job, { courseId });
     expect(resolveProvider).toHaveBeenCalledWith({ workspaceId: job.workspaceId, ownerUserId: job.ownerUserId }, job,
-      expect.objectContaining({ index: 0, count: 1, chunks: [chunk()] }));
+      expect.objectContaining({ index: 0, count: 1, chunks: [owned] }));
     expect(complete).toHaveBeenCalledTimes(1);
+    expect(snapshot.nodes).toMatchObject([{ courseId, label: "定义域", status: "supported", evidenceChunkIds: [chunkId] }]);
   });
 
   it("extracts chapters independently and does not publish a partial graph if a later chapter fails", async () => {

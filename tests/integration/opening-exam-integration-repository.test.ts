@@ -33,7 +33,8 @@ const pack: ExamPack = {
     explanation: `SEALED-EXPLANATION-${index}`, hint: `DELIVERED-HINT-${index}`, estimatedMinutes: 5,
   })),
   sourceItems: [{ id: "paper-1", topicId: "limits", label: "Paper exercise", sourceTitle: "Worksheet.pdf", sourcePage: 3,
-    kind: "exercise", suggestedDay: 1, skills: ["limit-laws"] }], weekPlan: [], limitations: ["Fixture only"],
+    kind: "exercise", suggestedDay: 1, skills: ["limit-laws"] }, { id: "paper-2", topicId: "limits", label: "Other exercise",
+    sourceTitle: "Other.pdf", sourcePage: 3, kind: "exercise", suggestedDay: 1, skills: [] }], weekPlan: [], limitations: ["Fixture only"],
 };
 let f: OpeningFixture;
 let courseId: string;
@@ -108,6 +109,20 @@ async function source(options: { image?: boolean; version?: number; history?: bo
   }
   return { sourceTitle: "Worksheet.pdf", sourceId: id, sourceVersion: version };
 }
+
+it("adds missing material pins without rewriting the milestone, skill bindings, or an unrelated stale pin", async () => {
+  const old = await source(), current = await source(), milestoneId = randomUUID();
+  const initial = await integration.bind(f.scope, bindInput({ materials: [old] }));
+  const saved = { ...initial.binding!, milestoneId };
+  await f.sql`UPDATE opening_exam_bindings SET binding=${f.sql.json(saved as never)} WHERE course_id=${courseId}`;
+  await f.sql`UPDATE opening_source_versions SET availability='unavailable' WHERE source_id=${old.sourceId}`;
+  const next = { ...current, sourceTitle: "Other.pdf" };
+  const updated = await integration.bind(f.scope, bindInput({ materials: [next] }), { addMissingMaterials: true });
+  expect(updated.binding).toEqual({ ...saved, materials: [old, next] });
+  await expect(integration.bind(f.scope, bindInput({ materials: [current] }), { addMissingMaterials: true }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect((await integration.read(f.scope)).binding).toEqual(updated.binding);
+});
 
 describe("atomic course-bound mock conversion", () => {
   function teachingPack() {

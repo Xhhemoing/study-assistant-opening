@@ -108,12 +108,24 @@ async function createPublicPackSource(
 export async function ensureExamCourseBinding(
   tx: TransactionSql, scope: Scope, pack: ExamPack, input: ExamBindInput, now: string,
   existing?: ExamCourseBinding, writePublicSource?: ExamPublicSourceWriter,
-  quota?: OpeningSourceQuota,
+  quota?: OpeningSourceQuota, options?: { addMissingMaterials: true },
 ): Promise<ExamCourseBinding> {
   await assertCourseAndMilestone(tx, scope, input);
   if (input.expectedPackVersion !== pack.version) throw conflict("冲刺题包版本已变化，请刷新后重试");
   if (existing) {
     if (existing.courseId !== input.courseId) throw conflict("冲刺已绑定课程，不可改绑其他课程");
+    if (options?.addMissingMaterials) {
+      const pinned = new Map(existing.materials.map(material => [material.sourceTitle, material]));
+      const selected = await mapMaterials(tx, scope, pack, input, now);
+      for (const material of selected) {
+        const previous = pinned.get(material.sourceTitle);
+        if (previous && (previous.sourceId !== material.sourceId || previous.sourceVersion !== material.sourceVersion)) {
+          throw conflict("原题材料已有其他版本的绑定，请在冲刺页确认后重试。");
+        }
+        pinned.set(material.sourceTitle, material);
+      }
+      return { ...existing, materials: [...pinned.values()] };
+    }
     const [storedGraph] = await tx`SELECT snapshot FROM opening_course_knowledge
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} FOR UPDATE`;
     const currentNodes = storedGraph ? knowledgeSnapshotSchema.parse(storedGraph.snapshot).nodes : [];

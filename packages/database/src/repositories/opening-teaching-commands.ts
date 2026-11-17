@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
+import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";
 import type {
   ActivitySpecClientInit,
   Scope,
@@ -56,6 +57,7 @@ import {
 
 type ActivityRow = {
   id: string;
+  client_key: string;
   status: string;
   workspace_id: string;
   owner_user_id: string;
@@ -182,6 +184,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
             throw learningError("NOT_FOUND", "teaching activity not found");
           }
           const activity = activityRows[0] as unknown as ActivityRow;
+          await assertOpeningCourseExamSourceCurrent(tx, scope, { id: activity.id, clientKey: String(activity.client_key) });
           const contentVersion = Number(activity.content_version);
           const pathVersion = Number(activity.path_version);
           const checkpoint = (activity.checkpoint_json ?? {}) as Record<string, unknown>;

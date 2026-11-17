@@ -74,7 +74,8 @@ describe("persisted lesson authorizations and frozen attempt qualification", () 
     const complexLesson = structuredClone(EXAM_LESSONS.find(item => item.id === "complex-arithmetic")!);
     const mapping = validExamLessonExposure(complexLesson)!;
     const modulusQuestion = EXAM_TRAINING_QUESTIONS.find(item => item.id === "train-complex-modulus")!;
-    const modulusPack: ExamPack = { ...pack, lessons: [complexLesson], questions: [modulusQuestion] };
+    const variantQuestion = { ...modulusQuestion, id: "train-complex-modulus-variant" };
+    const modulusPack: ExamPack = { ...pack, lessons: [complexLesson], questions: [modulusQuestion, variantQuestion] };
     const command = (state: ExamSprintState, value: ExamSprintCommand) => applyExamSprintCommand(state, value, modulusPack, NOW);
     const openComplex = (state: ExamSprintState) => {
       const run = state.runs.find(item => item.completedAt === null);
@@ -90,11 +91,11 @@ describe("persisted lesson authorizations and frozen attempt qualification", () 
 
     const running = command(prior, { action: "start", clientKey, mode: "practice" });
     const attempt = running.attempts.at(-1)!;
-    expect(attempt.questionId).toBe("train-complex-modulus");
+    expect(attempt.questionId).toBe(priorContext === "before practice" ? modulusQuestion.id : variantQuestion.id);
     expect(attempt.lessonExposureIds).toEqual([]);
     expect(examSprintOverview(running, modulusPack, NOW).lessonContents).toEqual([]);
     const withoutReopening = command(running, { action: "answer", clientKey, attemptId: attempt.id, answer: modulusQuestion.answer, confidence: 3 });
-    // A question already presented in the finished run remains a repeated exposure.
+    // A different question from the family presented in the finished run remains repeated exposure.
     expect(examSprintOverview(withoutReopening, modulusPack, NOW).currentAttempt!.independent).toBe(priorContext === "before practice");
 
     const reopened = openComplex(running);

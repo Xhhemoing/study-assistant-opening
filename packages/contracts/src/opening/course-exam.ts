@@ -24,6 +24,7 @@ export type CourseExamProposal = z.infer<typeof courseExamProposalSchema>;
 /** Private persistence shape. HTTP responses use the redacted overview below. */
 const courseExamSavedRequestSchema = z.object({
   id: z.string().uuid(), input: courseExamInputSchema, sourceVersion: z.number().int().nonnegative(), sourceTitle: z.string(),
+  referenceMode: z.literal("exam-only").optional(),
   privacyEpoch: z.number().int().nonnegative(), createdAt: z.string().datetime(),
   status: z.enum(["pending", "ready", "failed", "unknown"]), proposal: courseExamProposalSchema.nullable(),
   activityId: z.string().uuid().nullable(), modelLabel: z.string().nullable(),

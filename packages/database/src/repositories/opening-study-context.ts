@@ -5,6 +5,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { courseSourcePurposeAllows, studyContextAnchorSchema, type CourseSourcePurpose, type CourseSourceUse, type Scope, type StudyContextAnchor } from "@aistudy/contracts";
 import { learningError } from "./opening-learning-facts";
 import { teachingQuestionIdentityMatches, type TeachingQuestionSpec } from "./opening-teaching-question";
+import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";
 
 type Row = Record<string, unknown>;
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -164,10 +165,11 @@ export async function resolveOpeningStudyContext(
     if (!mapping || Number(mapping.version) !== anchor.kcMappingVersion) throw conflict("knowledge mapping version unavailable");
   }
   if (!activity && anchor.activityId) {
-    const [resolvedActivity] = await tx`SELECT course_id FROM opening_teaching_activities WHERE id=${anchor.activityId}
+    const [resolvedActivity] = await tx`SELECT course_id,id,client_key FROM opening_teaching_activities WHERE id=${anchor.activityId}
       AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
     if (!resolvedActivity) throw learningError("NOT_FOUND", "study activity not found");
     bind("courseId", resolvedActivity.course_id as string | null);
+    activity = resolvedActivity;
   }
   if (anchor.courseId) {
     const [resolvedCourse] = await tx`SELECT id FROM courses WHERE id=${anchor.courseId} AND workspace_id=${scope.workspaceId} AND (${expected.associationOnly === true} OR archived_at IS NULL) FOR SHARE`;
@@ -175,6 +177,9 @@ export async function resolveOpeningStudyContext(
   }
   // Saved session/activity/item membership shortcuts never waive current AI purpose.
   // Human reading and association-only history are intentionally not reclassified.
+  if (!expected.associationOnly && expected.sourceAccess !== "human_read" && activity) {
+    await assertOpeningCourseExamSourceCurrent(tx, scope, { id: String(activity.id), clientKey: String(activity.client_key) });
+  }
   if (!expected.associationOnly && expected.sourceAccess !== "human_read" && anchor.courseId) {
     if (anchor.sourceId) contextSourceIds.add(anchor.sourceId);
     const use: CourseSourceUse = anchor.purpose === "material_read" ? "citation"
