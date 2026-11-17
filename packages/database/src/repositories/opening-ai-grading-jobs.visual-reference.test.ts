@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { readOpeningAttemptGradingUsesVision } from "./opening-ai-grading-jobs";
+import { readOpeningAttemptGradingUsesVision, readOpeningObservationGradingUsesVision } from "./opening-ai-grading-jobs";
 const mocks = vi.hoisted(() => ({ question: vi.fn(), chunks: vi.fn() }));
 vi.mock("./opening-teaching-question", () => ({ readTeachingQuestionForGrading: mocks.question }));
 vi.mock("./opening-grading-visual-references", () => ({ readOpeningPinnedTeachingChunks: mocks.chunks }));
@@ -10,12 +10,17 @@ beforeEach(() => {
   vi.clearAllMocks(); sql.mockResolvedValue([{ id: "v", attempt_source_ids: ["s"], attempt_source_versions: { s: 2 } }]);
   mocks.question.mockResolvedValue({ sourceRefs: [ref] });
 });
-it("uses the identical pinned chunk resolver, not all visual course materials", async () => {
+it("uses the identical pinned chunk resolver in read-only mode, not all visual course materials", async () => {
   mocks.chunks.mockResolvedValue([{ image_object_key: "owned/page", page: 4 }]);
   await expect(readOpeningAttemptGradingUsesVision(sql as never, scope, "a")).resolves.toBe(true);
+  expect(mocks.question).toHaveBeenCalledWith(sql, scope, { id: "v", attempt_source_ids: ["s"], attempt_source_versions: { s: 2 } }, { readOnly: true });
   expect(mocks.chunks).toHaveBeenCalledWith(sql, scope, [ref], { s: 2 });
   mocks.chunks.mockResolvedValue([{ image_object_key: null, page: 4 }]);
   await expect(readOpeningAttemptGradingUsesVision(sql as never, scope, "a")).resolves.toBe(false);
+  expect(mocks.question).toHaveBeenLastCalledWith(sql, scope, { id: "v", attempt_source_ids: ["s"], attempt_source_versions: { s: 2 } }, { readOnly: true });
+  sql.mockResolvedValueOnce([{ attempt_id: "a" }]).mockResolvedValueOnce([{ id: "v", attempt_source_ids: ["s"], attempt_source_versions: { s: 2 } }]);
+  await expect(readOpeningObservationGradingUsesVision(sql as never, scope, "obs-1")).resolves.toBe(false);
+  expect(mocks.question).toHaveBeenLastCalledWith(sql, scope, { id: "v", attempt_source_ids: ["s"], attempt_source_versions: { s: 2 } }, { readOnly: true });
 });
 it("marks a missing immutable chunk unavailable rather than text, but rejects a foreign attempt", async () => {
   const conflict = Object.assign(new Error("pinned chunk missing"), { code: "CONFLICT" });

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { CourseRouteRequirementInput, TeachingActivity } from "@aistudy/contracts";
+import type { CourseExamSnapshot, CourseRouteRequirementInput, TeachingActivity } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository, createOpeningLearningRepository, createOpeningAiGradingRepository, createOpeningSourceChunksRepository,
   createOpeningBudgetRepository, createOpeningPrivacyRepository, createOpeningTeachingContentRepository, createOpeningJobRepository,
   createOpeningTeachingHintRepository, createOpeningKnowledgeRepository } from "@aistudy/database";
@@ -226,4 +226,71 @@ it("defaults suggested verification to unavailable until exact capability is ena
   expect((await x.route.read(f.scope,x.courseId)).suggestions[0]!.verification).toMatchObject({kind:"unavailable",status:"missing"});
   const enabled=createOpeningCourseRouteRepository(f.sql,{compilerEnabled:true,exactVerificationEnabled:true});
   expect((await enabled.read(f.scope,x.courseId)).suggestions[0]!.verification).toMatchObject({kind:"exact",status:"ready",exerciseKeys:[]});
+});
+it("runs route verification read in repeatable-read-only mode without FOR SHARE while confirm checks and locks exam-only origins", async () => {
+  const x=await setup();
+  await x.route.confirm(f.scope,x.courseId,{expectedRevisions:[],requirements:[x.requirement],confirmScope:true});
+  const start=await x.route.start(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,requirementId:x.requirement.id,expectedRequirementRevision:1,clientKey:randomUUID(),minutes:20});
+  if(start.kind!=="ready") throw new Error(JSON.stringify(start));
+  await compile(start.activity);
+  const answered=await answer(start.activity,0,"correct","independent",false);
+  const examSourceId=await x.rows.source("uploaded",1), examChunkId=await x.rows.chunk(examSourceId,1);
+  await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${examSourceId}`;
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES(${f.scope.workspaceId},${x.courseId},'source',${examSourceId},'reference','private','mock_exam')`;
+  const sprintSnapshot: CourseExamSnapshot = {
+    format: "course-exam-v1",
+    requests: [{
+      id: randomUUID(),
+      input: { clientKey: "course-exam-verify-fixture", sourceId: examSourceId, questionCount: 3 },
+      sourceVersion: 1,
+      sourceTitle: "Exam Paper",
+      referenceMode: "exam-only",
+      privacyEpoch: 0,
+      createdAt: new Date().toISOString(),
+      status: "ready",
+      proposal: {
+        title: "Exam",
+        topics: [{ label: "矩阵秩", evidenceChunkIds: [examChunkId] }],
+        questions: [1, 2, 3].map(index => ({
+          topic: "矩阵秩",
+          prompt: `第${index}题：求二阶单位矩阵的秩并说明理由。`,
+          referenceAnswer: "秩为2。",
+          rubric: ["秩为2"],
+          hints: { direction: "看列", concept: "秩", firstStep: "写列向量" },
+          evidenceChunkIds: [examChunkId],
+          estimatedMinutes: 5,
+        })),
+      },
+      activityId: start.activity.id,
+      modelLabel: "fixture",
+    }],
+  };
+  await f.sql`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,course_id,pack_snapshot,state)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${x.courseId},${f.sql.json(sprintSnapshot)},'{}'::jsonb)`;
+  await f.sql`UPDATE opening_teaching_activities SET client_key=${`course-exam:${randomUUID()}`} WHERE id=${start.activity.id}`;
+
+  const verification=createOpeningCourseRouteVerificationRepository(f.sql);
+  const preview=await verification.read(f.scope,x.courseId,start.activity.id);
+  expect(preview).toMatchObject({
+    courseId: x.courseId,
+    activityId: start.activity.id,
+    available: true,
+    items: [{ itemVersionId: answered.attempt.itemVersionId! }],
+  });
+
+  await f.sql`UPDATE course_asset_memberships SET purpose='teaching'
+    WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${examSourceId}`;
+  await expect(verification.read(f.scope,x.courseId,start.activity.id)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(verification.confirm(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,expectedContentVersion:1,requirementId:x.requirement.id,expectedRequirementRevision:1,itemVersionIds:[answered.attempt.itemVersionId!],confirmed:true})).rejects.toMatchObject({ code: "CONFLICT" });
+
+  await f.sql`UPDATE course_asset_memberships SET purpose='mock_exam'
+    WHERE workspace_id=${f.scope.workspaceId} AND course_id=${x.courseId} AND asset_id=${examSourceId}`;
+  const confirmed=await verification.confirm(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:start.activity.id,expectedContentVersion:1,requirementId:x.requirement.id,expectedRequirementRevision:1,itemVersionIds:[answered.attempt.itemVersionId!],confirmed:true});
+  expect(confirmed.requirements[0]!.requirement.verification).toMatchObject({
+    kind: "rubric",
+    status: "ready",
+    exerciseKeys: [`teaching-item:${answered.attempt.itemVersionId}`],
+  });
 });

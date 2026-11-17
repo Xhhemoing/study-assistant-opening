@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningAiGradingRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createOpeningStudyExposureRepository } from "@aistudy/database";
+import { createOpeningAiGradingRepository, createOpeningCourseExamRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingHintRepository, createOpeningLearningRepository, createOpeningLearnerStateService, createOpeningStudyExposureRepository } from "@aistudy/database";
 import { nextLearningStep } from "@aistudy/domain";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -213,5 +213,73 @@ describe("generic teaching hint ledger", () => {
     }
     const rows = await fixture.sql`SELECT release_key FROM opening_help_exposures WHERE attempt_id=${f.attempt.id} ORDER BY release_key`;
     expect(rows.map(row => row.release_key)).toEqual([first.exposureReceipt.releaseKey, `teaching-hint-v1:${f.attempt.id}:2`]);
+  });
+
+  it("blocks exam-only course-exam hints, level 4, answer key, and released replay after mock_exam source change or removal", async () => {
+    const base = await learningAttemptFixture(fixture);
+    await fixture.sql`UPDATE course_asset_memberships SET role='reference',visibility='private',purpose='mock_exam'
+      WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${base.courseId} AND asset_type='source' AND asset_id=${base.sourceId}`;
+    await fixture.sql`UPDATE opening_source_chunks SET text='线性代数期末真题：求二阶单位矩阵的秩。' WHERE id=${base.chunkId}`;
+    const exams = createOpeningCourseExamRepository(fixture.sql);
+    const ctx = await exams.begin(fixture.scope, base.courseId, { clientKey: randomUUID(), sourceId: base.sourceId, questionCount: 3 });
+    const activityId = await exams.complete(fixture.scope, base.courseId, ctx.request.id, {
+      title: "线性代数模拟练习",
+      topics: [{ label: "矩阵秩", evidenceChunkIds: [base.chunkId] }],
+      questions: [1, 2, 3].map(index => ({
+        topic: "矩阵秩",
+        prompt: `第${index}题：计算二阶单位矩阵的秩并说明理由。`,
+        referenceAnswer: "两列线性无关，因此秩等于2。",
+        rubric: ["识别线性无关列", "秩等于2"],
+        hints: generatedHints,
+        evidenceChunkIds: [base.chunkId],
+        estimatedMinutes: 5,
+      })),
+    }, "fixture-model");
+    const content = createOpeningTeachingContentRepository(fixture.sql);
+    const client = (await content.getClientInit(fixture.scope, activityId))!;
+    expect(client.sourceRefs).toEqual([]);
+    const prompt = client.blocks.find(block => block.role === "prompt")!;
+    const session = await createOpeningLearningRepository(fixture.sql).createSession(fixture.scope, {
+      courseId: base.courseId, activityId, skillLabel: "矩阵秩", sourceIds: [],
+    });
+    const attempts = createOpeningAttemptService(fixture.sql);
+    const attempt = await attempts.create(fixture.scope, {
+      sessionId: session.id, clientKey: randomUUID(), teachingBlock: { blockId: prompt.blockId, contentVersion: client.contentVersion },
+    });
+    const repo = createOpeningTeachingHintRepository(fixture.sql);
+    const first = await repo.read(fixture.scope, { attemptId: attempt.id, level: 1 });
+    expect(first.text).toBe(generatedHints.direction);
+    await attempts.submit(fixture.scope, attempt.id, {
+      clientKey: randomUUID(), answer: "秩为2", outcome: "unverified", assistance: "independent", verdictSource: "self_report",
+    });
+    const full = await repo.read(fixture.scope, { attemptId: attempt.id, level: 4 });
+    expect(full.text).toContain("秩等于2");
+    expect(await repo.readReleased(fixture.scope, { attemptId: attempt.id })).toEqual([first, full]);
+
+    // Repurpose mock_exam -> practice (allowed for normal practice, but exam-only origin requires mock_exam)
+    await fixture.sql`UPDATE course_asset_memberships SET purpose='practice',updated_at=now()
+      WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${base.courseId} AND asset_id=${base.sourceId}`;
+    for (const level of [1, 2, 3, 4] as const) {
+      await expect(repo.read(fixture.scope, { attemptId: attempt.id, level })).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    await expect(repo.readReleased(fixture.scope, { attemptId: attempt.id })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(content.getSubmittedAnswerKey(fixture.scope, activityId, prompt.blockId, attempt.id))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Restore purpose='mock_exam', then remove the backing course membership entirely
+    await fixture.sql`UPDATE course_asset_memberships SET purpose='mock_exam',updated_at=now()
+      WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${base.courseId} AND asset_id=${base.sourceId}`;
+    expect(await repo.readReleased(fixture.scope, { attemptId: attempt.id })).toEqual([first, full]);
+    await fixture.sql`DELETE FROM course_asset_memberships
+      WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${base.courseId} AND asset_id=${base.sourceId}`;
+    for (const level of [1, 2, 3, 4] as const) {
+      await expect(repo.read(fixture.scope, { attemptId: attempt.id, level })).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    await expect(repo.readReleased(fixture.scope, { attemptId: attempt.id })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(content.getSubmittedAnswerKey(fixture.scope, activityId, prompt.blockId, attempt.id))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+
+    const rows = await fixture.sql`SELECT release_key FROM opening_help_exposures WHERE attempt_id=${attempt.id} ORDER BY release_key`;
+    expect(rows.map(row => row.release_key)).toEqual([first.exposureReceipt.releaseKey, full.exposureReceipt.releaseKey]);
   });
 });
