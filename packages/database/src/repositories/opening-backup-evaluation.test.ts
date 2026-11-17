@@ -1,5 +1,21 @@
 import { expect, it } from "vitest";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
+it("removes only imported span binding authority without erasing plans, receipts or mutating existing history", () => {
+  const goal = { spanCourseBinding: { version: 1 }, spanRepair: { history: true }, spanPrerequisiteRepair: { history: true }, courseRoute: { goalId: "old" } };
+  const activity = { goal_json: goal, create_intent: { spanCourseBinding: {}, courseSpanRequest: { old: true } } };
+  expect(normalizeOpeningImportedEvaluation("opening_teaching_activities", activity)).toEqual({
+    goal_json: { spanRepair: goal.spanRepair, spanPrerequisiteRepair: goal.spanPrerequisiteRepair, courseRoute: goal.courseRoute },
+    create_intent: { courseSpanRequest: { old: true } },
+  });
+  const attempt = { create_intent: { spanCourseBinding: {}, spanExercise: { problemId: "original" }, spanValidation: { eligible: false } } };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_attempts", attempt)).toEqual({ create_intent: {
+    spanExercise: attempt.create_intent.spanExercise, spanValidation: attempt.create_intent.spanValidation,
+  } });
+  const decision = { receipt: { intentVersion: JSON.stringify({ courseBinding: goal.spanCourseBinding }) } };
+  expect(normalizeOpeningImportedEvaluation("opening_learning_decisions", decision)).toBe(decision);
+  expect(activity.goal_json.spanCourseBinding).toEqual({ version: 1 });
+  expect(attempt.create_intent.spanCourseBinding).toEqual({});
+});
 it.each(["original", "correct", "retract"])("strips claimed automatic authority from every imported %s row", revision_kind => {
   const original = { revision_kind, verdict_source: "deterministic", outcome: "correct", evidence_verdict: "LEARNING_EFFECT_OBSERVED",
     answer: "[[1,2]]", server_evaluation: { decision: "correct", evaluatorVersion: "matrix-exact-v1" }, history_revision: 7 };

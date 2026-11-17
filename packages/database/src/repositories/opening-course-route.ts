@@ -1,9 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { courseRouteConfirmSchema, type CourseRouteConfirm, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
-import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { assertCourseRouteCourse, readCourseRequirements, readCourseRouteMaterials, readOpeningCourseRoute } from "./opening-course-route-read";
-import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
+import { admitLearningSources, learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { assertCourseRouteCourse, readCourseRequirements, readCourseRouteMaterials, readCourseRouteSourceChunks, readOpeningCourseRoute } from "./opening-course-route-read";
+import { decideCourseRouteVerification, readConfirmedCourseSpanExerciseKeys, resolveCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
 import { readLearningGoal } from "./opening-learning-goals";
 import { createOpeningCourseRouteActions } from "./opening-course-route-actions";
 export { readOpeningCourseRoute } from "./opening-course-route-read";
@@ -18,14 +19,37 @@ export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnab
         await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         await assertCourseRouteCourse(tx,scope,courseId);
         const current=await readCourseRequirements(tx,scope,courseId);
+        const spanSets = new Map<string, string[]>();
+        for (const requirement of input.requirements) {
+          const explicit = input.spanBindings?.find(binding => binding.requirementId === requirement.id);
+          const previous = current.find(row => row.id === requirement.id);
+          if (explicit) {
+            if (!options.exactVerificationEnabled || requirement.requirementKey !== SPAN_REQUIREMENT_KEY || requirement.verification.kind !== "exact")
+              throw learningError("VALIDATION", "仅已开启的 canonical span exact 要求可显式确认内容绑定。");
+            spanSets.set(requirement.id, resolveCourseSpanExerciseKeys(explicit.exerciseKeys));
+          } else if (previous?.approvedAt && options.exactVerificationEnabled) {
+            const { courseId: _course, revision: _revision, lifecycle: _lifecycle, approvedAt: _approved, ...definition } = previous;
+            const keys = readConfirmedCourseSpanExerciseKeys(previous.requirementKey, previous.verification);
+            if (keys && isDeepStrictEqual({ ...definition, verification: requirement.verification }, requirement)
+              && requirement.verification.kind === "exact" && requirement.verification.rubric === previous.verification.rubric)
+              spanSets.set(requirement.id, keys);
+          }
+        }
+        // History and owner locks precede source locks. Never authorize content from a stale pre-lock material probe.
+        const boundRequirements = input.requirements.filter(requirement => spanSets.has(requirement.id));
+        await admitLearningSources(tx, scope, boundRequirements.flatMap(requirement => requirement.sourceRefs.map(ref => ref.sourceId)), { recordVersions: false });
         const materials=await readCourseRouteMaterials(tx,scope,courseId);
+        const chunks = boundRequirements.length ? await readCourseRouteSourceChunks(tx, scope, courseId) : [];
         const requirements=input.requirements.map(requirement=>{
           const previous=current.find(row=>row.id===requirement.id);
-          // Only an approved row's verification counts as an existing requirement.
-          return { ...requirement, verification:decideCourseRouteVerification(
-            requirement.verification,previous?.approvedAt!=null?previous.verification:null,
-            requirement.sourceRefs.length>0&&requirement.sourceRefs.every(ref=>materials.some(material=>material.sourceId===ref.sourceId&&material.sourceVersion===ref.sourceVersion&&material.available)),
-            options.exactVerificationEnabled===true) };
+          const keys = spanSets.get(requirement.id);
+          const sourcesAvailable = requirement.sourceRefs.length>0&&requirement.sourceRefs.every(ref=>materials.some(material=>material.sourceId===ref.sourceId&&material.sourceVersion===ref.sourceVersion&&material.available));
+          if (keys && (!sourcesAvailable || requirement.sourceRefs.some(ref => !chunks.some(chunk => chunk.sourceId === ref.sourceId && chunk.sourceVersion === ref.sourceVersion
+            && (!ref.chunkId || chunk.id === ref.chunkId) && (!ref.page || chunk.page === ref.page)))))
+            throw Object.assign(learningError("CONFLICT", "span 内容绑定的来源、片段或页码已不可用。"), { reasonCode: "SPAN_PREREQUISITE_SOURCE_UNAVAILABLE" });
+          // Only an approved row's verification counts as an existing requirement; submitted keys/status never confer authority.
+          return { ...requirement, verification: keys ? { kind: "exact" as const, status: "ready" as const, exerciseKeys: keys, rubric: requirement.verification.rubric, missingReasons: [] }
+            : decideCourseRouteVerification(requirement.verification,previous?.approvedAt!=null?previous.verification:null,sourcesAvailable,options.exactVerificationEnabled===true) };
         });
         const definitions=current.map(({courseId:_courseId,revision:_revision,lifecycle:_lifecycle,approvedAt:_approvedAt,...definition})=>definition);
         // An unknown response can replay the same full definition without raising revisions.

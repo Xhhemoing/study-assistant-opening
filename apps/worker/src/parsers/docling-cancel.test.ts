@@ -28,7 +28,7 @@ describe("parser process cancellation", () => {
       expect(() => process.kill(pids[0]!, 0)).toThrow();
       // An orphan can remain a zombie until init reaps it, but cannot execute.
       try { expect(await readFile(`/proc/${pids[1]}/stat`, "utf8")).toMatch(/\) Z /); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
     } finally { controller.abort(); await result.catch(() => {}); await rm(directory, { recursive: true, force: true }); }
   });
 });

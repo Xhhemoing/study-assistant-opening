@@ -308,6 +308,30 @@ describe("opening teaching commands (unit)", () => {
     expect(writes.some((w) => w.query.includes("library_revisions"))).toBe(false);
   });
 
+  it.each([undefined, "Generate a genuinely different worked example; do not copy the original."])(
+    "rejects an unsupported example without revision, checkpoint, learning or budget writes (prompt: %s)", async prompt => {
+      const activity = activityRow({ generate_status: "needs_check", content_version: 2 });
+      const before = structuredClone(activity);
+      const { sql, writes } = db(query => {
+        if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+        if (query.includes("FROM opening_teaching_activities")) return [activity];
+        if (query.includes("FROM opening_teaching_activity_specs")) return [specRow({ revision_number: 2 })];
+        return [];
+      });
+      expect(await createOpeningTeachingCommandsRepository(sql).executeCommand(scope, activityId, {
+        clientKey: "synthetic-example-request", kind: "example", blockId: blockA,
+        expectedVersion: 2, expectedPathVersion: 1, expectedRevisionNumber: 2, prompt,
+      })).toMatchObject({
+        ok: false, conflict: "validation", message: expect.stringContaining("未生成新例题"),
+        currentContentVersion: 2, currentPathVersion: 1, currentRevisionNumber: 2,
+      });
+      expect(activity).toEqual(before);
+      // Only lazy history-counter initialization is allowed, not a success log/replay or business write.
+      expect(writes.filter(({ query }) => /^\s*(INSERT|UPDATE|DELETE)\b/.test(query)))
+        .toEqual(writes.filter(({ query }) => query.includes("INSERT INTO opening_workspace_history_revisions")));
+    },
+  );
+
   it("T13 generate_in_flight blocks rewrite; skip still OK gate covered in domain", async () => {
     const { sql } = db((query) => {
       if (query.includes("FROM workspaces")) return [{ id: workspaceId }];

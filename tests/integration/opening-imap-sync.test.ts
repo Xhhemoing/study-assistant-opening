@@ -57,34 +57,42 @@ function makeClient() {
     secure: false,
     auth: { user: "fixture", pass: "fixture" },
     tls: { rejectUnauthorized: true },
-    logger: true,
-  }) as unknown as Parameters<typeof syncMailbox>[0]["client"];
+  });
 }
 
 async function runSync() {
   const client = makeClient();
-  await client.connect();
-  return syncMailbox({
-    scope: f.scope,
-    connectionId: fixtureConnection.id,
-    connectionVersion: fixtureConnection.version,
-    folder: "INBOX",
-    cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
-    since: new Date("2026-01-01T00:00:00.000Z"),
-    client,
-    imports: createOpeningImportsRepository(f.sql),
-    sources: createOpeningSourceRepository(f.sql),
-    privacy: createOpeningPrivacyRepository(f.sql),
-    upload: async ({ key, bytes }) => {
-      if (key.includes("/v") && failFinalUpload) throw new Error("storage unavailable");
-      objectByKey.set(key, bytes);
-    },
-  });
+  try {
+    await client.connect();
+    return await syncMailbox({
+      scope: f.scope,
+      connectionId: fixtureConnection.id,
+      connectionVersion: fixtureConnection.version,
+      folder: "INBOX",
+      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+      since: new Date("2026-01-01T00:00:00.000Z"),
+      client,
+      imports: createOpeningImportsRepository(f.sql),
+      sources: createOpeningSourceRepository(f.sql),
+      privacy: createOpeningPrivacyRepository(f.sql),
+      upload: async ({ key, bytes }) => {
+        if (key.includes("/v") && failFinalUpload) throw new Error("storage unavailable");
+        objectByKey.set(key, bytes);
+      },
+    });
+  } finally {
+    // syncMailbox logs out on success, but a rejected upload leaves the client
+    // connected. The fixture owns that socket on every path; wait for the
+    // server's close event before the next test can truncate or start a sync.
+    client.close();
+    await server.waitForConnectionsClosed();
+  }
 }
 
 let fixtureConnection: { id: string; version: number };
 
 beforeEach(async () => {
+  expect(server.activeConnectionCount()).toBe(0);
   objectByKey = new Map();
   failFinalUpload = false;
   await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox, opening_source_versions, opening_sources RESTART IDENTITY CASCADE`;
@@ -140,9 +148,21 @@ describe("isolated standard IMAP sync gate", () => {
   it("does not advance a UID cursor or create a receipt when final upload fails", async () => {
     failFinalUpload = true;
     await expect(runSync()).rejects.toThrow("storage unavailable");
+    expect(server.activeConnectionCount()).toBe(0);
     expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
     expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+  });
+
+  it("closes a failed sync before retrying on a fresh wire connection", async () => {
+    failFinalUpload = true;
+    await expect(runSync()).rejects.toThrow("storage unavailable");
+    expect(server.activeConnectionCount()).toBe(0);
+
+    failFinalUpload = false;
+    await expect(runSync()).resolves.toMatchObject({ imported: 1, skipped: 0, cursor: { lastUid: 11 } });
+    expect(server.activeConnectionCount()).toBe(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
   });
 
   it("isolates mailbox generations and workspace ownership through import receipts", async () => {

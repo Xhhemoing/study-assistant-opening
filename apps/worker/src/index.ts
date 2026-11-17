@@ -5,7 +5,7 @@ import { loadOpeningJobStaleConfig, loadWorkerStartupConfig } from "@aistudy/con
 import { assertConsumersActive, consumersReady, createWorkerReadiness, type ReadyConsumer } from "./runtime/worker-readiness";
 import { runStartupWithBackoff } from "./runtime/startup-backoff";
 import { createGradeObservationHandler } from "./jobs/grade-observation";
-import { createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, recordOpeningTutorTiming,
+import { createOpeningExplicitRegradeRequestRepository, createOpeningAiGradingRepository, createOpeningAiGradingJobRepository, recordOpeningTutorTiming,
   createOpeningParserHealthRepository, createOpeningPdfSegmentsRepository, createOpeningSourceVisualRecognitionsRepository } from "@aistudy/database";
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
@@ -383,6 +383,7 @@ export async function main(): Promise<void> {
   process.exitCode = undefined;
   timers.push(setInterval(() => { void heartbeat.run(); }, 5_000));
   const dispatch = createSerialTask(async () => {
+    await createOpeningExplicitRegradeRequestRepository(sql).recoverConfirmed();
     await createOpeningAiGradingJobRepository(sql).recoverExpired();
     await repository.recoverExpired();
     await tutorJobs.recoverExpired();

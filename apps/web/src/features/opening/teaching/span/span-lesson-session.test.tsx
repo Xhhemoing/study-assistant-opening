@@ -29,6 +29,15 @@ function lesson() { return find(render(), element => element.type === SpanLesson
 function unmount() { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); }
 const settle = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };
 beforeEach(() => { unmount(); hooks.values = []; hooks.effects = []; vi.clearAllMocks(); mocks.request.mockReset(); mocks.request.mockResolvedValue(details(snapshot)); vi.stubGlobal("window", { location: { href: `http://example.test/opening/courses/${id}/study/span` }, history: { state: null, replaceState: mocks.replaceState } }); });
+it.each([null, snapshot])("never auto-creates an unavailable B lesson with session %j", async session => {
+  mocks.request.mockResolvedValue({ ...details(session), executionUnavailable: { reasonCode: "SPAN_PREREQUISITE_PLAN_UNSUPPORTED", message: "仅可读取历史" } });
+  render(); await settle(); render(); await settle();
+  const tree = render();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.request.mock.calls.every(call => !call[2])).toBe(true);
+  expect(find(tree, element => element.type === SpanLesson)).toBeUndefined();
+  expect(mocks.replaceState).not.toHaveBeenCalled();
+});
 it("keeps worked teaching identity when a new-evidence event filters earlier reserved attempts", async () => {
   const attempts = ["teaching", "validation", "retest"].map(purpose => ({ id: purpose, startedAt: snapshot.createdAt,
     spanExercise: { id: `span-reserved-generated-${purpose}-independent-2d-1729-0` } } as LearningAttempt));

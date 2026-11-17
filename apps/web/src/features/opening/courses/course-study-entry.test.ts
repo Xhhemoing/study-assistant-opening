@@ -5,6 +5,7 @@ import type { TaskItem, TeachingActivity } from "@aistudy/contracts";
 import { openCourseStudy } from "./course-study-entry";
 import { buildCourseStudyInput, courseActivityNextStep, courseStudyTasks, currentCourseActivity } from "./course-study-model";
 import { CourseRetestReview } from "./course-study-workspace";
+import { sprintCourseScope } from "../exam-sprint/sprint-course-route";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
 const otherCourseId = "22222222-2222-4222-8222-222222222222";
@@ -153,6 +154,62 @@ describe("course study entry", () => {
     const client = api([existing]); client.listTasks.mockResolvedValue({ tasks: [task({ requirementKey: "new", teachingTarget: { activityId, courseId, requirementKey: "old" } })] });
     await expect(openCourseStudy(client, { ...options, taskId })).rejects.toThrow("学习要求已调整");
     expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe("course-scoped exam evidence entry", () => {
+  const key = `exam-activity:${taskId}:attempt-1-course-continue`;
+  const evidence = activity({ intentKind: "question", contentVersion: 0, clientKey: key });
+  const entry = { kind: "exam-sprint", activity: evidence, href: `/opening/sprint?courseId=${courseId}` };
+
+  it.each([{}, { activityId }])("dispatches the admitted evidence without creating teaching: %j", async query => {
+    const client = api([evidence]);
+    expect(await openCourseStudy(client, { ...options, compilerEnabled: false, ...query })).toEqual(entry);
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+  it("recognizes source-record evidence and retains static lesson precedence", async () => {
+    const source = activity({ intentKind: "question", clientKey: `exam-activity:${taskId}:source-2-register` });
+    expect(await openCourseStudy(api([source]), options)).toMatchObject({ kind: "exam-sprint" });
+    const lesson = { ...source, staticLesson: { protocol: "span-lesson-v1" as const, sessionId: taskId } };
+    expect(await openCourseStudy(api([lesson]), options)).toMatchObject({ kind: "static-lesson" });
+  });
+  it.each([
+    { clientKey: "caller-exam-activity:anything" },
+    { clientKey: "exam-activity:anything" },
+    { clientKey: `exam-activity:${taskId}:arbitrary-caller` },
+    { clientKey: `exam-activity:${taskId}:attempt-1-` },
+    { intentKind: "topic" as const },
+  ])("does not treat arbitrary caller strings or ordinary teaching as exam evidence: %j", async change => {
+    const ordinary = { ...evidence, ...change };
+    expect(await openCourseStudy(api([ordinary]), options)).toEqual({ kind: "activity", activity: ordinary });
+  });
+  it("preserves task admission and exact target requirements before exam dispatch", async () => {
+    const client = api([evidence]);
+    const selected = task({ teachingTarget: { activityId, courseId, requirementKey: null } });
+    client.listTasks.mockResolvedValue({ tasks: [selected] });
+    expect(await openCourseStudy(client, { ...options, taskId, activityId })).toEqual(entry);
+    client.getTeachingActivity.mockClear();
+    for (const invalid of [task({ ...selected, courseId: otherCourseId }), task({ ...selected, notBefore: "2099-11-01T00:00:00Z" }), task({ ...selected, teachingTarget: undefined }), task({ ...selected, requirementKey: "changed" })]) {
+      client.listTasks.mockResolvedValue({ tasks: [invalid] });
+      await expect(openCourseStudy(client, { ...options, taskId, activityId })).rejects.toThrow();
+    }
+    expect(client.getTeachingActivity).not.toHaveBeenCalled();
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+  it("rejects foreign explicit evidence and never substitutes foreign current progress", async () => {
+    const client = api([{ ...evidence, courseId: otherCourseId }]);
+    await expect(openCourseStudy(client, { ...options, activityId })).rejects.toThrow("不属于本课程");
+    expect(await openCourseStudy(client, { ...options, compilerEnabled: false })).toEqual({ kind: "practice" });
+    expect(client.createTeachingActivity).not.toHaveBeenCalled();
+  });
+  it("does not turn the dispatch key into sprint binding authorization", async () => {
+    const next = await openCourseStudy(api([evidence]), options);
+    if (next.kind !== "exam-sprint") throw new Error("Expected exam entry");
+    const requestedCourse = new URL(next.href, "https://study.invalid").searchParams.get("courseId")!;
+    expect(sprintCourseScope(requestedCourse, undefined)).toBe("loading");
+    expect(sprintCourseScope(requestedCourse, null)).toBe("unbound");
+    expect(sprintCourseScope(requestedCourse, { courseId: otherCourseId })).toBe("other");
+    expect(sprintCourseScope(requestedCourse, { courseId })).toBe("match");
   });
 });
 

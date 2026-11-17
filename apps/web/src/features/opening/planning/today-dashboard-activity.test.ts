@@ -159,7 +159,7 @@ describe("V2-10 teaching workspace gate (Today wire)", () => {
   it("usable only when generateStatus ready + blocks present", () => {
     expect(
       isTeachingWorkspaceContentUsable(
-        { ...activity, generateStatus: "ready" },
+        { ...activity, generateStatus: "ready", contentVersion: 1 },
         readyInit,
       ),
     ).toBe(true);

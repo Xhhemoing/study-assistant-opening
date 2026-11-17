@@ -28,6 +28,9 @@ import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { canCompleteObservation, observationStage, StageActionBar, type AttemptPrimaryAction } from "../learning/stage-action-bar";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { ExplicitRegradeControl } from "./explicit-regrade-control";
+import { ExplicitRegradeHttpOwner } from "./explicit-regrade-owner";
+import type { ExplicitRegradeOwner } from "./explicit-regrade-client";
 
 export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "sourceIds" | "contentVersion" | "intentSummary" | "status"> & {
   learnerFocus?: TeachingActivity["learnerFocus"];
@@ -40,6 +43,8 @@ export type InlineAttemptContext = Pick<TeachingActivity, "id" | "courseId" | "s
   /** Called only for a durably saved observation, including restored work. */
   onObservationReady?: (blockId: string, observation: LearningObservation) => void;
   completionAction?: AttemptPrimaryAction;
+  /** HTTP owner must inject a stable authenticated tab session and current server snapshot. */
+  explicitRegrade?: ExplicitRegradeOwner;
 };
 
 /** Full reference content is fetched only by an explicit action after the original is saved. */
@@ -407,6 +412,12 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           void rereadComparison();
         }} />
         : <><p className="text-xs font-medium text-text-2">{studentCopy.originalAnswer}</p><p className="whitespace-pre-wrap text-sm text-text">{recorded.answer}</p><AiGradingResult record={recorded} /></>}
+      {context.status !== "completed" && context.explicitRegrade
+        && context.explicitRegrade.snapshot.expectedHead === recorded.id
+        && context.explicitRegrade.snapshot.rootObservationId === (recorded.rootObservationId ?? recorded.id)
+        ? <ExplicitRegradeControl owner={context.explicitRegrade} disabled={pending || rereadNeeded} />
+        : context.status !== "completed" && !context.explicitRegrade
+          ? <ExplicitRegradeHttpOwner key={recorded.id} observationId={recorded.id} disabled={pending || rereadNeeded} /> : null}
       {context.status !== "completed" && !canGradeObservation(recorded) && !recorded.aiEvaluation && canCompleteObservation(recorded) ? <StageActionBar stage={observationStage(recorded)} primary={context.completionAction} /> : null}
       {answerKey ? <div className="rounded-lg bg-surface p-3 ring-1 ring-line"><p className="mb-2 text-xs font-medium text-text-2">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-text-3">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <p className="text-xs text-text-2">{studentCopy.referenceAvailable}</p>}
       {context.status !== "completed" && !assessed && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}

@@ -15,10 +15,10 @@ import { SpanLessonRequestError, spanLessonRequest, type SpanLessonDetails } fro
 import { nextSpanHintLevel, requestSpanHint, SPAN_HINT_LABELS } from "../../teaching/span/span-hint-client";
 import { spanProblemText } from "../../teaching/span/span-problem-text";
 import { isSpanReservedProblemId, readSpanDraftAnswer, SPAN_FEEDBACK_LABELS, updateSpanDraftAnswer, type SpanDraftAnswer } from "../../teaching/span/span-answer";
-import { readSpanNextResult } from "../../teaching/span/span-next-action-control";
+import { readSpanNextResult, readSpanPrerequisiteReturnResult } from "../../teaching/span/span-next-action-control";
 import { spanPracticeScope, spanStartsWithHint } from "../../teaching/span/span-practice";
 import { spanPresentationSchema } from "../../teaching/span/use-span-presentation";
-import { spanTargetedExplanationText } from "../../teaching/span/span-targeted-explanation";
+import { spanTargetedExplanationText, spanPrerequisiteExplanationText } from "../../teaching/span/span-targeted-explanation";
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId, spanRepairStage } from "../../teaching/span/span-lesson-moves";
 import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
 import { acknowledgeStudyExposure } from "../../assistant/study-exposure-ack";
@@ -92,17 +92,22 @@ function strongest(...levels: (HelpState["level"] | undefined)[]): HelpState["le
 }
 
 export function createSpanStudySession(details: SpanLessonDetails, save: Save, options: { photoEnabled?: boolean } = {}): StudySessionPort {
+  if (details.executionUnavailable || details.originChange || details.repair && details.prerequisiteRepair) throw new Error("当前学习仅可回看历史或暂停。");
   const session = details.session!;
   const sourceId = session.sourceIds[0];
   const mode = spanModeForIntent(session.intent);
   const repair = details.repair;
-  const repairStage = repair ? spanRepairStage(session.moveId) : null;
-  const moves = spanLessonMoves(mode, Boolean(repair));
+  const prerequisite = details.prerequisiteRepair;
+  const bounded = Boolean(repair || prerequisite);
+  const protocol = prerequisite ? { prerequisiteRepairVersion: prerequisite.version } : repair ? { repairVersion: repair.version } : {};
+  const namespace = prerequisite ? `span-prerequisite:${session.activityId}:v${prerequisite.version}` : repair ? `span-repair:${session.activityId}:v${repair.version}` : "";
+  const repairStage = bounded ? spanRepairStage(session.moveId) : null;
+  const moves = spanLessonMoves(mode, bounded);
   const retestId = session.retestId ? details.continuityRetestId ?? session.retestId : undefined;
   const index = session.retestId ? moves.length - 1 : moves.findIndex(move => move.id === session.moveId);
   const move = moves[index];
   // Repair scopes are stage identities, never client-selected problem identities.
-  const problemId = repair ? `span-repair:v${repair.version}:${repairStage ?? "unavailable"}` : move && index > 0 ? spanLessonProblemId(mode, index, moves.length) : null;
+  const problemId = bounded ? `${prerequisite ? "span-prerequisite" : "span-repair"}:v${prerequisite?.version ?? repair!.version}:${repairStage ?? "unavailable"}` : move && index > 0 ? spanLessonProblemId(mode, index, moves.length) : null;
   const position = { index: Math.max(0, index), total: moves.length };
   const budgetMinutes = session.intent.timeBudgetMinutes;
   const client = createOpeningLearningClient();
@@ -123,7 +128,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
   let confidence: { attemptId: string; value: PreAnswerConfidence } | null = null;
   const chosenConfidence = () => confidence && confidence.attemptId === attempt?.id ? confidence.value : null;
   const variantOrigin = () => draft()?.start?.clientKey.startsWith("span-variant:") ? draft()!.start!.clientKey.slice("span-variant:".length) : null;
-  const correctedRedo = () => Boolean(!repair && record && attempt && adaptSpanResult(record).outcome === "correct"
+  const correctedRedo = () => Boolean(!bounded && record && attempt && adaptSpanResult(record).outcome === "correct"
     && session.intent.purpose === "self_study" && !retestId && !variantOrigin()
     && (draft()?.start?.clientKey.startsWith("span-redo:") || details.attempts.some(row => row.id !== attempt!.id
       && row.itemVersionId === attempt!.itemVersionId && details.observations.some(observation => observation.attemptId === row.id && observation.serverEvaluation?.decision === "incorrect"))));
@@ -138,7 +143,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     const savedConfidence = sealed ? current?.submission?.input.preAnswerConfidence : attempt?.preAnswerConfidence;
     const answer = readSpanDraftAnswer(current?.fields.answer ?? "");
     const result = record ? (attempt ? adaptSpanDiagnosticResult(record, attempt) : adaptSpanResult(record)) : null;
-    if (repair && result && record && attempt) {
+    if (bounded && result && record && attempt) {
       // Help is an actual delivered fact, not a claim that this or an external prerequisite is mastered.
       const evaluation = record.serverEvaluation;
       const exact = evaluation?.evaluatorVersion === "span-exact-v1" && evaluation.attemptId === attempt.id
@@ -147,14 +152,22 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       result.assistance = delivered === "revealed" || record.assistance === "revealed" ? "revealed"
         : delivered === "hinted" || record.assistance === "hinted" ? "hinted" : record.assistance;
       const helpFact = result.assistance === "independent" ? "未使用帮助" : result.assistance === "hinted" ? "使用过提示" : result.assistance === "revealed" ? "看过完整示范" : "帮助情况待确认";
-      result.detail = `${repairStage === "confirmation" ? "本次新题确认" : "本次变式"}：${result.outcome === "correct" ? "答案正确" : result.outcome === "incorrect" ? "尚未正确" : "证据不足，待核对"}；${helpFact}。只记录本题结果，不代表已掌握或外部先修已修复。`;
+      if (prerequisite && repairStage === "confirmation") delete result.nextStep;
+      const boundary = prerequisite ? repairStage === "confirmation"
+        ? "本块到此为止，可在确认结果后返回原要求；尚未正确仍如实保留，不代表先修已修复或已经掌握。"
+        : "只记录本次变式结果；完整正确后才可明确发放新题确认，不代表先修已修复或已经掌握。"
+        : "只记录本题结果，不代表已掌握或外部先修已修复。";
+      result.detail = `${repairStage === "confirmation" ? "本次新题确认" : "本次变式"}：${result.outcome === "correct" ? "答案正确" : result.outcome === "incorrect" ? "尚未正确" : "证据不足，待核对"}；${helpFact}。${boundary}`;
     }
     view = { ...view, help, answer, answerSummary: sealed ? spanAnswerSummary(answer) : undefined,
       sealed, result, next, photo,
       confidence: sealed || record ? savedConfidence ? { value: savedConfidence, locked: true } : undefined
         : { value: chosenConfidence(), locked: false },
       canPracticeVariant: correctedRedo(),
-      canRedo: !view.blocked && (!next || Boolean(next.choiceReason)) && Boolean(repair ? repairStage === "variant" && record && result?.outcome !== "correct"
+      primaryActionLabel: prerequisite && record ? repairStage === "variant" && result?.outcome === "correct" ? "发放新题确认"
+        : prerequisite && repairStage === "confirmation" && (result?.outcome === "correct" || result?.outcome === "incorrect") ? "返回原要求" : undefined : undefined,
+      blocked: prerequisite && repairStage === "confirmation" && record && result?.outcome !== "correct" && result?.outcome !== "incorrect" ? "本次评价尚未确认，原答案与位置保留；请重新读取或核对课程记录。" : view?.blocked,
+      canRedo: !view.blocked && (!next || Boolean(next.choiceReason)) && Boolean(bounded ? repairStage === "variant" && record && result?.outcome !== "correct"
         : record && adaptSpanResult(record).outcome !== "correct" && !retestId && !photo?.workSource
           && !current?.submission?.input.workSource && !current?.start?.clientKey.startsWith("span-redo:")) };
     return view;
@@ -178,10 +191,10 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     if (!sourceId) return blockedView(step, "这节课的资料暂时不可用，请先到课程页恢复资料。");
     if (!readPracticeDraft(scope, storage())) {
       initializePracticeDraft(emptyPracticeDraft(scope, { sourceId, spanProblemId: problemId!, skillLabel: SKILL,
-        assistance: !retestId && spanStartsWithHint(problemId!, session.intent, details.executionPhase ?? undefined) ? "hinted" : "independent" }));
+        assistance: !bounded && !retestId && spanStartsWithHint(problemId!, session.intent, details.executionPhase ?? undefined) ? "hinted" : "independent" }));
     }
     const evidence = details.intentEvent?.signals.some(signal => signal === "guessed" || signal === "copied_answer") ? details.intentEvent : null;
-    const restored = repair ? undefined : [...details.attempts]
+    const restored = bounded ? undefined : [...details.attempts]
       .filter(row => !evidence || !isSpanReservedProblemId(row.spanExercise?.id) || row.startedAt >= evidence.createdAt)
       .sort((a, b) => b.historyRevision - a.historyRevision || b.startedAt.localeCompare(a.startedAt))
       .find(row => problemId === "reserved:auto" ? isSpanReservedProblemId(row.spanExercise?.id) && !row.spanPracticeOriginAttemptId : row.spanExercise?.id === problemId);
@@ -192,13 +205,13 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     if (issuedVariant) update({ start: { clientKey: `span-variant:${issuedVariant.spanPracticeOriginAttemptId}`, sessionId: session.sessionId,
       sessionInput: { courseId: session.courseId, activityId: session.activityId, sourceIds: [sourceId], skillLabel: SKILL }, createInput: null } });
     let created = false;
-    if (repair) {
-      if (repair.status !== "ready" || repairStage !== "variant" && repairStage !== "confirmation") throw new Error("本题步骤暂不可发题，原草稿保留。");
+    if (bounded) {
+      if ((prerequisite ?? repair)!.status !== "ready" || repairStage !== "variant" && repairStage !== "confirmation") throw new Error("本题步骤暂不可发题，原草稿保留。");
       // Re-read the semantic issuer even on refresh: it restores exactly the server-bound stage attempt.
       // Never guess the stage from a generated problem name or accept a local draft as authority.
       attempt = await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({
-        activityId: session.activityId, repairVersion: repair.version, expectedRevision: session.revision, stage: repairStage,
-        clientKey: `span-repair:${session.activityId}:v${repair.version}:${repairStage}` }) });
+        activityId: session.activityId, ...protocol, expectedRevision: session.revision, stage: repairStage,
+        clientKey: `${namespace}:${repairStage}` }) });
     }
     else if (known) attempt = (await client.getAttemptContext(known)).attempt;
     else if (issuedVariant) attempt = issuedVariant;
@@ -217,7 +230,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     }
     const current = attempt;
     if (current.courseId !== session.courseId || current.sessionId !== session.sessionId || !current.spanExercise) throw new Error("原题身份已变化，请重新读取。");
-    if (repair && known && known !== current.id) {
+    if (bounded && known && known !== current.id) {
       // Another tab may have explicitly authorized a retry. Preserve the old sealed draft;
       // adopt only the current server-issued attempt, never transplant its submission.
       const previous = draft()!;
@@ -239,7 +252,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     // Only replay levels the server already released for this attempt (legacy rule). Faded examples
     // open with hint 1 unless the learner is consolidating.
     const levels = [...new Set(details.hintLevels[current.id] ?? [])].sort();
-    if (!repair && created && !variantOrigin() && !draft()!.start?.clientKey.startsWith("span-redo:") && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
+    if (!bounded && created && !variantOrigin() && !draft()!.start?.clientKey.startsWith("span-redo:") && !retestId && spanStartsWithHint(current.spanExercise.id, session.intent, details.executionPhase ?? undefined)) levels.push(1);
     // Re-reading a released level is idempotent on the server (same release key), so this never adds help.
     hints = await Promise.all((retestId && !record ? [] : levels).map(async level => {
       const hint = await requestSpanHint(current, level);
@@ -277,30 +290,30 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     async load() {
       if (repair?.status === "needs_clarification") return blockedView({ kind: "learn", id: session.moveId, title: "先核对本题步骤", body: repair.message, estimateMinutes: details.estimateMinutes ?? null },
         `${repair.message} 请回课程记录补写或核对原题步骤；尚未定位可信的最早依赖步骤，也未识别外部先修。原活动、答案和学习位置保留，可暂停后再核对。`);
-      if (!move || repair && (!repairStage || mode !== "self_study" || retestId)) return blockedView({ kind: "learn", id: session.moveId, title: SKILL, body: "", estimateMinutes: null }, "学习位置已变化，请重新读取本节。");
+      if (!move || bounded && (!repairStage || mode !== "self_study" || retestId)) return blockedView({ kind: "learn", id: session.moveId, title: SKILL, body: "", estimateMinutes: null }, "学习位置已变化，请重新读取本节。");
       if (index === 0) {
         if (!sourceId) return blockedView({ kind: "learn", id: move.id, title: SKILL, body: "", estimateMinutes: null }, "这节课的资料暂时不可用，请先到课程页恢复资料。");
         const kind = mode === "overview" ? "overview" : mode === "challenge" ? "simulation" : "worked";
         let raw: z.infer<typeof presentationSchema>;
         try {
           raw = await spanLessonRequest("/api/opening/teaching/span/presentation", presentationSchema, { method: "POST",
-            body: JSON.stringify(repair ? { activityId: session.activityId, repairVersion: repair.version, stage: "example", clientKey: `span-repair:${session.activityId}:v${repair.version}:example` }
+            body: JSON.stringify(bounded ? { activityId: session.activityId, ...protocol, stage: "example", clientKey: `${namespace}:example` }
               : { courseId: session.courseId, sourceId, sessionId: session.sessionId, kind, clientKey: `span-demo:${session.sessionId}:${sourceId}:${kind}:v1` }) });
           await acknowledgeStudyExposure(raw.exposureReceipt);
-          if (repair && (!raw.targetedExplanation || raw.targetedExplanation.targetSkill !== repair.targetSkill)) throw new Error("本题步骤短讲缺失或不匹配，未回退通用讲解。");
+          if (bounded && (!raw.targetedExplanation || raw.targetedExplanation.targetSkill !== (prerequisite ?? repair)!.targetSkill)) throw new Error("本题步骤短讲缺失或不匹配，未回退通用讲解。");
         } catch (reason) {
-          if (!repair && !(reason instanceof SpanLessonRequestError && reason.status === 409)) throw reason;
-          return blockedView({ kind: "learn", id: move.id, title: repair ? "本题步骤短讲暂不可用" : "本节示范暂不可用", body: "原活动与答案保留，可暂停或重新读取。", estimateMinutes: null }, reason instanceof Error ? reason.message : "短讲暂不可用，未回退通用讲解。");
+          if (!bounded && !(reason instanceof SpanLessonRequestError && reason.status === 409)) throw reason;
+          return blockedView({ kind: "learn", id: move.id, title: bounded ? "本题步骤短讲暂不可用" : "本节示范暂不可用", body: "原活动与答案保留，可暂停或重新读取。", estimateMinutes: null }, reason instanceof Error ? reason.message : "短讲暂不可用，未回退通用讲解。");
         }
-        view = { step: repair ? { kind: "learn", id: move.id, title: "本题步骤短讲", body: spanTargetedExplanationText(repair, raw.targetedExplanation!), estimateMinutes: details.estimateMinutes ?? null }
+        view = { step: bounded ? { kind: "learn", id: move.id, title: prerequisite ? "先修步骤短讲" : "本题步骤短讲", body: prerequisite ? spanPrerequisiteExplanationText(prerequisite, raw.targetedExplanation!) : spanTargetedExplanationText(repair!, raw.targetedExplanation!), estimateMinutes: details.estimateMinutes ?? null }
           : adaptSpanLearn(raw, move, details.estimateMinutes ?? null, details.targetedFocus), position,
           help: adaptSpanHelp("none", [], false, false), answer: {}, sealed: false, result: null, next: null, photo: null, budgetMinutes };
         return view;
       }
       try { return await loadQuestion(); }
       catch (reason) {
-        if (!repair && !(reason instanceof SpanLessonRequestError && reason.status === 409)) throw reason;
-        return blockedView({ kind: "question", id: session.moveId, title: repair ? "本题步骤练习暂不可用" : "本题暂不可用", prompt: "原题、草稿与帮助记录保留，未改发通用题。", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 0 }, reason instanceof Error ? reason.message : "当前题暂不可用，请重新读取。");
+        if (!bounded && !(reason instanceof SpanLessonRequestError && reason.status === 409)) throw reason;
+        return blockedView({ kind: "question", id: session.moveId, title: bounded ? "本题步骤练习暂不可用" : "本题暂不可用", prompt: "原题、草稿与帮助记录保留，未改发通用题。", purpose: "practice", estimateMinutes: null, photo: false, coordinates: 0 }, reason instanceof Error ? reason.message : "当前题暂不可用，请重新读取。");
       }
     },
     current() {
@@ -308,25 +321,26 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     },
     edit(change: Partial<SpanDraftAnswer>) {
       const current = draft();
-      if (!current || view.step.kind !== "question") return view;
+      if (!current || view.step.kind !== "question" || bounded && view.blocked) return view;
       if (current.submission) throw new Error("答案已提交，不能再修改。");
       update({ fields: { answer: updateSpanDraftAnswer(current.fields.answer, change) } });
       return refresh();
     },
     setConfidence(value: PreAnswerConfidence | null) {
       const current = draft();
-      if (!current || !attempt || view.step.kind !== "question") return view;
+      if (!current || !attempt || view.step.kind !== "question" || bounded && view.blocked) return view;
       if (current.submission) throw new Error("答案已提交，作答前的把握不能再修改。");
       confidence = value ? { attemptId: attempt.id, value } : null;
       return refresh();
     },
     async redo() {
-      if (repair) {
+      if (bounded && view.blocked) return view;
+      if (bounded) {
         if (!view.canRedo || !attempt || repairStage !== "variant") return view;
         const previous = draft()!;
         const retried = await spanLessonRequest("/api/opening/teaching/span/reserved", learningAttemptSchema, { method: "POST", body: JSON.stringify({
-          activityId: session.activityId, repairVersion: repair.version, expectedRevision: session.revision, stage: "variant",
-          clientKey: `span-repair:${session.activityId}:v${repair.version}:retry:${attempt.id}`, retryAfterAttemptId: attempt.id }) });
+          activityId: session.activityId, ...protocol, expectedRevision: session.revision, stage: "variant",
+          clientKey: `${namespace}:retry:${attempt.id}`, retryAfterAttemptId: attempt.id }) });
         if (retried.sessionId !== session.sessionId || retried.itemVersionId !== attempt.itemVersionId || retried.id === attempt.id) throw new Error("同题重答身份未确认，原答案保留。");
         const next = emptyPracticeDraft(scope, { sourceId: previous.fields.sourceId, spanProblemId: previous.fields.spanProblemId, skillLabel: SKILL,
           answer: record?.answer ?? previous.fields.answer, assistance: delivered === "revealed" ? "revealed" : "hinted", deliveredAssistance: delivered === "revealed" ? "revealed" : "hinted" });
@@ -362,7 +376,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
         // must use the existing tutor admission/execute owner, not a generic move.
         // The server rechecks the effective head, grant, budget and earliest skill.
         const evaluation = record.serverEvaluation;
-        const exactWrong = !repair && evaluation?.evaluatorVersion === "span-exact-v1" && evaluation.decision === "incorrect"
+        const exactWrong = !bounded && evaluation?.evaluatorVersion === "span-exact-v1" && evaluation.decision === "incorrect"
           && evaluation.attemptId === current.id && evaluation.itemVersionId === current.itemVersionId && evaluation.problemId === current.problemId;
         if (exactWrong) return requestNext();
         if (correctedRedo()) {
@@ -384,7 +398,14 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
           if (!await save(session.intent, nextMove.id, "active")) throw new Error("学习进度还没保存，请再试一次。");
           return view;
         }
-        return requestNext();
+        if (!prerequisite) return requestNext();
+        if (repairStage !== "confirmation" || view.result?.outcome !== "correct" && view.result?.outcome !== "incorrect") throw new Error("还不能确认这次作答结果，暂未返回原要求。");
+        const raw = await spanLessonRequest("/api/opening/teaching/span/next", z.unknown(), { method: "POST", body: JSON.stringify({ activityId: session.activityId,
+          ...protocol, expectedRevision: session.revision, observationId: record.id,
+          clientKey: `span-prerequisite-return:${session.activityId}:${record.id}` }) });
+        const next = readSpanPrerequisiteReturnResult(raw, session.courseId);
+        return refresh(next.kind === "ready" ? { href: next.href, label: next.label, alternatives: [] }
+          : { href: next.primary.href, label: next.primary.label, notice: next.message, choiceReason: next.reason, alternatives: next.secondary ? [next.secondary] : [] });
       }
       // Replay a sealed request first; only a fresh submission reads the current photo candidate.
       const sealed = draft()!.submission;
@@ -415,7 +436,7 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
     },
     async choosePhoto(file: File) {
       const current = attempt;
-      if (!photo || !current) return view;
+      if (!photo || !current || bounded && view.blocked) return view;
       if (draft()?.submission) throw new Error("答案已提交，不能更换照片。");
       // Detach the old candidate before any remote work, so a failed replacement never submits the old photo.
       update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
@@ -439,12 +460,13 @@ export function createSpanStudySession(details: SpanLessonDetails, save: Save, o
       return refresh();
     },
     removePhoto() {
+      if (bounded && view.blocked) return view;
       if (draft()?.submission) throw new Error("答案已提交，不能移除照片。");
       update({ fields: { workSourceId: "", workSourceVersion: 0, workPhysicalPage: 1 } });
       photo = options.photoEnabled ? { status: "none" } : null;
       return refresh();
     },
-    changeExplanation: repair ? undefined : async () => {
+    changeExplanation: bounded ? undefined : async () => {
       if (view.next?.choiceReason !== "remediation_limit") return view;
       if (!await save({ ...session.intent, purpose: "overview" }, spanLessonMoves("overview")[0]!.id, "active")) throw new Error("讲法还没切换，原学习位置保留，请再试一次。");
       // The owner rebuilds this port with the saved snapshot, including its revision.

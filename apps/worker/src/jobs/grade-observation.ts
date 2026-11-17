@@ -13,7 +13,9 @@ export function createGradeObservationHandler(deps: OpeningAiGradingServiceDeps)
     const context = await deps.repository.context(scope, { observationId: payload.observationId });
     if ((context.observation.rootObservationId ?? context.observation.id) !== payload.rootObservationId
       || context.answerRevision !== payload.answerRevision
-      || job.key !== `ai-grade:${job.workspaceId}:${payload.rootObservationId}:${payload.answerRevision}`) {
+      || job.key !== (payload.regrade?.operationId ?? `ai-grade:${job.workspaceId}:${payload.rootObservationId}:${payload.answerRevision}`)
+      || payload.regrade && (context.operationId !== payload.regrade.operationId
+        || payload.regrade.ownerUserId !== job.ownerUserId || payload.regrade.privacyEpoch !== job.privacyEpoch)) {
       throw Object.assign(new Error("批改任务与封存作答不一致"), { code: "CONFLICT" });
     }
     const observation = await service.grade(scope, { observationId: payload.observationId });

@@ -1,11 +1,70 @@
 import { describe, expect, it } from "vitest";
 import type { CourseRouteRequirementInput } from "@aistudy/contracts";
-import { decideCourseRouteVerification } from "./opening-course-route-verification-policy";
+import { decideCourseRouteVerification, readCourseSpanBindingOptions, resolveCourseSpanExerciseKeys, readConfirmedCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
+import { chooseSpanRepairTeaching, listSpanTeachingProblems, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { listGeneratedSpanItems } from "../../../domain/src/opening/span-generated-items";
+import { getSpanItemIdentity, listSpanReservedProblems } from "@aistudy/domain/span-heldout-catalog";
 
 type Verification = CourseRouteRequirementInput["verification"];
 const submitted = (kind: Verification["kind"], rubric: string | null = "标准"): Verification => ({
   kind, rubric, status: "ready", exerciseKeys: ["forged"], missingReasons: ["forged"],
 });
+describe("explicit canonical span content confirmation", () => {
+  it("publishes only the finite public teaching metadata", () => {
+    const options = readCourseSpanBindingOptions();
+    expect(options.map(option => option.id)).toEqual(listSpanTeachingProblems().filter(problem => listSpanReservedProblems("validation")
+      .some(candidate => candidate.familyId === problem.familyId && candidate.target.length === problem.target.length)).map(problem => problem.id));
+    for (const option of options) expect(Object.keys(option).sort()).toEqual(["dimension", "familyId", "id", "supportedScope", "version"]);
+  });
+  it.each(listSpanTeachingProblems().filter(problem => readCourseSpanBindingOptions().some(option => option.id === problem.id)))("expands $id by family AND dimension, excluding other purposes", problem => {
+    const keys = resolveCourseSpanExerciseKeys([problem.id]);
+    expect(keys).toContain(problem.id);
+    expect(keys.some(id => getSpanItemIdentity(id)?.purpose === "validation")).toBe(true);
+    const all = [...listSpanTeachingProblems(), ...listGeneratedSpanItems("teaching"), ...listSpanReservedProblems("validation")];
+    expect(keys).toEqual(all.filter(candidate => candidate.familyId === problem.familyId && candidate.target.length === problem.target.length).map(candidate => candidate.id).sort());
+    for (const id of keys) expect(["retest", "research"]).not.toContain(getSpanItemIdentity(id)?.purpose);
+    expect(readConfirmedCourseSpanExerciseKeys(SPAN_REQUIREMENT_KEY, { ...submitted("exact"), exerciseKeys: keys })).toEqual(keys);
+  });
+  it("retains exact legacy sets without granting newly confirmed teaching keys", () => {
+    for (const option of readCourseSpanBindingOptions()) {
+      const legacy = [...listSpanTeachingProblems(), ...listSpanReservedProblems("validation")]
+        .filter(p => p.familyId === option.familyId && p.target.length === option.dimension).map(p => p.id).sort();
+      const stored = { ...submitted("exact"), exerciseKeys: legacy };
+      expect(readConfirmedCourseSpanExerciseKeys(SPAN_REQUIREMENT_KEY, stored)).toEqual(legacy);
+      const expanded = resolveCourseSpanExerciseKeys([option.id]);
+      expect(expanded.length).toBeGreaterThan(legacy.length);
+      expect(stored.exerciseKeys).toEqual(legacy);
+      for (const partial of [[...legacy, expanded.find(id => !legacy.includes(id))!], expanded.filter(id => id !== legacy[0])])
+        expect(readConfirmedCourseSpanExerciseKeys(SPAN_REQUIREMENT_KEY, { ...stored, exerciseKeys: partial })).toBeNull();
+    }
+  });
+  it("makes a real same-family/dimension distinct teaching pair available from new explicit confirmation", () => {
+    const problem = listSpanTeachingProblems().find(p => p.id === "span-example-2d")!;
+    const keys = resolveCourseSpanExerciseKeys([problem.id]);
+    const candidates = [...listSpanTeachingProblems(), ...listGeneratedSpanItems("teaching")].filter(p => keys.includes(p.id));
+    const pair = chooseSpanRepairTeaching(problem, { contentKeys: new Set(), unknownHistory: false }, candidates);
+    expect(pair).not.toBeNull();
+    for (const p of [pair!.teachingExample, pair!.practiceVariant]) {
+      expect(p).toMatchObject({ version: "1", familyId: problem.familyId });
+      expect(p.target).toHaveLength(problem.target.length);
+      expect(keys).toContain(p.id);
+    }
+  });
+  it("rejects hidden, generated, obsolete, arbitrary and duplicate confirmation identities", () => {
+    for (const keys of [[], ["span-example-2d", "span-example-2d"], ["teaching-item:fake"], ["span-reserved-20261021-q01"],
+      ["span-reserved-generated-teaching-1729-0"], ["span-example-2d:v2"], ["span-reserved-generated-research-1729-0"],
+      ["span-contrast-dependent"], ["span-simulation-dependent"]])
+      expect(() => resolveCourseSpanExerciseKeys(keys)).toThrow();
+  });
+  it("never reinterprets partial, augmented, duplicate or foreign stored sets as confirmed", () => {
+    const keys = resolveCourseSpanExerciseKeys(["span-example-2d"]);
+    for (const exerciseKeys of [["span-example-2d"], [...keys, "forged"], [...keys, keys[0]!], keys.slice(1)])
+      expect(readConfirmedCourseSpanExerciseKeys(SPAN_REQUIREMENT_KEY, { ...submitted("exact"), exerciseKeys })).toBeNull();
+    expect(readConfirmedCourseSpanExerciseKeys("foreign", { ...submitted("exact"), exerciseKeys: keys })).toBeNull();
+    expect(readConfirmedCourseSpanExerciseKeys(SPAN_REQUIREMENT_KEY, { ...submitted("exact"), status: "missing", exerciseKeys: keys })).toBeNull();
+  });
+});
+
 describe("server verification policy", () => {
   for (const available of [false, true]) for (const enabled of [false, true]) {
     it(`ignores client unavailable state (sources=${available}, exact=${enabled})`, () => {

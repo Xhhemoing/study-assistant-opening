@@ -17,6 +17,18 @@ const diagnostics = vi.hoisted(() => ({ enabled: false }));
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => diagnostics.enabled }));
 beforeEach(() => { diagnostics.enabled = false; });
 
+it("keeps pause and reread available for a ready cv0 shell without published content", () => {
+  const html = renderToStaticMarkup(createElement(ResumeCardView, {
+    activityTitle: "合成空壳教学", activityStatus: "active", generateStatusLabel: "主讲内容未生成",
+    resume: resume({ contentVersion: 0, clientInit: null }), onPause: () => {}, onReread: () => {},
+  }));
+  expect(html).toContain('data-resume-pause="true"');
+  expect(html).toContain('data-resume-reread="true"');
+  expect(html).not.toMatch(/data-resume-pause="true"[^>]*disabled/);
+  expect(html).not.toMatch(/data-resume-reread="true"[^>]*disabled/);
+  expect(html).not.toContain("已完成");
+});
+
 const AID = "11111111-1111-4111-8111-111111111111";
 const BID = "44444444-4444-4444-8444-444444444444";
 const BID2 = "55555555-5555-4555-8555-555555555555";

@@ -28,7 +28,7 @@ export function createOpeningAiGradingRepository(sql: Sql) {
       const original = current.observation;
       const result = await reviseOpeningLearningObservation(sql, scope, {
         rootObservationId: original.rootObservationId ?? original.id, revisesObservationId: original.id, expectedHead: original.id,
-        revisionKind: "replace", reason: "AI 批改", clientKey: aiGradingClientKey(input),
+        revisionKind: "replace", reason: "AI 批改", clientKey: current.regradeRequestId ? current.operationId : aiGradingClientKey(input),
         replacement: { answer: original.answer, outcome: acceptedAiGradingOutcome(proposal), assistance: original.assistance },
       }, { aiGrading: { input, proposal, modelLabel } });
       return result.observation!;

@@ -12,6 +12,8 @@ export type OpeningImapServer = {
   mails: OpeningImapMail[];
   close(): Promise<void>;
   logoutCount(): number;
+  activeConnectionCount(): number;
+  waitForConnectionsClosed(): Promise<void>;
 };
 
 /**
@@ -23,10 +25,15 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
   const mails = [...inputMails].sort((a, b) => a.uid - b.uid);
   let logoutCount = 0;
 
-  const sockets = new Set<Socket>();
+  const sockets = new Map<Socket, Promise<void>>();
   const server: Server = createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
+    const closed = new Promise<void>((resolve) => {
+      socket.once("close", () => {
+        sockets.delete(socket);
+        resolve();
+      });
+    });
+    sockets.set(socket, closed);
     let buffer = "";
     const send = (line: string) => socket.write(`${line}\r\n`);
     const tagged = (tag: string, text = "OK done") => send(`${tag} ${text}`);
@@ -113,14 +120,18 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
     port: address.port,
     mails,
     close: async () => {
-      for (const socket of sockets) {
+      for (const socket of sockets.keys()) {
         socket.destroy();
       }
-      sockets.clear();
+      await Promise.all(sockets.values());
       await new Promise<void>((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
       });
     },
     logoutCount: () => logoutCount,
+    activeConnectionCount: () => sockets.size,
+    waitForConnectionsClosed: async () => {
+      await Promise.all(sockets.values());
+    },
   };
 }

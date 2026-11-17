@@ -2,6 +2,9 @@ import { appendOpeningStudyIntentInTx, createOpeningStudyIntentRepository, readO
 import { composerMessageText, parseExplicitStudyMessage, DEFAULT_STUDY_SESSION_INTENT, studyIntentForMessage, tutorFailureForDisplay, TUTOR_STALE_MESSAGE, localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
 import { openingCanonicalLanguageQuestion } from "./opening-study-context";
+import { readTutorAttemptContext, assertTutorAttemptContext, tutorAttemptFence, tutorAttemptFenceSchema, type TutorAttemptFence, type TutorAttemptContext, type TutorAttemptContextTarget } from "./opening-tutor-attempt-context";
+export { tutorAttemptFence, tutorAttemptFenceSchema } from "./opening-tutor-attempt-context";
+export type { TutorAttemptContext, TutorAttemptFence } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
@@ -482,14 +485,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
     async readStream(scope: OpeningScope, id: string, context: {
       privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string; executionId?: string;
+      attemptFence?: TutorAttemptFence;
     }): Promise<OpeningTutorJobRecord | null> {
       return sql.begin(async tx => {
-        if (context.exposureReceiptId) await lockWorkspaceLearningHistory(tx, scope);
+        await lockWorkspaceLearningHistory(tx, scope);
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
           WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!workspace) return null;
-        const [row] = await tx`SELECT j.* FROM opening_tutor_jobs j
+        const [row] = await tx`SELECT j.*,t.attempt_id,t.context_anchor FROM opening_tutor_jobs j
           JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
           WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`;
         if (!row) return null;
         const job = mapJob(row as Record<string, unknown>);
@@ -498,6 +503,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           throw new Error("stream authorization changed");
         }
         if (context.executionId !== undefined && row.timing_execution_id !== context.executionId) throw new Error("stream execution changed");
+        const boundAttempt = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId;
+        if (boundAttempt || context.attemptFence) {
+          const fence = tutorAttemptFenceSchema.safeParse(context.attemptFence);
+          if (!fence.success || !boundAttempt) throw new Error("stream attempt fence missing");
+          const current = await readTutorAttemptContext(tx, scope, { jobId: id, userTurnId: String(row.user_turn_id), claimToken: context.claimToken });
+          if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
+        }
         const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(context.contextSourceRefs)}::jsonb`)}`;
         if (!available) throw new Error("stream material unavailable or excluded");
         if (context.exposureReceiptId) {
@@ -522,10 +534,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       return rows.map((row) => mapJob(row as Record<string, unknown>));
     },
 
-    /**
-     * One transaction: assistant turn completes, validated candidates are
-     * stored pending with program-assigned provenance, job succeeds.
-     */
+    /** One statement-consistent read of the bound attempt, with no grading side effects. */
+    readAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget) =>
+      sql.begin("isolation level repeatable read", tx => readTutorAttemptContext(tx, scope, target)) as Promise<TutorAttemptContext | null>,
+
+    assertAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) =>
+      sql.begin("isolation level repeatable read", tx => assertTutorAttemptContext(tx, scope, target, expected)) as Promise<void>,
+
+    /** Complete the answer, lineage and inert help receipt in one transaction. */
     async completeTurn(input: {
       scope: OpeningScope;
       jobId: string;
@@ -556,7 +572,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       expectedPrivacyEpoch?: number;
       claimToken?: string;
       enqueueMetadata?: boolean;
-    }, options?: { materialPurposePin?: OpeningMaterialPurposePin }): Promise<void> {
+    }, options?: { materialPurposePin?: OpeningMaterialPurposePin; attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext } }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure || input.generatedExposure) {
           await lockWorkspaceLearningHistory(tx, input.scope);
@@ -580,6 +596,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!workspace.length) throw new Error("workspace permission changed");
         if (options?.materialPurposePin) {
           await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(input.scope, options.materialPurposePin, tx);
+        }
+        if (options?.attemptContext) {
+          if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
+          await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
         }
         const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
         if (receipt) {

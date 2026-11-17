@@ -437,6 +437,45 @@ describe("teaching command history and rewrite atomicity (PG)", () => {
     }
   });
 
+  it("rejects a new-example request through the product service without changing visible content or saving a success revision", async () => {
+    const { sourceId, chunkId } = await seedCourseSource();
+    const activity = await createOpeningTeachingActivitiesRepository(f.sql).create(f.scope, {
+      clientKey: randomUUID(), intentKind: "topic", intentSummary: "Synthetic example request", sourceIds: [sourceId], createIntent: {},
+    });
+    const content = createOpeningTeachingContentRepository(f.sql);
+    const originalText = "Synthetic worked example: 7x + 4 = 25; subtract 4, divide by 7, then check x = 3.";
+    const unit = await content.createUnit(f.scope, { title: "Synthetic worked example", blocks: [
+      { id: blockA, type: "example", content: { text: originalText, citedChunkIds: [chunkId] } },
+    ] });
+    await content.publishActivitySpec(f.scope, { activityId: activity.id, teachingUnitId: unit.id,
+      expectedVersion: 0, revisionNumber: 1, blockOrder: [{ blockId: blockA, position: 0, blockType: "example", role: "example" }],
+      sourceRefs: [{ sourceId, version: 1, chunkId, page: 1 }],
+    });
+    const checkpoint = { drafts: [{ blockId: blockA, contentVersion: 1, draftText: "Keep my draft" }],
+      assistance: "unknown", independentVerifiedCurrentCount: 0, mastery: "MASTERY_NOT_ESTABLISHED", legacy: { keep: true } };
+    await f.sql`UPDATE opening_teaching_activities SET generate_status='needs_check', checkpoint_json=${f.sql.json(checkpoint)} WHERE id=${activity.id}`;
+    const before = await content.getClientInit(f.scope, activity.id), old = await graph();
+    const request = { clientKey: randomUUID(), kind: "example" as const, blockId: blockA,
+      expectedVersion: 1, expectedPathVersion: 1, expectedRevisionNumber: 1,
+      prompt: "Use different data and give a complete new worked example, not metadata or a new title." };
+    const service = createOpeningTeachingCommandService(f.sql);
+    for (const input of [request, { ...request, clientKey: randomUUID(), prompt: undefined }]) {
+      expect(await service.execute(f.scope, activity.id, input)).toMatchObject({
+        ok: false, conflict: "validation", message: expect.stringContaining("未生成新例题"),
+        currentContentVersion: 1, currentPathVersion: 1, currentRevisionNumber: 1,
+      });
+      const after = await content.getClientInit(f.scope, activity.id);
+      expect(after).toEqual(before);
+      expect(after?.blocks[0]?.content?.text).toBe(originalText);
+      expect(after?.sourceRefs).toEqual([{ sourceId, version: 1, chunkId, page: 1 }]);
+      expect(await graph()).toBe(old);
+    }
+    expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM opening_learning_observations WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM opening_help_exposures WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  });
+
   it("maps a document advanced before rewrite to stale_revision with no partial command writes", async () => {
     const x = await ready();
     await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: x.unit.documentId,

@@ -15,6 +15,7 @@ const tx = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
   if (text.includes("SELECT id FROM users")) return [{ id }];
   if (text.includes("SELECT o.*")) return [{ id, current_head_id: id, grading_work_source: { id: photo, version: 1, physicalPage: 1 }, answer_revision: 1 }];
   if (text.includes("client_key=")) return [];
+  if (text.includes("SELECT id FROM opening_explicit_regrade_requests")) return [];
   if (text.includes("SELECT v.*")) return [mocks.item()];
   if (text.includes("SELECT id,mime")) return mocks.photo();
   if (text.includes("INSERT INTO opening_source_versions")) return [];

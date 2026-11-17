@@ -6,8 +6,36 @@ import { adaptSpanHelp, adaptSpanNext, adaptSpanResult, spanAnswerSummary } from
 import { spanLessonMoves, spanLessonProblemId, spanPracticeMoveId } from "../../teaching/span/span-lesson-moves";
 import { spanSessionProblemIds } from "../../teaching/span/session-service";
 import { spanDiagnosticNextStep } from "../../teaching/span/span-diagnostic";
+import { readSpanNextResult, readSpanPrerequisiteReturnResult } from "../../teaching/span/span-next-action-control";
 
 const id = "11111111-1111-4111-8111-111111111111";
+const target = "22222222-2222-4222-8222-222222222222";
+const returned = { kind: "ready", activityId: target, courseId: id, href: `/opening/courses/${id}/study?activity=${target}`, label: "返回原要求", resumed: false };
+it("accepts only a real no-session course return in B and keeps ordinary strict", () => {
+  expect(readSpanPrerequisiteReturnResult(returned, id)).toEqual(returned);
+  expect(() => readSpanNextResult(returned, id)).toThrow();
+  const ordinary = { ...returned, sessionId: id, href: `/opening/courses/${id}/study/span?lesson=${target}` };
+  expect(readSpanNextResult(ordinary, id)).toEqual(ordinary);
+  expect(() => readSpanPrerequisiteReturnResult(ordinary, id)).toThrow();
+});
+it.each([
+  { sessionId: id }, { courseId: target }, { activityId: id },
+  ...[`https://evil.test/opening/courses/${id}/study?activity=${target}`, `//evil.test/opening/courses/${id}/study?activity=${target}`,
+    `/opening/courses/${target}/study?activity=${target}`, `/opening/courses/${id}/study?activity=${target}&extra=1`,
+    `/opening/courses/${id}/study?activity=${target}&activity=${target}`, `/opening/courses/${id}/study?activity=${target}#x`,
+    `/opening/courses/${id}/study?activity=${target} `, `/opening/courses/${id}/study?activity=${target}\\\\evil`,
+    `/opening/courses/${id}/study?mode=practice`, `/opening/courses/${id}/study/span?lesson=${target}`].map(href => ({ href })),
+])("rejects B return identity/query/origin attacks %j", patch => {
+  expect(() => readSpanPrerequisiteReturnResult({ ...returned, ...patch }, id)).toThrow();
+});
+it("keeps B choices bounded to current course records, route or actual lesson, never ordinary fallback", () => {
+  const choice = { kind: "choice", reason: "unseen_unavailable", message: "原位置保留", primary: { label: "核对记录", href: `/opening/courses/${id}#course-learning-records` } };
+  expect(readSpanPrerequisiteReturnResult(choice, id)).toEqual(choice);
+  for (const href of [`/opening/courses/${id}/study?mode=practice`, `/opening/courses/${target}`, "https://evil.test", `/opening/courses/${id}/study/span?lesson=${target}&extra=1`]) {
+    expect(() => readSpanPrerequisiteReturnResult({ ...choice, primary: { label: "x", href } }, id)).toThrow();
+    expect(() => readSpanPrerequisiteReturnResult({ ...choice, secondary: { label: "x", href } }, id)).toThrow();
+  }
+});
 const intent = (purpose: StudySessionIntent["purpose"]): StudySessionIntent =>
   ({ purpose, timeBudgetMinutes: 20, language: "zh", pace: "normal", continuous: true, selfReportedFatigue: "unknown" });
 

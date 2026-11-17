@@ -194,11 +194,17 @@ it("first save enqueues once, and an identical retry never enqueues twice", asyn
   expect(a.id).toBe(b.id); expect(await count()).toBe(1);
 });
 it.each([
-  ["disabled", { enabled: false }], ["no_model", { modelAvailable: false }], ["daily_cap", { dailyCap: 0 }],
+  ["disabled", { enabled: false }], ["no_model", { modelAvailable: false }], ["auto_disabled", { dailyCap: 0 }],
 ] as const)("saves successfully without queueing: %s", async (reason, patch) => {
   const f = await setup(), p = policy(patch), observation = await f.save(p);
   expect(await count()).toBe(0);
   expect(await f.jobs.read(fixture.scope, { observationId: observation.id }, p)).toMatchObject({ autoGradeSkipped: reason, retryable: true });
+  if (reason === "auto_disabled") {
+    expect((await createWorkspacePreferencesRepository(fixture.sql).getLearningPreferences(fixture.scope)).autoGradeOnSave).toBe(true);
+    await f.jobs.enqueue(fixture.scope, { observationId: observation.id });
+    expect(await count()).toBe(1);
+    expect(await fixture.sql`SELECT * FROM opening_budget_reservations`).toHaveLength(0);
+  }
 });
 it("serializes concurrent saves under the small workspace cap; manual requests remain unlimited and idempotent", async () => {
   const f = await setup(), p = policy({ dailyCap: 1 });
