@@ -8,6 +8,8 @@ describe("course section routes", () => {
   it("resolves old records, materials and media bookmarks before a stale tab", () => {
     expect(readCourseTab("?tab=overview", "#course-learning-records")).toBe("progress");
     expect(readCourseTab("?tab=overview", "#course-assets")).toBe("materials");
+    expect(readCourseTab("?tab=overview", "#course-settings-heading")).toBe("materials");
+    expect(readCourseTab("", "#course-settings-heading")).toBe("materials");
     expect(readCourseTab("?mediaSource=source&seekMs=4000")).toBe("materials");
     expect(readCourseTab("", "#course-media")).toBe("materials");
     expect(readCourseTab("", "#course-knowledge")).toBe("units");

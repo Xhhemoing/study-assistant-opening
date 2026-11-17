@@ -1,7 +1,7 @@
 "use client";
 
 import type { KnowledgeNode, KnowledgeSnapshot, TutorAction } from "@aistudy/contracts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../client/api";
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
@@ -60,9 +60,11 @@ export function confirmedKnowledgeState(next: KnowledgeRecord) {
 export function CourseKnowledge({
   courseId,
   api: supplied,
+  knowledgeRefreshToken = 0,
 }: {
   courseId: string;
   api?: OpeningApi;
+  knowledgeRefreshToken?: number;
 }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
   const [snapshot, setSnapshot] = useState<KnowledgeSnapshot | null>(null);
@@ -73,8 +75,10 @@ export function CourseKnowledge({
   const [graphOpen, setGraphOpen] = useState(false);
   const [selected, setSelected] = useState<KnowledgeNode | null>(null);
   const [unavailable, setUnavailable] = useState(false);
+  const mounted = useRef(true);
+  const requestSeq = useRef(0);
 
-  const loadActions = useCallback(async (knowledge: KnowledgeSnapshot) => {
+  const loadActions = useCallback(async (knowledge: KnowledgeSnapshot, seq = requestSeq.current) => {
     try {
       const tutor = await api.listTutorActions({
         courseId,
@@ -82,21 +86,28 @@ export function CourseKnowledge({
           ?? knowledge.nodes[0]?.label
           ?? "课程",
       });
-      setActions(tutor.slice(0, 3));
+      if (mounted.current && requestSeq.current === seq) {
+        setActions(tutor.slice(0, 3));
+      }
     } catch {
-      setActions([]);
+      if (mounted.current && requestSeq.current === seq) {
+        setActions([]);
+      }
     }
   }, [api, courseId]);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true); setError(""); setUnavailable(false);
     try {
       const knowledge = await api.getCourseKnowledge(courseId);
+      if (!mounted.current || requestSeq.current !== seq) return;
       setSnapshot(knowledge.snapshot);
       setRecord(knowledge);
       setSelected(null);
-      await loadActions(knowledge.snapshot);
+      await loadActions(knowledge.snapshot, seq);
     } catch (reason) {
+      if (!mounted.current || requestSeq.current !== seq) return;
       const message = userFacingMessage(reason, "课程知识暂时无法读取");
       if (/503|不可用|not configured|CONFIGURATION/i.test(message)) {
         setUnavailable(true);
@@ -106,11 +117,20 @@ export function CourseKnowledge({
         setError(message);
       }
     } finally {
-      setLoading(false);
+      if (mounted.current && requestSeq.current === seq) {
+        setLoading(false);
+      }
     }
   }, [api, courseId, loadActions]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    mounted.current = true;
+    void load();
+    return () => {
+      mounted.current = false;
+      requestSeq.current += 1;
+    };
+  }, [load, knowledgeRefreshToken]);
 
   const ordered = useMemo(
     () => (snapshot ? chaptersFirst(snapshot.nodes) : []),

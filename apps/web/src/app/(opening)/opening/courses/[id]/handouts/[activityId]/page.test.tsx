@@ -29,3 +29,30 @@ it("uses the same not-found result for unavailable and unauthorized handouts", a
   vi.mocked(loadCourseHandout).mockResolvedValue(null);
   await expect(CourseHandoutPage({ params: Promise.resolve({ id: "course", activityId: "activity" }) })).rejects.toThrow("NOT_FOUND");
 });
+it("validates searchParams.conversation as UUID and forwards valid ids only", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const data = {
+    courseId: "22222222-2222-4222-8222-222222222222",
+    init: {
+      id, activityId: id, teachingUnitId: id, documentId: id, revisionNumber: 1,
+      blockOrder: [], sourceRefs: [], goals: [], verificationStatus: "needs_check",
+      generationConfig: {}, version: 1, contentVersion: 1, blocks: [],
+      createdAt: "2026-11-03T00:00:00.000Z", updatedAt: "2026-11-03T00:00:00.000Z",
+    },
+    generateStatus: "ready",
+  } satisfies NonNullable<Awaited<ReturnType<typeof loadCourseHandout>>>;
+  vi.mocked(loadCourseHandout).mockResolvedValue(data);
+  const validPage = await CourseHandoutPage({
+    params: Promise.resolve({ id: data.courseId, activityId: id }),
+    searchParams: Promise.resolve({ conversation }),
+  });
+  expect(validPage.props).toEqual({ ...data, originalConversationId: conversation });
+  for (const bad of ["invalid", [conversation, conversation]]) {
+    const invalidPage = await CourseHandoutPage({
+      params: Promise.resolve({ id: data.courseId, activityId: id }),
+      searchParams: Promise.resolve({ conversation: bad }),
+    });
+    expect(invalidPage.props).toEqual(data);
+  }
+});

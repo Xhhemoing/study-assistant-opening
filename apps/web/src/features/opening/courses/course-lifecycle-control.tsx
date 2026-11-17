@@ -1,7 +1,9 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { learningLifecycleCommandSchema, type LearningGoal, type LearningGoalList } from "@aistudy/contracts";
 import { z } from "zod";
+import { conversationObjectHref, validConversationId } from "../assistant/conversation-links";
+import { ObjectConversationContext } from "../assistant/conversation-object-context";
 import { createLearningGoalClient, type LearningGoalClient } from "./learning-goal-client";
 import { createLearningManagementClient, LearningManagementRequestError, type LearningManagementClient } from "../planning/learning-management-client";
 import { ui } from "../design/ui";
@@ -10,9 +12,11 @@ type Command = z.infer<typeof learningLifecycleCommandSchema>;
 const labels = { active: "继续推进", maintenance: "定期维护", reduced: "减负", paused: "暂停", archived: "归档目标", stopped: "停止目标" };
 function key(courseId: string) { return `aistudy:lifecycle-command:${courseId}`; }
 function restore(courseId: string): Command | null { try { const raw = sessionStorage.getItem(key(courseId)); const value = raw ? learningLifecycleCommandSchema.safeParse(JSON.parse(raw)) : null; return value?.success ? value.data : null; } catch { return null; } }
-type LifecycleControlProps = { courseId: string; grouped?: boolean; goalsClient?: Pick<LearningGoalClient, "list">; client?: Pick<LearningManagementClient, "lifecycle"> };
+type LifecycleControlProps = { courseId: string; grouped?: boolean; originalConversationId?: string | null; goalsClient?: Pick<LearningGoalClient, "list">; client?: Pick<LearningManagementClient, "lifecycle"> };
 export function CourseLifecycleControl(props: LifecycleControlProps) { return <LifecycleControl key={props.courseId} {...props} />; }
-function LifecycleControl({ courseId, grouped = false, goalsClient, client: suppliedClient }: LifecycleControlProps) {
+function LifecycleControl({ courseId, grouped = false, originalConversationId, goalsClient, client: suppliedClient }: LifecycleControlProps) {
+  const contextConversationId = useContext(ObjectConversationContext);
+  const conversationId = originalConversationId ?? contextConversationId;
   const client = useMemo(() => suppliedClient ?? createLearningManagementClient(), [suppliedClient]);
   const goalClient = useMemo(() => goalsClient ?? createLearningGoalClient(), [goalsClient]);
   const [data, setData] = useState<LearningGoalList | null>(null), [goalId, setGoalId] = useState(""), [lifecycle, setLifecycle] = useState<LearningGoal["lifecycle"]>("active"), [interval, setInterval] = useState("7");
@@ -29,6 +33,10 @@ function LifecycleControl({ courseId, grouped = false, goalsClient, client: supp
   // A fresh read cannot clear a pending CAS that still has the same revision.
   }, [goalClient, courseId, reload]);
   const goal = data?.goals.find(value => value.id === goalId), locked = busy || Boolean(pending);
+  const goalsTarget = `?tab=${grouped ? "overview" : "progress"}#course-goals`;
+  const goalsHref = conversationId && validConversationId(conversationId)
+    ? conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}${goalsTarget}`, conversationId)
+    : goalsTarget;
   async function execute(command: Command) {
     if (writing.current) return;
     const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setMessage(""); setPending(command); setStorageWarning(!remember(command));
@@ -45,7 +53,7 @@ function LifecycleControl({ courseId, grouped = false, goalsClient, client: supp
       <label className="block space-y-1"><span className={ui.label}>目标状态</span><select className={ui.input} aria-label="目标状态" disabled={locked} value={lifecycle} onChange={event => setLifecycle(event.target.value as LearningGoal["lifecycle"])}>{Object.entries(labels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
       {["maintenance", "reduced"].includes(lifecycle) ? <label className="block space-y-1"><span className={ui.label}>维护间隔（天）</span><input className={ui.input} disabled={locked} type="number" min={1} max={365} value={interval} onChange={event => setInterval(event.target.value)} /></label> : null}
       <button type="button" className={ui.secondary} disabled={locked || !goal} onClick={save}>确认目标状态</button>
-    </> : <a className={ui.secondary} href={`?tab=${grouped ? "overview" : "progress"}#course-goals`}>先确认课程目标</a> : null}
+    </> : <a className={ui.secondary} href={goalsHref}>先确认课程目标</a> : null}
     {pending ? <div className="space-y-2" role="status"><p className="text-xs text-warn">状态保存待确认，原目标、版本和请求保留。读取相同旧版本不能确认请求结束。</p><button className={ui.secondary} type="button" disabled={busy} onClick={() => void execute(pending)}>重新确认这次状态变更</button>{storageWarning ? <p className="text-xs text-warn">请求恢复信息无法保存，请保留本页；刷新后无法保证恢复。</p> : null}</div> : null}
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}{message ? <p role="status" className="text-xs text-text-2">{message}</p> : null}
     <button className={ui.quiet} type="button" disabled={busy || loading} onClick={() => setReload(value => value + 1)}>重新读取目标状态</button>

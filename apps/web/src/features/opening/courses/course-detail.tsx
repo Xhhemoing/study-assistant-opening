@@ -1,11 +1,12 @@
 "use client";
 
+import type { SourceRecord } from "@aistudy/contracts";
 import { builtInLessonsForCourse } from "./built-in-lessons";
 import { ArrowLeft, BookOpen } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, ui } from "../design/ui";
+import { EmptyState, LoadError, LoadingRows, PageHeader, ContentGrid, tone, ui } from "../design/ui";
 import { CourseLearningView, CourseSummaryPanel } from "../learning/course-view";
 import type { CourseAsset, CourseSummary } from "./course-model";
 import { CourseAddMaterials } from "./course-add-materials";
@@ -20,11 +21,13 @@ import { CourseExamProgress } from "../exam-sprint/course-exam-progress";
 import { MediaReader } from "../sources/media-reader";
 import { createOpeningApi } from "../client/api";
 import { sourceViewerHref } from "../inbox/source-viewer";
+import { startSourceRefresh } from "../inbox/source-refresh";
+import { sourceStatusLabel } from "../inbox/upload-state";
 import { CoursePanel, CourseTabs } from "./course-tabs";
 import { legacyCourseStudyHref } from "./course-tabs-route";
 import { CourseSprintMode } from "./course-sprint-mode";
-import { conversationObjectHref } from "../assistant/conversation-links";
-import { useConversationObjectHref } from "../assistant/conversation-object-context";
+import { conversationObjectHref, validConversationId } from "../assistant/conversation-links";
+import { ObjectConversationContext, useConversationObjectHref } from "../assistant/conversation-object-context";
 import { CourseSpaceHeader } from "./course-space";
 import { LibraryDocumentList } from "../library/library-document-list";
 import { LearnerStateCard } from "../teaching/learner-state-card";
@@ -58,7 +61,55 @@ export function CourseContents({ assets }: { courseId: string; assets: CourseAss
   </section>;
 }
 
-export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; libraryHref: string }) {
+type CourseSourceDetails = NonNullable<CourseAsset["source"]> & {
+  uploadState?: SourceRecord["uploadState"];
+  parseState?: SourceRecord["parseState"] | "parsing";
+  error?: SourceRecord["error"];
+  createdAt?: string;
+};
+
+const ASSET_ROLE_LABELS: Record<string, string> = {
+  core: "核心",
+  optional: "选读",
+  reference: "参考",
+  archive: "归档",
+  primary: "主要材料",
+  extra: "补充材料",
+};
+
+function assetRoleLabel(role: string): string {
+  return ASSET_ROLE_LABELS[role] ?? "课程材料";
+}
+
+function assetSourceStatus(source: CourseSourceDetails | undefined): { label: string; className: string } | null {
+  if (!source || (!source.parseState && !source.uploadState)) return null;
+  const uploadState = source.uploadState ?? "uploaded";
+  if (uploadState === "rejected") return { label: "上传被拒绝", className: `${ui.badge} ${tone.danger}` };
+  const parseState = (source.parseState === "parsing" ? "running" : source.parseState ?? "not_started") as SourceRecord["parseState"];
+  const failed = parseState === "failed";
+  const ready = uploadState === "uploaded" && parseState === "ready";
+  const stateTone = failed ? tone.danger : ready ? tone.success : tone.neutral;
+  const label = sourceStatusLabel({ uploadState, parseState, error: source.error, createdAt: source.createdAt });
+  return { label, className: `${ui.badge} ${stateTone}` };
+}
+
+function assetNeedsSourcePolling(assets: readonly CourseAsset[]): boolean {
+  return assets.some((asset) => {
+    const source = asset.source as CourseSourceDetails | undefined;
+    if (!source) return false;
+    const uploadState = source.uploadState ?? "uploaded";
+    return uploadState === "uploaded" && ["queued", "running", "parsing"].includes(source.parseState ?? "");
+  });
+}
+
+function isSourceReady(asset: CourseAsset): boolean {
+  const source = asset.source as CourseSourceDetails | undefined;
+  if (!source) return false;
+  const uploadState = source.uploadState ?? "uploaded";
+  return uploadState === "uploaded" && source.parseState === "ready";
+}
+
+export function CourseAssets({ courseId, assets, onRemoved, onChanged, libraryHref }: { courseId: string; assets: CourseAsset[]; onRemoved: (id: string) => void; onChanged?: () => void; libraryHref: string }) {
   const objectHref = useConversationObjectHref();
   const diagnostics = useDiagnosticsEnabled();
   const [selected, setSelected] = useState<CourseAsset | null>(null);
@@ -72,12 +123,17 @@ export function CourseAssets({ courseId, assets, onRemoved, libraryHref }: { cou
     } catch (reason) { setError(userFacingMessage(reason, "移出课程失败，请重试。")); }
     finally { setBusy(false); }
   }
-  return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>
-    <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={objectHref(`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`)} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
-    <span className="shrink-0 text-xs text-text-3">{({ primary: "主要材料", reference: "参考材料", extra: "补充材料" } as Record<string, string>)[asset.role] ?? "课程材料"}</span><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(asset); setError(""); }} type="button" aria-label={`将 ${asset.document?.title ?? asset.source?.name ?? "未命名课程材料"} 移出此课程`}>移出课程</button>
-    {asset.assetType === "source" ? <CourseSourcePurposeControl courseId={courseId} sourceId={asset.assetId} sourceName={asset.source?.name ?? "课程材料"} /> : null}
-    {diagnostics ? <p className="w-full break-all text-xs text-text-3">材料 ID：{asset.assetId} · 角色：{asset.role}</p> : null}
-  </li>)}</ul>
+  return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => {
+    const roleLabel = assetRoleLabel(asset.role);
+    const statusBadge = assetSourceStatus(asset.source as CourseSourceDetails | undefined);
+    return <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>
+      <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={objectHref(`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`)} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
+      {statusBadge ? <span className={statusBadge.className}>{statusBadge.label}</span> : null}
+      <span className="shrink-0 text-xs text-text-3">{roleLabel}</span><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(asset); setError(""); }} type="button" aria-label={`将 ${asset.document?.title ?? asset.source?.name ?? "未命名课程材料"} 移出此课程`}>移出课程</button>
+      {asset.assetType === "source" ? <CourseSourcePurposeControl courseId={courseId} sourceId={asset.assetId} sourceName={asset.source?.name ?? "课程材料"} onChanged={onChanged} /> : null}
+      {diagnostics ? <p className="w-full break-all text-xs text-text-3">材料 ID：{asset.assetId} · 角色：{roleLabel}</p> : null}
+    </li>;
+  })}</ul>
     {selected ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">将“{selected.document?.title ?? selected.source?.name ?? "未命名课程材料"}”移出此课程？原件和其他课程中的引用仍保留，此操作不会删除材料或停止模型使用。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void remove()} type="button">{busy ? "移出中…" : "确认移出此课程"}</button><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(null); setError(""); }} type="button">取消</button></div></div> : null}
     {error ? <LoadError message={error} /> : null}
   </div>;
@@ -232,6 +288,43 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
   const grouped = paths.openingActions && studySessionV2;
   const objectHref = (href: string) => conversationObjectHref(href, conversationId);
   const { course, assets, setCourse, setAssets, loading, error, reload } = useCourseBundle(id);
+  const [knowledgeRefreshToken, setKnowledgeRefreshToken] = useState(0);
+  const [routeRefreshToken, setRouteRefreshToken] = useState(0);
+  const [assetRefreshToken, setAssetRefreshToken] = useState(0);
+  useEffect(() => {
+    if (!assetRefreshToken) return;
+    let active = true;
+    void fetch(`/api/courses/${encodeURIComponent(id)}/assets`, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const assetBody = await response.json() as { assets?: CourseAsset[] };
+        if (active && Array.isArray(assetBody.assets)) setAssets(assetBody.assets);
+      })
+      .catch(() => { /* keep current course assets on silent refresh failure */ });
+    return () => { active = false; };
+  }, [id, assetRefreshToken, setAssets]);
+  const shouldPollSources = Boolean(course && course.id === id && !loading && !error) && assetNeedsSourcePolling(assets);
+  const readySourceCount = assets.filter(isSourceReady).length;
+  useEffect(() => {
+    if (!shouldPollSources) return;
+    let active = true;
+    const stop = startSourceRefresh({
+      refresh: async () => {
+        const response = await fetch(`/api/courses/${encodeURIComponent(id)}/assets`, { cache: "no-store" });
+        if (!response.ok) throw new Error();
+        const assetBody = await response.json() as { assets?: CourseAsset[] };
+        if (!active || !Array.isArray(assetBody.assets)) return;
+        setAssets(assetBody.assets);
+        const nextReadyCount = assetBody.assets.filter(isSourceReady).length;
+        if (nextReadyCount !== readySourceCount || !assetNeedsSourcePolling(assetBody.assets)) {
+          setKnowledgeRefreshToken((value = 0) => value + 1);
+          setRouteRefreshToken((value = 0) => value + 1);
+        }
+      },
+      onError: () => {},
+    });
+    return () => { active = false; stop(); };
+  }, [id, shouldPollSources, readySourceCount, setAssets]);
   useEffect(() => {
     if (!paths.openingActions || mode === "sprint") return;
     function followLegacyStudyLink() {
@@ -247,15 +340,25 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
   if (error || !course) return <section className="p-5"><Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />返回课程</Link><LoadError message={error || "找不到这门课程。"} onRetry={reload} /></section>;
   if (paths.openingActions && mode === "sprint") return <CourseSprintMode key={id} course={course} />;
 
+  const bumpKnowledge = () => setKnowledgeRefreshToken((value = 0) => value + 1);
+  const bumpCrossTab = () => {
+    setKnowledgeRefreshToken((value = 0) => value + 1);
+    setRouteRefreshToken((value = 0) => value + 1);
+  };
+  const refreshCourseMaterials = () => {
+    setAssetRefreshToken((value = 0) => value + 1);
+    bumpCrossTab();
+  };
+
   const studyActions = <CourseStudyActions assetCount={assets.length} opening={paths.openingActions} courseId={id} courseTitle={course.title} archived={Boolean(course.archivedAt)} />;
   const settings = <CourseSettingsPanel key={id} course={course} grouped={grouped} onChange={(saved) => setCourse((current) => current?.id === saved.id ? saved : current)} />;
   const goal = <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>;
   const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <h2 className="text-base font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
-      <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={reload} /><Link className={ui.quiet} href={objectHref(paths.libraryMaterials)}>打开资料</Link></div>
+      <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={refreshCourseMaterials} /><Link className={ui.quiet} href={objectHref(paths.libraryMaterials)}>打开资料</Link></div>
     </div>
-    {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => setAssets((current) => current.filter((asset) => asset.id !== assetId))} /> : <EmptyState title="还没有课程材料" description="点「添加材料」从资料中选择，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={objectHref(paths.upload(id))}>上传并归入本课</Link>} />}
+    {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => { setAssets((current) => current.filter((asset) => asset.id !== assetId)); bumpCrossTab(); }} onChanged={refreshCourseMaterials} /> : <EmptyState title="还没有课程材料" description="点「添加材料」从资料中选择，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={objectHref(paths.upload(id))}>上传并归入本课</Link>} />}
   </section>;
 
   const page = <section className="flex h-full min-h-0 flex-col bg-bg text-text">
@@ -284,8 +387,8 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="units">
           {grouped ? <><h2 className="text-base font-semibold">章节路线</h2><CourseContents courseId={id} assets={assets} /></> : null}
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
-          <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} grouped={grouped} originalConversationId={conversationId} />
-          <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} /></section>
+          <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} grouped={grouped} originalConversationId={conversationId} refreshToken={routeRefreshToken ?? 0} onKnowledgeRebuilt={bumpKnowledge} onChanged={bumpKnowledge} />
+          <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} knowledgeRefreshToken={knowledgeRefreshToken ?? 0} /></section>
           {builtInLessonsForCourse(id, course).length ? <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">现成的线性代数课</h2><p className="text-sm leading-6 text-text-2">图示、思考与独立练习都已备好，不会替换本课程的任务或学习进度。</p><div className="flex flex-wrap gap-2">{builtInLessonsForCourse(id, course).map(lesson => <Link key={lesson.id} className={ui.secondary} href={objectHref(lesson.href)}>{lesson.label}</Link>)}</div></section> : null}
         </CoursePanel>
         <CoursePanel name="progress">
@@ -297,9 +400,12 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{grouped ? <details><summary className="cursor-pointer py-3 text-sm font-medium">课程设置</summary>{settings}</details> : settings}</CoursePanel>
       </CourseTabs> : <>
         {studyActions}<CourseLearningView courseId={id} />
-        <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>
+        <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} knowledgeRefreshToken={knowledgeRefreshToken ?? 0} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>
       </>}
     </ContentGrid></div>
   </section>;
-  return paths.openingActions ? <CourseStudyProvider key={id} courseId={id}>{page}</CourseStudyProvider> : page;
+  const wrappedPage = conversationId && validConversationId(conversationId)
+    ? <ObjectConversationContext.Provider value={conversationId}>{page}</ObjectConversationContext.Provider>
+    : page;
+  return paths.openingActions ? <CourseStudyProvider key={id} courseId={id}>{wrappedPage}</CourseStudyProvider> : wrappedPage;
 }

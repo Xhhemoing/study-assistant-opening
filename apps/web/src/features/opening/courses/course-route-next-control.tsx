@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
-import { courseRouteNextSchema, courseRouteRetestScheduleSchema, type CourseRouteActionResult, type CourseRouteRetestReceipt, type TeachingActivity } from "@aistudy/contracts";
+import { courseRouteNextSchema, courseRouteRetestScheduleSchema, type CourseRouteActionResult, type CourseRouteRetestReceipt, type CourseRouteSnapshot, type TeachingActivity } from "@aistudy/contracts";
 import { createCourseRouteClient, CourseRouteRequestError, type CourseRouteClient } from "./course-route-client";
 import { ui } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
@@ -9,19 +9,26 @@ import { CourseRouteVerificationControl } from "./course-route-verification-cont
 import { conversationObjectHref } from "../assistant/conversation-links";
 const commandSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("next"), input: courseRouteNextSchema }), z.object({ kind: z.literal("retest"), input: courseRouteRetestScheduleSchema })]);
 type Command = z.infer<typeof commandSchema>;
+function isNextPendingStale(command: Command, activityId: string, fresh: CourseRouteSnapshot): boolean {
+  if (!fresh.currentRoute || fresh.currentActivity?.id !== activityId) return true;
+  if (fresh.currentRoute.goalId !== command.input.goalId) return true;
+  if (fresh.currentRoute.goalRevision !== command.input.expectedGoalRevision) return true;
+  if (fresh.currentActivity.pathVersion !== command.input.expectedPathVersion) return true;
+  return false;
+}
 function key(id: string) { return `aistudy:route-next:${id}`; }
 function restore(activityId: string): Command | null { try { const raw = sessionStorage.getItem(key(activityId)); if (!raw) return null; const decoded: unknown = JSON.parse(raw), value = commandSchema.safeParse(decoded); if (value.success && value.data.input.activityId === activityId) return value.data; const legacy = courseRouteNextSchema.safeParse(decoded); return legacy.success && legacy.data.activityId === activityId ? { kind: "next", input: legacy.data } : null; } catch { return null; } }
 export function CourseRouteNextControl(props: { activity: TeachingActivity; originalConversationId?: string | null; client?: CourseRouteClient; onNavigate?: (href: string) => void }) { return props.activity.routeManaged && props.activity.courseId ? <NextControl key={props.activity.id} {...props} courseId={props.activity.courseId} /> : null; }
 function NextControl({ activity, courseId, originalConversationId, client: suppliedClient, onNavigate = href => window.location.assign(href) }: { activity: TeachingActivity; courseId: string; originalConversationId?: string | null; client?: CourseRouteClient; onNavigate?: (href: string) => void }) {
   const client = useMemo(() => suppliedClient ?? createCourseRouteClient(), [suppliedClient]);
   const [pending, setPending] = useState<Command | null>(() => restore(activity.id));
-  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [result, setResult] = useState<CourseRouteActionResult | null>(null), [retest, setRetest] = useState<CourseRouteRetestReceipt | null>(null), [storageWarning, setStorageWarning] = useState(false);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState(""), [result, setResult] = useState<CourseRouteActionResult | null>(null), [retest, setRetest] = useState<CourseRouteRetestReceipt | null>(null), [storageWarning, setStorageWarning] = useState(false);
   const [requirementChanged, setRequirementChanged] = useState(false);
   const writing = useRef(false), active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   async function execute(kind: Command["kind"]) {
     if (writing.current || requirementChanged || (pending && pending.kind !== kind)) return;
-    const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError("");
+    const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setNotice("");
     try {
       let command = pending;
       if (!command) {
@@ -39,7 +46,23 @@ function NextControl({ activity, courseId, originalConversationId, client: suppl
       else { const value = await client.scheduleRetest(courseId, command.input); if (active.current) setRetest(value); }
       setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* Verified receipt resolves the command in memory. */ }
     } catch (reason) {
-      if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* This first request was explicitly rejected. */ } }
+      const isClientRejection = reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408;
+      const isConflict = reason instanceof CourseRouteRequestError && reason.status === 409;
+      if (isClientRejection && !retryingUnknown) { setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* This first request was explicitly rejected. */ } }
+      if (isConflict && retryingUnknown && pending) {
+        try {
+          const fresh = await client.read(courseId, activity.id);
+          if (!active.current) return;
+          if (isNextPendingStale(pending, activity.id, fresh)) {
+            setPending(null);
+            try { sessionStorage.removeItem(key(activity.id)); } catch { /* Cleared stale pending intent. */ }
+            setNotice("课程路线或活动已更新，刚才的待确认安排已不能应用，请重新核对。");
+            return;
+          }
+        } catch {
+          if (!active.current) return;
+        }
+      }
       if (active.current) setError(userFacingMessage(reason, kind === "retest" ? "复测安排结果尚未确认，请保留本页并重新确认这次安排。" : "下一步安排结果尚未确认，请保留本页并重新确认这次安排。"));
     } finally { writing.current = false; if (active.current) setBusy(false); }
   }
@@ -52,6 +75,7 @@ function NextControl({ activity, courseId, originalConversationId, client: suppl
     {storageWarning ? <p className="text-xs text-warn">恢复信息无法保存，请保留本页；刷新后可能无法恢复这次请求。</p> : null}
     {result?.kind === "choice" ? <div className="space-y-2"><p role="status" className="text-sm text-text-2">{result.message}</p><a className={ui.secondary} href={conversationObjectHref(result.href, originalConversationId)}>查看并处理下一步</a></div> : null}
     {retest ? <div role="status" className="space-y-2"><p className="text-sm text-text-2">{retestCancelled ? "复测已取消或失效，原任务与记录保留，不会重新安排。" : retestDone ? "已完成的复测记录保留，本次没有新建安排。" : `复测已安排，最早开始：${new Date(retest.notBeforeAt).toLocaleString("zh-CN")}`}</p>{!retestCancelled ? <a className={ui.secondary} href={conversationObjectHref(retest.href, originalConversationId)}>{retestDone ? "查看复测记录" : "打开复测任务（到时间后可开始）"}</a> : <a className={ui.quiet} href={conversationObjectHref(`/opening/courses/${courseId}?tab=progress#course-learning-records`, originalConversationId)}>查看学习记录</a>}</div> : null}
+    {notice ? <p role="status" className="text-xs text-text-2">{notice}</p> : null}
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
     <CourseRouteVerificationControl courseId={courseId} activityId={activity.id} originalConversationId={originalConversationId} client={client} disabled={busy || Boolean(pending)} onConfirmed={() => { setRequirementChanged(true); setResult(null); }} />
     {requirementChanged ? <p role="status" className="text-xs text-text-2">要求版本已更新，请从课程路线明确开始新版本活动；本节答案和评价原样保留。</p> : null}

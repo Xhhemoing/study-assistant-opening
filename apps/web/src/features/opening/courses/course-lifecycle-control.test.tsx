@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { CourseLifecycleControl } from "./course-lifecycle-control";
+import { ObjectConversationContext } from "../assistant/conversation-object-context";
 import type { LearningGoalClient } from "./learning-goal-client";
 import type { LearningManagementClient } from "../planning/learning-management-client";
 const id = "11111111-1111-4111-8111-111111111111";
@@ -37,4 +38,16 @@ it("retains a timed-out lifecycle command across remount", async () => {
   await act(async () => root.unmount()); root = createRoot(host); await render(value);
   await act(async () => button("重新确认这次状态变更").click());
   expect(vi.mocked(value.management.lifecycle).mock.calls[1]).toEqual(original);
+});
+it("preserves originalConversationId from prop or ObjectConversationContext on goal link", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const value = clients();
+  vi.mocked(value.goals.list).mockResolvedValue({ goals: [], selectedGoalIds: {}, legacyConflicts: [] } as never);
+  await act(async () => root.render(<CourseLifecycleControl courseId={id} grouped originalConversationId={conversation} goalsClient={value.goals} client={value.management} />));
+  expect([...host.querySelectorAll("a")].find(item => item.textContent === "先确认课程目标")?.getAttribute("href"))
+    .toBe(`/opening/courses/${id}?tab=overview&conversation=${conversation}#course-goals`);
+
+  await act(async () => root.render(<ObjectConversationContext.Provider value={conversation}><CourseLifecycleControl courseId={id} goalsClient={value.goals} client={value.management} /></ObjectConversationContext.Provider>));
+  expect([...host.querySelectorAll("a")].find(item => item.textContent === "先确认课程目标")?.getAttribute("href"))
+    .toBe(`/opening/courses/${id}?tab=progress&conversation=${conversation}#course-goals`);
 });

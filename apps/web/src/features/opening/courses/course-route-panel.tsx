@@ -76,36 +76,109 @@ function requirementInput(row: CourseRouteSnapshot["requirements"][number]): Cou
 export function routeStartBlockers({ archived, busy, pending, goalId, scopeState }: { archived: boolean; busy: boolean; pending: boolean; goalId: string; scopeState: CourseRouteSnapshot["scopeState"] }): string[] {
   return [archived ? "课程已归档，恢复课程后才能开始" : "", pending ? "上一次安排结果尚未确认，请先在下方重新确认" : "", busy ? "正在处理上一项操作" : "", goalId ? "" : "先选择本次路线目标", scopeState === "confirmed" ? "" : "先确认全课范围"].filter(Boolean);
 }
-type RoutePanelProps = { courseId: string; archived?: boolean; grouped?: boolean; originalConversationId?: string | null; client?: CourseRouteClient; goalsClient?: Pick<LearningGoalClient, "list">; knowledgeClient?: KnowledgeRebuildClient; onNavigate?: (href: string) => void };
+function isPendingCommandStale(command: Command, snapshot: CourseRouteSnapshot | null, goals: LearningGoalList | null): boolean {
+  if (command.kind === "confirm") {
+    if (!snapshot) return false;
+    if (command.input.expectedRevisions.length === 0) {
+      return snapshot.scopeState === "confirmed" || snapshot.requirements.length > 0;
+    }
+    return command.input.expectedRevisions.some((expected) => {
+      const row = snapshot.requirements.find((item) => item.requirement.id === expected.id);
+      return !row || row.requirement.revision !== expected.revision;
+    });
+  }
+  if (snapshot) {
+    const row = snapshot.requirements.find((item) => item.requirement.id === command.input.requirementId);
+    if (!row || row.requirement.revision !== command.input.expectedRequirementRevision) return true;
+  }
+  if (goals) {
+    const goal = goals.goals.find((item) => item.id === command.input.goalId);
+    if (!goal || goal.revision !== command.input.expectedGoalRevision) return true;
+  }
+  return false;
+}
+type RoutePanelProps = { courseId: string; archived?: boolean; grouped?: boolean; originalConversationId?: string | null; refreshToken?: number; onKnowledgeRebuilt?: () => void; onChanged?: () => void; client?: CourseRouteClient; goalsClient?: Pick<LearningGoalClient, "list">; knowledgeClient?: KnowledgeRebuildClient; onNavigate?: (href: string) => void };
 export function CourseRoutePanel(props: RoutePanelProps) { return <RoutePanel key={props.courseId} {...props} />; }
-function RoutePanel({ courseId, archived = false, grouped = false, originalConversationId, client: suppliedClient, goalsClient, knowledgeClient, onNavigate = href => window.location.assign(href) }: RoutePanelProps) {
+function RoutePanel({ courseId, archived = false, grouped = false, originalConversationId, refreshToken = 0, onKnowledgeRebuilt, onChanged, client: suppliedClient, goalsClient, knowledgeClient, onNavigate = href => window.location.assign(href) }: RoutePanelProps) {
   const client = useMemo(() => suppliedClient ?? createCourseRouteClient(), [suppliedClient]);
   const goalClient = useMemo(() => goalsClient ?? createLearningGoalClient(), [goalsClient]);
   const [snapshot, setSnapshot] = useState<CourseRouteSnapshot | null>(null), [goals, setGoals] = useState<LearningGoalList | null>(null);
   const [editing, setEditing] = useState<CourseRouteRequirementInput[] | null>(null), [goalId, setGoalId] = useState(""), [pageInputs, setPageInputs] = useState<PageInputs>({}), [pageTouched, setPageTouched] = useState<Record<string, boolean>>({});
   const [spanChoices, setSpanChoices] = useState<Record<string, string[]>>({});
-  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [reload, setReload] = useState(0), [error, setError] = useState(""), [goalError, setGoalError] = useState("");
+  const [busy, setBusy] = useState(false), [loading, setLoading] = useState(true), [reload, setReload] = useState(0), [error, setError] = useState(""), [goalError, setGoalError] = useState(""), [conflictNotice, setConflictNotice] = useState("");
   const [result, setResult] = useState<CourseRouteActionResult | null>(null), [pending, setPending] = useState<Command | null>(() => readCommand(courseId)), [storageWarning, setStorageWarning] = useState(false);
   const [routeStale, setRouteStale] = useState(false), [revealScope, setRevealScope] = useState(0);
-  const writing = useRef(false), active = useRef(true), scopeEditor = useRef<HTMLFieldSetElement>(null);
+  const writing = useRef(false), active = useRef(true), scopeEditor = useRef<HTMLFieldSetElement>(null), pendingRef = useRef(pending), lastRefreshToken = useRef(refreshToken);
+  pendingRef.current = pending;
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => {
+    if (refreshToken !== lastRefreshToken.current) {
+      lastRefreshToken.current = refreshToken;
+      setRouteStale(true);
+    }
+  }, [refreshToken]);
   // A reload replaces the scope draft, so a finished rebuild waits for editing and route commands to settle.
   useEffect(() => { if (routeStale && !editing && !busy && !pending) { setRouteStale(false); setReload(value => value + 1); } }, [routeStale, editing, busy, pending]);
   useEffect(() => { if (revealScope) scopeEditor.current?.focus(); }, [revealScope]);
   useEffect(() => { let live = true; setLoading(true); setError("");
-    void client.read(courseId).then(value => { if (live) { setSnapshot(value); setEditing(null); setSpanChoices({}); } }).catch(reason => { if (live) { setSnapshot(null); setError(userFacingMessage(reason, "课程路线暂不可读取。")); } }).finally(() => { if (live) setLoading(false); });
-    void goalClient.list(courseId).then(value => { if (live) { setGoals(value); setGoalId(value.selectedGoalIds[courseId] ?? ""); setGoalError(""); } }).catch(() => { if (live) { setGoals(null); setGoalError("目标暂不可读取，请重新读取后开始。"); } });
+    let latestSnapshot: CourseRouteSnapshot | null = null;
+    let latestGoals: LearningGoalList | null = null;
+    function clearIfStale() {
+      const command = pendingRef.current;
+      if (command && isPendingCommandStale(command, latestSnapshot, latestGoals)) {
+        try { sessionStorage.removeItem(pendingKey(courseId)); } catch { /* ignore storage errors */ }
+        setPending(null);
+        setConflictNotice("课程路线或目标已更新，刚才的待确认安排已不能应用，请核对当前状态。");
+      }
+    }
+    void client.read(courseId).then(value => { if (live) { latestSnapshot = value; setSnapshot(value); setEditing(null); setSpanChoices({}); clearIfStale(); } }).catch(reason => { if (live) { setSnapshot(null); setError(userFacingMessage(reason, "课程路线暂不可读取。")); } }).finally(() => { if (live) setLoading(false); });
+    void goalClient.list(courseId).then(value => { if (live) { latestGoals = value; setGoals(value); setGoalId(value.selectedGoalIds[courseId] ?? ""); setGoalError(""); clearIfStale(); } }).catch(() => { if (live) { setGoals(null); setGoalError("目标暂不可读取，请重新读取后开始。"); } });
     return () => { live = false; };
   }, [client, goalClient, courseId, reload]);
   function saveCommand(command: Command | null) { try { if (command) sessionStorage.setItem(pendingKey(courseId), JSON.stringify(command)); else sessionStorage.removeItem(pendingKey(courseId)); return true; } catch { return false; } }
   async function execute(command: Command) {
     if (writing.current || archived) return;
-    const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setResult(null); setPending(command); setStorageWarning(!saveCommand(command));
+    const retryingUnknown = pending !== null; writing.current = true; setBusy(true); setError(""); setConflictNotice(""); setResult(null); setPending(command); setStorageWarning(!saveCommand(command));
     try {
-      if (command.kind === "confirm") { const value = await client.confirm(courseId, command.input); if (active.current) { setSnapshot(value); setEditing(null); setSpanChoices({}); } }
+      if (command.kind === "confirm") { const value = await client.confirm(courseId, command.input); if (active.current) { setSnapshot(value); setEditing(null); setSpanChoices({}); onChanged?.(); } }
       else { const value = await client.start(courseId, command.input); if (active.current) { setResult(value); if (value.kind === "ready") onNavigate(conversationObjectHref(value.href, originalConversationId)); } }
       saveCommand(null); if (active.current) setPending(null);
-    } catch (reason) { if (reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { saveCommand(null); if (active.current) { setPending(null); setSnapshot(null); } } if (active.current) setError(userFacingMessage(reason, "安排结果尚未确认，请原样重新确认。")); }
+    } catch (reason) {
+      const isClientRejection = reason instanceof CourseRouteRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408;
+      const isConflict = reason instanceof CourseRouteRequestError && reason.status === 409;
+      if (isClientRejection && !retryingUnknown) {
+        saveCommand(null);
+        if (active.current) {
+          setPending(null);
+          if (!isConflict) setSnapshot(null);
+        }
+      }
+      if (isConflict) {
+        const [snapshotResult, goalsResult] = await Promise.allSettled([client.read(courseId), goalClient.list(courseId)]);
+        if (!active.current) return;
+        const nextSnapshot = snapshotResult.status === "fulfilled" ? snapshotResult.value : null;
+        const nextGoals = goalsResult.status === "fulfilled" ? goalsResult.value : null;
+        if (nextSnapshot) {
+          setSnapshot(nextSnapshot);
+          setEditing(null);
+          setSpanChoices({});
+        } else if (!retryingUnknown) {
+          setSnapshot(null);
+        }
+        if (nextGoals) {
+          setGoals(nextGoals);
+          setGoalId(nextGoals.selectedGoalIds[courseId] ?? "");
+          setGoalError("");
+        }
+        if (retryingUnknown && (nextSnapshot || nextGoals) && isPendingCommandStale(command, nextSnapshot, nextGoals)) {
+          saveCommand(null);
+          setPending(null);
+          setConflictNotice("课程路线或目标已更新，刚才的待确认安排已不能应用，请核对当前状态。");
+          return;
+        }
+      }
+      if (active.current) setError(userFacingMessage(reason, "安排结果尚未确认，请原样重新确认。"));
+    }
     finally { writing.current = false; if (active.current) setBusy(false); }
   }
   function confirm() {
@@ -138,14 +211,14 @@ function RoutePanel({ courseId, archived = false, grouped = false, originalConve
   return <section id="course-learning-route" aria-labelledby="course-route-heading" className="space-y-3 border-t border-line pt-5">
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 id="course-route-heading" className="text-base font-semibold">全课路线与下一步</h2><a className={ui.quiet} href={goalsHref}>目标与成功标准</a></div>
     <p className="text-xs leading-6 text-text-3">先核对目标、资料和课程范围，再进入真实学习活动。提取建议与知识图不代表已覆盖全课，学习记录也不会自动宣称掌握。</p>
-    {snapshot ? <CourseSetupChecklist courseId={courseId} snapshot={snapshot} goals={goals ? availableGoals : null} goalId={goalId} goalsUnavailable={Boolean(goalError)} goalsHref={goalsHref} archived={archived} scopeActionDisabled={locked || loading} reloadToken={reload} knowledgeClient={knowledgeClient} onReviewScope={reviewScope} onKnowledgeRebuilt={() => setRouteStale(true)} /> : null}
+    {snapshot ? <CourseSetupChecklist courseId={courseId} snapshot={snapshot} goals={goals ? availableGoals : null} goalId={goalId} goalsUnavailable={Boolean(goalError)} goalsHref={goalsHref} archived={archived} scopeActionDisabled={locked || loading} reloadToken={reload} originalConversationId={originalConversationId} knowledgeClient={knowledgeClient} onReviewScope={reviewScope} onKnowledgeRebuilt={() => { setRouteStale(true); onKnowledgeRebuilt?.(); }} /> : null}
     {routeStale && (editing || busy || pending) ? <p role="status" className="text-xs text-text-2">知识点已重新整理；完成当前编辑或确认后会重新读取课程路线，显示新的建议。</p> : null}
     {loading ? <p role="status" className="text-sm text-text-3">正在读取课程路线…</p> : snapshot ? <>
       <p className="text-sm text-text-2">{snapshot.scopeState === "confirmed" ? `已确认 ${snapshot.summary.total} 项要求，其中 ${snapshot.summary.mandatory} 项必修；${snapshot.summary.verified} 项已有验证记录，${snapshot.summary.blocked} 项受阻。` : "尚未确认全课范围，请对照大纲和全部资料检查。"}</p>
       {archived ? <p className="text-xs text-warn">课程已归档，路线与记录保留；恢复课程后可开始新的学习。</p> : null}
       {snapshot.currentActivity && ["active", "paused"].includes(snapshot.currentActivity.status) ? <a className={ui.primary} href={conversationObjectHref(`/opening/courses/${courseId}/study?activity=${snapshot.currentActivity.id}`, originalConversationId)}>继续已有活动：{snapshot.currentActivity.intentSummary}</a> : null}
       <label className="block space-y-1"><span className={ui.label}>本次路线目标</span><select className={ui.input} value={goalId} disabled={locked || !goals} onChange={event => setGoalId(event.target.value)}><option value="">请选择目标</option>{availableGoals.map(goal => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label>{goalError ? <p className="text-xs text-warn">{goalError}</p> : null}{!availableGoals.length && !goalError ? <a className={ui.secondary} href={goalsHref}>先确认课程目标</a> : null}
-      <ul className="divide-y divide-line border-y border-line">{snapshot.requirements.map(row => <li className="space-y-2 py-3" key={row.requirement.id}><p className="text-xs text-text-3">讲义：{compilationLabel(row.compilation)}</p><p className="text-xs text-text-3">{row.questionCoverage ? `已保存题目 ${row.questionCoverage.savedQuestions} 道 · 附参考解答 ${row.questionCoverage.withReferenceAnswers} 道 · 曾发题 ${row.questionCoverage.issuedQuestions} 道` : "题目覆盖未收集"} · 能否作为独立新题尚未确认</p><p className="text-xs text-text-3">{reservedSupplyLabel(row.reservedSupply)}{row.reservedSupply?.reason != null ? <> · 原因：{row.reservedSupply.reason}</> : null}</p><p className="text-xs text-text-3">程序算术核对：{referenceChecksLabel(row.referenceChecks)}</p><CitationCoverage value={row.citationCoverage} /><div className="flex flex-wrap justify-between gap-2"><h3 className="text-sm font-medium">{row.requirement.title}{row.requirement.mandatory ? " · 必修" : " · 可选"}</h3><span className="text-xs text-text-3">{statusLabels[row.status]}</span></div>{row.delayedCheck ? <p className="text-xs text-text-3">延迟验证：{delayedLabels[row.delayedCheck.status]}{row.delayedCheck.notBeforeAt ? ` · 最早 ${new Date(row.delayedCheck.notBeforeAt).toLocaleString("zh-CN")}` : ""}</p> : null}{!row.sourcesAvailable ? <p className="text-xs text-warn">资料不可用</p> : null}{row.missingReasons.map((reason, index) => <p className="text-xs text-warn" key={index}>{reason}</p>)}{row.sharedEvidence?.length?<p className="text-xs text-text-3">其中 {row.sharedEvidence.length} 条独立证据来自其他课程原活动；适用本要求关联目标，不新增作答或时间。</p>:null}{row.sourcesAvailable && row.compilation?.saved === true && row.compilation.activityId && row.compilation.documentId && (row.compilation.revisionNumber ?? 0) > 0 && row.compilation.contentVersion > 0 && (row.compilation.generateStatus === "ready" || row.compilation.generateStatus === "needs_check") ? <a className={ui.secondary} href={`/opening/courses/${courseId}/handouts/${row.compilation.activityId}`}>打开已保存讲义</a> : null}<div className="flex flex-wrap items-center gap-2"><button className={ui.secondary} type="button" disabled={startBlockers.length > 0} aria-describedby={startBlockers.length ? `route-start-reason-${row.requirement.id}` : undefined} onClick={() => start(row)}>学习这一项</button>{startBlockers.length ? <p id={`route-start-reason-${row.requirement.id}`} className="text-xs text-text-3">暂不能开始：{startBlockers.join("；")}。</p> : null}</div></li>)}</ul>
+      <ul className="divide-y divide-line border-y border-line">{snapshot.requirements.map(row => <li className="space-y-2 py-3" key={row.requirement.id}><p className="text-xs text-text-3">讲义：{compilationLabel(row.compilation)}</p><p className="text-xs text-text-3">{row.questionCoverage ? `已保存题目 ${row.questionCoverage.savedQuestions} 道 · 附参考解答 ${row.questionCoverage.withReferenceAnswers} 道 · 曾发题 ${row.questionCoverage.issuedQuestions} 道` : "题目覆盖未收集"} · 能否作为独立新题尚未确认</p><p className="text-xs text-text-3">{reservedSupplyLabel(row.reservedSupply)}{row.reservedSupply?.reason != null ? <> · 原因：{row.reservedSupply.reason}</> : null}</p><p className="text-xs text-text-3">程序算术核对：{referenceChecksLabel(row.referenceChecks)}</p><CitationCoverage value={row.citationCoverage} /><div className="flex flex-wrap justify-between gap-2"><h3 className="text-sm font-medium">{row.requirement.title}{row.requirement.mandatory ? " · 必修" : " · 可选"}</h3><span className="text-xs text-text-3">{statusLabels[row.status]}</span></div>{row.delayedCheck ? <p className="text-xs text-text-3">延迟验证：{delayedLabels[row.delayedCheck.status]}{row.delayedCheck.notBeforeAt ? ` · 最早 ${new Date(row.delayedCheck.notBeforeAt).toLocaleString("zh-CN")}` : ""}</p> : null}{!row.sourcesAvailable ? <p className="text-xs text-warn">资料不可用</p> : null}{row.missingReasons.map((reason, index) => <p className="text-xs text-warn" key={index}>{reason}</p>)}{row.sharedEvidence?.length?<p className="text-xs text-text-3">其中 {row.sharedEvidence.length} 条独立证据来自其他课程原活动；适用本要求关联目标，不新增作答或时间。</p>:null}{row.sourcesAvailable && row.compilation?.saved === true && row.compilation.activityId && row.compilation.documentId && (row.compilation.revisionNumber ?? 0) > 0 && row.compilation.contentVersion > 0 && (row.compilation.generateStatus === "ready" || row.compilation.generateStatus === "needs_check") ? <a className={ui.secondary} href={conversationObjectHref(`/opening/courses/${courseId}/handouts/${row.compilation.activityId}`, originalConversationId)}>打开已保存讲义</a> : null}<div className="flex flex-wrap items-center gap-2"><button className={ui.secondary} type="button" disabled={startBlockers.length > 0} aria-describedby={startBlockers.length ? `route-start-reason-${row.requirement.id}` : undefined} onClick={() => start(row)}>学习这一项</button>{startBlockers.length ? <p id={`route-start-reason-${row.requirement.id}`} className="text-xs text-text-3">暂不能开始：{startBlockers.join("；")}。</p> : null}</div></li>)}</ul>
       {!editing ? <button type="button" className={ui.secondary} disabled={locked} onClick={openScope}>检查与确认课程范围</button> : <fieldset ref={scopeEditor} tabIndex={-1} disabled={locked} className="space-y-3 outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"><legend className="text-sm font-medium">对照大纲检查完整范围</legend><p className="text-xs leading-6 text-text-3">名称调整保留同一项身份；新增要求会创建新的身份。请核对前置、关联目标和资料；删除范围项不会删除已有学习事实。</p>
       {editing.map(row => <details key={row.id} open className="space-y-3 border-b border-line py-3"><summary className="cursor-pointer text-sm font-medium">{row.title || "新课程要求"}</summary><label className="block space-y-1"><span className={ui.label}>要求名称</span><input className={ui.input} value={row.title} maxLength={200} onChange={event => update(row.id, { title: event.target.value })} /></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={row.mandatory} onChange={event => update(row.id, { mandatory: event.target.checked })} />必修要求</label>
         <label className="block space-y-1"><span className={ui.label}>成功标准与评分依据</span><textarea className={ui.input} rows={3} value={row.verification.rubric ?? ""} onChange={event => update(row.id, { verification: { ...row.verification, rubric: event.target.value || null, ...(row.verification.kind === "exact" ? {} : { kind: "rubric", status: "needs_check" }) } })} /></label><p className="text-xs text-text-3">当前验证方式：{row.verification.kind === "exact" ? "精确判定" : row.verification.kind === "rubric" ? "按评分标准核对" : row.verification.kind === "manual" ? "人工核对" : "暂不可验证"}；填写标准不会自动获得验证通过。</p>
@@ -165,8 +238,8 @@ function RoutePanel({ courseId, archived = false, grouped = false, originalConve
       <details className="border-t border-line pt-3"><summary className="cursor-pointer text-sm text-text-2">全部课程资料 · {snapshot.materials.length}</summary><ul className="mt-3 space-y-2 text-sm">{snapshot.materials.map(material => <li className="flex flex-wrap justify-between gap-2" key={`${material.sourceId}:${material.sourceVersion}`}><span>{material.title}</span><span className="text-xs text-text-3">{material.available ? "可用" : "不可用，请补齐或替换"}</span></li>)}</ul></details>
     </> : null}
     {pending ? <div role="status" className="space-y-2"><p className="text-sm text-warn">安排结果尚未确认，刚才的选择已保留。</p><button className={ui.secondary} type="button" disabled={busy || archived} onClick={() => void execute(pending)}>重新确认这次安排</button>{storageWarning ? <p className="text-xs text-warn">恢复信息无法保存，请保留本页；刷新后无法保证找回这次安排。</p> : null}</div> : null}
-    {result?.kind === "choice" ? <div className="space-y-2"><p className="text-sm text-text-2" role="status">{result.message}</p><a className={ui.secondary} href={conversationObjectHref(result.href, originalConversationId)}>处理这项选择</a></div> : null}{error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
-    <CourseSharedSkillControl courseId={courseId} disabled={locked} onChanged={()=>setReload(value=>value+1)}/>
+    {result?.kind === "choice" ? <div className="space-y-2"><p className="text-sm text-text-2" role="status">{result.message}</p><a className={ui.secondary} href={conversationObjectHref(result.href, originalConversationId)}>处理这项选择</a></div> : null}{conflictNotice ? <p role="status" className="text-xs text-text-2">{conflictNotice}</p> : null}{error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
+    <CourseSharedSkillControl courseId={courseId} disabled={locked} onChanged={() => { setReload(value => value + 1); onChanged?.(); }}/>
     <button className={ui.quiet} type="button" disabled={busy || loading || Boolean(pending)} onClick={() => setReload(value => value + 1)}>重新读取课程路线</button>
   </section>;
 }

@@ -85,3 +85,27 @@ it.each([[false, "plain"], [true, "grouped"]] as const)("links 学习安排 to t
   expect(host.querySelector("[data-route-panel]")?.getAttribute("data-route-panel")).toBe(mode);
   expect(host.querySelector("[data-route-panel]")?.getAttribute("data-route-conversation")).toBe(conversation);
 });
+
+it("localizes course asset role values and material parse status badges", async () => {
+  const courseId = "55555555-5555-4555-8555-555555555555";
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ assets: [] })));
+  const roleAssets: CourseAsset[] = [
+    { id: "a-core", assetType: "source", assetId: source, role: "core", sortOrder: 0, source: { id: source, name: "核心教材", uploadState: "uploaded", parseState: "ready" } as CourseAsset["source"] },
+    { id: "a-opt", assetType: "source", assetId: note, role: "optional", sortOrder: 1, source: { id: note, name: "选读讲义", uploadState: "uploaded", parseState: "queued" } as CourseAsset["source"] },
+    { id: "a-ref", assetType: "document", assetId: "44444444-4444-4444-8444-444444444444", role: "reference", sortOrder: 2, document: { id: "44444444-4444-4444-8444-444444444444", title: "参考笔记", updatedAt: "2026-10-22T08:00:00Z" } },
+    { id: "a-arch", assetType: "source", assetId: "77777777-7777-4777-8777-777777777777", role: "archive", sortOrder: 3, source: { id: "77777777-7777-4777-8777-777777777777", name: "归档视频", uploadState: "uploaded", parseState: "parsing" } as CourseAsset["source"] },
+  ];
+  await act(async () => root.render(<CourseAssets courseId={courseId} assets={roleAssets} onRemoved={() => undefined} libraryHref="/opening/library?tab=notes" />));
+  const items = [...host.querySelectorAll("li")].map(item => item.textContent ?? "");
+  expect(items[0]).toContain("核心");
+  expect(items[0]).toContain("可以用于提问");
+  expect(items[0]).not.toMatch(/\bcore\b|\bready\b/);
+  expect(items[1]).toContain("选读");
+  expect(items[1]).toContain("解析排队中");
+  expect(items[1]).not.toMatch(/\boptional\b|\bqueued\b/);
+  expect(items[2]).toContain("参考");
+  expect(items[2]).not.toMatch(/\breference\b/);
+  expect(items[3]).toContain("归档");
+  expect(items[3]).toContain("正在解析");
+  expect(items[3]).not.toMatch(/\barchive\b|\bparsing\b/);
+});

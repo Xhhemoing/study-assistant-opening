@@ -90,7 +90,7 @@ it("switches the real course to three sections, keeps drafts mounted, preserves 
 
 it("opens old tabs, sections and anchors at their actual target and follows back/forward history", async () => {
   await act(async () => root.render(<Harness />)); await click("切换新版");
-  for (const [url, name] of [["?section=library", "materials"], ["?tab=notes", "notes"], ["?tab=practice", "practice"], ["?section=review", "review"], ["?tab=overview#course-learning-records", "progress"], ["?tab=overview#course-assets", "materials"], ["?tab=overview#course-media", "materials"], ["?tab=overview#course-knowledge", "units"], ["?tab=overview#course-units", "units"]]) {
+  for (const [url, name] of [["?section=library", "materials"], ["?tab=notes", "notes"], ["?tab=practice", "practice"], ["?section=review", "review"], ["?tab=overview#course-learning-records", "progress"], ["?tab=overview#course-assets", "materials"], ["?tab=overview#course-media", "materials"], ["?tab=overview#course-settings-heading", "materials"], ["?tab=overview#course-knowledge", "units"], ["?tab=overview#course-units", "units"]]) {
     await visit(url!);
     expect(panel(name!).hidden).toBe(false);
     if (name === "practice" || name === "review") expect(panel(name).querySelector("details")?.open).toBe(true);
