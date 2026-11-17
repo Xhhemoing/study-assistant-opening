@@ -7,11 +7,39 @@ import type {
 
 const RESUMABLE: ReadonlySet<TeachingActivityStatus> = new Set(["active", "paused"]);
 
-/** Most recently updated active/paused activity, or null. */
+function isResumableTodayActivity(row: TeachingActivity): boolean {
+  if (!RESUMABLE.has(row.status)) return false;
+  const createIntent = (row as { createIntent?: { protocol?: unknown; legacy?: unknown } }).createIntent;
+  if (row.staticLessonUnavailable) return false;
+  if (
+    createIntent?.protocol === "card-review-session-v1"
+    || row.clientKey?.startsWith("card-session:")
+    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "cardReviewSession" in row.checkpointJson)
+    || (row.courseId === null && row.intentSummary === "有界卡片复习")
+  ) {
+    return false;
+  }
+  if (createIntent?.legacy === true || row.clientKey?.startsWith("legacy-course-continue:")) {
+    return false;
+  }
+  if (!row.staticLesson && (
+    createIntent?.protocol === "span-lesson-v1"
+    || row.clientKey?.startsWith("span-lesson:")
+    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "spanLesson" in row.checkpointJson)
+  )) {
+    return false;
+  }
+  if (row.intentKind === "course_continue" && row.contentVersion === 0 && !(row.staticLesson && row.courseId)) {
+    return false;
+  }
+  return true;
+}
+
+/** Most recently updated active/paused usable activity, or null. */
 export function pickCurrentTeachingActivity(
   activities: readonly TeachingActivity[],
 ): TeachingActivity | null {
-  const resumable = activities.filter((row) => RESUMABLE.has(row.status));
+  const resumable = activities.filter(isResumableTodayActivity);
   if (!resumable.length) return null;
   return [...resumable].sort((a, b) => {
     const byTime = b.updatedAt.localeCompare(a.updatedAt);

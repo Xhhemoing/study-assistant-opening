@@ -14,8 +14,10 @@ vi.mock("./span-session-client", async original => ({ ...await original<typeof i
 vi.mock("../../capabilities/capabilities-provider", () => ({ useOpeningCapabilities: () => ({ studySessionV2: false }) }));
 import { SpanLessonSession } from "./span-lesson-session";
 import { SpanLesson } from "./span-lesson";
+import { TransitionLink as Link } from "../../v3/motion/view-transition";
 import type { LearningAttempt } from "@aistudy/contracts";
 const id = "11111111-1111-4111-8111-111111111111", sourceId = "22222222-2222-4222-8222-222222222222";
+const conversationId = "33333333-3333-4333-8333-333333333333";
 const snapshot: SpanLessonSnapshot = { activityId: id, sessionId: id, courseId: id, sourceIds: [sourceId], intent: { purpose: "self_study", timeBudgetMinutes: 20, pace: "normal", language: "zh", continuous: true, selfReportedFatigue: "unknown" }, moveId: "self-example", status: "active", revision: 1, retestId: null, createdAt: "2026-10-21T00:00:00Z", updatedAt: "2026-10-21T00:00:00Z" };
 const details = (session: SpanLessonSnapshot | null) => ({ session, attempts: [], observations: [], assistance: {}, hintLevels: {}, intentEvent: null });
 const props = { courseId: id, sourceIds: [id], sourceLoadError: false };
@@ -24,7 +26,12 @@ function find(node: ReactNode, match: (element: ReactElement<Record<string, unkn
   if (!isValidElement<Record<string, unknown>>(node)) return undefined;
   return match(node) ? node : find(node.props.children as ReactNode, match);
 }
-function render() { hooks.cursor = 0; const tree = SpanLessonSession(props); hooks.effects.splice(0).forEach(effect => effect()); return tree; }
+function findAll(node: ReactNode, match: (element: ReactElement<Record<string, unknown>>) => boolean): ReactElement<Record<string, unknown>>[] {
+  if (Array.isArray(node)) return node.flatMap(value => findAll(value, match));
+  if (!isValidElement<Record<string, unknown>>(node)) return [];
+  return [...(match(node) ? [node] : []), ...findAll(node.props.children as ReactNode, match)];
+}
+function render(extraProps: Partial<ComponentProps<typeof SpanLessonSession>> = {}) { hooks.cursor = 0; const tree = SpanLessonSession({ ...props, ...extraProps }); hooks.effects.splice(0).forEach(effect => effect()); return tree; }
 function lesson() { return find(render(), element => element.type === SpanLesson)! as ReactElement<ComponentProps<typeof SpanLesson>>; }
 function unmount() { for (const value of hooks.values) (value as { cleanup?: () => void } | null)?.cleanup?.(); }
 const settle = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };
@@ -91,4 +98,34 @@ it.each(["start", "save"] as const)("does not let an interrupted %s request rewr
   } else void lesson().props.onProgress!(snapshot.intent, "self-faded", "active");
   unmount(); resolve({ ...snapshot, revision: 2 }); await settle();
   expect(mocks.replaceState).not.toHaveBeenCalled();
+});
+it("preserves originalConversationId on return link when session has not started", async () => {
+  mocks.request.mockResolvedValueOnce(details(null));
+  render({ originalConversationId: conversationId, sourceIds: [] });
+  await settle();
+  const emptyTree = render({ originalConversationId: conversationId, sourceIds: [] });
+  const emptyLinks = findAll(emptyTree, el => el.type === Link).map(el => el.props.href);
+  expect(emptyLinks).toContain(`/opening/courses/${id}/study?conversation=${conversationId}`);
+});
+
+it("preserves originalConversationId on course return link when session is completed while keeping today link clean", async () => {
+  mocks.request.mockResolvedValueOnce(details({ ...snapshot, status: "completed" }));
+  render({ originalConversationId: conversationId });
+  await settle();
+  const completedTree = render({ originalConversationId: conversationId });
+  const completedLinks = findAll(completedTree, el => el.type === Link).map(el => el.props.href);
+  expect(completedLinks).toContain("/opening/today");
+  expect(completedLinks).toContain(`/opening/courses/${id}?conversation=${conversationId}`);
+});
+
+it("preserves originalConversationId on origin-change return links", async () => {
+  mocks.request.mockResolvedValueOnce({ ...details(snapshot), executionUnavailable: { reasonCode: "SPAN_PREREQUISITE_PLAN_UNSUPPORTED", message: "仅可读取历史" } });
+  render({ originalConversationId: conversationId });
+  await settle();
+  const unavailableTree = render({ originalConversationId: conversationId });
+  const originEl = find(unavailableTree, el => typeof el.type === "function" && el.type.name === "SpanOriginChangeView")!;
+  const originTree = (originEl.type as (p: unknown) => ReactNode)(originEl.props);
+  const originLinks = findAll(originTree, el => el.type === Link).map(el => el.props.href);
+  expect(originLinks).toContain(`/opening/courses/${id}?conversation=${conversationId}`);
+  expect(originLinks).toContain(`/opening/courses/${id}?conversation=${conversationId}#course-learning-records`);
 });

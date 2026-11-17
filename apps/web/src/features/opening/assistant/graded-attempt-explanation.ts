@@ -77,7 +77,7 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
       const saved = readReceipt();
       if (saved && JSON.stringify(saved.snapshot) !== JSON.stringify(snapshot)) throw new Error(changedMessage);
       baseline.current = snapshot; setReceipt(saved); setReady(true);
-      if (saved?.phase === "creating") setRecoveryMessage("会话创建结果尚未确认；现有 API 无创建请求键 GET 恢复，已停止新建，未发送收费讲解。");
+      if (saved?.phase === "creating") setRecoveryMessage("会话创建结果尚未确认，暂时无法直接找回上次创建进度；已停止新建，未发送收费讲解。");
     })().catch(() => {
       if (active && epoch === generation.current && validOwner()) setRecoveryMessage("无法确认之前的讲解或账户权限，已停止发送；不会重复创建。");
     });

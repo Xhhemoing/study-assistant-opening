@@ -154,6 +154,7 @@ it("does not blindly recreate a conversation after its create response is lost",
   await act(async () => root.render(null)); await render();
   expect(api.createConversation).toHaveBeenCalledOnce(); expect(bodies).toHaveLength(0);
   expect(host.textContent).toContain("会话创建结果尚未确认");
+  expect(host.textContent).not.toMatch(/API|GET|请求键/);
 });
 it.each(["owner", "cookie", "epoch", "head"])("revokes recovered result on %s drift without POST or cross-owner receipt reads", async kind => {
   await render(); await act(async () => action()!.click());
@@ -258,4 +259,20 @@ it("does not send after the bound item/head changes during conversation creation
 it("honors disabled host state and has no mount/reload POST", async () => {
   await render(attempt, true); expect(action()!.disabled).toBe(true); await act(async () => action()!.click());
   await act(async () => root.render(null)); await render(); expect(posts()).toHaveLength(0);
+});
+
+it("keeps exam_help selectable in the support purpose dropdown when entering from exam sprint", async () => {
+  await act(async () => root.render(
+    <AssistantView
+      api={api}
+      embedded
+      startFresh
+      learningAttempt={attempt}
+      studyContext={{ courseId: attempt.courseId, attemptId: attempt.id, purpose: "exam_help" }}
+    />,
+  ));
+  const select = host.querySelector("select") as HTMLSelectElement | null;
+  expect(select).not.toBeNull();
+  expect(select!.value).toBe("exam_help");
+  expect(select!.querySelector('option[value="exam_help"]')?.textContent).toBe("考前练习答疑");
 });

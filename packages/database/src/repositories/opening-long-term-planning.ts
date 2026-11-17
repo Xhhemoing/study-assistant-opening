@@ -67,7 +67,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
     acceptedBlocks: accepted?.blocks ?? [], committedMinutes: state.usedMinutes,
     remainingMinutes: state.budget ? Math.max(0, state.budget.dailyMinutes - state.budget.bufferMinutes - state.usedMinutes) : 0,
     overcommittedMinutes: state.budget ? Math.max(0, state.usedMinutes + state.budget.bufferMinutes - state.budget.dailyMinutes) : 0,
-    tasks, recovery: { ...recovery, agenda, href: activity && (!agenda || agenda.resumable) ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
+    tasks, recovery: { ...recovery, agenda, href: activity ? (!agenda || agenda.resumable ? activityHref(activity) : null) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
     maintenanceTasks: maintenance.flatMap(row => { const match = /^planner:\d{4}-\d{2}-\d{2}:maintenance:([a-f0-9-]{36}):([a-f0-9-]{36})$/.exec(String(row.client_key));
       return match ? [{ taskId: row.id, version: Number(row.version), goalId: match[1], requirementId: match[2] }] : []; }) });
 }
@@ -157,7 +157,7 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
         if (activity && task && selectLearningRecoveryTask(await createOpeningPlansRepository(db).listTasks(scope), activity)?.id !== input.taskId) throw learningError("CONFLICT", "所选任务不属于原活动，请重新读取真实恢复位置。");
         if (activity && await readOpeningSpanTutorOriginChange(db, scope, String(activity.id))) throw learningError("CONFLICT", "原活动依据已变化，请打开原活动按最新记录重新选择。");
         const agenda = activity?.course_id ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id)) : null;
-        if (agenda && !agenda.resumable && (input.action === "continue" || agenda.status === "cancelled" || agenda.status === "completed")) {
+        if (agenda && !agenda.resumable) {
           throw learningError("CONFLICT", `原学习位置需重新确认：${agenda.invalidationReasons.join("、") || agenda.status}`);
         }
         if (input.action === "continue") {

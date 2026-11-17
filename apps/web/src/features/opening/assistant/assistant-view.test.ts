@@ -13,6 +13,7 @@ import {
   pendingJobDiscoveryState,
   learningAttemptTurnContext,
   canReuseAssistantConversation,
+  boundConversationContextChanged,
   shouldRefreshCurrentConversation,
   shouldLoadConversationList,
   conversationForAssistant,
@@ -421,5 +422,25 @@ describe("purpose-specific question scope", () => {
     const attemptId = "11111111-1111-4111-8111-111111111111";
     expect(assistantContextScope({ attemptId, purpose: "language_support" })).not.toBe(assistantContextScope({ attemptId, purpose: "learning_help" }));
     expect(assistantContextScope({ attemptId })).toBe(assistantContextScope({ attemptId, purpose: "learning_help" }));
+  });
+});
+
+describe("bound conversation context continuity", () => {
+  const courseId = "11111111-1111-4111-8111-111111111111";
+  const sourceId = "22222222-2222-4222-8222-222222222222";
+  const otherId = "44444444-4444-4444-8444-444444444444";
+
+  it("allows server-pinned sourceVersion and page after Turn 1 when prepared omitted them", () => {
+    const prepared = { courseId, sourceId, chunkId: otherId, purpose: "learning_help" as const, fragment: "定义" };
+    const verified = { ...prepared, sourceVersion: 2, page: 5 };
+    expect(boundConversationContextChanged(verified, prepared)).toBe(false);
+  });
+
+  it("rejects mismatched pinned sourceVersion, page, identity keys, or un-prepared bound contexts", () => {
+    const prepared = { courseId, sourceId, sourceVersion: 1, page: 3 };
+    expect(boundConversationContextChanged({ ...prepared, sourceVersion: 2 }, prepared)).toBe(true);
+    expect(boundConversationContextChanged({ ...prepared, page: 4 }, prepared)).toBe(true);
+    expect(boundConversationContextChanged({ ...prepared, sourceId: otherId }, prepared)).toBe(true);
+    expect(boundConversationContextChanged({ courseId, sourceId }, undefined)).toBe(true);
   });
 });

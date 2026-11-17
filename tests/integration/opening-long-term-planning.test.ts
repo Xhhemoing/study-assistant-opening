@@ -169,6 +169,24 @@ it.each(["cancelled", "completed", "declined", "superseded"] as const)(
     await expect(repo().recover(f.scope, { action: "shorten", activityId: lesson.activityId, taskId: null, minutes: 5, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("原学习位置需重新确认") });
     expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
   });
+it("blocks fallback task href and both continue/shorten when a delayed retest is deferred", async () => {
+  const c = await course(); await budget();
+  const lesson = await delayedLesson(c.id), linked = await task(c.id, 20);
+  const futureSnooze = new Date(Date.now() + 86_400_000).toISOString();
+  await f.sql`UPDATE opening_retest_activities SET snoozed_until=${futureSnooze} WHERE id=${lesson.retestId}`;
+  await f.sql`UPDATE opening_teaching_activities SET create_intent=create_intent || ${f.sql.json({ source: "task", taskId: linked.id })} WHERE id=${lesson.activityId}`;
+  const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
+  const overview = await repo().read(f.scope, date);
+  expect(overview.recovery).toMatchObject({
+    activityId: lesson.activityId,
+    taskId: linked.id,
+    href: null,
+    agenda: { activityId: lesson.activityId, status: "deferred", resumable: false },
+  });
+  await expect(repo().recover(f.scope, { action: "continue", activityId: lesson.activityId, taskId: linked.id, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(repo().recover(f.scope, { action: "shorten", activityId: lesson.activityId, taskId: linked.id, minutes: 5, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
+});
 it("does not leak a non-agenda decision-bearing activity with a closed retest into overview recovery", async () => {
   const c = await course(), retestId = randomUUID(), nonAgendaId = randomUUID();
   await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)

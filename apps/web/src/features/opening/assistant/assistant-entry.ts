@@ -22,8 +22,9 @@ export function assistantEntry(href: string, currentPath = "/opening/today"): As
   const { context } = parsed;
   // 学习页上的题目绑定由抽屉按当前题目判断；讲解、示范、页面加载中都应能直接提问。
   const error = parsed.error ?? null;
-  const fresh = unbound || Boolean(context?.attemptId || context?.activityId || context?.sourceId || context?.fragment || error);
-  const conversation = fresh ? null : url.searchParams.get("conversation");
+  const rawConversation = url.searchParams.get("conversation")?.trim() || null;
+  const conversation = unbound || error ? null : rawConversation;
+  const fresh = unbound || Boolean(error) || (!conversation && Boolean(context?.attemptId || context?.activityId || context?.sourceId || context?.fragment));
   return { key: `${studyConversationIdentity(context)}:${context?.purpose ?? "learning_help"}:${fresh ? "fresh" : conversation ?? "chat"}:${error ?? ""}`,
     label: context?.label || (context?.fragment ? "选中内容" : context?.sourceId ? "材料提问" : context?.courseId ? "课程提问" : "自由提问"),
     context: context ?? undefined, error: error ?? undefined, conversation, fresh };

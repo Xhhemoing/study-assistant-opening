@@ -55,3 +55,35 @@ it("still clears a first definite HTTP 409 plan rejection", async () => {
   expect(sessionStorage.getItem(`aistudy:long-term-command:verified-test:${date}`)).toBeNull();
   expect(host.textContent).not.toContain("保存结果待确认，这次填写的内容已保留");
 });
+
+it("hides shorten and continue controls on non-resumable recovery while explaining why and keeping replan enabled", async () => {
+  const api = client({
+    ...overview,
+    budget: { dailyMinutes: 60, bufferMinutes: 10, revision: 2, updatedAt: "2026-10-27T00:00:00Z" },
+    recovery: {
+      kind: "continue",
+      activityId: id,
+      taskId: null,
+      href: null,
+      agenda: {
+        courseId: id, goalId: null, activityId: id, sessionId: id, itemVersionId: null,
+        status: "deferred", mode: "diagnose", userOverride: null, help: { delivered: false, level: "none" },
+        requirement: "span-v1", selectedAction: null, returnTo: null, originActivityId: null,
+        pendingRetestId: null, parentDecisionId: null, decisionCurrent: true,
+        invalidationReasons: ["retest_deferred"], intent: null, moveId: "self-example",
+        budget: null, decisionId: null, resumable: false, suggestion: null,
+        dataAsOf: "2026-10-27T00:00:00Z",
+      },
+    },
+  });
+  vi.mocked(api.recover).mockResolvedValue({ overview, draft: null });
+  await render(api);
+  expect(host.textContent).toContain("对应的复测尚未到可继续时间");
+  expect(host.textContent).not.toContain("这次只学几分钟");
+  expect(host.textContent).not.toContain("选择更短的本次活动");
+  expect(host.querySelector("a")).toBeNull();
+  const replan = button("预览缺席后的安排");
+  expect(replan.disabled).toBe(false);
+  await act(async () => replan.click());
+  expect(api.recover).toHaveBeenCalledWith(expect.objectContaining({ action: "replan", activityId: id }));
+});

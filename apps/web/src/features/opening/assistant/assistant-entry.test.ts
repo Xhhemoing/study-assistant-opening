@@ -49,4 +49,20 @@ describe("global assistant entry", () => {
     expect(entry.conversation).toBeNull();
     expect(assistantEntry("/opening/assistant?context=none", `/opening/courses/${id}/study`).error).toBeUndefined();
   });
+  it("preserves explicit conversation alongside bound context unless unbound or invalid", () => {
+    const conversationId = "22222222-2222-4222-8222-222222222222";
+    const withSource = assistantEntry(`/opening/assistant?conversation=${conversationId}&source=${id}&version=1&page=3`);
+    expect(withSource.conversation).toBe(conversationId);
+    expect(withSource.fresh).toBe(false);
+    expect(withSource.context).toMatchObject({ sourceId: id, sourceVersion: 1, page: 3 });
+
+    const withAttempt = assistantEntry(`/opening/assistant?conversation=${conversationId}&attemptId=${id}&courseId=${id}`);
+    expect(withAttempt.conversation).toBe(conversationId);
+    expect(withAttempt.fresh).toBe(false);
+    expect(withAttempt.context).toMatchObject({ attemptId: id, courseId: id });
+
+    expect(assistantEntry(`/opening/assistant?conversation=${conversationId}&context=none&attemptId=${id}`).conversation).toBeNull();
+    expect(assistantEntry(`/opening/assistant?conversation=${conversationId}&version=2`).conversation).toBeNull();
+    expect(assistantEntry(`/opening/assistant?attemptId=${id}`).fresh).toBe(true);
+  });
 });

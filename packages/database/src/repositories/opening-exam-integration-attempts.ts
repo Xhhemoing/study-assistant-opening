@@ -164,6 +164,16 @@ export async function syncExamIntegration(tx: TransactionSql, scope: Scope, spri
   const previouslyAnswered = new Set(before.attempts.filter(attempt => attempt.answeredAt !== null).map(attempt => attempt.id));
   const previouslyOpenRuns = new Set(before.runs.filter(run => run.completedAt === null).map(run => run.id));
   const completedRuns = new Set(state.runs.filter(run => run.completedAt !== null && previouslyOpenRuns.has(run.id)).map(run => run.id));
+  const closedKeys = completedRuns.size
+    ? state.attempts.filter(attempt => attempt.answeredAt === null && completedRuns.has(attempt.runId))
+      .map(attempt => `exam-activity:${sprintId}:${attempt.id}`.slice(0, 200))
+    : [];
+  if (closedKeys.length) {
+    await tx`UPDATE opening_teaching_activities SET status='completed',updated_at=clock_timestamp()
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND course_id=${binding.courseId} AND status IN ('active','paused')
+        AND client_key LIKE ${`exam-activity:${sprintId}:%`} AND client_key=ANY(${closedKeys}::text[])`;
+  }
   const candidates = state.attempts.filter(attempt => attempt.answeredAt !== null
     && (!previouslyAnswered.has(attempt.id) || completedRuns.has(attempt.runId)));
   if (!candidates.length) return;
