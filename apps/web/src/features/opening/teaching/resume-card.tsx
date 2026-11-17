@@ -118,6 +118,18 @@ export function checkpointConflictRequiresJuxtapose(
   return Boolean(result && result.ok === false && result.mismatch === "draft_anchor_lost");
 }
 
+function isResumeContentUsable(
+  resume: Pick<LearningResume, "generateStatus" | "contentVersion" | "clientInit">,
+): boolean {
+  if (resume.generateStatus !== "ready" && resume.generateStatus !== "needs_check") {
+    return false;
+  }
+  if (resume.contentVersion <= 0 || !resume.clientInit || resume.clientInit.contentVersion <= 0) {
+    return false;
+  }
+  return Array.isArray(resume.clientInit.blocks) && resume.clientInit.blocks.length > 0;
+}
+
 export function ResumeCardView({
   activityTitle,
   activityStatus,
@@ -157,6 +169,12 @@ export function ResumeCardView({
   const thought = summarizeThoughtTrain(resume);
   const materialsGate = resume.gates.materials;
   const jobGate = resume.gates.job;
+  const contentUsable = isResumeContentUsable(resume);
+  const jobInFlight =
+    jobGate === "in_flight" ||
+    resume.generateStatus === "queued" ||
+    resume.generateStatus === "generating";
+  const generatingWait = jobInFlight && !contentUsable;
   const showMaterialsBanner = materialsGate !== "available";
   const showJobBanner = jobGate !== "ready";
   const serverDrafts = resume.drafts;
@@ -317,22 +335,33 @@ export function ResumeCardView({
       ) : null}
 
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className={buttonClass}
-          data-resume-continue-cta="true"
-          disabled={continueDisabled || continueBusy}
-          onClick={onContinue}
-        >
-          {continueBusy ? (
-            <>
-              <LoaderCircle size={14} className="animate-spin" aria-hidden />
-              加载中…
-            </>
-          ) : (
-            "继续学习"
-          )}
-        </button>
+        {generatingWait ? (
+          <p
+            className="flex items-center gap-1.5 text-xs text-text-2"
+            role="status"
+            data-resume-generating="true"
+          >
+            <LoaderCircle size={13} className="animate-spin text-accent" aria-hidden />
+            正在生成主讲内容，准备好后将自动更新
+          </p>
+        ) : (
+          <button
+            type="button"
+            className={buttonClass}
+            data-resume-continue-cta="true"
+            disabled={continueDisabled || continueBusy}
+            onClick={onContinue}
+          >
+            {continueBusy ? (
+              <>
+                <LoaderCircle size={14} className="animate-spin" aria-hidden />
+                加载中…
+              </>
+            ) : (
+              "继续学习"
+            )}
+          </button>
+        )}
         {activityStatus === "paused" ? (
           <button
             type="button"
@@ -378,7 +407,7 @@ export function ResumeCardView({
             保存未保存内容
           </button>
         ) : null}
-        {onReread && !hasJuxtaposition ? (
+        {onReread && !hasJuxtaposition && !generatingWait ? (
           <button
             type="button"
             className={ui.quiet}
@@ -400,6 +429,8 @@ export type ResumeCardProps = {
   resume?: LearningResume | null;
   localUnsent?: LocalUnsentDraft[];
   api?: OpeningApi;
+  /** When true, parent owns in-flight polling across card and wait_init. */
+  disablePolling?: boolean;
   /** Called when user taps Continue — parent mounts TeachingWorkspace. */
   onContinue?: (resume: LearningResume) => void;
   /** Notify parent when pause/unpause updates activity. */
@@ -413,6 +444,7 @@ export function ResumeCard({
   resume: resumeProp = null,
   localUnsent: localUnsentProp = EMPTY_LOCAL_DRAFTS,
   api: apiProp,
+  disablePolling = false,
   onContinue,
   onActivityUpdated,
   onResumeUpdated,
@@ -520,9 +552,13 @@ export function ResumeCard({
   // While the lesson is still being generated, re-read the gate with backoff
   // (3s → 30s, stop after ~10 min) so the card turns ready on its own instead of
   // leaving the learner on "正在准备讲解" until they guess to press 重新读取.
-  const jobInFlight = liveResume?.activityId === activity.id && liveResume.gates.job === "in_flight";
+  const jobInFlight =
+    liveResume?.activityId === activity.id &&
+    (liveResume.gates.job === "in_flight" ||
+      liveResume.generateStatus === "queued" ||
+      liveResume.generateStatus === "generating");
   useEffect(() => {
-    if (!jobInFlight) return;
+    if (!jobInFlight || disablePolling) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let delay = 3000;
@@ -534,7 +570,13 @@ export function ResumeCard({
         if (cancelled || !requestScope.active) return;
         setLiveResume(next);
         onResumeUpdated?.(next);
-        if (next.gates.job !== "in_flight") return;
+        if (
+          next.gates.job !== "in_flight" &&
+          next.generateStatus !== "queued" &&
+          next.generateStatus !== "generating"
+        ) {
+          return;
+        }
       } catch {
         // transient read failure: keep the current card and retry later
       }
@@ -545,7 +587,7 @@ export function ResumeCard({
     timer = setTimeout(() => { void tick(); }, delay);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
     // onResumeUpdated is a notification callback; re-arming on its identity would reset backoff.
-  }, [jobInFlight, activity.id, api, requestScope]);
+  }, [jobInFlight, disablePolling, activity.id, api, requestScope]);
 
   const handleContinue = useCallback(async () => {
     if (!liveResume) return;

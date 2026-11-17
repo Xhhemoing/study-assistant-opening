@@ -22,12 +22,14 @@ export function ActivitySummaryContent({ summary, task, api, onReread }: {
     </dl>
     {summary.openQuestions.length ? <div><p className="text-xs font-medium text-text-2">下次可继续核对</p><ul className="mt-1 list-disc space-y-1 pl-4 text-xs leading-5 text-text-2">{summary.openQuestions.map((question, i) => <li key={i}>{question}</li>)}</ul></div> : null}
     {summary.taskId && task ? <div className="space-y-2 border-t border-accent/30 pt-3">
-      <p className="text-sm text-text">把「{task.title}」标记为完成？</p>
-      <p className="text-xs text-text-2">由你确认，结束学习不会自动完成任务。</p>
+      {task.status === "pending" ? <>
+        <p className="text-sm text-text">把「{task.title}」标记为完成？</p>
+        <p className="text-xs text-text-2">由你确认，结束学习不会自动完成任务。</p>
+      </> : <p className="text-sm text-text">关联任务「{task.title}」</p>}
       <TaskQueueRefreshContext.Provider value={onReread}><TaskStatusControl task={task} api={api} disabled={false} /></TaskQueueRefreshContext.Provider>
     </div> : null}
     {summary.taskId && !task ? <p className="text-xs text-text-2">关联任务当前不可用，学习小结已保留。</p> : null}
-    <p className="text-xs leading-6 text-text-2">想接着学：回到今日页点「开始学习」，或在今日队列中对任务选「开始此项」，会开始新的一节，本节记录保持不变。</p>
+    <p className="text-xs leading-6 text-text-2">想接着学：若在课程路线中可直接使用下方路线下一步，也可回到课程或今日页开始新的一节，本节记录保持不变。</p>
   </section>;
 }
 
@@ -63,7 +65,7 @@ export function ActivitySummaryCard({ activityId, api: apiProp }: { activityId: 
   const visible = snapshot?.activityId === activityId ? snapshot : null;
   const error = failure?.activityId === activityId ? failure.message : "";
   return <div className="space-y-2">
-    {visible ? <ActivitySummaryContent summary={visible.summary} task={visible.task} api={api} onReread={() => { refreshQueue?.(); void load(); }} /> : <p role="status" className="text-xs text-text-2">正在读取学习小结…</p>}
+    {visible ? <ActivitySummaryContent summary={visible.summary} task={visible.task} api={api} onReread={() => { refreshQueue?.(); void load(); }} /> : !error ? <p role="status" className="text-xs text-text-2">正在读取学习小结…</p> : null}
     {error ? <div role="alert" className="space-y-2 text-xs text-danger"><p>{error}</p><button type="button" className={ui.secondary} onClick={() => { void load(); }}>重新读取</button></div> : null}
   </div>;
 }

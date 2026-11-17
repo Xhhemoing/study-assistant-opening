@@ -57,3 +57,10 @@ it("carries the original conversation reference without changing the teaching ac
   mocks.get.mockResolvedValue({ activityId, courseId, retestId: null });
   await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, conversation }) })).rejects.toThrow(`REDIRECT:/opening/courses/${courseId}/study/span?lesson=${activityId}&conversation=${conversation}`);
 });
+
+it.each(["not-a-uuid", "", "00000000-0000-0000-0000-000000000000"])("drops malformed conversation parameter %j before rendering or redirecting", async malformed => {
+  const page = await CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, conversation: malformed }) });
+  expect(page.props.originalConversationId).toBeUndefined();
+  mocks.get.mockResolvedValue({ activityId, courseId, retestId: null });
+  await expect(CourseStudyPage({ params: Promise.resolve({ id: courseId }), searchParams: Promise.resolve({ activity: activityId, conversation: malformed }) })).rejects.toThrow(`REDIRECT:/opening/courses/${courseId}/study/span?lesson=${activityId}`);
+});

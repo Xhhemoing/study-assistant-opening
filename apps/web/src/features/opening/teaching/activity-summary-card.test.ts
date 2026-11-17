@@ -25,6 +25,15 @@ describe("learning completion", () => {
     expect(html).toContain("标记完成");
     expect(api.updateTaskStatus).not.toHaveBeenCalled();
   });
+  it("shows status rather than a completion prompt for an already finished linked task", () => {
+    const api = { updateTaskStatus: vi.fn() };
+    const task = { id: "task-1", title: "矩阵练习", status: "done", version: 2 } as TaskItem;
+    const html = renderToStaticMarkup(createElement(ActivitySummaryContent, { summary: { ...summary, taskId: task.id }, task, api, onReread: vi.fn() }));
+    expect(html).toContain("关联任务「矩阵练习」");
+    expect(html).toContain("已完成");
+    expect(html).not.toContain("标记为完成？");
+    expect(html).toContain("课程路线");
+  });
   it("ends through the current activity version without completing a task", async () => {
     const activity = { id: "activity-1", status: "active", updatedAt: "2026-10-15T01:00:00.000Z" };
     const api = { getTeachingActivity: vi.fn().mockResolvedValue(activity), patchTeachingActivityStatus: vi.fn().mockResolvedValue({ ...activity, status: "completed" }), updateTaskStatus: vi.fn() };

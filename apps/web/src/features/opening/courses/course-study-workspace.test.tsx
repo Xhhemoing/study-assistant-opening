@@ -7,27 +7,29 @@ import type { OpeningApi } from "../client/api";
 import type { TeachingActivity } from "@aistudy/contracts";
 
 const data = vi.hoisted(() => ({
-  course: { id: "11111111-1111-4111-8111-111111111111", title: "线性代数", archivedAt: null },
+  course: { id: "11111111-1111-4111-8111-111111111111", title: "线性代数", archivedAt: null as string | null },
   activity: { id: "22222222-2222-4222-8222-222222222222", courseId: "11111111-1111-4111-8111-111111111111",
     workspaceId: "33333333-3333-4333-8333-333333333333", ownerUserId: "44444444-4444-4444-8444-444444444444",
     status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, intentKind: "goal", intentSummary: "矩阵",
     sourceIds: [], clientKey: "test:course-study", createdAt: "2026-10-23T00:00:00.000Z", updatedAt: "2026-10-23T00:00:00.000Z" } satisfies TeachingActivity,
-  teachingMount: vi.fn(), practiceMount: vi.fn(), router: { replace: vi.fn() },
+  teachingMount: vi.fn(), practiceMount: vi.fn(), practiceProps: vi.fn(), materialsProps: vi.fn(), router: { replace: vi.fn() },
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => data.router, usePathname: () => `/opening/courses/${data.course.id}/study` }));
 vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.course, loading: false, error: null, reload: vi.fn() }) }));
 vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ kind: "activity", activity: data.activity })) }));
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
-vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children, gate, materialsHref }: { children: React.ReactNode; gate: string; materialsHref: string }) => { data.materialsProps({ gate, materialsHref }); return children; } }));
 vi.mock("./course-route-next-control", () => ({ CourseRouteNextControl: ({ originalConversationId }: { originalConversationId?: string | null }) => createElement("p", { "data-route-conversation": originalConversationId ?? "" }) }));
 vi.mock("../teaching/teaching-workspace", async () => ({ ...(await vi.importActual("../teaching/teaching-workspace")), TeachingContinueEntry: ({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) => {
   useEffect(() => { data.teachingMount(); }, []);
   return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
 } }));
-vi.mock("../learning/attempt-form", () => ({ LearningAttemptForm: () => {
+vi.mock("../learning/attempt-form", () => ({ LearningAttemptForm: (props: { initialFocus?: { skillLabel: string; requirementKey: string | null } }) => {
+  data.practiceProps(props);
   useEffect(() => { data.practiceMount(); }, []);
   return createElement("textarea", { "aria-label": "练习原答", defaultValue: "" });
 } }));
+vi.mock("../assistant/conversation-companion", () => ({ OriginalConversationSlot: ({ conversationId }: { conversationId: string }) => <textarea aria-label="原对话记录" data-original-conversation={conversationId} defaultValue="原对话" /> }));
 
 vi.mock("../assistant/assistant-session", () => ({ AssistantSession: () => <textarea aria-label="课前工具草稿" /> }));
 import { CourseStudyWorkspace } from "./course-study-workspace";
@@ -36,8 +38,10 @@ import { openCourseStudy } from "./course-study-entry";
 let host: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  data.course.archivedAt = null;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
+  window.localStorage.clear();
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.stubGlobal("matchMedia", vi.fn((media: string) => ({
     media, matches: false, onchange: null,
@@ -238,4 +242,92 @@ it("keeps the outer return and tools available when material access blocks teach
   await click("讲义已就绪");
   expect(host.querySelector('[aria-label="课程学习顶栏"]')).not.toBeNull();
   expect(host.querySelector('[aria-label="返回课程"]')).not.toBeNull();
+});
+
+it("renders ConversationCompanionTabs in panes.assistant when originalConversationId is present", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  await click("工具");
+  expect(host.querySelector(`[data-original-conversation="${conversation}"]`)).not.toBeNull();
+  expect(host.querySelector('[role="group"][aria-label="对话来源"]')).not.toBeNull();
+  await click("本课对话");
+  expect(host.querySelector('[aria-label="课前工具草稿"]')).not.toBeNull();
+});
+
+it("only toggles overflow-hidden on readyTeaching so entry and practice states never clip vertically", async () => {
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace key="study" courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  const main = () => host.querySelector("#main")!;
+  expect(main().querySelector('[class*="overflow-y-auto"]')).not.toBeNull();
+  expect(main().querySelector('[class*="overflow-hidden"]')).toBeNull();
+  await click("讲义已就绪");
+  expect(main().querySelector('[class*="flex flex-col overflow-hidden"]')).not.toBeNull();
+  expect(main().querySelector('[class*="overflow-y-auto"]')).toBeNull();
+  await act(async () => root.render(<CourseStudyWorkspace key="practice" courseId={data.course.id} initialMode="practice" teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(main().querySelector('[class*="overflow-y-auto"]')).not.toBeNull();
+  expect(main().querySelector('[class*="overflow-hidden"]')).toBeNull();
+});
+
+it.each([
+  { label: "route-choice", mockEntry: { kind: "route-choice" as const, choice: { kind: "choice" as const, reason: "scope_unconfirmed" as const, message: "请核对课程路线", courseId: data.course.id, href: `/opening/courses/${data.course.id}#course-learning-route`, requirementIds: [] } } },
+  { label: "cards", mockEntry: { kind: "cards" as const, task: { id: "88888888-8888-4888-8888-888888888888", courseId: data.course.id, title: "卡片复习", minutes: 10, dueAt: null, priority: 1, status: "pending" as const } } },
+  { label: "completed activity", mockEntry: { kind: "activity" as const, activity: { ...data.activity, status: "completed" as const } } },
+  { label: "skipped activity", mockEntry: { kind: "activity" as const, activity: { ...data.activity, status: "skipped" as const } } },
+])("excludes $label from the waiting alternatives banner", async ({ mockEntry }) => {
+  vi.mocked(openCourseStudy).mockResolvedValueOnce(mockEntry as never);
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: mockEntry.kind === "activity" ? mockEntry.activity.status : "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(host.querySelector("[data-study-alternatives]")).toBeNull();
+});
+
+it.each([
+  { name: "failed", generateStatus: "failed" as const, compileEnabled: true, attr: "failed", text: "本次讲解生成未完成" },
+  { name: "disabled", generateStatus: "ready" as const, compileEnabled: false, attr: "disabled", text: "当前未开启自动生成讲解" },
+  { name: "queued", generateStatus: "queued" as const, compileEnabled: true, attr: "waiting", text: "讲解准备好之前，可以先做这些" },
+])("distinguishes $name state in the alternatives banner", async ({ generateStatus, compileEnabled, attr, text }) => {
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity: { ...data.activity, generateStatus, contentVersion: 0 } });
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus, contentVersion: 0, pathVersion: 1, clientInit: null, gates: { materials: "available", job: generateStatus === "queued" ? "in_flight" : "ready" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled={compileEnabled} sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  const banner = host.querySelector("[data-study-alternatives]");
+  expect(banner?.getAttribute("data-study-alternatives")).toBe(attr);
+  expect(banner?.textContent).toContain(text);
+});
+
+it("preserves originalConversationId on archived, materialsHref, and cards links", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  data.course.archivedAt = "2026-11-01T00:00:00.000Z";
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={{} as OpeningApi} />));
+  expect(host.querySelector('a[href*="#course-settings-heading"]')?.getAttribute("href")).toBe(`/opening/courses/${data.course.id}?tab=materials&conversation=${conversation}#course-settings-heading`);
+
+  data.course.archivedAt = null;
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "cards", task: { id: "88888888-8888-4888-8888-888888888888", courseId: data.course.id, title: "卡片复习", minutes: 10, dueAt: null, priority: 1, status: "pending" } });
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={{} as OpeningApi} />));
+  expect(host.querySelector('a[href^="/opening/cards"]')?.getAttribute("href")).toBe(`/opening/cards?conversation=${conversation}`);
+
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "partial" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={data.activity.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(data.materialsProps).toHaveBeenCalledWith(expect.objectContaining({ materialsHref: `/opening/library?tab=materials&courseId=${data.course.id}&conversation=${conversation}` }));
+});
+
+it("passes learnerFocus from the active TeachingActivity as initialFocus when opening practice", async () => {
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({
+    kind: "activity",
+    activity: {
+      ...data.activity,
+      learnerFocus: {
+        skillLabel: "线性无关",
+        requirementKey: "span:linear-combination:v1",
+        activityKind: "targeted_explain",
+        reasonCode: "needs_practice",
+        focusObservationId: null,
+        recentAssistance: [],
+        strategyVersion: "v1",
+      },
+    },
+  });
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  await click("独立练习");
+  expect(data.practiceProps).toHaveBeenCalledWith(expect.objectContaining({ initialFocus: { skillLabel: "线性无关", requirementKey: "span:linear-combination:v1" } }));
 });
