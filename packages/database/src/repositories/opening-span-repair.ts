@@ -10,6 +10,20 @@ import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence
 import { parseOpeningSpanExercise, readOpeningSpanExposureHistory } from "./opening-span-attempt";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure } from "./opening-study-exposure";
 
+import { readOpeningSpanPrerequisiteRepair } from "./opening-span-prerequisite-runtime";
+import type { SpanPrerequisiteRepairPlan } from "@aistudy/contracts";
+/** Narrow shared stage reader; legacy A parsing and receipt interpretation remain separate. */
+export async function readOpeningSpanStagePlan(db: Sql | TransactionSql, scope: Scope, activityId: string) {
+  return await readOpeningSpanPrerequisiteRepair(db, scope, activityId) ?? await readOpeningSpanRepair(db, scope, activityId);
+}
+const planIsB = (plan: SpanRepairPlan | SpanPrerequisiteRepairPlan): plan is SpanPrerequisiteRepairPlan => "courseBinding" in plan;
+const planKey = (plan: SpanRepairPlan | SpanPrerequisiteRepairPlan, activityId: string, stage: "example" | "variant" | "confirmation") =>
+  planIsB(plan) ? spanPrerequisiteAttemptKey(activityId, stage) : spanRepairAttemptKey(activityId, stage);
+export const spanPrerequisiteAttemptKey = (activityId: string, stage: "example" | "variant" | "confirmation") => `span-prerequisite:${activityId}:v1:${stage}`;
+async function stageKey(db: Sql | TransactionSql, scope: Scope, activityId: string, stage: "example" | "variant" | "confirmation") {
+  const plan = await readOpeningSpanStagePlan(db, scope, activityId);
+  return plan ? planKey(plan, activityId, stage) : spanRepairAttemptKey(activityId, stage);
+}
 const prerequisite = { status: "unknown" as const, reasonCode: "prerequisite_binding_missing" as const };
 const conflict = (message: string) => Object.assign(learningError("CONFLICT", message), { reasonCode: "SPAN_REPAIR_CHANGED" });
 function canonicalSpecMatches(raw: unknown, problem: SpanProblem) {
@@ -140,14 +154,16 @@ export async function readOpeningSpanRepair(db: Db, scope: Scope, activityId: st
 
 export const spanRepairAttemptKey = (activityId: string, stage: "example" | "variant" | "confirmation") => `span-repair:${activityId}:v1:${stage}`;
 
-const retryPrefix = (activityId: string) => `${spanRepairAttemptKey(activityId, "variant")}:retry:`;
 export function isOpeningSpanRepairAttemptKey(activityId: string, key: string): boolean {
-  return ["example", "variant", "confirmation"].some(stage => key === spanRepairAttemptKey(activityId, stage as "example" | "variant" | "confirmation"))
-    || key.startsWith(retryPrefix(activityId)) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(key.slice(retryPrefix(activityId).length));
+  return [spanRepairAttemptKey, spanPrerequisiteAttemptKey].some(makeKey => {
+    const prefix = `${makeKey(activityId, "variant")}:retry:`;
+    return (["example", "variant", "confirmation"] as const).some(stage => key === makeKey(activityId, stage))
+      || key.startsWith(prefix) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(key.slice(prefix.length));
+  });
 }
 /** Read only already-authorized stage attempts. Random client keys never enter this lineage. */
 export async function readOpeningSpanRepairVariant(db: Db, scope: Scope, activityId: string) {
-  const key = spanRepairAttemptKey(activityId, "variant"), prefix = retryPrefix(activityId);
+  const key = await stageKey(db, scope, activityId, "variant"), prefix = `${key}:retry:`;
   const [row] = await db`SELECT id,client_key,create_intent,item_version_id FROM opening_learning_attempts
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND activity_id=${activityId}
       AND (client_key=${key} OR left(client_key,${prefix.length})=${prefix}) ORDER BY history_revision DESC,id DESC LIMIT 1`;
@@ -156,7 +172,7 @@ export async function readOpeningSpanRepairVariant(db: Db, scope: Scope, activit
 /** Returns one stable child key; replays do not authorize a grandchild, stale parents cannot fork. */
 export async function openingSpanRepairRetryKey(db: Db, scope: Scope, activityId: string, parentId: string) {
   const current = await readOpeningSpanRepairVariant(db, scope, activityId);
-  const key = `${retryPrefix(activityId)}${parentId}`;
+  const key = `${await stageKey(db, scope, activityId, "variant")}:retry:${parentId}`;
   if (current?.client_key === key) return key;
   if (current?.id !== parentId) throw conflict("重答的前题已变化或不属于当前步骤，请重新读取。");
   const [head] = await db`SELECT o.server_evaluation,o.revision_kind FROM opening_learning_attempts a
@@ -174,8 +190,9 @@ export async function openingSpanRepairRetryKey(db: Db, scope: Scope, activityId
 
 /** Same-item feedback and released help remain real help in the new attempt; never erase the first answer. */
 export async function inheritOpeningSpanRepairRetryHelp(tx: TransactionSql, scope: Scope, activityId: string, key: string, attemptId: string) {
-  if (!key.startsWith(retryPrefix(activityId))) return;
-  const parentId = key.slice(retryPrefix(activityId).length);
+  const prefix = `${await stageKey(tx, scope, activityId, "variant")}:retry:`;
+  if (!key.startsWith(prefix)) return;
+  const parentId = key.slice(prefix.length);
   const [parent] = await tx`SELECT a.item_version_id,a.session_id,o.assistance FROM opening_learning_attempts a
     JOIN opening_learning_observations root ON root.id=a.observation_id AND root.attempt_id=a.id
       AND root.workspace_id=a.workspace_id AND root.owner_user_id=a.owner_user_id
@@ -194,9 +211,9 @@ export async function inheritOpeningSpanRepairRetryHelp(tx: TransactionSql, scop
 }
 
 /** Owned issued attempt + current exact head, including regrade lineage, never client completion claims. */
-async function stageResult(db: Db, scope: Scope, current: SpanLessonSnapshot, stage: "variant" | "confirmation", requireCorrect: boolean) {
+export async function stageResult(db: Db, scope: Scope, current: SpanLessonSnapshot, stage: "variant" | "confirmation", requireCorrect: boolean) {
   const variant = stage === "variant" ? await readOpeningSpanRepairVariant(db, scope, current.activityId) : null;
-  const key = variant ? String(variant.client_key) : spanRepairAttemptKey(current.activityId, stage);
+  const key = variant ? String(variant.client_key) : await stageKey(db, scope, current.activityId, stage);
   const [row] = await db`SELECT o.*,a.item_version_id AS issued_item,a.problem_id AS issued_problem,v.evaluation_spec
     FROM opening_learning_attempts a
     JOIN opening_learning_item_versions v ON v.id=a.item_version_id AND v.workspace_id=a.workspace_id AND v.owner_user_id=a.owner_user_id
@@ -224,25 +241,27 @@ async function stageResult(db: Db, scope: Scope, current: SpanLessonSnapshot, st
     || requireCorrect && (verified.outcome !== "correct" || !verified.coreEvidenceComplete)) {
     throw conflict("当前题的有效步骤证据尚未完成，请保留答案并核对；未推进本题步骤。");
   }
+  return observation;
 }
 
 export async function assertOpeningSpanRepairTransition(db: Db, scope: Scope, current: SpanLessonSnapshot, input: SpanLessonSaveInput) {
   // A pause preserves exactly the same state even when source/evidence drift makes content unavailable.
   if (input.status === "paused" && input.moveId === current.moveId && isDeepStrictEqual(input.intent, current.intent)) return;
-  const plan = await readOpeningSpanRepair(db, scope, current.activityId);
+  const plan = await readOpeningSpanStagePlan(db, scope, current.activityId);
   if (!plan) return;
   // Pause is always available without rewriting intent/stage, even for clarification.
   if (!isDeepStrictEqual(input.intent, current.intent)) throw conflict("本题步骤活动不可用偏好更新替换既定计划，请先暂停。");
   if (input.moveId === current.moveId && input.status !== "completed") return;
   if (plan.status !== "ready") throw conflict("请先回原题补写或核对，不能把证据不足标为完成。");
   if (input.status === "completed") {
+    if (planIsB(plan)) throw conflict("先修补讲只可通过明确返回原要求结束，不能用通用保存标为完成。");
     if (current.moveId !== "self_study-reserved" || input.moveId !== current.moveId) throw conflict("本题步骤尚未完成新题确认。");
     await stageResult(db, scope, current, "confirmation", false);
     return;
   }
   if (input.status !== "active" || current.status !== "active") throw conflict("请先恢复原学习步骤，再继续。");
   if (current.moveId === "self-example" && input.moveId === "self-faded") {
-    const key = spanRepairAttemptKey(current.activityId, "example");
+    const key = planKey(plan, current.activityId, "example");
     const [released] = await db`SELECT 1 AS ok FROM opening_help_exposures h JOIN opening_learning_attempts a ON a.id=h.attempt_id
       AND a.workspace_id=h.workspace_id AND a.owner_user_id=h.owner_user_id AND a.session_id=h.session_id
       WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId} AND a.activity_id=${current.activityId}
@@ -262,7 +281,7 @@ export async function assertOpeningSpanRepairTransition(db: Db, scope: Scope, cu
 export async function assertOpeningSpanRepairAttempt(db: Db, scope: Scope, activityId: string, input: {
   clientKey: string; spanExercise?: { problemId: string; version: number };
 }) {
-  const plan = await readOpeningSpanRepair(db, scope, activityId);
+  const plan = await readOpeningSpanStagePlan(db, scope, activityId);
   if (!plan) return;
   if (plan.status !== "ready" || !input.spanExercise) throw conflict("本题步骤内容尚不可用，未发放通用题目。");
   const [activity] = await db`SELECT checkpoint_json FROM opening_teaching_activities WHERE id=${activityId}
@@ -270,11 +289,12 @@ export async function assertOpeningSpanRepairAttempt(db: Db, scope: Scope, activ
   const move = (activity?.checkpoint_json as { spanLesson?: { moveId?: string } })?.spanLesson?.moveId;
   const stage = move === "self-example" ? "example" : move === "self-faded" ? "variant" : move === "self_study-reserved" ? "confirmation" : null;
   if (!stage) throw conflict("题目请求不属于当前本题步骤。");
-  if (stage === "variant" && input.clientKey.startsWith(retryPrefix(activityId))) {
-    const parentId = input.clientKey.slice(retryPrefix(activityId).length);
-    if (!isOpeningSpanRepairAttemptKey(activityId, input.clientKey)
+  const prefix = `${planKey(plan, activityId, "variant")}:retry:`;
+  if (stage === "variant" && input.clientKey.startsWith(prefix)) {
+    const parentId = input.clientKey.slice(prefix.length);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(parentId)
       || await openingSpanRepairRetryKey(db, scope, activityId, parentId) !== input.clientKey) throw conflict("重答请求不属于当前本题步骤。");
-  } else if (input.clientKey !== spanRepairAttemptKey(activityId, stage)) throw conflict("题目请求不属于当前本题步骤。");
+  } else if (input.clientKey !== planKey(plan, activityId, stage)) throw conflict("题目请求不属于当前本题步骤。");
   if (stage !== "confirmation") {
     const identity = stage === "example" ? plan.teachingExample : plan.practiceVariant;
     if (input.spanExercise.problemId !== identity.problemId || String(input.spanExercise.version) !== identity.version) throw conflict("题目身份与本题步骤计划不一致。");
@@ -282,7 +302,8 @@ export async function assertOpeningSpanRepairAttempt(db: Db, scope: Scope, activ
     // Stage-specific issuer alone chooses the unseen validation identity. Recheck under the history lock.
     const { readOpeningSpanReservedChoice } = await import("./opening-span-reserved-selection");
     const example = getSpanTeachingProblem(plan.teachingExample.problemId, plan.teachingExample.version)!;
-    const choice = await readOpeningSpanReservedChoice(db, scope, "self_study", "validation", example.familyId);
+    const choice = await readOpeningSpanReservedChoice(db, scope, "self_study", "validation", example.familyId,
+      planIsB(plan) ? (await (await import("./opening-span-course-binding")).readOpeningSpanCourseBinding(db, scope, activityId))?.allowedExerciseKeys : undefined);
     if (choice.kind !== "available" || choice.problem.id !== input.spanExercise.problemId || Number(choice.problem.version) !== input.spanExercise.version) {
       throw conflict("新题确认暂不可发放，未借用其他用途或重复题目。");
     }

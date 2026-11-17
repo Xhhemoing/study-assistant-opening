@@ -1,5 +1,5 @@
 import type { OpeningJobRecord } from "@aistudy/database";
-import { isBudgetReplayError, ledgerActionForProviderError, OpeningProviderError } from "@aistudy/ai";
+import { isBudgetReplayError, ledgerActionForProviderError, OpeningProviderError, readGradingDiagnostic, recordGradingDiagnostic } from "@aistudy/ai";
 import { withJobHeartbeat } from "./lifecycle";
 
 export type JobHandler = (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
@@ -78,8 +78,13 @@ export async function runJob(
         epochIsCurrent = await workspaceEpochIsCurrent(repository, job);
       } catch (error) {
         const state = isUnknownOutcome(error, job.kind) ? "outcome_unknown" : "failed";
+        if (job.kind === "grade-observation") recordGradingDiagnostic(error, "admission");
         return repository.finish(job.id, state, {
-          error: error instanceof Error ? error.message : "job failed",
+          error: job.kind === "grade-observation"
+            ? state === "outcome_unknown" ? "批改费用或发送结果尚未确认，原答案已保存，不会重复发送。" : "AI 批改暂时未完成，原答案已保存，请手动改评。"
+            : error instanceof Error ? error.message : "job failed",
+          // Job id/key already correlate the operation. Never copy arbitrary error fields.
+          ...(job.kind === "grade-observation" && readGradingDiagnostic(error) ? { diagnostic: readGradingDiagnostic(error) } : {}),
           ...(job.kind === "parse" || job.kind === "parse-media" ? { retryable: state !== "outcome_unknown" && canRetryParse(error) } : {}),
         }, job.claimToken);
       }

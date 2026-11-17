@@ -168,9 +168,13 @@ export function createOpeningAiGradingJobRepository(sql: Sql) {
             WHERE root.id=${payload.rootObservationId} AND root.workspace_id=${scope.workspaceId} AND root.owner_user_id=${scope.ownerUserId}`;
           const [target] = await tx`SELECT grading_operation_id FROM opening_learning_observations
             WHERE id=${payload.observationId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-          const ledger = await readOpeningAiGradingLedger(tx, scope, String(target?.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${payload.observationId}`));
-          const matchingResult = head?.ai_evaluation && (head.submitted_intent as { aiGrading?: { input?: { observationId?: string } } })?.aiGrading?.input?.observationId === payload.observationId;
-          const obsolete = workspace.disabled_at != null || !head || Number(head.answer_revision) !== payload.answerRevision || head.revision_kind === "retract"
+          const ledger = await readOpeningAiGradingLedger(tx, scope, String(payload.regrade?.operationId ?? target?.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${payload.observationId}`));
+          const matchingResult = head?.ai_evaluation && (!payload.regrade || head.client_key === payload.regrade.operationId) && (head.submitted_intent as { aiGrading?: { input?: { observationId?: string } } })?.aiGrading?.input?.observationId === payload.observationId;
+          const [latestRegrade] = await tx`SELECT id FROM opening_explicit_regrade_requests
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND root_observation_id=${payload.rootObservationId} AND answer_revision=${payload.answerRevision}
+              AND confirmed_at IS NOT NULL ORDER BY grading_version DESC LIMIT 1`;
+          const obsolete = (payload.regrade ? latestRegrade?.id !== payload.regrade.requestId : Boolean(latestRegrade)) || workspace.disabled_at != null || !head || Number(head.answer_revision) !== payload.answerRevision || head.revision_kind === "retract"
             || Number(workspace.privacy_epoch) !== Number(job.privacy_epoch)
             || head.id !== payload.observationId && !matchingResult;
           const saved = !obsolete && matchingResult;

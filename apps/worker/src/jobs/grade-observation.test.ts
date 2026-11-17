@@ -43,6 +43,18 @@ describe("durable grading handler", () => {
     await expect(f.handler(job, raw)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(f.gateway.call).not.toHaveBeenCalled();
   });
+  it.each(["owner", "epoch", "operation"] as const)("rejects a regrade %s mismatch before the gateway", async mismatch => {
+    const f = setup();
+    const regrade = { requestId: id(9), operationId: `ai-regrade:${job.workspaceId}:${id(9)}`,
+      ownerUserId: mismatch === "owner" ? id(8) : job.ownerUserId,
+      privacyEpoch: mismatch === "epoch" ? 99 : job.privacyEpoch, gradingVersion: 1, workSource: null };
+    const raw = { ...payload, regrade };
+    // The actual DB adapter separately binds the full persisted request to the claim.
+    f.repository.context.mockImplementation(async () => ({ observation: original, existing: null, answerRevision: 1,
+      operationId: mismatch === "operation" ? "wrong" : regrade.operationId, stem: "sum", referenceText: "", misconceptions: [], workSource: null }));
+    await expect(f.handler({ ...job, key: regrade.operationId, payload: raw }, raw)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.gateway.call).not.toHaveBeenCalled();
+  });
   it("requires a real execution claim", async () => {
     const f = setup();
     await expect(f.handler({ ...job, claimToken: undefined }, payload)).rejects.toMatchObject({ code: "CONFLICT" });

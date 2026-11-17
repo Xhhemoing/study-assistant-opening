@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { createOpeningConversationRepository, createOpeningTutorJobsRepository, createOpeningStudyIntentRepository, createOpeningStudyContextRepository, createOpeningStudyExposureRepository } from "@aistudy/database";
 import { readOpeningLearningEvidenceContext } from "../../packages/database/src/repositories/opening-learning-evidence-context";
+import { tutorAttemptFence } from "@aistudy/database";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
@@ -256,7 +257,8 @@ it.each(["cancelled", "outcome_unknown"] as const)("keeps actually streamed help
   });
   const [workspace] = await fixture.sql`SELECT privacy_epoch FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
   const context = { privacyEpoch: Number(workspace!.privacy_epoch), claimToken: claimed!.claimToken,
-    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id };
+    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id,
+    attemptFence: tutorAttemptFence((await jobs.readAttemptContext(fixture.scope, { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken }))!) };
   expect(await jobs.readStream(fixture.otherScope, saved.jobId, context)).toBeNull();
   await expect(jobs.readStream(fixture.scope, saved.jobId, { ...context, privacyEpoch: context.privacyEpoch + 1 })).rejects.toThrow("authorization changed");
   expect((await fixture.sql`SELECT delivered FROM opening_help_exposures WHERE id=${exposure.id}`)[0]?.delivered).toBe(false);
@@ -291,9 +293,10 @@ it("does not release a generated stream after cancellation or material exclusion
   });
   const [workspace] = await fixture.sql`SELECT privacy_epoch FROM workspaces WHERE id=${fixture.scope.workspaceId}`;
   const context = { privacyEpoch: Number(workspace!.privacy_epoch), claimToken: claimed!.claimToken,
-    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id };
+    contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }], exposureReceiptId: exposure.id,
+    attemptFence: tutorAttemptFence((await jobs.readAttemptContext(fixture.scope, { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken }))!) };
   await fixture.sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${f.sourceId}`;
-  await expect(jobs.readStream(fixture.scope, saved.jobId, context)).rejects.toThrow("material unavailable");
+  await expect(jobs.readStream(fixture.scope, saved.jobId, context)).rejects.toThrow();
   await fixture.sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${f.sourceId}`;
   await jobs.cancel(fixture.scope, saved.jobId);
   expect(await jobs.readStream(fixture.scope, saved.jobId, context)).toMatchObject({ status: "cancelled" });

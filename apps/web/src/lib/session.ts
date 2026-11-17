@@ -3,6 +3,7 @@ import {
   createIdentityRepository,
   hashSessionToken,
   type IdentityRepository,
+  type ServerSessionWriteCredential,
 } from "@aistudy/database";
 import { SignJWT, jwtVerify } from "jose";
 import type { Sql } from "postgres";
@@ -50,6 +51,38 @@ export async function verifySessionJwt(
     workspaceId: payload.workspaceId,
     sid: payload.sid,
   };
+}
+
+/**
+ * Server-internal candidate input for a write transaction, NOT authorization.
+ * Read the token through the existing server cookie owner. Never log/serialize
+ * this result; the database must independently recheck it in the caller's tx.
+ * This does not change resolve/Principal or the ordinary cookie policy.
+ */
+export async function readSessionWriteCredential(
+  token: string | undefined | null,
+  secret: string,
+): Promise<ServerSessionWriteCredential | null> {
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, encoder.encode(secret));
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (
+      typeof payload.sub !== "string" || !uuid.test(payload.sub) ||
+      typeof payload.workspaceId !== "string" || !uuid.test(payload.workspaceId) ||
+      typeof payload.sid !== "string" || !uuid.test(payload.sid) ||
+      typeof payload.exp !== "number" || !Number.isFinite(payload.exp)
+    ) return null;
+    return {
+      userId: payload.sub,
+      workspaceId: payload.workspaceId,
+      sessionId: payload.sid,
+      tokenHash: hashSessionToken(token),
+      jwtExpiresAtSeconds: payload.exp,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export type SessionService = {

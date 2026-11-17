@@ -16,6 +16,19 @@ export function normalizeOpeningImportedEvaluation(table: string, row: Record<st
     delete protocol.tutorAutomation;
     return { ...row, learning_protocol: protocol };
   }
+  // Only the incoming copy loses authority. Retain plans, receipts and old history verbatim.
+  if (table === "opening_teaching_activities" && record(row.goal_json)) {
+    const goal = { ...row.goal_json };
+    delete goal.spanCourseBinding;
+    const intent = record(row.create_intent) ? { ...row.create_intent } : row.create_intent;
+    if (record(intent)) delete intent.spanCourseBinding;
+    return { ...row, goal_json: goal, ...(record(intent) ? { create_intent: intent } : {}) };
+  }
+  if (table === "opening_learning_attempts" && record(row.create_intent)) {
+    const intent = { ...row.create_intent };
+    delete intent.spanCourseBinding;
+    return { ...row, create_intent: intent };
+  }
   if (table === "opening_learning_item_versions" && "evaluation_spec" in row) return { ...row, evaluation_spec: null };
   if (table !== "opening_learning_observations") return row;
   if (row.verdict_source === "ai_graded" || row.ai_evaluation != null) {

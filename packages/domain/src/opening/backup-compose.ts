@@ -170,8 +170,7 @@ export function composeOpeningBackupDraft(input: OpeningBackupComposeInput): Ope
     tables: clone(records.tables), objects: objectResult.objects,
   };
   if (unavailable.size) backup.tables.opening_source_versions = [...versions].map(([key, row]) => ({
-    source_id: row.source_id, version: row.version, workspace_id: row.workspace_id, bytes: row.bytes,
-    sha256: row.sha256, availability: unavailable.has(key) ? "unavailable" : row.availability,
+    ...row, availability: unavailable.has(key) ? "unavailable" : row.availability,
   }));
   const preview = validateOpeningRestore(backup, staging.snapshot.deletionJournal, staging.snapshot.memoryDeletions);
   return preview.allowed ? { ok: true, backup } : fail("PREVIEW_REJECTED", ...preview.errors);

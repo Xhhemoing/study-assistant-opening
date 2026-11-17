@@ -104,7 +104,17 @@ test("technology spikes run once in the handler/browser job after Chromium insta
   const spike = "run: npm test -- --project '@aistudy/spike-*'";
   assert.equal(workflow.split(spike).length - 1, 1, "spikes must execute exactly once");
   assert.ok(!staticUnit.includes(spike), "static-unit must not run browser-dependent spikes");
-  const installIndex = browser.indexOf("run: npx playwright install chromium --with-deps");
+  const installIndex = browser.indexOf("run: bash scripts/ci/install-playwright.sh");
+  const installSteps = ["handler-browser-spikes", "opening-worker-flow"].map(name =>
+    parsedJobs[name].steps.find(step => step.name === "Install Playwright Chromium"));
+  assert.deepEqual(installSteps[0], installSteps[1], "both browser jobs share the same installer and time budget");
+  assert.equal(installSteps[0]["timeout-minutes"], 10);
+  assert.equal(installSteps[0].if, undefined, "browser cache hit must not skip system dependencies");
+  assert.equal(installSteps[0]["continue-on-error"], undefined);
+  const staticSteps = parsedJobs["static-unit"].steps;
+  const npmIndex = staticSteps.findIndex(step => step.run === "npm ci");
+  const fixturesIndex = staticSteps.findIndex(step => step.run?.includes("unittest discover -s scripts/ci"));
+  assert.ok(npmIndex >= 0 && fixturesIndex > npmIndex, "installer fixtures need the pinned Playwright before execution");
   const spikeIndex = browser.indexOf(spike);
   const handlerIndex = browser.indexOf("run: npm run test:handler");
   const browserIndex = browser.indexOf("run: npm run test:browser");

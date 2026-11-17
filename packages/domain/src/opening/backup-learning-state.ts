@@ -1,5 +1,5 @@
 import { isRecord, isUuid } from "./backup-validation";
-import { interventionPrefsPatchSchema, interventionPrefsSchema, openingAiSettingsSchema } from "@aistudy/contracts";
+import { courseSourcePurposeSchema, interventionPrefsPatchSchema, interventionPrefsSchema, openingAiSettingsSchema } from "@aistudy/contracts";
 
 type Row = Record<string, unknown>;
 export type OpeningRestoreLearningState = {
@@ -66,6 +66,9 @@ export function validateBackupLearningState(tables: Record<string, Row[]>, error
     if (!isUuid(row.id) || !["core", "optional", "reference", "archive"].includes(String(row.role))
       || !["private", "course", "public"].includes(String(row.visibility)) || !Number.isSafeInteger(row.sort_order)) {
       errors.push("course membership metadata is invalid");
+    }
+    if (row.purpose != null && !courseSourcePurposeSchema.safeParse(row.purpose).success) {
+      errors.push("course membership purpose is invalid");
     }
     const id = String(row.id).toLowerCase(), key = `${String(row.course_id).toLowerCase()}/${String(row.asset_id).toLowerCase()}`;
     if (membershipIds.has(id) || memberships.has(key)) errors.push("course membership is duplicated");

@@ -425,7 +425,7 @@ describe("course source purpose storage and concurrency", () => {
     expect(JSON.stringify(safe)).not.toContain("Restricted A");
     expect(safe?.sourceVersions).toEqual({ [b.id]: 0 });
     expect(await f.sql`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course.id}`).toEqual(receipts);
-    const provider = { complete: vi.fn(async (_input: ProviderInput) => ({ text: JSON.stringify({ nodes: [{ label: "Allowed B", kind: "concept",
+    const provider = { complete: vi.fn(async (_input: ProviderInput) => ({ requestId: null, text: JSON.stringify({ nodes: [{ label: "Allowed B", kind: "concept",
       evidenceChunkIds: [bChunk.id], status: "supported" }], edges: [] }), citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 })) };
     const replace = vi.fn(knowledge.replace.bind(knowledge));
     const handler = createBuildCourseKnowledgeHandler({

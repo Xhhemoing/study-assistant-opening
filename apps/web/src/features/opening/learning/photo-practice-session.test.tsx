@@ -65,8 +65,13 @@ it.each([
     if (input.workSource) expect(input.workSource).toEqual({ id: workId, version: 2, physicalPage: 1 });
     gradingIo.observation.mockResolvedValue({ ...observation, eligibility: { usableForCurrentVersion: "yes" } });
     gradingIo.sources.mockResolvedValue([sources[0]]);
-    const tx = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
+    let confirmedSuccessor = false;
+    const tx = Object.assign(vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
       const sql = parts.join("?");
+      if (sql.replace(/\s+/g, " ").trim() === "SELECT id FROM opening_explicit_regrade_requests WHERE workspace_id=? AND owner_user_id=? AND root_observation_id=? AND answer_revision=? AND confirmed_at IS NOT NULL LIMIT 1") {
+        expect(values).toEqual([courseId, courseId, observationId, 1]);
+        return confirmedSuccessor ? [{ id: id(identity + 7) }] : [];
+      }
       if (sql.includes("SELECT id FROM users")) return [{ id: courseId }];
       if (sql.includes("SELECT o.*")) return [{ id: observationId, current_head_id: observationId, grading_work_source: input.workSource ?? null, answer_revision: 1 }];
       if (sql.includes("client_key=")) return [];
@@ -79,6 +84,9 @@ it.each([
     expect(context.observation.answer).toBe(input.answer);
     expect(context.workSource).toEqual(input.workSource ?? null);
     expect(context.stem).toBe(stem);
+    confirmedSuccessor = true;
+    await expect(readOpeningAiGradingContext(tx as never, { workspaceId: courseId, ownerUserId: courseId }, { observationId }, { readOnly: true }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "已确认新的显式批改请求，旧请求不能再次执行或发布结果" });
     return observation;
   });
   const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);

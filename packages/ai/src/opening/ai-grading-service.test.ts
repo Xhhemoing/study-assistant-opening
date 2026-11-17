@@ -2,10 +2,12 @@ import { expect, it, vi } from "vitest";
 import type { LearningObservation, ProviderOutput, Scope } from "@aistudy/contracts";
 import { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "./ai-grading-service";
 import { createModelGateway, type ResolvedTaskModel } from "./model-gateway";
+import { createOpeningProvider, readGradingDiagnostic } from "./provider";
 
 const scope: Scope = { workspaceId: "00000000-0000-4000-8000-000000000001", ownerUserId: "00000000-0000-4000-8000-000000000002" };
 const input = { observationId: "00000000-0000-4000-8000-000000000003" };
 const base = `ai-grade:${scope.workspaceId}:${input.observationId}`;
+const regradeOperation = `ai-regrade:${scope.workspaceId}:00000000-0000-4000-8000-000000000005`;
 const proposal = { outcome: "correct", questionMatch: true, confidence: .95, feedback: "正确",
   criteria: [{ label: "计算", verdict: "correct", feedback: "结果为1。" }] };
 const output: ProviderOutput = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 10,
@@ -15,14 +17,14 @@ const graded = { ...original, id: "00000000-0000-4000-8000-000000000004", outcom
 type Repository = OpeningAiGradingServiceDeps["repository"];
 type Budget = ReturnType<OpeningAiGradingServiceDeps["budget"]>;
 
-function setup() {
+function setup(operationId = base) {
   const complete = vi.fn(async () => output);
   const model: ResolvedTaskModel = { provider: { complete }, inputCentsPerMillion: 20_000, outputCentsPerMillion: 20_000,
     modelSnapshot: { id: "changed", providerId: "fixture", modelName: "changed-model", inputCentsPerMillion: 20_000, outputCentsPerMillion: 20_000 } };
   let saved: LearningObservation | null = null;
   const repository = {
     context: vi.fn<Repository["context"]>(async () => ({ observation: original, stem: "1/2+1/2?", referenceText: "1", misconceptions: [],
-      existing: saved, answerRevision: 1, operationId: base, workSource: null })),
+      existing: saved, answerRevision: 1, operationId, workSource: null })),
     apply: vi.fn<Repository["apply"]>(async () => { saved = graded; return graded; }),
     ledger: vi.fn<Repository["ledger"]>(async () => "unsent"),
     releasedReservation: vi.fn<NonNullable<Repository["releasedReservation"]>>(async () => null),
@@ -34,6 +36,89 @@ function setup() {
   const service = createOpeningAiGradingService({ repository, gateway, budget: () => budget, images: async () => [] });
   return { repository, budget, complete, service, gateway };
 }
+
+it.each(["provider", "parse", "persist"] as const)("preserves safe %s diagnosis when the ledger requires unknown cost", async phase => {
+  const f = setup();
+  const sensitive = "sk-secret https://private.example prompt answer rawresponse stack";
+  const fetchImpl = vi.fn(async () => new Response(phase === "provider" ? sensitive : JSON.stringify({
+    choices: [{ message: { content: phase === "parse" ? '{"invalid":true}' : JSON.stringify(proposal) } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  }), { status: phase === "provider" ? 503 : 200 }));
+  const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture", fetchImpl });
+  const gateway = createModelGateway({ resolve: async () => ({ provider, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+    modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture" } }) });
+  f.budget.markUnknown.mockImplementation(async () => { f.repository.ledger.mockResolvedValue("unknown"); });
+  if (phase === "persist") f.repository.apply.mockRejectedValue(Object.assign(new Error(sensitive), { code: sensitive }));
+  const service = createOpeningAiGradingService({ repository: f.repository, gateway, budget: () => f.budget, images: async () => [] });
+  const error = await service.grade(scope, input).catch(error => error);
+  expect(error).toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  expect(readGradingDiagnostic(error)).toEqual({ phase, errorClass: phase === "provider" ? "OpeningProviderError" : "Error",
+    code: phase === "provider" ? "PROVIDER_UNAVAILABLE" : phase === "parse" ? "GRADING_PARSE" : "UNKNOWN",
+    attemptedFetch: true, httpStatus: phase === "provider" ? 503 : 200 });
+  expect(JSON.stringify(readGradingDiagnostic(error))).not.toContain(sensitive);
+  await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  expect(fetchImpl).toHaveBeenCalledTimes(1); expect(f.budget.release).not.toHaveBeenCalled();
+});
+
+it.each([
+  [base, "usage"], [base, "settle"], [regradeOperation, "usage"], [regradeOperation, "settle"],
+] as const)("logs one safe diagnostic for %s after durable grading when %s fails", async (operationId, phase) => {
+  const f = setup(operationId);
+  const sensitive = "sk-secret https://private.example prompt answer rawresponse stack";
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(proposal) } }],
+      ...(phase === "usage" ? {} : { usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+    }), { status: 200 }));
+    const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture", fetchImpl });
+    const gateway = createModelGateway({ resolve: async () => ({ provider, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+      modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture" } }) });
+    f.budget.markUnknown.mockImplementation(async () => { f.repository.ledger.mockResolvedValue("unknown"); });
+    if (phase === "settle") f.budget.settle.mockImplementation(async () => {
+      expect(f.repository.apply).toHaveBeenCalledTimes(1);
+      f.repository.ledger.mockResolvedValue("unknown");
+      throw Object.assign(new Error(sensitive), { code: sensitive, endpoint: sensitive, stack: sensitive });
+    });
+    const service = createOpeningAiGradingService({ repository: f.repository, gateway, budget: () => f.budget, images: async () => [] });
+    expect(await service.grade(scope, input)).toBe(graded);
+    expect(warn).toHaveBeenCalledExactlyOnceWith({ event: "grading_diagnostic", operationId, phase,
+      errorClass: "Error", code: phase === "usage" ? "USAGE_MISSING" : "UNKNOWN", attemptedFetch: true, httpStatus: 200 });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(sensitive);
+    expect(f.repository.apply).toHaveBeenCalledTimes(1);
+    expect(f.budget.reserve).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ requestId: operationId }));
+    expect(f.budget.claimExecution).toHaveBeenCalledExactlyOnceWith("fresh");
+    if (phase === "usage") {
+      expect(f.budget.markUnknown).toHaveBeenCalledExactlyOnceWith("fresh");
+      expect(f.budget.settle).not.toHaveBeenCalled();
+    } else {
+      expect(f.budget.settle).toHaveBeenCalledTimes(1);
+      expect(f.budget.markUnknown).not.toHaveBeenCalled();
+    }
+    expect(await service.grade(scope, input)).toBe(graded);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(f.repository.apply).toHaveBeenCalledTimes(1);
+    expect(f.budget.reserve).toHaveBeenCalledTimes(1);
+    expect(f.budget.release).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally { warn.mockRestore(); }
+});
+
+it("blocks an already unknown regrade without logging, releasing or sending again", async () => {
+  const f = setup(regradeOperation);
+  f.repository.ledger.mockResolvedValue("unknown");
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    await expect(f.service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+    expect(f.repository.ledger).toHaveBeenCalledWith(scope, regradeOperation);
+    expect(f.repository.releasedReservation).not.toHaveBeenCalled();
+    expect(f.repository.apply).not.toHaveBeenCalled();
+    expect(f.budget.reserve).not.toHaveBeenCalled();
+    expect(f.complete).not.toHaveBeenCalled();
+    expect(f.budget.release).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  } finally { warn.mockRestore(); }
+});
 
 it("grades the original work alongside pinned reference images with distinct roles and preserves correction metadata", async () => {
   const f = setup();

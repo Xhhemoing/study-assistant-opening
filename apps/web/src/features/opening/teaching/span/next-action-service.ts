@@ -1,7 +1,8 @@
-import { controlledLearningTools, type Scope } from "@aistudy/contracts";
+import { controlledLearningTools, spanPrerequisiteReturnInputSchema, type Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { createOpeningSpanTutorNextRepository, type OpeningSpanNextChoiceReason } from "@aistudy/database";
 
+import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 const inputSchema = controlledLearningTools.next_question.input;
 const choiceMessages: Record<OpeningSpanNextChoiceReason, string> = {
@@ -15,9 +16,13 @@ const choiceMessages: Record<OpeningSpanNextChoiceReason, string> = {
   evidence_changed: "原建议采用的评价已更正。已有派生活动、答案和帮助记录保留，请按原活动的最新记录明确选择下一步。",
 };
 export function createSpanNextActionService(sql: Sql) {
-  const repository = createOpeningSpanTutorNextRepository(sql);
+  const compilerEnabled = isTeachingCompilerEnabled(process.env);
+  const repository = createOpeningSpanTutorNextRepository(sql, { compilerEnabled, exactVerificationEnabled: compilerEnabled });
   return { async next(scope: Scope, raw: unknown) {
-    const result = await repository.next(scope, inputSchema.parse(raw));
+    const isB = !!raw && typeof raw === "object" && "prerequisiteRepairVersion" in raw;
+    const result = await repository.next(scope, isB ? spanPrerequisiteReturnInputSchema.parse(raw) : inputSchema.parse(raw));
+    if (result.kind === "course_return") return { kind: "ready" as const, href: result.href,
+      activityId: result.activity.id, courseId: result.courseId, label: "返回原要求（本块结果不代表已掌握）", resumed: result.resumed };
     if (result.kind === "choice") {
       const records = `/opening/courses/${result.courseId}#course-learning-records`;
       const sessionHref = (session: NonNullable<typeof result.originSession>) => {
@@ -27,6 +32,9 @@ export function createSpanNextActionService(sql: Sql) {
       };
       const origin = result.originSession ? sessionHref(result.originSession) : records;
       const practice = `/opening/courses/${result.courseId}/study?${new URLSearchParams({ mode: "practice", skillLabel: SPAN_SKILL_LABEL, requirementKey: SPAN_REQUIREMENT_KEY })}`;
+      if (isB) return { kind: "choice" as const, reason: result.reason, message: choiceMessages[result.reason],
+        primary: { label: "保留原位置，核对返回条件", href: origin },
+        secondary: { label: "回看课程记录", href: records } };
       return { kind: "choice" as const, reason: result.reason, message: choiceMessages[result.reason],
         primary: result.reason === "remediation_limit" ? { label: "换讲法：回原活动选择串讲例题", href: origin }
           : result.reason === "evidence_changed" ? { label: result.originSession ? "查看原活动的最新记录，重新选择下一步" : "回看课程记录", href: origin }

@@ -431,7 +431,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
           {referenceSkipped ? (
             <p className="text-xs leading-6 text-text-3" role="status">已跳过参考核对，保持自报结果。</p>
           ) : null}
-          {onAskAttempt ? <button type="button" className="min-h-11 text-sm text-accent underline underline-offset-4" onClick={() => onAskAttempt(attempt)}>围绕本次作答继续提问</button> : <details className="border-t border-line pt-3"><summary className="min-h-10 cursor-pointer text-sm text-text-2">围绕本次作答继续提问</summary><div className="mt-3 h-[36rem] max-h-[75dvh]"><AssistantView embedded startFresh initialCourseId={courseId} initialSourceIds={attempt.sourceIds} learningAttempt={attempt} /></div><p className="mt-2 text-xs leading-6 text-text-3">后续帮助仍关联这次作答；已保存的原答案不会被重写。</p></details>}
+          {onAskAttempt ? <button type="button" className="min-h-11 text-sm text-accent underline underline-offset-4" onClick={() => onAskAttempt({ ...attempt, observationId: recorded.id })}>围绕本次作答继续提问</button> : <details className="border-t border-line pt-3"><summary className="min-h-10 cursor-pointer text-sm text-text-2">围绕本次作答继续提问</summary><div className="mt-3 h-[36rem] max-h-[75dvh]"><AssistantView embedded startFresh initialCourseId={courseId} initialSourceIds={attempt.sourceIds} learningAttempt={{ ...attempt, observationId: recorded.id }} /></div><p className="mt-2 text-xs leading-6 text-text-3">后续帮助仍关联这次作答；已保存的原答案不会被重写。</p></details>}
           <div className="flex flex-wrap gap-2">
             {attempt.problemId ? (
               <button
