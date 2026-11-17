@@ -8,6 +8,7 @@ import { createSpanTutorNextAction } from "../../../apps/worker/src/runtime/span
 import { prepareTutorNextAction } from "../../../apps/worker/src/jobs/tutor-next-action";
 import { createSpanLessonSessionService } from "../../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
+import { POST as createAttempt } from "../../../apps/web/src/app/api/opening/attempts/route";
 import { POST as automaticRetest } from "../../../apps/web/src/app/api/opening/teaching/span/delayed/automatic/route";
 import { PATCH as updateTask } from "../../../apps/web/src/app/api/opening/tasks/[id]/route";
 import { GET as readLesson, POST as createLesson, PATCH as saveLesson } from "../../../apps/web/src/app/api/opening/teaching/span/lesson/route";
@@ -437,7 +438,7 @@ describe("authenticated span tutor learning flow", () => {
 });
 
 
-it.each(["correct", "incorrect"] as const)("authenticated normal confirm/start P error -> bounded B -> %s confirmation -> explicit T return", async outcome => {
+it.each(["correct", "incorrect", "drift_wrong", "drift_correct"] as const)("authenticated normal confirm/start P error -> bounded B -> %s confirmation -> explicit T return", async outcome => {
   vi.stubEnv("OPENING_TEACHING_COMPILER_ENABLED", "1");
   vi.stubEnv("OPENING_TEACHING_VALIDATION_ENABLED", "0");
   const { sql, scope, cookie } = currentFixture(), rows = backupRows(sql, scope);
@@ -464,8 +465,9 @@ it.each(["correct", "incorrect"] as const)("authenticated normal confirm/start P
       spanBindings: [{ requirementId: p, exerciseKeys: ["span-example-2d"], confirmContent: true }] }) }), context));
   expect(confirmed.requirements[0].requirement).toMatchObject({ id: p, requirementKey: SPAN_REQUIREMENT_KEY, verification: { kind: "exact", status: "ready" } });
   expect(confirmed.spanBindingOptions).toContainEqual(expect.objectContaining({ id: "span-example-2d", version: "1", dimension: 2 }));
-  const start = async (requirementId: string) => json(await startRoute(request(`${routePath}/start`, { goalId: goal.id, expectedGoalRevision: goal.revision,
-    requirementId, expectedRequirementRevision: 1, minutes: 20, clientKey: randomUUID() }), context));
+  const startBody = (requirementId: string, clientKey = randomUUID()) => ({ goalId: goal.id, expectedGoalRevision: goal.revision,
+    requirementId, expectedRequirementRevision: 1, minutes: 20, clientKey });
+  const start = async (requirementId: string) => json(await startRoute(request(`${routePath}/start`, startBody(requirementId)), context));
   const own = await start(p); expect(own).toMatchObject({ kind: "ready", requirementId: p });
   const ownRead = await json(await readLesson(lessonGet(courseId, own.activity.id)));
   expect(ownRead.attempts).toHaveLength(1); const ownAttempt = ownRead.attempts[0];
@@ -478,7 +480,9 @@ it.each(["correct", "incorrect"] as const)("authenticated normal confirm/start P
   };
   const originalWrong = await submit(ownAttempt, false, true);
   expect(originalWrong).toMatchObject({ outcome: "incorrect", verdictSource: "deterministic", serverEvaluation: { skills: { equation: "incorrect" } } });
-  const b = await start(t); expect(b).toMatchObject({ kind: "ready", action: "prerequisite", requirementId: p });
+  const targetRequest = startBody(t);
+  const b = await json(await startRoute(request(`${routePath}/start`, targetRequest), context));
+  expect(b).toMatchObject({ kind: "ready", action: "prerequisite", requirementId: p });
   expect(b.activity.id).not.toBe(own.activity.id);
   const chooser = vi.spyOn(spanDomain, "chooseSpanRepairTeaching");
   const read = async () => spanLessonDetailsSchema.parse(await json(await readLesson(lessonGet(courseId, b.activity.id))));
@@ -486,6 +490,32 @@ it.each(["correct", "incorrect"] as const)("authenticated normal confirm/start P
   expect(details.prerequisiteRepair).toMatchObject({ version: 1, returnToRequirementId: t, targetSkill: "equation" }); expect(details.attempts).toEqual([]);
   const beforeExampleGet = await persistedCourse(courseId); await read(); await read();
   expect(chooser).not.toHaveBeenCalled(); expect(await persistedCourse(courseId)).toEqual(beforeExampleGet);
+  if (outcome.startsWith("drift")) {
+    const newer = await json(await createAttempt(request("/api/opening/attempts", { sessionId: ownAttempt.sessionId, clientKey: randomUUID(),
+      spanExercise: { sourceId, problemId: ownAttempt.spanExercise.id, version: 1 } })), 201);
+    const observed = await submit(newer, outcome === "drift_correct", outcome === "drift_wrong");
+    expect(observed.outcome).toBe(outcome === "drift_correct" ? "correct" : "incorrect");
+    const before = await persistedCourse(courseId);
+    const replay = await json(await startRoute(request(`${routePath}/start`, targetRequest), context), 409);
+    expect(replay).toMatchObject({ error: { code: "CONFLICT" } });
+    details = await read();
+    expect(details.executionUnavailable?.reasonCode).toBe("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+    expect(details.prerequisiteRepair).toBeUndefined();
+    expect(details.session?.activityId).toBe(b.activity.id);
+    const history = await json(await readRoute(new Request(`http://localhost${routePath}?activityId=${b.activity.id}`, { headers: { cookie } }), context));
+    expect(history.currentActivity.id).toBe(b.activity.id);
+    expect(await persistedCourse(courseId)).toEqual(before);
+    expect(chooser).not.toHaveBeenCalled();
+    const paused = await json(await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${session.activityId}`, {
+      expectedRevision: session.revision, intent: session.intent, moveId: session.moveId, status: "paused" })));
+    expect(paused.status).toBe("paused");
+    const afterPause = await persistedCourse(courseId);
+    details = await read();
+    expect(details.session?.status).toBe("paused");
+    expect(details.executionUnavailable?.reasonCode).toBe("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+    expect(await persistedCourse(courseId)).toEqual(afterPause);
+    return;
+  }
   const move = async (moveId: string, status = 200) => {
     const response = await saveLesson(patchRequest(`/api/opening/teaching/span/lesson?activityId=${session.activityId}`, {
       expectedRevision: session.revision, intent: session.intent, moveId, status: "active" }));

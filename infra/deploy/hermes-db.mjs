@@ -5,6 +5,11 @@ import { spawnSync } from "node:child_process";
 import { parseEnv } from "node:util";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runCompletionOwned, ownedNodeCLI } from './hermes-writer-control.mjs';
+
+export function parserPreflightOwned(parserPython, args, options, execute) {
+  return runCompletionOwned(parserPython, args, 90, options, execute);
+}
 
 /** Bind pg_dump to DATABASE_URL; ambient libpq service/password/host settings cannot redirect it. */
 export function postgresBackupEnvironment(databaseUrl, inherited) {
@@ -107,7 +112,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     if (result.error || !result.stdout?.length) fail("Migration session outcome is unconfirmed; backend completion must be inspected.");
     process.stdout.write(result.stdout);
     if (result.status !== 0) process.exitCode = 1;
-  } else if (action === "parser") {
+  } else if (action === "parser" || action === 'parser-owned') {
     const cache = configured.HF_HOME || join(legacyDir, ".local/hf-home");
     env = {
       PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8",
@@ -115,11 +120,15 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       PARSER_PYTHON: parserPython, PARSER_CWD: join(target, "services/parser"),
       HF_HOME: cache, HF_HUB_CACHE: join(cache, "hub"), HUGGINGFACE_HUB_CACHE: join(cache, "hub"),
       TRANSFORMERS_CACHE: join(cache, "hub"), XDG_CACHE_HOME: cache, TORCH_HOME: join(cache, "torch"),
-      PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", HF_HUB_OFFLINE: "1",
+      PYTHONIOENCODING: "utf-8", PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", HF_HUB_OFFLINE: "1",
       ...(configured.PARSER_OCR_MODEL_DIR ? { PARSER_OCR_MODEL_DIR: configured.PARSER_OCR_MODEL_DIR } : {}),
     };
     // Match provision-worker's cold-import allowance on the shared host.
-    run(parserPython, ["-m", "opening_parser", "--check"], { cwd: env.PARSER_CWD, timeout: 90_000 });
+    if (action === 'parser-owned') {
+      const result = await ownedNodeCLI(()=>parserPreflightOwned(parserPython, ['-m', 'opening_parser', '--check'],
+        { cwd: env.PARSER_CWD, env, stdio: ['ignore', 'ignore', 'pipe'] }));
+      if (result.error || result.status !== 0) fail('Owned parser preflight failed; sensitive output withheld.');
+    } else run(parserPython, ["-m", "opening_parser", "--check"], { cwd: env.PARSER_CWD, timeout: 90_000 });
   } else {
     fail("Unknown database/preflight action.");
   }

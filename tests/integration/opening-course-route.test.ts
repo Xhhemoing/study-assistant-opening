@@ -386,6 +386,19 @@ async function prerequisiteRuntimeFixture(dailyMinutes = 120, initialOutcome: "c
   return { ...x, service, target, attempt, observation, targetRequest,
     startB: () => service.start(f.scope, x.courseId, targetRequest) };
 }
+async function allWorkspaceRows() {
+  const tables = await f.sql<{ name: string }[]>`SELECT c.table_name AS name FROM information_schema.columns c
+    JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
+    WHERE c.table_schema='public' AND c.column_name='workspace_id' AND t.table_type='BASE TABLE' ORDER BY c.table_name`;
+  const rows: Record<string, unknown> = {};
+  for (const { name } of tables) {
+    if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error("Unexpected table identifier");
+    rows[name] = await f.sql.unsafe(
+      `SELECT to_jsonb(t) AS row FROM "${name}" t WHERE workspace_id=$1 ORDER BY to_jsonb(t)::text`, [f.scope.workspaceId]);
+  }
+  rows.workspaces = await f.sql`SELECT to_jsonb(t) AS row FROM workspaces t WHERE id=${f.scope.workspaceId}`;
+  return rows;
+}
 async function runtimeSnapshot(courseId: string) {
   return {
     activities: await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${courseId} ORDER BY id`,
@@ -396,6 +409,88 @@ async function runtimeSnapshot(courseId: string) {
     capacity: await readOpeningLearningCapacity(f.sql, f.scope),
   };
 }
+it.each(["wrong", "correct", "unknown", "helped_wrong", "helped_correct", "retract_new", "fresh_wrong", "fresh_correct", "retract_old", "no_drift"] as const)(
+  "validates old active B against current original P %s without rewriting history", async scenario => {
+  const x = await prerequisiteRuntimeFixture(), started = ready(await x.startB());
+  const plan = (await readOpeningSpanPrerequisiteRepair(f.sql, f.scope, started.activity.id))!;
+  const lessons = createOpeningSpanSessionRepository(f.sql), session = (await lessons.get(f.scope, started.activity.id))!;
+  let observation = x.observation;
+  if (scenario !== "retract_old" && scenario !== "no_drift") {
+    const excluded = [x.attempt.spanExercise!.id, plan.teachingExample.problemId, plan.practiceVariant.problemId];
+    const fresh = resolveCourseSpanExerciseKeys(["span-example-2d"]).map(id => getSpanTeachingProblem(id))
+      .find(problem => problem && !excluded.includes(problem.id) && solveSpanProblem(problem).kind === "unique");
+    if (scenario.startsWith("fresh") && !fresh) throw new Error("expected independent problem in confirmed P bank");
+    const attempts = createOpeningAttemptService(f.sql);
+    const attempt = await attempts.create(f.scope, { sessionId: x.attempt.sessionId, clientKey: randomUUID(),
+      spanExercise: { sourceId: x.sourceId, problemId: scenario.startsWith("fresh") ? fresh!.id : x.attempt.spanExercise!.id, version: 1 } });
+    const problem = attempt.spanExercise!, solution = solveSpanProblem(problem);
+    if (solution.kind !== "unique") throw new Error("expected unique controlled P solution");
+    expect(problem.familyId).toBe(x.attempt.spanExercise!.familyId);
+    if (scenario.startsWith("helped")) await createSpanHintService(f.sql).read(f.scope, { attemptId: attempt.id, level: 1 });
+    const correct = scenario === "correct" || scenario === "helped_correct" || scenario === "fresh_correct";
+    observation = await attempts.submit(f.scope, attempt.id, { clientKey: randomUUID(),
+      answer: scenario === "unknown" ? "unrecognized P response" : JSON.stringify({ membership: "in_span",
+        coefficients: correct ? solution.coefficients : ["0", "0"],
+        equation: { vectors: correct ? problem.vectors : [["999", "0"], ["0", "999"]], target: problem.target }, coordinateChecks: problem.target }),
+      outcome: "unverified", assistance: "independent" });
+    expect(observation.id).not.toBe(x.observation.id);
+    expect(observation).toMatchObject({ outcome: scenario === "unknown" ? "unverified" : correct ? "correct" : "incorrect", verdictSource: "deterministic" });
+    if (scenario.startsWith("helped")) expect(observation.assistance).toBe("hinted");
+    if (scenario.startsWith("fresh")) expect(observation.assistance).toBe("independent");
+  }
+  if (scenario === "retract_new" || scenario === "retract_old") await reviseOpeningLearningObservation(f.sql, f.scope, {
+    rootObservationId: observation.rootObservationId ?? observation.id, revisesObservationId: observation.id,
+    expectedHead: observation.id, revisionKind: "retract", reason: "撤回先修依据", clientKey: randomUUID() });
+  const [latest] = await f.sql`SELECT o.id,o.revision_kind FROM opening_learning_attempts a
+    JOIN opening_learning_observations root ON root.id=a.observation_id
+    JOIN opening_learning_observations o ON o.id=COALESCE(root.effective_head_id,root.id)
+    WHERE a.course_id=${x.courseId} AND a.create_intent->'spanCourseBinding'->'requirement'->>'id'=${x.requirement.id}
+      AND NOT (a.create_intent->'spanCourseBinding' ? 'returnTarget')
+    ORDER BY a.submitted_at DESC NULLS LAST,a.started_at DESC,a.id DESC LIMIT 1`;
+  if (scenario.startsWith("retract")) expect(latest!.revision_kind).toBe("retract");
+  else expect(latest!.id).toBe(observation.id);
+  const before = await allWorkspaceRows(), chooser = vi.spyOn(prerequisiteDomain, "chooseSpanRepairTeaching");
+  const history = await createSpanLessonSessionService(f.sql).read(f.scope, x.courseId, started.activity.id);
+  expect(history.session?.activityId).toBe(started.activity.id);
+  if (!history.session) throw new Error("expected saved lesson history");
+  expect((await x.repo.read(f.scope, x.courseId, started.activity.id)).currentActivity?.id).toBe(started.activity.id);
+  if (scenario === "no_drift") {
+    expect(ready(await x.startB())).toMatchObject({ action: "prerequisite", resumed: true, activity: { id: started.activity.id } });
+    expect(await readOpeningSpanPrerequisiteRepair(f.sql, f.scope, started.activity.id)).toEqual(plan);
+    expect(history.prerequisiteRepair).toBeTruthy();
+    expect(history.executionUnavailable).toBeUndefined();
+  } else {
+    const conflict = { code: "CONFLICT", reasonCode: "SPAN_PREREQUISITE_EVIDENCE_CHANGED" };
+    await expect(x.startB()).rejects.toMatchObject(conflict);
+    await expect(readOpeningSpanPrerequisiteRepair(f.sql, f.scope, started.activity.id)).rejects.toMatchObject(conflict);
+    await expect(createSpanPresentationService(f.sql).read(f.scope, { activityId: started.activity.id,
+      prerequisiteRepairVersion: 1, stage: "example", clientKey: randomUUID() })).rejects.toMatchObject(conflict);
+    expect(history.executionUnavailable?.reasonCode).toBe(conflict.reasonCode);
+    expect(history.prerequisiteRepair).toBeUndefined();
+  }
+  const [saved] = await f.sql`SELECT goal_json FROM opening_teaching_activities WHERE id=${started.activity.id}`;
+  expect(saved!.goal_json.spanPrerequisiteRepair).toEqual(plan);
+  expect(await f.sql`SELECT id FROM opening_learning_observations WHERE id=${x.observation.id}`).toHaveLength(1);
+  expect(chooser).not.toHaveBeenCalled();
+  expect(await allWorkspaceRows()).toEqual(before);
+  if (scenario !== "no_drift") {
+    expect(await lessons.save(f.scope, started.activity.id, { expectedRevision: session.revision,
+      intent: session.intent, moveId: session.moveId, status: "paused" })).toMatchObject({ status: "paused", activityId: started.activity.id });
+    const paused = await allWorkspaceRows();
+    const read = await createSpanLessonSessionService(f.sql).read(f.scope, x.courseId, started.activity.id);
+    expect(read.session?.status).toBe("paused");
+    if (!read.session) throw new Error("expected paused lesson history");
+    expect(read.executionUnavailable?.reasonCode).toBe("SPAN_PREREQUISITE_EVIDENCE_CHANGED");
+    expect(await allWorkspaceRows()).toEqual(paused);
+  }
+});
+it("refuses unconfirmed prerequisite scope without manufacturing evidence or a B", async () => {
+  const x = await prerequisiteRuntimeFixture();
+  await f.sql`UPDATE course_requirements SET approved_at=NULL WHERE id=${x.requirement.id}`;
+  const before = await allWorkspaceRows();
+  expect(await x.startB()).toMatchObject({ kind: "choice", reason: "scope_unconfirmed" });
+  expect(await allWorkspaceRows()).toEqual(before);
+});
 it("persists real direct P qualification and first B plan exactly once under concurrent public T starts", async () => {
   const x = await prerequisiteRuntimeFixture(), before = await runtimeSnapshot(x.courseId);
   const qualification = vi.spyOn(prerequisiteDomain, "qualifySpanPrerequisiteRepair");
@@ -543,6 +638,54 @@ it.each([
   const receipt = await activityDecision(next);
   expect(JSON.parse(receipt.intentVersion).progress.find((row: { requirement: { id: string } }) => row.requirement.id === x.requirement.id))
     .toMatchObject({ requirement: progress.requirement, status: progress.status, observationId: progress.observationId, sourcesAvailable: progress.sourcesAvailable });
+});
+it("grant stop preserves all workspace rows for old and fresh T keys and B return replay", async () => {
+  const x = await finishPrerequisiteBlock("incorrect"), returning = createSpanNextActionService(f.sql);
+  const returned = await returning.next(f.scope, x.returnRequest);
+  if (returned.kind !== "ready") throw new Error("expected T before grant stop");
+  const target = (await createOpeningTeachingActivitiesRepository(f.sql).get(f.scope, returned.activityId))!;
+  await compile(target);
+  const answered = await answer(target, 0, "incorrect");
+  const prefs = createOpeningAdaptivePrefsRepository(f.sql), current = await prefs.get(f.scope);
+  const grant = current.prefs.spanTutorGrants![x.courseId]!;
+  await prefs.patch(f.scope, { spanTutorGrant: { courseId: x.courseId, enabled: false, dailyMinutes: grant.dailyMinutes,
+    expiresOn: grant.expiresOn, expectedRevision: grant.revision } });
+  const before = await allWorkspaceRows();
+  const start = { ...x.targetRequest, clientKey: randomUUID() };
+  const next = { goalId: x.goal.id, expectedGoalRevision: 1, activityId: target.id, expectedPathVersion: target.pathVersion,
+    observationId: answered.observation.id, clientKey: randomUUID(), minutes: 20 };
+  for (const fresh of [false, false, true]) {
+    await expect(x.service.start(f.scope, x.courseId, { ...start, ...(fresh ? { clientKey: randomUUID() } : {}) }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "导师授权已停止，原位置保留。" });
+    expect(await allWorkspaceRows()).toEqual(before);
+    await expect(x.service.next(f.scope, x.courseId, { ...next, ...(fresh ? { clientKey: randomUUID() } : {}) }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "导师授权已停止，原位置保留。" });
+    expect(await allWorkspaceRows()).toEqual(before);
+  }
+  await expect(returning.next(f.scope, { ...x.returnRequest, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await allWorkspaceRows()).toEqual(before);
+});
+it.each(["target_revision", "prerequisite_revision", "source", "return_receipt"] as const)(
+  "completed B %s drift preserves all workspace rows", async drift => {
+  const x = await finishPrerequisiteBlock("incorrect");
+  const returned = await createSpanNextActionService(f.sql).next(f.scope, x.returnRequest);
+  if (returned.kind !== "ready") throw new Error("expected T before drift");
+  if (drift === "target_revision" || drift === "prerequisite_revision") {
+    const id = drift === "target_revision" ? x.target.id : x.requirement.id;
+    await f.sql`UPDATE course_requirements SET revision=revision+1 WHERE id=${id}`;
+  }
+  if (drift === "source") await f.sql`UPDATE opening_sources SET version=version+1 WHERE id=${x.sourceId}`;
+  if (drift === "return_receipt") {
+    const [row] = await f.sql`SELECT id,receipt FROM opening_learning_decisions WHERE target_id=${returned.activityId}`;
+    const receipt = structuredClone(row!.receipt); receipt.evidenceRefs = [];
+    await f.sql`UPDATE opening_learning_decisions SET receipt=${f.sql.json(receipt)} WHERE id=${row!.id}`;
+  }
+  const before = await allWorkspaceRows();
+  const request = { ...x.targetRequest, expectedRequirementRevision: drift === "target_revision" ? 2 : 1, clientKey: randomUUID() };
+  if (drift === "source" || drift === "prerequisite_revision")
+    expect(await x.service.start(f.scope, x.courseId, request)).toMatchObject({ kind: "choice", reason: "evidence_unknown" });
+  else await expect(x.service.start(f.scope, x.courseId, request)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await allWorkspaceRows()).toEqual(before);
 });
 it("Hf03 fails closed on T start and next after a completed B return and a legitimate course grant stop without replay writes", async () => {
   const x = await finishPrerequisiteBlock("incorrect");

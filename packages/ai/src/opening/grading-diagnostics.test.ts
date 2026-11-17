@@ -59,6 +59,48 @@ it("logs only fixed diagnostic fields and canonical operation identities", () =>
   } finally { warn.mockRestore(); }
 });
 
+const workspaceId = "00000000-0000-4000-8000-000000000001";
+const requestId = "00000000-0000-4000-8000-000000000002";
+const regradeOperation = `ai-regrade:${workspaceId}:${requestId}`;
+
+it.each([`ai-grade:${workspaceId}:${requestId}`, `ai-grade:${workspaceId}:${requestId}:999999999`, regradeOperation])(
+  "logs a canonical grading identity exactly once: %s", operationId => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const error = new Error(sensitive);
+      recordGradingDiagnostic(error, "settle");
+      logGradingDiagnostic(error, operationId);
+      expect(warn).toHaveBeenCalledExactlyOnceWith({ event: "grading_diagnostic", operationId,
+        phase: "settle", errorClass: "Error", code: "UNKNOWN", attemptedFetch: null });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sensitive);
+    } finally { warn.mockRestore(); }
+  });
+
+it.each([
+  `ai-regrade:${workspaceId}`, `ai-regrade:${workspaceId}:not-a-uuid`,
+  `ai-regrade:not-a-uuid:${requestId}`, regradeOperation.toUpperCase(),
+  `${regradeOperation}:1`, `${regradeOperation}:retry:${requestId}`, `${regradeOperation}:fallback`,
+  `prefix:${regradeOperation}`, `${regradeOperation}${sensitive}`, `${regradeOperation}\n`,
+  `ai-anything:${workspaceId}:${requestId}`, `ai-grade:${workspaceId}:${requestId}:0`,
+  `ai-grade:${workspaceId}:${requestId}:1000000000`,
+])("rejects noncanonical diagnostic identities (%#)", operationId => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    const error = new Error(sensitive);
+    recordGradingDiagnostic(error, "settle");
+    logGradingDiagnostic(error, operationId);
+    expect(warn).not.toHaveBeenCalled();
+  } finally { warn.mockRestore(); }
+});
+
+it("does not log a canonical regrade identity without process-local diagnostic provenance", () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    logGradingDiagnostic({ diagnostic: { phase: "settle", errorClass: "Error", code: "UNKNOWN", attemptedFetch: true } }, regradeOperation);
+    expect(warn).not.toHaveBeenCalled();
+  } finally { warn.mockRestore(); }
+});
+
 it("records a caller abort before fetch as false, and an unobserved adapter transport as unknown", async () => {
   const fetchImpl = vi.fn();
   const provider = createOpeningProvider({ baseUrl: "https://fixture.example", apiKey: sensitive, model: "fixture", fetchImpl });

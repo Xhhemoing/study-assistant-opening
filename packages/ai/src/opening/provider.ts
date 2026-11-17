@@ -142,7 +142,9 @@ export function logGradingDiagnostic(value: unknown, operationId: string): void 
   const diagnostic = readGradingDiagnostic(value);
   const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
   const operation = new RegExp(`^ai-grade:${uuid}:${uuid}(?::[1-9][0-9]{0,8})?$`);
-  if (diagnostic && operation.test(operationId)) console.warn({ event: "grading_diagnostic", operationId, ...diagnostic });
+  // Absolute end check also rejects a trailing newline (which `$` alone permits).
+  const regradeOperation = new RegExp(`^ai-regrade:${uuid}:${uuid}(?![\\s\\S])`);
+  if (diagnostic && (operation.test(operationId) || regradeOperation.test(operationId))) console.warn({ event: "grading_diagnostic", operationId, ...diagnostic });
 }
 
 /** Strip optional markdown code fences (```json ... ``` / ``` ... ```). */

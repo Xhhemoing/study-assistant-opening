@@ -1,4 +1,6 @@
 export const DATABASE_PACKAGE = "@aistudy/database" as const;
+export { createOpeningMaterialImportBindingsRepository, type OpeningMaterialImportBindingsRepository,
+  type OpeningMaterialImportBinding, type OpeningMaterialImportReceipt } from "./repositories/opening-material-import-bindings";
 export { saveOpeningReservedCandidates, admitOpeningReservedCandidate, type OpeningReservedCandidate, type OpeningReservedPinnedContext,
   type OpeningReservedExposureInput, type OpeningReservedExposureResult, type OpeningReservedExposureReader, type OpeningReservedPorts } from "./repositories/opening-course-reserved-selection";
 export * from "./schema/library";
@@ -343,3 +345,4 @@ export * from "./repositories/opening-learning-asset-links";
 export * from "./repositories/opening-study-notes";
 export * from "./repositories/opening-answer-interpretation";
 export * from "./repositories/opening-source-visual-recognitions";
+export { createOpeningLearningAdviceContextRepository } from './repositories/opening-learning-advice-context';

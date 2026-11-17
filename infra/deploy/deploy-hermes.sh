@@ -17,8 +17,17 @@ TARGET_SHA="${TARGET_SHA:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ACTION="${1:-deploy}"
 [[ $# -le 1 ]] || { echo 'Only one deployment action is accepted.' >&2; exit 2; }
-case "$ACTION" in deploy|status|logs|restart|rollback) ;; *) echo "Usage: $0 [deploy|status|logs|restart|rollback]" >&2; exit 2 ;; esac
+case "$ACTION" in deploy|status|logs|restart|rollback|repair-check|repair-pre-migration|complete-postmigration-check|complete-postmigration|complete-postmigration-reload-sample|complete-postmigration-archive-retained|complete-postmigration-postarchive-reload-sample|complete-postmigration-postarchive) ;; *) echo 'Unknown deployment action.' >&2; exit 2 ;; esac
 
+# Git trust checks select this checkout via cwd, never a caller's routed index,
+# gitdir/object/config environment. Subshell-only: do not mutate caller env or
+# shared config, and preserve the existing exact-main/CI/ancestry gates.
+git() (
+  for name in ${!GIT_@}; do unset "$name"; done
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_TEMPLATE_DIR='' GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+  command git "$@"
+)
 fail() { echo "[!] $*" >&2; exit 1; }
 quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 ssh_run() {
@@ -52,6 +61,120 @@ verify_release() {
   printf 'Verified release %s\nCI: %s\n' "$COMMIT" "$ci_url"
 }
 
+verify_repair_git() {
+  local baseline=6afaaa70d3467da4f17daaad44a99e2d36b9f991 path history
+  [[ "$SCRIPT_DIR" == "$(git rev-parse --show-toplevel)/infra/deploy" ]] || fail 'Repair entry must come from this exact clean checkout.'
+  [[ "$repository" == Xhhemoing/study-assistant-opening ]] || fail 'Repair requires the formal repository.'
+  git merge-base --is-ancestor "$baseline" "$COMMIT" || fail 'Repair baseline is not an ancestor.'
+  [[ "$baseline" != "$COMMIT" ]] || fail 'Repair requires new controls and an artifact at the same new commit.'
+  # The independently fetched exact main and reviewed local Git graph, not an
+  # artifact manifest or private operator note, establish control-only ancestry.
+  # Check EVERY parent edge too: application changes reverted at tip are refused.
+  history=$(git log --format= -m --name-only "$baseline..$COMMIT") || fail 'Could not inspect every repair parent diff.'
+  while IFS= read -r path; do
+    case "$path" in
+      infra/deploy/pm-capture-readonly.py|tests/tooling/hermes-pm-capture.test.mjs|tests/tooling/hermes_pm_capture_test.py)
+        [[ "$ACTION" == complete-postmigration* ]] || fail 'PM capture paths are completion-only.' ;;
+      infra/deploy/hermes-entry.py|infra/deploy/hermes-db.mjs|infra/deploy/hermes-git-environment.mjs|infra/deploy/verify-release-artifact.mjs|scripts/check-new-fixed-colors.mjs|scripts/check-new-fixed-colors.test.mjs|scripts/ci/checks.py|scripts/ci/test_checks.py|tests/tooling/release-artifact.test.mjs)
+        [[ "$ACTION" == complete-postmigration* ]] || fail 'Additional control paths are completion-only.' ;;
+      infra/deploy/deploy-hermes.sh|infra/deploy/hermes-peer-broker.py|infra/deploy/hermes-release.sh|infra/deploy/hermes-supervisor.mjs|infra/deploy/hermes-writer-control.mjs|infra/deploy/hermes-writer-state.py|infra/deploy/hermes-config-durability.mjs|tests/tooling/hermes-*.mjs|tests/tooling/hermes_*test.py) ;;
+      *) fail 'Repair ancestry contains changes outside the reviewed control/test closure.' ;;
+    esac
+  done < <(printf '%s\n' "$history" | sort -u | grep -v '^$')
+  git diff --quiet "$baseline" "$COMMIT" -- . ':!infra/deploy' ':!tests/tooling' ':!scripts/check-new-fixed-colors.mjs' ':!scripts/check-new-fixed-colors.test.mjs' ':!scripts/ci/checks.py' ':!scripts/ci/test_checks.py' || fail 'Repair application/migration bytes differ from baseline.'
+}
+
+# Execute reviewed Python bytes in memory over strict SSH: no remote entry
+# extraction, temporary directory, chmod, transition, fsync or crash handler.
+# This is eligibility scope only; it does not claim DB visibility or readiness.
+if [[ "$ACTION" == repair-check ]]; then
+  verify_release
+  verify_repair_git
+  [[ -n "$EXPLICIT_HOST" ]] || fail 'Explicit HOST is required for repair check.'
+  check_code="import fcntl,types,sys
+sources=$(python3 -c 'import json,sys; from pathlib import Path; print(json.dumps({name: (Path(sys.argv[1])/name).read_text() for name in ("hermes-trusted-loader.py", "hermes-writer-exec.py", "hermes-peer-broker.py", "hermes-writer-state.py")}))' "$SCRIPT_DIR")
+bootstrap=types.ModuleType('bootstrap')
+exec(sources['hermes-trusted-loader.py'], bootstrap.__dict__)
+class MemorySourceLoader(bootstrap.SourceLoader):
+    def verify(self):
+        # Reviewed checkout bytes arrive over SSH, never as remote source files.
+        # Keep the real loader/cache/dependency injection and exact inventory;
+        # state and manager still use the descriptor-based DAC readers.
+        if set(sources) != set(bootstrap.SOURCES) or any(not isinstance(value,str) for value in sources.values()):
+            raise ValueError('Invalid memory source inventory')
+        captured={name: (value.encode(),None) for name,value in sources.items()}
+        if self.sources is not None and captured != self.sources:
+            raise ValueError('Memory source inventory changed')
+        self.sources=captured
+loader=MemorySourceLoader('/reviewed-memory')
+m=loader.load('hermes-writer-state.py')
+fd=bootstrap.safe_open(sys.argv[1]+'/deploy.lock',private=True)
+fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+print(m.json.dumps(m.repair_check(*sys.argv[1:])))"
+  ssh_run "/usr/bin/python3 -I -S -B -c $(quote "$check_code") $(quote "$DEPLOY_STATE") $(quote "$CURRENT_LINK") $(quote "$SYSTEMD_DIR")"
+  exit
+fi
+
+if [[ "$ACTION" == complete-postmigration* ]]; then
+  # Controls follow the existing exact-main/clean/latest-push-CI Git trust path.
+  # The payload remains the already verified signed e5 release and retained gzip.
+  [[ -z "${PI_CODING_AGENT:-}${PI_SESSION_ID:-}${PI_SESSION_FILE:-}" ]] || fail 'Completion intake must run outside Pi in an independently authorized scope.'
+  [[ "${COMPLETION_SCOPE:-}" == 20261110T081511-846613 && -n "$EXPLICIT_HOST" ]] || fail 'Explicit completion incident and HOST required.'
+  [[ "${COMPLETION_RELEASE:-}" == "$RELEASES_DIR/e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf-"* && "${COMPLETION_ARCHIVE:-}" == /* ]] || fail 'Existing e5 release and retained gzip required.'
+  for value in "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$COMPLETION_RELEASE" "$COMPLETION_ARCHIVE"; do
+    [[ "$value" =~ ^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$ && "$value" != *'/..'* ]] || fail 'Unsafe completion path.'
+  done
+  [[ "$MIN_FREE_KB" =~ ^[1-9][0-9]*$ && "$MIN_FREE_KB" -ge 6291456 && -z "$ARTIFACT_RUN_ID" && -z "$TARGET_SHA" ]] || fail 'Completion forbids artifact download/target override or lower capacity floor.'
+  verify_release
+  verify_repair_git
+  if [[ "$ACTION" == complete-postmigration-check ]]; then
+    check_code="$(node "$SCRIPT_DIR/../../tests/tooling/hermes-completion-precheck.mjs")"
+    # Full signed gzip/payload comparison may be cold IO; do not retain a
+    # hidden short shell deadline around the reviewed readonly Python program.
+    command='timeout --signal=KILL 2700s /usr/bin/python3 -I -S -B -'
+    for value in "$DEPLOY_STATE" "$CURRENT_LINK" "$SYSTEMD_DIR" "$COMPLETION_RELEASE" "$DIR/.env.production" "$COMPLETION_ARCHIVE" "$WORKER_CONFIG_DIR"; do command+=" $(quote "$value")"; done
+    ssh_run "$command" <<< "$check_code"
+  else
+    [[ "${COMPLETION_CONFIRM:-}" == complete-20261110T081511-846613-existing-e5 ]] || fail 'Explicit incident completion execution confirmation required.'
+    controls=(hermes-release.sh hermes-supervisor.mjs hermes-config-durability.mjs hermes-db.mjs hermes-health.mjs hermes-writer-control.mjs hermes-trusted-loader.py hermes-writer-state.py hermes-writer-exec.py hermes-peer-broker.py)
+    paths=(); for value in "${controls[@]}"; do paths+=("infra/deploy/$value"); done
+    # Only reviewed committed controls, never a newly downloaded payload.
+    control_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-completion.XXXXXXXX.tar.gz")"
+    trap 'rm -f -- "$control_archive"' EXIT
+    git -c core.autocrlf=false -c core.eol=lf -c tar.umask=0022 archive --format=tar.gz --output="$control_archive" "$COMMIT" "${paths[@]}"
+    [[ $(wc -c < "$control_archive") -le 1048576 ]] || fail 'Completion control transport exceeds 1 MiB.'
+    verify_release
+    remote_command='entry=$(mktemp -d /tmp/aistudy-entry.XXXXXXXX) || exit; '
+    remote_command+="/usr/bin/python3 -I -S -B -c $(quote "$(< "$SCRIPT_DIR/hermes-entry.py")") extract-git \"\$entry\" || exit; "
+    mode=completion-launch
+    if [[ "$ACTION" == complete-postmigration-reload-sample ]]; then mode=completion-reload-samples; fi
+    if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then mode=completion-retained-archive; fi
+    if [[ "$ACTION" == complete-postmigration-postarchive-reload-sample ]]; then mode=completion-postarchive-reload-samples; fi
+    if [[ "$ACTION" == complete-postmigration-postarchive ]]; then mode=completion-postarchive-launch; fi
+    remote_command+="if node \"\$entry/hermes-supervisor.mjs\" $mode \"\$entry/hermes-release.sh\""
+    for value in complete-postmigration "$DIR" "$RELEASES_DIR" "$CURRENT_LINK" "$DEPLOY_STATE" "$BACKUP_DIR" "$SYSTEMD_DIR" "$WORKER_CONFIG_DIR" "$MIN_FREE_KB" e5bab172cee9b7a3bf6b165b01f8d56aea7e66cf "$COMPLETION_RELEASE" 4136bafe71484359263128af46d8ddadfe7e9e0227a0976d3f3858f3b9d2b0a0 "$COMPLETION_ARCHIVE"; do remote_command+=" $(quote "$value")"; done
+    # Retain the private entry for the full independent service lifetime, even
+    # on SSH loss. No caller EXIT trap may remove an executing service's controls.
+    # Capture from this action's real entry, using reviewed source bytes in
+    # memory, not another target file/SSH session or a caller-supplied helper.
+    # Command substitution strips trailing newlines; retain the exact reviewed
+    # helper bytes by appending and then removing a non-newline sentinel.
+    metadata_code="$(cat -- "$SCRIPT_DIR/pm-capture-readonly.py" && printf x)"
+    metadata_code="${metadata_code%x}"
+    capture_stage=C
+    if [[ "$ACTION" == complete-postmigration-reload-sample || "$ACTION" == complete-postmigration-postarchive-reload-sample ]]; then capture_stage=A; fi
+    if [[ "$ACTION" == complete-postmigration-archive-retained ]]; then capture_stage=B; fi
+    sample_phase_arg=''
+    if [[ "$ACTION" == complete-postmigration-postarchive* ]]; then sample_phase_arg=' --sample-phase postarchive'; fi
+    remote_command+='; then action_rc=0; else action_rc=$?; fi; '
+    # Helper owns the leading separator and strict frame; prior stderr is untouched.
+    remote_command+="if /usr/bin/python3 -I -S -B -c $(quote "$metadata_code") target --stage $(quote "$capture_stage") --entry \"\$entry\" --state $(quote "$DEPLOY_STATE")$sample_phase_arg >&2; then capture_rc=0; else capture_rc=\$?; fi; "
+    remote_command+='if [ "$action_rc" != 0 ]; then exit "$action_rc"; fi; exit "$capture_rc"'
+    ssh_run "$remote_command" < "$control_archive"
+  fi
+  exit
+fi
+
 remote_archive=''
 local_archive=''
 artifact_directory=''
@@ -64,8 +187,12 @@ cleanup() {
   [[ -z "$artifact_directory" ]] || rm -rf -- "$artifact_directory"
 }
 trap cleanup EXIT
-if [[ "$ACTION" == deploy ]]; then
+if [[ "$ACTION" == deploy || "$ACTION" == repair-pre-migration ]]; then
   verify_release
+  if [[ "$ACTION" == repair-pre-migration ]]; then
+    verify_repair_git
+    [[ -n "$ARTIFACT_RUN_ID" ]] || fail 'Repair requires the attested new-commit artifact; source fallback is forbidden.'
+  fi
   if [[ -n "$ARTIFACT_RUN_ID" ]]; then
     [[ "$ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ && "$TARGET_SHA" == "$COMMIT" ]] || fail 'Artifact deployment requires explicit run ID and matching TARGET_SHA.'
     [[ "$repository" == Xhhemoing/study-assistant-opening ]] || fail 'Artifact source must be the formal repository.'
@@ -76,7 +203,7 @@ if [[ "$ACTION" == deploy ]]; then
     local_archive="$artifact_directory/payload/release.tar.gz"
     # Control-plane scripts come from reviewed Git, NOT from the downloaded blob.
     control_archive="$(mktemp "${TMPDIR:-/tmp}/aistudy-control.XXXXXXXX.tar.gz")"
-    git -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz --output="$control_archive" "$COMMIT" infra/deploy
+    git -c core.autocrlf=false -c core.eol=lf -c tar.umask=0022 archive --format=tar.gz --output="$control_archive" "$COMMIT" infra/deploy
     [[ "$(git ls-remote "$DEPLOY_REMOTE" refs/heads/feat/opening-release | cut -f1)" == "$COMMIT" ]] || fail 'Release tip changed while verifying artifact.'
   else
     [[ -z "$TARGET_SHA" || "$TARGET_SHA" == "$COMMIT" ]] || fail 'TARGET_SHA differs from HEAD.'

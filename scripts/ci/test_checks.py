@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from checks import allowed_doc, check_gate
+from checks import allowed_doc, check_gate, git_environment
 
 SCRIPT = Path(__file__).with_name("checks.py").resolve()
 REPO = SCRIPT.parents[2]
@@ -17,6 +17,14 @@ class ClassificationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        home = self.root / '.private-home'
+        for directory in (home, home / 'xdg', home / 'templates', home / 'hooks'):
+            directory.mkdir(exist_ok=True)
+        self.env = {**git_environment(), 'HOME': str(home), 'XDG_CONFIG_HOME': str(home / 'xdg'),
+                    'GIT_DIR': str(self.root / '.git'), 'GIT_WORK_TREE': str(self.root),
+                    'GIT_INDEX_FILE': str(self.root / '.git/index'), 'GIT_TEMPLATE_DIR': str(home / 'templates'),
+                    'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.hooksPath',
+                    'GIT_CONFIG_VALUE_0': str(home / 'hooks')}
         self.git("init", "-q")
         self.git("config", "user.email", "ci@example.invalid")
         self.git("config", "user.name", "CI test")
@@ -25,7 +33,7 @@ class ClassificationTests(unittest.TestCase):
         self.base = self.commit()
 
     def git(self, *args):
-        return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE).decode().strip()
+        return subprocess.check_output(["git", *args], cwd=self.root, env=self.env, stderr=subprocess.PIPE).decode().strip()
 
     def put(self, path, text):
         p = self.root / path
@@ -40,7 +48,7 @@ class ClassificationTests(unittest.TestCase):
     def run_check(self, mode, base=None):
         return subprocess.run(
             ["python3", str(SCRIPT), mode], cwd=self.root,
-            env={**os.environ, "DIFF_BASE": self.base if base is None else base,
+            env={**self.env, "DIFF_BASE": self.base if base is None else base,
                  "DIFF_HEAD": self.git("rev-parse", "HEAD"),
                  "GITHUB_OUTPUT": str(self.root / ".git/output")},
             text=True, capture_output=True,
