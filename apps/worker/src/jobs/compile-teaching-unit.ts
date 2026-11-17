@@ -52,6 +52,8 @@ export type TeachingGenerateStatus =
   | "stale";
 
 export type CompileTeachingUnitDeps = {
+  /** Separate example operation: never enters the legacy whole-lesson status machine. */
+  exampleHandler?: (job: OpeningJobRecord, payload: unknown) => Promise<unknown>;
   /** Explicit operator kill switch; false fails before creating content or spending budget. */
   enabled?: boolean;
   budget: Pick<OpeningBudgetRepository, "reserve" | "release" | "claimExecution" | "settle" | "markUnknown">;
@@ -223,6 +225,10 @@ export function createCompileTeachingUnitHandler(deps: CompileTeachingUnitDeps) 
     job: OpeningJobRecord,
     payload: unknown,
   ): Promise<unknown> {
+    if (payload && typeof payload === "object" && "mode" in payload && payload.mode === "example") {
+      if (!deps.exampleHandler) throw new Error("example generation handler is unavailable");
+      return deps.exampleHandler(job, payload);
+    }
     const body = parsePayload(payload);
     const scope = openingJobScope(job);
     const operationId = `compile-teaching-unit:${job.id}`;

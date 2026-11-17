@@ -58,6 +58,7 @@ export {
 export { solveTeachingBlind, independentTeachingSolver, teachingBlindSolveMatchesCurrent, type TeachingBlindSolveConfig, type TeachingBlindSolveIdentity, type TeachingBlindSolveReceipt, type TeachingModelIdentity } from "./opening/teaching-blind-solve";
 export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type ModelTaskGroup, type ModelTaskKey, type ModelTaskSpec } from "./opening/model-tasks";
 export { buildAnswerGradingInput } from "./opening/answer-grading";
+export { buildWorkedExampleProviderInput, parseWorkedExampleOutput, type WorkedExampleProducerInput } from "./opening/worked-example-producer";
 export { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "./opening/ai-grading-service";
 export { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_TOOLS, SYSTEM_QUERY_LIMITS, type SystemQueryReader, type SystemQueryService, type SystemQueryFocus, type SystemQueryClock, type SystemQueryPlanner } from "./opening/system-query-agent";
 export {

@@ -57,6 +57,7 @@ import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { studentCopy } from "./student-copy";
 import { buildTeachingStudyUnits, saveTeachingUnitPosition, teachingStudyUnitText, teachingUnitForBlock, type TeachingStudyUnit } from "./study-unit-focus";
 import { unitProgress } from "./unit-progress";
+import { TeachingExampleControl } from "./teaching-example-control";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import type { ExplicitRegradeOwner } from "./explicit-regrade-client";
 
@@ -458,6 +459,7 @@ export function TeachingWorkspace({
   );
 
   const showBlockCommands = liveActivity.status !== "completed" && schemaOk;
+  const exampleTarget = currentUnit?.blocks.find(block => block.role === "example" && block.blockType === "example");
   const askScope = `${liveActivity.id}:${contentVersion}:${currentUnit?.id ?? ""}`;
   const currentAskRequest = askRequest?.scope === askScope ? askRequest : undefined;
   const askInCompanion = (text: string) => {
@@ -492,7 +494,7 @@ export function TeachingWorkspace({
       <button type="button" className={ui.secondary} onClick={toggleWholeLesson} aria-pressed={showAll}>{showAll ? "只看当前单元" : "查看整节内容"}</button>
       {liveInit.goals.length ? <details className="text-xs leading-6 text-text-2"><summary className="cursor-pointer">本节目标</summary><ul className="mt-2 list-disc space-y-1 pl-4">{liveInit.goals.map(goal => <li key={goal.goalId}>{goal.statement}</li>)}</ul></details> : null}
     </div> },
-    { id: "help", label: "学习帮助", content: currentUnit && showBlockCommands ? <BlockCommands key={toolsContext.blockId} activityId={liveActivity.id} blockId={toolsContext.blockId ?? currentUnit.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} disabled={positionBusy} whyAvailable={WHY_ASSIST_AVAILABLE} api={commandApi} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} explanationContext={assistantContext.context} onAskExplanation={askInCompanion} defaultOpen compact /> : <p className="text-xs leading-6 text-text-3">当前没有可以调整的学习内容。</p> },
+    { id: "help", label: "学习帮助", content: currentUnit && showBlockCommands ? <div className="space-y-3">{exampleTarget ? <TeachingExampleControl target={{ activityId: liveActivity.id, documentId: liveInit.documentId, revisionNumber: liveInit.revisionNumber, blockId: exampleTarget.blockId, contentVersion }} onPublished={handleBlockReread} /> : null}<BlockCommands key={toolsContext.blockId} activityId={liveActivity.id} blockId={toolsContext.blockId ?? currentUnit.id} contentVersion={contentVersion} pathVersion={pathVersion} returnDisabled={returnDisabled} disabled={positionBusy} whyAvailable={WHY_ASSIST_AVAILABLE} api={commandApi} onSuccess={applySuccess} onConflict={handleConflict} onReread={handleBlockReread} explanationContext={assistantContext.context} onAskExplanation={askInCompanion} defaultOpen compact /></div> : <p className="text-xs leading-6 text-text-3">当前没有可以调整的学习内容。</p> },
     { id: "materials", label: "资料与引用", content: <div className="space-y-3">
       {liveInit.sourceRefs.length ? <ul className="space-y-3">{liveInit.sourceRefs.map((ref, index) => {
         const label = formatTeachingSourceLabel(ref, sourceNameById);
