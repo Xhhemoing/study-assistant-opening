@@ -156,9 +156,11 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
         if (input.activityId && !activity || input.taskId && (!task || task.status !== "pending")) throw learningError("NOT_FOUND", "原活动或待办不存在，请重新读取。");
         if (activity && task && selectLearningRecoveryTask(await createOpeningPlansRepository(db).listTasks(scope), activity)?.id !== input.taskId) throw learningError("CONFLICT", "所选任务不属于原活动，请重新读取真实恢复位置。");
         if (activity && await readOpeningSpanTutorOriginChange(db, scope, String(activity.id))) throw learningError("CONFLICT", "原活动依据已变化，请打开原活动按最新记录重新选择。");
+        const agenda = activity?.course_id ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id)) : null;
+        if (agenda && !agenda.resumable && (input.action === "continue" || agenda.status === "cancelled" || agenda.status === "completed")) {
+          throw learningError("CONFLICT", `原学习位置需重新确认：${agenda.invalidationReasons.join("、") || agenda.status}`);
+        }
         if (input.action === "continue") {
-          const agenda = activity ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id)) : null;
-          if (agenda && !agenda.resumable) throw learningError("CONFLICT", `原学习位置需重新确认：${agenda.invalidationReasons.join("、") || agenda.status}`);
           return { href: activity ? activityHref(activity) : task ? `/opening/today?task=${task.id}` : "/opening/today", activityId: activity?.id ?? null, taskId: task?.id ?? null };
         }
         const capacity = await readOpeningLearningCapacity(tx, scope, now);

@@ -23,11 +23,15 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND ${options.retestReferences ? db`lower(a.checkpoint_json->'spanLesson'->>'retestId')=ANY(${options.retestReferences}::text[])`
         : options.spanOnly ? db`a.checkpoint_json->'spanLesson'->>'retestId' IS NULL` : db`true`}
       AND ${options.recoveryOnly ? db`(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId') IS NULL
-        OR EXISTS (SELECT 1 FROM opening_retest_activities r WHERE r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
-          AND r.course_id=a.course_id AND r.status IN ('accepted','in_progress')
-          AND lower(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId'))
-            =ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])))` : db`true`}
-      AND ${options.hasDecisionOnly ? db`EXISTS (SELECT 1 FROM opening_learning_decisions d WHERE d.workspace_id=a.workspace_id
+        OR EXISTS (SELECT 1 FROM opening_retest_activities r
+          LEFT JOIN opening_tasks rt ON rt.id=r.task_id AND rt.workspace_id=r.workspace_id AND rt.owner_user_id=r.owner_user_id
+          WHERE r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+            AND r.course_id=a.course_id AND r.status IN ('proposed','accepted','in_progress')
+            AND (rt.id IS NULL OR rt.status NOT IN ('done','skipped'))
+            AND lower(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId'))
+              =ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])))` : db`true`}
+      AND ${options.hasDecisionOnly ? db`(a.create_intent->>'protocol'='span-lesson-v1' OR a.goal_json ? 'courseRoute')
+        AND EXISTS (SELECT 1 FROM opening_learning_decisions d WHERE d.workspace_id=a.workspace_id
         AND d.owner_user_id=a.owner_user_id AND d.layer='activity' AND d.target_id=a.id)` : db`true`}
       AND ${options.references?.length ? db`a.id::text=ANY(${options.references}::text[])` : db`true`}`;
   return rows.map(row => {

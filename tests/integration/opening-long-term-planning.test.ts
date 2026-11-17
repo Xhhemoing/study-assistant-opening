@@ -132,6 +132,53 @@ it.each(["cancelled", "completed"] as const)("offers the older usable activity h
   const exhausted = await repo().read(f.scope, date);
   expect(exhausted.recovery).toMatchObject({ activityId: null, href: null, agenda: null });
 });
+async function seedActivityDecision(activityId: string) {
+  const receipt = {
+    layer: "activity", targetId: activityId, stateVersion: "rev:0", goalVersion: "span-unit-v1",
+    intentVersion: JSON.stringify({ intent: DEFAULT_STUDY_SESSION_INTENT }), policyVersion: "span-teaching-v2",
+    selectedAction: "create:self-study", reasonCodes: ["explicit_request"], evidenceRefs: ["course:test"],
+    candidates: [{ action: "create:self-study", eligible: true, reasonCodes: ["explicit_request"], evidenceRefs: ["course:test"] }],
+    sourceVersions: {}, dataAsOf: now.toISOString(), invalidationConditions: ["state_changed"],
+  };
+  await f.sql`INSERT INTO opening_learning_decisions(id,workspace_id,owner_user_id,layer,target_id,client_key,receipt)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},'activity',${activityId},${randomUUID()},${f.sql.json(receipt)})`;
+}
+it.each(["cancelled", "completed", "declined", "superseded"] as const)(
+  "prefers older usable activity over decision-bearing %s retest and blocks continue/shorten when only that decision-bearing activity remains",
+  async retestStatus => {
+    const c = await course(), older = randomUUID();
+    await budget();
+    await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,content_version,client_key,create_intent,updated_at)
+      VALUES(${older},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},'paused','goal','Older usable activity',1,${randomUUID()},'{}'::jsonb,'2026-11-01T00:00:00Z')`;
+    const lesson = await delayedLesson(c.id);
+    await seedActivityDecision(lesson.activityId);
+    await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-03T00:00:00Z' WHERE id=${lesson.activityId}`;
+    await f.sql`UPDATE opening_retest_activities SET status=${retestStatus} WHERE id=${lesson.retestId}`;
+    const first = await repo().read(f.scope, date);
+    expect(first.recovery).toMatchObject({ activityId: older, href: `/opening/courses/${c.id}/study?activity=${older}` });
+    await f.sql`UPDATE opening_teaching_activities SET status='completed' WHERE id=${older}`;
+    const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
+    const second = await repo().read(f.scope, date);
+    expect(second.recovery).toMatchObject({
+      activityId: lesson.activityId,
+      href: null,
+      agenda: { activityId: lesson.activityId, resumable: false, status: retestStatus === "completed" ? "completed" : "cancelled" },
+    });
+    expect(second.recovery.agenda?.resumable).toBe(false);
+    await expect(repo().recover(f.scope, { action: "continue", activityId: lesson.activityId, taskId: null, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("原学习位置需重新确认") });
+    await expect(repo().recover(f.scope, { action: "shorten", activityId: lesson.activityId, taskId: null, minutes: 5, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("原学习位置需重新确认") });
+    expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
+  });
+it("does not leak a non-agenda decision-bearing activity with a closed retest into overview recovery", async () => {
+  const c = await course(), retestId = randomUUID(), nonAgendaId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,requirement_key,evidence_cycle_id,status,version)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},${SPAN_SKILL_LABEL},${SPAN_REQUIREMENT_KEY},${randomUUID()},'cancelled',2)`;
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,content_version,client_key,create_intent,goal_json,checkpoint_json)
+    VALUES(${nonAgendaId},${f.scope.workspaceId},${f.scope.ownerUserId},${c.id},'paused','goal','Non-agenda decision activity',1,${randomUUID()},'{}'::jsonb,'{}'::jsonb,${f.sql.json({ spanLesson: { retestId } })})`;
+  await seedActivityDecision(nonAgendaId);
+  const overview = await repo().read(f.scope, date);
+  expect(overview.recovery).toMatchObject({ activityId: null, href: null, agenda: null });
+});
 it.each(["accepted", "in_progress"] as const)("keeps the actual delayed lesson target reachable while its retest is %s", async status => {
   const c = await course(), lesson = await delayedLesson(c.id);
   await f.sql`UPDATE opening_retest_activities SET status=${status} WHERE id=${lesson.retestId}`;

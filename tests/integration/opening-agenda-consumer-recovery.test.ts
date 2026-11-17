@@ -203,6 +203,7 @@ it.each(["cancelled", "deferred"] as const)("does not revive a %s retest in eith
         invalidationReasons: expect.arrayContaining([status === "cancelled" ? "retest_cancelled_or_unavailable" : "retest_deferred"]),
         suggestion: { activityKind: "full_explain", reasonCode: "repeated_assisted_error", focusObservationId: latest.observationId } });
     }
+    expect(recovered.today.recovery.href).toBeNull();
     await expect(continueOriginal(ids, recovered.today)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(await persisted()).toEqual(before);
   }
