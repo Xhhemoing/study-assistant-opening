@@ -6,12 +6,13 @@ import { createCourseRouteClient, CourseRouteRequestError, type CourseRouteClien
 import { ui } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { CourseRouteVerificationControl } from "./course-route-verification-control";
+import { conversationObjectHref } from "../assistant/conversation-links";
 const commandSchema = z.discriminatedUnion("kind", [z.object({ kind: z.literal("next"), input: courseRouteNextSchema }), z.object({ kind: z.literal("retest"), input: courseRouteRetestScheduleSchema })]);
 type Command = z.infer<typeof commandSchema>;
 function key(id: string) { return `aistudy:route-next:${id}`; }
 function restore(activityId: string): Command | null { try { const raw = sessionStorage.getItem(key(activityId)); if (!raw) return null; const decoded: unknown = JSON.parse(raw), value = commandSchema.safeParse(decoded); if (value.success && value.data.input.activityId === activityId) return value.data; const legacy = courseRouteNextSchema.safeParse(decoded); return legacy.success && legacy.data.activityId === activityId ? { kind: "next", input: legacy.data } : null; } catch { return null; } }
-export function CourseRouteNextControl(props: { activity: TeachingActivity; client?: CourseRouteClient; onNavigate?: (href: string) => void }) { return props.activity.routeManaged && props.activity.courseId ? <NextControl key={props.activity.id} {...props} courseId={props.activity.courseId} /> : null; }
-function NextControl({ activity, courseId, client: suppliedClient, onNavigate = href => window.location.assign(href) }: { activity: TeachingActivity; courseId: string; client?: CourseRouteClient; onNavigate?: (href: string) => void }) {
+export function CourseRouteNextControl(props: { activity: TeachingActivity; originalConversationId?: string | null; client?: CourseRouteClient; onNavigate?: (href: string) => void }) { return props.activity.routeManaged && props.activity.courseId ? <NextControl key={props.activity.id} {...props} courseId={props.activity.courseId} /> : null; }
+function NextControl({ activity, courseId, originalConversationId, client: suppliedClient, onNavigate = href => window.location.assign(href) }: { activity: TeachingActivity; courseId: string; originalConversationId?: string | null; client?: CourseRouteClient; onNavigate?: (href: string) => void }) {
   const client = useMemo(() => suppliedClient ?? createCourseRouteClient(), [suppliedClient]);
   const [pending, setPending] = useState<Command | null>(() => restore(activity.id));
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [result, setResult] = useState<CourseRouteActionResult | null>(null), [retest, setRetest] = useState<CourseRouteRetestReceipt | null>(null), [storageWarning, setStorageWarning] = useState(false);
@@ -34,7 +35,7 @@ function NextControl({ activity, courseId, client: suppliedClient, onNavigate = 
         } else command = { kind, input };
         setPending(command); try { sessionStorage.setItem(key(activity.id), JSON.stringify(command)); } catch { setStorageWarning(true); }
       }
-      if (command.kind === "next") { const value = await client.next(courseId, command.input); if (active.current) { setResult(value); if (value.kind === "ready") onNavigate(value.href); } }
+      if (command.kind === "next") { const value = await client.next(courseId, command.input); if (active.current) { setResult(value); if (value.kind === "ready") onNavigate(conversationObjectHref(value.href, originalConversationId)); } }
       else { const value = await client.scheduleRetest(courseId, command.input); if (active.current) setRetest(value); }
       setPending(null); try { sessionStorage.removeItem(key(activity.id)); } catch { /* Verified receipt resolves the command in memory. */ }
     } catch (reason) {
@@ -49,10 +50,10 @@ function NextControl({ activity, courseId, client: suppliedClient, onNavigate = 
     <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={busy || requirementChanged || Boolean(pending && pending.kind !== "next")} onClick={() => void execute("next")}>{busy && pending?.kind === "next" ? "正在核对…" : pending?.kind === "next" ? "重新确认这次下一步" : "核对结果并安排下一步"}</button><button type="button" className={ui.quiet} disabled={busy || requirementChanged || Boolean(pending && pending.kind !== "retest")} onClick={() => void execute("retest")}>{pending?.kind === "retest" ? "重新确认这次复测" : "安排3天后复测"}</button></div>
     {pending ? <p role="status" className="text-xs text-warn">{pending.kind === "retest" ? "复测安排结果尚未确认" : "下一步结果尚未确认"}；原活动、版本和证据引用已保留。</p> : null}
     {storageWarning ? <p className="text-xs text-warn">恢复信息无法保存，请保留本页；刷新后可能无法恢复这次请求。</p> : null}
-    {result?.kind === "choice" ? <div className="space-y-2"><p role="status" className="text-sm text-text-2">{result.message}</p><a className={ui.secondary} href={result.href}>查看并处理下一步</a></div> : null}
-    {retest ? <div role="status" className="space-y-2"><p className="text-sm text-text-2">{retestCancelled ? "复测已取消或失效，原任务与记录保留，不会重新安排。" : retestDone ? "已完成的复测记录保留，本次没有新建安排。" : `复测已安排，最早开始：${new Date(retest.notBeforeAt).toLocaleString("zh-CN")}`}</p>{!retestCancelled ? <a className={ui.secondary} href={retest.href}>{retestDone ? "查看复测记录" : "打开复测任务（到时间后可开始）"}</a> : <a className={ui.quiet} href={`/opening/courses/${courseId}?tab=progress#course-learning-records`}>查看学习记录</a>}</div> : null}
+    {result?.kind === "choice" ? <div className="space-y-2"><p role="status" className="text-sm text-text-2">{result.message}</p><a className={ui.secondary} href={conversationObjectHref(result.href, originalConversationId)}>查看并处理下一步</a></div> : null}
+    {retest ? <div role="status" className="space-y-2"><p className="text-sm text-text-2">{retestCancelled ? "复测已取消或失效，原任务与记录保留，不会重新安排。" : retestDone ? "已完成的复测记录保留，本次没有新建安排。" : `复测已安排，最早开始：${new Date(retest.notBeforeAt).toLocaleString("zh-CN")}`}</p>{!retestCancelled ? <a className={ui.secondary} href={conversationObjectHref(retest.href, originalConversationId)}>{retestDone ? "查看复测记录" : "打开复测任务（到时间后可开始）"}</a> : <a className={ui.quiet} href={conversationObjectHref(`/opening/courses/${courseId}?tab=progress#course-learning-records`, originalConversationId)}>查看学习记录</a>}</div> : null}
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
-    <CourseRouteVerificationControl courseId={courseId} activityId={activity.id} client={client} disabled={busy || Boolean(pending)} onConfirmed={() => { setRequirementChanged(true); setResult(null); }} />
+    <CourseRouteVerificationControl courseId={courseId} activityId={activity.id} originalConversationId={originalConversationId} client={client} disabled={busy || Boolean(pending)} onConfirmed={() => { setRequirementChanged(true); setResult(null); }} />
     {requirementChanged ? <p role="status" className="text-xs text-text-2">要求版本已更新，请从课程路线明确开始新版本活动；本节答案和评价原样保留。</p> : null}
   </section>;
 }

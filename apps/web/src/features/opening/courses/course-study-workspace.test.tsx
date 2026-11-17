@@ -19,6 +19,7 @@ vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.cours
 vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ kind: "activity", activity: data.activity })) }));
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
 vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock("./course-route-next-control", () => ({ CourseRouteNextControl: ({ originalConversationId }: { originalConversationId?: string | null }) => createElement("p", { "data-route-conversation": originalConversationId ?? "" }) }));
 vi.mock("../teaching/teaching-workspace", async () => ({ ...(await vi.importActual("../teaching/teaching-workspace")), TeachingContinueEntry: ({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) => {
   useEffect(() => { data.teachingMount(); }, []);
   return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
@@ -138,6 +139,45 @@ it("keeps fallback practice and teaching surfaces mounted while the lesson is no
   expect(data.teachingMount).toHaveBeenCalledOnce();
   expect(data.practiceMount).toHaveBeenCalledOnce();
   expect(api.getTeachingResume).toHaveBeenCalledOnce();
+});
+
+it("passes the original conversation into the route next control", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity: { ...data.activity, routeManaged: true } });
+  const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={data.activity.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(host.querySelector("[data-route-conversation]")?.getAttribute("data-route-conversation")).toBe(conversation);
+});
+
+it("carries the original conversation from a read-only retest to its learning records", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const courseId = data.course.id, activityId = data.activity.id;
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({
+    kind: "retest-review",
+    task: {
+      id: activityId, title: "补测记录", minutes: 15, dueAt: null, priority: 1, status: "done",
+      retest: { candidateId: activityId, activityId, courseId, skillLabel: "矩阵", prompt: "原补测题干", recommendedAt: null },
+    },
+  });
+  const api = {} as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={courseId} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  const link = [...host.querySelectorAll("a")].find(item => item.textContent === "查看学习记录");
+  expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + "?conversation=" + conversation + "#course-learning-records");
+  expect(host.textContent).toContain("补测已完成 · 只读回顾");
+});
+
+it("carries the original conversation from study admission back to the route choice", async () => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const courseId = data.course.id;
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({
+    kind: "route-choice",
+    choice: { kind: "choice", reason: "scope_unconfirmed", message: "请核对课程路线", courseId,
+      href: "/opening/courses/" + courseId + "#course-learning-route", requirementIds: [] },
+  });
+  const api = {} as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={courseId} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  const link = [...host.querySelectorAll("a")].find(item => item.textContent === "核对课程路线");
+  expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + "?conversation=" + conversation + "#course-learning-route");
 });
 
 it("waits for task admission before requesting the bound activity checkpoint", async () => {
