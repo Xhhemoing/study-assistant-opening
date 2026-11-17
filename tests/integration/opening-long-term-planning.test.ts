@@ -172,7 +172,8 @@ it.each(["cancelled", "completed", "declined", "superseded"] as const)(
 it("blocks fallback task href and both continue/shorten when a delayed retest is deferred", async () => {
   const c = await course(); await budget();
   const lesson = await delayedLesson(c.id), linked = await task(c.id, 20);
-  await f.sql`UPDATE opening_retest_activities SET snoozed_until='2026-11-05T09:00:00Z' WHERE id=${lesson.retestId}`;
+  const futureSnooze = new Date(Date.now() + 86_400_000).toISOString();
+  await f.sql`UPDATE opening_retest_activities SET snoozed_until=${futureSnooze} WHERE id=${lesson.retestId}`;
   await f.sql`UPDATE opening_teaching_activities SET create_intent=create_intent || ${f.sql.json({ source: "task", taskId: linked.id })} WHERE id=${lesson.activityId}`;
   const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
   const overview = await repo().read(f.scope, date);

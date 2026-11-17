@@ -804,10 +804,14 @@ describe("course-bound exam sprint canonical bridge", () => {
   });
 
   it("closes unanswered exam-activity rows when a run finishes without answering", async () => {
-    const bound = await bind(), view = await start("diagnostic");
+    await bind();
+    const view = await start("diagnostic");
+    const [sprintRow] = await f.sql`SELECT id FROM opening_exam_sprints
+      WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId} LIMIT 1`;
+    const sprintId = String(sprintRow!.id);
     const activeRows = await f.sql`SELECT id,status,client_key FROM opening_teaching_activities
       WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId} AND course_id=${courseId}
-        AND client_key LIKE ${`exam-activity:${bound.binding!.sprintId}:%`}`;
+        AND client_key LIKE ${`exam-activity:${sprintId}:%`}`;
     expect(activeRows).toHaveLength(1);
     expect(activeRows[0]!.status).toBe("active");
 
@@ -815,7 +819,7 @@ describe("course-bound exam sprint canonical bridge", () => {
 
     const closedRows = await f.sql`SELECT id,status FROM opening_teaching_activities
       WHERE workspace_id=${f.scope.workspaceId} AND owner_user_id=${f.scope.ownerUserId} AND course_id=${courseId}
-        AND client_key LIKE ${`exam-activity:${bound.binding!.sprintId}:%`}`;
+        AND client_key LIKE ${`exam-activity:${sprintId}:%`}`;
     expect(closedRows).toHaveLength(1);
     expect(closedRows[0]!.status).toBe("completed");
   });
