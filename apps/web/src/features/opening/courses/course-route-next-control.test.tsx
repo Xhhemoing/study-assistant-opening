@@ -40,6 +40,5 @@ it.each([undefined, conversation])("keeps the original conversation %s on a next
   await render(api, activity, { originalConversationId });
   await act(async () => button("核对结果并安排下一步").click());
   const link = [...host.querySelectorAll("a")].find(item => item.textContent === "查看并处理下一步");
-  const suffix = originalConversationId ? "&conversation=" + originalConversationId : "";
   expect(link?.getAttribute("href")).toBe("/opening/courses/" + courseId + (originalConversationId ? "?conversation=" + originalConversationId : "") + "#course-learning-route");
 });
