@@ -70,3 +70,13 @@ it("does not replace a current activity with an old request failure", async () =
   await act(async () => old.reject(new Error("旧请求失败")));
   expect(container.textContent).toContain("当前活动"); expect(container.querySelector('[role="alert"]')).toBeNull();
 });
+
+it("hides the loading indicator when summary reading fails and retries cleanly", async () => {
+  getSummary.mockRejectedValueOnce(new Error("小结暂不可读")).mockResolvedValueOnce(summary("恢复后的小结"));
+  await render("same");
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain("小结暂不可读");
+  expect(container.textContent).not.toContain("正在读取学习小结…");
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  expect(container.textContent).toContain("恢复后的小结");
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});

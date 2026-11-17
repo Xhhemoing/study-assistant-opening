@@ -2,6 +2,7 @@ import { z } from "zod";
 import { headers } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
+import { validConversationId } from "../../../../../../features/opening/assistant/conversation-links";
 import { CourseStudyWorkspace } from "../../../../../../features/opening/courses/course-study-workspace";
 import { loadCourseStudyContext } from "../../../../../../features/opening/courses/server/course-study-context";
 import { courseStudyStandaloneActivity, parseCourseStudyPracticeEntry } from "../../../../../../features/opening/courses/course-study-query";
@@ -13,6 +14,9 @@ export default async function CourseStudyPage({ params, searchParams }: {
   const { id } = await params;
   const query = await searchParams;
   const { activity, task, retest, after } = query;
+  const conversation = z.string().uuid().safeParse(query.conversation);
+  const originalConversationId =
+    conversation.success && validConversationId(conversation.data) ? conversation.data : undefined;
   const request = new Request("http://opening.local/courses/study", { headers: await headers() });
   const standaloneActivity = courseStudyStandaloneActivity(query);
   if (standaloneActivity) {
@@ -21,7 +25,7 @@ export default async function CourseStudyPage({ params, searchParams }: {
       if (lesson.courseId !== id) notFound();
       const destination = new URLSearchParams({ lesson: lesson.activityId });
       if (lesson.retestId) destination.set("retest", lesson.retestId);
-      if (query.conversation !== undefined) destination.set("conversation", query.conversation);
+      if (originalConversationId !== undefined) destination.set("conversation", originalConversationId);
       redirect(`/opening/courses/${lesson.courseId}/study/span?${destination}`);
     }
   }
@@ -29,5 +33,5 @@ export default async function CourseStudyPage({ params, searchParams }: {
   const hasAnchor = query.block !== undefined || query.contentVersion !== undefined;
   const historicalAnchor = anchor.success ? { blockId: anchor.data.block, contentVersion: anchor.data.contentVersion } : undefined;
   const context = await loadCourseStudyContext(request, id);
-  return <CourseStudyWorkspace key={`${id}:${activity ?? ""}:${task ?? ""}:${retest ?? ""}:${after ?? ""}:${query.mode ?? "current"}:${query.exercise ?? ""}:${query.variant ?? ""}:${query.skillLabel ?? ""}:${query.requirementKey ?? ""}`} originalConversationId={query.conversation} historicalAnchor={historicalAnchor} historicalAnchorError={hasAnchor && !anchor.success ? "原单元链接不完整，请返回笔记核对，或明确选择继续当前断点。" : undefined} courseId={id} activityId={activity} taskId={task} retestId={retest} {...context} {...parseCourseStudyPracticeEntry(query)} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
+  return <CourseStudyWorkspace key={`${id}:${activity ?? ""}:${task ?? ""}:${retest ?? ""}:${after ?? ""}:${query.mode ?? "current"}:${query.exercise ?? ""}:${query.variant ?? ""}:${query.skillLabel ?? ""}:${query.requirementKey ?? ""}`} originalConversationId={originalConversationId} historicalAnchor={historicalAnchor} historicalAnchorError={hasAnchor && !anchor.success ? "原单元链接不完整，请返回笔记核对，或明确选择继续当前断点。" : undefined} courseId={id} activityId={activity} taskId={task} retestId={retest} {...context} {...parseCourseStudyPracticeEntry(query)} teachingCompileEnabled={isTeachingCompilerEnabled()} />;
 }

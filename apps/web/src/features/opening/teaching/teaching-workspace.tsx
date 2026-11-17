@@ -117,6 +117,17 @@ export type TeachingWorkspaceProps = {
   originalConversationId?: string | null;
 };
 
+function isActivityOrResumeInFlight(state: {
+  generateStatus: TeachingActivity["generateStatus"];
+  gates?: { job?: string };
+}): boolean {
+  return (
+    state.gates?.job === "in_flight" ||
+    state.generateStatus === "queued" ||
+    state.generateStatus === "generating"
+  );
+}
+
 /**
  * Usable gate: ready or needs_check with published (non-empty) blocks.
  * needs_check is admitted for learning with an explicit 「待核对」 affordance;
@@ -165,6 +176,23 @@ export function buildSourceNameMap(
     if (s.id && s.name) map[s.id] = s.name;
   }
   return map;
+}
+
+/** Final-unit CTA routes managed activities back to the course route tab while preserving conversation context. */
+export function teachingFinalUnitCompletionAction(
+  activity: Pick<TeachingActivity, "courseId" | "routeManaged">,
+  originalConversationId?: string | null,
+): { label: string; href: string } {
+  if (activity.routeManaged && activity.courseId) {
+    return {
+      label: "回到课程路线",
+      href: conversationObjectHref(`/opening/courses/${encodeURIComponent(activity.courseId)}?tab=units#course-learning-route`, originalConversationId),
+    };
+  }
+  return {
+    label: "结束练习",
+    href: conversationObjectHref(activity.courseId ? `/opening/courses/${encodeURIComponent(activity.courseId)}` : "/opening/today", originalConversationId),
+  };
 }
 
 export function TeachingWorkspace({
@@ -453,7 +481,7 @@ export function TeachingWorkspace({
         label: units[currentIndex + 1]?.questionBlockId ? "下一题" : "下一单元",
         disabled: positionBusy,
         onClick: () => { const next = units[currentIndex + 1]; if (next) void navigateUnit(next); },
-      } : { label: "结束练习", href: conversationObjectHref(liveActivity.courseId ? `/opening/courses/${liveActivity.courseId}` : "/opening/today", originalConversationId) },
+      } : teachingFinalUnitCompletionAction(liveActivity, originalConversationId),
     }),
     [liveActivity, contentVersion, liveInit.generationConfig, updateLiveActivity, onAttemptReady, onObservationReady, explicitRegrade, units, currentIndex, positionBusy, navigateUnit, originalConversationId],
   );
@@ -501,7 +529,7 @@ export function TeachingWorkspace({
         const numericVersion = ref.version == null || (typeof ref.version === "string" && !/^\d+$/.test(ref.version.trim())) ? null : Number(ref.version);
         const version = numericVersion != null && Number.isInteger(numericVersion) && numericVersion >= 0 ? numericVersion : null;
         return <li key={`${ref.sourceId}:${index}`} className="space-y-1 text-xs leading-6" data-source-ref={ref.sourceId}>
-          {version != null ? <a className="break-words font-medium text-accent underline underline-offset-4" href={sourceViewerHref(ref.sourceId, version, { page: ref.page })}>{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""}</a> : <p className="break-words font-medium text-text">{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""} · 引用版本待确认</p>}
+          {version != null ? <a className="break-words font-medium text-accent underline underline-offset-4" href={conversationObjectHref(sourceViewerHref(ref.sourceId, version, { page: ref.page }), originalConversationId)}>{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""}</a> : <p className="break-words font-medium text-text">{label.primary}{ref.page != null ? ` · 第 ${ref.page} 页` : ""} · 引用版本待确认</p>}
           <details className="text-text-3"><summary className="cursor-pointer">来源详情</summary><p className="break-all">资料标识：{ref.sourceId}</p><p>引用版本：{ref.version ?? "未知"}</p>{ref.chunkId ? <p className="break-all">原始片段：{ref.chunkId}</p> : null}</details>
         </li>;
       })}</ul> : <p className="text-xs leading-6 text-text-3">本节没有附带可定位的资料引用。</p>}
@@ -679,8 +707,21 @@ export function TeachingContinueEntry({
   const compileInFlight = useRef(false);
   const [compileBlocked, setCompileBlocked] = useState(false);
   const [compilerUnavailable, setCompilerUnavailable] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const activityRef = useRef(activity);
+  activityRef.current = activity;
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const autoOpenActivityId = useRef<string | null>(null);
 
   useEffect(() => {
+    if (autoOpenActivityId.current && autoOpenActivityId.current !== activityProp.id) {
+      autoOpenActivityId.current = null;
+    }
     setActivity(activityProp);
   }, [activityProp]);
 
@@ -690,13 +731,29 @@ export function TeachingContinueEntry({
 
   const updateResume = useCallback((next: LearningResume) => {
     setLiveResume(next);
-    setActivity(previous => ({ ...previous, status: next.status, generateStatus: next.generateStatus, contentVersion: next.contentVersion, pathVersion: next.pathVersion }));
-  }, []);
+    const prev = activityRef.current;
+    if (
+      prev.id === next.activityId &&
+      (prev.status !== next.status ||
+        prev.generateStatus !== next.generateStatus ||
+        prev.contentVersion !== next.contentVersion ||
+        prev.pathVersion !== next.pathVersion)
+    ) {
+      const updated: TeachingActivity = {
+        ...prev,
+        status: next.status,
+        generateStatus: next.generateStatus,
+        contentVersion: next.contentVersion,
+        pathVersion: next.pathVersion,
+      };
+      setActivity(updated);
+      onActivityUpdated?.(updated);
+    }
+  }, [onActivityUpdated]);
 
   const openWorkspaceFromResume = useCallback(
     async (resume: LearningResume) => {
-      setLiveResume(resume);
-      setActivity(previous => ({ ...previous, status: resume.status, generateStatus: resume.generateStatus, contentVersion: resume.contentVersion, pathVersion: resume.pathVersion }));
+      updateResume(resume);
       setWaitError(null);
 
       // Prefer resume.clientInit when present and usable.
@@ -707,6 +764,7 @@ export function TeachingContinueEntry({
           resume.clientInit,
         )
       ) {
+        autoOpenActivityId.current = null;
         setWorkspaceInit(resume.clientInit);
         setPhase("workspace");
         return;
@@ -718,28 +776,33 @@ export function TeachingContinueEntry({
         return;
       }
 
+      const targetId = activityRef.current.id;
       setWaitBusy(true);
       setPhase("wait_init");
       try {
-        const init = await api.getTeachingClientInit(activity.id);
+        const init = await api.getTeachingClientInit(targetId);
+        if (!mounted.current || activityRef.current.id !== targetId) return;
         if (
           isTeachingWorkspaceContentUsable(
             resume,
             init,
           )
         ) {
+          autoOpenActivityId.current = null;
           setWorkspaceInit(init);
           setPhase("workspace");
         } else {
           setWaitError("主讲内容尚未可用；请稍后再继续。断点与草稿仍保留。");
         }
       } catch (err) {
-        setWaitError(userFacingMessage(err, "这节讲解暂时打不开，请稍后重新读取。"));
+        if (mounted.current && activityRef.current.id === targetId) {
+          setWaitError(userFacingMessage(err, "这节讲解暂时打不开，请稍后重新读取。"));
+        }
       } finally {
-        setWaitBusy(false);
+        if (mounted.current) setWaitBusy(false);
       }
     },
-    [activity, api],
+    [api, updateResume],
   );
 
   const backToCard = useCallback(() => {
@@ -749,23 +812,36 @@ export function TeachingContinueEntry({
 
   // Re-read the resume so a finished job is seen; the cached one still says in_flight.
   const retryFromFreshResume = useCallback(async () => {
+    const targetId = activity.id;
     setWaitBusy(true);
     try {
-      const fresh = await api.getTeachingResume(activity.id);
+      const fresh = await api.getTeachingResume(targetId);
+      if (!mounted.current || activityRef.current.id !== targetId) return;
       setCompileBlocked(false);
       setWaitError(null);
-      setActivity(previous => ({ ...previous, status: fresh.status, generateStatus: fresh.generateStatus, contentVersion: fresh.contentVersion, pathVersion: fresh.pathVersion }));
-      setLiveResume(fresh);
+      updateResume(fresh);
       setWaitBusy(false);
-      if (phase === "wait_init") await openWorkspaceFromResume(fresh);
+      if (
+        phase === "wait_init" ||
+        (autoOpenActivityId.current === targetId &&
+          fresh.clientInit &&
+          isTeachingWorkspaceContentUsable(fresh, fresh.clientInit))
+      ) {
+        await openWorkspaceFromResume(fresh);
+      }
     } catch (err) {
-      setWaitBusy(false);
-      setWaitError(userFacingMessage(err, "无法刷新断点；不会伪造讲义。"));
+      if (mounted.current) {
+        setWaitBusy(false);
+        setWaitError(userFacingMessage(err, "无法刷新断点；不会伪造讲义。"));
+      }
     }
-  }, [activity.id, api, openWorkspaceFromResume, phase]);
+  }, [activity.id, api, openWorkspaceFromResume, phase, updateResume]);
 
-  const inFlight = activity.generateStatus === "queued" || activity.generateStatus === "generating"
-    || liveResume?.gates.job === "in_flight";
+  const activeResume = liveResume?.activityId === activity.id ? liveResume : null;
+  const inFlight =
+    activity.status !== "completed" &&
+    activity.status !== "skipped" &&
+    isActivityOrResumeInFlight(activeResume ?? activity);
   const compilerOff = !teachingCompileEnabled || compilerUnavailable;
   // Resume maps known failed/cancelled jobs to unknown, but those terminal states
   // permit a new user-requested compile; a genuinely unknown operation does not.
@@ -778,24 +854,95 @@ export function TeachingContinueEntry({
 
   const requestCompile = useCallback(async () => {
     if (compileInFlight.current || waitBusy || !canCompile) return;
+    const targetId = activity.id;
     compileInFlight.current = true;
     setWaitBusy(true);
     setWaitError(null);
     try {
-      const next = await api.requestTeachingCompile(activity.id, `compile:${Date.now().toString(36)}`);
+      const next = await api.requestTeachingCompile(targetId, `compile:${Date.now().toString(36)}`);
+      if (!mounted.current || activityRef.current.id !== targetId) return;
+      autoOpenActivityId.current = targetId;
       setActivity(next);
       onActivityUpdated?.(next);
-      setLiveResume(null);
-      setLiveResume(await api.getTeachingResume(activity.id));
+      const fresh = await api.getTeachingResume(targetId);
+      if (!mounted.current || activityRef.current.id !== targetId) return;
+      updateResume(fresh);
+      if (fresh.clientInit && isTeachingWorkspaceContentUsable(fresh, fresh.clientInit)) {
+        autoOpenActivityId.current = null;
+        setWorkspaceInit(fresh.clientInit);
+        setPhase("workspace");
+      } else if (!isActivityOrResumeInFlight(fresh)) {
+        autoOpenActivityId.current = null;
+      }
     } catch (err) {
-      setCompileBlocked(true);
-      if (err instanceof OpeningApiError && err.code === "CONFIGURATION") setCompilerUnavailable(true);
-      setWaitError(userFacingMessage(err, "生成请求未确认，请先重新读取状态；不会自动重试。"));
+      autoOpenActivityId.current = null;
+      if (mounted.current && activityRef.current.id === targetId) {
+        setCompileBlocked(true);
+        if (err instanceof OpeningApiError && err.code === "CONFIGURATION") setCompilerUnavailable(true);
+        setWaitError(userFacingMessage(err, "生成请求未确认，请先重新读取状态；不会自动重试。"));
+      }
     } finally {
       compileInFlight.current = false;
-      setWaitBusy(false);
+      if (mounted.current) setWaitBusy(false);
     }
-  }, [activity.id, api, onActivityUpdated, waitBusy, canCompile]);
+  }, [activity.id, api, onActivityUpdated, updateResume, waitBusy, canCompile]);
+
+  const updateResumeRef = useRef(updateResume);
+  updateResumeRef.current = updateResume;
+  const openWorkspaceRef = useRef(openWorkspaceFromResume);
+  openWorkspaceRef.current = openWorkspaceFromResume;
+
+  // Keep exponential-backoff polling active across both card and wait_init
+  // whenever a generation job is in flight; switching card <-> wait_init does not reset backoff.
+  const shouldPollInFlight = phase !== "workspace" && inFlight;
+  useEffect(() => {
+    if (!shouldPollInFlight) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 3000;
+    const startedAt = Date.now();
+    const targetId = activity.id;
+    const tick = async () => {
+      if (cancelled || !mounted.current || activityRef.current.id !== targetId) return;
+      try {
+        const next = await api.getTeachingResume(targetId);
+        if (cancelled || !mounted.current || activityRef.current.id !== targetId) return;
+        updateResumeRef.current(next);
+        if (next.clientInit && isTeachingWorkspaceContentUsable(next, next.clientInit)) {
+          if (autoOpenActivityId.current === targetId || phaseRef.current === "wait_init") {
+            autoOpenActivityId.current = null;
+            setWaitError(null);
+            setWorkspaceInit(next.clientInit);
+            setPhase("workspace");
+          }
+          return;
+        }
+        if (!isActivityOrResumeInFlight(next)) {
+          if (
+            (autoOpenActivityId.current === targetId || phaseRef.current === "wait_init") &&
+            (next.generateStatus === "ready" || next.generateStatus === "needs_check") &&
+            next.contentVersion > 0
+          ) {
+            autoOpenActivityId.current = null;
+            await openWorkspaceRef.current(next);
+          } else {
+            autoOpenActivityId.current = null;
+          }
+          return;
+        }
+      } catch {
+        // transient read failure: keep the current state and retry with backoff
+      }
+      if (cancelled || !mounted.current || Date.now() - startedAt > 10 * 60_000) return;
+      delay = Math.min(delay * 2, 30_000);
+      timer = setTimeout(() => { void tick(); }, delay);
+    };
+    timer = setTimeout(() => { void tick(); }, delay);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [shouldPollInFlight, activity.id, api]);
 
   const contentState = liveResume ?? activity;
   const contentUsable = isTeachingWorkspaceContentUsable(contentState, liveResume?.clientInit ?? workspaceInit);
@@ -806,7 +953,7 @@ export function TeachingContinueEntry({
     <p className="text-xs leading-6 text-text-2">{inFlight ? "生成任务仍在处理中；重新读取只查询状态，不会重复生成。" : compilerOff ? "主讲内容生成功能未开启；可以重新读取已有内容或暂停，不会自动重试生成。" : "尚无可用的主讲内容；不会记为已学完。生成仅在你明确点击后提交。"}</p>
     {waitError ? <p className="text-xs leading-6 text-danger" role="alert">{waitError}</p> : null}
     <div className="flex flex-wrap gap-2">
-      {canCompile ? <button type="button" className={ui.primary} disabled={waitBusy} data-teaching-request-compile="true" onClick={() => void requestCompile()}>{waitBusy ? "正在提交…" : contentState.contentVersion === 0 && contentState.generateStatus === "ready" ? "生成主讲内容" : "重新生成主讲内容"}</button> : null}
+      {canCompile ? <button type="button" className={ui.primary} disabled={waitBusy} data-teaching-request-compile="true" onClick={() => void requestCompile()}>{waitBusy ? "正在提交…" : contentState.contentVersion === 0 && contentState.generateStatus === "ready" ? "生成并开始学习" : "重新生成并开始学习"}</button> : null}
       <button type="button" className={ui.secondary} disabled={waitBusy} data-teaching-refresh-status="true" onClick={() => void retryFromFreshResume()}>{waitBusy ? "正在读取…" : "重新读取状态"}</button>
     </div>
   </div> : null;
@@ -835,7 +982,7 @@ export function TeachingContinueEntry({
   }
 
   if (phase === "wait_init") {
-    const waitingInFlight = liveResume?.gates.job === "in_flight";
+    const waitingInFlight = inFlight;
     return (
       <section
         className="flex h-full min-h-0 flex-col px-5 py-5"
@@ -880,6 +1027,7 @@ export function TeachingContinueEntry({
         resume={liveResume}
         localUnsent={localUnsent}
         api={api}
+        disablePolling
         onContinue={(resume) => void openWorkspaceFromResume(resume)}
         onActivityUpdated={(next) => {
           setActivity(next);

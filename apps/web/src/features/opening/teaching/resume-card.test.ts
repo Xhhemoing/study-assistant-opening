@@ -144,9 +144,9 @@ describe("ResumeCardView", () => {
             permission: "owned",
             materials: "partial",
             unavailableSourceIds: [BID2],
-            job: "in_flight",
+            job: "ready",
           },
-          continuableActions: ["continue_block", "wait_job", "resolve_material", "command_return"],
+          continuableActions: ["continue_block", "resolve_material", "command_return"],
           clientInit: null,
         }),
         onContinue: () => undefined,
@@ -158,7 +158,7 @@ describe("ResumeCardView", () => {
     expect(html).toContain("学习位置");
     expect(html).toContain("今日主题学习");
     expect(html).toContain('data-resume-client-init="null"');
-    expect(html).toContain('data-resume-job-gate="in_flight"');
+    expect(html).toContain('data-resume-job-gate="ready"');
     expect(html).toContain('data-resume-materials-gate="partial"');
     expect(html).toContain("1 段内容已保存");
     expect(html).toContain("还有 1 道题可以继续");
@@ -170,6 +170,82 @@ describe("ResumeCardView", () => {
     expect(html).toContain('data-resume-reread="true"');
     expect(html).not.toContain("ConversationResume");
     expect(html).not.toContain("强制覆盖");
+  });
+
+  it("suppresses competing continue and reread buttons while job is in_flight without usable content", () => {
+    const html = renderToStaticMarkup(
+      createElement(ResumeCardView, {
+        activityTitle: "生成中的活动",
+        activityStatus: "active",
+        generateStatusLabel: "正在生成主讲内容",
+        resume: resume({
+          generateStatus: "queued",
+          contentVersion: 0,
+          gates: {
+            permission: "owned",
+            materials: "partial",
+            unavailableSourceIds: [BID2],
+            job: "in_flight",
+          },
+          continuableActions: ["wait_job", "resolve_material"],
+          clientInit: null,
+        }),
+        onContinue: () => undefined,
+        onPause: () => undefined,
+        onReread: () => undefined,
+      }),
+    );
+    expect(html).toContain('data-resume-job-gate="in_flight"');
+    expect(html).toContain('data-resume-generating="true"');
+    expect(html).toContain("正在生成主讲内容");
+    expect(html).not.toContain('data-resume-continue-cta="true"');
+    expect(html).not.toContain("继续学习");
+    expect(html).not.toContain('data-resume-reread="true"');
+    expect(html).toContain('data-resume-pause="true"');
+    expect(html).not.toContain("data-resume-diagnostics");
+  });
+
+  it("keeps continue and reread available while job is in_flight if usable content is already published", () => {
+    const html = renderToStaticMarkup(
+      createElement(ResumeCardView, {
+        activityTitle: "重生成中的已有讲义",
+        activityStatus: "active",
+        generateStatusLabel: "主讲内容已就绪",
+        resume: resume({
+          generateStatus: "ready",
+          contentVersion: 2,
+          gates: {
+            permission: "owned",
+            materials: "available",
+            unavailableSourceIds: [],
+            job: "in_flight",
+          },
+          clientInit: {
+            id: AID,
+            activityId: AID,
+            teachingUnitId: BID,
+            documentId: BID2,
+            revisionNumber: 1,
+            blockOrder: [{ blockId: BID, position: 0, blockType: "text", role: "teach" }],
+            sourceRefs: [],
+            goals: [],
+            verificationStatus: "structure_ok",
+            generationConfig: {},
+            version: 1,
+            createdAt: ISO,
+            updatedAt: ISO,
+            blocks: [{ blockId: BID, position: 0, blockType: "text", role: "teach", content: { text: "已有正文" } }],
+            contentVersion: 2,
+            checkpointJson: {},
+          },
+        }),
+        onContinue: () => undefined,
+        onReread: () => undefined,
+      }),
+    );
+    expect(html).toContain('data-resume-continue-cta="true"');
+    expect(html).toContain('data-resume-reread="true"');
+    expect(html).not.toContain('data-resume-generating="true"');
   });
 
   it("keeps full conflict contents and recovery controls available without diagnostics", () => {

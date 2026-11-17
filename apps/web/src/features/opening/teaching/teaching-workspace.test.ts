@@ -68,6 +68,7 @@ import {
   formatTeachingSourceLabel,
   isTeachingWorkspaceContentUsable,
   TeachingContinueEntry,
+  teachingFinalUnitCompletionAction,
   TeachingWorkspace,
   waitInitActionVisibility,
   saveCurrentTeachingUnitPosition,
@@ -889,4 +890,137 @@ it("keeps the question's next action inside its result stage rather than exposin
   expect(html).not.toContain("data-teaching-primary-advance");
   expect(html).toContain('data-attempt-stage="draft"');
   expect(html).toContain("目录");
+});
+
+it("preserves originalConversationId on material source viewer links", () => {
+  const sourceId = "6a80b8ed-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const conversation = "77777777-7777-4777-8777-777777777777";
+  const html = renderToStaticMarkup(
+    createElement(TeachingWorkspace, {
+      activity: { ...activityReady, sourceIds: [sourceId] },
+      clientInit: clientInit({ sourceRefs: [{ sourceId, version: 2, page: 5 }] }),
+      sourceNameById: { [sourceId]: "讲义.pdf" },
+      originalConversationId: conversation,
+    }),
+  );
+  expect(html).toContain(`/opening/library?tab=materials&amp;source=${sourceId}&amp;version=2&amp;page=5&amp;conversation=${conversation}`);
+});
+
+it("builds route-aware final-unit completion CTA while preserving ordinary course and today exits", () => {
+  const conversation = "77777777-7777-4777-8777-777777777777";
+  expect(teachingFinalUnitCompletionAction({ courseId: WID, routeManaged: true }, conversation)).toEqual({
+    label: "回到课程路线",
+    href: `/opening/courses/${WID}?tab=units&conversation=${conversation}#course-learning-route`,
+  });
+  expect(teachingFinalUnitCompletionAction({ courseId: WID, routeManaged: false }, conversation)).toEqual({
+    label: "结束练习",
+    href: `/opening/courses/${WID}?conversation=${conversation}`,
+  });
+  expect(teachingFinalUnitCompletionAction({ courseId: null, routeManaged: false }, conversation)).toEqual({
+    label: "结束练习",
+    href: "/opening/today",
+  });
+});
+
+describe("TeachingContinueEntry jobInFlight polling and compile auto-transition", () => {
+  const shell = { ...activityReady, contentVersion: 0 };
+  const empty = learningResume({ contentVersion: 0, clientInit: null });
+
+  it("polls with backoff across card and wait_init and auto-opens workspace once usable content arrives after 生成并开始学习", async () => {
+    vi.useFakeTimers();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const queuedActivity: TeachingActivity = { ...shell, generateStatus: "queued" };
+    const queuedResume = learningResume({
+      ...empty,
+      generateStatus: "queued",
+      gates: { ...empty.gates, job: "in_flight" },
+    });
+    const readyResume = learningResume({
+      generateStatus: "ready",
+      contentVersion: 1,
+      clientInit: clientInit(),
+      gates: { ...empty.gates, job: "ready" },
+    });
+    let releaseGetResumeAfterCompile!: (value: LearningResume) => void;
+    const getTeachingResume = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<LearningResume>(resolve => { releaseGetResumeAfterCompile = resolve; }))
+      .mockResolvedValueOnce(queuedResume)
+      .mockResolvedValueOnce(queuedResume)
+      .mockResolvedValueOnce(readyResume);
+    const api = {
+      requestTeachingCompile: vi.fn().mockResolvedValue(queuedActivity),
+      getTeachingResume,
+      getTeachingClientInit: vi.fn(),
+    } as unknown as OpeningApi;
+
+    try {
+      await act(async () => {
+        root.render(createElement(TeachingContinueEntry, { activity: shell, resume: empty, teachingCompileEnabled: true, api }));
+      });
+      const compileBtn = host.querySelector<HTMLButtonElement>('[data-teaching-request-compile="true"]')!;
+      expect(compileBtn.textContent).toBe("生成并开始学习");
+      await act(async () => compileBtn.click());
+      // ResumeCard never loses its resume object to a null reset race while compile response settles.
+      expect(host.querySelector('[data-testid="resume-card-mock"]')?.getAttribute("data-has-resume")).toBe("true");
+      await act(async () => releaseGetResumeAfterCompile(queuedResume));
+
+      // First poll at 3s in card phase (still queued).
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(2);
+      expect(host.querySelector('[data-teaching-continue-entry="card"]')).toBeTruthy();
+
+      // Switch to wait_init; backoff stays at 6s (not reset to 3s).
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-resume-continue-cta]')!.click());
+      expect(host.querySelector('[data-teaching-continue-entry="wait_init"]')).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5999); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(3);
+
+      // Next backoff tick (12s) while still in wait_init resolves usable content and auto-transitions into workspace.
+      await act(async () => { await vi.advanceTimersByTimeAsync(12000); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(4);
+      expect(host.querySelector('[data-teaching-continue-entry="workspace"]')).toBeTruthy();
+      expect(host.querySelector('[data-teaching-workspace="true"]')).toBeTruthy();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      vi.useRealTimers();
+    }
+  });
+
+  it("auto-opens workspace directly from card phase when polling completes after 生成并开始学习", async () => {
+    vi.useFakeTimers();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const queuedActivity: TeachingActivity = { ...shell, generateStatus: "queued" };
+    const queuedResume = learningResume({ ...empty, generateStatus: "queued", gates: { ...empty.gates, job: "in_flight" } });
+    const readyResume = learningResume({ generateStatus: "ready", contentVersion: 1, clientInit: clientInit(), gates: { ...empty.gates, job: "ready" } });
+    const api = {
+      requestTeachingCompile: vi.fn().mockResolvedValue(queuedActivity),
+      getTeachingResume: vi.fn().mockResolvedValueOnce(queuedResume).mockResolvedValueOnce(readyResume),
+      getTeachingClientInit: vi.fn(),
+    } as unknown as OpeningApi;
+
+    try {
+      await act(async () => {
+        root.render(createElement(TeachingContinueEntry, { activity: shell, resume: empty, teachingCompileEnabled: true, api }));
+      });
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-teaching-request-compile="true"]')!.click());
+      expect(host.querySelector('[data-teaching-continue-entry="card"]')).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(host.querySelector('[data-teaching-continue-entry="workspace"]')).toBeTruthy();
+      expect(host.querySelector('[data-teaching-workspace="true"]')).toBeTruthy();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      vi.useRealTimers();
+    }
+  });
 });
