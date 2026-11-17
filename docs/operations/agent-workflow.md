@@ -86,6 +86,7 @@ metadata：changed_files、commands＋真实 exit、results、commit、remoteSHA
 
 - 实际隔离的文件与运行资源可并行编码／验证；共享环境重验证必须经现有 `run-heavy` 串行，不能只靠“不同 worktree”并跑数据库、类型或构建。不得停止或抢占其他任务。
 - 轻量源码、语法、diff 与现成近邻检查先行；只跑本片直接相关 unit／包 types／集成，不先全套再定点。纯文档只审实际 diff 和规则一致性，不跑业务测试或服务。
+- `npm run typecheck -w @aistudy/<pkg>` 与根级 `npm run typecheck` 均仅覆盖工作区 `src/`（不含 `*.test.ts[x]`）及 `tsconfig.e2e.json`（`tests/e2e/**/*.ts`、`tests/restart/**/*.ts`、`playwright*.ts`/`mts`、`scripts/db-reset-e2e.ts`），**不**检查 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`。改动 `tests/e2e/**/*.ts` 或 `tests/restart/**/*.ts` 时运行 `npm run typecheck`（经 `run-heavy` 串行）或 `tsc -p tsconfig.e2e.json --noEmit`；改动 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts` 时运行 `npx eslint <changed-files>` 与对应 Vitest 项目（`--project integration`/`handler`/`contract`/`unit`）并交精确 head CI（若另跑 `tsc --noEmit` 须显式传入匹配 `tsconfig.base.json` 的选项如 `--strict`、`--moduleResolution Bundler`）。另可选用 `#421` 合入的本地看板辅助脚本 `scripts/local-dev-{flow,watch,worker}.mjs` 进行局部调度与监听，仍受本文件既有并发、资源与唯一集成者合入规则约束。
 - 本地资源不足时先限制新卡／工作树／重验证准入，不以本地全套、构建或大包 PG 阻塞已授权实施。完整类型、构建和测试门禁交现有远端 CI；未运行范围如实记 `unverified`，不能把定点 roots 绿说成包／依赖闭包绿。
 - 已有验证在源码版本、输入、环境与覆盖仍有效时复用。新改动只补直接缺验；集成的新影响补相关检查，不把不相干局部绿相加成整体绿。
 - 失败按 failure → cause → fix → recheck：保留红测、锁拒绝、超时与缺终态，足够诊断后只做最小修复，不盲重试或降低断言／安全 guard。真正隔离 worker 的并行仍须获准且服从当前配额。

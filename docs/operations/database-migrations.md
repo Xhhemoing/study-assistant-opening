@@ -284,3 +284,130 @@ COMMIT;
    `pg_restore` 覆盖真实学习数据来“撤销 0108”。无备份/演练/兼容候选证据时保持阻塞，交用户决定。
 
 本节未执行升级、备份、恢复演练、应用回退或数据库恢复；没有相应执行证据，不得记为通过。
+
+## 9. 0109–0111 发布前核对、前向兼容与回退边界
+
+本节依据当前主干精确迁移源码整理，仅作发布前只读核对与边界说明；**本次文档步骤未连接任何生产或测试数据库，未执行迁移 `0108`–`0111`、备份、隔离恢复演练或生产配置修改。含 `0108`–`0111` 的版本部署与迁移执行仍须按 U 级权限取得用户对精确目标、SHA 与操作的逐次明确批准**，并先完成第 2 节备份及新建空隔离库恢复验证。
+
+### 9.1 迁移对象清单（与源码逐字一致）
+
+- **`0109_opening_course_reserved_questions.sql`**（依赖连续链路中的 `0108`；不做历史曝光回填，空曝光台账不证明未曝光）：
+  - 新建表：`opening_course_reserved_questions`、`opening_course_question_exposures`、`opening_course_question_exposure_coverage`。
+  - `opening_course_reserved_questions` 上只读内容保护 trigger：`opening_reserved_question_immutable`（`BEFORE UPDATE`）。
+  - 范围与创世保护 triggers：`opening_course_question_exposures_scope`、`opening_course_question_exposure_coverage_scope`、`opening_course_question_exposure_immutable`、`opening_course_question_coverage_guard`、`opening_course_question_coverage_genesis`（`AFTER INSERT ON workspaces`）。
+  - 历史失效 trigger `opening_course_question_history_invalidate`，挂接在全部 12 张表上：
+    1. `library_revisions`（`BEFORE DELETE OR UPDATE OF blocks`）
+    2. `opening_source_chunks`（`BEFORE DELETE OR UPDATE OF text,image_object_key`）
+    3. `opening_sources`（`BEFORE DELETE`）
+    4. `opening_turns`（`BEFORE DELETE OR UPDATE OF text,help_input_snapshot`）
+    5. `cards`（`BEFORE DELETE OR UPDATE`）
+    6. `opening_help_exposures`（`BEFORE DELETE`）
+    7. `opening_learning_item_versions`（`BEFORE DELETE`）
+    8. `library_blocks`（`BEFORE DELETE OR UPDATE OF content`）
+    9. `opening_problem_refs`（`BEFORE DELETE OR UPDATE OF stem_snapshot`）
+    10. `opening_teaching_activities`（`BEFORE DELETE OR UPDATE OF checkpoint_json`）
+    11. `opening_learning_observations`（`BEFORE DELETE OR UPDATE OF answer`）
+    12. `opening_course_question_exposures`（`BEFORE DELETE`）
+- **`0110_opening_course_source_purpose.sql`**（要求连续链路中已存在真实的 `0109`）：
+  - 在 `course_asset_memberships` 新增可空列 `purpose`（`purpose text NULL`；既有历史行保持 `NULL` 未分类）。
+  - 新增检查约束 `course_asset_memberships_source_purpose_check`：`purpose IS NULL OR (asset_type = 'source' AND purpose IN ('teaching', 'practice', 'mock_exam', 'reference'))`。
+- **`0111_opening_explicit_regrade_requests.sql`**（显式二次批改授权，不回填或不改写历史批改/预算记录）：
+  - 新建表：`opening_explicit_regrade_requests`（含唯一约束 `opening_explicit_regrade_client_unique`、`opening_explicit_regrade_operation_unique`）。
+  - 新建部分索引：唯一索引 `opening_explicit_regrade_single_successor`（`CREATE UNIQUE INDEX ... WHERE confirmed_at IS NOT NULL`）与查询索引 `opening_explicit_regrade_current`（`CREATE INDEX ... WHERE confirmed_at IS NOT NULL`）。
+
+### 9.2 发布前只读核对 SQL（REPEATABLE READ READ ONLY）
+
+由获准操作者在维护窗口或发布前通过只读连接执行，并将输出与候选源码 `packages/database/src/migrations/` 的全量文件及 SHA-256 逐行比对后留存至私有运维记录（公开仓库不保存连接串、数据库身份或原始结果）：
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+
+SELECT id, checksum, verification_state, recorded_at
+FROM schema_migrations
+ORDER BY id;
+
+SELECT
+  to_regclass('opening_knowledge_confirmations') IS NOT NULL AS has_0108_confirmations,
+  to_regclass('opening_course_reserved_questions') IS NOT NULL AS has_0109_reserved_questions,
+  to_regclass('opening_course_question_exposures') IS NOT NULL AS has_0109_exposures,
+  to_regclass('opening_course_question_exposure_coverage') IS NOT NULL AS has_0109_coverage,
+  to_regclass('opening_explicit_regrade_requests') IS NOT NULL AS has_0111_regrade_requests;
+
+SELECT table_schema, table_name, column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND table_name = 'course_asset_memberships'
+  AND column_name = 'purpose';
+
+SELECT conname, conrelid::regclass AS table_name
+FROM pg_constraint
+WHERE conrelid IN (
+  to_regclass('course_asset_memberships'),
+  to_regclass('opening_explicit_regrade_requests')
+)
+  AND conname IN (
+    'course_asset_memberships_source_purpose_check',
+    'opening_explicit_regrade_client_unique',
+    'opening_explicit_regrade_operation_unique'
+  )
+ORDER BY conname;
+
+SELECT schemaname, tablename, indexname
+FROM pg_indexes
+WHERE schemaname = current_schema()
+  AND tablename = 'opening_explicit_regrade_requests'
+  AND indexname IN (
+    'opening_explicit_regrade_single_successor',
+    'opening_explicit_regrade_current'
+  )
+ORDER BY indexname;
+
+SELECT c.relname AS table_name, t.tgname, t.tgenabled
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = current_schema()
+  AND NOT t.tgisinternal
+  AND (
+    (c.relname = 'opening_course_reserved_questions' AND t.tgname = 'opening_reserved_question_immutable')
+    OR (c.relname = 'opening_course_question_exposures' AND t.tgname IN (
+      'opening_course_question_exposures_scope',
+      'opening_course_question_exposure_immutable'
+    ))
+    OR (c.relname = 'opening_course_question_exposure_coverage' AND t.tgname IN (
+      'opening_course_question_exposure_coverage_scope',
+      'opening_course_question_coverage_guard'
+    ))
+    OR (c.relname = 'workspaces' AND t.tgname = 'opening_course_question_coverage_genesis')
+    OR (c.relname IN (
+      'library_revisions',
+      'opening_source_chunks',
+      'opening_sources',
+      'opening_turns',
+      'cards',
+      'opening_help_exposures',
+      'opening_learning_item_versions',
+      'library_blocks',
+      'opening_problem_refs',
+      'opening_teaching_activities',
+      'opening_learning_observations',
+      'opening_course_question_exposures'
+    ) AND t.tgname = 'opening_course_question_history_invalidate')
+  )
+ORDER BY c.relname, t.tgname;
+
+COMMIT;
+```
+
+判停条件（任一异常即阻断升级或发布，交人工排查，不手工改账或补表）：
+
+- `schema_migrations` 存在未知 ID、跳号、非法 `verification_state` 或 `verified` 行 checksum 与当前候选文件不一致；
+- 迁移号已登记在 `schema_migrations`，但对应的表、可空列 `course_asset_memberships.purpose`、约束、索引或 `0109` triggers 缺失或 `tgenabled <> 'O'`（全量就绪后应观测到 `opening_reserved_question_immutable` 1 个、`opening_course_question_history_invalidate` 共 12 个以及其余 5 个 scope/immutable/guard/genesis triggers）；
+- 迁移号尚未登记，但上述新表/列/trigger 已提前存在。
+
+### 9.3 前向仅增量与不删表回退边界
+
+- **前向仅增量原则**：`0109`、`0110`、`0111` 均为只增不改历史的加法迁移；`0109` 不补写历史曝光且空表不代表未曝光，`0110` 保持既有 `course_asset_memberships.purpose` 为 `NULL`，`0111` 不回填或改写既有批改与预算记录。
+- **严禁破坏性回退与改账**：回退应用版本时，**严禁** `DROP` `opening_course_reserved_questions`、`opening_course_question_exposures`、`opening_course_question_exposure_coverage`、`course_asset_memberships.purpose`、`opening_explicit_regrade_requests` 或任何 `0109` triggers（删列会丢失用户分类，删表/删 trigger 会破坏保留题/费用与历史失效边界），也**严禁**删除或编辑 `schema_migrations` 行、篡改 checksum、添加 down migration 或用旧备份直接覆盖真实学习库。
+- **跨 `0108`–`0111` 应用回退必须先停写且旧 runner 会拒绝**：一旦 `0108`–`0111` 任一编号已登记进 `schema_migrations`，若需回退应用版本，必须**先停止对应入口写入**（停用保留题发题/曝光、用途写入、显式二次批改准入与执行、以及确认协议写入；保留所有已产生表、列、费用及保留记录，不得在回退中释放未知保留或费用）。同时，旧版本自带的 canonical runner（`packages/database/src/migrate.ts`）不认识后续已登记的迁移编号，执行部署前步 `npm run db:migrate` 时仍会以 `MIGRATION_UNKNOWN_HISTORY` 拒绝并阻断发布；**因此不得绕过迁移前步直接切回旧包开放写入**。确需跨 `0108`–`0111` 回退时，必须由独立的 `H` 回退候选 PR 提供受控旧版或兼容降级实现——且**完整携带原样 `0001`–`0111` 迁移文件及精确 checksum** 并满足停写/兼容守卫——经完整审查、精确 head required CI 及用户单独批准后方可实施。
+- **未执行声明**：本节所有 SQL、核对标准与回退边界均未经线上或生产数据库实操执行；实际执行迁移 `0108`–`0111`、执行备份与空隔离库恢复演练、调整生产配置或部署含迁移版本，一律须在发布前另行取得用户 U 级逐次批准。

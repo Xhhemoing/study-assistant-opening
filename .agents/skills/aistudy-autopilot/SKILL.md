@@ -32,13 +32,18 @@ description: Use when orchestrating continuous high-throughput autonomous develo
   - 每次新增 writer 前本机可用内存 **`available >= 500 MiB`**；
   - 遵守平台真实配额、共享环境 `scripts/run-heavy.mjs` 重验证锁，以及未合入 H 栈 `<= 2`（未合入 H PR `> 4` 时暂停新 H，优先 L 或缺陷修复）。
 - 满足上述守卫后，对 N 个互不重叠的任务卡并发启动 `Workspace: "share"` 子 Agent。
-- 每个 worker 只执行最贴近改动的快速门禁（不在多个 worker 中并发执行完整 E2E 或全仓 build；纯文档卡片不在 worktree 中安装依赖）：
+- 依赖与可选本地辅助脚本边界：
+  - `Workspace: "share"` 新建工作树默认不含 `node_modules`：纯文档卡片一般不在 worktree 中安装依赖；需要执行本地 unit/lint/tsc 检查（含脚本门禁）的编码工作树，须在派卡时预授权 `npm ci --prefer-offline --no-audit --no-fund`，并在终止子 Agent 前清理 `<worktree>/node_modules`（Windows 下用 `rmdir /s /q`）。
+  - 可选使用 `#421` 合入的本地看板辅助脚本（`scripts/local-dev-flow.mjs`、`scripts/local-dev-watch.mjs`、`scripts/local-dev-worker.mjs`）执行结构化 `.codex.json` 任务板调度、文件监听与本地 worker 调用，但仍须严格遵守并发 `<= 5`、`available >= 500 MiB`、严格 `allowedPaths` 与“不自动合入”规则。
+- 每个 worker 只执行最贴近改动的快速门禁（不在多个 worker 中并发执行完整 E2E 或全仓 build）：
   - `node scripts/check-new-fixed-colors.mjs`
   - `node scripts/check-server-boundary.mjs`
   - `node scripts/check-learner-copy.mjs --strict`
   - `node scripts/check-api-contracts.mjs --strict`
   - 改动涉及的 unit 测试：`npx vitest run --project unit <changed-tests>` 或 `node --test <tooling-tests>`
-  - 改动涉及包的 `npx eslint <changed-files>` 与所属包 `npm run typecheck -w @aistudy/<pkg>`（注意：`@aistudy/senseweave` 未定义 `typecheck` 脚本；`@aistudy/web`、`@aistudy/worker` 与其余 7 个 workspace 包 `ai`、`config`、`contracts`、`database`、`domain`、`jingwei`、`ui` 均有定义）
+  - 改动涉及包的 `npx eslint <changed-files>` 与所属包 `npm run typecheck -w @aistudy/<pkg>`（注意：`@aistudy/senseweave` 未定义 `typecheck` 脚本；`@aistudy/web`、`@aistudy/worker` 与其余 7 个 workspace 包 `ai`、`config`、`contracts`、`database`、`domain`、`jingwei`、`ui` 均有定义）。注意根级 `npm run typecheck` 仅覆盖各工作区 `src/`（不含 `*.test.ts[x]`）及 `tsconfig.e2e.json`（`tests/e2e/**/*.ts`、`tests/restart/**/*.ts`、`playwright*.ts`/`mts`、`scripts/db-reset-e2e.ts`），**不**检查 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`：
+    - 若改动 `tests/e2e/**/*.ts` 或 `tests/restart/**/*.ts`，运行根级 `npm run typecheck`（经 `run-heavy` 串行锁）或 `npx tsc -p tsconfig.e2e.json --noEmit`；
+    - 若改动 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`，运行 `npx eslint <changed-files>` 与对应 Vitest 项目（`--project integration` / `--project handler` / `--project contract` / `--project unit`）及精确 head CI；若需额外执行独立 `tsc --noEmit`，须显式传入匹配 `tsconfig.base.json` 的编译选项（如 `--strict --moduleResolution Bundler` 等），避免误以为根 `npm run typecheck` 已覆盖 `tests/integration/`。
   - `git diff --check`（强制 LF，禁止 staged `.env`、`apps/web/next-env.d.ts`）
 - 通过后 worker **直接 commit + push 到 `study-assistant-opening` 并按 v2 分级创建 PR**（`L` 卡 `--base integration/opening`，仅当当次会话获明确整批授权时可用 `--base feat/opening-release`；`H` 卡独立 `--base feat/opening-release`），在 PR 正文标明风险分级、依据、完整 base-to-head 改动、`unverified` 范围，并向主控回报 PR 号、精确 40 位 `headRefOid`、改动文件与命令真实退出码。
 
@@ -81,7 +86,7 @@ description: Use when orchestrating continuous high-throughput autonomous develo
     ```
 - **Windows `share` worktree 实践提示**：
   - 本地仓库配置启用长路径：`git config core.longpaths true`，并保持 subagent `Role` 简短（`<= 12` 字符），避免在 `Workspace: "share"` 检出深层工作树路径时触发 Windows `MAX_PATH` 失败。
-  - 清理废弃临时 worktree 加速技巧（确认无未合并独有成果且符合清理授权后）：先 `cmd /c "if exist `"<wt>\node_modules`" rmdir /s /q `"<wt>\node_modules`""` 再 `git worktree remove --force "<wt>"` + `git worktree prune`。
+  - 若在 `Workspace: "share"` 编码 worktree 内执行了预授权的 `npm ci --prefer-offline --no-audit --no-fund`，在终止 subagent 或回收废弃 worktree 前先清理 `<worktree>/node_modules`（确认无未合并独有成果且符合清理授权后，Windows 先 `cmd /c "if exist `"<wt>\node_modules`" rmdir /s /q `"<wt>\node_modules`""`，再 `git worktree remove --force "<wt>"` + `git worktree prune`）。
 
 ### Wave 4 — 收尾核对、U 级清单与浏览器验收交接
 - 更新 `docs/STATUS.md`（实际日期、已合 PR/SHA 列表、未解决缺陷、待审批事项，由唯一集成者负责）及 `docs/plans/2026-10-27-full-learning-loop-master-plan.md` 附录 F：**两者均必须通过独立 PR + 必选 CI（`lint-typecheck-test-build` 与 `real-worker-pdf-browser-flow`）后合入**（`scripts/ci/checks.py` 将 `STATUS.md` 排除在 `docs_only` 快速路径之外，因此修改 `docs/STATUS.md` 的 PR 会运行完整 CI）。
