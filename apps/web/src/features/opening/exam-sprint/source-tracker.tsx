@@ -43,9 +43,20 @@ function SourceRecordForm({ source, records, disabled, send, reviewContext }: { 
 }
 
 function SourceDetail({ source, records, disabled, send, onClose, reviewContext }: { source: ExamSourceItem; records: ExamSourceRecord[]; disabled: boolean; send: Send; onClose: () => void; reviewContext?: WorkReviewContext }) {
+  const material = reviewContext?.integration?.binding?.materials.find(item => item.sourceTitle === source.sourceTitle);
+  const matchingPdf = material && reviewContext?.resources?.sources.some(item =>
+    item.id === material.sourceId && item.version === material.sourceVersion &&
+    item.mime === "application/pdf" && item.name === source.sourceTitle);
+  const original = matchingPdf ? /^Topic_([1-5])_Example_(Test|Problems)_to_Practice\.pdf$/.exec(source.sourceTitle) : null;
+  const isProblemSet = original?.[2] === "Problems";
+  const answerPage = original ? (isProblemSet ? 3 : original[1] === "5" ? 6 : 5) : null;
+  const downloadHref = material ? `/api/opening/sources/${encodeURIComponent(material.sourceId)}/download?version=${material.sourceVersion}&disposition=inline` : null;
   return <section className="space-y-4 rounded-lg border border-accent/30 bg-accent-soft p-4" aria-label={`${source.label} 学习登记`}>
     <div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{source.label}</h3><p className="mt-1 text-xs leading-6 text-text-2">{source.sourceTitle} · {source.sourcePage ? `第 ${source.sourcePage} 页` : "页码待核对"} · 建议第 {source.suggestedDay} 天</p></div><button type="button" className={ui.quiet} onClick={onClose}>关闭</button></div>
-    <p className="rounded-lg bg-warn-soft p-3 text-xs leading-6 text-warn">这是原资料题号索引，原题尚未录入在线题库。请打开你自己的对应 PDF 或练习材料，完成后登记；登记不会自动变成“已掌握”。</p>
+    {downloadHref ? <div className="flex flex-wrap gap-2">
+      <a className={ui.primary} href={`${downloadHref}${matchingPdf && source.sourcePage ? `#page=${source.sourcePage}` : ""}`} target="_blank" rel="noreferrer">打开原题</a>
+      {answerPage ? <a className={ui.secondary} href={`${downloadHref}#page=${answerPage}`} target="_blank" rel="noreferrer">{isProblemSet ? "查看参考解答" : "查看答案页"}</a> : null}
+    </div> : <p className="rounded-lg bg-warn-soft p-3 text-xs leading-6 text-warn">请打开你自己的对应 PDF 或练习材料，完成后登记。也可在「课程与证据」中关联资料。</p>}
     <SourceRecordForm key={`${source.id}-${records.length}`} source={source} records={records} disabled={disabled} send={send} reviewContext={reviewContext} />
     {records.length ? <details className="border-t border-accent/30 pt-3"><summary className="min-h-11 cursor-pointer text-sm py-2">已保存 {records.length} 条记录 · 查看历史</summary><ol className="mt-3 space-y-3">{[...records].reverse().map(record => <li key={record.id} className="rounded-lg bg-surface p-3 text-xs leading-6"><p className="font-medium">{phaseLabels[record.phase]} · {outcomeLabels[record.outcome]}</p><p>{assistanceLabels[record.assistance]} · {record.durationMinutes} 分钟 · {new Date(record.recordedAt).toLocaleString("zh-CN")}</p>{record.errorCause ? <p>错因：{causeLabels[record.errorCause]}</p> : null}{record.workSourceId ? <a className="flex min-h-11 items-center text-accent underline" target="_blank" rel="noreferrer" href={`/api/opening/sources/${encodeURIComponent(record.workSourceId)}/download${record.workSourceVersion === undefined ? "" : `?version=${record.workSourceVersion}`}`}>{record.workSourceVersion === undefined ? "打开照片资料（当前版本）" : `查看本次作答照片 · v${record.workSourceVersion}`}</a> : null}{record.reviewId ? <p>AI 候选点评已挂接 · {record.referenceChecked ? "已手动核对" : "待核对"}</p> : null}{record.answerText ? <p className="whitespace-pre-wrap">{record.answerText}</p> : null}{record.note ? <p className="whitespace-pre-wrap text-text-2">{record.note}</p> : null}</li>)}</ol></details> : null}
   </section>;

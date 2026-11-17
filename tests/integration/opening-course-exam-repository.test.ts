@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
-import { createOpeningCourseExamRepository, createOpeningTeachingContentRepository, createOpeningLearningRepository,
+import { createOpeningCourseExamRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingCommandsRepository, createOpeningTeachingContentRepository, createOpeningLearningRepository,
   createOpeningAiGradingRepository, createOpeningExamSprintRepository, createScopedOpeningSystemQueryReader } from "@aistudy/database";
 import type { CourseExamProposal, ExamPack } from "@aistudy/contracts";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
+import { readOpeningAiGradingContext } from "../../packages/database/src/repositories/opening-ai-grading-context";
+import { resolveOpeningStudyContext } from "../../packages/database/src/repositories/opening-study-context";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
@@ -18,9 +20,9 @@ const proposal = (chunkId: string): CourseExamProposal => ({ title: "线性代�
     referenceAnswer: "两列线性无关，因此秩等于2。", rubric: ["识别线性无关列", "秩等于2"],
     hints: { direction: "观察列向量。", concept: "秩是线性无关列的最大数量。", firstStep: "写出两个列向量。" },
     evidenceChunkIds: [chunkId], estimatedMinutes: 5 })) });
-async function seed() {
+async function seed(purpose: "mock_exam" | null = null) {
   const f = await learningAttemptFixture(fixture);
-  await fixture.sql`UPDATE course_asset_memberships SET role='reference',visibility='private'
+  await fixture.sql`UPDATE course_asset_memberships SET role='reference',visibility='private',purpose=${purpose}
     WHERE workspace_id=${fixture.scope.workspaceId} AND course_id=${f.courseId} AND asset_type='source' AND asset_id=${f.sourceId}`;
   await fixture.sql`UPDATE opening_source_chunks SET text='线性代数期末真题：求矩阵的秩；判断列向量是否线性无关。' WHERE id=${f.chunkId}`;
   const repo = createOpeningCourseExamRepository(fixture.sql), input = { clientKey: randomUUID(), sourceId: f.sourceId, questionCount: 3 };
@@ -137,13 +139,85 @@ it("publishes a course-specific mock with hidden answers and grades free answers
   expect(graded.skillLabel).toBe("矩阵秩");
   expect((await f.repo.begin(fixture.scope, f.courseId, f.input)).request.activityId).toBe(activityId);
   expect(await f.repo.complete(fixture.scope, f.courseId, ctx.request.id, proposal(f.chunkId), "fixture-model")).toBe(activityId);
-  const [count] = await fixture.sql`SELECT count(*) AS n FROM opening_teaching_activities WHERE client_key=${`course-exam:${ctx.request.id}`}`;
+  const [count] = await fixture.sql`SELECT count(*) AS n FROM opening_teaching_activities
+    WHERE course_id=${f.courseId} AND create_intent->>'requestId'=${ctx.request.id}`;
   expect(Number(count!.n)).toBe(1);
   const records = await createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope)({ name: "exam_sprint", arguments: {} }, new AbortController().signal);
   expect(records.status).toBe("ok");
   expect(records.data).toEqual(expect.arrayContaining([expect.objectContaining({ attemptCount: 1, completedCount: 1 })]));
   expect(records.evidence.some(item => item.href === `/opening/courses/${f.courseId}/exam`)).toBe(true);
   expect(JSON.stringify(records)).not.toContain("两列线性无关");
+});
+
+it("publishes and answers variants from an exam-only paper without lending its original to ordinary learning", async () => {
+  const f = await seed("mock_exam"), scope = fixture.scope;
+  const otherChunk = randomUUID();
+  await fixture.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text)
+    SELECT ${otherChunk},source_id,source_version,2,'not cited in the proposal' FROM opening_source_chunks WHERE id=${f.chunkId}`;
+  const ctx = await f.begin();
+  expect(ctx.chunks.map(chunk => chunk.id)).toContain(otherChunk);
+  const activities = createOpeningTeachingActivitiesRepository(fixture.sql);
+  const publicIntent = { clientKey: `course-exam:${ctx.request.id}`, intentKind: "topic" as const,
+    intentSummary: "Client-created activity", courseId: f.courseId, createIntent: { kind: "course_exam", requestId: ctx.request.id } };
+  await expect(activities.create(scope, { ...publicIntent, sourceIds: [f.sourceId] })).rejects.toMatchObject({ code: "CONFLICT" });
+  const preexisting = await activities.create(scope, publicIntent);
+
+  const activityId = await f.repo.complete(scope, f.courseId, ctx.request.id, proposal(f.chunkId), "fixture-model");
+  expect(activityId).not.toBe(preexisting.id);
+  expect(await activities.get(scope, activityId)).toMatchObject({ sourceIds: [] });
+  const overview = await f.repo.read(scope, f.courseId);
+  expect(overview.papers[0]).toMatchObject({ activityId, status: "ready", available: true });
+  await fixture.sql`DELETE FROM opening_source_chunks WHERE id=${otherChunk}`;
+  const content = createOpeningTeachingContentRepository(fixture.sql);
+  const client = (await content.getClientInit(scope, activityId))!;
+  expect(client.sourceRefs).toEqual([]);
+  expect(JSON.stringify(client)).not.toContain("两列线性无关");
+  const prompts = client.blocks.filter(block => block.role === "prompt");
+  const session = await createOpeningLearningRepository(fixture.sql).createSession(scope, {
+    courseId: f.courseId, activityId, skillLabel: "矩阵秩", sourceIds: [],
+  });
+  const attempts = createOpeningAttemptService(fixture.sql);
+  const issue = (index: number) => attempts.create(scope, { sessionId: session.id, clientKey: randomUUID(),
+    teachingBlock: { blockId: prompts[index]!.blockId, contentVersion: client.contentVersion } });
+  const submit = (id: string) => attempts.submit(scope, id, { clientKey: randomUUID(),
+    answer: "秩为 2。", outcome: "unverified", assistance: "independent", verdictSource: "self_report" });
+  const answered = await submit((await issue(0)).id);
+  const issued = await issue(1);
+  const commands = createOpeningTeachingCommandsRepository(fixture.sql);
+  const why = { clientKey: randomUUID(), kind: "why" as const, blockId: prompts[0]!.blockId, expectedVersion: client.contentVersion };
+  expect(await commands.executeCommand(scope, activityId, why)).toMatchObject({ ok: true });
+  const resolveItem = () => fixture.sql.begin(tx => resolveOpeningStudyContext(tx, scope, {
+    purpose: "learning_help", itemVersionId: issued.itemVersionId!,
+  }));
+  expect(await resolveItem()).toMatchObject({ activityId, itemVersionId: issued.itemVersionId });
+  const grading = createOpeningAiGradingRepository(fixture.sql);
+  const gradingInput = await grading.context(scope, { observationId: answered.id });
+  const readOnlyGrading = () => fixture.sql.begin("isolation level repeatable read read only", tx =>
+    readOpeningAiGradingContext(tx, scope, { observationId: answered.id }, { readOnly: true }));
+  expect((await readOnlyGrading()).referenceText).toBe(gradingInput.referenceText);
+  expect(gradingInput.sourceIds).toEqual([]);
+  expect(gradingInput.referenceText).toContain("秩等于2");
+  expect(gradingInput.referenceText).not.toContain("线性代数期末真题");
+  for (const workSourceId of [f.sourceId, f.sourceId.toUpperCase()]) {
+    await expect(grading.context(scope, { observationId: answered.id, workSourceId,
+      workSourceVersion: ctx.request.sourceVersion, physicalPage: 1 })).rejects.toMatchObject({
+      code: "VALIDATION", message: "请选择自己的作答照片，不要选择原题或参考答案",
+    });
+  }
+  expect(await f.repo.complete(scope, f.courseId, ctx.request.id, proposal(f.chunkId), "fixture-model")).toBe(activityId);
+
+  await backupRows(fixture.sql, scope).exclude(f.sourceId);
+  expect((await f.repo.read(scope, f.courseId)).papers[0]).toMatchObject({ available: false, activityId: null });
+  await expect(content.getClientInit(scope, activityId)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(issue(2)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(resolveItem()).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(commands.executeCommand(scope, activityId, why)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(commands.executeCommand(scope, activityId.toUpperCase(), { ...why, clientKey: randomUUID() }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(grading.context(scope, { observationId: answered.id })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(readOnlyGrading()).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(await submit(issued.id)).toMatchObject({ answer: "秩为 2。", attemptId: issued.id });
+  expect((await fixture.sql`SELECT answer FROM opening_learning_observations WHERE id=${answered.id}`)[0]).toEqual({ answer: "秩为 2。" });
 });
 
 it("keeps different courses independent and prevents cross-owner and cross-course source selection", async () => {
@@ -156,11 +230,12 @@ it("keeps different courses independent and prevents cross-owner and cross-cours
   await expect(a.repo.begin(fixture.scope, a.courseId, { ...a.input, questionCount: 5 })).rejects.toMatchObject({ code: "CONFLICT" });
 });
 
-it.each(["version", "membership", "privacy"])("rechecks %s before model send and publication", async cause => {
-  const f = await seed(), ctx = await f.begin();
+it.each(["version", "membership", "privacy", "purpose"])("rechecks %s before model send and publication", async cause => {
+  const f = await seed(cause === "purpose" ? "mock_exam" : null), ctx = await f.begin();
   if (cause === "version") await fixture.sql`UPDATE opening_sources SET version=version+1 WHERE id=${f.sourceId}`;
   if (cause === "membership") await fixture.sql`DELETE FROM course_asset_memberships WHERE course_id=${f.courseId} AND asset_id=${f.sourceId}`;
   if (cause === "privacy") await backupRows(fixture.sql, fixture.scope).exclude(f.sourceId);
+  if (cause === "purpose") await fixture.sql`UPDATE course_asset_memberships SET purpose='teaching' WHERE course_id=${f.courseId} AND asset_id=${f.sourceId}`;
   await expect(f.repo.assertCurrent(fixture.scope, f.courseId, ctx.request.id)).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(f.repo.complete(fixture.scope, f.courseId, ctx.request.id, proposal(f.chunkId), null)).rejects.toMatchObject({ code: "CONFLICT" });
   expect((await f.repo.read(fixture.scope, f.courseId)).papers[0]).toMatchObject({ available: false, activityId: null, topics: [] });
@@ -184,7 +259,8 @@ it("ends an interrupted request on refresh and refuses both replay sends and lat
   await expect(f.repo.complete(fixture.scope, f.courseId, ctx.request.id, proposal(f.chunkId), null)).rejects.toMatchObject({ code: "CONFLICT" });
   expect((await f.repo.read(fixture.scope, f.courseId)).papers[0]!.status).toBe("unknown");
   expect((await f.begin()).request.status).toBe("unknown");
-  const [count] = await fixture.sql`SELECT count(*) AS n FROM opening_teaching_activities WHERE client_key=${`course-exam:${ctx.request.id}`}`;
+  const [count] = await fixture.sql`SELECT count(*) AS n FROM opening_teaching_activities
+    WHERE course_id=${f.courseId} AND create_intent->>'requestId'=${ctx.request.id}`;
   expect(Number(count!.n)).toBe(0);
 });
 

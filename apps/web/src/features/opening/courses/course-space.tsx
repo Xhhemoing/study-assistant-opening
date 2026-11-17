@@ -16,6 +16,7 @@ export function CourseSpaceHeader({ courseId, title, archived = false }: { cours
   return <PageHeader title={title} actions={<div className="flex flex-wrap items-center gap-3">
     {study?.goal?.targetDate ? <span className="text-sm text-text-2">目标 <time dateTime={study.goal.targetDate}>{study.goal.targetDate}</time></span> : null}
     {!archived ? <Link className={ui.primary} href={objectHref(href)}>{current ? "继续" : next ? "开始下一项" : "开始学习"}</Link> : <span className="text-sm text-text-2">已归档</span>}
+    {!archived ? <Link className={ui.secondary} href={objectHref(`/opening/sprint?courseId=${encodeURIComponent(courseId)}`)}>考前冲刺</Link> : null}
     <Link className={ui.quiet} href="/opening/courses">全部课程</Link>
   </div>} />;
 }

@@ -70,13 +70,13 @@ export async function readExamIntegrationInTx(tx: TransactionSql, scope: Scope, 
 }
 
 export function createOpeningExamIntegrationRepository(
-  sql: Sql, pack: ExamPack, options: ExamIntegrationOptions = {},
+  sql: Sql, pack: ExamPack, integrationOptions: ExamIntegrationOptions = {},
 ) {
   return {
     async read(scope: Scope): Promise<ExamIntegrationOverview> {
       return sql.begin(async tx => { await owner(tx, scope, false); return readExamIntegrationInTx(tx, scope, pack); });
     },
-    async bind(scope: Scope, raw: ExamBindInput): Promise<ExamIntegrationOverview> {
+    async bind(scope: Scope, raw: ExamBindInput, options?: { addMissingMaterials: true }): Promise<ExamIntegrationOverview> {
       const input = examBindInputSchema.parse(raw);
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
@@ -91,10 +91,12 @@ export function createOpeningExamIntegrationRepository(
             VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${tx.json(initial.pack as never)},${tx.json(initial.state as never)},${now},${now}) RETURNING id,pack_snapshot,state`;
         }
         const sprintId = String(row!.id), snapshot = parseExamSprintSnapshot(row!.pack_snapshot, row!.state);
-        const intent = { action: "bind", ...input };
+        const intent = { action: options?.addMissingMaterials ? "add_missing_materials" : "bind", ...input };
         if (await commandReplay(tx, sprintId, input.clientKey, intent)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
         const existing = await readExamBinding(tx, sprintId);
-        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined, options.writePublicSource, options.quota);
+        const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined,
+          integrationOptions.writePublicSource, integrationOptions.quota, options);
+        if (options?.addMissingMaterials && isDeepStrictEqual(binding, existing)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
         await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding,updated_at)
           VALUES(${sprintId},${binding.courseId},${tx.json(binding as never)},${now}) ON CONFLICT(sprint_id)
           DO UPDATE SET binding=EXCLUDED.binding,updated_at=EXCLUDED.updated_at`;

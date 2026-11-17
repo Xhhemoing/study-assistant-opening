@@ -4,6 +4,7 @@ import { assertReferenceTextRevision } from "./opening-teaching-reference-revisi
 
 type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
+import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql } from "postgres";
@@ -637,7 +638,8 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
     },
 
     async getActivitySpec(scope: Scope, activityId: string): Promise<ActivitySpec | null> {
-      await assertOwnedActivity(sql, scope, activityId);
+      const activity = await assertOwnedActivity(sql, scope, activityId);
+      await assertOpeningCourseExamSourceCurrent(sql, scope, activity, { readOnly: true });
       const rows = await sql`
         SELECT s.* FROM opening_teaching_activity_specs s
         WHERE s.workspace_id = ${scope.workspaceId}

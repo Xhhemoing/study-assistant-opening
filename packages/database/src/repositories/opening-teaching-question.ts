@@ -5,6 +5,7 @@ import type { TransactionSql } from "postgres";
 import { checkArithmeticAnswer, type ResolvedCourseQuestion } from "@aistudy/domain";
 import { learningError, type LearningSql } from "./opening-learning-facts";
 import { readOpeningReservedKey } from "./opening-course-reserved-selection";
+import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";
 
 type Block = { id: string; type: string; content: Record<string, unknown> };
 
@@ -61,7 +62,7 @@ export function teachingQuestionText(content: Record<string, unknown> | undefine
 /** Only a published, owned teaching revision can issue this identity. Client text is never used. */
 export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: Scope,
   activityId: string, input: { blockId: string; contentVersion: number }, sourceVersions: Record<string, number>) {
-  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.goal_json,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
+  const [row] = await tx`SELECT s.*,a.content_version,a.status,a.goal_json,a.client_key,a.source_ids AS activity_source_ids,r.id AS revision_id,r.blocks
     FROM opening_teaching_activity_specs s
     JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
     JOIN opening_teaching_units u ON u.id=s.teaching_unit_id AND u.workspace_id=s.workspace_id AND u.owner_user_id=s.owner_user_id
@@ -72,6 +73,7 @@ export async function readTeachingQuestionForAttempt(tx: TransactionSql, scope: 
     throw learningError("CONFLICT", "teaching content changed; reread before answering");
   }
   if (row.status === "completed") throw learningError("CONFLICT", "completed teaching activity cannot accept new attempts");
+  await assertOpeningCourseExamSourceCurrent(tx, scope, { id: activityId, clientKey: String(row.client_key) });
   const ordered = [...row.block_order as TeachingBlockRef[]].sort((a, b) => a.position - b.position);
   const index = ordered.findIndex(block => block.blockId === input.blockId && block.role !== "answer_key"
     && (block.role === "prompt" || ["prompt", "question"].includes(block.blockType)));
@@ -221,9 +223,10 @@ function cardVariantLineageOnly(spec: TeachingQuestionSpec, refs: TeachingSource
 }
 
 /** Read the immutable question and its hidden answer only for server-side grading. */
-export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: Scope, item: Record<string, unknown>) {
+export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: Scope, item: Record<string, unknown>,
+  options: { readOnly?: boolean } = {}) {
   if (item.teaching_revision_id == null) return null;
-  const [row] = await tx`SELECT r.blocks,v.evaluation_spec,v.activity_id,v.teaching_revision_id,v.teaching_block_id,a.create_intent,s.block_order AS current_block_order FROM opening_learning_item_versions v
+  const [row] = await tx`SELECT r.blocks,v.evaluation_spec,v.activity_id,v.teaching_revision_id,v.teaching_block_id,a.create_intent,a.client_key,s.block_order AS current_block_order FROM opening_learning_item_versions v
     JOIN library_revisions r ON r.id=v.teaching_revision_id AND r.workspace_id=v.workspace_id
     JOIN opening_teaching_activities a ON a.id=v.activity_id AND a.workspace_id=v.workspace_id AND a.owner_user_id=v.owner_user_id
     LEFT JOIN opening_teaching_activity_specs s ON s.activity_id=v.activity_id AND s.workspace_id=v.workspace_id AND s.owner_user_id=v.owner_user_id
@@ -231,6 +234,7 @@ export async function readTeachingQuestionForGrading(tx: TransactionSql, scope: 
     WHERE v.id=${String(item.id)} AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
       AND ${teachingQuestionIdentityMatches(tx)}`;
   if (!row) throw learningError("CONFLICT", "保存的课堂题目已不可读取，请重新打开课程");
+  await assertOpeningCourseExamSourceCurrent(tx, scope, { id: String(row.activity_id), clientKey: String(row.client_key) }, options);
   const spec = (row.evaluation_spec ?? item.evaluation_spec) as TeachingQuestionSpec, blocks = row.blocks as Block[];
   // Ordinary AI grading remains compatible with legacy/visual questions, without
   // upgrading their authority. When exact resolution is available, use the

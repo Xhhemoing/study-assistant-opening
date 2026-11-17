@@ -8,6 +8,10 @@ import { ContentBlock, ContentGrid, PageHeader, ui } from "../design/ui";
 import { createCourseExamCheckpointStore } from "./course-exam-checkpoint";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
+function sourceAvailable(sources: CourseExamOverview["sources"], id: string) {
+  return sources.some(source => source.id === id);
+}
+
 export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
   const objectHref = useConversationObjectHref();
   const [data, setData] = useState(initial), [sourceId, setSourceId] = useState(initial.sources[0]?.id ?? "");
@@ -25,9 +29,18 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
     if (!response.ok) throw new Error(body.error?.message ?? body.message ?? "考前练习暂时无法读取，请重试。");
     const result = courseExamOverviewSchema.parse(body);
     if (!mounted.current) return result;
+    const savedPending = pending.current;
     setData(result);
-    const current = pending.current && result.papers.find(paper => paper.clientKey === pending.current!.clientKey);
+    const current = savedPending && result.papers.find(paper => paper.clientKey === savedPending.clientKey);
     if (current && (current.status === "ready" || current.status === "failed")) { store.clear(); pending.current = null; }
+    if (!pending.current) {
+      const selectedSource = savedPending?.sourceId ?? sourceId;
+      if (!selectedSource) setSourceId(result.sources[0]?.id ?? "");
+      else if (!sourceAvailable(result.sources, selectedSource)) {
+        setSourceId("");
+        setError("已选择的材料已不可用，请重新选择。");
+      }
+    }
     return result;
   }
   useEffect(() => {
@@ -57,8 +70,9 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
     catch (reason) { if (mounted.current) setError(userFacingMessage(reason, "读取失败，请重试。")); }
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
+  const canGenerate = Boolean(pending.current) || sourceAvailable(data.sources, sourceId);
   async function generate() {
-    if (flight.current || recovering || recoveryBlocked || !sourceId) return;
+    if (flight.current || recovering || recoveryBlocked || !canGenerate) return;
     flight.current = true;
     setBusy(true); setError("");
     try {
@@ -70,7 +84,15 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   function startAnother() {
-    try { store.clear(); pending.current = null; setRecoveryBlocked(false); setError("已准备另开一份；再次组卷会重新调用模型。"); }
+    try {
+      store.clear();
+      pending.current = null;
+      setRecoveryBlocked(false);
+      if (sourceId && !sourceAvailable(data.sources, sourceId)) {
+        setSourceId("");
+        setError("已选择的材料已不可用，请重新选择。");
+      } else setError("已准备另开一份；再次组卷会重新调用模型。");
+    }
     catch (reason) { setError(userFacingMessage(reason, "尚未另开一份。")); }
   }
   const locked = busy || recovering || recoveryBlocked || Boolean(pending.current);
@@ -85,7 +107,7 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
         <button type="button" className={ui.quiet} disabled={busy || recovering} onClick={refresh}>刷新材料与结果</button>
       </div>
       {data.sources.length ? <>
-        <label className="block text-sm">选择真题或样卷<select className={ui.input} value={sourceId} disabled={locked} onChange={event => { setSourceId(event.target.value); }}>
+        <label className="block text-sm">选择真题或样卷<select className={ui.input} value={sourceId} disabled={locked} onChange={event => { setSourceId(event.target.value); setError(""); }}>
           <option value="">请选择</option>{data.sources.map(source => <option key={source.id} value={source.id}>{source.title}</option>)}
         </select></label>
         <div className="flex flex-wrap items-end gap-3">
@@ -95,7 +117,7 @@ export function CourseExamView({ initial }: { initial: CourseExamOverview }) {
           <label className="text-sm">结束页<input className={`${ui.input} w-24`} type="number" min={1} value={lastPage} disabled={locked} onChange={event => { setLastPage(event.target.value); }} /></label>
           </div></details>
         </div>
-        <button type="button" className={ui.primary} disabled={busy || recovering || recoveryBlocked || !sourceId} onClick={generate}>{recovering ? "正在核对原组卷…" : busy ? "正在准备…" : pending.current ? "查看这次组卷结果" : "分析考点并组卷"}</button>
+        <button type="button" className={ui.primary} disabled={busy || recovering || recoveryBlocked || !canGenerate} onClick={generate}>{recovering ? "正在核对原组卷…" : busy ? "正在准备…" : pending.current ? "查看这次组卷结果" : "分析考点并组卷"}</button>
       </> : <p className="text-sm text-text-2">先上传一份真题，等材料读取完成后回到这里组卷。</p>}
       {pending.current && !recovering ? <p role="status" className="text-sm text-text-2">原组卷请求已保留。请先刷新核对结果；修改组卷条件前，需要显式另开一份。</p> : null}
       {(pending.current || recoveryBlocked) && !busy && !recovering ? <button type="button" className={ui.quiet} onClick={startAnother}>另开一份练习</button> : null}

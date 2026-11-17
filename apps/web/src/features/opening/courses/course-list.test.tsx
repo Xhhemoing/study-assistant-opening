@@ -56,21 +56,15 @@ it("keeps the first-course action for a truly empty workspace", async () => {
   expect(host.textContent).not.toContain("清空搜索");
 });
 
-it("offers an independent course menu with the canonical sprint link in both layouts", async () => {
+it("offers a directly visible canonical sprint link in both layouts", async () => {
   await render();
-  expect(prefReads()).toHaveLength(1);
-  expect(host.querySelector('summary[aria-label="进行中数学更多操作"]')).not.toBeNull();
   expect(sprint()?.getAttribute("href")).toBe(`/opening/sprint?courseId=${id}`);
   expect(sprint()?.textContent).toBe("考前冲刺");
   expect(sprint()?.parentElement?.closest("a")).toBeNull();
-  const details = sprint()!.closest("details")!;
-  expect(details.open).toBe(false);
-  await act(async () => details.querySelector("summary")!.click());
-  expect(details.open).toBe(true);
+  expect(sprint()?.closest("details, [hidden]")).toBeNull();
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="卡片视图"]')!.click());
   expect(sprint()?.getAttribute("href")).toBe(`/opening/sprint?courseId=${id}`);
-  expect(host.querySelector('[aria-label="卡片视图"]')?.getAttribute("aria-pressed")).toBe("true");
-  expect(prefReads()).toHaveLength(1);
+  expect(sprint()?.closest("details, [hidden]")).toBeNull();
 });
 
 it.each([
@@ -79,49 +73,35 @@ it.each([
   { targetDate: exam.targetDate, weeklyMinutes: 120 },
   { ...exam, targetDate: null },
   null,
-])("does not present generic goals or missing exam dates as an exam", async goal => {
+])("keeps sprint reachable regardless of course goal mode or date", async goal => {
   readPrefs = async () => Response.json(prefs(goal));
   await render();
-  expect(sprint()).toBeNull();
+  expect(sprint()?.getAttribute("href")).toBe(`/opening/sprint?courseId=${id}`);
+  expect(sprint()?.closest("details, [hidden]")).toBeNull();
   expect(host.querySelector('a[href="/opening/courses/' + id + '"]')).not.toBeNull();
 });
 
-it.each(["pending", "invalid", "failure", "malformed"])("keeps courses usable without an exam menu when goals are %s", async kind => {
+it.each(["pending", "invalid", "failure", "malformed"])("keeps sprint reachable when goal preferences are %s", async kind => {
   readPrefs = kind === "pending" ? () => new Promise(() => {}) : kind === "failure" ? async () => { throw new Error("offline"); }
     : async () => Response.json(kind === "invalid" ? prefs(exam, true) : { prefs: "broken" });
   await render();
-  expect(sprint()).toBeNull();
+  expect(sprint()?.getAttribute("href")).toBe(`/opening/sprint?courseId=${id}`);
+  expect(sprint()?.closest("details, [hidden]")).toBeNull();
   expect(host.textContent).toContain("进行中数学");
-  expect(host.querySelector('a[href="/opening/courses/' + id + '"]')).not.toBeNull();
 });
 
-it("does not read or show Opening goal actions on the legacy course route", async () => {
+it("does not show Opening sprint actions on the legacy course route", async () => {
   await render(false);
   expect(prefReads()).toHaveLength(0);
   expect(sprint()).toBeNull();
   expect(host.querySelector('a[href="/learn/courses/' + id + '"]')).not.toBeNull();
 });
 
-it("ignores old goal responses across Opening mode changes", async () => {
-  let resolveOld!: (response: Response) => void;
-  readPrefs = () => new Promise(resolve => { resolveOld = resolve; });
+it("removes sprint actions when leaving Opening and restores them when returning", async () => {
   await render();
+  expect(sprint()).not.toBeNull();
   await render(false);
-  readPrefs = async () => Response.json(prefs(null));
-  await render();
-  await act(async () => resolveOld(Response.json(prefs())));
-  expect(prefReads()).toHaveLength(2);
   expect(sprint()).toBeNull();
-});
-
-it("ignores a goal response from an unmounted course list", async () => {
-  let resolveOld!: (response: Response) => void;
-  readPrefs = () => new Promise(resolve => { resolveOld = resolve; });
   await render();
-  await act(async () => root.render(null));
-  readPrefs = async () => Response.json(prefs(null));
-  await render();
-  await act(async () => resolveOld(Response.json(prefs())));
-  expect(prefReads()).toHaveLength(2);
-  expect(sprint()).toBeNull();
+  expect(sprint()?.getAttribute("href")).toBe(`/opening/sprint?courseId=${id}`);
 });

@@ -8,7 +8,7 @@ import { CourseExamProgress } from "./course-exam-progress";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 
 vi.mock("next/link", () => ({ default: ({ href, children, className }: { href: string; children?: unknown; className?: string }) => createElement("a", { href, className }, children as never) }));
-const course = "11111111-1111-4111-8111-111111111111", source = "22222222-2222-4222-8222-222222222222";
+const course = "11111111-1111-4111-8111-111111111111", source = "22222222-2222-4222-8222-222222222222", otherSource = "33333333-3333-4333-8333-333333333333";
 const initial: CourseExamOverview = { courseId: course, courseTitle: "线性代数", targetDate: "2026-10-31", dailyMinutes: 60,
   sources: [{ id: source, title: "2025 年真题", version: 1 }], papers: [] };
 let container: HTMLDivElement, root: Root;
@@ -25,6 +25,72 @@ async function click(text: string) {
   const button = [...container.querySelectorAll("button")].find(item => item.textContent === text);
   expect(button).toBeTruthy(); await act(async () => button!.click());
 }
+async function chooseSource(value: string) {
+  const select = container.querySelector("select") as HTMLSelectElement | null;
+  expect(select).toBeTruthy();
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, value);
+    select!.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+it("defaults to the first source that appears after refresh and can continue with it", async () => {
+  const refreshed: CourseExamOverview = { ...initial, sources: [{ id: source, title: "新真题", version: 1 }, { id: otherSource, title: "另一份真题", version: 1 }] };
+  fetchMock.mockResolvedValueOnce(Response.json(refreshed)).mockResolvedValueOnce(Response.json(refreshed));
+  await act(async () => root.render(createElement(CourseExamView, { initial: { ...initial, sources: [] } })));
+  await click("刷新材料与结果");
+  expect((container.querySelector("select") as HTMLSelectElement).value).toBe(source);
+  const generateButton = [...container.querySelectorAll("button")].find(item => item.textContent === "分析考点并组卷") as HTMLButtonElement | undefined;
+  expect(generateButton?.disabled).toBe(false);
+  await click("分析考点并组卷");
+  expect(fetchMock.mock.calls[1]![1].method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[1]![1].body).sourceId).toBe(source);
+});
+
+it("keeps a user-selected source when refresh still returns it", async () => {
+  const refreshed: CourseExamOverview = { ...initial, sources: [{ id: source, title: "真题", version: 2 }, { id: otherSource, title: "另一份真题", version: 1 }] };
+  fetchMock.mockResolvedValue(Response.json(refreshed));
+  await act(async () => root.render(createElement(CourseExamView, { initial: { ...initial, sources: refreshed.sources } })));
+  await act(async () => { await Promise.resolve(); });
+  expect((container.querySelector("select") as HTMLSelectElement).value).toBe(source);
+  expect((container.querySelector("select") as HTMLSelectElement).disabled).toBe(false);
+  await chooseSource(otherSource);
+  expect((container.querySelector("select") as HTMLSelectElement).value).toBe(otherSource);
+  await click("刷新材料与结果");
+  expect((container.querySelector("select") as HTMLSelectElement).value).toBe(otherSource);
+});
+
+it("clears a selected source that disappears after refresh and blocks a new paper", async () => {
+  fetchMock.mockResolvedValueOnce(Response.json({ ...initial, sources: [{ id: source, title: "真题", version: 2 }] }));
+  await act(async () => root.render(createElement(CourseExamView, { initial: { ...initial, sources: [
+    { id: source, title: "真题", version: 1 }, { id: otherSource, title: "将失效的真题", version: 1 },
+  ] } })));
+  await act(async () => { await Promise.resolve(); });
+  await chooseSource(otherSource);
+  await click("刷新材料与结果");
+  const generateButton = [...container.querySelectorAll("button")].find(item => item.textContent === "分析考点并组卷") as HTMLButtonElement | undefined;
+  expect((container.querySelector("select") as HTMLSelectElement).value).toBe("");
+  expect(generateButton?.disabled).toBe(true);
+  expect(container.textContent).toContain("已选择的材料已不可用");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("keeps a checkpoint when its source disappears and refresh stays read-only", async () => {
+  fetchMock.mockRejectedValueOnce(new Error("connection lost"));
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await click("分析考点并组卷");
+  const original = JSON.parse(fetchMock.mock.calls[0]![1].body);
+  await act(async () => root.render(null));
+  fetchMock.mockResolvedValueOnce(Response.json({ ...initial, sources: [], papers: [{ id: source, clientKey: original.clientKey, sourceTitle: "原真题",
+    createdAt: "2026-10-22T08:00:00Z", status: "unknown", title: null, topics: [], questionCount: 5, activityId: null, available: false }] }));
+  await act(async () => root.render(createElement(CourseExamView, { initial: { ...initial, sources: [] } })));
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock.mock.calls[1]![1].method).toBeUndefined();
+  const checkpoint = window.sessionStorage.getItem(Object.keys(window.sessionStorage)[0]!);
+  expect(JSON.parse(checkpoint!).input).toEqual(original);
+  expect(container.textContent).toContain("原组卷请求已保留");
+  expect(container.textContent).toContain("另开一份练习");
+});
 
 it("keeps the same request key after uncertain delivery and only starts another paper explicitly", async () => {
   fetchMock.mockRejectedValue(new Error("connection lost"));
@@ -102,4 +168,60 @@ it("links course progress to the generic course workflow and releases no answer 
   expect(container.querySelector("a")?.getAttribute("href")).toBe(`/opening/courses/${course}/exam`);
   expect(container.textContent).toContain("1 份模拟练习，共 5 题");
   expect(container.textContent).not.toContain("预置考点");
+});
+
+it.each(["ready", "failed"] as const)("requires a new source after the removed source's request is %s", async status => {
+  fetchMock.mockRejectedValueOnce(new Error("response lost"));
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await click("分析考点并组卷");
+  const original = JSON.parse(fetchMock.mock.calls[0]![1].body);
+  await act(async () => root.render(null));
+  const replacement: CourseExamOverview = { ...initial, sources: [{ id: otherSource, title: "现有真题", version: 1 }] };
+  fetchMock.mockResolvedValueOnce(Response.json({ ...replacement, papers: [{
+    id: source, clientKey: original.clientKey, sourceTitle: "原真题", createdAt: "2026-10-22T08:00:00Z",
+    status, title: null, topics: [], questionCount: 5, activityId: status === "ready" ? source : null, available: false,
+  }] })).mockResolvedValueOnce(Response.json(replacement));
+  await act(async () => root.render(createElement(CourseExamView, { initial: replacement })));
+  expect(fetchMock.mock.calls[1]![1].method).toBeUndefined();
+  expect(window.sessionStorage.length).toBe(0);
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const generate = [...container.querySelectorAll("button")].find(button => button.textContent === "分析考点并组卷");
+  expect(generate?.disabled).toBe(true);
+  await chooseSource(otherSource);
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  expect(fetchMock.mock.calls[2]![1].method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toMatchObject({ sourceId: otherSource });
+  expect(JSON.parse(fetchMock.mock.calls[2]![1].body).clientKey).not.toBe(original.clientKey);
+});
+
+it.each(["pending", "unknown"] as const)("replays a removed source's %s request, then requires a current source when starting another paper", async status => {
+  fetchMock.mockRejectedValueOnce(new Error("response lost"));
+  await act(async () => root.render(createElement(CourseExamView, { initial })));
+  await click("分析考点并组卷");
+  const original = JSON.parse(fetchMock.mock.calls[0]![1].body);
+  const replacement: CourseExamOverview = { ...initial, sources: [{ id: otherSource, title: "现有真题", version: 1 }] };
+  const unresolved: CourseExamOverview = { ...replacement, papers: [{
+    id: source, clientKey: original.clientKey, sourceTitle: "原真题", createdAt: "2026-10-22T08:00:00Z",
+    status, title: null, topics: [], questionCount: 5, activityId: null, available: false,
+  }] };
+  fetchMock.mockResolvedValueOnce(Response.json(unresolved)).mockResolvedValueOnce(Response.json(unresolved))
+    .mockResolvedValueOnce(Response.json(replacement));
+  await click("刷新材料与结果");
+  expect(fetchMock.mock.calls[1]![1].method).toBeUndefined();
+  await click("查看这次组卷结果");
+  expect(fetchMock.mock.calls[2]![1].method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toEqual(original);
+  await click("另开一份练习");
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  const generate = [...container.querySelectorAll("button")].find(button => button.textContent === "分析考点并组卷");
+  expect(generate?.disabled).toBe(true);
+  await chooseSource(otherSource);
+  await click("分析考点并组卷");
+  expect(fetchMock).toHaveBeenCalledTimes(4);
+  expect(fetchMock.mock.calls[3]![1].method).toBe("POST");
+  expect(JSON.parse(fetchMock.mock.calls[3]![1].body)).toMatchObject({ sourceId: otherSource });
+  expect(JSON.parse(fetchMock.mock.calls[3]![1].body).clientKey).not.toBe(original.clientKey);
 });
