@@ -372,8 +372,7 @@ WHERE n.nspname = current_schema()
     (c.relname = 'opening_course_reserved_questions' AND t.tgname = 'opening_reserved_question_immutable')
     OR (c.relname = 'opening_course_question_exposures' AND t.tgname IN (
       'opening_course_question_exposures_scope',
-      'opening_course_question_exposure_immutable',
-      'opening_course_question_history_invalidate'
+      'opening_course_question_exposure_immutable'
     ))
     OR (c.relname = 'opening_course_question_exposure_coverage' AND t.tgname IN (
       'opening_course_question_exposure_coverage_scope',
