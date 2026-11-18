@@ -1,32 +1,10 @@
 import type { TaskItem, TeachingActivity, TeachingActivityCreateInput } from "@aistudy/contracts";
 import { compareCurrentLearningActivities, selectCurrentLearningActivity } from "@aistudy/domain";
-
-function courseStudyPlaceholder(row: TeachingActivity): boolean {
-  const createIntent = (row as { createIntent?: { protocol?: unknown; legacy?: unknown } }).createIntent;
-  if (row.staticLessonUnavailable) return true;
-  if (
-    createIntent?.protocol === "card-review-session-v1"
-    || row.clientKey?.startsWith("card-session:")
-    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "cardReviewSession" in row.checkpointJson)
-  ) {
-    return true;
-  }
-  if (createIntent?.legacy === true || row.clientKey?.startsWith("legacy-course-continue:")) {
-    return true;
-  }
-  if (!row.staticLesson && (
-    createIntent?.protocol === "span-lesson-v1"
-    || row.clientKey?.startsWith("span-lesson:")
-    || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "spanLesson" in row.checkpointJson)
-  )) {
-    return true;
-  }
-  return row.intentKind === "course_continue" && row.contentVersion === 0 && !row.staticLesson;
-}
+import { isTeachingActivityPlaceholder } from "../teaching/today-activity";
 
 /** Course membership is authoritative; a workspace's latest activity is never a fallback. */
 export function courseStudyActivities(rows: readonly TeachingActivity[], courseId: string): TeachingActivity[] {
-  return rows.filter(row => row.courseId === courseId && !courseStudyPlaceholder(row))
+  return rows.filter(row => row.courseId === courseId && !isTeachingActivityPlaceholder(row))
     .sort(compareCurrentLearningActivities);
 }
 
@@ -37,7 +15,7 @@ export function assertCourseStudyActivity(activity: TeachingActivity, courseId: 
 
 export function currentCourseActivity(rows: readonly TeachingActivity[], courseId: string, references: readonly string[] = []): TeachingActivity | null {
   const selected = selectCurrentLearningActivity(rows.map(row => ({ ...row,
-    placeholder: courseStudyPlaceholder(row) })), courseId, references);
+    placeholder: isTeachingActivityPlaceholder(row) })), courseId, references);
   return selected ? rows.find(row => row.id === selected.id)! : null;
 }
 

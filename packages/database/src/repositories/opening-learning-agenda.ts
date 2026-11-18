@@ -16,7 +16,8 @@ import { readOpeningCurrentLearningActivity } from "./opening-current-learning-a
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown) => typeof value === "string" ? value : null;
 /** Same transaction, exact persisted session, no activity/job/budget writes. */
-export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope, courseId: string, activityId?: string | null): Promise<LearningAgenda | null> {
+export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope, courseId: string, activityId?: string | null, options: { now?: Date } = {}): Promise<LearningAgenda | null> {
+  const now = options.now ?? new Date();
   // An exact historical request still reads its original receipt/status. Only
   // the unbound current lookup applies active/paused candidate selection.
   const current = activityId == null ? await readOpeningCurrentLearningActivity(tx, scope, courseId) : null;
@@ -61,7 +62,7 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
       WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId} AND r.course_id=${courseId}
         AND lower(${retestId})=ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])`;
     if (!retest || ["cancelled","declined","expired","invalidated","superseded"].includes(String(retest.status)) || retest.task_status === "skipped") { status = "cancelled"; reasons.push("retest_cancelled_or_unavailable"); }
-    else if ([retest.snoozed_until,retest.not_before_at,retest.not_before,retest.scheduled_start_at ?? retest.recommended_at].some(value => value && new Date(value).getTime() > Date.now())) { status = "deferred"; reasons.push("retest_deferred"); }
+    else if ([retest.snoozed_until,retest.not_before_at,retest.not_before,retest.scheduled_start_at ?? retest.recommended_at].some(value => value && new Date(value).getTime() > now.getTime())) { status = "deferred"; reasons.push("retest_deferred"); }
     else if (retest.status === "completed" || retest.task_status === "done") status = "completed";
     else dueRetest = ["accepted", "in_progress"].includes(String(retest.status)) && retest.task_status === "pending"
       && (retest.scheduled_start_at ?? retest.recommended_at) != null;
@@ -138,7 +139,7 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
     budget: goal.learningBudget || goal.tutorBudget ? object(goal.learningBudget ?? goal.tutorBudget) : null, decisionId: decision?.id ?? null, parentDecisionId: decision?.parentDecisionId ?? null,
     decisionCurrent: decision ? invalidationReasons.length === 0 : null, invalidationReasons, suggestion,
     resumable: ["active","paused"].includes(status) && invalidationReasons.every(reason => ["state_changed", "intent_changed", "policy_changed"].includes(reason)),
-    dataAsOf: state?.dataAsOf ?? new Date().toISOString() });
+    dataAsOf: state?.dataAsOf ?? now.toISOString() });
 }
 function agendaMode(value: unknown): LearningAgenda["mode"] {
   return ["diagnose","targeted_explain","full_explain","reduced_help_practice","transfer_check"].includes(String(value)) ? value as LearningAgenda["mode"] : "unknown";
@@ -148,6 +149,6 @@ function parseVersion(decision: LearningDecision): Record<string, unknown> {
   if (!decision.intentVersion.startsWith("{")) return {};
   return object(JSON.parse(decision.intentVersion));
 }
-export function createOpeningLearningAgendaRepository(sql: Sql) {
-  return { get: (scope: Scope, courseId: string, activityId?: string | null) => sql.begin("isolation level repeatable read read only", tx => readOpeningLearningAgenda(tx, scope, courseId, activityId)) as Promise<LearningAgenda | null> };
+export function createOpeningLearningAgendaRepository(sql: Sql, clock: () => Date = () => new Date()) {
+  return { get: (scope: Scope, courseId: string, activityId?: string | null) => sql.begin("isolation level repeatable read read only", tx => readOpeningLearningAgenda(tx, scope, courseId, activityId, { now: clock() })) as Promise<LearningAgenda | null> };
 }

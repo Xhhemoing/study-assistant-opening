@@ -57,7 +57,7 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
   const [activity] = active ? await db`SELECT * FROM opening_teaching_activities WHERE id=${active.activityId}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${active.courseId}` : [];
   const task = selectLearningRecoveryTask(tasks, activity);
-  const agenda = activity ? await readOpeningLearningAgenda(db as unknown as TransactionSql, scope, String(activity.course_id), String(activity.id)) : null;
+  const agenda = activity ? await readOpeningLearningAgenda(db as unknown as TransactionSql, scope, String(activity.course_id), String(activity.id), { now }) : null;
   const recovery = learningRecoveryChoice({ activityId: activity ? String(activity.id) : null, taskId: task?.id ?? null, pending: Boolean(task) });
   const warnings = ["共同预算包含已接受任务、复测与本次活动。缺席不代表能力下降；已接受安排保持原样。"];
   if (!state.budget) warnings.push("请明确设置工作区每日共同预算后生成计划；课程周预算不会自动相加成可用时间。");
@@ -156,7 +156,7 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
         if (input.activityId && !activity || input.taskId && (!task || task.status !== "pending")) throw learningError("NOT_FOUND", "原活动或待办不存在，请重新读取。");
         if (activity && task && selectLearningRecoveryTask(await createOpeningPlansRepository(db).listTasks(scope), activity)?.id !== input.taskId) throw learningError("CONFLICT", "所选任务不属于原活动，请重新读取真实恢复位置。");
         if (activity && await readOpeningSpanTutorOriginChange(db, scope, String(activity.id))) throw learningError("CONFLICT", "原活动依据已变化，请打开原活动按最新记录重新选择。");
-        const agenda = activity?.course_id ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id)) : null;
+        const agenda = activity?.course_id ? await readOpeningLearningAgenda(tx, scope, String(activity.course_id), String(activity.id), { now: clock() }) : null;
         if (agenda && !agenda.resumable) {
           throw learningError("CONFLICT", `原学习位置需重新确认：${agenda.invalidationReasons.join("、") || agenda.status}`);
         }

@@ -8,6 +8,7 @@ import { openCourseStudy } from "../../apps/web/src/features/opening/courses/cou
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 import { currentCourseActivity, courseStudyActivities } from "../../apps/web/src/features/opening/courses/course-study-model";
+import { pickCurrentTeachingActivity } from "../../apps/web/src/features/opening/teaching/today-activity";
 import { navigateCourseStaticLesson } from "../../apps/web/src/features/opening/courses/course-study-workspace";
 let f: OpeningFixture;
 let courseId: string;
@@ -315,4 +316,24 @@ it("resolves a persisted older task target, blocks ambiguous/closed targets and 
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { taskId })).toBeNull();
   await activity({ taskId });
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { taskId })).toBeNull();
+});
+it("excludes card-session keys, cardReviewSession checkpoints, and legacy-course-continue keys even when create_intent is empty", async () => {
+  const usable = await activity({ at: "2026-11-01T00:00:00Z" });
+  const cardByKey = randomUUID(), cardByCheckpoint = randomUUID(), legacyByKey = randomUUID();
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,content_version,client_key,create_intent,checkpoint_json,updated_at)
+    VALUES
+      (${cardByKey},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'active','topic','Card key row',1,${`card-session:${randomUUID()}`},'{}'::jsonb,'{}'::jsonb,'2026-11-03T00:00:00Z'),
+      (${cardByCheckpoint},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'paused','topic','Card checkpoint row',1,${randomUUID()},'{}'::jsonb,${f.sql.json({ cardReviewSession: { elapsedSeconds: 0 } })},'2026-11-03T00:00:01Z'),
+      (${legacyByKey},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'active','course_continue','Legacy key row',1,${`legacy-course-continue:${courseId}`},'{}'::jsonb,'{}'::jsonb,'2026-11-03T00:00:02Z')`;
+  const before = await readFootprint();
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({ activityId: usable, sessionId: null, courseId });
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({ activityId: usable, sessionId: null, courseId });
+  for (const excluded of [cardByKey, cardByCheckpoint, legacyByKey]) {
+    expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: excluded })).toBeNull();
+  }
+  const rows = (await createOpeningTeachingActivitiesRepository(f.sql).listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(currentCourseActivity(rows, courseId)?.id).toBe(usable);
+  expect(pickCurrentTeachingActivity(rows)?.id).toBe(usable);
+  expect(courseStudyActivities(rows, courseId).map(row => row.id)).toEqual([usable]);
+  expect(await readFootprint()).toEqual(before);
 });
