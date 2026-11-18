@@ -1,5 +1,4 @@
 import type { TutorAction } from "@aistudy/contracts";
-import { nextLearningStep } from "./adaptive/next-learning-step";
 
 /**
  * K02 nodeId-required adaptive recommendation input.
@@ -26,7 +25,15 @@ export type AdaptiveTutorActionKind = TutorAction["kind"];
 export function recommendAdaptiveTutorAction(
   input: AdaptiveTutorRecommendInput,
 ): AdaptiveTutorActionKind {
-  return nextLearningStep({ kind: "adaptive", input }).kind;
+  if (!input.nodeId || !String(input.nodeId).trim()) {
+    throw new Error("nodeId is required for adaptive tutor recommendation");
+  }
+  if (input.retestDue) return "delayed_retest";
+  if (input.hasAssistance && !input.hasCheckedIndependent) {
+    return "independent_variant";
+  }
+  if (!input.hasCheckedIndependent) return "clarify";
+  return "independent_variant";
 }
 
 export function isAdaptiveTutorRecommendInput(
