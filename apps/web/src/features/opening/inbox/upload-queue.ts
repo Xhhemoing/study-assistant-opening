@@ -143,7 +143,7 @@ export function createUploadQueue(client: UploadOperation, initialFiles: LocalUp
       if (!stillActive(item.id)) return;
       item.state = "failed";
       item.message = uploadErrorMessage(error, "上传未完成，原件仍在本地，请重试。");
-      if (error instanceof UploadUserError && error.code === "UPLOAD_MISMATCH") dismissible.add(item.id);
+      if (error instanceof UploadUserError && error.code === "UPLOAD_MISMATCH" && !item.completionPending) dismissible.add(item.id);
       else dismissible.delete(item.id);
       update?.(snapshot());
       return;

@@ -2,6 +2,7 @@ import { guardSessionRequest } from "../../auth/session-expiry";
 import { UploadUserError } from "./upload-error";
 import type { SessionIdentity } from "../../auth/session-identity";
 import { uploadIdentityHeaders } from "./upload-identity";
+import { userFacingMessage } from "../../../lib/user-facing-error";
 
 export type PutProgress = (loaded: number, total: number) => void;
 
@@ -16,6 +17,20 @@ function isUploadMismatchBody(body: unknown): boolean {
   if ("code" in body && body.code === "UPLOAD_MISMATCH") return true;
   if (!("error" in body) || !body.error || typeof body.error !== "object") return false;
   return "code" in body.error && body.error.code === "UPLOAD_MISMATCH";
+}
+
+function uploadMismatchMessage(body: unknown): string {
+  const fallback = "文件内容与扩展名不匹配，请确认未损坏或改名后重试。";
+  if (!body || typeof body !== "object") return fallback;
+  const record = body as { error?: unknown; message?: unknown };
+  const nestedMessage = record.error && typeof record.error === "object" && "message" in record.error && typeof record.error.message === "string"
+    ? record.error.message
+    : undefined;
+  const raw = (nestedMessage && nestedMessage.trim() ? nestedMessage : undefined)
+    ?? (typeof record.message === "string" ? record.message : "");
+  const firstLine = raw.trim().split(/\r?\n/, 1)[0]?.trim().slice(0, 240).trim() ?? "";
+  const safeMessage = firstLine ? userFacingMessage(new Error(firstLine), "") : "";
+  return safeMessage || fallback;
 }
 
 /** Private object PUT. Progress counts uploaded bytes, never server parse percent. */
@@ -50,7 +65,7 @@ export function putPrivateBytes(
         const body = xhr.status === 400 || xhr.status === 401 ? parseJsonSafely(xhr.responseText) : null;
         if (xhr.status === 401) guard.inspectFailure(xhr.status, body);
         if (xhr.status === 400 && isUploadMismatchBody(body)) {
-          reject(new UploadUserError("文件内容与扩展名不匹配，请确认未损坏或改名后重试。", "UPLOAD_MISMATCH"));
+          reject(new UploadUserError(uploadMismatchMessage(body), "UPLOAD_MISMATCH"));
           return;
         }
         reject(new UploadUserError(`上传对象失败 (${xhr.status})`));

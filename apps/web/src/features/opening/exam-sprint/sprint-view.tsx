@@ -70,6 +70,7 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
   const resourceState = useExamResources(resourcesEnabled);
   const previousCourseId = useRef(courseId);
   const currentCourseIdRef = useRef(courseId);
+  const [settledCourseId, setSettledCourseId] = useState(courseId);
   useEffect(() => {
     currentCourseIdRef.current = courseId;
     if (previousCourseId.current === courseId) return;
@@ -81,6 +82,7 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
     setReturnNavigation(null);
     setResourcesEnabled(false);
     setTab("practice");
+    setSettledCourseId(courseId);
   }, [courseId]);
   useEffect(() => { void client.load(); return () => client.dispose(); }, [client]);
   const { overview, integration, forecast, review, busy, uncertain, error } = snapshot;
@@ -97,11 +99,11 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
   }, [scope, onCourseBound]);
   const overviewReady = overview !== null;
   useEffect(() => {
-    if (!overviewReady) return;
+    if (!overviewReady || settledCourseId !== courseId) return;
     if (scope === "unbound" || ["integration", "sources", "forecast"].includes(tab)) setResourcesEnabled(true);
     if (["integration", "sources", "estimates"].includes(tab) || (tab !== "forecast" && integration === null)) void client.loadIntegration();
     if (tab === "forecast") void client.loadForecast();
-  }, [client, tab, overviewReady, scope]);
+  }, [client, tab, overviewReady, scope, settledCourseId, courseId]);
   const reloadCurrent = () => { if (!overview) { void client.load(); return; } if (!integration && tab !== "forecast") { void client.loadIntegration(); return; } if (["integration", "sources", "estimates"].includes(tab)) void client.loadIntegration(); else if (tab === "forecast") void client.loadForecast(forecast?.teacher ?? ""); else void client.load(); };
   const lessonContent = overview && lessonNavigation?.open ? confirmedSprintLesson(overview, lessonNavigation.intent) : null;
   const visibleLessonContent = lessonContent?.exposureId === lessonNavigation?.exposureId ? lessonContent : null;

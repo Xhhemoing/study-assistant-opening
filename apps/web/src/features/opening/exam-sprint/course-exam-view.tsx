@@ -47,14 +47,18 @@ function validateCourseExamInput(raw: {
   return { ok: false, message: "请检查选择的真题和页码范围后重试。" };
 }
 
+function isUnresolvedStatus(value: unknown): boolean {
+  return value === "pending" || value === "unknown";
+}
+
 function isPendingConflict(body: unknown, clientKey: string, papers: CourseExamOverview["papers"]): boolean {
   const existing = papers.find(paper => paper.clientKey === clientKey);
-  if (existing && (existing.status === "pending" || existing.status === "unknown")) return true;
+  if (existing && isUnresolvedStatus(existing.status)) return true;
   if (!body || typeof body !== "object") return false;
   const record = body as Record<string, unknown>;
-  if (record.pending === true || record.status === "pending") return true;
+  if (record.pending === true || isUnresolvedStatus(record.status)) return true;
   const error = record.error && typeof record.error === "object" ? record.error as Record<string, unknown> : null;
-  if (error && (error.pending === true || error.status === "pending" || error.reason === "pending")) return true;
+  if (error && (error.pending === true || isUnresolvedStatus(error.status) || isUnresolvedStatus(error.reason))) return true;
   const message = typeof error?.message === "string" ? error.message : typeof record.message === "string" ? record.message : "";
   return message.includes("尚未收到完整") || message.includes("正在生成");
 }

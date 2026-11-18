@@ -481,3 +481,38 @@ it("allows immediate dismiss on deterministic 400 rejections while retaining unc
   reconciled.dismiss(id);
   expect(reconciled.snapshot()).toEqual([]);
 });
+
+it("keeps completionPending items non-dismissible even when retry throws UploadUserError UPLOAD_MISMATCH", async () => {
+  const ticket: UploadTicket = {
+    source: { ...source, uploadState: "pending" as const, parseState: "not_started" as const },
+    uploadUrl: "/api/opening/sources/11111111-1111-4111-8111-111111111111/staging",
+    expiresAt: source.createdAt,
+  };
+  const uploadFile = vi.fn()
+    .mockResolvedValueOnce({
+      phase: "interrupted" as const,
+      sourceId: source.id,
+      ticket,
+      keptLocal: true as const,
+      completionPending: true,
+      message: "可能已保存，待核对。请重试核对同一材料。",
+    })
+    .mockRejectedValueOnce(new UploadUserError("上传凭证已过期，请重试上传。", "UPLOAD_MISMATCH"));
+  const guarded = createUploadQueue({ uploadFile }, [file("pending-throw.pdf")]);
+  await guarded.start();
+  const id = guarded.snapshot()[0]!.id;
+  expect(guarded.snapshot()[0]?.completionPending).toBe(true);
+
+  await guarded.retry(id);
+  expect(guarded.snapshot()[0]).toMatchObject({ state: "failed", completionPending: true });
+  guarded.dismiss(id);
+  expect(guarded.snapshot()).toHaveLength(1);
+  expect(guarded.snapshot()[0]?.message).toContain("待核对");
+
+  const directMismatch = createUploadQueue({
+    uploadFile: vi.fn().mockRejectedValueOnce(new UploadUserError("文件内容与扩展名不匹配，请确认未损坏或改名后重试。", "UPLOAD_MISMATCH")),
+  }, [file("fresh-mismatch.pdf")]);
+  await directMismatch.start();
+  directMismatch.dismiss(directMismatch.snapshot()[0]!.id);
+  expect(directMismatch.snapshot()).toEqual([]);
+});
