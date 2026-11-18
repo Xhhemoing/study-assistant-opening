@@ -576,8 +576,8 @@ it("hides permanently deleted sources, their derived notes/observations, while k
   // Also create observations referencing aiSource and delSource
   const learning = createOpeningLearningRepository(f.sql);
   const actId = randomUUID();
-  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,client_key,create_intent)
-    VALUES(${actId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'active','topic','Privacy obs',${randomUUID()},'{}'::jsonb)`;
+  await f.sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,source_ids,status,intent_kind,intent_summary,client_key,create_intent)
+    VALUES(${actId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${[aiSource.sourceId, delSource.sourceId]}::uuid[],'active','topic','Privacy obs',${randomUUID()},'{}'::jsonb)`;
   const session = await learning.createSession(f.scope, {
     activityId: actId,
     courseId,
