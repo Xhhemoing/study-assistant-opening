@@ -1,12 +1,19 @@
 ---
 title: 个人知识资产图的数据与接口对接
 date: 2026-11-18
-status: proposed
+status: promoted
 scope: [Opening, 课程要求, 学习证据, 来源, 笔记, 探索]
-promotion_target: 经集成者确认后进入对应的 contracts、database、web 实施卡
+promotion_target:
+  - packages/contracts/src/opening/asset-graph.ts
+  - packages/database/src/repositories/opening-asset-graph.ts
+  - apps/web/src/features/opening/server/asset-graph-service.ts
+  - apps/web/src/app/api/opening/asset-graph/query/route.ts
+  - apps/web/src/features/opening/asset-graph/
 ---
 
 # 个人知识资产图 · 数据与接口对接
+
+> 状态说明（2026-11-18）：本文档已由 `proposed` 晋升为 `promoted`，首期后端与前端全链路已由 `#437`–`#441` 落地于 `9918fa01`（以下正文保留原对接基线作为契约与样例参考）。
 
 给设计前端和实现后端的人。核对版本为 `c9072ef5`。**当前可以直接开发合成数据前端；统一图查询仍是提案。** 已存在的业务接口见第 2 节。配套的 [JSON 请求与响应样例](2026-11-18-knowledge-assets-examples.json) 可独立交给另一个模型，内容均为虚构。
 

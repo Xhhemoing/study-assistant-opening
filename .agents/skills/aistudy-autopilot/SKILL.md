@@ -10,10 +10,12 @@ description: Use when orchestrating continuous high-throughput autonomous develo
 ## 核心架构：Hub-and-Spoke 流水线
 
 - **唯一主控 Coordinator（当前主对话）**：负责任务拆解、文件 `allowedPaths` 隔离、共享契约与迁移号协调、并发子 Agent 调度，并按 `AGENTS.md` 与 `docs/operations/agent-workflow.md` 的唯一集成者边界、v2 风险分级与 `--match-head-commit` 规则合入 PR、同步双干线及发起 `docs/STATUS.md` PR。主控**不与 worker 同时写业务文件**，不在同一步串行等待可并行的审查或子任务。
+- **唤醒活性不变量（Wakeup Liveness Invariant）**：全流程最终收尾前，主控在结束任何回合前必须核实至少有 1 个运行中 Subagent **或**本回合已调用 `schedule(..., TimerCondition="any")` 并拿到有效 `task-id`；严禁仅口头声称挂定时却未调工具导致会话永久休眠。
 - **隔离编码 Workers（`Workspace: "share"` / `aistudy-autopilot-worker`）**：每张任务卡拥有互不重叠的 `allowedPaths`、独立的 Git 工作树与分支，只跑 **30 秒级极速本地门禁**，通过后立刻 commit + push 并开 PR，将 PR 号与精确 40 位 `headRefOid` 交回主控。
 - **零上下文污染 Audit / Reviewer Subagents（`Workspace: "inherit"`）**：
   - 全部严格只读，通过 `git diff` / `git show` / `gh pr view` 按提交 SHA 核对，绝不依赖可变工作区状态。
   - 必须显式指定两个独立审视角度：**视角 A（安全 / 契约 / 信任边界 / 并发与隔离）** 与 **视角 B（业务行为 / UI / 测试覆盖与失败路径）**。
+  - **常驻热只读双审查员复用**：在多波推进期间保持安全/契约与行为/测试两个 `Workspace: "inherit"` 只读审查员常驻，跨 PR 通过 `send_message` 绑定精确 `headRefOid` 复用；编码 `Workspace: "share"` worktree 则随完自清 `node_modules` 并 `kill` 回收。
 - **批处理编排（`run_workflow`）**：当任务天然分裂成 >=4 个同构独立单元（多模块审计、多 PR 状态检查、多文件重构）时，使用 `run_workflow` 以 Python 代码编排 `parallel` / `pipeline`。
 
 ## 五阶段持续迭代闭环
@@ -38,6 +40,7 @@ description: Use when orchestrating continuous high-throughput autonomous develo
 - 每个 worker 只执行最贴近改动的快速门禁（不在多个 worker 中并发执行完整 E2E 或全仓 build）：
   - `node scripts/check-new-fixed-colors.mjs`
   - `node scripts/check-server-boundary.mjs`
+    - **App Router 分层边界（Plan §7.4）**：`apps/web/src/app/**` 路由文件禁止直接运行时导入 `@aistudy/database` 或数据库/缓存驱动，须经 `apps/web/src/features/*/server/*` 的 `import "server-only"` 应用服务层适配。
   - `node scripts/check-learner-copy.mjs --strict`
   - `node scripts/check-api-contracts.mjs --strict`
   - 改动涉及的 unit 测试：`npx vitest run --project unit <changed-tests>` 或 `node --test <tooling-tests>`
@@ -45,7 +48,8 @@ description: Use when orchestrating continuous high-throughput autonomous develo
     - 若改动 `tests/e2e/**/*.ts` 或 `tests/restart/**/*.ts`，运行根级 `npm run typecheck`（经 `run-heavy` 串行锁）或 `npx tsc -p tsconfig.e2e.json --noEmit`；
     - 若改动 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`，运行 `npx eslint <changed-files>` 与对应 Vitest 项目（`--project integration` / `--project handler` / `--project contract` / `--project unit`）及精确 head CI；若需额外执行独立 `tsc --noEmit`，须显式传入匹配 `tsconfig.base.json` 的编译选项（如 `--strict --moduleResolution Bundler` 等），避免误以为根 `npm run typecheck` 已覆盖 `tests/integration/`。
   - `git diff --check`（强制 LF，禁止 staged `.env`、`apps/web/next-env.d.ts`）
-- 通过后 worker **直接 commit + push 到 `study-assistant-opening` 并按 v2 分级创建 PR**（`L` 卡 `--base integration/opening`，仅当当次会话获明确整批授权时可用 `--base feat/opening-release`；`H` 卡独立 `--base feat/opening-release`），在 PR 正文标明风险分级、依据、完整 base-to-head 改动、`unverified` 范围，并向主控回报 PR 号、精确 40 位 `headRefOid`、改动文件与命令真实退出码。
+- 通过后 worker **直接 commit + push 到 `study-assistant-opening` 并按 v2 分级创建 PR**（`L` 卡 `--base integration/opening`，仅当当次会话获明确整批授权时可用 `--base feat/opening-release`；`H` 卡独立 `--base feat/opening-release`），在 PR 正文标明风险分级、依据、完整 base-to-head 改动、`unverified` 范围，并向主控回报 PR 号、精确 40 位 `headRefOid`、改动文件与命令真实退出码：
+  - **PowerShell PR 正文防转义**：Windows `pwsh` 下创建/更新 PR 正文一律使用单引号 Here-String `@' ... '@ | gh pr create/edit --body-file -`，防止双引号内 Markdown 反引号触发转义。
 
 ### Wave 2 — 远端全量 CI + 独立审查门禁（与 Wave 1/下一波重叠）
 - PR 一开出，`GitHub Actions` 按改动分类运行对应作业（`docs_only=false` 时并发运行 `integration-parser`、`handler-browser-spikes`、`static-unit-contract-spikes`、`production-build` 与 `isolated-worker-pdf-browser`；`docs_only=true` 时运行 `classify-changes` 与 `documentation-light-check`）。合并前在**精确最终 PR `headRefOid`** 上**必须同时通过两项必选 CI 门禁**：
@@ -65,7 +69,7 @@ description: Use when orchestrating continuous high-throughput autonomous develo
   2. 信任边界（API 鉴权、`ownerId`/`workspaceId` 隔离、`lockWorkspaceLearningHistory` 锁序、`append-only` 事件不变量）
   3. UI 与学习者文案（仅 Tailwind 语义 token，无原生 CSS / inline style，无禁用技术词）
   4. 测试真实性（覆盖行为与失败路径，无弱化或跳过既有断言）
-- 需要等待远端 CI 完成时，使用 `schedule(DurationSeconds=480, TimerCondition="any", ...)` 做事件驱动唤醒，严禁使用 shell `sleep` 轮询。
+- **两段式 CI 定时节拍（保护 30 步规划复盘周期）**：需要等待远端全量 CI 时使用事件驱动 `schedule(..., TimerCondition="any")`，严禁使用 shell `sleep` 轮询或高频短定时消耗步数预算；新 PR 推送后首轮设 `DurationSeconds=480`（8 分钟），唤醒后若仅余 `integration-parser` / `handler-browser-spikes` 等收尾作业设续轮 `180`–`300` 秒（并按唤醒活性不变量确认拿到有效 `task-id` 后再结束回合）。
 
 ### Wave 3 — 自动合入、双干线推进与分支/工作树回收
 - 同时满足以下全部条件后，由唯一集成者执行精确 SHA 合入：

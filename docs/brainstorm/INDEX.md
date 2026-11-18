@@ -6,7 +6,7 @@
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
-| 2026-11-18 | [个人知识资产图的数据与接口对接](2026-11-18-knowledge-assets-api.md) | proposed | Opening、课程要求、资料、笔记、学习证据与探索 | 以有界只读投影支持双向展开和切换视角，动作走原业务入口；附前端可回放的合成请求与响应 | 经集成者确认后进入 contracts、database、web 的相关实施卡 |
+| 2026-11-18 | [个人知识资产图的数据与接口对接](2026-11-18-knowledge-assets-api.md) | promoted | Opening、课程要求、资料、笔记、学习证据与探索 | 以有界只读投影支持双向展开和切换视角，动作走原业务入口；附前端可回放的合成请求与响应 | [契约](../../packages/contracts/src/opening/asset-graph.ts)、[只读仓储](../../packages/database/src/repositories/opening-asset-graph.ts)、[查询路由](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 与 [知识地图前端](../../apps/web/src/features/opening/asset-graph/asset-graph-workspace.tsx) |
 | 2026-11-18 | [长效学习 Agent 的候选架构](2026-11-18-long-running-learning-agent.md) | exploring | 多周学习委托、自由探索、动态知识与跨活动恢复 | 共享跨周内核与独立活动空间，事件协调复用数据库与队列，按委托主动准备可逆草案 | 产品场景与实施计划（待讨论） |
 | 2026-10-17 | [长短期目标驱动的学习架构与最小前置补习](2026-10-17-goal-driven-learning.md) | promoted | Goals、Opening 规划/教学、知识图谱、学习证据、BKT | 目标优先与两层决策；首批兼容扩展现有课程 JSON，贯通排序/预算和教学；正式目标桥接、稳定技能、条件前置与照片步骤评分分阶段推进，不新增第三套目标或宣称全部完成 | [目标驱动学习框架与改进计划](../plans/2026-10-17-goal-driven-learning-framework.md) |
 | 2026-10-06 | [框架与算法优化调研](2026-10-06-framework-algorithm-optimization-research.md) | exploring | Opening 全栈框架、AI/检索/规划算法、连接器、可靠性 | 保持 PostgreSQL 事实源与 AI 治理骨架；优先解决 web/worker 边界、可评测检索、AI 失败恢复和回调幂等，复杂算法按证据再升级 | 框架/runtime、检索评测、AI retry、DingTalk callback、worker queue ADR、后续功能切片 |
