@@ -22,6 +22,8 @@ describe("workspace navigation", () => {
     ["/opening/cards/session", "/opening/review"],
     ["/opening/review?tab=cards", "/opening/review"],
     ["/opening/library/doc-1", "/opening/library"],
+    ["/opening/map", "/opening/library"],
+    ["/opening/map?context=course&id=course/10000000-0000-4000-8000-000000000001", "/opening/library"],
     ["/opening/search", "/opening/library"],
   ])("keeps one owner for %s", (pathname, expected) => {
     expect(openingNavigation().filter(item => navigationIsActive(item.href, pathname)).map(item => item.href)).toEqual([expected]);
@@ -29,6 +31,7 @@ describe("workspace navigation", () => {
   it("keeps route boundaries and settings activation intact", () => {
     expect(navigationIsActive("/opening/today", "/opening/coursesx")).toBe(false);
     expect(navigationIsActive("/opening/review", "/opening/cardsx")).toBe(false);
+    expect(navigationIsActive("/opening/library", "/opening/mapx")).toBe(false);
     expect(navigationIsActive("/opening/review", "/opening/cards")).toBe(true);
     expect(navigationIsActive("/opening/today", "/learn/courses/123")).toBe(false);
     expect(navigationIsActive("/opening/settings/connections", "/opening/settings/connections")).toBe(true);
