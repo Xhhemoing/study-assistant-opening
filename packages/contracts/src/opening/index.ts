@@ -311,3 +311,4 @@ export * from "./learning-asset-links";
 export * from "./course-shared-skill";
 export * from "./question-identity";
 export * from "./question-evaluation";
+export * from "./asset-graph";
